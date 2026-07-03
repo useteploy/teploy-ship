@@ -1,0 +1,139 @@
+import { generateText } from "@neutron-build/ai";
+import type { Message, ModelAdapter } from "@neutron-build/ai";
+import type { AgentExecutor } from "@neutron-build/agents";
+import { workflow } from "@neutron-build/workflow";
+import type { WorkflowContext, WorkflowDefinition } from "@neutron-build/workflow";
+
+import { executeAction } from "./agent.js";
+import { parseAction } from "./actions.js";
+import type { ApprovalPolicy } from "./approval.js";
+import { formatObservation, systemPrompt } from "./prompt.js";
+
+export interface DurableAgentInput {
+  task: string;
+}
+
+export interface DurableAgentOutput {
+  status: "finished" | "max-steps";
+  summary: string;
+  turns: number;
+}
+
+/**
+ * Supplies the executor. `create` runs once (recorded as a step) and
+ * returns a serializable handle; `attach` reconstructs a client from that
+ * handle on every execution pass — including replays and post-suspension
+ * resumes — with no I/O.
+ */
+export interface ExecutorProvider {
+  create: () => Promise<{ handle: string }>;
+  attach: (handle: string) => AgentExecutor;
+}
+
+export interface DurableAgentConfig {
+  model: ModelAdapter;
+  executor: ExecutorProvider;
+  /** Deterministic classifier: "required" actions park the run on an approval event. */
+  approveAction?: ApprovalPolicy;
+  workdir?: string;
+  maxSteps?: number;
+  actionTimeoutMs?: number;
+  maxObservationChars?: number;
+  name?: string;
+  /** Total run budget passed to the workflow (e.g. "7d"). */
+  runTimeout?: string | number;
+}
+
+/** The event name a turn's approval-required action parks on. Deliver {approved, reason?}. */
+export function approvalEvent(turn: number): string {
+  return `turn-${turn}-approval`;
+}
+
+export interface ApprovalDecisionPayload {
+  approved: boolean;
+  reason?: string;
+}
+
+/**
+ * The CodeAct agent as a durable workflow. Every model call and every
+ * execution is a recorded step, so a crashed run replays completed turns
+ * from the log and continues without re-calling the model or re-running
+ * commands. Approval-required actions park the run on a `waitForEvent`
+ * (deliver an ApprovalDecisionPayload to `approvalEvent(turn)`), so a
+ * human gate costs nothing while pending — the AI SDK/Workflow approval
+ * bridge applied to a coding agent.
+ *
+ * Limitation (honest): a sandbox has a TTL, so a run that parks for
+ * longer than the container lives will find it reaped on resume and its
+ * next live command will fail. True multi-day durability of the *sandbox
+ * filesystem* needs snapshots (teploy-sandbox M3); until then this gives
+ * crash-recovery within a run and approvals that resolve within the
+ * container's lifetime.
+ */
+export function durableAgent(
+  config: DurableAgentConfig,
+): WorkflowDefinition<DurableAgentInput, DurableAgentOutput> {
+  const workdir = config.workdir ?? "/work";
+  const maxSteps = config.maxSteps ?? 20;
+  const maxObs = config.maxObservationChars ?? 8000;
+
+  return workflow<DurableAgentInput, DurableAgentOutput>(
+    config.name ?? "coding-agent",
+    async (ctx: WorkflowContext, input: DurableAgentInput): Promise<DurableAgentOutput> => {
+      const handle = await ctx.step("sandbox", async () => (await config.executor.create()).handle);
+      const executor = config.executor.attach(handle);
+
+      const messages: Message[] = [
+        { role: "system", content: systemPrompt({ workdir, task: input.task }) },
+        { role: "user", content: "Begin. Work step by step and verify before finishing." },
+      ];
+
+      for (let turn = 0; turn < maxSteps; turn++) {
+        const thought = await ctx.step(`turn-${turn}-think`, async () => {
+          const generated = await generateText({ model: config.model, messages });
+          return generated.text;
+        });
+        messages.push({ role: "assistant", content: thought });
+
+        const action = parseAction(thought);
+        if (action.kind === "finish") {
+          return { status: "finished", summary: action.message, turns: turn + 1 };
+        }
+        if (action.kind === "none") {
+          messages.push({
+            role: "user",
+            content: "No code block found. Respond with exactly one fenced code block, or a ```finish block if done.",
+          });
+          continue;
+        }
+
+        // Approval policy is deterministic (pure classifier), so the
+        // decision to park replays identically; only the human decision
+        // is external input, delivered via waitForEvent.
+        const decision = config.approveAction ? await config.approveAction(action) : "auto";
+        if (decision === "required") {
+          const approval = await ctx.waitForEvent<ApprovalDecisionPayload>(approvalEvent(turn));
+          if (!approval.approved) {
+            const reason = approval.reason !== undefined ? `: ${approval.reason}` : "";
+            messages.push({ role: "user", content: `Action denied by the operator${reason}. Choose a different approach.` });
+            continue;
+          }
+        }
+
+        const result = await ctx.step(`turn-${turn}-exec`, () =>
+          executeAction(executor, action, config.actionTimeoutMs, `t${turn}`),
+        );
+        messages.push({ role: "user", content: truncate(formatObservation(result), maxObs) });
+      }
+
+      return { status: "max-steps", summary: `Reached the ${maxSteps}-turn limit.`, turns: maxSteps };
+    },
+    config.runTimeout !== undefined ? { timeout: config.runTimeout } : {},
+  );
+}
+
+function truncate(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const head = Math.floor(max * 0.6);
+  return `${text.slice(0, head)}\n... [${text.length - max} chars truncated] ...\n${text.slice(-(max - head))}`;
+}

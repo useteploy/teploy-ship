@@ -145,6 +145,29 @@ test("model errors end the run cleanly", async () => {
   assert.match(result.summary, /model exploded/);
 });
 
+test("live loop gates approval-required actions via onApprovalRequest", async () => {
+  const executor = await localExecutor();
+  const seen: string[] = [];
+  const { model } = scriptedModel([
+    "```bash\nrm -rf important/\n```",
+    "```finish\nSkipped the destructive command.\n```",
+  ]);
+  const result = await runAgent({
+    model,
+    executor,
+    task: "clean up",
+    approveAction: (a) => (a.kind === "bash" && a.code.includes("rm -rf") ? "required" : "auto"),
+    onApprovalRequest: (a) => {
+      seen.push(a.kind === "bash" ? a.code : a.kind);
+      return false; // deny
+    },
+  });
+  assert.equal(result.status, "finished");
+  assert.match(seen[0] ?? "", /rm -rf/);
+  // the denial was fed back and the agent adapted
+  assert.equal(result.steps[0]?.result, undefined); // action never executed
+});
+
 test("large observations are truncated before going back to the model", async () => {
   const executor = await localExecutor();
   const { model, calls } = scriptedModel([

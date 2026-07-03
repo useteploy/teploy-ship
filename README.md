@@ -40,15 +40,44 @@ it.
 Filesystem state persists between actions; process/Python-variable state
 does not (a persistent kernel is a later milestone).
 
+## Durable runs and approval gating
+
+`durableAgent()` returns a `@neutron-build/workflow` workflow: every model
+call and every command is a recorded step, so a crashed run replays
+completed turns from the log and continues — no re-calling the model, no
+re-running commands. Actions classified `"required"` (see
+`defaultApprovalPolicy` — destructive/network/privilege commands) **park
+the run** on an approval event; deliver `{ approved }` to
+`approvalEvent(turn)` to resume. A human gate costs nothing while
+pending.
+
+```ts
+import { durableAgent, defaultApprovalPolicy } from "teploy-agent";
+const wf = durableAgent({ model, executor: sandboxProvider, approveAction: defaultApprovalPolicy });
+// run it with @neutron-build/workflow's executeRun / Scheduler; a dangerous
+// action → status "waiting"; deliverEvent(store, runId, approvalEvent(n), { approved: true }) resumes.
+```
+
+The live `runAgent()` loop takes the same `approveAction` policy with an
+inline `onApprovalRequest` resolver.
+
+**Honest limitation:** sandboxes have a TTL, so a run that parks longer
+than its container lives finds it reaped on resume. True multi-day
+durability of the sandbox *filesystem* needs snapshots (teploy-sandbox
+M3); until then this gives crash-recovery within a run and approvals that
+resolve within the container's lifetime.
+
 ## Status
 
-M1: the CodeAct loop, action parsing, bash/python/finish action space,
-observation truncation, a CLI, and full-stack validation. Deliberately
-thin — the AI SDK owns model calls and the executor owns compute. Next:
-durability (wrap runs in `@neutron-build/workflow` so long tasks survive
-restarts and approvals park for free), a persistent execution kernel,
-context/memory management for long runs, and the eval/recovery tuning
-that is the real ~30% of agent quality.
+M1–M2: the CodeAct loop (bash/python/finish, observation truncation, CLI,
+full-stack validation against a live sandbox) and durability + action
+approval (durable workflow, replay crash-recovery, approval parking, a
+dangerous-command policy). Deliberately thin on the brain — the AI SDK
+owns model calls, the executor owns compute, the Workflow SDK owns
+durability. Next: a persistent execution kernel (Python variables across
+actions), context/memory management for long runs, sandbox snapshots for
+true multi-day durability, and the eval/recovery tuning that is the real
+~30% of agent quality.
 
 ## Note
 

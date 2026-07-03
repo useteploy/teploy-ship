@@ -4,6 +4,7 @@ import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 
 import type { Action } from "./actions.js";
 import { describeAction, parseAction } from "./actions.js";
+import type { ApprovalPolicy } from "./approval.js";
 import { formatObservation, systemPrompt } from "./prompt.js";
 
 export interface AgentStep {
@@ -34,6 +35,10 @@ export interface RunAgentOptions {
   actionTimeoutMs?: number;
   /** Cap on an observation fed back to the model, chars (default 8000). */
   maxObservationChars?: number;
+  /** Classifies each executable action; "required" actions must be approved. */
+  approveAction?: ApprovalPolicy;
+  /** Resolver for approval-required actions in the live loop (true = run). */
+  onApprovalRequest?: (action: Action) => boolean | Promise<boolean>;
   onEvent?: (event: AgentEvent) => void;
   abortSignal?: AbortSignal;
 }
@@ -103,9 +108,28 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
       continue;
     }
 
+    if (options.approveAction !== undefined && (await options.approveAction(action)) === "required") {
+      if (options.onApprovalRequest === undefined) {
+        // No resolver in the live loop: treat as denied and let the agent adapt.
+        const denied = "Action denied: it requires approval and no approver is available. Choose a safer action.";
+        messages.push({ role: "user", content: denied });
+        steps.push({ index, thought, action });
+        emit({ type: "observation", step: index, text: denied });
+        continue;
+      }
+      const approved = await options.onApprovalRequest(action);
+      if (!approved) {
+        const denied = "Action denied by the operator. Choose a different approach.";
+        messages.push({ role: "user", content: denied });
+        steps.push({ index, thought, action });
+        emit({ type: "observation", step: index, text: denied });
+        continue;
+      }
+    }
+
     let result: ExecResult;
     try {
-      result = await executeAction(options, action);
+      result = await executeAction(options.executor, action, options.actionTimeoutMs);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       emit({ type: "error", step: index, text: message });
@@ -126,17 +150,26 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
   };
 }
 
-/** Execute a code action through the executor. Python runs via a written file so multi-line and tracebacks work. */
-async function executeAction(options: RunAgentOptions, action: Extract<Action, { kind: "bash" | "python" }>): Promise<ExecResult> {
-  const opts = options.actionTimeoutMs !== undefined ? { timeoutMs: options.actionTimeoutMs } : {};
+/**
+ * Execute a code action through an executor. Python runs via a written
+ * file so multi-line code and tracebacks work. Shared by the live loop
+ * and the durable workflow. `scriptSuffix` keeps replayed and live runs
+ * writing the same path (a durable step must be deterministic — no
+ * Date.now() in the filename).
+ */
+export async function executeAction(
+  executor: AgentExecutor,
+  action: Extract<Action, { kind: "bash" | "python" }>,
+  timeoutMs?: number,
+  scriptSuffix?: string,
+): Promise<ExecResult> {
+  const opts = timeoutMs !== undefined ? { timeoutMs } : {};
   if (action.kind === "bash") {
-    return options.executor.exec(action.code, opts);
+    return executor.exec(action.code, opts);
   }
-  // Python: write to a file in the workdir, then run it — preserves the
-  // script for debugging and gives real tracebacks with line numbers.
-  const scriptPath = `.teploy-agent/step-${Date.now()}.py`;
-  await options.executor.putFile(scriptPath, action.code);
-  return options.executor.exec(`python3 ${scriptPath}`, opts);
+  const scriptPath = `.teploy-agent/step-${scriptSuffix ?? String(Date.now())}.py`;
+  await executor.putFile(scriptPath, action.code);
+  return executor.exec(`python3 ${scriptPath}`, opts);
 }
 
 function truncate(text: string, max: number): string {

@@ -24,7 +24,8 @@
   },
   "dependencies": {
     "@neutron-build/ai": "link:../../Neutron/typescript/packages/neutron-ai",
-    "@neutron-build/agents": "link:../../Neutron/typescript/packages/neutron-agents"
+    "@neutron-build/agents": "link:../../Neutron/typescript/packages/neutron-agents",
+    "@neutron-build/workflow": "link:../../Neutron/typescript/packages/neutron-workflow"
   },
   "devDependencies": {
     "@types/node": "^22.10.7",

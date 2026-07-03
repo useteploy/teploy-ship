@@ -14,6 +14,9 @@ importers:
       '@neutron-build/ai':
         specifier: link:../../Neutron/typescript/packages/neutron-ai
         version: link:../../Neutron/typescript/packages/neutron-ai
+      '@neutron-build/workflow':
+        specifier: link:../../Neutron/typescript/packages/neutron-workflow
+        version: link:../../Neutron/typescript/packages/neutron-workflow
     devDependencies:
       '@types/node':
         specifier: ^22.10.7
