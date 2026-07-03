@@ -1,0 +1,36 @@
+{
+  "name": "teploy-agent",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Teploy's coding agent — a CodeAct brain on the Neutron primitives. (Working name; product name TBD.)",
+  "author": "Tyler",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "teploy-agent": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "lint": "tsc --noEmit --pretty false",
+    "test": "pnpm run build && node --test --experimental-test-isolation=none \"dist/**/*.test.js\"",
+    "start": "node dist/cli.js"
+  },
+  "dependencies": {
+    "@neutron-build/ai": "link:../../Neutron/typescript/packages/neutron-ai",
+    "@neutron-build/agents": "link:../../Neutron/typescript/packages/neutron-agents"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.7",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
