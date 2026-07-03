@@ -1,0 +1,104 @@
+Running 3 tasks against anthropic/claude-sonnet-5 (3x)...
+
+  [PASS] fizzbuzz (attempt 1, 2 steps)
+  [PASS] fizzbuzz (attempt 2, 2 steps)
+  [PASS] fizzbuzz (attempt 3, 2 steps)
+  [PASS] sum-numbers (attempt 1, 3 steps)
+  [PASS] sum-numbers (attempt 2, 3 steps)
+  [PASS] sum-numbers (attempt 3, 3 steps)
+  [PASS] fix-bug (attempt 1, 5 steps)
+  [PASS] fix-bug (attempt 2, 4 steps)
+  [PASS] fix-bug (attempt 3, 4 steps)
+
+  [PASS] fizzbuzz (2 steps, 3717ms)
+  [PASS] fizzbuzz (2 steps, 3446ms)
+  [PASS] fizzbuzz (2 steps, 3276ms)
+  [PASS] sum-numbers (3 steps, 4318ms)
+  [PASS] sum-numbers (3 steps, 4598ms)
+  [PASS] sum-numbers (3 steps, 3987ms)
+  [PASS] fix-bug (5 steps, 7851ms)
+  [PASS] fix-bug (4 steps, 7007ms)
+  [PASS] fix-bug (4 steps, 7210ms)
+
+3/3 tasks passed (100%)
+
+{
+  "results": [
+    {
+      "task": "fizzbuzz",
+      "attempt": 0,
+      "passed": true,
+      "agentStatus": "finished",
+      "steps": 2,
+      "durationMs": 3717
+    },
+    {
+      "task": "fizzbuzz",
+      "attempt": 1,
+      "passed": true,
+      "agentStatus": "finished",
+      "steps": 2,
+      "durationMs": 3446
+    },
+    {
+      "task": "fizzbuzz",
+      "attempt": 2,
+      "passed": true,
+      "agentStatus": "finished",
+      "steps": 2,
+      "durationMs": 3276
+    },
+    {
+      "task": "sum-numbers",
+      "attempt": 0,
+      "passed": true,
+      "agentStatus": "finished",
+      "steps": 3,
+      "durationMs": 4318
+    },
+    {
+      "task": "sum-numbers",
+      "attempt": 1,
+      "passed": true,
+      "agentStatus": "finished",
+      "steps": 3,
+      "durationMs": 4598
+    },
+    {
+      "task": "sum-numbers",
+      "attempt": 2,
+      "passed": true,
+      "agentStatus": "finished",
+      "steps": 3,
+      "durationMs": 3987
+    },
+    {
+      "task": "fix-bug",
+      "attempt": 0,
+      "passed": true,
+      "agentStatus": "finished",
+      "steps": 5,
+      "durationMs": 7851
+    },
+    {
+      "task": "fix-bug",
+      "attempt": 1,
+      "passed": true,
+      "agentStatus": "finished",
+      "steps": 4,
+      "durationMs": 7007
+    },
+    {
+      "task": "fix-bug",
+      "attempt": 2,
+      "passed": true,
+      "agentStatus": "finished",
+      "steps": 4,
+      "durationMs": 7210
+    }
+  ],
+  "passedTasks": 3,
+  "totalTasks": 3,
+  "attemptPassRate": 1,
+  "passRate": 1
+}
