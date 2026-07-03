@@ -23,3 +23,15 @@ export type {
 } from "./durable.js";
 
 export { formatObservation, systemPrompt } from "./prompt.js";
+
+export { checkCommand, formatReport, localEvalExecutor, runEval } from "./eval.js";
+export type {
+  EvalExecutor,
+  EvalReport,
+  EvalRunResult,
+  EvalTask,
+  RunEvalOptions,
+  Verification,
+} from "./eval.js";
+
+export { builtinSuite } from "./tasks.js";

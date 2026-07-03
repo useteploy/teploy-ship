@@ -9,13 +9,19 @@ import { LocalExecutor, SandboxExecutor } from "@neutron-build/agents";
 import type { AgentExecutor } from "@neutron-build/agents";
 
 import { runAgent } from "./agent.js";
+import { formatReport, runEval } from "./eval.js";
+import { builtinSuite } from "./tasks.js";
 
-// teploy-agent run "<task>" [--model provider/model] [--sandbox <url>]
-//   --sandbox-token <t> --sandbox-image <img> [--workdir <dir>] [--max-steps N]
+// teploy-agent run "<task>" [--model provider/model] [--sandbox <url>] ...
+// teploy-agent eval [--model provider/model] [--repeats N]
 async function main(): Promise<void> {
   const [command, ...rest] = process.argv.slice(2);
+  if (command === "eval") {
+    await evalCommand(rest);
+    return;
+  }
   if (command !== "run") {
-    console.error('Usage: teploy-agent run "<task>" [--model provider/model] [--sandbox <url> --sandbox-token <t>]');
+    console.error('Usage:\n  teploy-agent run "<task>" [--model provider/model] [--sandbox <url> --sandbox-token <t>]\n  teploy-agent eval [--model provider/model] [--repeats N]');
     process.exit(2);
   }
 
@@ -65,6 +71,26 @@ async function main(): Promise<void> {
   await executor.destroy();
   console.log(`\n=== ${result.status} ===\n${result.summary}`);
   process.exit(result.status === "finished" ? 0 : 1);
+}
+
+async function evalCommand(rest: string[]): Promise<void> {
+  const args = parseArgs(rest);
+  const modelId = args.flags.model ?? "anthropic/claude-sonnet-5";
+  const model = modelId.startsWith("anthropic/")
+    ? anthropic(modelId.slice("anthropic/".length))
+    : openai(modelId.replace(/^openai\//, ""));
+  const repeats = args.flags.repeats !== undefined ? Number(args.flags.repeats) : 1;
+
+  console.error(`Running ${builtinSuite.length} tasks against ${modelId} (${repeats}x)...\n`);
+  const report = await runEval({
+    tasks: builtinSuite,
+    model,
+    repeats,
+    onResult: (r) => console.error(`  [${r.passed ? "PASS" : "FAIL"}] ${r.task} (attempt ${r.attempt + 1}, ${r.steps} steps)`),
+  });
+  console.log(`\n${formatReport(report)}`);
+  if (args.flags.json !== undefined) console.log(`\n${JSON.stringify(report, null, 2)}`);
+  process.exit(report.passRate === 1 ? 0 : 1);
 }
 
 function parseArgs(argv: string[]): { positional: string[]; flags: Record<string, string> } {

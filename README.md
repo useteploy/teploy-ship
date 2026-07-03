@@ -85,21 +85,44 @@ tunable, testable machinery (patterns informed by OpenHands):
 Both are wired into `runAgent` (`recovery` / `condense` options, or
 `false` to disable) and are the substrate future tuning adjusts.
 
-**Honest note on "the 30%":** these close part of the gap to a
-mature agent (OpenHands, Devin), but not the number. The rest —
-prompt/action-ergonomics tuning, and knowing *which* changes help —
-requires an **eval harness** (SWE-bench-class task suite) and real model
-runs. This repo builds the machinery; the pass rate comes from running
-it. That's the next milestone.
+## Evals — making quality measurable
+
+The harness that turns tuning from guessing into measuring. A task
+carries a prompt, optional workspace `setup`, and a **`verify`** that runs
+*after* the agent stops and decides pass/fail on its own — the agent's
+"finish" claim is never trusted, so an agent that says "done" without
+doing the work scores FAIL.
+
+```sh
+teploy-agent eval --model anthropic/claude-sonnet-5 --repeats 3
+```
+
+```ts
+import { runEval, checkCommand, builtinSuite } from "teploy-agent";
+const report = await runEval({ tasks: builtinSuite, model, repeats: 3 });
+// report.passRate, per-task PASS/FAIL, steps, duration
+```
+
+Each attempt runs in a fresh, isolated workspace; `repeats > 1` gives
+pass@k. The `builtinSuite` is a tiny starter benchmark (fizzbuzz,
+sum-file, fix-a-bug) whose checks are themselves tested (a correct
+solution passes, a wrong one fails). This is where the remaining agent
+quality gets closed: change a prompt or action, run the suite, keep what
+moves the number.
+
+**Honest status:** the machinery is built and tested with scripted
+models; the actual pass rate requires running the suite against a real
+model (API cost + time), which hasn't been done yet. The harness makes
+that a measurement, not a guess.
 
 ## Status
 
-M1–M3: the CodeAct loop, durability + action approval, and recovery +
-context condensation — all built on the Neutron/Teploy stack, all
-tested. Next: an eval harness to make tuning measurable, a persistent
-execution kernel (Python variables across actions), a structured
-file-editor action, sandbox snapshots for multi-day durability, and the
-eval-driven tuning that turns working machinery into a good agent.
+M1–M4: the CodeAct loop, durability + action approval, recovery +
+context condensation, and the eval harness + starter benchmark — all on
+the Neutron/Teploy stack, all tested. Next: run the suite against a real
+model for a baseline, then grow the benchmark and tune against it; a
+persistent execution kernel, a structured file-editor action, and
+sandbox snapshots.
 
 ## Note
 
