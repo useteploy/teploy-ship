@@ -5,7 +5,11 @@ import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 import type { Action } from "./actions.js";
 import { describeAction, parseAction } from "./actions.js";
 import type { ApprovalPolicy } from "./approval.js";
+import { condenseIfNeeded, defaultCondenseConfig } from "./memory.js";
+import type { CondenseConfig } from "./memory.js";
 import { formatObservation, systemPrompt } from "./prompt.js";
+import { RecoveryTracker, defaultRecoveryConfig } from "./recovery.js";
+import type { RecoveryConfig } from "./recovery.js";
 
 export interface AgentStep {
   index: number;
@@ -39,6 +43,10 @@ export interface RunAgentOptions {
   approveAction?: ApprovalPolicy;
   /** Resolver for approval-required actions in the live loop (true = run). */
   onApprovalRequest?: (action: Action) => boolean | Promise<boolean>;
+  /** Loop/failure recovery tuning; false disables stuck detection. */
+  recovery?: RecoveryConfig | false;
+  /** Context condensation tuning; false disables it. */
+  condense?: CondenseConfig | false;
   onEvent?: (event: AgentEvent) => void;
   abortSignal?: AbortSignal;
 }
@@ -65,15 +73,36 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
   const maxObs = options.maxObservationChars ?? 8000;
   const emit = options.onEvent ?? (() => {});
 
-  const messages: Message[] = [
+  let messages: Message[] = [
     { role: "system", content: systemPrompt({ workdir, task: options.task }) },
     { role: "user", content: "Begin. Work step by step and verify before finishing." },
   ];
   const steps: AgentStep[] = [];
 
+  const recovery = options.recovery === false ? null : new RecoveryTracker(options.recovery ?? defaultRecoveryConfig);
+  const condense = options.condense === false ? null : (options.condense ?? defaultCondenseConfig);
+  const summarize = async (transcript: string): Promise<string> => {
+    const generated = await generateText({
+      model: options.model,
+      system: "Summarize this agent transcript into a compact progress recap: what was attempted, what worked, what failed, current state, and what remains. Be specific about file names and results.",
+      prompt: transcript,
+      maxOutputTokens: 800,
+    });
+    return generated.text;
+  };
+
   for (let index = 0; index < maxSteps; index++) {
     if (options.abortSignal?.aborted) {
       return { status: "aborted", summary: "Run aborted.", steps, messages };
+    }
+
+    // Keep the conversation inside the model's window before each call.
+    if (condense !== null) {
+      try {
+        messages = await condenseIfNeeded(messages, summarize, condense);
+      } catch (error) {
+        emit({ type: "error", step: index, text: `condense failed: ${error instanceof Error ? error.message : String(error)}` });
+      }
     }
 
     let thought: string;
@@ -140,6 +169,19 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
     messages.push({ role: "user", content: observation });
     steps.push({ index, thought, action, result, observation });
     emit({ type: "observation", step: index, text: observation });
+
+    // Recovery: break loops and thrashing before they burn the budget.
+    if (recovery !== null) {
+      const signal = recovery.observe(action, result.exitCode);
+      if (signal.kind === "abort") {
+        emit({ type: "error", step: index, text: signal.message });
+        return { status: "error", summary: signal.message, steps, messages };
+      }
+      if (signal.kind === "nudge") {
+        messages.push({ role: "user", content: signal.message });
+        emit({ type: "observation", step: index, text: signal.message });
+      }
+    }
   }
 
   return {

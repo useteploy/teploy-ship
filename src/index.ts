@@ -7,6 +7,12 @@ export type { Action } from "./actions.js";
 export { autoApprove, defaultApprovalPolicy } from "./approval.js";
 export type { ApprovalDecision, ApprovalPolicy } from "./approval.js";
 
+export { RecoveryTracker, defaultRecoveryConfig } from "./recovery.js";
+export type { RecoveryConfig, RecoverySignal } from "./recovery.js";
+
+export { condenseIfNeeded, defaultCondenseConfig, historySize } from "./memory.js";
+export type { CondenseConfig, Summarizer } from "./memory.js";
+
 export { approvalEvent, durableAgent } from "./durable.js";
 export type {
   ApprovalDecisionPayload,

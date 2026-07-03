@@ -174,7 +174,61 @@ test("large observations are truncated before going back to the model", async ()
     "```bash\nfor i in $(seq 1 5000); do echo line-$i; done\n```",
     "```finish\ndone\n```",
   ]);
-  await runAgent({ model, executor, task: "spew", maxObservationChars: 500 });
+  await runAgent({ model, executor, task: "spew", maxObservationChars: 500, condense: false });
   const observation = calls[1]?.messages.find((m, i) => m.role === "user" && i > 1);
   assert.ok(String(observation?.content).includes("truncated"));
+});
+
+test("the live loop breaks a repeated-action loop with a recovery nudge", async () => {
+  const executor = await localExecutor();
+  // the model stubbornly repeats the same failing command
+  const { model } = scriptedModel(Array(10).fill("```bash\ncat /no-such-file\n```"));
+  const result = await runAgent({
+    model,
+    executor,
+    task: "read a file that doesn't exist",
+    maxSteps: 12,
+    recovery: { loopThreshold: 3, failureThreshold: 99, maxNudges: 2 },
+    condense: false,
+  });
+  // recovery aborts rather than burning all 12 steps in the loop
+  assert.equal(result.status, "error");
+  assert.match(result.summary, /repeating the same action|failing/);
+  assert.ok(result.steps.length < 12);
+});
+
+test("the live loop condenses an overgrown conversation before the next model call", async () => {
+  const executor = await localExecutor();
+  let sawCondensed = false;
+  let turn = 0;
+  const model: ModelAdapter = {
+    provider: "scripted",
+    modelId: "s1",
+    async doGenerate(options) {
+      // once history is condensed, a "Progress so far" message appears
+      if (options.messages.some((m) => typeof m.content === "string" && m.content.includes("Progress so far"))) {
+        sawCondensed = true;
+      }
+      // a summarizer call has the recap system prompt — answer briefly
+      if (options.messages.some((m) => m.role === "system" && String(m.content).includes("progress recap"))) {
+        return { content: [{ type: "text", text: "recap: made progress" }], finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, raw: null };
+      }
+      turn++;
+      const text = turn > 3 ? "```finish\ndone\n```" : "```bash\nyes | head -c 20000\n```";
+      return { content: [{ type: "text", text }], finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, raw: null };
+    },
+    async *doStream() {
+      throw new Error("unused");
+    },
+  };
+  const result = await runAgent({
+    model,
+    executor,
+    task: "generate output",
+    maxSteps: 8,
+    condense: { maxChars: 15_000, keepRecent: 4 },
+    recovery: false,
+  });
+  assert.equal(result.status, "finished");
+  assert.ok(sawCondensed, "an overgrown conversation should have been condensed before a later model call");
 });

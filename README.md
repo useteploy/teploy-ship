@@ -67,17 +67,39 @@ durability of the sandbox *filesystem* needs snapshots (teploy-sandbox
 M3); until then this gives crash-recovery within a run and approvals that
 resolve within the container's lifetime.
 
+## Recovery and memory (agent quality infrastructure)
+
+Two of the levers that make an agent actually finish tasks — built as
+tunable, testable machinery (patterns informed by OpenHands):
+
+- **Stuck detection** (`recovery.ts`): repeated-identical-action loops and
+  consecutive-failure thrashing are detected; the agent is nudged to
+  change course, and a run that keeps looping past `maxNudges` aborts
+  rather than burning the whole step budget.
+- **Context condensation** (`memory.ts`): when the conversation outgrows a
+  char budget, the middle turns are summarized (via an injected
+  summarizer — an LLM call in production) while the system prompt, the
+  task, and recent turns stay verbatim. Keeps long runs inside the
+  model's window.
+
+Both are wired into `runAgent` (`recovery` / `condense` options, or
+`false` to disable) and are the substrate future tuning adjusts.
+
+**Honest note on "the 30%":** these close part of the gap to a
+mature agent (OpenHands, Devin), but not the number. The rest —
+prompt/action-ergonomics tuning, and knowing *which* changes help —
+requires an **eval harness** (SWE-bench-class task suite) and real model
+runs. This repo builds the machinery; the pass rate comes from running
+it. That's the next milestone.
+
 ## Status
 
-M1–M2: the CodeAct loop (bash/python/finish, observation truncation, CLI,
-full-stack validation against a live sandbox) and durability + action
-approval (durable workflow, replay crash-recovery, approval parking, a
-dangerous-command policy). Deliberately thin on the brain — the AI SDK
-owns model calls, the executor owns compute, the Workflow SDK owns
-durability. Next: a persistent execution kernel (Python variables across
-actions), context/memory management for long runs, sandbox snapshots for
-true multi-day durability, and the eval/recovery tuning that is the real
-~30% of agent quality.
+M1–M3: the CodeAct loop, durability + action approval, and recovery +
+context condensation — all built on the Neutron/Teploy stack, all
+tested. Next: an eval harness to make tuning measurable, a persistent
+execution kernel (Python variables across actions), a structured
+file-editor action, sandbox snapshots for multi-day durability, and the
+eval-driven tuning that turns working machinery into a good agent.
 
 ## Note
 
