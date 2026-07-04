@@ -4,6 +4,8 @@ export type { AgentEvent, AgentResult, AgentStep, RunAgentOptions } from "./agen
 export { describeAction, parseAction } from "./actions.js";
 export type { Action } from "./actions.js";
 
+export { ensureKernel, installKernel, runCell, stopKernel } from "./kernel.js";
+
 export { autoApprove, defaultApprovalPolicy } from "./approval.js";
 export type { ApprovalDecision, ApprovalPolicy } from "./approval.js";
 

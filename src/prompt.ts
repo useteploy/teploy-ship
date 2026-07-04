@@ -19,15 +19,33 @@ Think briefly about what to do next, then emit EXACTLY ONE fenced code block. Th
 ls -la
 \`\`\`
 
-- Python (a fresh interpreter each time; persist state to files, not variables):
+- Python (a persistent session — variables survive between python actions):
 \`\`\`python
-print(2 + 2)
+data = load_something()
+print(len(data))
+\`\`\`
+
+- Edit a file surgically (the SEARCH text must match the file exactly, ONCE — copy it verbatim, whitespace included):
+\`\`\`edit path/to/file.py
+<<<<<<< SEARCH
+def broken(x):
+    return x - 1
+=======
+def broken(x):
+    return x + 1
+>>>>>>> REPLACE
+\`\`\`
+
+- Create (or overwrite) a whole file:
+\`\`\`create path/to/new_file.py
+print("hello")
 \`\`\`
 
 Rules:
 - One code block per turn. Do not emit two.
 - Wait for the observation before continuing; never assume an action's result.
-- The filesystem persists between actions; shell/Python process state does not.
+- Prefer \`\`\`edit over shell text-surgery (sed/heredocs) for changing files.
+- The filesystem always persists between actions. Python variables usually persist, but may reset after long pauses — anything important belongs in a file.
 - Prefer small, verifiable steps. Read errors and fix them.
 
 # Finishing

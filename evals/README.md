@@ -50,3 +50,24 @@ action change helps, because everything still passes. This suite is a
 several diagnostic steps, tasks that exercise recovery/condensation, and
 some the agent *sometimes fails*. A useful benchmark sits well below
 100% so improvements are visible. Grow toward SWE-bench-lite class.
+
+## 2026-07-04 — kernel + editor measured (Haiku, hardSuite)
+
+| Metric | Before (2026-07-03) | After kernel+editor |
+|---|---|---|
+| pass@2 | 3/6 (50%) | **6/6 (100%)** |
+| per-attempt | 5/12 (~42%) | 8/12 (67%) |
+
+Same model (claude-haiku-4-5), same suite, same grader. The change under
+test: the persistent python kernel + the ```edit/```create structured
+actions, plus the prompt lines documenting them.
+
+Per-task movement: balanced-brackets 0/2→2/2 (previously two 1-step
+premature finishes — now it writes the file via ```create and passes in
+3 steps), roman 0/2→1/2, chunk 0/2→1/2, config 1/2→1/2, csv 2/2 stays,
+multi-file 1/2 stays. Remaining failures are still short-attempt
+premature finishes (2–3 steps) — the known failure mode, next lever.
+
+Caveats: n=12 attempts, so per-attempt movement (42→67%) is directional;
+pass@2 saturating the suite means Haiku now ALSO needs a harder tier for
+further tuning headroom. Sonnet unaffected (was already 100%).

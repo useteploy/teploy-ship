@@ -5,6 +5,7 @@ import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 import type { Action } from "./actions.js";
 import { describeAction, parseAction } from "./actions.js";
 import type { ApprovalPolicy } from "./approval.js";
+import { ensureKernel, installKernel, runCell, stopKernel } from "./kernel.js";
 import { condenseIfNeeded, defaultCondenseConfig } from "./memory.js";
 import type { CondenseConfig } from "./memory.js";
 import { formatObservation, systemPrompt } from "./prompt.js";
@@ -47,6 +48,8 @@ export interface RunAgentOptions {
   recovery?: RecoveryConfig | false;
   /** Context condensation tuning; false disables it. */
   condense?: CondenseConfig | false;
+  /** Persistent python kernel (variables survive between actions); false = per-file execution. */
+  kernel?: boolean;
   onEvent?: (event: AgentEvent) => void;
   abortSignal?: AbortSignal;
 }
@@ -91,6 +94,8 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
     return generated.text;
   };
 
+  let kernelUsed = false;
+  try {
   for (let index = 0; index < maxSteps; index++) {
     if (options.abortSignal?.aborted) {
       return { status: "aborted", summary: "Run aborted.", steps, messages };
@@ -128,9 +133,12 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
       return { status: "finished", summary: action.message, steps, messages };
     }
 
-    if (action.kind === "none") {
-      // The model produced no runnable action; nudge it once and continue.
-      const nudge = "No code block found. Respond with exactly one fenced code block (bash/python), or a ```finish block if done.";
+    if (action.kind === "none" || action.kind === "invalid") {
+      // No runnable action (or a malformed one): feed the reason back.
+      const nudge =
+        action.kind === "invalid"
+          ? action.message
+          : "No code block found. Respond with exactly one fenced code block (bash/python/edit/create), or a ```finish block if done.";
       messages.push({ role: "user", content: nudge });
       steps.push({ index, thought, action });
       emit({ type: "observation", step: index, text: nudge });
@@ -156,9 +164,10 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
       }
     }
 
+    if (action.kind === "python") kernelUsed = true;
     let result: ExecResult;
     try {
-      result = await executeAction(options.executor, action, options.actionTimeoutMs);
+      result = await executeAction(options.executor, action, options.actionTimeoutMs, `s${index}`, options.kernel !== false);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       emit({ type: "error", step: index, text: message });
@@ -190,28 +199,85 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
     steps,
     messages,
   };
+  } finally {
+    // A local kernel is a real OS process; never leak it past the run.
+    if (kernelUsed && options.kernel !== false) {
+      await stopKernel(options.executor);
+    }
+  }
 }
 
 /**
- * Execute a code action through an executor. Python runs via a written
- * file so multi-line code and tracebacks work. Shared by the live loop
- * and the durable workflow. `scriptSuffix` keeps replayed and live runs
- * writing the same path (a durable step must be deterministic — no
- * Date.now() in the filename).
+ * Execute a code action through an executor. Shared by the live loop and
+ * the durable workflow. `scriptSuffix` keeps replayed and live runs
+ * writing the same paths (a durable step must be deterministic — no
+ * Date.now() in filenames).
+ *
+ * Python prefers the persistent kernel (variables survive between
+ * actions); if the kernel can't start in this workspace it falls back to
+ * per-file execution. Edit/create run over getFile/putFile — structured
+ * file surgery with no shell quoting anywhere.
  */
 export async function executeAction(
   executor: AgentExecutor,
-  action: Extract<Action, { kind: "bash" | "python" }>,
+  action: Extract<Action, { kind: "bash" | "python" | "edit" | "create" }>,
   timeoutMs?: number,
   scriptSuffix?: string,
+  useKernel = true,
 ): Promise<ExecResult> {
   const opts = timeoutMs !== undefined ? { timeoutMs } : {};
-  if (action.kind === "bash") {
-    return executor.exec(action.code, opts);
+  const suffix = scriptSuffix ?? String(Date.now());
+
+  switch (action.kind) {
+    case "bash":
+      return executor.exec(action.code, opts);
+
+    case "python": {
+      if (useKernel) {
+        await installKernel(executor);
+        if (await ensureKernel(executor)) {
+          return runCell(executor, suffix, action.code, timeoutMs);
+        }
+      }
+      const scriptPath = `.teploy-agent/step-${suffix}.py`;
+      await executor.putFile(scriptPath, action.code);
+      return executor.exec(`python3 ${scriptPath}`, opts);
+    }
+
+    case "create":
+      await executor.putFile(action.file, action.content);
+      return ok(`created ${action.file} (${action.content.length} chars)`);
+
+    case "edit": {
+      let current: string;
+      try {
+        current = new TextDecoder().decode(await executor.getFile(action.file));
+      } catch {
+        return fail(`edit failed: no such file: ${action.file} (use \`\`\`create for new files)`);
+      }
+      const occurrences = action.search === "" ? 0 : current.split(action.search).length - 1;
+      if (occurrences === 0) {
+        return fail(
+          `edit failed: SEARCH text not found in ${action.file}. Read the file and copy the exact text (whitespace matters).`,
+        );
+      }
+      if (occurrences > 1) {
+        return fail(
+          `edit failed: SEARCH text appears ${occurrences} times in ${action.file}. Include more surrounding lines to make it unique.`,
+        );
+      }
+      await executor.putFile(action.file, current.replace(action.search, action.replace));
+      return ok(`edited ${action.file}: 1 replacement`);
+    }
   }
-  const scriptPath = `.teploy-agent/step-${scriptSuffix ?? String(Date.now())}.py`;
-  await executor.putFile(scriptPath, action.code);
-  return executor.exec(`python3 ${scriptPath}`, opts);
+}
+
+function ok(message: string): ExecResult {
+  return { exitCode: 0, stdout: message, stderr: "", timedOut: false, truncated: false };
+}
+
+function fail(message: string): ExecResult {
+  return { exitCode: 1, stdout: "", stderr: message, timedOut: false, truncated: false };
 }
 
 function truncate(text: string, max: number): string {

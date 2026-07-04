@@ -145,6 +145,29 @@ test("model errors end the run cleanly", async () => {
   assert.match(result.summary, /model exploded/);
 });
 
+test("python variables persist across actions through the loop (kernel)", async () => {
+  const executor = await localExecutor();
+  const { model } = scriptedModel([
+    "```python\ntotal = sum(range(11))\nprint('computed')\n```",
+    (obs) => (obs.includes("computed") ? "```python\nprint(f'total={total}')\n```" : "```finish\nno-compute\n```"),
+    (obs) => (obs.includes("total=55") ? "```finish\nkernel state persisted.\n```" : "```finish\nstate lost!\n```"),
+  ]);
+  const result = await runAgent({ model, executor, task: "sum with state", recovery: false, condense: false });
+  assert.equal(result.summary, "kernel state persisted.");
+});
+
+test("edit and create actions work through the loop with real verification", async () => {
+  const executor = await localExecutor();
+  const { model } = scriptedModel([
+    '```create greet.py\ndef greet():\n    return "helo"\n```',
+    "```edit greet.py\n<<<<<<< SEARCH\n    return \"helo\"\n=======\n    return \"hello\"\n>>>>>>> REPLACE\n```",
+    "```bash\npython3 -c \"import greet; print(greet.greet())\"\n```",
+    (obs) => (obs.includes("hello") ? "```finish\nedited and verified.\n```" : "```finish\nedit failed\n```"),
+  ]);
+  const result = await runAgent({ model, executor, task: "fix the typo", recovery: false, condense: false });
+  assert.equal(result.summary, "edited and verified.");
+});
+
 test("live loop gates approval-required actions via onApprovalRequest", async () => {
   const executor = await localExecutor();
   const seen: string[] = [];

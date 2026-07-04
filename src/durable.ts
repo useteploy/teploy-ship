@@ -110,10 +110,13 @@ export function durableAgent(
         if (action.kind === "finish") {
           return { status: "finished", summary: action.message, turns: turn + 1 };
         }
-        if (action.kind === "none") {
+        if (action.kind === "none" || action.kind === "invalid") {
           messages.push({
             role: "user",
-            content: "No code block found. Respond with exactly one fenced code block, or a ```finish block if done.",
+            content:
+              action.kind === "invalid"
+                ? action.message
+                : "No code block found. Respond with exactly one fenced code block, or a ```finish block if done.",
           });
           continue;
         }
