@@ -80,7 +80,7 @@ ${inst.problem_statement}`;
 
       const started = Date.now();
       const result = await runAgent({
-        model: anthropic(MODEL),
+        model: anthropic(MODEL, { cache: true }),
         executor,
         task,
         workdir: "/testbed",

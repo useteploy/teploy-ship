@@ -36,7 +36,7 @@ async function main(): Promise<void> {
 
   const modelId = args.flags.model ?? "anthropic/claude-sonnet-5";
   const model = modelId.startsWith("anthropic/")
-    ? anthropic(modelId.slice("anthropic/".length))
+    ? anthropic(modelId.slice("anthropic/".length), { cache: true })
     : openai(modelId.replace(/^openai\//, ""));
 
   let executor: AgentExecutor;
@@ -79,7 +79,7 @@ async function evalCommand(rest: string[]): Promise<void> {
   const args = parseArgs(rest);
   const modelId = args.flags.model ?? "anthropic/claude-sonnet-5";
   const model = modelId.startsWith("anthropic/")
-    ? anthropic(modelId.slice("anthropic/".length))
+    ? anthropic(modelId.slice("anthropic/".length), { cache: true })
     : openai(modelId.replace(/^openai\//, ""));
   const repeats = args.flags.repeats !== undefined ? Number(args.flags.repeats) : 1;
   const suiteName = args.flags.suite ?? "builtin";
