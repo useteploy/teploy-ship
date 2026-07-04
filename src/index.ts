@@ -13,7 +13,7 @@ export type { RecoveryConfig, RecoverySignal } from "./recovery.js";
 export { condenseIfNeeded, defaultCondenseConfig, historySize } from "./memory.js";
 export type { CondenseConfig, Summarizer } from "./memory.js";
 
-export { approvalEvent, durableAgent } from "./durable.js";
+export { approvalEvent, durableAgent, sandboxProvider } from "./durable.js";
 export type {
   ApprovalDecisionPayload,
   DurableAgentConfig,

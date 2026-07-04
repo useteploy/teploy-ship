@@ -1,5 +1,6 @@
 import { generateText } from "@neutron-build/ai";
 import type { Message, ModelAdapter } from "@neutron-build/ai";
+import { SandboxExecutor } from "@neutron-build/agents";
 import type { AgentExecutor } from "@neutron-build/agents";
 import { workflow } from "@neutron-build/workflow";
 import type { WorkflowContext, WorkflowDefinition } from "@neutron-build/workflow";
@@ -28,6 +29,15 @@ export interface DurableAgentOutput {
 export interface ExecutorProvider {
   create: () => Promise<{ handle: string }>;
   attach: (handle: string) => AgentExecutor;
+  /**
+   * Optional snapshot support (both or neither). With it, the durable
+   * agent snapshots the workspace before parking on approval and
+   * restores from the snapshot after the decision — so a parked run
+   * survives its container's TTL. `snapshot` returns a durable image
+   * ref; `createFrom` boots a fresh workspace from one.
+   */
+  snapshot?: (handle: string) => Promise<string>;
+  createFrom?: (image: string) => Promise<{ handle: string }>;
 }
 
 export interface DurableAgentConfig {
@@ -63,12 +73,13 @@ export interface ApprovalDecisionPayload {
  * human gate costs nothing while pending — the AI SDK/Workflow approval
  * bridge applied to a coding agent.
  *
- * Limitation (honest): a sandbox has a TTL, so a run that parks for
- * longer than the container lives will find it reaped on resume and its
- * next live command will fail. True multi-day durability of the *sandbox
- * filesystem* needs snapshots (teploy-sandbox M3); until then this gives
- * crash-recovery within a run and approvals that resolve within the
- * container's lifetime.
+ * Durability across long parks: when the provider supports snapshots
+ * (see ExecutorProvider), the workspace is committed to an image before
+ * every approval park and restored into a fresh container after the
+ * decision — so a run parked for days survives its container's TTL.
+ * Without snapshot support, the old limitation stands: approvals must
+ * resolve within the container's lifetime. Crash-recovery replay within
+ * a run works in both cases.
  */
 export function durableAgent(
   config: DurableAgentConfig,
@@ -80,8 +91,8 @@ export function durableAgent(
   return workflow<DurableAgentInput, DurableAgentOutput>(
     config.name ?? "coding-agent",
     async (ctx: WorkflowContext, input: DurableAgentInput): Promise<DurableAgentOutput> => {
-      const handle = await ctx.step("sandbox", async () => (await config.executor.create()).handle);
-      const executor = config.executor.attach(handle);
+      let handle = await ctx.step("sandbox", async () => (await config.executor.create()).handle);
+      let executor = config.executor.attach(handle);
 
       const messages: Message[] = [
         { role: "system", content: systemPrompt({ workdir, task: input.task }) },
@@ -112,7 +123,26 @@ export function durableAgent(
         // is external input, delivered via waitForEvent.
         const decision = config.approveAction ? await config.approveAction(action) : "auto";
         if (decision === "required") {
+          // With snapshot support, persist the workspace BEFORE parking:
+          // the park can outlive the container's TTL. The snapshot ref is
+          // a recorded step result, so replay reconstructs it for free.
+          const canSnapshot = config.executor.snapshot !== undefined && config.executor.createFrom !== undefined;
+          let parkImage: string | undefined;
+          if (canSnapshot) {
+            parkImage = await ctx.step(`turn-${turn}-snapshot`, () => config.executor.snapshot!(handle));
+          }
+
           const approval = await ctx.waitForEvent<ApprovalDecisionPayload>(approvalEvent(turn));
+
+          // Restore AFTER the park either way (approved or denied — the
+          // run continues in both cases and the original container may
+          // be long gone). The new handle is a recorded step result, so
+          // replay re-attaches identically without re-creating anything.
+          if (parkImage !== undefined) {
+            handle = await ctx.step(`turn-${turn}-restore`, async () => (await config.executor.createFrom!(parkImage)).handle);
+            executor = config.executor.attach(handle);
+          }
+
           if (!approval.approved) {
             const reason = approval.reason !== undefined ? `: ${approval.reason}` : "";
             messages.push({ role: "user", content: `Action denied by the operator${reason}. Choose a different approach.` });
@@ -130,6 +160,38 @@ export function durableAgent(
     },
     config.runTimeout !== undefined ? { timeout: config.runTimeout } : {},
   );
+}
+
+/**
+ * ExecutorProvider over a live teploy-sandbox daemon, snapshot-capable —
+ * the production wiring for durable Ship runs. Handles are
+ * "runId" strings; snapshots are daemon image refs.
+ */
+export function sandboxProvider(options: {
+  baseURL: string;
+  token: string;
+  image: string;
+  ttlSec?: number;
+  fetch?: typeof globalThis.fetch;
+}): ExecutorProvider {
+  const base = { baseURL: options.baseURL, token: options.token, ...(options.fetch !== undefined ? { fetch: options.fetch } : {}) };
+  const create = { image: options.image, ...(options.ttlSec !== undefined ? { ttlSec: options.ttlSec } : {}) };
+  return {
+    async create() {
+      const sandbox = await SandboxExecutor.start({ ...base, create });
+      return { handle: sandbox.runId };
+    },
+    attach(handle: string) {
+      return SandboxExecutor.attach(handle, base);
+    },
+    async snapshot(handle: string) {
+      return SandboxExecutor.attach(handle, base).snapshot();
+    },
+    async createFrom(image: string) {
+      const sandbox = await SandboxExecutor.start({ ...base, create: { ...create, image } });
+      return { handle: sandbox.runId };
+    },
+  };
 }
 
 function truncate(text: string, max: number): string {

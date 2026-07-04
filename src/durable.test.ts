@@ -170,6 +170,76 @@ test("a denied action is fed back and the agent adapts", async () => {
   assert.match((done.output as { summary: string }).summary, /skipped/);
 });
 
+test("snapshot-capable providers snapshot before parking and restore after — surviving a reaped container", async () => {
+  let removed = false;
+  const { model } = reactiveModel([
+    "```bash\nrm -rf build/\n```", // dangerous → parks
+    (obs) => (obs.includes("exit 0") ? "```finish\nCleaned after restore.\n```" : "```bash\necho hmm\n```"),
+  ]);
+
+  // Simulated snapshot-capable provider: workspaces are maps; snapshot
+  // copies state to an image store; the ORIGINAL workspace is destroyed
+  // while parked (the TTL reaper), so only a restore can continue.
+  const images = new Map<string, Map<string, string>>();
+  const workspaces = new Map<string, Map<string, string> | null>();
+  let counter = 0;
+  const makeExecutor = (handle: string): AgentExecutor => ({
+    async exec(cmd) {
+      const ws = workspaces.get(handle);
+      if (ws === null || ws === undefined) throw new Error(`workspace ${handle} was reaped`);
+      if (cmd.includes("rm -rf")) {
+        removed = true;
+        ws.delete("build");
+      }
+      return { exitCode: 0, stdout: "", stderr: "", timedOut: false, truncated: false };
+    },
+    async putFile() {},
+    async getFile() {
+      return new Uint8Array();
+    },
+    async destroy() {},
+  });
+  const provider: ExecutorProvider = {
+    async create() {
+      const handle = `ws-${counter++}`;
+      workspaces.set(handle, new Map([["build", "junk"]]));
+      return { handle };
+    },
+    attach: makeExecutor,
+    async snapshot(handle) {
+      const ws = workspaces.get(handle);
+      if (ws === null || ws === undefined) throw new Error("cannot snapshot a reaped workspace");
+      const image = `snap-${counter++}`;
+      images.set(image, new Map(ws));
+      return image;
+    },
+    async createFrom(image) {
+      const state = images.get(image);
+      if (state === undefined) throw new Error(`no such image ${image}`);
+      const handle = `ws-${counter++}`;
+      workspaces.set(handle, new Map(state));
+      return { handle };
+    },
+  };
+
+  const wf = durableAgent({ model, executor: provider, approveAction: defaultApprovalPolicy });
+  const store = new MemoryEventStore();
+
+  const parked = await executeRun({ workflow: wf, runId: "run-1", store, input: { task: "clean build" } });
+  assert.equal(parked.status, "waiting");
+  assert.equal(images.size, 1, "workspace must be snapshotted before parking");
+  assert.equal(removed, false);
+
+  // the TTL reaper takes the original workspace while parked
+  workspaces.set("ws-0", null);
+
+  await deliverEvent(store, "run-1", approvalEvent(0), { approved: true });
+  const done = await executeRun({ workflow: wf, runId: "run-1", store });
+  assert.equal(done.status, "completed");
+  assert.deepEqual(done.output, { status: "finished", summary: "Cleaned after restore.", turns: 2 });
+  assert.equal(removed, true, "the approved action ran in the RESTORED workspace");
+});
+
 test("auto-safe actions never park", async () => {
   const { model } = reactiveModel(["```bash\nls\n```", "```finish\nlisted\n```"]);
   const { provider } = await localProvider();
