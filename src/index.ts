@@ -35,3 +35,4 @@ export type {
 } from "./eval.js";
 
 export { builtinSuite } from "./tasks.js";
+export { hardSuite } from "./hard-tasks.js";

@@ -10,7 +10,9 @@ import type { AgentExecutor } from "@neutron-build/agents";
 
 import { runAgent } from "./agent.js";
 import { formatReport, runEval } from "./eval.js";
+import type { EvalTask } from "./eval.js";
 import { builtinSuite } from "./tasks.js";
+import { hardSuite } from "./hard-tasks.js";
 
 // teploy-agent run "<task>" [--model provider/model] [--sandbox <url>] ...
 // teploy-agent eval [--model provider/model] [--repeats N]
@@ -80,10 +82,13 @@ async function evalCommand(rest: string[]): Promise<void> {
     ? anthropic(modelId.slice("anthropic/".length))
     : openai(modelId.replace(/^openai\//, ""));
   const repeats = args.flags.repeats !== undefined ? Number(args.flags.repeats) : 1;
+  const suiteName = args.flags.suite ?? "builtin";
+  const tasks: EvalTask[] =
+    suiteName === "hard" ? hardSuite : suiteName === "all" ? [...builtinSuite, ...hardSuite] : builtinSuite;
 
-  console.error(`Running ${builtinSuite.length} tasks against ${modelId} (${repeats}x)...\n`);
+  console.error(`Running ${tasks.length} tasks (${suiteName}) against ${modelId} (${repeats}x)...\n`);
   const report = await runEval({
-    tasks: builtinSuite,
+    tasks,
     model,
     repeats,
     onResult: (r) => console.error(`  [${r.passed ? "PASS" : "FAIL"}] ${r.task} (attempt ${r.attempt + 1}, ${r.steps} steps)`),

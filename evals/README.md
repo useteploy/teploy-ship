@@ -5,7 +5,31 @@ quality changes can be compared over time.
 
 | Date | Model | Suite | pass@k | Note |
 |------|-------|-------|--------|------|
-| 2026-07-03 | claude-sonnet-5 | builtinSuite (3) | 3/3 (100%), 9/9 attempts | First live run. See below. |
+| 2026-07-03 | claude-sonnet-5 | builtinSuite (3) | 3/3 (100%), 9/9 attempts | First live run. Stack works; suite saturated. |
+| 2026-07-03 | claude-sonnet-5 | hardSuite (6) | 6/6 (100%), 12/12 attempts | Harder (6–7 steps/task) but Sonnet still saturates it. |
+| 2026-07-03 | claude-haiku-4-5 | hardSuite (6) | 3/6 (50%), 5/12 attempts | **Discrimination confirmed** — the benchmark works. See below. |
+
+## The benchmark discriminates (validated 2026-07-03)
+
+Same `hardSuite`, two models: Sonnet 5 **100%**, Haiku 4.5 **50%**
+(pass@2; ~42% per-attempt). A benchmark that separates a strong model
+from a weaker one is a working instrument — it can now measure whether a
+model *or a harness change* is better.
+
+**What the Haiku failures reveal (the tuning targets):**
+- **Premature finishing** — several tasks (roman, brackets) failed at
+  *1 step*: the agent emitted a finish without creating the file, and
+  independent verification caught it. This is an agent-quality failure
+  (not raw capability) and is plausibly fixable — e.g. a prompt that
+  forbids finishing without a verifying action, or recovery that rejects
+  an unverified finish. **Now measurable against the 50% baseline.**
+- **Genuine capability gaps** — multi-file-bug and chunk failed some
+  attempts *after* real work (5–15 steps), i.e. wrong fixes. Those track
+  model strength.
+
+This is the point of the harness: it turned "is the agent good?" into
+"Haiku scores 50% on hardSuite, and here are the specific failure modes
+to attack."
 
 ## 2026-07-03 — claude-sonnet-5, builtinSuite, repeats=3
 
