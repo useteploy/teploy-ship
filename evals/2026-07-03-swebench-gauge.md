@@ -74,3 +74,43 @@ tree — never revert your fix; if unsure, leave your best attempt in
 place." Re-run the two failed instances (~$1–2) and see if empty-patch
 → real patch. That's the first real tuning iteration with a
 before/after.
+
+---
+
+# Retry results (same day) — combined score now 2/3
+
+The two failed instances were re-run with: the environment briefing +
+patch-preservation prompt, a diff-snapshot safety net in the harness,
+and (see caveat) an executor bug fix. Scored by the official evaluator:
+
+| Instance | First attempt | Retry |
+|---|---|---|
+| psf__requests-3362 | fail (empty patch) | **RESOLVED** |
+| psf__requests-2317 | fail (empty patch) | still fails — but now a real 943-char, 2-file patch, not empty |
+
+**Combined 3-instance scoreboard: 2/3** (flask-4045 + requests-3362),
+vs OpenHands CodeAct 2.1's 1/3 on the same instances (model-mismatch
+caveat above still applies).
+
+**Confounded-variables caveat, stated honestly:** two things changed
+between attempts — (1) the prompt/harness tuning, and (2) a real
+executor bug found mid-retry: `putFile` piped file content through
+`ssh docker exec -i ... cat`, whose stdin never received EOF, hanging
+runs indefinitely (caught via `docker top` showing a bare `cat` blocked
+on read; the run sat ~1h with zero API cost). Python actions had been
+silently degraded before the fix, which alone could explain some
+empty-patch behavior. This run therefore does NOT cleanly isolate the
+prompt's contribution.
+
+**Infrastructure hardening that followed:** the executor was rewritten
+from ssh-shell-strings to the Docker Engine API (`dockerode` over an
+SSH-forwarded Unix socket): exec as argv arrays (no shell assembly),
+files as tar archives (no stdin pipes), in-container `timeout` + a
+local backstop. `swebench/smoke.mjs` (8 checks: quoting torture,
+putFile/getFile, cwd, timeout, exit codes) passes against a real
+instance image — this structurally removes both bug classes rather
+than patching them.
+
+**Next:** requests-2317 now produces real-but-wrong patches — diagnose
+why that patch fails the hidden tests (a tractable debugging task, vs
+"agent gave up"). Then widen the instance set for a less noisy number.

@@ -1,57 +1,69 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+// AgentExecutor over the Docker Engine API (see docker-client.mjs for
+// why: argv-array exec and tar-based file transfer structurally remove
+// the shell-quoting and stdin-EOF failure modes of the old ssh-string
+// executor). The agent's bash action is passed as ONE argv element to
+// `bash -lc` — Docker delivers it verbatim; we never build shell strings
+// around dynamic content.
+import { pack as tarPack, extract as tarExtract } from "tar-stream";
 
-const run = promisify(execFile);
+import { execCollect } from "./docker-client.mjs";
 
-/**
- * An AgentExecutor that drives commands inside a running Docker container
- * on a remote host, over SSH. Purpose-built for the SWE-bench gauge: the
- * repo lives at /testbed in the container, so exec/file ops are rooted
- * there. (teploy-sandbox's daemon confines to /work; a production
- * SWE-bench-through-sandbox path would add an arbitrary-workdir option —
- * noted, out of scope for a 3-task gauge.)
- */
-export function containerExecutor({ ssh, container, workdir = "/testbed" }) {
-  const dockerExec = async (argv, { input, timeoutMs } = {}) => {
-    // ssh <host> docker exec [-i] <container> sh -c '<cmd>' — cmd is passed
-    // as a single argv, so no extra shell quoting on our side.
-    const args = [ssh, "docker", "exec", ...(input !== undefined ? ["-i"] : []), container, ...argv];
-    try {
-      const { stdout, stderr } = await run("ssh", args, {
-        ...(input !== undefined ? { input } : {}),
-        maxBuffer: 16 * 1024 * 1024,
-        ...(timeoutMs !== undefined ? { timeout: timeoutMs } : {}),
-      });
-      return { stdout, stderr, exitCode: 0 };
-    } catch (error) {
-      if (error.killed) return { stdout: error.stdout ?? "", stderr: error.stderr ?? "", exitCode: -1, timedOut: true };
-      return { stdout: error.stdout ?? "", stderr: error.stderr ?? "", exitCode: typeof error.code === "number" ? error.code : 1 };
-    }
-  };
+export function containerExecutor({ container, workdir = "/testbed" }) {
+  const absolute = (path) => (path.startsWith("/") ? path : `${workdir}/${path}`);
 
   return {
     async exec(command, options = {}) {
-      const cwd = options.cwd ? `${workdir}/${options.cwd}` : workdir;
-      const full = `cd ${shq(cwd)} && ${command}`;
-      const r = await dockerExec(["bash", "-lc", full], { timeoutMs: options.timeoutMs ?? 120000 });
-      return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr, timedOut: r.timedOut === true, truncated: false };
+      const cwd = options.cwd !== undefined ? absolute(options.cwd) : workdir;
+      return execCollect(container, ["bash", "-lc", command], {
+        workingDir: cwd,
+        timeoutMs: options.timeoutMs ?? 120000,
+        ...(options.maxOutputBytes !== undefined ? { maxBytes: options.maxOutputBytes } : {}),
+      });
     },
+
     async putFile(path, data) {
-      const abs = path.startsWith("/") ? path : `${workdir}/${path}`;
-      const body = typeof data === "string" ? data : Buffer.from(data);
-      const r = await dockerExec(["bash", "-lc", `mkdir -p "$(dirname ${shq(abs)})" && cat > ${shq(abs)}`], { input: body });
-      if (r.exitCode !== 0) throw new Error(`putFile ${path}: ${r.stderr}`);
+      const abs = absolute(path);
+      const body = typeof data === "string" ? Buffer.from(data) : Buffer.from(data);
+      const archive = tarPack();
+      // Entry named with the full path relative to /; extraction creates
+      // intermediate directories.
+      archive.entry({ name: abs.replace(/^\//, ""), mode: 0o644 }, body);
+      archive.finalize();
+      const chunks = [];
+      for await (const chunk of archive) chunks.push(chunk);
+      await container.putArchive(Buffer.concat(chunks), { path: "/" });
     },
+
     async getFile(path) {
-      const abs = path.startsWith("/") ? path : `${workdir}/${path}`;
-      const r = await dockerExec(["cat", abs]);
-      if (r.exitCode !== 0) throw new Error(`getFile ${path}: ${r.stderr}`);
-      return new TextEncoder().encode(r.stdout);
+      const abs = absolute(path);
+      let stream;
+      try {
+        stream = await container.getArchive({ path: abs });
+      } catch (error) {
+        throw new Error(`No such file: ${path} (${error.message})`);
+      }
+      const extractor = tarExtract();
+      const found = new Promise((resolve, reject) => {
+        let buffer;
+        extractor.on("entry", (header, entryStream, next) => {
+          const chunks = [];
+          entryStream.on("data", (chunk) => chunks.push(chunk));
+          entryStream.on("end", () => {
+            if (header.type === "file" && buffer === undefined) buffer = Buffer.concat(chunks);
+            next();
+          });
+          entryStream.resume();
+        });
+        extractor.on("finish", () => resolve(buffer));
+        extractor.on("error", reject);
+      });
+      stream.pipe(extractor);
+      const buffer = await found;
+      if (buffer === undefined) throw new Error(`No such file: ${path}`);
+      return new Uint8Array(buffer);
     },
+
+    // Container lifecycle belongs to the harness (run-inference), not the executor.
     async destroy() {},
   };
-}
-
-function shq(s) {
-  return `'${s.replaceAll("'", `'\\''`)}'`;
 }

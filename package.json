@@ -23,12 +23,14 @@
     "start": "node dist/cli.js"
   },
   "dependencies": {
-    "@neutron-build/ai": "link:../../Neutron/typescript/packages/neutron-ai",
     "@neutron-build/agents": "link:../../Neutron/typescript/packages/neutron-agents",
+    "@neutron-build/ai": "link:../../Neutron/typescript/packages/neutron-ai",
     "@neutron-build/workflow": "link:../../Neutron/typescript/packages/neutron-workflow"
   },
   "devDependencies": {
     "@types/node": "^22.10.7",
+    "dockerode": "^5.0.1",
+    "tar-stream": "^3.2.0",
     "typescript": "^5.7.2"
   },
   "engines": {
