@@ -114,3 +114,32 @@ than patching them.
 **Next:** requests-2317 now produces real-but-wrong patches — diagnose
 why that patch fails the hidden tests (a tractable debugging task, vs
 "agent gave up"). Then widen the instance set for a less noisy number.
+
+---
+
+# 2317 diagnosis (same day) — final gauge: 3/3
+
+Diagnosed why requests-2317's real patch "failed," using the official
+eval artifacts rather than guesswork:
+
+1. The official report showed **all 8 FAIL_TO_PASS tests PASSED** with
+   our patch — the agent's fix was functionally correct.
+2. The blocker was one PASS_TO_PASS "regression":
+   `test_params_are_merged_case_sensitive`.
+3. That test **passes with our patch in isolation** (0.4s), and it is
+   network-dependent (hits httpbin live, like much of this 2015-era
+   suite).
+4. **Re-running the official evaluator on the byte-identical patch:
+   RESOLVED.** The original failure was benchmark-side network
+   flakiness, not our patch.
+
+**Final 3-instance gauge: 3/3 resolved** (flask-4045, requests-2317,
+requests-3362) vs OpenHands CodeAct 2.1's 1/3 on the same instances —
+still with the standing caveats: n=3, and our model (claude-sonnet-5,
+2026) is far newer than their entry's (sonnet, 2024-10).
+
+**Operational lesson for all future runs:** old requests/flask
+instances contain live-network tests; a FAIL verdict on them warrants
+one re-score before being believed. (The leaderboard community handles
+this the same way; SWE-bench Verified exists partly because of such
+noise.)
