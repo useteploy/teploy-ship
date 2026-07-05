@@ -1,5 +1,5 @@
 {
-  "name": "teploy-agent",
+  "name": "teploy-ship",
   "version": "0.0.1",
   "private": true,
   "description": "Teploy's coding agent \u2014 a CodeAct brain on the Neutron primitives. (Working name; product name TBD.)",

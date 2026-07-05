@@ -1,4 +1,4 @@
-# teploy-agent
+# teploy-ship
 
 Teploy's autonomous coding agent — a **CodeAct brain** built entirely on
 the Neutron primitives. *(Working name; the product's real name is a
