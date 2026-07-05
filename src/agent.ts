@@ -52,6 +52,13 @@ export interface RunAgentOptions {
   condense?: CondenseConfig | false;
   /** Persistent python kernel (variables survive between actions); false = per-file execution. */
   kernel?: boolean;
+  /**
+   * Verified-finish guard (default on): the FIRST finish attempted before
+   * any action has executed successfully is rejected with a nudge to do
+   * and verify the work — the premature-finish failure mode. A second
+   * finish is always honored (never an infinite refusal loop).
+   */
+  requireVerifiedFinish?: boolean;
   onEvent?: (event: AgentEvent) => void;
   abortSignal?: AbortSignal;
 }
@@ -115,6 +122,8 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
   };
 
   let kernelUsed = false;
+  let anySuccessfulAction = false;
+  let finishNudged = false;
   try {
   for (let index = 0; index < maxSteps; index++) {
     if (options.abortSignal?.aborted) {
@@ -149,6 +158,15 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
     emit({ type: "action", step: index, text: describeAction(action) });
 
     if (action.kind === "finish") {
+      if (options.requireVerifiedFinish !== false && !anySuccessfulAction && !finishNudged) {
+        finishNudged = true;
+        const nudge =
+          "You are finishing without having successfully executed anything. Do the work first: take the actions the task needs, verify the result with a command, and only then finish.";
+        messages.push({ role: "user", content: nudge });
+        steps.push({ index, thought, action });
+        emit({ type: "observation", step: index, text: nudge });
+        continue;
+      }
       steps.push({ index, thought, action });
       emit({ type: "finish", step: index, text: action.message });
       return { status: "finished", summary: action.message, steps, messages, usage };
@@ -195,6 +213,7 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
       return { status: "error", summary: `Execution failed: ${message}`, steps, messages, usage };
     }
 
+    if (result.exitCode === 0) anySuccessfulAction = true;
     const observation = truncate(formatObservation(result), maxObs);
     messages.push({ role: "user", content: observation });
     steps.push({ index, thought, action, result, observation });

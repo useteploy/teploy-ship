@@ -8,6 +8,8 @@ quality changes can be compared over time.
 | 2026-07-03 | claude-sonnet-5 | builtinSuite (3) | 3/3 (100%), 9/9 attempts | First live run. Stack works; suite saturated. |
 | 2026-07-03 | claude-sonnet-5 | hardSuite (6) | 6/6 (100%), 12/12 attempts | Harder (6–7 steps/task) but Sonnet still saturates it. |
 | 2026-07-03 | claude-haiku-4-5 | hardSuite (6) | 3/6 (50%), 5/12 attempts | **Discrimination confirmed** — the benchmark works. See below. |
+| 2026-07-04 | claude-haiku-4-5 | hardSuite (6) | 6/6 (100%) pass@2 | Kernel + str_replace editor closed the gap — measured harness win. |
+| 2026-07-05 | claude-haiku-4-5 | extremeSuite (4) | 2/4 (50%), repeats 1 | **Headroom restored.** Guard ON; both failures are premature finishes after one successful exploratory command (guard's designed limit — deliverable-aware finish check is the next lever). |
 
 ## The benchmark discriminates (validated 2026-07-03)
 

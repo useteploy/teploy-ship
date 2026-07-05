@@ -1,0 +1,18 @@
+  [FAIL] build-order (attempt 1, 2 steps)
+  [PASS] dedupe-refactor (attempt 1, 12 steps)
+
+  [PASS] expr-interpreter (19 steps, 202112ms)
+  [FAIL] session-audit (2 steps, 23191ms)  — check `test "$(tr -s ' ' < totals.txt | sed 's/ *$//' | tr '\n' '|')" = "alice 190|bob 100|carol 80|"` exited 1: /bin/sh: totals.txt: No such file or directory
+  [FAIL] build-order (2 steps, 25504ms)  — check `test "$(python3 plan.py | tr '\n' '|')" = "core|util|lib|app|cli|zed|" && printf 'a: b\nb: c\nc: a\n' > cyc.txt && cp deps.txt deps.bak && cp cyc.txt deps.txt && test "$(python3 plan.py | tr '\n' '|')" = "CYCLE|"; RC=$?; cp deps.bak deps.txt; exit $RC` exited 1: /opt/homebrew/Cellar/python@3.14/3.14.5/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python: can't open file '/private/var/folders/6f/7yv53mdd3j57c90gt2wykvsr0000gn/T/teploy-eval-IXjG0b/plan.py': [Errno 2] No such file or directory
+cp: deps.bak: No such file or directory
+  [PASS] dedupe-refactor (12 steps, 97480ms)
+
+2/4 tasks passed (50%)
+
+Notes:
+- claude-haiku-4-5, repeats 1, verified-finish guard ON (default).
+- 2/4 (50%) vs 100% on hardSuite -> extreme tier restores headroom.
+- Both failures are premature finishes AFTER one successful exploratory
+  command, so the any-successful-execution guard does not catch them.
+  Next quality lever (deferred): finish-time deliverable check / one-shot
+  "re-read the task requirements" confirmation nudge.

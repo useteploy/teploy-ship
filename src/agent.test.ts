@@ -255,3 +255,50 @@ test("the live loop condenses an overgrown conversation before the next model ca
   assert.equal(result.status, "finished");
   assert.ok(sawCondensed, "an overgrown conversation should have been condensed before a later model call");
 });
+
+test("verified-finish guard: an immediate finish is nudged once, then honored", async () => {
+  const executor = await localExecutor();
+  const { model, calls } = scriptedModel([
+    "```finish\nAll done! (nothing was actually done)\n```", // premature — nudged
+    "```finish\nStill claiming done.\n```", // second finish honored (no infinite refusal)
+  ]);
+  const result = await runAgent({ model, executor, task: "do something", recovery: false, condense: false });
+  assert.equal(result.status, "finished");
+  assert.equal(result.steps.length, 2);
+  assert.equal(result.steps[0]?.action.kind, "finish"); // rejected first attempt recorded
+  // the nudge reached the model on the second call
+  const nudge = calls[1]?.messages.at(-1);
+  assert.match(String(nudge?.content), /finishing without having successfully executed/);
+});
+
+test("verified-finish guard: a finish after real verified work passes immediately", async () => {
+  const executor = await localExecutor();
+  const { model } = scriptedModel([
+    "```bash\necho done-work\n```",
+    "```finish\nDid the work.\n```",
+  ]);
+  const result = await runAgent({ model, executor, task: "work", recovery: false, condense: false });
+  assert.equal(result.status, "finished");
+  assert.equal(result.steps.length, 2);
+});
+
+test("verified-finish guard: failed actions do not count as verification", async () => {
+  const executor = await localExecutor();
+  const { model } = scriptedModel([
+    "```bash\nfalse\n```", // executes but fails
+    "```finish\ndone\n```", // still premature — nudged
+    "```bash\ntrue\n```",
+    "```finish\nnow done\n```",
+  ]);
+  const result = await runAgent({ model, executor, task: "work", recovery: false, condense: false });
+  assert.equal(result.status, "finished");
+  assert.equal(result.summary, "now done");
+});
+
+test("verified-finish guard can be disabled", async () => {
+  const executor = await localExecutor();
+  const { model } = scriptedModel(["```finish\ninstant\n```"]);
+  const result = await runAgent({ model, executor, task: "x", requireVerifiedFinish: false, recovery: false, condense: false });
+  assert.equal(result.status, "finished");
+  assert.equal(result.steps.length, 1);
+});

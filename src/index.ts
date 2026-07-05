@@ -38,3 +38,4 @@ export type {
 
 export { builtinSuite } from "./tasks.js";
 export { hardSuite } from "./hard-tasks.js";
+export { extremeSuite } from "./extreme-tasks.js";

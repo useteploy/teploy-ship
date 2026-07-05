@@ -98,6 +98,8 @@ export function durableAgent(
         { role: "system", content: systemPrompt({ workdir, task: input.task }) },
         { role: "user", content: "Begin. Work step by step and verify before finishing." },
       ];
+      let anySuccessfulAction = false;
+      let finishNudged = false;
 
       for (let turn = 0; turn < maxSteps; turn++) {
         const thought = await ctx.step(`turn-${turn}-think`, async () => {
@@ -108,6 +110,15 @@ export function durableAgent(
 
         const action = parseAction(thought);
         if (action.kind === "finish") {
+          if (!anySuccessfulAction && !finishNudged) {
+            finishNudged = true;
+            messages.push({
+              role: "user",
+              content:
+                "You are finishing without having successfully executed anything. Do the work first: take the actions the task needs, verify the result with a command, and only then finish.",
+            });
+            continue;
+          }
           return { status: "finished", summary: action.message, turns: turn + 1 };
         }
         if (action.kind === "none" || action.kind === "invalid") {
@@ -156,6 +167,7 @@ export function durableAgent(
         const result = await ctx.step(`turn-${turn}-exec`, () =>
           executeAction(executor, action, config.actionTimeoutMs, `t${turn}`),
         );
+        if (result.exitCode === 0) anySuccessfulAction = true;
         messages.push({ role: "user", content: truncate(formatObservation(result), maxObs) });
       }
 

