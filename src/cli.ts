@@ -3,8 +3,9 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { anthropic } from "@neutron-build/ai/anthropic";
-import { openai } from "@neutron-build/ai/openai";
+import { anthropic, createAnthropic } from "@neutron-build/ai/anthropic";
+import { openai, createOpenAI } from "@neutron-build/ai/openai";
+import type { ModelAdapter } from "@neutron-build/ai";
 import { LocalExecutor, SandboxExecutor } from "@neutron-build/agents";
 import type { AgentExecutor } from "@neutron-build/agents";
 
@@ -34,10 +35,7 @@ async function main(): Promise<void> {
     process.exit(2);
   }
 
-  const modelId = args.flags.model ?? "anthropic/claude-sonnet-5";
-  const model = modelId.startsWith("anthropic/")
-    ? anthropic(modelId.slice("anthropic/".length), { cache: true })
-    : openai(modelId.replace(/^openai\//, ""));
+  const model = resolveModel(args.flags.model ?? "anthropic/claude-sonnet-5");
 
   let executor: AgentExecutor;
   let workdir: string;
@@ -75,12 +73,36 @@ async function main(): Promise<void> {
   process.exit(result.status === "finished" ? 0 : 1);
 }
 
-async function evalCommand(rest: string[]): Promise<void> {
-  const args = parseArgs(rest);
-  const modelId = args.flags.model ?? "anthropic/claude-sonnet-5";
-  const model = modelId.startsWith("anthropic/")
+/**
+ * Model resolution with gateway support: when AI_GATEWAY_URL (+ _KEY) is
+ * set, all calls route through teploy-gateway with the project key —
+ * provider keys never reach the app. Prompt caching stays on either way
+ * (the gateway forwards cache_control untouched and tracks the cache
+ * fields per project).
+ */
+function resolveModel(modelId: string): ModelAdapter {
+  const gatewayURL = process.env.AI_GATEWAY_URL;
+  const gatewayKey = process.env.AI_GATEWAY_KEY;
+  if (gatewayURL !== undefined && gatewayURL !== "") {
+    if (gatewayKey === undefined || gatewayKey === "") {
+      console.error("AI_GATEWAY_URL is set but AI_GATEWAY_KEY is missing.");
+      process.exit(2);
+    }
+    if (modelId.startsWith("anthropic/")) {
+      // Keep the provider prefix: the gateway routes by provider/model.
+      return createAnthropic({ baseURL: gatewayURL, apiKey: gatewayKey })(modelId, { cache: true });
+    }
+    return createOpenAI({ baseURL: gatewayURL, apiKey: gatewayKey, provider: "gateway" })(modelId);
+  }
+  return modelId.startsWith("anthropic/")
     ? anthropic(modelId.slice("anthropic/".length), { cache: true })
     : openai(modelId.replace(/^openai\//, ""));
+}
+
+async function evalCommand(rest: string[]): Promise<void> {
+  const args = parseArgs(rest);
+  const model = resolveModel(args.flags.model ?? "anthropic/claude-sonnet-5");
+  const modelId = args.flags.model ?? "anthropic/claude-sonnet-5";
   const repeats = args.flags.repeats !== undefined ? Number(args.flags.repeats) : 1;
   const suiteName = args.flags.suite ?? "builtin";
   const tasks: EvalTask[] =
