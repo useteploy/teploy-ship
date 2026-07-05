@@ -3,7 +3,7 @@
 // terminal (streamed, interactive approvals) or as durable runs that
 // park on approval, survive exits/crashes, and resume later.
 import { mkdirSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -12,19 +12,23 @@ import { openai, createOpenAI } from "@neutron-build/ai/openai";
 import type { ModelAdapter } from "@neutron-build/ai";
 import { LocalExecutor, SandboxExecutor } from "@neutron-build/agents";
 import type { AgentExecutor } from "@neutron-build/agents";
-import { deliverEvent, executeRun } from "@neutron-build/workflow";
+import { deliverEvent } from "@neutron-build/workflow";
 import type { RunOutcome } from "@neutron-build/workflow";
 
 import { parseArgs } from "./args.js";
 import { runAgent } from "./agent.js";
 import { defaultApprovalPolicy } from "./approval.js";
-import { approvalEvent, durableAgent, sandboxProvider } from "./durable.js";
+import { durableAgent, sandboxProvider } from "./durable.js";
 import type { ExecutorProvider } from "./durable.js";
 import { formatReport, runEval } from "./eval.js";
 import type { EvalTask } from "./eval.js";
-import { FileEventStore, RunMetaStore, stateDir } from "./run-store.js";
+import { stateDir } from "./run-store.js";
+import { fileRuntime, nucleusRuntime } from "./runtime.js";
+import type { ShipRuntime } from "./runtime.js";
+import { startWorker } from "./worker.js";
 import { builtinSuite } from "./tasks.js";
 import { hardSuite } from "./hard-tasks.js";
+import { extremeSuite } from "./extreme-tasks.js";
 import { bold, dim, green, promptApproval, red, renderEvent, renderUsage, yellow } from "./ui.js";
 
 const USAGE = `teploy-ship — coding agent on your own stack
@@ -38,19 +42,27 @@ Usage:
   teploy-ship runs                    list durable runs
   teploy-ship resume <run-id>         continue a durable run (after a crash or park)
   teploy-ship approve <run-id>        approve a parked action and continue
+      [--handoff]                     deliver the decision, let a worker finish the run
   teploy-ship deny <run-id> [reason]  deny a parked action and continue
-  teploy-ship eval [--suite builtin|hard|all] [--repeats N] [--json]
+  teploy-ship worker                  resident worker: picks up due nucleus-store runs
+      [--interval seconds]            poll interval (default 5)
+  teploy-ship eval [--suite builtin|hard|extreme|all] [--repeats N] [--json]
 
 Config: flags > env > ~/.config/teploy-ship/config.json
-  (model, sandboxUrl, sandboxToken, sandboxImage)
+  (model, sandboxUrl, sandboxToken, sandboxImage, store, nucleusUrl)
 Gateway: set AI_GATEWAY_URL + AI_GATEWAY_KEY to route through teploy-gateway.
-Durable state: ${stateDir()} (override: TEPLOY_SHIP_STATE)`;
+Durable store: local files by default (${stateDir()}, override: TEPLOY_SHIP_STATE).
+  With --store nucleus (+ --nucleus-url or NUCLEUS_URL), runs live in a shared
+  Nucleus: any machine can list/approve them, and a worker completes them —
+  approve from your laptop, close it, the worker carries the run home.`;
 
 interface Config {
   model?: string;
   sandboxUrl?: string;
   sandboxToken?: string;
   sandboxImage?: string;
+  store?: string;
+  nucleusUrl?: string;
 }
 
 function loadConfig(): Config {
@@ -161,6 +173,18 @@ async function makeExecutor(
 // durable runs
 // ---------------------------------------------------------------------------
 
+/** flags > env > config: pick where durable runs live. */
+async function makeRuntime(args: ReturnType<typeof parseArgs>, config: Config): Promise<ShipRuntime> {
+  const storeKind = (args.flags.store as string) ?? config.store ?? "file";
+  if (storeKind === "file") return fileRuntime();
+  if (storeKind !== "nucleus") fail(`unknown --store: ${storeKind} (expected file or nucleus)`);
+  const url = (args.flags["nucleus-url"] as string) ?? process.env.NUCLEUS_URL ?? config.nucleusUrl;
+  if (url === undefined || url === "") {
+    fail("--store nucleus needs --nucleus-url, NUCLEUS_URL, or nucleusUrl in config");
+  }
+  return nucleusRuntime(url, `cli-${hostname()}-${process.pid}`);
+}
+
 function durableProvider(args: ReturnType<typeof parseArgs>, config: Config): ExecutorProvider {
   const sandboxUrl = (args.flags.sandbox as string) ?? config.sandboxUrl;
   if (sandboxUrl !== undefined) {
@@ -187,7 +211,13 @@ function durableProvider(args: ReturnType<typeof parseArgs>, config: Config): Ex
   };
 }
 
-async function executePass(runId: string, task: string, args: ReturnType<typeof parseArgs>, config: Config): Promise<RunOutcome> {
+async function executePass(
+  runtime: ShipRuntime,
+  runId: string,
+  task: string,
+  args: ReturnType<typeof parseArgs>,
+  config: Config,
+): Promise<RunOutcome | null> {
   const modelId = (args.flags.model as string) ?? config.model ?? "anthropic/claude-sonnet-5";
   const usingSandbox = ((args.flags.sandbox as string) ?? config.sandboxUrl) !== undefined;
   const wf = durableAgent({
@@ -198,11 +228,10 @@ async function executePass(runId: string, task: string, args: ReturnType<typeof 
     // the honest working directory to show the agent.
     workdir: usingSandbox ? "/work" : ".",
   });
-  const store = new FileEventStore();
-  const meta = new RunMetaStore();
-  const outcome = await executeRun({ workflow: wf, runId, store, input: { task } });
-  const previous = await meta.load(runId);
-  await meta.save({
+  const outcome = await runtime.execute(wf, runId, { task });
+  if (outcome === null) return null; // another executor holds the lease
+  const previous = await runtime.loadMeta(runId);
+  await runtime.saveMeta({
     runId,
     task,
     model: modelId,
@@ -214,7 +243,13 @@ async function executePass(runId: string, task: string, args: ReturnType<typeof 
   return outcome;
 }
 
-function reportOutcome(runId: string, outcome: RunOutcome): void {
+function reportOutcome(runId: string, outcome: RunOutcome | null): void {
+  if (outcome === null) {
+    process.stderr.write(
+      `${yellow("handed off")} — another executor (a worker?) holds this run; it continues there.\n  watch: ${bold("teploy-ship runs")}\n`,
+    );
+    return;
+  }
   switch (outcome.status) {
     case "completed":
       process.stderr.write(`${green("completed")} — ${JSON.stringify(outcome.output)}\n`);
@@ -233,55 +268,104 @@ function reportOutcome(runId: string, outcome: RunOutcome): void {
 }
 
 async function startDurable(task: string, args: ReturnType<typeof parseArgs>, config: Config): Promise<void> {
+  const runtime = await makeRuntime(args, config);
   const runId = `run-${randomUUID().slice(0, 8)}`;
   process.stderr.write(`${dim(`durable run ${runId}`)}\n`);
-  const outcome = await executePass(runId, task, args, config);
+  const outcome = await executePass(runtime, runId, task, args, config);
   reportOutcome(runId, outcome);
-  process.exit(outcome.status === "failed" ? 1 : 0);
+  await runtime.close();
+  process.exit(outcome?.status === "failed" ? 1 : 0);
 }
 
 async function resumeCommand(rest: string[]): Promise<void> {
   const args = parseArgs(rest);
+  const config = loadConfig();
   const runId = args.positional[0];
   if (runId === undefined) fail("usage: teploy-ship resume <run-id>");
-  const meta = await new RunMetaStore().load(runId);
+  const runtime = await makeRuntime(args, config);
+  const meta = await runtime.loadMeta(runId);
   if (meta === null) fail(`unknown run: ${runId}`);
-  const outcome = await executePass(runId, meta.task, args, loadConfig());
+  const outcome = await executePass(runtime, runId, meta.task, args, config);
   reportOutcome(runId, outcome);
-  process.exit(outcome.status === "failed" ? 1 : 0);
+  await runtime.close();
+  process.exit(outcome?.status === "failed" ? 1 : 0);
 }
 
 async function decideCommand(rest: string[], approved: boolean): Promise<void> {
   const args = parseArgs(rest);
+  const config = loadConfig();
   const runId = args.positional[0];
   if (runId === undefined) fail(`usage: teploy-ship ${approved ? "approve" : "deny"} <run-id>`);
-  const metaStore = new RunMetaStore();
-  const meta = await metaStore.load(runId);
+  const runtime = await makeRuntime(args, config);
+  const meta = await runtime.loadMeta(runId);
   if (meta === null) fail(`unknown run: ${runId}`);
   if (meta.eventName === undefined) fail(`run ${runId} is not waiting for approval (status: ${meta.status})`);
 
   const reason = args.positional[1];
-  await deliverEvent(new FileEventStore(), runId, meta.eventName, {
+  await deliverEvent(runtime.store, runId, meta.eventName, {
     approved,
     ...(reason !== undefined ? { reason } : {}),
   });
+  // Flag the run due so a resident worker can take it; racing is safe —
+  // whoever wins the lease continues, the other reports the handoff.
+  await runtime.markWake?.(runId);
+  if (args.flags.handoff === true) {
+    if (runtime.kind !== "nucleus") fail("--handoff needs --store nucleus (a worker must see the run)");
+    process.stderr.write(
+      `${approved ? green("approved") : red("denied")} — handed to workers.\n  watch: ${bold("teploy-ship runs --store nucleus")}\n`,
+    );
+    await runtime.close();
+    process.exit(0);
+  }
   process.stderr.write(`${approved ? green("approved") : red("denied")} — continuing run…\n`);
-  const outcome = await executePass(runId, meta.task, args, loadConfig());
+  const outcome = await executePass(runtime, runId, meta.task, args, config);
   reportOutcome(runId, outcome);
-  process.exit(outcome.status === "failed" ? 1 : 0);
+  await runtime.close();
+  process.exit(outcome?.status === "failed" ? 1 : 0);
 }
 
-async function runsCommand(): Promise<void> {
-  const metas = await new RunMetaStore().list();
+async function runsCommand(rest: string[]): Promise<void> {
+  const runtime = await makeRuntime(parseArgs(rest), loadConfig());
+  const metas = await runtime.listMeta();
   if (metas.length === 0) {
     process.stderr.write(dim("no durable runs\n"));
-    return;
   }
   for (const meta of metas) {
     const status =
       meta.status === "completed" ? green(meta.status) : meta.status === "waiting" ? yellow(meta.status) : meta.status === "failed" ? red(meta.status) : meta.status;
     process.stdout.write(`${meta.runId}  ${status}  ${dim(meta.updatedAt)}  ${meta.task.slice(0, 60)}\n`);
   }
+  await runtime.close();
+}
+
+async function workerCommand(rest: string[]): Promise<void> {
+  const args = parseArgs(rest);
+  const config = loadConfig();
+  if (((args.flags.store as string) ?? config.store) !== "nucleus") {
+    fail("worker needs the shared store: --store nucleus (+ --nucleus-url or NUCLEUS_URL)");
+  }
+  const runtime = await makeRuntime(args, config);
+  if (runtime.kind !== "nucleus") fail("worker needs --store nucleus");
+  const modelId = (args.flags.model as string) ?? config.model ?? "anthropic/claude-sonnet-5";
+  const usingSandbox = ((args.flags.sandbox as string) ?? config.sandboxUrl) !== undefined;
+  const worker = startWorker({
+    runtime: runtime as import("./runtime.js").NucleusShipRuntime,
+    model: resolveModel(modelId),
+    executor: durableProvider(args, config),
+    workdir: usingSandbox ? "/work" : ".",
+    intervalMs: args.flags.interval !== undefined ? Number(args.flags.interval) * 1000 : 5000,
+  });
+  // The scheduler's own timer is unref'd; this ref'd no-op holds the
+  // process resident until a signal stops it.
+  const keepAlive = setInterval(() => {}, 60_000);
+  const shutdown = (): void => {
+    process.stderr.write(`\n${dim("worker stopping…")}\n`);
+    clearInterval(keepAlive);
+    worker.stop();
+    void runtime.close().finally(() => process.exit(0));
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 }
 
 // ---------------------------------------------------------------------------
@@ -296,7 +380,7 @@ async function evalCommand(rest: string[]): Promise<void> {
   const repeats = args.flags.repeats !== undefined ? Number(args.flags.repeats) : 1;
   const suiteName = (args.flags.suite as string) ?? "builtin";
   const tasks: EvalTask[] =
-    suiteName === "hard" ? hardSuite : suiteName === "all" ? [...builtinSuite, ...hardSuite] : builtinSuite;
+    suiteName === "hard" ? hardSuite : suiteName === "extreme" ? extremeSuite : suiteName === "all" ? [...builtinSuite, ...hardSuite, ...extremeSuite] : builtinSuite;
 
   process.stderr.write(`Running ${tasks.length} tasks (${suiteName}) against ${modelId} (${repeats}x)...\n\n`);
   const report = await runEval({
@@ -318,13 +402,15 @@ async function main(): Promise<void> {
     case "run":
       return runCommand(rest);
     case "runs":
-      return runsCommand();
+      return runsCommand(rest);
     case "resume":
       return resumeCommand(rest);
     case "approve":
       return decideCommand(rest, true);
     case "deny":
       return decideCommand(rest, false);
+    case "worker":
+      return workerCommand(rest);
     case "eval":
       return evalCommand(rest);
     default:
