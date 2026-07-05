@@ -15,6 +15,31 @@ teploy-agent run "write fib.py that prints 8 Fibonacci numbers and run it"
 # local workspace by default; --sandbox <url> --sandbox-token <t> for teploy-sandbox
 ```
 
+## The CLI — teploy-ship
+
+```sh
+teploy-ship run "fix the failing test"      # live: streamed output, y/N prompts on dangerous actions
+teploy-ship run --durable "big refactor"    # parks on approvals, survives exits and crashes
+teploy-ship runs                            # list durable runs
+teploy-ship approve run-1a2b3c4d            # approve a parked action — the run continues
+teploy-ship deny run-1a2b3c4d "not in prod" # deny with a reason — the agent adapts
+teploy-ship eval --suite hard --repeats 2   # the benchmark harness
+```
+
+Live runs stream thoughts (dim), actions (bold), and observations to the
+terminal; the default approval policy flags destructive/network/privilege
+actions for an interactive y/N (`--yes` or `--headless` for CI; `--json`
+for machine output). Every run ends with a cache-aware token summary.
+
+Durable runs execute as workflows over a file-backed event log
+(`~/.local/state/teploy-ship`, override `TEPLOY_SHIP_STATE`): a parked
+run holds zero processes; `approve`/`deny`/`resume` continue it in a new
+invocation — replay skips completed work, so nothing re-runs. With
+`--sandbox`, parks snapshot the workspace so the run survives container
+TTLs too. Config defaults live in `~/.config/teploy-ship/config.json`
+(model, sandboxUrl, sandboxToken, sandboxImage); set `AI_GATEWAY_URL` +
+`AI_GATEWAY_KEY` to route all model calls through teploy-gateway.
+
 ## The stack it stands on
 
 | Layer | Provides |

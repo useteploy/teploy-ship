@@ -2,12 +2,12 @@
   "name": "teploy-agent",
   "version": "0.0.1",
   "private": true,
-  "description": "Teploy's coding agent — a CodeAct brain on the Neutron primitives. (Working name; product name TBD.)",
+  "description": "Teploy's coding agent \u2014 a CodeAct brain on the Neutron primitives. (Working name; product name TBD.)",
   "author": "Tyler",
   "license": "MIT",
   "type": "module",
   "bin": {
-    "teploy-agent": "./dist/cli.js"
+    "teploy-ship": "./dist/cli.js"
   },
   "exports": {
     ".": {

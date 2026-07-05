@@ -1,5 +1,5 @@
 import { generateText } from "@neutron-build/ai";
-import type { Message, ModelAdapter } from "@neutron-build/ai";
+import type { Message, ModelAdapter, Usage } from "@neutron-build/ai";
 import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 
 import type { Action } from "./actions.js";
@@ -34,6 +34,8 @@ export interface RunAgentOptions {
   task: string;
   /** Absolute workdir shown to the agent (default /work — the sandbox convention). */
   workdir?: string;
+  /** Continue a prior conversation (e.g. a previous run's result.messages); task becomes the next user turn. */
+  priorMessages?: Message[];
   /** Max action turns before giving up (default 20). */
   maxSteps?: number;
   /** Per-action wall-clock cap, ms (default 120000). */
@@ -61,6 +63,8 @@ export interface AgentResult {
   steps: AgentStep[];
   /** Full conversation, for inspection or a follow-up turn. */
   messages: Message[];
+  /** Total model usage across every call in the run (cache fields included). */
+  usage: Usage;
 }
 
 /**
@@ -76,11 +80,26 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
   const maxObs = options.maxObservationChars ?? 8000;
   const emit = options.onEvent ?? (() => {});
 
-  let messages: Message[] = [
-    { role: "system", content: systemPrompt({ workdir, task: options.task }) },
-    { role: "user", content: "Begin. Work step by step and verify before finishing." },
-  ];
+  let messages: Message[] =
+    options.priorMessages !== undefined && options.priorMessages.length > 0
+      ? [...options.priorMessages, { role: "user", content: options.task }]
+      : [
+          { role: "system", content: systemPrompt({ workdir, task: options.task }) },
+          { role: "user", content: "Begin. Work step by step and verify before finishing." },
+        ];
   const steps: AgentStep[] = [];
+  let usage: Usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+  const addTo = (u: Usage): void => {
+    const cacheRead = (usage.cacheReadTokens ?? 0) + (u.cacheReadTokens ?? 0);
+    const cacheWrite = (usage.cacheWriteTokens ?? 0) + (u.cacheWriteTokens ?? 0);
+    usage = {
+      inputTokens: usage.inputTokens + u.inputTokens,
+      outputTokens: usage.outputTokens + u.outputTokens,
+      totalTokens: usage.totalTokens + u.totalTokens,
+      ...(cacheRead > 0 ? { cacheReadTokens: cacheRead } : {}),
+      ...(cacheWrite > 0 ? { cacheWriteTokens: cacheWrite } : {}),
+    };
+  };
 
   const recovery = options.recovery === false ? null : new RecoveryTracker(options.recovery ?? defaultRecoveryConfig);
   const condense = options.condense === false ? null : (options.condense ?? defaultCondenseConfig);
@@ -91,6 +110,7 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
       prompt: transcript,
       maxOutputTokens: 800,
     });
+    addTo(generated.usage);
     return generated.text;
   };
 
@@ -98,7 +118,7 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
   try {
   for (let index = 0; index < maxSteps; index++) {
     if (options.abortSignal?.aborted) {
-      return { status: "aborted", summary: "Run aborted.", steps, messages };
+      return { status: "aborted", summary: "Run aborted.", steps, messages, usage };
     }
 
     // Keep the conversation inside the model's window before each call.
@@ -115,11 +135,12 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
       const generateOptions: Parameters<typeof generateText>[0] = { model: options.model, messages };
       if (options.abortSignal !== undefined) generateOptions.abortSignal = options.abortSignal;
       const generated = await generateText(generateOptions);
+      addTo(generated.usage);
       thought = generated.text;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       emit({ type: "error", step: index, text: message });
-      return { status: "error", summary: `Model call failed: ${message}`, steps, messages };
+      return { status: "error", summary: `Model call failed: ${message}`, steps, messages, usage };
     }
 
     messages.push({ role: "assistant", content: thought });
@@ -130,7 +151,7 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
     if (action.kind === "finish") {
       steps.push({ index, thought, action });
       emit({ type: "finish", step: index, text: action.message });
-      return { status: "finished", summary: action.message, steps, messages };
+      return { status: "finished", summary: action.message, steps, messages, usage };
     }
 
     if (action.kind === "none" || action.kind === "invalid") {
@@ -171,7 +192,7 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       emit({ type: "error", step: index, text: message });
-      return { status: "error", summary: `Execution failed: ${message}`, steps, messages };
+      return { status: "error", summary: `Execution failed: ${message}`, steps, messages, usage };
     }
 
     const observation = truncate(formatObservation(result), maxObs);
@@ -184,7 +205,7 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
       const signal = recovery.observe(action, result.exitCode);
       if (signal.kind === "abort") {
         emit({ type: "error", step: index, text: signal.message });
-        return { status: "error", summary: signal.message, steps, messages };
+        return { status: "error", summary: signal.message, steps, messages, usage };
       }
       if (signal.kind === "nudge") {
         messages.push({ role: "user", content: signal.message });
@@ -198,6 +219,7 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
     summary: `Reached the ${maxSteps}-step limit without finishing.`,
     steps,
     messages,
+    usage,
   };
   } finally {
     // A local kernel is a real OS process; never leak it past the run.
