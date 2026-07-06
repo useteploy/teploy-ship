@@ -26,6 +26,20 @@ export interface RepoRef {
  */
 export function parseRepoUrl(url: string): RepoRef {
   const parsed = new URL(url);
+  // file:// remotes: local bare repos (tests, air-gapped mirrors). Clone
+  // and push work; PR APIs obviously don't — publish only reaches the PR
+  // call on a non-empty diff against a real host.
+  if (parsed.protocol === "file:") {
+    const segments = parsed.pathname.replace(/\.git$/, "").split("/").filter(Boolean);
+    if (segments.length < 2) throw new Error(`repo URL needs /owner/repo: ${url}`);
+    return {
+      kind: "forgejo",
+      base: "file://",
+      owner: segments[segments.length - 2]!,
+      repo: segments[segments.length - 1]!,
+      cloneUrl: parsed.pathname,
+    };
+  }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw new Error(`unsupported repo URL protocol: ${parsed.protocol} (use http/https)`);
   }
@@ -165,8 +179,9 @@ export async function openPullRequest(options: {
 }
 
 /** The task prompt wrapper for repo work — repo-aware, token-free. */
-export function fixPrompt(options: { task: string; branch: string; base: string }): string {
-  return `You are working in a git repository, already cloned at your working directory and checked out on branch ${options.branch} (branched from ${options.base}).
+export function fixPrompt(options: { task: string; branch: string; base: string; context?: string }): string {
+  const context = options.context !== undefined && options.context !== "" ? `\n\n${options.context}` : "";
+  return `You are working in a git repository, already cloned at your working directory and checked out on branch ${options.branch} (branched from ${options.base}).${context}
 
 ${options.task}
 
@@ -246,8 +261,9 @@ export async function commentOnPr(
 }
 
 /** Task prompt for review follow-ups — the branch state is the context. */
-export function reviewPrompt(options: { task: string; branch: string; pr: number }): string {
-  return `You are addressing review feedback on open pull request #${options.pr}. The repository is cloned at your working directory, checked out on the PR's branch ${options.branch} — your earlier changes for this PR are already in the tree.
+export function reviewPrompt(options: { task: string; branch: string; pr: number; context?: string }): string {
+  const context = options.context !== undefined && options.context !== "" ? `\n\n${options.context}` : "";
+  return `You are addressing review feedback on open pull request #${options.pr}. The repository is cloned at your working directory, checked out on the PR's branch ${options.branch} — your earlier changes for this PR are already in the tree.${context}
 
 Review feedback to address:
 ${options.task}

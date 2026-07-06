@@ -10,6 +10,7 @@ import type { AgentExecutor } from "@neutron-build/agents";
 import { MemoryEventStore, deliverEvent, executeRun } from "@neutron-build/workflow";
 
 import { approvalEvent, durableAgent } from "./durable.js";
+import { FileRepoMemory } from "./repo-memory.js";
 import type { ExecutorProvider } from "./durable.js";
 import { defaultApprovalPolicy } from "./approval.js";
 
@@ -253,4 +254,73 @@ test("auto-safe actions never park", async () => {
   const store = new MemoryEventStore();
   const outcome = await executeRun({ workflow: wf, runId: "run-1", store, input: { task: "list" } });
   assert.equal(outcome.status, "completed");
+});
+
+test("repo runs inject the playbook + memory into the prompt and record a note after publish", async () => {
+  // bare remote seeded with a SHIP.md playbook
+  const bareDir = await mkdtemp(join(tmpdir(), "durable-repo-bare-"));
+  const seedDir = await mkdtemp(join(tmpdir(), "durable-repo-seed-"));
+  const seeder = new LocalExecutor({ root: seedDir });
+  await seeder.exec(
+    `git init -q -b main . && git config user.email t@t && git config user.name t && printf 'Run tests with make check-42.\\n' > SHIP.md && git add -A && git commit -qm seed && git clone -q --bare . ${bareDir}/owner/repo.git`,
+  );
+
+  const memory = new FileRepoMemory(await mkdtemp(join(tmpdir(), "durable-repo-mem-")));
+  await memory.record({ repo: "owner/repo", note: "previously fixed the parser → PR #7" });
+
+  const prompts: string[] = [];
+  const model: ModelAdapter = {
+    provider: "scripted",
+    modelId: "s1",
+    async doGenerate(options): Promise<AdapterGenerateResult> {
+      prompts.push(String(options.messages[0]?.content ?? ""));
+      const finishes = options.messages.filter(
+        (m) => typeof m.content === "string" && m.content.includes("Before finishing"),
+      ).length;
+      // finish with NO tree changes: publish path runs, no PR API touched
+      const text = finishes > 0 ? "```finish\nnothing to change\n```" : "```bash\ntrue\n```";
+      const asst = options.messages.filter((m) => m.role === "assistant").length;
+      return {
+        content: [{ type: "text", text: asst === 0 ? "```bash\ntrue\n```" : text }],
+        finishReason: "stop",
+        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+        raw: null,
+      };
+    },
+    async *doStream() {
+      throw new Error("unused");
+    },
+  };
+
+  const work = await mkdtemp(join(tmpdir(), "durable-repo-work-"));
+  const provider: ExecutorProvider = {
+    async create() {
+      return { handle: work };
+    },
+    attach(handle: string) {
+      return new LocalExecutor({ root: handle });
+    },
+  };
+
+  const wf = durableAgent({ model, executor: provider, workdir: ".", repoMemory: memory });
+  const store = new MemoryEventStore();
+  const outcome = await executeRun({
+    workflow: wf,
+    runId: "run-repo1",
+    store,
+    input: { task: "check the build", repo: `file://${bareDir}/owner/repo.git` },
+  });
+  assert.equal(outcome.status, "completed");
+
+  // the recorded context step exists and the model saw playbook + history
+  const events = await store.load("run-repo1");
+  assert.ok(events.some((e) => e.type === "step-completed" && e.name === "repo-context"));
+  const system = prompts[0] ?? "";
+  assert.match(system, /make check-42/);
+  assert.match(system, /previously fixed the parser/);
+
+  // publish recorded a fresh note (empty diff -> "no PR")
+  const notes = await memory.recent("owner/repo", 5);
+  assert.equal(notes.length, 2);
+  assert.match(notes[0]!.note, /check the build → no PR/);
 });

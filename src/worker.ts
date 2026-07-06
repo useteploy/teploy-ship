@@ -53,6 +53,7 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
     approveAction: defaultApprovalPolicy,
     workdir: options.workdir,
     ...(options.gitToken !== undefined ? { gitToken: options.gitToken } : {}),
+    repoMemory: options.runtime.memory,
   });
   const scheduler = new Scheduler({
     workflows: [wf as unknown as WorkflowDefinition<never, unknown>],
