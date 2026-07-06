@@ -1,0 +1,39 @@
+# Self-hosted Teploy Ship — deployed with teploy.
+#
+# Two services from one image (deploy/build-image.sh):
+#   ship-web    the dashboard + Forgejo webhook receiver
+#   ship-worker executes durable runs (needs the model + git tokens)
+# Both point at a shared Nucleus (run one with `nucleus start`, or use
+# an existing instance) so any machine can list/approve runs.
+#
+# Required secrets (set in the teploy env store, never in this file):
+#   SHIP_WEB_TOKEN       dashboard login + API bearer
+#   SHIP_WEBHOOK_SECRET  Forgejo webhook HMAC
+#   SHIP_GIT_TOKEN       deploy token for repo runs (clone/push/PR)
+#   ANTHROPIC_API_KEY    or AI_GATEWAY_URL + AI_GATEWAY_KEY
+#   NUCLEUS_URL          postgres://…:5432/nucleus
+
+app: teploy-ship
+image: teploy-ship:dev
+
+services:
+  ship-web:
+    command: ["web", "--store", "nucleus", "--port", "7460"]
+    port: 7460
+    env:
+      - SHIP_WEB_TOKEN
+      - SHIP_WEBHOOK_SECRET
+      - NUCLEUS_URL
+      - SHIP_MODEL
+
+  ship-worker:
+    command: ["worker", "--store", "nucleus", "--interval", "5"]
+    env:
+      - NUCLEUS_URL
+      - SHIP_GIT_TOKEN
+      - ANTHROPIC_API_KEY
+      - AI_GATEWAY_URL
+      - AI_GATEWAY_KEY
+      - SHIP_MODEL
+    volumes:
+      - ship-data:/data

@@ -1,0 +1,17 @@
+{
+  "name": "teploy-ship-web",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@neutron-build/cli": "file:../vendor/neutron-build-cli-0.1.3.tgz",
+    "@neutron-build/core": "file:../vendor/neutron-build-core-0.1.4.tgz",
+    "@preact/preset-vite": "^2.9.4",
+    "preact": "10.25.4",
+    "teploy-ship": "file:..",
+    "vite": "^6.0.7"
+  },
+  "overrides": {
+    "@neutron-build/core": "file:../vendor/neutron-build-core-0.1.4.tgz"
+  }
+}

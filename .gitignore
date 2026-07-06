@@ -4,3 +4,4 @@ dist/
 e2e-tmp.mjs
 web/node_modules/
 web/dist/
+deploy/vendor/

@@ -92,7 +92,8 @@ test("durable park -> approve -> resume works across store instances (separate C
   await deliverEvent(new FileEventStore(dir), "r1", approvalEvent(1), { approved: true });
   const second = await executeRun({ workflow: makeWf(), runId: "r1", store: new FileEventStore(dir), input: { task: "clean" } });
   assert.equal(second.status, "completed");
-  assert.deepEqual(second.output, { status: "finished", summary: "cleaned.", turns: 5 });
+  const { usage: uOut, ...outRest } = second.output as Record<string, unknown>;
+  assert.deepEqual(outRest, { status: "finished", summary: "cleaned.", turns: 5 });
 });
 
 test("RunMetaStore saves, lists newest-first, and tracks the parked event", async () => {

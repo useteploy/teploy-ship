@@ -27,7 +27,11 @@ export function toTimeline(events: WorkflowEvent[]): TimelineItem[] {
         const name = event.name ?? "";
         const result = (event.data as { result?: unknown } | undefined)?.result;
         if (/-think$/.test(name)) {
-          items.push({ kind: "thought", title: name, body: String(result ?? ""), at });
+          const text =
+            typeof result === "object" && result !== null && "text" in result
+              ? String((result as { text: unknown }).text)
+              : String(result ?? "");
+          items.push({ kind: "thought", title: name, body: text, at });
         } else if (/-exec$/.test(name)) {
           const r = result as { exitCode?: number; stdout?: string; stderr?: string } | string | undefined;
           if (typeof r === "object" && r !== null && "exitCode" in r) {
@@ -69,8 +73,18 @@ export function toTimeline(events: WorkflowEvent[]): TimelineItem[] {
         break;
       }
       case "run-completed": {
-        const output = (event.data as { output?: { summary?: string } } | undefined)?.output;
-        items.push({ kind: "done", title: "completed", body: output?.summary ?? "", at });
+        const output = (event.data as
+          | { output?: { summary?: string; pr?: string; usage?: { inputTokens: number; outputTokens: number; totalTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number } } }
+          | undefined)?.output;
+        const extras: string[] = [];
+        if (output?.pr !== undefined && output.pr !== null) extras.push(`PR: ${output.pr}`);
+        const usage = output?.usage;
+        if (usage !== undefined) {
+          const cache = usage.cacheReadTokens !== undefined ? `, cache-read ${usage.cacheReadTokens}` : "";
+          extras.push(`tokens: ${usage.inputTokens} in / ${usage.outputTokens} out${cache}`);
+        }
+        const body = [output?.summary ?? "", extras.join(" · ")].filter((s) => s !== "").join("\n\n");
+        items.push({ kind: "done", title: "completed", body, at });
         break;
       }
       case "run-failed": {

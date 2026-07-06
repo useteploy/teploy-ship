@@ -34,6 +34,16 @@ export interface DurableAgentOutput {
   turns: number;
   /** PR opened by a repo run (absent for workspace runs or empty diffs). */
   pr?: string;
+  /** Model usage summed across the run's turns (cache fields included). */
+  usage?: RunUsage;
+}
+
+export interface RunUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
 }
 
 // (review follow-ups set input.pr — the run works the EXISTING PR branch
@@ -163,11 +173,27 @@ export function durableAgent(
       let failNudges = 0;
       let lastExecFailed = false;
 
+      const usage: RunUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+      const addUsage = (u: Partial<RunUsage> | undefined): void => {
+        if (u === undefined) return;
+        usage.inputTokens += u.inputTokens ?? 0;
+        usage.outputTokens += u.outputTokens ?? 0;
+        usage.totalTokens += u.totalTokens ?? 0;
+        if (u.cacheReadTokens !== undefined) usage.cacheReadTokens = (usage.cacheReadTokens ?? 0) + u.cacheReadTokens;
+        if (u.cacheWriteTokens !== undefined) usage.cacheWriteTokens = (usage.cacheWriteTokens ?? 0) + u.cacheWriteTokens;
+      };
+
       for (let turn = 0; turn < maxSteps; turn++) {
-        const thought = await ctx.step(`turn-${turn}-think`, async () => {
+        // The step records { text, usage } so replay re-accumulates cost
+        // without re-calling the model. Logs from before telemetry
+        // recorded the bare text — both shapes replay.
+        const generatedStep = await ctx.step(`turn-${turn}-think`, async () => {
           const generated = await generateText({ model: config.model, messages });
-          return generated.text;
+          return { text: generated.text, usage: generated.usage };
         });
+        const step = typeof generatedStep === "string" ? { text: generatedStep, usage: undefined } : generatedStep;
+        const thought = step.text;
+        addUsage(step.usage);
         messages.push({ role: "assistant", content: thought });
 
         const action = parseAction(thought);
@@ -191,7 +217,7 @@ export function durableAgent(
             }
           }
           const pr = await publishIfRepoRun(ctx, executor, config, input, checkout, action.message);
-          return { status: "finished", summary: action.message, turns: turn + 1, ...(pr !== null ? { pr } : {}) };
+          return { status: "finished", summary: action.message, turns: turn + 1, usage, ...(pr !== null ? { pr } : {}) };
         }
         if (action.kind === "none" || action.kind === "invalid") {
           messages.push({
@@ -247,7 +273,7 @@ export function durableAgent(
       // Non-empty diffs are published even off a max-steps exit — real
       // fixes die in runs that never got to say finish (SWE-bench lesson).
       const pr = await publishIfRepoRun(ctx, executor, config, input, checkout, `Reached the ${maxSteps}-turn limit.`);
-      return { status: "max-steps", summary: `Reached the ${maxSteps}-turn limit.`, turns: maxSteps, ...(pr !== null ? { pr } : {}) };
+      return { status: "max-steps", summary: `Reached the ${maxSteps}-turn limit.`, turns: maxSteps, usage, ...(pr !== null ? { pr } : {}) };
     },
     config.runTimeout !== undefined ? { timeout: config.runTimeout } : {},
   );

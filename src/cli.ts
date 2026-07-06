@@ -492,7 +492,12 @@ async function webCommand(rest: string[]): Promise<void> {
   if (mode === "preview" && !existsSync(join(webDir, "dist"))) {
     fail(`web app is not built (${join(webDir, "dist")} missing) — run: pnpm --dir "${webDir}" build`);
   }
-  const child = spawn("pnpm", ["exec", "neutron-ts", mode], { cwd: webDir, env, stdio: "inherit" });
+  // Spawn the app's own installed bin: `pnpm exec` re-resolves (and in a
+  // container without a pnpm lockfile, re-INSTALLS) instead of using
+  // node_modules/.bin, which both npm and pnpm populate.
+  const bin = join(webDir, "node_modules", ".bin", "neutron-ts");
+  if (!existsSync(bin)) fail(`web app dependencies are not installed (${bin} missing) — run: pnpm install in ${webDir}`);
+  const child = spawn(bin, [mode], { cwd: webDir, env, stdio: "inherit" });
   child.on("exit", (code) => process.exit(code ?? 1));
 }
 

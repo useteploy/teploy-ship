@@ -82,7 +82,9 @@ test("durable agent runs a full session as recorded steps and finishes", async (
 
   const outcome = await executeRun({ workflow: wf, runId: "run-1", store, input: { task: "print 6*7" } });
   assert.equal(outcome.status, "completed");
-  assert.deepEqual(outcome.output, { status: "finished", summary: "answer.py prints 42.", turns: 4 });
+  const { usage: u1, ...out1 } = outcome.output as Record<string, unknown>;
+  assert.ok(u1 !== undefined && (u1 as { totalTokens: number }).totalTokens > 0, "usage is recorded");
+  assert.deepEqual(out1, { status: "finished", summary: "answer.py prints 42.", turns: 4 });
 
   // the sandbox + each turn's think/exec are recorded steps
   const steps = (await store.load("run-1")).filter((e) => e.type === "step-completed");
@@ -153,7 +155,8 @@ test("an approval-required action parks the run and resumes on the delivered dec
   await deliverEvent(store, "run-1", approvalEvent(0), { approved: true });
   const done = await executeRun({ workflow: wf, runId: "run-1", store });
   assert.equal(done.status, "completed");
-  assert.deepEqual(done.output, { status: "finished", summary: "Cleaned the build dir.", turns: 3 });
+  const { usage: u2, ...out2 } = done.output as Record<string, unknown>;
+  assert.deepEqual(out2, { status: "finished", summary: "Cleaned the build dir.", turns: 3 });
   assert.equal(removed, true, "the command runs after approval");
 });
 
@@ -243,7 +246,8 @@ test("snapshot-capable providers snapshot before parking and restore after — s
   await deliverEvent(store, "run-1", approvalEvent(0), { approved: true });
   const done = await executeRun({ workflow: wf, runId: "run-1", store });
   assert.equal(done.status, "completed");
-  assert.deepEqual(done.output, { status: "finished", summary: "Cleaned after restore.", turns: 3 });
+  const { usage: u3, ...out3 } = done.output as Record<string, unknown>;
+  assert.deepEqual(out3, { status: "finished", summary: "Cleaned after restore.", turns: 3 });
   assert.equal(removed, true, "the approved action ran in the RESTORED workspace");
 });
 
@@ -323,4 +327,32 @@ test("repo runs inject the playbook + memory into the prompt and record a note a
   const notes = await memory.recent("owner/repo", 5);
   assert.equal(notes.length, 2);
   assert.match(notes[0]!.note, /check the build → no PR/);
+});
+
+test("pre-telemetry logs (bare-string think steps) still replay", async () => {
+  // this file's reactiveModel consumes turns per LIVE call (process-local
+  // index) — replayed turns consume nothing, so the script starts at the
+  // first live turn
+  const { model, callCount } = reactiveModel([
+    "```finish\ndone after replay\n```",
+    "```finish\ndone after replay\n```",
+  ]);
+  const { provider } = await localProvider();
+  const wf = durableAgent({ model, executor: provider });
+  const store = new MemoryEventStore();
+
+  // a log written before usage telemetry: think results are bare strings
+  const base = { v: 1, at: new Date().toISOString() };
+  await store.append("run-legacy", { ...base, seq: 0, type: "run-started", data: { workflow: "coding-agent", input: { task: "t" } } });
+  await store.append("run-legacy", { ...base, seq: 1, type: "step-completed", name: "sandbox", data: { result: (await provider.create()).handle } });
+  await store.append("run-legacy", { ...base, seq: 2, type: "step-completed", name: "turn-0-think", data: { result: "```bash\ntrue\n```" } });
+  await store.append("run-legacy", { ...base, seq: 3, type: "step-completed", name: "turn-0-exec", data: { result: { exitCode: 0, stdout: "", stderr: "", timedOut: false, truncated: false } } });
+
+  const outcome = await executeRun({ workflow: wf, runId: "run-legacy", store });
+  assert.equal(outcome.status, "completed");
+  const output = outcome.output as { summary: string; usage: { totalTokens: number } };
+  assert.equal(output.summary, "done after replay");
+  // replayed legacy turns contribute no usage; live turns do
+  assert.ok(output.usage.totalTokens > 0);
+  assert.equal(callCount(), 2, "replayed think turn must not re-call the model");
 });
