@@ -8,6 +8,14 @@ export const config = { mode: "app" };
  * SHA-256 of the configured secret into X-Gitea-Signature. Only issue
  * events labeled "ship" become intake tasks — one label on your own
  * Forgejo IS the v1 kanban.
+ *
+ * REGISTRATION GOTCHA (cost a live debugging session): register the hook
+ * with events ["issues", "issue_comment", "pull_request_comment"].
+ * Forgejo routes comments on PULL REQUESTS through the
+ * pull_request_comment trigger even though the delivery still arrives
+ * with the X-Gitea-Event: issue_comment header — without that trigger,
+ * PR-review comments are silently never queued (no hook_task row, no
+ * log line). Same for labels on PRs (pull_request_label).
  */
 export async function action({ request }: { request: Request }): Promise<Response> {
   const secret = process.env.SHIP_WEBHOOK_SECRET;
