@@ -175,3 +175,84 @@ Requirements:
 - Your deliverable is the EDITED WORKING TREE. Do not commit, push, or touch git config — that is handled after you finish. Never revert your edits; if an approach fails, improve it rather than restoring the original.
 - Keep the change minimal and in the style of the surrounding code.`;
 }
+
+/** Head/base of an open PR, resolved worker-side (token never leaves it). */
+export async function resolvePr(
+  ref: RepoRef,
+  token: string,
+  pr: number,
+  fetchImpl: typeof fetch = fetch,
+): Promise<RepoCheckout> {
+  const endpoint =
+    ref.kind === "github"
+      ? `https://api.github.com/repos/${ref.owner}/${ref.repo}/pulls/${pr}`
+      : `${ref.base}/api/v1/repos/${ref.owner}/${ref.repo}/pulls/${pr}`;
+  const response = await fetchImpl(endpoint, {
+    headers: { authorization: ref.kind === "github" ? `Bearer ${token}` : `token ${token}` },
+  });
+  if (!response.ok) throw new Error(`PR #${pr} lookup failed (${response.status})`);
+  const data = (await response.json()) as { head?: { ref?: string }; base?: { ref?: string } };
+  if (data.head?.ref === undefined || data.base?.ref === undefined) {
+    throw new Error(`PR #${pr} payload missing head/base`);
+  }
+  return { branch: data.head.ref, base: data.base.ref };
+}
+
+/** Clone and stand on an EXISTING PR head branch (review follow-ups). */
+export async function setupRepoForPr(
+  executor: AgentExecutor,
+  options: { ref: RepoRef; token: string; pr: number },
+): Promise<RepoCheckout> {
+  const { ref, token, pr } = options;
+  const checkout = await resolvePr(ref, token, pr);
+  await git(executor, `git clone --depth 50 ${authenticatedUrl(ref, token)} . 2>&1`, 300_000);
+  await git(executor, `git remote set-url origin ${ref.cloneUrl}`);
+  await git(executor, 'git config user.name "Teploy Ship" && git config user.email "ship@teploy.dev"');
+  await git(executor, 'echo ".teploy-agent/" >> .git/info/exclude');
+  // A shallow clone only has the default branch; fetch the PR head into a
+  // real local ref (plain \`fetch origin <branch>\` stops at FETCH_HEAD).
+  await git(
+    executor,
+    `git fetch --depth 50 ${authenticatedUrl(ref, token)} ${checkout.branch}:${checkout.branch} 2>&1 && git checkout ${checkout.branch}`,
+    300_000,
+  );
+  return checkout;
+}
+
+/** Marker every Ship-authored PR comment carries — also the self-trigger guard. */
+export const SHIP_COMMENT_MARKER = "[teploy-ship]";
+
+/** Reply on a PR thread (PRs are issues on both hosts). */
+export async function commentOnPr(
+  ref: RepoRef,
+  token: string,
+  pr: number,
+  body: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  const endpoint =
+    ref.kind === "github"
+      ? `https://api.github.com/repos/${ref.owner}/${ref.repo}/issues/${pr}/comments`
+      : `${ref.base}/api/v1/repos/${ref.owner}/${ref.repo}/issues/${pr}/comments`;
+  const response = await fetchImpl(endpoint, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: ref.kind === "github" ? `Bearer ${token}` : `token ${token}`,
+    },
+    body: JSON.stringify({ body: `${SHIP_COMMENT_MARKER} ${body}` }),
+  });
+  if (!response.ok) throw new Error(`PR comment failed (${response.status})`);
+}
+
+/** Task prompt for review follow-ups — the branch state is the context. */
+export function reviewPrompt(options: { task: string; branch: string; pr: number }): string {
+  return `You are addressing review feedback on open pull request #${options.pr}. The repository is cloned at your working directory, checked out on the PR's branch ${options.branch} — your earlier changes for this PR are already in the tree.
+
+Review feedback to address:
+${options.task}
+
+Requirements:
+- Make the requested change, then run the repository's tests to prove nothing broke.
+- Your deliverable is the EDITED WORKING TREE. Do not commit, push, or touch git config. Never revert the branch's existing work unless the feedback explicitly asks for it.`;
+}

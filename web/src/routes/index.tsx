@@ -4,7 +4,7 @@ import { enqueueRun } from "teploy-ship/runtime";
 import type { RunMeta } from "teploy-ship/runtime";
 import type { IntakeTask } from "teploy-ship/runtime";
 
-import { defaultModel, shipRuntime } from "../lib/store.js";
+import { defaultModel, shipRuntime } from "../lib/store.server.js";
 
 export const config = { mode: "app" };
 
@@ -39,9 +39,11 @@ export async function action({ request }: { request: Request }): Promise<Respons
     const runId = `run-${randomUUID().slice(0, 8)}`;
     await enqueueRun(runtime, {
       runId,
-      task: task.detail !== undefined ? `${task.title}\n\n${task.detail}` : task.title,
+      // review follow-ups carry the feedback itself as the task
+      task: task.pr !== undefined ? (task.detail ?? task.title) : task.detail !== undefined ? `${task.title}\n\n${task.detail}` : task.title,
       model: defaultModel(),
       ...(task.repo !== undefined ? { repo: task.repo } : {}),
+      ...(task.pr !== undefined ? { pr: task.pr } : {}),
     });
     await runtime.intake.setState(taskId, "launched", runId);
     return new Response(null, { status: 302, headers: { location: `/runs/${runId}` } });

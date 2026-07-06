@@ -91,6 +91,7 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
 ${task.detail}` : task.title,
         model: options.modelId ?? "worker-default",
         ...(task.repo !== undefined ? { repo: task.repo } : {}),
+        ...(task.pr !== undefined ? { pr: task.pr } : {}),
       });
       await options.runtime.intake.setState(task.taskId, "launched", runId);
       launchedToday.set(task.source, { day: today, count: count + 1 });

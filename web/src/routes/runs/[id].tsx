@@ -2,7 +2,7 @@ import { deliverEvent } from "@neutron-build/workflow";
 
 import type { RunMeta } from "teploy-ship/runtime";
 
-import { shipRuntime } from "../../lib/store.js";
+import { shipRuntime } from "../../lib/store.server.js";
 import { itemClass, toTimeline } from "../../lib/timeline.js";
 import type { TimelineItem } from "../../lib/timeline.js";
 

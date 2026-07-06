@@ -1,0 +1,16 @@
+    from calc import evaluate as e; assert abs(e('2^3^2')-512)<1e-9; assert abs(e('1+2*3')-7)<1e-9; assert abs(e('2*3^2')-18)<1e-9; assert abs(e('-2^2')-(-4))<1e-9; assert abs(e('10-4-3')-3)<1e-9; assert abs(e('(2+3)*4^2/8')-10)<1e-9; print('ok')
+                                           ^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError
+  [PASS] session-audit (16 steps, 76182ms)
+  [PASS] build-order (18 steps, 332003ms)
+  [PASS] dedupe-refactor (13 steps, 110775ms)
+
+3/4 tasks passed (75%)
+
+Notes:
+- claude-haiku-4-5, repeats 1, after the failed-finish hold (finish right
+  after a failed execution is held with a fix-it nudge, max 2).
+- 3/4 vs yesterday's 4/4: the miss is expr-interpreter with a WRONG FIX
+  (capability miss on the designed 3-interacting-bugs case), not a
+  premature finish — the failure class the guard targets stayed closed.
+  Within single-repeat noise; hardSuite remains the regression floor.

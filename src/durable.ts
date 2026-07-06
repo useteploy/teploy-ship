@@ -7,7 +7,7 @@ import type { WorkflowContext, WorkflowDefinition } from "@neutron-build/workflo
 
 import { executeAction } from "./agent.js";
 import { FINISH_NUDGE_FAILED, FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, parseAction } from "./actions.js";
-import { commitAndPush, fixPrompt, openPullRequest, parseRepoUrl, setupRepo } from "./git.js";
+import { commentOnPr, commitAndPush, fixPrompt, openPullRequest, parseRepoUrl, reviewPrompt, setupRepo, setupRepoForPr } from "./git.js";
 import type { RepoCheckout } from "./git.js";
 import type { ApprovalPolicy } from "./approval.js";
 import { formatObservation, systemPrompt } from "./prompt.js";
@@ -22,6 +22,8 @@ export interface DurableAgentInput {
    * diff and opens a PR as recorded steps.
    */
   repo?: string;
+  /** Review follow-up: work PR #pr's existing head branch and reply there. */
+  pr?: number;
 }
 
 export interface DurableAgentOutput {
@@ -31,6 +33,9 @@ export interface DurableAgentOutput {
   /** PR opened by a repo run (absent for workspace runs or empty diffs). */
   pr?: string;
 }
+
+// (review follow-ups set input.pr — the run works the EXISTING PR branch
+// and replies on the thread instead of opening a new PR)
 
 /**
  * Supplies the executor. `create` runs once (recorded as a step) and
@@ -119,12 +124,17 @@ export function durableAgent(
           if (token === undefined || token === "") {
             throw new Error("repo run needs gitToken on the executing worker (SHIP_GIT_TOKEN)");
           }
-          return setupRepo(executor, { ref: parseRepoUrl(repoUrl), token, runId: ctx.runId });
+          const ref = parseRepoUrl(repoUrl);
+          return input.pr !== undefined
+            ? setupRepoForPr(executor, { ref, token, pr: input.pr })
+            : setupRepo(executor, { ref, token, runId: ctx.runId });
         });
       }
       const task =
         checkout !== null
-          ? fixPrompt({ task: input.task, branch: checkout.branch, base: checkout.base })
+          ? input.pr !== undefined
+            ? reviewPrompt({ task: input.task, branch: checkout.branch, pr: input.pr })
+            : fixPrompt({ task: input.task, branch: checkout.branch, base: checkout.base })
           : input.task;
 
       const messages: Message[] = [
@@ -247,6 +257,17 @@ async function publishIfRepoRun(
       checkout: co,
       message: `${input.task.slice(0, 68)}\n\nTeploy Ship ${ctx.runId}`,
     });
+    // Review follow-up: the PR already exists — push updated it; reply
+    // on the thread (marker doubles as the self-trigger guard).
+    if (input.pr !== undefined) {
+      const prUrl = `${ref.base}/${ref.owner}/${ref.repo}/pulls/${input.pr}`;
+      if (pushed === null) {
+        await commentOnPr(ref, token, input.pr, `No code change was needed for this feedback (run ${ctx.runId}).\n\n${summary.slice(0, 800)}`);
+        return { pr: prUrl };
+      }
+      await commentOnPr(ref, token, input.pr, `Pushed ${pushed.sha.slice(0, 10)} addressing this (run ${ctx.runId}).\n\n${summary.slice(0, 800)}`);
+      return { pr: prUrl };
+    }
     if (pushed === null) return { pr: null };
     const pr = await openPullRequest({
       ref,

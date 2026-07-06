@@ -1,4 +1,4 @@
-import { webToken } from "../lib/store.js";
+import { webToken } from "../lib/store.server.js";
 
 export const config = { mode: "app" };
 

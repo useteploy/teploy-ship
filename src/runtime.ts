@@ -149,7 +149,7 @@ export async function nucleusRuntime(url: string, owner: string): Promise<Nucleu
  */
 export async function enqueueRun(
   runtime: ShipRuntime,
-  options: { runId: string; task: string; model: string; repo?: string; workflowName?: string },
+  options: { runId: string; task: string; model: string; repo?: string; pr?: number; workflowName?: string },
 ): Promise<void> {
   const now = new Date().toISOString();
   await runtime.store.append(options.runId, {
@@ -159,7 +159,11 @@ export async function enqueueRun(
     at: now,
     data: {
       workflow: options.workflowName ?? "coding-agent",
-      input: { task: options.task, ...(options.repo !== undefined ? { repo: options.repo } : {}) },
+      input: {
+        task: options.task,
+        ...(options.repo !== undefined ? { repo: options.repo } : {}),
+        ...(options.pr !== undefined ? { pr: options.pr } : {}),
+      },
     },
   });
   await runtime.saveMeta({

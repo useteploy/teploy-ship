@@ -1,6 +1,4 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
-
-import { shipRuntime } from "../../lib/store.js";
+import { shipRuntime } from "../../lib/store.server.js";
 
 export const config = { mode: "app" };
 
@@ -16,6 +14,10 @@ export async function action({ request }: { request: Request }): Promise<Respons
   if (secret === undefined || secret === "") {
     return json(503, { title: "webhook disabled: SHIP_WEBHOOK_SECRET is not set" });
   }
+  // node:crypto is imported lazily: this action only ever runs server-side,
+  // and a top-level node: import in a route module breaks the client bundle
+  // (framework-excellence finding: no server/client route splitting).
+  const { createHmac, timingSafeEqual } = await import("node:crypto");
   const body = await request.text();
   const signature = request.headers.get("x-gitea-signature") ?? request.headers.get("x-forgejo-signature") ?? "";
   const expected = createHmac("sha256", secret).update(body).digest("hex");
@@ -24,6 +26,7 @@ export async function action({ request }: { request: Request }): Promise<Respons
   }
 
   const event = request.headers.get("x-gitea-event") ?? request.headers.get("x-forgejo-event") ?? "";
+  if (event === "issue_comment") return handleComment(body);
   if (event !== "issues") return json(200, { ok: true, skipped: `event ${event}` });
 
   const payload = JSON.parse(body) as {
@@ -48,6 +51,42 @@ export async function action({ request }: { request: Request }): Promise<Respons
     title: payload.issue.title ?? `issue #${payload.issue.number}`,
     ...(payload.issue.body !== undefined && payload.issue.body !== "" ? { detail: payload.issue.body } : {}),
     dedupeKey: `forgejo:${payload.repository.full_name}#${payload.issue.number}`,
+  });
+  return json(created ? 201 : 200, { ok: true, taskId: task.taskId, created });
+}
+
+/**
+ * PR conversation comments become review follow-up tasks: the worker
+ * checks out the PR's existing branch, addresses the feedback, pushes,
+ * and replies. Ship's own replies carry the [teploy-ship] marker and are
+ * skipped here — the loop guard.
+ */
+async function handleComment(body: string): Promise<Response> {
+  const payload = JSON.parse(body) as {
+    action?: string;
+    comment?: { id?: number; body?: string };
+    issue?: { number?: number; title?: string; pull_request?: unknown };
+    repository?: { full_name?: string; clone_url?: string };
+  };
+  if (payload.action !== "created") return json(200, { ok: true, skipped: "not a new comment" });
+  if (payload.issue?.pull_request === undefined || payload.issue.pull_request === null) {
+    return json(200, { ok: true, skipped: "not a PR comment" });
+  }
+  const text = payload.comment?.body ?? "";
+  if (text.includes("[teploy-ship]")) return json(200, { ok: true, skipped: "own comment" });
+  if (payload.repository?.full_name === undefined || payload.issue.number === undefined || payload.comment?.id === undefined) {
+    return json(400, { title: "payload missing repository/issue/comment" });
+  }
+
+  const runtime = await shipRuntime();
+  const { created, task } = await runtime.intake.propose({
+    source: "forgejo",
+    kind: "review",
+    ...(payload.repository.clone_url !== undefined ? { repo: payload.repository.clone_url } : {}),
+    pr: payload.issue.number,
+    title: `PR #${payload.issue.number} review: ${(payload.issue.title ?? "").slice(0, 60)}`,
+    detail: text,
+    dedupeKey: `forgejo:${payload.repository.full_name}#comment-${payload.comment.id}`,
   });
   return json(created ? 201 : 200, { ok: true, taskId: task.taskId, created });
 }

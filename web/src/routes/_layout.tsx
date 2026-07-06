@@ -1,7 +1,7 @@
 import type { ComponentChildren } from "preact";
 import type { MiddlewareFn } from "@neutron-build/core";
 
-import { webToken } from "../lib/store.js";
+import { webToken } from "../lib/store.server.js";
 
 /**
  * Single-token auth for the whole surface, exported from the root layout

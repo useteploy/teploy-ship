@@ -20,6 +20,8 @@ export interface IntakeTask {
   kind: string;
   /** Clone URL for repo work; absent for plain workspace tasks. */
   repo?: string;
+  /** Review follow-up: the PR this task addresses. */
+  pr?: number;
   title: string;
   detail?: string;
   /** Same key = same task; re-proposals return the existing one. */
@@ -35,6 +37,7 @@ export interface ProposeInput {
   source: string;
   kind: string;
   repo?: string;
+  pr?: number;
   title: string;
   detail?: string;
   dedupeKey: string;
@@ -55,6 +58,7 @@ function newTask(input: ProposeInput): IntakeTask {
     source: input.source,
     kind: input.kind,
     ...(input.repo !== undefined ? { repo: input.repo } : {}),
+    ...(input.pr !== undefined ? { pr: input.pr } : {}),
     title: input.title,
     ...(input.detail !== undefined ? { detail: input.detail } : {}),
     dedupeKey: input.dedupeKey,
@@ -137,6 +141,7 @@ export class NucleusIntakeStore implements IntakeStore {
           source TEXT,
           kind TEXT,
           repo TEXT,
+          pr TEXT,
           title TEXT,
           detail TEXT,
           dedupe_key TEXT,
@@ -162,6 +167,7 @@ export class NucleusIntakeStore implements IntakeStore {
       updatedAt: String(row.updated_at),
     };
     if (row.repo !== null && row.repo !== undefined) task.repo = String(row.repo);
+    if (row.pr !== null && row.pr !== undefined) task.pr = Number(row.pr);
     if (row.detail !== null && row.detail !== undefined) task.detail = String(row.detail);
     if (row.run_id !== null && row.run_id !== undefined) task.runId = String(row.run_id);
     return task;
@@ -176,13 +182,14 @@ export class NucleusIntakeStore implements IntakeStore {
     if (rows.length > 0) return { created: false, task: this.#toTask(rows[0]!) };
     const task = newTask(input);
     await this.#db.query(
-      `INSERT INTO ship_tasks (task_id, source, kind, repo, title, detail, dedupe_key, state, run_id, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      `INSERT INTO ship_tasks (task_id, source, kind, repo, pr, title, detail, dedupe_key, state, run_id, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
       [
         task.taskId,
         task.source,
         task.kind,
         task.repo ?? null,
+        task.pr !== undefined ? String(task.pr) : null,
         task.title,
         task.detail ?? null,
         task.dedupeKey,
