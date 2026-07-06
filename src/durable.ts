@@ -9,6 +9,8 @@ import { executeAction } from "./agent.js";
 import { FINISH_NUDGE_FAILED, FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, parseAction } from "./actions.js";
 import { commentOnPr, commitAndPush, fixPrompt, openPullRequest, parseRepoUrl, reviewPrompt, setupRepo, setupRepoForPr } from "./git.js";
 import type { RepoCheckout } from "./git.js";
+import { condenseIfNeeded, defaultCondenseConfig } from "./memory.js";
+import type { CondenseConfig } from "./memory.js";
 import { loadRepoContext, runNote } from "./repo-memory.js";
 import type { RepoMemoryStore } from "./repo-memory.js";
 import type { ApprovalPolicy } from "./approval.js";
@@ -85,6 +87,15 @@ export interface DurableAgentConfig {
   gitToken?: string;
   /** Per-repo memory: recent-run notes injected into and recorded by repo runs. */
   repoMemory?: RepoMemoryStore;
+  /**
+   * Context condensation (default on, same budgets as the live loop):
+   * when the history outgrows the budget, the middle turns are replaced
+   * by a summary produced in a recorded step — the decision is a pure
+   * function of replayed messages, so replay stays deterministic.
+   * NOTE: enabling/disabling changes the step sequence of runs long
+   * enough to condense — don't flip it under in-flight runs.
+   */
+  condense?: CondenseConfig | false;
 }
 
 /** The event name a turn's approval-required action parks on. Deliver {approved, reason?}. */
@@ -164,7 +175,7 @@ export function durableAgent(
             : fixPrompt({ task: input.task, branch: checkout.branch, base: checkout.base, context: repoContext })
           : input.task;
 
-      const messages: Message[] = [
+      let messages: Message[] = [
         { role: "system", content: systemPrompt({ workdir, task }) },
         { role: "user", content: "Begin. Work step by step and verify before finishing." },
       ];
@@ -183,7 +194,30 @@ export function durableAgent(
         if (u.cacheWriteTokens !== undefined) usage.cacheWriteTokens = (usage.cacheWriteTokens ?? 0) + u.cacheWriteTokens;
       };
 
+      const condense = config.condense === false ? null : (config.condense ?? defaultCondenseConfig);
+
       for (let turn = 0; turn < maxSteps; turn++) {
+        if (condense !== null) {
+          messages = await condenseIfNeeded(
+            messages,
+            async (transcript) => {
+              const summaryStep = await ctx.step(`turn-${turn}-condense`, async () => {
+                const generated = await generateText({
+                  model: config.model,
+                  system:
+                    "Summarize this agent transcript into a compact progress recap: what was attempted, what worked, what failed, current state, and what remains. Be specific about file names and results.",
+                  prompt: transcript,
+                  maxOutputTokens: 800,
+                });
+                return { text: generated.text, usage: generated.usage };
+              });
+              addUsage(summaryStep.usage);
+              return summaryStep.text;
+            },
+            condense,
+          );
+        }
+
         // The step records { text, usage } so replay re-accumulates cost
         // without re-calling the model. Logs from before telemetry
         // recorded the bare text — both shapes replay.

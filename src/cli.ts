@@ -14,7 +14,7 @@ import { openai, createOpenAI } from "@neutron-build/ai/openai";
 import type { ModelAdapter } from "@neutron-build/ai";
 import { LocalExecutor, SandboxExecutor } from "@neutron-build/agents";
 import type { AgentExecutor } from "@neutron-build/agents";
-import { deliverEvent } from "@neutron-build/workflow";
+import { cancelRun, deliverEvent } from "@neutron-build/workflow";
 import type { RunOutcome } from "@neutron-build/workflow";
 
 import { parseArgs } from "./args.js";
@@ -48,6 +48,7 @@ Usage:
   teploy-ship approve <run-id>        approve a parked action and continue
       [--handoff]                     deliver the decision, let a worker finish the run
   teploy-ship deny <run-id> [reason]  deny a parked action and continue
+  teploy-ship cancel <run-id> [reason]  stop a durable run (parked or mid-flight)
   teploy-ship fix --repo <url> "<task>"  clone, fix on a branch, push, open a PR
       [--git-token <t>]               also SHIP_GIT_TOKEN or gitToken in config
       [--base <branch>]               PR target (default: repo default branch)
@@ -349,6 +350,9 @@ function reportOutcome(runId: string, outcome: RunOutcome | null): void {
         `${yellow("parked")} — waiting for approval.\n  approve: ${bold(`teploy-ship approve ${runId}`)}\n  deny:    ${bold(`teploy-ship deny ${runId} [reason]`)}\n`,
       );
       break;
+    case "cancelled":
+      process.stderr.write(`${yellow("cancelled")}${outcome.error?.detail !== undefined ? ` — ${outcome.error.detail}` : ""}\n`);
+      break;
     case "failed":
       process.stderr.write(`${red("failed")} — ${outcome.error?.detail ?? ""}\n`);
       break;
@@ -412,6 +416,30 @@ async function decideCommand(rest: string[], approved: boolean): Promise<void> {
   reportOutcome(runId, outcome);
   await runtime.close();
   process.exit(outcome?.status === "failed" ? 1 : 0);
+}
+
+async function cancelCommand(rest: string[]): Promise<void> {
+  const args = parseArgs(rest);
+  const config = loadConfig();
+  const runId = args.positional[0];
+  if (runId === undefined) fail("usage: teploy-ship cancel <run-id> [reason]");
+  const runtime = await makeRuntime(args, config);
+  const meta = await runtime.loadMeta(runId);
+  if (meta === null) fail(`unknown run: ${runId}`);
+  await cancelRun(runtime.store, runId, args.positional[1]);
+  // Wake the run so whichever executor gets it settles the cancel; a
+  // mid-flight worker stops at its next step either way. In file mode
+  // there is no worker, so settle it here.
+  await runtime.markWake?.(runId);
+  if (runtime.kind === "file") {
+    const outcome = await executePass(runtime, runId, meta.task, args, config);
+    reportOutcome(runId, outcome);
+  } else {
+    await runtime.saveMeta({ ...meta, status: "cancelled", updatedAt: new Date().toISOString() });
+    process.stderr.write(`${yellow("cancelled")} — a worker settles it at its next step.\n`);
+  }
+  await runtime.close();
+  process.exit(0);
 }
 
 async function runsCommand(rest: string[]): Promise<void> {
@@ -542,6 +570,8 @@ async function main(): Promise<void> {
       return decideCommand(rest, true);
     case "deny":
       return decideCommand(rest, false);
+    case "cancel":
+      return cancelCommand(rest);
     case "fix":
       return fixCommand(rest);
     case "worker":

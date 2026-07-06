@@ -7,7 +7,7 @@ import { test } from "node:test";
 import type { AdapterGenerateResult, ModelAdapter } from "@neutron-build/ai";
 import { LocalExecutor } from "@neutron-build/agents";
 import type { AgentExecutor } from "@neutron-build/agents";
-import { MemoryEventStore, deliverEvent, executeRun } from "@neutron-build/workflow";
+import { MemoryEventStore, cancelRun, deliverEvent, executeRun } from "@neutron-build/workflow";
 
 import { approvalEvent, durableAgent } from "./durable.js";
 import { FileRepoMemory } from "./repo-memory.js";
@@ -355,4 +355,66 @@ test("pre-telemetry logs (bare-string think steps) still replay", async () => {
   // replayed legacy turns contribute no usage; live turns do
   assert.ok(output.usage.totalTokens > 0);
   assert.equal(callCount(), 2, "replayed think turn must not re-call the model");
+});
+
+test("durable runs condense long histories in a recorded step and replay without re-summarizing", async () => {
+  let summarizeCalls = 0;
+  const big = "x".repeat(400); // each observation ~400 chars
+  const model: ModelAdapter = {
+    provider: "scripted",
+    modelId: "s1",
+    async doGenerate(options): Promise<AdapterGenerateResult> {
+      const system = options.messages.find((m) => m.role === "system");
+      if (String(system?.content ?? "").includes("Summarize this agent transcript")) {
+        summarizeCalls++;
+        return { content: [{ type: "text", text: "SUMMARY-OF-EARLIER-STEPS" }], finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, raw: null };
+      }
+      const asst = options.messages.filter((m) => m.role === "assistant").length;
+      const sawNudge = options.messages.some(
+        (m) => typeof m.content === "string" && m.content.includes("Before finishing"),
+      );
+      const text = asst >= 6 ? (sawNudge ? "```finish\nlong done\n```" : "```finish\nlong done\n```") : `\`\`\`bash\necho ${big}\n\`\`\``;
+      return { content: [{ type: "text", text }], finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, raw: null };
+    },
+    async *doStream() {
+      throw new Error("unused");
+    },
+  };
+
+  const { provider } = await localProvider();
+  const wf = durableAgent({
+    model,
+    executor: provider,
+    maxSteps: 12,
+    condense: { maxChars: 1500, keepRecent: 4 },
+  });
+  const store = new MemoryEventStore();
+  const outcome = await executeRun({ workflow: wf, runId: "run-condense", store, input: { task: "long task" } });
+  assert.equal(outcome.status, "completed");
+  assert.ok(summarizeCalls >= 1, "the summarizer ran at least once");
+
+  const events = await store.load("run-condense");
+  const condenseSteps = events.filter((e) => e.type === "step-completed" && /-condense$/.test(e.name ?? ""));
+  assert.equal(condenseSteps.length, summarizeCalls, "every summarize call is a recorded step");
+
+  // replay the finished run: terminal short-circuit, zero new model calls
+  const before = summarizeCalls;
+  const again = await executeRun({ workflow: wf, runId: "run-condense", store });
+  assert.equal(again.status, "completed");
+  assert.equal(summarizeCalls, before, "replay must not re-summarize");
+});
+
+test("cancel settles a parked durable agent run as cancelled", async () => {
+  const { model } = reactiveModel(["```bash\nrm -rf build/\n```"]);
+  const { provider } = await localProvider();
+  const wf = durableAgent({ model, executor: provider, approveAction: defaultApprovalPolicy });
+  const store = new MemoryEventStore();
+
+  const parked = await executeRun({ workflow: wf, runId: "run-cxl", store, input: { task: "clean" } });
+  assert.equal(parked.status, "waiting");
+
+  await cancelRun(store, "run-cxl", "operator changed their mind");
+  const settled = await executeRun({ workflow: wf, runId: "run-cxl", store });
+  assert.equal(settled.status, "cancelled");
+  await assert.rejects(() => deliverEvent(store, "run-cxl", approvalEvent(0), { approved: true }), /already finished/);
 });

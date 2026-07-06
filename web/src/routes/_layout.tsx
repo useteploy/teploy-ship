@@ -65,6 +65,7 @@ table.runs td { padding: 8px 10px; border-bottom: 1px solid var(--border); verti
 .status.completed { color: var(--green); border-color: var(--green); }
 .status.waiting { color: var(--yellow); border-color: var(--yellow); }
 .status.failed { color: var(--red); border-color: var(--red); }
+.status.cancelled { color: var(--dim); border-color: var(--dim); }
 .status.queued, .status.wake, .status.sleeping, .status.retrying { color: var(--blue); border-color: var(--blue); }
 form.newrun { display: flex; gap: 8px; margin: 18px 0; }
 form.newrun input[type=text] { flex: 1; background: var(--panel); color: var(--text);

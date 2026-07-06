@@ -87,6 +87,11 @@ export function toTimeline(events: WorkflowEvent[]): TimelineItem[] {
         items.push({ kind: "done", title: "completed", body, at });
         break;
       }
+      case "run-cancelled": {
+        const reason = (event.data as { reason?: string | null } | undefined)?.reason;
+        items.push({ kind: "error", title: "cancelled", body: reason ?? "", at });
+        break;
+      }
       case "run-failed": {
         const error = (event.data as { error?: { detail?: string; title?: string } } | undefined)?.error;
         items.push({ kind: "error", title: "run failed", body: error?.detail ?? error?.title ?? "", at });

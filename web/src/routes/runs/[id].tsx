@@ -1,4 +1,4 @@
-import { deliverEvent } from "@neutron-build/workflow";
+import { cancelRun, deliverEvent } from "@neutron-build/workflow";
 
 import type { RunMeta } from "teploy-ship/runtime";
 
@@ -34,6 +34,13 @@ export async function action({
   const runtime = await shipRuntime();
   const runId = params.id;
   const meta = await runtime.loadMeta(runId);
+  const active = meta !== null && !["completed", "failed", "cancelled"].includes(meta.status);
+  if (active && intent === "cancel") {
+    await cancelRun(runtime.store, runId, "cancelled from the dashboard").catch(() => {});
+    await runtime.markWake?.(runId);
+    await runtime.saveMeta({ ...meta, status: "cancelled", updatedAt: new Date().toISOString() });
+    return new Response(null, { status: 302, headers: { location: `/runs/${runId}` } });
+  }
   if (meta?.eventName !== undefined && (intent === "approve" || intent === "deny")) {
     const reason = String(form.get("reason") ?? "").trim();
     await deliverEvent(runtime.store, runId, meta.eventName, {
@@ -56,7 +63,7 @@ const POLL = `
   var root = document.getElementById("run-root");
   if (!root) return;
   var status = root.getAttribute("data-run-status");
-  if (status === "completed" || status === "failed") return;
+  if (status === "completed" || status === "failed" || status === "cancelled") return;
   var last = null;
   setInterval(function () {
     fetch(location.pathname, {
@@ -74,7 +81,7 @@ const POLL = `
 `;
 
 export default function RunDetail({ data }: { data: RunData }) {
-  const active = data.meta !== null && data.meta.status !== "completed" && data.meta.status !== "failed";
+  const active = data.meta !== null && !["completed", "failed", "cancelled"].includes(data.meta.status);
   return (
     <div id="run-root" data-event-count={String(data.eventCount)} data-run-status={data.meta?.status ?? "unknown"}>
       <h1 style="font-size: 18px">
@@ -88,15 +95,24 @@ export default function RunDetail({ data }: { data: RunData }) {
             <span class={`status ${data.meta.status}`}>{data.meta.status}</span> · {data.meta.model} · updated{" "}
             {data.meta.updatedAt}
           </p>
-          {data.meta.eventName !== undefined && (
+          {(data.meta.eventName !== undefined || active) && (
             <form class="decide" method="post">
               <input type="hidden" name="reason" value="" />
-              <button class="approve" type="submit" name="intent" value="approve">
-                Approve
-              </button>
-              <button class="deny" type="submit" name="intent" value="deny">
-                Deny
-              </button>
+              {data.meta.eventName !== undefined && (
+                <>
+                  <button class="approve" type="submit" name="intent" value="approve">
+                    Approve
+                  </button>
+                  <button class="deny" type="submit" name="intent" value="deny">
+                    Deny
+                  </button>
+                </>
+              )}
+              {active && (
+                <button class="deny" type="submit" name="intent" value="cancel">
+                  Cancel run
+                </button>
+              )}
             </form>
           )}
           <ul class="timeline">
