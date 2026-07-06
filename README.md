@@ -1,8 +1,8 @@
-# teploy-ship
+# Teploy Ship
 
 Teploy's autonomous coding agent — a **CodeAct brain** built entirely on
-the Neutron primitives. *(Working name; the product's real name is a
-deliberately-open item.)*
+the Neutron primitives. Self-hosted AI dev team: issues in, pull
+requests out, on your own servers.
 
 The agent acts by writing code, not by emitting structured tool-call
 JSON: each turn it thinks, then runs one fenced code block (bash or
