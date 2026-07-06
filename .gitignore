@@ -2,3 +2,5 @@ node_modules/
 dist/
 *.log
 e2e-tmp.mjs
+web/node_modules/
+web/dist/

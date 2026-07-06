@@ -1,0 +1,22 @@
+{
+  "name": "teploy-ship-web",
+  "private": true,
+  "type": "module",
+  "version": "0.0.1",
+  "scripts": {
+    "dev": "neutron-ts dev",
+    "build": "neutron-ts build && node -e \"require('node:fs').rmSync('dist/index.html')\"",
+    "preview": "neutron-ts preview"
+  },
+  "dependencies": {
+    "@neutron-build/cli": "link:../../../Neutron/typescript/packages/neutron-cli",
+    "@neutron-build/core": "link:../../../Neutron/typescript/packages/neutron",
+    "preact": "10.25.4",
+    "teploy-ship": "link:.."
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.9.4",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7"
+  }
+}

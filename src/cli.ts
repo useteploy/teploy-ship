@@ -2,9 +2,11 @@
 // teploy-ship — the Ship CLI: run coding-agent tasks live in your
 // terminal (streamed, interactive approvals) or as durable runs that
 // park on approval, survive exits/crashes, and resume later.
-import { mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 
 import { anthropic, createAnthropic } from "@neutron-build/ai/anthropic";
@@ -46,6 +48,9 @@ Usage:
   teploy-ship deny <run-id> [reason]  deny a parked action and continue
   teploy-ship worker                  resident worker: picks up due nucleus-store runs
       [--interval seconds]            poll interval (default 5)
+  teploy-ship web                     serve the runs dashboard (browser approve/deny)
+      [--port N] [--token <t>]        token also via SHIP_WEB_TOKEN (required)
+      [--dev]                         vite dev server instead of the built app
   teploy-ship eval [--suite builtin|hard|extreme|all] [--repeats N] [--json]
 
 Config: flags > env > ~/.config/teploy-ship/config.json
@@ -368,6 +373,40 @@ async function workerCommand(rest: string[]): Promise<void> {
   process.on("SIGTERM", shutdown);
 }
 
+async function webCommand(rest: string[]): Promise<void> {
+  const args = parseArgs(rest);
+  const config = loadConfig();
+  const token = (args.flags.token as string) ?? process.env.SHIP_WEB_TOKEN;
+  if (token === undefined || token === "") {
+    fail("web needs an access token: --token <t> or SHIP_WEB_TOKEN (the browser login uses it)");
+  }
+  const webDir = join(dirname(fileURLToPath(import.meta.url)), "..", "web");
+  if (!existsSync(join(webDir, "package.json"))) fail(`web app not found at ${webDir}`);
+
+  const storeKind = (args.flags.store as string) ?? config.store ?? "file";
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    SHIP_WEB_TOKEN: token,
+    SHIP_STORE: storeKind,
+    ...(args.flags.port !== undefined ? { SHIP_WEB_PORT: String(args.flags.port) } : {}),
+    ...(args.flags.model !== undefined ? { SHIP_MODEL: String(args.flags.model) } : config.model !== undefined ? { SHIP_MODEL: config.model } : {}),
+  };
+  if (storeKind === "nucleus") {
+    const url = (args.flags["nucleus-url"] as string) ?? process.env.NUCLEUS_URL ?? config.nucleusUrl;
+    if (url === undefined || url === "") fail("--store nucleus needs --nucleus-url, NUCLEUS_URL, or nucleusUrl in config");
+    env.NUCLEUS_URL = url;
+  }
+
+  // The web app is a Neutron TS app living in web/; dev serves via Vite,
+  // otherwise the production preview server runs the built output.
+  const mode = args.flags.dev === true ? "dev" : "preview";
+  if (mode === "preview" && !existsSync(join(webDir, "dist"))) {
+    fail(`web app is not built (${join(webDir, "dist")} missing) — run: pnpm --dir "${webDir}" build`);
+  }
+  const child = spawn("pnpm", ["exec", "neutron-ts", mode], { cwd: webDir, env, stdio: "inherit" });
+  child.on("exit", (code) => process.exit(code ?? 1));
+}
+
 // ---------------------------------------------------------------------------
 // eval (unchanged behavior)
 // ---------------------------------------------------------------------------
@@ -411,6 +450,8 @@ async function main(): Promise<void> {
       return decideCommand(rest, false);
     case "worker":
       return workerCommand(rest);
+    case "web":
+      return webCommand(rest);
     case "eval":
       return evalCommand(rest);
     default:

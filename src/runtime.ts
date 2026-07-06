@@ -2,6 +2,7 @@ import {
   LeaseManager,
   NucleusEventStore,
   RunIndex,
+  WIRE_FORMAT_VERSION,
   executeRun,
   executeRunExclusive,
 } from "@neutron-build/workflow";
@@ -10,6 +11,8 @@ import type { EventStore, RunOutcome, WorkflowDefinition } from "@neutron-build/
 import { NucleusPgwire } from "./nucleus-pgwire.js";
 import { FileEventStore, RunMetaStore } from "./run-store.js";
 import type { RunMeta } from "./run-store.js";
+
+export type { RunMeta } from "./run-store.js";
 
 /**
  * Where durable runs live. The file runtime keeps everything on this
@@ -126,4 +129,48 @@ export async function nucleusRuntime(url: string, owner: string): Promise<Nucleu
     markWake: (runId) => index.markWake(runId),
     close: () => db.close(),
   };
+}
+
+/**
+ * Enqueue a run without executing it: append the run-started event
+ * (exactly the shape executeRun writes on an empty log) and flag the run
+ * due. A resident worker picks it up on its next tick; with the file
+ * runtime there is no worker, so the caller resumes it explicitly. This
+ * is how surfaces that must never run the agent in-process (the web UI)
+ * commission work.
+ */
+export async function enqueueRun(
+  runtime: ShipRuntime,
+  options: { runId: string; task: string; model: string; workflowName?: string },
+): Promise<void> {
+  const now = new Date().toISOString();
+  await runtime.store.append(options.runId, {
+    v: WIRE_FORMAT_VERSION,
+    seq: 0,
+    type: "run-started",
+    at: now,
+    data: {
+      workflow: options.workflowName ?? "coding-agent",
+      input: { task: options.task },
+    },
+  });
+  await runtime.saveMeta({
+    runId: options.runId,
+    task: options.task,
+    model: options.model,
+    status: "queued",
+    createdAt: now,
+    updatedAt: now,
+  });
+  // markWake only updates an existing index record; a freshly enqueued
+  // run has none, so the scheduler would never see it. record() is the
+  // insert-or-update path — "wake" makes the run due immediately.
+  if (runtime.kind === "nucleus") {
+    const nucleus = runtime as NucleusShipRuntime;
+    await nucleus.index.record(
+      options.runId,
+      options.workflowName ?? "coding-agent",
+      { status: "wake" } as unknown as RunOutcome,
+    );
+  }
 }
