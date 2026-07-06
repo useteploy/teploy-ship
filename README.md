@@ -140,6 +140,16 @@ models; the actual pass rate requires running the suite against a real
 model (API cost + time), which hasn't been done yet. The harness makes
 that a measurement, not a guess.
 
+## Optional: security scan gate (future, not core)
+
+The same output-gating shape as eval `verify` can host an **opt-in security
+scan** of the agent's diff/artifact before the result is accepted or merged —
+so Ship is an agent whose output is security-checked when you want it. Pair an
+AI heuristic pass (secrets, obvious injection/auth patterns, plain-English
+findings) with deterministic scanners (Trivy/Grype/OSV-scanner) for CVE and
+image coverage; treat it as a flag-or-block gate, not a silver bullet — LLMs
+miss deep logic flaws. Concept salvaged from the archived `penscanai` idea.
+
 ## Status
 
 M1–M4: the CodeAct loop, durability + action approval, recovery +

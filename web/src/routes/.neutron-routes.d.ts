@@ -4,6 +4,7 @@ declare module "@neutron-build/core" {
     paths:
     | "/"
     | "/hooks/forgejo"
+    | "/hooks/github"
     | "/login"
     | `/runs/${string}`
   }
