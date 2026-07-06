@@ -19,14 +19,30 @@ const PYTHON_LANGS = new Set(["python", "py", "python3"]);
 const SEARCH_REPLACE = /^<{7} SEARCH\n([\s\S]*?)^={7}\n([\s\S]*?)^>{7} REPLACE\s*$/m;
 
 /**
- * Parse the first actionable code block from a model response. CodeAct is
- * one action per turn, so later blocks are ignored (the model is told to
- * emit exactly one). A `finish` block ends the task; its body is the
- * final answer. Prose outside the block is the agent's reasoning and is
- * kept in history but never executed.
+ * Parse the first action from a model response. CodeAct is one action per
+ * turn, so later blocks are ignored (the model is told to emit exactly
+ * one). A `finish` block ends the task; its body is the final answer.
+ * Prose outside the block is the agent's reasoning and is never executed.
+ *
+ * Models sometimes fall back into their native tool-calling dialect and
+ * emit `<invoke name="bash"><parameter name="command">…` XML instead of a
+ * fenced block — then hallucinate the tool result and "finish" in the
+ * same message. The XML is rescued into a real action, and WHICHEVER
+ * comes first in the text wins, so a hallucinated trailing ```finish
+ * never outranks the action the model actually attempted.
  */
 export function parseAction(text: string): Action {
+  const fenced = parseFencedAction(text);
+  const xml = parseToolXmlAction(text);
+  if (fenced !== null && xml !== null) {
+    return fenced.index <= xml.index ? fenced.action : xml.action;
+  }
+  return fenced?.action ?? xml?.action ?? { kind: "none" };
+}
+
+function parseFencedAction(text: string): { index: number; action: Action } | null {
   for (const match of text.matchAll(FENCE)) {
+    const index = match.index;
     const info = match[1]!.trim();
     const code = match[2]!;
     const [langRaw, ...argParts] = info.split(/\s+/);
@@ -34,34 +50,62 @@ export function parseAction(text: string): Action {
     const arg = argParts.join(" ");
 
     if (lang === "finish") {
-      return { kind: "finish", message: code.trim() };
+      return { index, action: { kind: "finish", message: code.trim() } };
     }
     if (lang === "edit") {
-      if (arg === "") return { kind: "invalid", message: "```edit needs a file path: ```edit path/to/file" };
+      if (arg === "") return { index, action: { kind: "invalid", message: "```edit needs a file path: ```edit path/to/file" } };
       const sr = SEARCH_REPLACE.exec(code);
       if (sr === null) {
         return {
-          kind: "invalid",
-          message:
-            "```edit block must contain exactly:\n<<<<<<< SEARCH\n(old text)\n=======\n(new text)\n>>>>>>> REPLACE",
+          index,
+          action: {
+            kind: "invalid",
+            message:
+              "```edit block must contain exactly:\n<<<<<<< SEARCH\n(old text)\n=======\n(new text)\n>>>>>>> REPLACE",
+          },
         };
       }
-      return { kind: "edit", file: arg, search: sr[1]!, replace: sr[2]! };
+      return { index, action: { kind: "edit", file: arg, search: sr[1]!, replace: sr[2]! } };
     }
     if (lang === "create") {
-      if (arg === "") return { kind: "invalid", message: "```create needs a file path: ```create path/to/file" };
-      return { kind: "create", file: arg, content: code };
+      if (arg === "") return { index, action: { kind: "invalid", message: "```create needs a file path: ```create path/to/file" } };
+      return { index, action: { kind: "create", file: arg, content: code } };
     }
     if (PYTHON_LANGS.has(lang)) {
-      return { kind: "python", code };
+      return { index, action: { kind: "python", code } };
     }
     if (BASH_LANGS.has(lang) && arg === "") {
-      return { kind: "bash", code };
+      return { index, action: { kind: "bash", code } };
     }
     // A fenced block in an unknown language (e.g. ```json data) isn't an
     // action — keep scanning for a real one.
   }
-  return { kind: "none" };
+  return null;
+}
+
+const INVOKE = /<(?:\w+:)?invoke\s+name="([^"]+)"[^>]*>([\s\S]*?)<\/(?:\w+:)?invoke>/;
+const INVOKE_OPEN = /<(?:\w+:)?invoke\s+name="([^"]+)"/;
+const PARAM = /<(?:\w+:)?parameter\s+name="[^"]*"[^>]*>([\s\S]*?)<\/(?:\w+:)?parameter>/;
+
+const XML_CORRECTION =
+  'You emitted XML tool-call syntax, but this session has NO tool-calling — it will never execute. Act with a fenced code block instead: ```bash, ```python, ```edit, ```create, or ```finish.';
+
+function parseToolXmlAction(text: string): { index: number; action: Action } | null {
+  const match = INVOKE.exec(text);
+  if (match === null) {
+    // an opening tag with no close (cut-off output) still deserves the correction
+    const open = INVOKE_OPEN.exec(text);
+    return open === null ? null : { index: open.index, action: { kind: "invalid", message: XML_CORRECTION } };
+  }
+  const name = match[1]!.toLowerCase();
+  const content = PARAM.exec(match[2]!)?.[1] ?? "";
+  if (/bash|shell|terminal|cmd|exec/.test(name) && content.trim() !== "") {
+    return { index: match.index, action: { kind: "bash", code: content } };
+  }
+  if (/python/.test(name) && content.trim() !== "") {
+    return { index: match.index, action: { kind: "python", code: content } };
+  }
+  return { index: match.index, action: { kind: "invalid", message: XML_CORRECTION } };
 }
 
 /** Human-readable one-liner for logs/telemetry. */
@@ -88,3 +132,21 @@ function firstLine(code: string): string {
   const line = code.trim().split("\n", 1)[0] ?? "";
   return line.length > 80 ? line.slice(0, 77) + "..." : line;
 }
+
+/**
+ * Finish-guard nudges, shared by the live loop (agent.ts) and the durable
+ * workflow (durable.ts) so both stay word-for-word identical — the durable
+ * loop replays deterministically, and the transcripts should match.
+ *
+ * The first finish of a run is always held once:
+ * - with zero successful executions, the agent is told to do the work;
+ * - otherwise it is told to PROVE each deliverable with a real command.
+ * The second finish is honored unconditionally (no loops). This kills the
+ * hallucinated-verification finish observed live (2026-07-05): the agent
+ * claimed done.txt existed without ever creating it.
+ */
+export const FINISH_NUDGE_NO_WORK =
+  "You are finishing without having successfully executed anything. Do the work first: take the actions the task needs, verify the result with a command, and only then finish.";
+
+export const FINISH_NUDGE_VERIFY =
+  "Before finishing, verify your work. Re-read the task, then run one command that PROVES each artifact or change it requires actually exists and is correct (list or cat the files you claim to have created, run the tests, execute the program). If any check fails or anything is missing, fix it before finishing. If everything is already proven, finish again.";

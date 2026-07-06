@@ -73,6 +73,7 @@ test("durable agent runs a full session as recorded steps and finishes", async (
     "```bash\necho 'print(6*7)' > answer.py\n```",
     "```bash\npython3 answer.py\n```",
     (obs) => (obs.includes("42") ? "```finish\nanswer.py prints 42.\n```" : "```bash\necho wrong\n```"),
+    (obs) => (obs.includes("Before finishing") ? "```finish\nanswer.py prints 42.\n```" : "```bash\necho wrong\n```"),
   ]);
   const { provider } = await localProvider();
   const wf = durableAgent({ model, executor: provider });
@@ -80,7 +81,7 @@ test("durable agent runs a full session as recorded steps and finishes", async (
 
   const outcome = await executeRun({ workflow: wf, runId: "run-1", store, input: { task: "print 6*7" } });
   assert.equal(outcome.status, "completed");
-  assert.deepEqual(outcome.output, { status: "finished", summary: "answer.py prints 42.", turns: 3 });
+  assert.deepEqual(outcome.output, { status: "finished", summary: "answer.py prints 42.", turns: 4 });
 
   // the sandbox + each turn's think/exec are recorded steps
   const steps = (await store.load("run-1")).filter((e) => e.type === "step-completed");
@@ -118,6 +119,7 @@ test("an approval-required action parks the run and resumes on the delivered dec
   const { model } = reactiveModel([
     "```bash\nrm -rf build/\n```", // dangerous → requires approval
     (obs) => (obs.includes("exit 0") ? "```finish\nCleaned the build dir.\n```" : "```bash\necho hmm\n```"),
+    (obs) => (obs.includes("Before finishing") ? "```finish\nCleaned the build dir.\n```" : "```bash\necho hmm\n```"),
   ]);
   const root = await mkdtemp(join(tmpdir(), "durable-approve-"));
   const inner = new LocalExecutor({ root });
@@ -150,7 +152,7 @@ test("an approval-required action parks the run and resumes on the delivered dec
   await deliverEvent(store, "run-1", approvalEvent(0), { approved: true });
   const done = await executeRun({ workflow: wf, runId: "run-1", store });
   assert.equal(done.status, "completed");
-  assert.deepEqual(done.output, { status: "finished", summary: "Cleaned the build dir.", turns: 2 });
+  assert.deepEqual(done.output, { status: "finished", summary: "Cleaned the build dir.", turns: 3 });
   assert.equal(removed, true, "the command runs after approval");
 });
 
@@ -178,6 +180,7 @@ test("snapshot-capable providers snapshot before parking and restore after — s
   const { model } = reactiveModel([
     "```bash\nrm -rf build/\n```", // dangerous → parks
     (obs) => (obs.includes("exit 0") ? "```finish\nCleaned after restore.\n```" : "```bash\necho hmm\n```"),
+    (obs) => (obs.includes("Before finishing") ? "```finish\nCleaned after restore.\n```" : "```bash\necho hmm\n```"),
   ]);
 
   // Simulated snapshot-capable provider: workspaces are maps; snapshot
@@ -239,7 +242,7 @@ test("snapshot-capable providers snapshot before parking and restore after — s
   await deliverEvent(store, "run-1", approvalEvent(0), { approved: true });
   const done = await executeRun({ workflow: wf, runId: "run-1", store });
   assert.equal(done.status, "completed");
-  assert.deepEqual(done.output, { status: "finished", summary: "Cleaned after restore.", turns: 2 });
+  assert.deepEqual(done.output, { status: "finished", summary: "Cleaned after restore.", turns: 3 });
   assert.equal(removed, true, "the approved action ran in the RESTORED workspace");
 });
 

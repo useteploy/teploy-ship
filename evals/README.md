@@ -10,6 +10,7 @@ quality changes can be compared over time.
 | 2026-07-03 | claude-haiku-4-5 | hardSuite (6) | 3/6 (50%), 5/12 attempts | **Discrimination confirmed** — the benchmark works. See below. |
 | 2026-07-04 | claude-haiku-4-5 | hardSuite (6) | 6/6 (100%) pass@2 | Kernel + str_replace editor closed the gap — measured harness win. |
 | 2026-07-05 | claude-haiku-4-5 | extremeSuite (4) | 2/4 (50%), repeats 1 | **Headroom restored.** Guard ON; both failures are premature finishes after one successful exploratory command (guard's designed limit — deliverable-aware finish check is the next lever). |
+| 2026-07-07 | claude-haiku-4-5 | extremeSuite (4) | 4/4 (100%), repeats 1 | **Verified finish + XML-relapse rescue.** First finish held once (prove deliverables); parseAction rescues native tool-call XML into real actions. 2/4 → 4/4. See 2026-07-07 notes — interim 0/4 run mid-change is part of the story. |
 
 ## The benchmark discriminates (validated 2026-07-03)
 

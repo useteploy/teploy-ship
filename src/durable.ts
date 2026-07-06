@@ -6,7 +6,7 @@ import { workflow } from "@neutron-build/workflow";
 import type { WorkflowContext, WorkflowDefinition } from "@neutron-build/workflow";
 
 import { executeAction } from "./agent.js";
-import { parseAction } from "./actions.js";
+import { FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, parseAction } from "./actions.js";
 import type { ApprovalPolicy } from "./approval.js";
 import { formatObservation, systemPrompt } from "./prompt.js";
 
@@ -110,12 +110,15 @@ export function durableAgent(
 
         const action = parseAction(thought);
         if (action.kind === "finish") {
-          if (!anySuccessfulAction && !finishNudged) {
+          // First finish is held once (verify-or-do-the-work), second is
+          // honored; a finish on the final turn is honored immediately.
+          // Both branches derive purely from replayed step results, so the
+          // nudge is deterministic across resume/replay.
+          if (!finishNudged && turn + 1 < maxSteps) {
             finishNudged = true;
             messages.push({
               role: "user",
-              content:
-                "You are finishing without having successfully executed anything. Do the work first: take the actions the task needs, verify the result with a command, and only then finish.",
+              content: anySuccessfulAction ? FINISH_NUDGE_VERIFY : FINISH_NUDGE_NO_WORK,
             });
             continue;
           }

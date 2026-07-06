@@ -50,6 +50,10 @@ test("runs a full CodeAct session against a real executor and finishes", async (
     "```bash\npython3 sum.py\n```",
     // 3. finish ONLY if the real program output came back — proving the loop fed it in
     (obs) => (obs.includes("55") ? "```finish\nsum.py prints 55.\n```" : "```bash\necho wrong-output-was-fed\n```"),
+    // 4. the finish guard holds the first finish and asks for proof — verify
+    (obs) => (obs.includes("Before finishing") ? "```bash\ncat sum.py\n```" : "```bash\necho unexpected-nudge\n```"),
+    // 5. proven — finish again
+    "```finish\nsum.py prints 55.\n```",
   ]);
 
   const events: AgentEvent[] = [];
@@ -151,6 +155,7 @@ test("python variables persist across actions through the loop (kernel)", async 
     "```python\ntotal = sum(range(11))\nprint('computed')\n```",
     (obs) => (obs.includes("computed") ? "```python\nprint(f'total={total}')\n```" : "```finish\nno-compute\n```"),
     (obs) => (obs.includes("total=55") ? "```finish\nkernel state persisted.\n```" : "```finish\nstate lost!\n```"),
+    (obs) => (obs.includes("Before finishing") ? "```finish\nkernel state persisted.\n```" : "```finish\nstate lost!\n```"),
   ]);
   const result = await runAgent({ model, executor, task: "sum with state", recovery: false, condense: false });
   assert.equal(result.summary, "kernel state persisted.");
@@ -163,6 +168,7 @@ test("edit and create actions work through the loop with real verification", asy
     "```edit greet.py\n<<<<<<< SEARCH\n    return \"helo\"\n=======\n    return \"hello\"\n>>>>>>> REPLACE\n```",
     "```bash\npython3 -c \"import greet; print(greet.greet())\"\n```",
     (obs) => (obs.includes("hello") ? "```finish\nedited and verified.\n```" : "```finish\nedit failed\n```"),
+    (obs) => (obs.includes("Before finishing") ? "```finish\nedited and verified.\n```" : "```finish\nedit failed\n```"),
   ]);
   const result = await runAgent({ model, executor, task: "fix the typo", recovery: false, condense: false });
   assert.equal(result.summary, "edited and verified.");
@@ -271,15 +277,34 @@ test("verified-finish guard: an immediate finish is nudged once, then honored", 
   assert.match(String(nudge?.content), /finishing without having successfully executed/);
 });
 
-test("verified-finish guard: a finish after real verified work passes immediately", async () => {
+test("verified-finish guard: first finish after work gets ONE verify nudge, second is honored", async () => {
   const executor = await localExecutor();
+  const nudges: string[] = [];
   const { model } = scriptedModel([
     "```bash\necho done-work\n```",
     "```finish\nDid the work.\n```",
+    (obs) => {
+      nudges.push(obs);
+      return "```finish\nDid the work.\n```";
+    },
   ]);
   const result = await runAgent({ model, executor, task: "work", recovery: false, condense: false });
   assert.equal(result.status, "finished");
-  assert.equal(result.steps.length, 2);
+  assert.equal(result.summary, "Did the work.");
+  // the deliverable-verification nudge (not the do-the-work one) was sent
+  assert.match(nudges[0] ?? "", /Before finishing, verify your work/);
+  assert.equal(result.steps.length, 3);
+});
+
+test("verified-finish guard: a finish on the final step is honored immediately", async () => {
+  const executor = await localExecutor();
+  const { model } = scriptedModel([
+    "```bash\necho work\n```",
+    "```finish\nlast-step finish\n```",
+  ]);
+  const result = await runAgent({ model, executor, task: "work", maxSteps: 2, recovery: false, condense: false });
+  assert.equal(result.status, "finished");
+  assert.equal(result.summary, "last-step finish");
 });
 
 test("verified-finish guard: failed actions do not count as verification", async () => {

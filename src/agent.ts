@@ -3,7 +3,7 @@ import type { Message, ModelAdapter, Usage } from "@neutron-build/ai";
 import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 
 import type { Action } from "./actions.js";
-import { describeAction, parseAction } from "./actions.js";
+import { FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, describeAction, parseAction } from "./actions.js";
 import type { ApprovalPolicy } from "./approval.js";
 import { ensureKernel, installKernel, runCell, stopKernel } from "./kernel.js";
 import { condenseIfNeeded, defaultCondenseConfig } from "./memory.js";
@@ -53,10 +53,12 @@ export interface RunAgentOptions {
   /** Persistent python kernel (variables survive between actions); false = per-file execution. */
   kernel?: boolean;
   /**
-   * Verified-finish guard (default on): the FIRST finish attempted before
-   * any action has executed successfully is rejected with a nudge to do
-   * and verify the work — the premature-finish failure mode. A second
-   * finish is always honored (never an infinite refusal loop).
+   * Verified-finish guard (default on): the FIRST finish of a run is held
+   * once — with zero successful executions the agent is told to do the
+   * work; otherwise it is told to prove each deliverable with a real
+   * command before finishing again. A second finish is always honored
+   * (never an infinite refusal loop), and a finish on the final step is
+   * honored immediately (a nudge there could only burn the run).
    */
   requireVerifiedFinish?: boolean;
   onEvent?: (event: AgentEvent) => void;
@@ -158,10 +160,9 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
     emit({ type: "action", step: index, text: describeAction(action) });
 
     if (action.kind === "finish") {
-      if (options.requireVerifiedFinish !== false && !anySuccessfulAction && !finishNudged) {
+      if (options.requireVerifiedFinish !== false && !finishNudged && index + 1 < maxSteps) {
         finishNudged = true;
-        const nudge =
-          "You are finishing without having successfully executed anything. Do the work first: take the actions the task needs, verify the result with a command, and only then finish.";
+        const nudge = anySuccessfulAction ? FINISH_NUDGE_VERIFY : FINISH_NUDGE_NO_WORK;
         messages.push({ role: "user", content: nudge });
         steps.push({ index, thought, action });
         emit({ type: "observation", step: index, text: nudge });

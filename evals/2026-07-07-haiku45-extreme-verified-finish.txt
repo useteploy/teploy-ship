@@ -1,0 +1,30 @@
+
+  [PASS] expr-interpreter (attempt 1, 15 steps)
+  [PASS] session-audit (attempt 1, 20 steps)
+  [PASS] build-order (attempt 1, 20 steps)
+  [PASS] dedupe-refactor (attempt 1, 23 steps)
+
+  [PASS] expr-interpreter (15 steps, 36396ms)
+  [PASS] session-audit (20 steps, 85270ms)
+  [PASS] build-order (20 steps, 160468ms)
+  [PASS] dedupe-refactor (23 steps, 199705ms)
+
+4/4 tasks passed (100%)
+
+Notes:
+- claude-haiku-4-5, repeats 1. Same suite scored 2/4 on 2026-07-05.
+- Two harness changes measured together here:
+  1. Deliverable-verified finish: the FIRST finish of a run is held once —
+     zero-successful-executions gets "do the work"; otherwise "prove each
+     deliverable with a real command". Second finish always honored.
+  2. XML tool-call rescue: Haiku relapses into native <invoke> syntax,
+     hallucinates the tool result, and finishes (observed live in the 0/4
+     interim run this session). parseAction now rescues bash/python invokes
+     into real actions — first-in-text wins, so a trailing hallucinated
+     ```finish never outranks the attempted action. Plus a prompt rule
+     banning XML tool syntax.
+- Interim run after (1) but before (2): 0/4 — the guard alone made runs
+  LONGER, exposing the XML relapse more often. The instrument caught a
+  regression the unit suite could not see; the parser rescue closed it.
+- 2/4 -> 4/4. Extreme tier is saturated for Haiku pass@1; hard suites stay
+  the regression floor, next headroom tier only when a change needs it.

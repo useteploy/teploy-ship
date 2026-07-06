@@ -76,6 +76,7 @@ test("durable park -> approve -> resume works across store instances (separate C
         "```bash\nrm -rf build\n```", // parks
         (obs) => (obs.includes("exit 0") ? "```bash\ntest ! -d build && echo gone\n```" : "```finish\nbad\n```"),
         (obs) => (obs.includes("gone") ? "```finish\ncleaned.\n```" : "```finish\nnot-gone\n```"),
+        (obs) => (obs.includes("Before finishing") ? "```finish\ncleaned.\n```" : "```finish\nnot-gone\n```"),
       ]),
       executor: provider,
       approveAction: defaultApprovalPolicy,
@@ -91,7 +92,7 @@ test("durable park -> approve -> resume works across store instances (separate C
   await deliverEvent(new FileEventStore(dir), "r1", approvalEvent(1), { approved: true });
   const second = await executeRun({ workflow: makeWf(), runId: "r1", store: new FileEventStore(dir), input: { task: "clean" } });
   assert.equal(second.status, "completed");
-  assert.deepEqual(second.output, { status: "finished", summary: "cleaned.", turns: 4 });
+  assert.deepEqual(second.output, { status: "finished", summary: "cleaned.", turns: 5 });
 });
 
 test("RunMetaStore saves, lists newest-first, and tracks the parked event", async () => {
@@ -110,17 +111,17 @@ test("RunMetaStore saves, lists newest-first, and tracks the parked event", asyn
 test("runAgent aggregates usage across calls, cache fields included", async () => {
   const executor = new LocalExecutor({ root: await mkdtemp(join(tmpdir(), "ship-usage-")) });
   const result = await runAgent({
-    model: reactiveModel(["```bash\necho one\n```", "```bash\necho two\n```", "```finish\ndone\n```"]),
+    model: reactiveModel(["```bash\necho one\n```", "```bash\necho two\n```", "```finish\ndone\n```", "```finish\ndone\n```"]),
     executor,
     task: "count",
     recovery: false,
     condense: false,
   });
-  // three model calls at 10/5/15 + 100 cache-read each
-  assert.equal(result.usage.inputTokens, 30);
-  assert.equal(result.usage.outputTokens, 15);
-  assert.equal(result.usage.totalTokens, 45);
-  assert.equal(result.usage.cacheReadTokens, 300);
+  // four model calls (finish is verify-nudged once) at 10/5/15 + 100 cache-read each
+  assert.equal(result.usage.inputTokens, 40);
+  assert.equal(result.usage.outputTokens, 20);
+  assert.equal(result.usage.totalTokens, 60);
+  assert.equal(result.usage.cacheReadTokens, 400);
 });
 
 test("parseArgs: boolean flags, value flags, positionals", () => {
