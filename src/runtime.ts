@@ -8,11 +8,15 @@ import {
 } from "@neutron-build/workflow";
 import type { EventStore, RunOutcome, WorkflowDefinition } from "@neutron-build/workflow";
 
+import { FileIntakeStore, NucleusIntakeStore } from "./intake.js";
+import type { IntakeStore } from "./intake.js";
 import { NucleusPgwire } from "./nucleus-pgwire.js";
 import { FileEventStore, RunMetaStore } from "./run-store.js";
 import type { RunMeta } from "./run-store.js";
 
 export type { RunMeta } from "./run-store.js";
+export type { IntakeStore, IntakeTask, ProposeInput } from "./intake.js";
+export { FileIntakeStore, NucleusIntakeStore } from "./intake.js";
 
 /**
  * Where durable runs live. The file runtime keeps everything on this
@@ -38,6 +42,8 @@ export interface ShipRuntime {
   listMeta(): Promise<RunMeta[]>;
   /** Flag a parked run due so a resident worker picks it up (nucleus only). */
   markWake?(runId: string): Promise<void>;
+  /** The intake queue: proposed tasks awaiting launch. */
+  intake: IntakeStore;
   close(): Promise<void>;
 }
 
@@ -47,6 +53,7 @@ export function fileRuntime(): ShipRuntime {
   return {
     kind: "file",
     store,
+    intake: new FileIntakeStore(),
     execute: (workflow, runId, input) =>
       executeRun({ workflow, runId, store, ...(input !== undefined ? { input } : {}) }),
     saveMeta: (m) => meta.save(m),
@@ -99,6 +106,7 @@ export async function nucleusRuntime(url: string, owner: string): Promise<Nucleu
     index,
     leases,
     owner,
+    intake: new NucleusIntakeStore(db),
     async execute(workflow, runId, input) {
       const outcome = await executeRunExclusive({
         workflow,
@@ -141,7 +149,7 @@ export async function nucleusRuntime(url: string, owner: string): Promise<Nucleu
  */
 export async function enqueueRun(
   runtime: ShipRuntime,
-  options: { runId: string; task: string; model: string; workflowName?: string },
+  options: { runId: string; task: string; model: string; repo?: string; workflowName?: string },
 ): Promise<void> {
   const now = new Date().toISOString();
   await runtime.store.append(options.runId, {
@@ -151,7 +159,7 @@ export async function enqueueRun(
     at: now,
     data: {
       workflow: options.workflowName ?? "coding-agent",
-      input: { task: options.task },
+      input: { task: options.task, ...(options.repo !== undefined ? { repo: options.repo } : {}) },
     },
   });
   await runtime.saveMeta({

@@ -327,3 +327,40 @@ test("verified-finish guard can be disabled", async () => {
   assert.equal(result.status, "finished");
   assert.equal(result.steps.length, 1);
 });
+
+test("verified-finish guard: a finish right after a FAILED execution is held with a fix-it nudge", async () => {
+  const executor = await localExecutor();
+  const nudges: string[] = [];
+  const { model } = scriptedModel([
+    "```bash\necho work\n```",
+    "```finish\ndone\n```", // first finish -> verify nudge
+    "```bash\nfalse\n```", // verification FAILS
+    "```finish\ndone anyway\n```", // held: last exec failed
+    (obs) => {
+      nudges.push(obs);
+      return "```bash\ntrue\n```"; // fix proven
+    },
+    "```finish\nactually done\n```",
+  ]);
+  const result = await runAgent({ model, executor, task: "work", recovery: false, condense: false });
+  assert.equal(result.status, "finished");
+  assert.equal(result.summary, "actually done");
+  assert.match(nudges[0] ?? "", /FAILED/);
+});
+
+test("verified-finish guard: fail-nudges are capped so a stuck agent still terminates", async () => {
+  const executor = await localExecutor();
+  const { model } = scriptedModel([
+    "```bash\nfalse\n```",
+    "```finish\ngive up\n```", // first finish -> do-the-work nudge
+    "```bash\nfalse\n```",
+    "```finish\ngive up\n```", // fail nudge 1
+    "```bash\nfalse\n```",
+    "```finish\ngive up\n```", // fail nudge 2
+    "```bash\nfalse\n```",
+    "```finish\ngive up\n```", // cap reached -> honored
+  ]);
+  const result = await runAgent({ model, executor, task: "impossible", recovery: false, condense: false });
+  assert.equal(result.status, "finished");
+  assert.equal(result.summary, "give up");
+});

@@ -74,6 +74,8 @@ interface Config {
   store?: string;
   nucleusUrl?: string;
   gitToken?: string;
+  /** Per-source intake policies for the worker: { forgejo: "auto", … } */
+  intake?: Record<string, "ignore" | "propose" | "auto">;
 }
 
 function loadConfig(): Config {
@@ -426,12 +428,16 @@ async function workerCommand(rest: string[]): Promise<void> {
   if (runtime.kind !== "nucleus") fail("worker needs --store nucleus");
   const modelId = (args.flags.model as string) ?? config.model ?? "anthropic/claude-sonnet-5";
   const usingSandbox = ((args.flags.sandbox as string) ?? config.sandboxUrl) !== undefined;
+  const gitToken = (args.flags["git-token"] as string) ?? process.env.SHIP_GIT_TOKEN ?? config.gitToken;
   const worker = startWorker({
     runtime: runtime as import("./runtime.js").NucleusShipRuntime,
     model: resolveModel(modelId),
+    modelId,
     executor: durableProvider(args, config),
     workdir: usingSandbox ? "/work" : ".",
     intervalMs: args.flags.interval !== undefined ? Number(args.flags.interval) * 1000 : 5000,
+    ...(gitToken !== undefined ? { gitToken } : {}),
+    ...(config.intake !== undefined ? { intakePolicies: config.intake } : {}),
   });
   // The scheduler's own timer is unref'd; this ref'd no-op holds the
   // process resident until a signal stops it.

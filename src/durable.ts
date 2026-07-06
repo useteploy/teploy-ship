@@ -6,18 +6,30 @@ import { workflow } from "@neutron-build/workflow";
 import type { WorkflowContext, WorkflowDefinition } from "@neutron-build/workflow";
 
 import { executeAction } from "./agent.js";
-import { FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, parseAction } from "./actions.js";
+import { FINISH_NUDGE_FAILED, FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, parseAction } from "./actions.js";
+import { commitAndPush, fixPrompt, openPullRequest, parseRepoUrl, setupRepo } from "./git.js";
+import type { RepoCheckout } from "./git.js";
 import type { ApprovalPolicy } from "./approval.js";
 import { formatObservation, systemPrompt } from "./prompt.js";
 
 export interface DurableAgentInput {
   task: string;
+  /**
+   * When set, the run is a repo run: the workflow clones this URL as a
+   * recorded step before the agent starts (credential-free remote — the
+   * token comes from the executing worker's config, never the input or
+   * the log) and, after the agent's work, commits/pushes any non-empty
+   * diff and opens a PR as recorded steps.
+   */
+  repo?: string;
 }
 
 export interface DurableAgentOutput {
   status: "finished" | "max-steps";
   summary: string;
   turns: number;
+  /** PR opened by a repo run (absent for workspace runs or empty diffs). */
+  pr?: string;
 }
 
 /**
@@ -52,6 +64,8 @@ export interface DurableAgentConfig {
   name?: string;
   /** Total run budget passed to the workflow (e.g. "7d"). */
   runTimeout?: string | number;
+  /** Deploy token for repo runs (clone/push/PR). Required when input.repo is set. */
+  gitToken?: string;
 }
 
 /** The event name a turn's approval-required action parks on. Deliver {approved, reason?}. */
@@ -94,12 +108,33 @@ export function durableAgent(
       let handle = await ctx.step("sandbox", async () => (await config.executor.create()).handle);
       let executor = config.executor.attach(handle);
 
+      // Repo runs: clone + branch as a recorded step, then hand the agent
+      // a repo-aware task. On replay the step returns the recorded
+      // checkout without touching the network.
+      let checkout: RepoCheckout | null = null;
+      if (input.repo !== undefined) {
+        const repoUrl = input.repo;
+        checkout = await ctx.step("repo-setup", async () => {
+          const token = config.gitToken;
+          if (token === undefined || token === "") {
+            throw new Error("repo run needs gitToken on the executing worker (SHIP_GIT_TOKEN)");
+          }
+          return setupRepo(executor, { ref: parseRepoUrl(repoUrl), token, runId: ctx.runId });
+        });
+      }
+      const task =
+        checkout !== null
+          ? fixPrompt({ task: input.task, branch: checkout.branch, base: checkout.base })
+          : input.task;
+
       const messages: Message[] = [
-        { role: "system", content: systemPrompt({ workdir, task: input.task }) },
+        { role: "system", content: systemPrompt({ workdir, task }) },
         { role: "user", content: "Begin. Work step by step and verify before finishing." },
       ];
       let anySuccessfulAction = false;
       let finishNudged = false;
+      let failNudges = 0;
+      let lastExecFailed = false;
 
       for (let turn = 0; turn < maxSteps; turn++) {
         const thought = await ctx.step(`turn-${turn}-think`, async () => {
@@ -114,15 +149,22 @@ export function durableAgent(
           // honored; a finish on the final turn is honored immediately.
           // Both branches derive purely from replayed step results, so the
           // nudge is deterministic across resume/replay.
-          if (!finishNudged && turn + 1 < maxSteps) {
-            finishNudged = true;
-            messages.push({
-              role: "user",
-              content: anySuccessfulAction ? FINISH_NUDGE_VERIFY : FINISH_NUDGE_NO_WORK,
-            });
-            continue;
+          if (turn + 1 < maxSteps) {
+            let nudge: string | null = null;
+            if (!finishNudged) {
+              finishNudged = true;
+              nudge = anySuccessfulAction ? FINISH_NUDGE_VERIFY : FINISH_NUDGE_NO_WORK;
+            } else if (lastExecFailed && failNudges < 2) {
+              failNudges += 1;
+              nudge = FINISH_NUDGE_FAILED;
+            }
+            if (nudge !== null) {
+              messages.push({ role: "user", content: nudge });
+              continue;
+            }
           }
-          return { status: "finished", summary: action.message, turns: turn + 1 };
+          const pr = await publishIfRepoRun(ctx, executor, config, input, checkout, action.message);
+          return { status: "finished", summary: action.message, turns: turn + 1, ...(pr !== null ? { pr } : {}) };
         }
         if (action.kind === "none" || action.kind === "invalid") {
           messages.push({
@@ -171,13 +213,52 @@ export function durableAgent(
           executeAction(executor, action, config.actionTimeoutMs, `t${turn}`),
         );
         if (result.exitCode === 0) anySuccessfulAction = true;
+        lastExecFailed = result.exitCode !== 0;
         messages.push({ role: "user", content: truncate(formatObservation(result), maxObs) });
       }
 
-      return { status: "max-steps", summary: `Reached the ${maxSteps}-turn limit.`, turns: maxSteps };
+      // Non-empty diffs are published even off a max-steps exit — real
+      // fixes die in runs that never got to say finish (SWE-bench lesson).
+      const pr = await publishIfRepoRun(ctx, executor, config, input, checkout, `Reached the ${maxSteps}-turn limit.`);
+      return { status: "max-steps", summary: `Reached the ${maxSteps}-turn limit.`, turns: maxSteps, ...(pr !== null ? { pr } : {}) };
     },
     config.runTimeout !== undefined ? { timeout: config.runTimeout } : {},
   );
+}
+
+/** Recorded publish step for repo runs: commit, push, open the PR. */
+async function publishIfRepoRun(
+  ctx: WorkflowContext,
+  executor: AgentExecutor,
+  config: DurableAgentConfig,
+  input: DurableAgentInput,
+  checkout: RepoCheckout | null,
+  summary: string,
+): Promise<string | null> {
+  if (checkout === null || input.repo === undefined) return null;
+  const repoUrl = input.repo;
+  const co = checkout;
+  const result = await ctx.step("repo-publish", async () => {
+    const token = config.gitToken ?? "";
+    const ref = parseRepoUrl(repoUrl);
+    const pushed = await commitAndPush(executor, {
+      ref,
+      token,
+      checkout: co,
+      message: `${input.task.slice(0, 68)}\n\nTeploy Ship ${ctx.runId}`,
+    });
+    if (pushed === null) return { pr: null };
+    const pr = await openPullRequest({
+      ref,
+      token,
+      head: co.branch,
+      base: co.base,
+      title: input.task.length > 72 ? `${input.task.slice(0, 72)}…` : input.task,
+      body: `${summary}\n\n---\nTask: ${input.task}\nRun: ${ctx.runId}\nGenerated by Teploy Ship.`,
+    });
+    return { pr: pr.url };
+  });
+  return (result as { pr: string | null }).pr;
 }
 
 /**

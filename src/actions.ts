@@ -148,5 +148,8 @@ function firstLine(code: string): string {
 export const FINISH_NUDGE_NO_WORK =
   "You are finishing without having successfully executed anything. Do the work first: take the actions the task needs, verify the result with a command, and only then finish.";
 
+export const FINISH_NUDGE_FAILED =
+  "Your most recent executed command FAILED. The task is NOT done: fix the problem in the actual files, run a command that proves it works (tests pass, program runs), and only then finish.";
+
 export const FINISH_NUDGE_VERIFY =
   "Before finishing, verify your work. Re-read the task, then run one command that PROVES each artifact or change it requires actually exists and is correct (list or cat the files you claim to have created, run the tests, execute the program). If any check fails or anything is missing, fix it before finishing. If everything is already proven, finish again.";

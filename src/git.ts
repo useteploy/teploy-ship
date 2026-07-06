@@ -84,6 +84,10 @@ export async function setupRepo(
   await git(executor, `git clone --depth 50 ${authenticatedUrl(ref, token)} . 2>&1`, 300_000);
   await git(executor, `git remote set-url origin ${ref.cloneUrl}`);
   await git(executor, 'git config user.name "Teploy Ship" && git config user.email "ship@teploy.dev"');
+  // Harness scratch (the python kernel writes .teploy-agent/ into the
+  // workspace) must never reach a PR; repo-local exclude keeps it out of
+  // git add -A and out of the status the agent reads.
+  await git(executor, 'echo ".teploy-agent/" >> .git/info/exclude');
   const base = await git(executor, "git rev-parse --abbrev-ref HEAD");
   const branch = `ship/${runId}`;
   await git(executor, `git checkout -b ${branch}`);

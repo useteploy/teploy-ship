@@ -3,7 +3,7 @@ import type { Message, ModelAdapter, Usage } from "@neutron-build/ai";
 import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 
 import type { Action } from "./actions.js";
-import { FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, describeAction, parseAction } from "./actions.js";
+import { FINISH_NUDGE_FAILED, FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, describeAction, parseAction } from "./actions.js";
 import type { ApprovalPolicy } from "./approval.js";
 import { ensureKernel, installKernel, runCell, stopKernel } from "./kernel.js";
 import { condenseIfNeeded, defaultCondenseConfig } from "./memory.js";
@@ -126,6 +126,8 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
   let kernelUsed = false;
   let anySuccessfulAction = false;
   let finishNudged = false;
+  let failNudges = 0;
+  let lastExecFailed = false;
   try {
   for (let index = 0; index < maxSteps; index++) {
     if (options.abortSignal?.aborted) {
@@ -160,13 +162,26 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
     emit({ type: "action", step: index, text: describeAction(action) });
 
     if (action.kind === "finish") {
-      if (options.requireVerifiedFinish !== false && !finishNudged && index + 1 < maxSteps) {
-        finishNudged = true;
-        const nudge = anySuccessfulAction ? FINISH_NUDGE_VERIFY : FINISH_NUDGE_NO_WORK;
-        messages.push({ role: "user", content: nudge });
-        steps.push({ index, thought, action });
-        emit({ type: "observation", step: index, text: nudge });
-        continue;
+      // Two holds, both bounded: the first finish gets one verify/do-work
+      // nudge; any finish whose most recent execution FAILED gets a
+      // fix-it nudge (at most twice) — an agent that just watched its
+      // tests fail does not get to walk away. Cap + final-step passthrough
+      // guarantee termination.
+      if (options.requireVerifiedFinish !== false && index + 1 < maxSteps) {
+        let nudge: string | null = null;
+        if (!finishNudged) {
+          finishNudged = true;
+          nudge = anySuccessfulAction ? FINISH_NUDGE_VERIFY : FINISH_NUDGE_NO_WORK;
+        } else if (lastExecFailed && failNudges < 2) {
+          failNudges += 1;
+          nudge = FINISH_NUDGE_FAILED;
+        }
+        if (nudge !== null) {
+          messages.push({ role: "user", content: nudge });
+          steps.push({ index, thought, action });
+          emit({ type: "observation", step: index, text: nudge });
+          continue;
+        }
       }
       steps.push({ index, thought, action });
       emit({ type: "finish", step: index, text: action.message });
@@ -215,6 +230,7 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
     }
 
     if (result.exitCode === 0) anySuccessfulAction = true;
+    lastExecFailed = result.exitCode !== 0;
     const observation = truncate(formatObservation(result), maxObs);
     messages.push({ role: "user", content: observation });
     steps.push({ index, thought, action, result, observation });

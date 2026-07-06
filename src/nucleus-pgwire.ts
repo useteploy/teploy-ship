@@ -25,6 +25,12 @@ export class NucleusPgwire {
     this.#pool = new pg.Pool({ connectionString: url, max: 4 });
   }
 
+  /** Raw parameterized query — rows as objects. The intake store builds on this. */
+  async query(sql: string, params: unknown[] = []): Promise<Record<string, unknown>[]> {
+    const result = await this.#pool.query(sql, params);
+    return result.rows as Record<string, unknown>[];
+  }
+
   async #fetchval<T>(sql: string, params: unknown[] = []): Promise<T | null> {
     const result = await this.#pool.query(sql, params);
     const row = result.rows[0] as Record<string, unknown> | undefined;
