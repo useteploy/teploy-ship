@@ -97,22 +97,22 @@ button.deny { color: var(--red); border-color: var(--red); }
 .empty { color: var(--dim); padding: 30px 0; }
 `;
 
+// The layout renders a FRAGMENT, not a document: the framework owns the
+// <html>/<head>/<body> shell (index.html in app mode). Rendering a full
+// document here nests <html> inside the shell's #app div — the browser
+// flattens it and hydration, unable to match, appends a second copy of
+// the entire UI (found live on the first teploy-deployed instance).
+// charset/viewport/title live in index.html; the style block rides in
+// the fragment, which browsers apply from body just fine.
 export default function Layout({ children }: { children: ComponentChildren }) {
   return (
-    <html lang="en">
-      <head>
-        <meta charSet="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>Teploy Ship</title>
-        <style dangerouslySetInnerHTML={{ __html: CSS }} />
-      </head>
-      <body>
-        <header class="top">
-          <a href="/" class="brand">TEPLOY SHIP</a>
-          <span class="store">runs</span>
-        </header>
-        <main>{children}</main>
-      </body>
-    </html>
+    <>
+      <style dangerouslySetInnerHTML={{ __html: CSS }} />
+      <header class="top">
+        <a href="/" class="brand">TEPLOY SHIP</a>
+        <span class="store">runs</span>
+      </header>
+      <main>{children}</main>
+    </>
   );
 }
