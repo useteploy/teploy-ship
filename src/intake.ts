@@ -6,6 +6,14 @@ import type { NucleusPgwire } from "./nucleus-pgwire.js";
 import { stateDir } from "./run-store.js";
 
 /**
+ * Per-source intake policy. Auto is OFF unless a source is explicitly
+ * configured "auto" — autonomy is earned per source, never default —
+ * and even then the worker bounds the blast radius of a storm with a
+ * daily launch count cap, a concurrency ceiling, and a daily spend cap.
+ */
+export type IntakePolicy = "ignore" | "propose" | "auto";
+
+/**
  * The intake contract: ONE task shape every source emits — the web form,
  * the CLI, the Forgejo webhook, observe, whatever comes later. A task is
  * a proposal until a policy (or a human in the web queue) launches it as

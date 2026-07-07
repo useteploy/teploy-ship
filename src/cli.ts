@@ -30,6 +30,7 @@ import { stateDir } from "./run-store.js";
 import { fileRuntime, nucleusRuntime } from "./runtime.js";
 import type { ShipRuntime } from "./runtime.js";
 import { startWorker } from "./worker.js";
+import { costUSD } from "./pricing.js";
 import { builtinSuite } from "./tasks.js";
 import { hardSuite } from "./hard-tasks.js";
 import { extremeSuite } from "./extreme-tasks.js";
@@ -55,6 +56,8 @@ Usage:
       (accepts run flags: --model, --sandbox…, --max-steps, --yes, --json)
   teploy-ship worker                  resident worker: picks up due nucleus-store runs
       [--interval seconds]            poll interval (default 5)
+      [--max-concurrent N]            cap simultaneously-running auto runs (default 3, SHIP_MAX_CONCURRENT_RUNS)
+      [--daily-budget USD]            per-source daily spend cap (default 10, SHIP_DAILY_BUDGET_USD; <=0 off)
   teploy-ship web                     serve the runs dashboard (browser approve/deny)
       [--port N] [--token <t>]        token also via SHIP_WEB_TOKEN (required)
       [--dev]                         vite dev server instead of the built app
@@ -78,6 +81,18 @@ interface Config {
   gitToken?: string;
   /** Per-source intake policies for the worker: { forgejo: "auto", … } */
   intake?: Record<string, "ignore" | "propose" | "auto">;
+  /** Worker: max simultaneously-executing auto-launched runs (default 3). */
+  maxConcurrentRuns?: number;
+  /** Worker: per-source daily spend cap in USD (default 10; <= 0 disables). */
+  dailyBudgetUSD?: number;
+  /** Worker: per-source budget overrides in USD/day. */
+  intakeBudgets?: Record<string, number>;
+}
+
+/** One-line usage summary with an estimated cost tail when the model is priced. */
+function usageLine(modelId: string, usage: Parameters<typeof renderUsage>[0]): string {
+  const cost = costUSD(modelId, usage);
+  return cost > 0 ? `${renderUsage(usage)} · ~$${cost.toFixed(4)}` : renderUsage(usage);
 }
 
 function loadConfig(): Config {
@@ -131,7 +146,8 @@ async function runCommand(rest: string[]): Promise<void> {
     return;
   }
 
-  const model = resolveModel((args.flags.model as string) ?? config.model ?? "anthropic/claude-sonnet-5");
+  const modelId = (args.flags.model as string) ?? config.model ?? "anthropic/claude-sonnet-5";
+  const model = resolveModel(modelId);
   const { executor, workdir } = await makeExecutor(args, config);
 
   const abort = new AbortController();
@@ -155,10 +171,10 @@ async function runCommand(rest: string[]): Promise<void> {
 
   await executor.destroy();
   if (args.flags.json === true) {
-    process.stdout.write(JSON.stringify({ status: result.status, summary: result.summary, steps: result.steps.length, usage: result.usage }, null, 2) + "\n");
+    process.stdout.write(JSON.stringify({ status: result.status, summary: result.summary, steps: result.steps.length, usage: result.usage, costUSD: costUSD(modelId, result.usage) }, null, 2) + "\n");
   } else {
     const mark = result.status === "finished" ? green(result.status) : red(result.status);
-    process.stderr.write(`\n${mark} — ${result.summary}\n${dim(renderUsage(result.usage))}\n`);
+    process.stderr.write(`\n${mark} — ${result.summary}\n${dim(usageLine(modelId, result.usage))}\n`);
   }
   process.exit(result.status === "finished" ? 0 : 1);
 }
@@ -200,7 +216,8 @@ async function fixCommand(rest: string[]): Promise<void> {
 
   const ref = parseRepoUrl(repoUrl);
   const runId = `run-${randomUUID().slice(0, 8)}`;
-  const model = resolveModel((args.flags.model as string) ?? config.model ?? "anthropic/claude-sonnet-5");
+  const modelId = (args.flags.model as string) ?? config.model ?? "anthropic/claude-sonnet-5";
+  const model = resolveModel(modelId);
   const { executor } = await makeExecutor(args, config);
 
   process.stderr.write(dim(`cloning ${ref.owner}/${ref.repo}…\n`));
@@ -253,9 +270,9 @@ async function fixCommand(rest: string[]): Promise<void> {
   await runtime.close();
   await executor.destroy();
   if (args.flags.json === true) {
-    process.stdout.write(JSON.stringify({ status: result.status, pr: pr.url, number: pr.number, sha: pushed.sha, runId }, null, 2) + "\n");
+    process.stdout.write(JSON.stringify({ status: result.status, pr: pr.url, number: pr.number, sha: pushed.sha, runId, usage: result.usage, costUSD: costUSD(modelId, result.usage) }, null, 2) + "\n");
   } else {
-    process.stderr.write(`\n${green("PR opened")} — ${bold(pr.url)}\n${dim(renderUsage(result.usage))}\n`);
+    process.stderr.write(`\n${green("PR opened")} — ${bold(pr.url)}\n${dim(usageLine(modelId, result.usage))}\n`);
   }
   process.exit(0);
 }
@@ -476,6 +493,17 @@ async function workerCommand(rest: string[]): Promise<void> {
     intervalMs: args.flags.interval !== undefined ? Number(args.flags.interval) * 1000 : 5000,
     ...(gitToken !== undefined ? { gitToken } : {}),
     ...(config.intake !== undefined ? { intakePolicies: config.intake } : {}),
+    ...(args.flags["max-concurrent"] !== undefined
+      ? { maxConcurrentRuns: Number(args.flags["max-concurrent"]) }
+      : config.maxConcurrentRuns !== undefined
+        ? { maxConcurrentRuns: config.maxConcurrentRuns }
+        : {}),
+    ...(args.flags["daily-budget"] !== undefined
+      ? { dailyBudgetUSD: Number(args.flags["daily-budget"]) }
+      : config.dailyBudgetUSD !== undefined
+        ? { dailyBudgetUSD: config.dailyBudgetUSD }
+        : {}),
+    ...(config.intakeBudgets !== undefined ? { intakeBudgets: config.intakeBudgets } : {}),
   });
   // The scheduler's own timer is unref'd; this ref'd no-op holds the
   // process resident until a signal stops it.

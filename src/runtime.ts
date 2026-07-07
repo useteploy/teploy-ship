@@ -10,6 +10,8 @@ import type { EventStore, RunOutcome, WorkflowDefinition } from "@neutron-build/
 
 import { FileIntakeStore, NucleusIntakeStore } from "./intake.js";
 import type { IntakeStore } from "./intake.js";
+import { FileSpendStore, NucleusSpendStore } from "./spend.js";
+import type { SpendStore } from "./spend.js";
 import { FileRepoMemory, NucleusRepoMemory } from "./repo-memory.js";
 import type { RepoMemoryStore } from "./repo-memory.js";
 import { NucleusPgwire } from "./nucleus-pgwire.js";
@@ -19,6 +21,8 @@ import type { RunMeta } from "./run-store.js";
 export type { RunMeta } from "./run-store.js";
 export type { IntakeStore, IntakeTask, ProposeInput } from "./intake.js";
 export { FileIntakeStore, NucleusIntakeStore } from "./intake.js";
+export type { SpendStore } from "./spend.js";
+export { FileSpendStore, NucleusSpendStore, utcDay } from "./spend.js";
 export type { RepoMemoryStore, RepoNote } from "./repo-memory.js";
 export { FileRepoMemory, NucleusRepoMemory, loadRepoContext, runNote } from "./repo-memory.js";
 
@@ -48,6 +52,8 @@ export interface ShipRuntime {
   markWake?(runId: string): Promise<void>;
   /** The intake queue: proposed tasks awaiting launch. */
   intake: IntakeStore;
+  /** Per-source, per-UTC-day spend ledger backing the worker's budget cap. */
+  spend: SpendStore;
   /** Per-repo playbook memory (notes Ship records about its own runs). */
   memory: RepoMemoryStore;
   close(): Promise<void>;
@@ -60,6 +66,7 @@ export function fileRuntime(): ShipRuntime {
     kind: "file",
     store,
     intake: new FileIntakeStore(),
+    spend: new FileSpendStore(),
     memory: new FileRepoMemory(),
     execute: (workflow, runId, input) =>
       executeRun({ workflow, runId, store, ...(input !== undefined ? { input } : {}) }),
@@ -114,6 +121,7 @@ export async function nucleusRuntime(url: string, owner: string): Promise<Nucleu
     leases,
     owner,
     intake: new NucleusIntakeStore(db),
+    spend: new NucleusSpendStore(db),
     memory: new NucleusRepoMemory(db),
     async execute(workflow, runId, input) {
       const outcome = await executeRunExclusive({
