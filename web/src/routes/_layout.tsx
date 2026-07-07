@@ -15,8 +15,10 @@ import { webToken } from "../lib/store.server.js";
 export const middleware: MiddlewareFn = async (request, _context, next) => {
   const url = new URL(request.url);
   const path = url.pathname;
-  // /hooks/* authenticates via webhook HMAC inside the route, not bearer
-  if (path === "/login" || path.startsWith("/hooks/") || path.startsWith("/assets/") || path === "/favicon.ico") return next();
+  // /hooks/* authenticates via webhook HMAC inside the route, not bearer;
+  // /health is the family-convention liveness probe (teploy's deploy gate
+  // polls it before any login could exist).
+  if (path === "/login" || path === "/health" || path.startsWith("/hooks/") || path.startsWith("/assets/") || path === "/favicon.ico") return next();
 
   const expected = webToken();
   const header = request.headers.get("authorization");

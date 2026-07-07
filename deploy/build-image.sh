@@ -24,5 +24,5 @@ done
 ls deploy/vendor
 
 echo "==> docker build ${TAG}"
-docker build -f deploy/Dockerfile -t "${TAG}" .
+docker build -t "${TAG}" .
 echo "done: ${TAG}"

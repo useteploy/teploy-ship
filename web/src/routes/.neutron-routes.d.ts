@@ -3,6 +3,7 @@ declare module "@neutron-build/core" {
   interface NeutronGeneratedRouteMap {
     paths:
     | "/"
+    | "/health"
     | "/hooks/forgejo"
     | "/hooks/github"
     | "/login"

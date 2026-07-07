@@ -1,0 +1,12 @@
+# What `teploy deploy` skips when syncing this directory to the server
+# for the remote image build. The Dockerfile needs only: dist/, web/dist/,
+# web/src/ (+ web config files), and deploy/ (vendor tarballs + runtime
+# package.jsons).
+.git
+node_modules
+reference
+evals
+swebench
+_internal
+/src
+/web/dist/**/*.map

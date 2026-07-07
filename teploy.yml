@@ -1,0 +1,66 @@
+# Self-hosted Teploy Ship — deployed with teploy.
+#
+# One image (deploy/build-image.sh), two processes:
+#   web     the dashboard + webhook receivers (Forgejo + GitHub)
+#   worker  executes durable runs (needs the model + git tokens)
+# Nucleus runs as a teploy accessory (network alias `<app>-nucleus`, i.e.
+# ship-nucleus) so any machine can list/approve runs against it.
+#
+# No domain: `ingress: host` publishes the web process directly at
+# <server-ip>:7460 — the shape for a private/tailnet box. Gate the port
+# with your firewall (e.g. `ufw allow from 100.64.0.0/10 to any port 7460`
+# for Tailscale-only access).
+#
+# Required secrets — set ONCE via `teploy secret set` from this directory
+# (they are app-scoped and injected into both processes on every deploy;
+# never put values in this file):
+#   SHIP_WEB_TOKEN       dashboard login + API bearer
+#   SHIP_WEBHOOK_SECRET  Forgejo/GitHub webhook HMAC
+#   SHIP_GIT_TOKEN       deploy token for repo runs (clone/push/PR)
+#   AI_GATEWAY_KEY       project key minted by `teploy-gateway key create`
+#     (or set ANTHROPIC_API_KEY instead and drop AI_GATEWAY_URL below)
+
+app: ship
+server: smoke # your server name from servers.yml (smoke = the dev test box)
+user: tyler
+ingress: host
+port: 7460
+platform: linux/amd64
+
+# No image: teploy syncs this directory (see .teployignore) and builds
+# from the root Dockerfile ON the server. Prerequisites, run locally
+# first: `pnpm run build`, `cd web && pnpm run build`, and the SDK
+# tarball pack from deploy/build-image.sh (the @neutron-build packages
+# are ahead of their npm releases, so the image installs them from
+# deploy/vendor/ tarballs).
+
+processes:
+  web: web --store nucleus --port 7460
+  worker: worker --store nucleus --interval 5
+
+# Nucleus sidecar. NUCLEUS_ALLOW_NO_AUTH: nucleus's pgwire SCRAM password
+# auth panics upstream ("Salt required for SCRAM auth source"), so
+# password auth is not usable yet; the accessory is only reachable on the
+# app's private docker network. Same posture observe's teploy.yml ships.
+accessories:
+  nucleus:
+    image: ghcr.io/neutron-build/nucleus:latest
+    port: 5432
+    env:
+      NUCLEUS_ALLOW_NO_AUTH: "1"
+      NUCLEUS_ALLOW_INSECURE_CLUSTER: "1"
+      NUCLEUS_ALLOW_INSECURE_REPLICATION: "1"
+    volumes:
+      nucleus-data: /data
+
+env:
+  NUCLEUS_URL: postgres://nucleus@ship-nucleus:5432/nucleus
+  SHIP_MODEL: anthropic/claude-sonnet-5
+  # Route model calls through teploy-gateway (172.18.0.1 = the teploy
+  # docker network's host bridge). Drop this to call providers directly.
+  AI_GATEWAY_URL: http://172.18.0.1:8089
+
+# Durable state for the worker's file paths (nucleus mode needs little,
+# but the image declares VOLUME /data).
+volumes:
+  ship-data: /data
