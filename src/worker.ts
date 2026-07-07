@@ -174,6 +174,8 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
     intervalMs: options.intervalMs ?? 5000,
     onError: (runId, error) =>
       log(`[worker] run ${runId}: ${error instanceof Error ? error.message : String(error)}`),
+    onTickError: (error) =>
+      log(`[worker] tick failed (store unreachable?): ${error instanceof Error ? error.message : String(error)}`),
   });
   scheduler.start();
 
