@@ -390,10 +390,16 @@ export function sandboxProvider(options: {
   token: string;
   image: string;
   ttlSec?: number;
+  /** Sandbox network mode for the run (default "none" — the daemon's safe default). */
+  network?: "none" | "egress";
   fetch?: typeof globalThis.fetch;
 }): ExecutorProvider {
   const base = { baseURL: options.baseURL, token: options.token, ...(options.fetch !== undefined ? { fetch: options.fetch } : {}) };
-  const create = { image: options.image, ...(options.ttlSec !== undefined ? { ttlSec: options.ttlSec } : {}) };
+  const create = {
+    image: options.image,
+    ...(options.ttlSec !== undefined ? { ttlSec: options.ttlSec } : {}),
+    ...(options.network !== undefined ? { network: options.network } : {}),
+  };
   return {
     async create() {
       const sandbox = await SandboxExecutor.start({ ...base, create });

@@ -41,7 +41,7 @@ const USAGE = `teploy-ship — coding agent on your own stack
 Usage:
   teploy-ship run "<task>"            live run in the terminal (streamed, interactive approvals)
       [--model provider/model]        default anthropic/claude-sonnet-5
-      [--sandbox <url> --sandbox-token <t> [--sandbox-image <img>]]
+      [--sandbox <url> --sandbox-token <t> [--sandbox-image <img>] [--sandbox-network none|egress]]
       [--max-steps N] [--yes] [--json]
   teploy-ship run --durable "<task>"  durable run: parks on approvals, survives exits
   teploy-ship runs                    list durable runs
@@ -54,6 +54,9 @@ Usage:
       [--git-token <t>]               also SHIP_GIT_TOKEN or gitToken in config
       [--base <branch>]               PR target (default: repo default branch)
       (accepts run flags: --model, --sandbox…, --max-steps, --yes, --json)
+      NOTE: fix always needs network to clone/push — pass
+      --sandbox-network egress (or sandboxNetwork:"egress" in config)
+      whenever --sandbox is used; plain --sandbox defaults to "none".
   teploy-ship worker                  resident worker: picks up due nucleus-store runs
       [--interval seconds]            poll interval (default 5)
       [--max-concurrent N]            cap simultaneously-running auto runs (default 3, SHIP_MAX_CONCURRENT_RUNS)
@@ -76,6 +79,8 @@ interface Config {
   sandboxUrl?: string;
   sandboxToken?: string;
   sandboxImage?: string;
+  /** Sandbox network mode for spawned runs (default "none"; "egress" for git/network-needing tasks). */
+  sandboxNetwork?: "none" | "egress";
   store?: string;
   nucleusUrl?: string;
   gitToken?: string;
@@ -187,10 +192,11 @@ async function makeExecutor(
   if (sandboxUrl !== undefined) {
     const token = (args.flags["sandbox-token"] as string) ?? config.sandboxToken;
     if (token === undefined) fail("--sandbox requires --sandbox-token (or sandboxToken in config)");
+    const network = (args.flags["sandbox-network"] as "none" | "egress" | undefined) ?? config.sandboxNetwork ?? "none";
     const executor = await SandboxExecutor.start({
       baseURL: sandboxUrl,
       token,
-      create: { image: (args.flags["sandbox-image"] as string) ?? config.sandboxImage ?? "python:3.12-slim" },
+      create: { image: (args.flags["sandbox-image"] as string) ?? config.sandboxImage ?? "python:3.12-slim", network },
     });
     return { executor, workdir: "/work" };
   }
@@ -302,6 +308,7 @@ function durableProvider(args: ReturnType<typeof parseArgs>, config: Config): Ex
       baseURL: sandboxUrl,
       token,
       image: (args.flags["sandbox-image"] as string) ?? config.sandboxImage ?? "python:3.12-slim",
+      network: (args.flags["sandbox-network"] as "none" | "egress" | undefined) ?? config.sandboxNetwork ?? "none",
     });
   }
   // Local durable runs: a persistent per-run workspace under the state
