@@ -59,6 +59,13 @@ env:
   # Route model calls through teploy-gateway (172.18.0.1 = the teploy
   # docker network's host bridge). Drop this to call providers directly.
   AI_GATEWAY_URL: http://172.18.0.1:8089
+  # Auto-launch is OFF by default — a labeled issue only ever becomes a
+  # PROPOSED task you launch from the dashboard. To let the worker launch
+  # a source's tasks without a click, set (via `teploy secret set`, not
+  # here — earn it deliberately per source):
+  #   SHIP_INTAKE_POLICIES={"forgejo":"auto"}
+  # The daily count cap, concurrency ceiling, and per-source spend budget
+  # still bound it (SHIP_DAILY_BUDGET_USD, SHIP_MAX_CONCURRENT_RUNS).
 
 # Durable state for the worker's file paths (nucleus mode needs little,
 # but the image declares VOLUME /data).

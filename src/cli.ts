@@ -480,6 +480,36 @@ async function runsCommand(rest: string[]): Promise<void> {
   await runtime.close();
 }
 
+/**
+ * Per-source intake policies from the config file, with SHIP_INTAKE_POLICIES
+ * (a JSON object like {"forgejo":"auto"}) merged over them — the only way to
+ * set them on a teploy-deployed worker, which has no config file. Returns
+ * undefined when neither source defines any, so the worker's own default
+ * (nothing auto) stands.
+ */
+function resolveIntakePolicies(config: Config): Config["intake"] | undefined {
+  const merged: Record<string, "ignore" | "propose" | "auto"> = { ...(config.intake ?? {}) };
+  const raw = process.env.SHIP_INTAKE_POLICIES;
+  if (raw !== undefined && raw !== "") {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      fail("SHIP_INTAKE_POLICIES must be JSON, e.g. {\"forgejo\":\"auto\"}");
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      fail("SHIP_INTAKE_POLICIES must be a JSON object of source -> ignore|propose|auto");
+    }
+    for (const [source, policy] of Object.entries(parsed as Record<string, unknown>)) {
+      if (policy !== "ignore" && policy !== "propose" && policy !== "auto") {
+        fail(`SHIP_INTAKE_POLICIES.${source} must be ignore|propose|auto, got ${String(policy)}`);
+      }
+      merged[source] = policy;
+    }
+  }
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
 async function workerCommand(rest: string[]): Promise<void> {
   const args = parseArgs(rest);
   const config = loadConfig();
@@ -491,6 +521,10 @@ async function workerCommand(rest: string[]): Promise<void> {
   const modelId = (args.flags.model as string) ?? config.model ?? "anthropic/claude-sonnet-5";
   const usingSandbox = ((args.flags.sandbox as string) ?? config.sandboxUrl) !== undefined;
   const gitToken = (args.flags["git-token"] as string) ?? process.env.SHIP_GIT_TOKEN ?? config.gitToken;
+  // A teploy-deployed worker has no config file — everything is env. Intake
+  // policies via SHIP_INTAKE_POLICIES (JSON, e.g. {"forgejo":"auto"}) merged
+  // over the file's; auto is still earned per source, never a default.
+  const intakePolicies = resolveIntakePolicies(config);
   const worker = startWorker({
     runtime: runtime as import("./runtime.js").NucleusShipRuntime,
     model: resolveModel(modelId),
@@ -499,7 +533,7 @@ async function workerCommand(rest: string[]): Promise<void> {
     workdir: usingSandbox ? "/work" : ".",
     intervalMs: args.flags.interval !== undefined ? Number(args.flags.interval) * 1000 : 5000,
     ...(gitToken !== undefined ? { gitToken } : {}),
-    ...(config.intake !== undefined ? { intakePolicies: config.intake } : {}),
+    ...(intakePolicies !== undefined ? { intakePolicies } : {}),
     ...(args.flags["max-concurrent"] !== undefined
       ? { maxConcurrentRuns: Number(args.flags["max-concurrent"]) }
       : config.maxConcurrentRuns !== undefined
