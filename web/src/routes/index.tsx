@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import { deliverEvent } from "@neutron-build/workflow";
 import { enqueueRun } from "teploy-ship/runtime";
 import type { RunMeta } from "teploy-ship/runtime";
 import type { IntakeTask } from "teploy-ship/runtime";
@@ -8,17 +9,22 @@ import { defaultModel, shipRuntime } from "../lib/store.server.js";
 
 export const config = { mode: "app" };
 
-interface HomeData {
-  runs: RunMeta[];
+interface InboxData {
+  /** Runs parked on an approval — the top priority. */
+  parked: RunMeta[];
+  /** Proposed intake tasks awaiting a launch/dismiss decision. */
   proposed: IntakeTask[];
   store: string;
   model: string;
 }
 
-export async function loader(): Promise<HomeData> {
+const TERMINAL = ["completed", "failed", "cancelled"];
+
+export async function loader(): Promise<InboxData> {
   const runtime = await shipRuntime();
   const [runs, proposed] = await Promise.all([runtime.listMeta(), runtime.intake.list("proposed")]);
-  return { runs, proposed, store: runtime.kind, model: defaultModel() };
+  const parked = runs.filter((r) => r.status === "waiting" && r.eventName !== undefined);
+  return { parked, proposed, store: runtime.kind, model: defaultModel() };
 }
 
 export async function action({ request }: { request: Request }): Promise<Response> {
@@ -26,107 +32,126 @@ export async function action({ request }: { request: Request }): Promise<Respons
   const intent = String(form.get("intent") ?? "new-run");
   const runtime = await shipRuntime();
 
+  // Approve / deny a parked run — deliver the decision event, flag the run
+  // due, and let the resident worker carry it. (Mirrors runs/[id].tsx; the
+  // web process never executes the agent.)
+  if (intent === "approve" || intent === "deny") {
+    const runId = String(form.get("runId") ?? "");
+    const meta = await runtime.loadMeta(runId);
+    if (meta?.eventName !== undefined) {
+      await deliverEvent(runtime.store, runId, meta.eventName, { approved: intent === "approve" });
+      await runtime.markWake?.(runId);
+      await runtime.saveMeta({ ...meta, status: "wake", updatedAt: new Date().toISOString() });
+    }
+    return redirect("/");
+  }
+
+  // Launch / dismiss a proposed intake task.
   if (intent === "launch-task" || intent === "dismiss-task") {
     const taskId = String(form.get("taskId") ?? "");
     const task = await runtime.intake.get(taskId);
-    if (task === null || task.state !== "proposed") {
-      return new Response(null, { status: 302, headers: { location: "/" } });
-    }
+    if (task === null || task.state !== "proposed") return redirect("/");
     if (intent === "dismiss-task") {
       await runtime.intake.setState(taskId, "dismissed");
-      return new Response(null, { status: 302, headers: { location: "/" } });
+      return redirect("/");
     }
     const runId = `run-${randomUUID().slice(0, 8)}`;
     await enqueueRun(runtime, {
       runId,
-      // review follow-ups carry the feedback itself as the task
       task: task.pr !== undefined ? (task.detail ?? task.title) : task.detail !== undefined ? `${task.title}\n\n${task.detail}` : task.title,
       model: defaultModel(),
       ...(task.repo !== undefined ? { repo: task.repo } : {}),
       ...(task.pr !== undefined ? { pr: task.pr } : {}),
     });
     await runtime.intake.setState(taskId, "launched", runId);
-    return new Response(null, { status: 302, headers: { location: `/runs/${runId}` } });
+    return redirect(`/runs/${runId}`);
   }
 
+  // Quick new run.
   const task = String(form.get("task") ?? "").trim();
-  if (task === "") return new Response(null, { status: 302, headers: { location: "/" } });
+  if (task === "") return redirect("/");
   const runId = `run-${randomUUID().slice(0, 8)}`;
   await enqueueRun(runtime, { runId, task, model: defaultModel() });
-  return new Response(null, { status: 302, headers: { location: `/runs/${runId}` } });
+  return redirect(`/runs/${runId}`);
 }
 
-export default function Runs({ data }: { data: HomeData }) {
+function redirect(location: string): Response {
+  return new Response(null, { status: 302, headers: { location } });
+}
+
+function short(s: string, n: number): string {
+  return s.length > n ? `${s.slice(0, n)}…` : s;
+}
+
+// Poll the inbox so new parked runs / proposals appear without a manual
+// refresh. Cheap: re-runs the loader via the framework data protocol.
+const POLL = `
+(function(){var last=null;setInterval(function(){fetch("/",{headers:{"X-Neutron-Data":"true","X-Neutron-Routes":"route:index.tsx"}}).then(function(r){return r.ok?r.text():null;}).then(function(t){if(t===null)return;if(last===null){last=t;return;}if(t!==last)location.reload();}).catch(function(){});},4000);})();
+`;
+
+export default function Inbox({ data }: { data: InboxData }) {
+  const nothing = data.parked.length === 0 && data.proposed.length === 0;
   return (
     <>
-      <h1 style="font-size: 18px">Runs</h1>
+      <h1 class="page">Inbox</h1>
       <p class="meta">
-        store: {data.store} · model: {data.model}
-        {data.store === "file" && " · no worker executes file-store runs — resume queued runs from the CLI"}
+        Everything waiting on you. · store: {data.store} · model: {data.model}
+        {data.store === "file" && " · file store has no worker — resume queued runs from the CLI"}
       </p>
+
       <form class="newrun" method="post">
         <input type="text" name="task" placeholder='new task, e.g. "fix the failing test in api/"' />
         <button type="submit">Queue run</button>
       </form>
-      {data.proposed.length > 0 && (
-        <>
-          <h2 style="font-size: 15px; margin-top: 24px">Inbox — proposed tasks</h2>
-          <table class="runs">
-            <thead>
-              <tr>
-                <th>source</th>
-                <th>task</th>
-                <th>repo</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.proposed.map((t) => (
-                <tr key={t.taskId}>
-                  <td>{t.source}/{t.kind}</td>
-                  <td>{t.title.length > 70 ? `${t.title.slice(0, 70)}…` : t.title}</td>
-                  <td>{t.repo !== undefined ? t.repo.replace(/^https?:\/\//, "").slice(0, 40) : "—"}</td>
-                  <td style="white-space: nowrap">
-                    <form method="post" style="display: inline">
-                      <input type="hidden" name="taskId" value={t.taskId} />
-                      <button class="approve" type="submit" name="intent" value="launch-task">Launch</button>{" "}
-                      <button type="submit" name="intent" value="dismiss-task">Dismiss</button>
-                    </form>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </>
-      )}
-      {data.runs.length === 0 ? (
-        <p class="empty">No runs yet.</p>
+
+      <h2 class="section">
+        Needs approval <span class="count">({data.parked.length})</span>
+      </h2>
+      {data.parked.length === 0 ? (
+        <p class="empty">No runs are parked.</p>
       ) : (
-        <table class="runs">
-          <thead>
-            <tr>
-              <th>run</th>
-              <th>status</th>
-              <th>task</th>
-              <th>updated</th>
-            </tr>
-          </thead>
-          <tbody>
-            {data.runs.map((run) => (
-              <tr key={run.runId}>
-                <td>
-                  <a href={`/runs/${run.runId}`}>{run.runId}</a>
-                </td>
-                <td>
-                  <span class={`status ${run.status}`}>{run.status}</span>
-                </td>
-                <td>{run.task.length > 80 ? `${run.task.slice(0, 80)}…` : run.task}</td>
-                <td>{run.updatedAt}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        data.parked.map((r) => (
+          <div key={r.runId} class="card attn">
+            <div class="row-actions">
+              <span class={`status ${r.status}`}>waiting</span>
+              <a href={`/runs/${r.runId}`}>{r.runId}</a>
+              <span class="spacer" style="flex:1" />
+              <form method="post" class="row-actions">
+                <input type="hidden" name="runId" value={r.runId} />
+                <button class="approve sm" type="submit" name="intent" value="approve">Approve</button>
+                <button class="deny sm" type="submit" name="intent" value="deny">Deny</button>
+              </form>
+            </div>
+            <div class="meta" style="margin:8px 0 0">{short(r.task, 140)}</div>
+          </div>
+        ))
       )}
+
+      <h2 class="section">
+        Proposed tasks <span class="count">({data.proposed.length})</span>
+      </h2>
+      {data.proposed.length === 0 ? (
+        <p class="empty">No proposed tasks. Label a Forgejo/GitHub issue `ship` to see it here.</p>
+      ) : (
+        data.proposed.map((t) => (
+          <div key={t.taskId} class="card">
+            <div class="row-actions">
+              <span class="chip">{t.source}/{t.kind}</span>
+              {t.repo !== undefined && <span class="meta">{t.repo.replace(/^https?:\/\//, "").slice(0, 44)}</span>}
+              <span style="flex:1" />
+              <form method="post" class="row-actions">
+                <input type="hidden" name="taskId" value={t.taskId} />
+                <button class="approve sm" type="submit" name="intent" value="launch-task">Launch</button>
+                <button class="sm" type="submit" name="intent" value="dismiss-task">Dismiss</button>
+              </form>
+            </div>
+            <div class="meta" style="margin:8px 0 0">{short(t.title, 140)}</div>
+          </div>
+        ))
+      )}
+
+      {nothing && <p class="empty" style="margin-top:28px">Inbox zero. <a href="/runs">See all runs →</a></p>}
+      <script dangerouslySetInnerHTML={{ __html: POLL }} />
     </>
   );
 }

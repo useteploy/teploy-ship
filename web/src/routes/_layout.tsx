@@ -53,11 +53,33 @@ body { margin: 0; background: var(--bg); color: var(--text);
   font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 a { color: var(--blue); text-decoration: none; }
 a:hover { text-decoration: underline; }
-header.top { display: flex; align-items: baseline; gap: 16px;
-  padding: 14px 20px; border-bottom: 1px solid var(--border); }
-header.top .brand { font-weight: 700; color: var(--text); letter-spacing: .02em; }
-header.top .store { color: var(--dim); font-size: 12px; }
-main { max-width: 1080px; margin: 0 auto; padding: 20px; }
+header.top { display: flex; align-items: center; gap: 22px;
+  padding: 12px 20px; border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; background: var(--bg); z-index: 10; }
+header.top .brand { font-weight: 700; color: var(--text); letter-spacing: .04em; font-size: 13px; }
+header.top nav.nav { display: flex; gap: 4px; }
+header.top nav.nav a { color: var(--dim); padding: 5px 11px; border-radius: 6px; font-size: 13px; }
+header.top nav.nav a:hover { color: var(--text); background: var(--panel); text-decoration: none; }
+header.top nav.nav a.active { color: var(--text); background: var(--panel); }
+header.top .spacer { flex: 1; }
+header.top .env { color: var(--dim); font-size: 12px; }
+header.top .env b { color: var(--text); font-weight: 500; }
+main { max-width: 1080px; margin: 0 auto; padding: 22px 20px 60px; }
+h1.page { font-size: 18px; margin: 4px 0 2px; }
+h2.section { font-size: 14px; color: var(--dim); font-weight: 500; text-transform: uppercase;
+  letter-spacing: .05em; margin: 28px 0 10px; }
+.count { color: var(--dim); font-weight: 400; }
+.card { border: 1px solid var(--border); background: var(--panel); border-radius: 8px;
+  padding: 12px 14px; margin: 8px 0; }
+.card.attn { border-left: 3px solid var(--yellow); }
+.row-actions { display: flex; gap: 8px; align-items: center; }
+.chip { display: inline-block; padding: 2px 9px; border-radius: 10px; font-size: 12px;
+  border: 1px solid var(--border); color: var(--dim); }
+.chips { display: flex; gap: 6px; margin: 10px 0 4px; flex-wrap: wrap; }
+.chips a { padding: 3px 11px; border-radius: 12px; border: 1px solid var(--border);
+  color: var(--dim); font-size: 12px; }
+.chips a:hover, .chips a.on { color: var(--text); border-color: var(--dim); text-decoration: none; }
+button.sm { padding: 4px 10px; font-size: 12px; }
 table.runs { width: 100%; border-collapse: collapse; }
 table.runs th { text-align: left; color: var(--dim); font-weight: 500;
   padding: 6px 10px; border-bottom: 1px solid var(--border); font-size: 12px; }
@@ -104,15 +126,27 @@ button.deny { color: var(--red); border-color: var(--red); }
 // the entire UI (found live on the first teploy-deployed instance).
 // charset/viewport/title live in index.html; the style block rides in
 // the fragment, which browsers apply from body just fine.
+// Highlight the current section (the layout renders as a fragment and has
+// no request path, so mark the active nav link client-side).
+const NAV_ACTIVE = `(function(){var p=location.pathname;document.querySelectorAll('nav.nav a').forEach(function(a){var h=a.getAttribute('href');if(h==='/'?p==='/':p.indexOf(h)===0)a.classList.add('active');});})();`;
+
 export default function Layout({ children }: { children: ComponentChildren }) {
   return (
     <>
       <style dangerouslySetInnerHTML={{ __html: CSS }} />
       <header class="top">
         <a href="/" class="brand">TEPLOY SHIP</a>
-        <span class="store">runs</span>
+        <nav class="nav">
+          <a href="/">Inbox</a>
+          <a href="/runs">Runs</a>
+          <a href="/sources">Sources</a>
+          <a href="/spend">Spend</a>
+          <a href="/settings">Settings</a>
+        </nav>
+        <span class="spacer" />
       </header>
       <main>{children}</main>
+      <script dangerouslySetInnerHTML={{ __html: NAV_ACTIVE }} />
     </>
   );
 }

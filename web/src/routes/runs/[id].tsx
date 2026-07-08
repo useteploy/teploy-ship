@@ -84,8 +84,8 @@ export default function RunDetail({ data }: { data: RunData }) {
   const active = data.meta !== null && !["completed", "failed", "cancelled"].includes(data.meta.status);
   return (
     <div id="run-root" data-event-count={String(data.eventCount)} data-run-status={data.meta?.status ?? "unknown"}>
-      <h1 style="font-size: 18px">
-        <a href="/">runs</a> / {data.runId}
+      <h1 class="page">
+        <a href="/runs">runs</a> / {data.runId}
       </h1>
       {data.meta === null ? (
         <p class="empty">Unknown run.</p>
