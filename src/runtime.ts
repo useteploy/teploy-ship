@@ -12,6 +12,8 @@ import { FileIntakeStore, NucleusIntakeStore } from "./intake.js";
 import type { IntakeStore } from "./intake.js";
 import { FileSpendStore, NucleusSpendStore } from "./spend.js";
 import type { SpendStore } from "./spend.js";
+import { FilePolicyStore, NucleusPolicyStore } from "./policies.js";
+import type { PolicyStore } from "./policies.js";
 import { FileRepoMemory, NucleusRepoMemory } from "./repo-memory.js";
 import type { RepoMemoryStore } from "./repo-memory.js";
 import { NucleusPgwire } from "./nucleus-pgwire.js";
@@ -23,6 +25,8 @@ export type { IntakeStore, IntakeTask, ProposeInput } from "./intake.js";
 export { FileIntakeStore, NucleusIntakeStore } from "./intake.js";
 export type { SpendStore, SpendEntry } from "./spend.js";
 export { FileSpendStore, NucleusSpendStore, utcDay } from "./spend.js";
+export type { PolicyStore, SourcePolicy } from "./policies.js";
+export { FilePolicyStore, NucleusPolicyStore } from "./policies.js";
 export type { RepoMemoryStore, RepoNote } from "./repo-memory.js";
 export { FileRepoMemory, NucleusRepoMemory, loadRepoContext, runNote } from "./repo-memory.js";
 export type { ModelPricing, UsageLike } from "./pricing.js";
@@ -56,6 +60,8 @@ export interface ShipRuntime {
   intake: IntakeStore;
   /** Per-source, per-UTC-day spend ledger backing the worker's budget cap. */
   spend: SpendStore;
+  /** Editable per-source intake policies (dashboard-managed, env-seeded). */
+  policies: PolicyStore;
   /** Per-repo playbook memory (notes Ship records about its own runs). */
   memory: RepoMemoryStore;
   close(): Promise<void>;
@@ -69,6 +75,7 @@ export function fileRuntime(): ShipRuntime {
     store,
     intake: new FileIntakeStore(),
     spend: new FileSpendStore(),
+    policies: new FilePolicyStore(),
     memory: new FileRepoMemory(),
     execute: (workflow, runId, input) =>
       executeRun({ workflow, runId, store, ...(input !== undefined ? { input } : {}) }),
@@ -124,6 +131,7 @@ export async function nucleusRuntime(url: string, owner: string): Promise<Nucleu
     owner,
     intake: new NucleusIntakeStore(db),
     spend: new NucleusSpendStore(db),
+    policies: new NucleusPolicyStore(db),
     memory: new NucleusRepoMemory(db),
     async execute(workflow, runId, input) {
       const outcome = await executeRunExclusive({

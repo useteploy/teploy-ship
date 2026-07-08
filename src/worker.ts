@@ -10,6 +10,7 @@ import { defaultApprovalPolicy } from "./approval.js";
 import { enqueueRun } from "./runtime.js";
 import type { NucleusShipRuntime } from "./runtime.js";
 import type { IntakeStore, IntakePolicy, IntakeTask } from "./intake.js";
+import type { SourcePolicy } from "./policies.js";
 import type { SpendStore } from "./spend.js";
 import { utcDay } from "./spend.js";
 import { costUSD } from "./pricing.js";
@@ -204,19 +205,42 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
   const maxConcurrentRuns = options.maxConcurrentRuns ?? envInt("SHIP_MAX_CONCURRENT_RUNS") ?? 3;
   const defaultBudget = options.dailyBudgetUSD ?? envInt("SHIP_DAILY_BUDGET_USD") ?? 10;
   const budgets = options.intakeBudgets ?? {};
+  const envPolicies = options.intakePolicies ?? {};
+
+  // The policy store is dashboard-authoritative; seed it from the env defaults
+  // once (first run) so an operator who never opens the UI keeps the same
+  // behavior, then let store edits win on every subsequent sweep.
+  void options.runtime.policies
+    .seed(envPolicies)
+    .catch((err) => log(`[worker] policy seed failed: ${err instanceof Error ? err.message : String(err)}`));
 
   // Intake sweep state, process-local across ticks.
   const launchedToday = new Map<string, { day: string; count: number }>();
   const inFlight = new Map<string, string>();
 
-  const sweep = (): Promise<void> =>
-    sweepIntake({
+  const sweep = async (): Promise<void> => {
+    // Re-read the live policies each tick so dashboard edits take effect
+    // without a worker restart. Store wins over the env seed; a per-source
+    // budget in the store overrides the global default.
+    let stored: SourcePolicy[] = [];
+    try {
+      stored = await options.runtime.policies.list();
+    } catch (err) {
+      log(`[worker] policy read failed, using env defaults: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    const policies: Record<string, IntakePolicy> = { ...envPolicies };
+    const storeBudgets: Record<string, number> = {};
+    for (const p of stored) {
+      policies[p.source] = p.policy;
+      if (p.dailyBudgetUSD !== undefined) storeBudgets[p.source] = p.dailyBudgetUSD;
+    }
+    return sweepIntake({
       intake: options.runtime.intake,
       spend: options.runtime.spend,
-      policies: options.intakePolicies ?? {},
+      policies,
       dailyAutoLimit: options.dailyAutoLimit ?? 10,
       maxConcurrentRuns,
-      budgetFor: (source) => budgets[source] ?? defaultBudget,
+      budgetFor: (source) => storeBudgets[source] ?? budgets[source] ?? defaultBudget,
       modelId,
       launchedToday,
       inFlight,
@@ -235,6 +259,7 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
       now: () => new Date(),
       log,
     });
+  };
 
   const intakeTimer = setInterval(() => {
     void sweep().catch((error) => log(`[worker] intake sweep: ${error instanceof Error ? error.message : String(error)}`));

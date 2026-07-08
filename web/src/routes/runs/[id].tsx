@@ -75,6 +75,14 @@ export async function action({
 // serialized data (new events, status flip) reloads the page.
 const POLL = `
 (function () {
+  // Restore scroll after a poll-triggered reload so watching a live run's
+  // timeline doesn't jump to the top on every new event.
+  var SK = "ship-scroll:" + location.pathname;
+  var saved = sessionStorage.getItem(SK);
+  if (saved !== null) {
+    sessionStorage.removeItem(SK);
+    window.scrollTo(0, parseInt(saved, 10) || 0);
+  }
   var root = document.getElementById("run-root");
   if (!root) return;
   var status = root.getAttribute("data-run-status");
@@ -88,7 +96,10 @@ const POLL = `
       .then(function (text) {
         if (text === null) return;
         if (last === null) { last = text; return; }
-        if (text !== last) location.reload();
+        if (text !== last) {
+          sessionStorage.setItem(SK, String(window.scrollY));
+          location.reload();
+        }
       })
       .catch(function () {});
   }, 3000);

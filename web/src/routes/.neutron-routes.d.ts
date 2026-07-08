@@ -7,7 +7,11 @@ declare module "@neutron-build/core" {
     | "/hooks/forgejo"
     | "/hooks/github"
     | "/login"
+    | "/runs"
     | `/runs/${string}`
+    | "/settings"
+    | "/sources"
+    | "/spend"
   }
 }
 
