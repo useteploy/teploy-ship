@@ -228,7 +228,10 @@ export function durableAgent(
         const step = typeof generatedStep === "string" ? { text: generatedStep, usage: undefined } : generatedStep;
         const thought = step.text;
         addUsage(step.usage);
-        messages.push({ role: "assistant", content: thought });
+        // An empty model response serializes to an empty text content block,
+        // which Anthropic rejects on the next call — never store it empty
+        // (parseAction on "" gives a "none" action → nudged below).
+        messages.push({ role: "assistant", content: thought.trim() === "" ? "(no response)" : thought });
 
         const action = parseAction(thought);
         if (action.kind === "finish") {

@@ -364,3 +364,32 @@ test("verified-finish guard: fail-nudges are capped so a stuck agent still termi
   assert.equal(result.status, "finished");
   assert.equal(result.summary, "give up");
 });
+
+test("an empty model response never becomes an empty stored turn", async () => {
+  const executor = await localExecutor();
+  // Turn 1 is empty (a rare API hiccup). Before the fix this stored an
+  // empty assistant text block, which Anthropic rejects on the NEXT call —
+  // killing the run. Turn 2 recovers with a finish.
+  const { model } = scriptedModel([
+    "", // empty response
+    "```finish\nrecovered\n```",
+  ]);
+  const result = await runAgent({
+    model,
+    executor,
+    task: "handle an empty turn",
+    recovery: false,
+    condense: false,
+    requireVerifiedFinish: false,
+  });
+  assert.equal(result.status, "finished");
+  assert.equal(result.summary, "recovered");
+  // No assistant turn in the transcript is empty/whitespace-only — the
+  // guarantee that keeps the next model call wire-legal.
+  for (const m of result.messages) {
+    if (m.role === "assistant") {
+      const text = typeof m.content === "string" ? m.content : "";
+      assert.notEqual(text.trim(), "", "an assistant turn was stored empty");
+    }
+  }
+});

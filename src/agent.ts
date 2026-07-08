@@ -156,7 +156,12 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
       return { status: "error", summary: `Model call failed: ${message}`, steps, messages, usage };
     }
 
-    messages.push({ role: "assistant", content: thought });
+    // A rare empty model response would serialize to an empty text content
+    // block, which Anthropic rejects on the NEXT call ("text content blocks
+    // must be non-empty") — killing the whole run. Keep the stored turn
+    // non-empty; parseAction on the empty thought yields a "none" action, so
+    // the loop nudges for a real action below.
+    messages.push({ role: "assistant", content: thought.trim() === "" ? "(no response)" : thought });
     const action = parseAction(thought);
     emit({ type: "thought", step: index, text: thought });
     emit({ type: "action", step: index, text: describeAction(action) });
