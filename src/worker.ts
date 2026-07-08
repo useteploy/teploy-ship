@@ -176,6 +176,21 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
       log(`[worker] run ${runId}: ${error instanceof Error ? error.message : String(error)}`),
     onTickError: (error) =>
       log(`[worker] tick failed (store unreachable?): ${error instanceof Error ? error.message : String(error)}`),
+    onRunStart: (runId) => log(`[worker] picked up ${runId}`),
+    onComplete: (runId, outcome) => {
+      log(`[worker] ${runId} → ${outcome.status}`);
+      // The index is status-authoritative, but persist the terminal status
+      // onto the raw meta doc too so it's self-consistent (accurate for
+      // direct reads / file mode, not just the index-overlaid reads).
+      void options.runtime
+        .loadMeta(runId)
+        .then((meta) => {
+          if (meta !== null && meta.status !== outcome.status) {
+            return options.runtime.saveMeta({ ...meta, status: outcome.status, updatedAt: new Date().toISOString() });
+          }
+        })
+        .catch((error) => log(`[worker] ${runId}: meta update failed: ${error instanceof Error ? error.message : String(error)}`));
+    },
   });
   scheduler.start();
 
