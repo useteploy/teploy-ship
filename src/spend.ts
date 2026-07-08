@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { NucleusPgwire } from "./nucleus-pgwire.js";
@@ -11,11 +11,20 @@ import { stateDir } from "./run-store.js";
  * alongside the count cap. "Reset" is implicit: a new UTC day is a new
  * key, so yesterday's total never blocks today.
  */
+/** One (day, source) bucket in the spend ledger. */
+export interface SpendEntry {
+  day: string;
+  source: string;
+  amountUSD: number;
+}
+
 export interface SpendStore {
   /** Add `amountUSD` to a source's accumulated spend for `day` (UTC "YYYY-MM-DD"). */
   add(source: string, day: string, amountUSD: number): Promise<void>;
   /** Accumulated spend for `source` on `day`; 0 if nothing recorded. */
   get(source: string, day: string): Promise<number>;
+  /** Every recorded (day, source, amount) bucket — for the spend dashboard. */
+  list(): Promise<SpendEntry[]>;
 }
 
 /** Today's date as the UTC "YYYY-MM-DD" bucket key. */
@@ -53,6 +62,25 @@ export class FileSpendStore implements SpendStore {
 
   async get(source: string, day: string): Promise<number> {
     return (await this.#read(day))[source] ?? 0;
+  }
+
+  async list(): Promise<SpendEntry[]> {
+    let files: string[];
+    try {
+      files = await readdir(this.#dir);
+    } catch {
+      return [];
+    }
+    const entries: SpendEntry[] = [];
+    for (const file of files) {
+      if (!file.endsWith(".json")) continue;
+      const day = file.slice(0, -5);
+      const totals = await this.#read(day);
+      for (const [source, amountUSD] of Object.entries(totals)) {
+        entries.push({ day, source, amountUSD });
+      }
+    }
+    return entries;
   }
 }
 
@@ -111,5 +139,18 @@ export class NucleusSpendStore implements SpendStore {
     if (rows.length === 0) return 0;
     const value = Number(rows[0]!.amount_usd);
     return Number.isFinite(value) ? value : 0;
+  }
+
+  async list(): Promise<SpendEntry[]> {
+    await this.#ensure();
+    const rows = await this.#db.query("SELECT day, source, amount_usd FROM ship_spend");
+    return rows.map((r) => {
+      const amountUSD = Number(r.amount_usd);
+      return {
+        day: String(r.day),
+        source: String(r.source),
+        amountUSD: Number.isFinite(amountUSD) ? amountUSD : 0,
+      };
+    });
   }
 }

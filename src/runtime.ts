@@ -21,7 +21,7 @@ import type { RunMeta } from "./run-store.js";
 export type { RunMeta } from "./run-store.js";
 export type { IntakeStore, IntakeTask, ProposeInput } from "./intake.js";
 export { FileIntakeStore, NucleusIntakeStore } from "./intake.js";
-export type { SpendStore } from "./spend.js";
+export type { SpendStore, SpendEntry } from "./spend.js";
 export { FileSpendStore, NucleusSpendStore, utcDay } from "./spend.js";
 export type { RepoMemoryStore, RepoNote } from "./repo-memory.js";
 export { FileRepoMemory, NucleusRepoMemory, loadRepoContext, runNote } from "./repo-memory.js";
