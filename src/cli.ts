@@ -61,6 +61,9 @@ Usage:
       [--interval seconds]            poll interval (default 5)
       [--max-concurrent N]            cap simultaneously-running auto runs (default 3, SHIP_MAX_CONCURRENT_RUNS)
       [--daily-budget USD]            per-source daily spend cap (default 10, SHIP_DAILY_BUDGET_USD; <=0 off)
+      run in a sandbox (needed for repo tasks whose tests want tools the
+      worker image lacks): SHIP_SANDBOX_URL + SHIP_SANDBOX_TOKEN
+      [+ SHIP_SANDBOX_IMAGE, SHIP_SANDBOX_NETWORK=egress]
   teploy-ship web                     serve the runs dashboard (browser approve/deny)
       [--port N] [--token <t>]        token also via SHIP_WEB_TOKEN (required)
       [--dev]                         vite dev server instead of the built app
@@ -184,19 +187,41 @@ async function runCommand(rest: string[]): Promise<void> {
   process.exit(result.status === "finished" ? 0 : 1);
 }
 
+interface SandboxSettings {
+  url: string;
+  token: string;
+  image: string;
+  network: "none" | "egress";
+}
+
+/**
+ * Sandbox executor settings, resolved flags > env > config file. A
+ * teploy-deployed worker has no config file, so the SHIP_SANDBOX_* env vars
+ * are the only way to point it at a sandbox daemon. Returns undefined when
+ * no sandbox is configured (the caller falls back to a LocalExecutor).
+ */
+function resolveSandbox(args: ReturnType<typeof parseArgs>, config: Config): SandboxSettings | undefined {
+  const url = (args.flags.sandbox as string) ?? process.env.SHIP_SANDBOX_URL ?? config.sandboxUrl;
+  if (url === undefined || url === "") return undefined;
+  const token = (args.flags["sandbox-token"] as string) ?? process.env.SHIP_SANDBOX_TOKEN ?? config.sandboxToken;
+  if (token === undefined || token === "") {
+    fail("a sandbox URL is set but no token — use --sandbox-token, SHIP_SANDBOX_TOKEN, or sandboxToken in config");
+  }
+  const image = (args.flags["sandbox-image"] as string) ?? process.env.SHIP_SANDBOX_IMAGE ?? config.sandboxImage ?? "python:3.12-slim";
+  const network = ((args.flags["sandbox-network"] as string) ?? process.env.SHIP_SANDBOX_NETWORK ?? config.sandboxNetwork ?? "none") as "none" | "egress";
+  return { url, token, image, network };
+}
+
 async function makeExecutor(
   args: ReturnType<typeof parseArgs>,
   config: Config,
 ): Promise<{ executor: AgentExecutor; workdir: string }> {
-  const sandboxUrl = (args.flags.sandbox as string) ?? config.sandboxUrl;
-  if (sandboxUrl !== undefined) {
-    const token = (args.flags["sandbox-token"] as string) ?? config.sandboxToken;
-    if (token === undefined) fail("--sandbox requires --sandbox-token (or sandboxToken in config)");
-    const network = (args.flags["sandbox-network"] as "none" | "egress" | undefined) ?? config.sandboxNetwork ?? "none";
+  const sandbox = resolveSandbox(args, config);
+  if (sandbox !== undefined) {
     const executor = await SandboxExecutor.start({
-      baseURL: sandboxUrl,
-      token,
-      create: { image: (args.flags["sandbox-image"] as string) ?? config.sandboxImage ?? "python:3.12-slim", network },
+      baseURL: sandbox.url,
+      token: sandbox.token,
+      create: { image: sandbox.image, network: sandbox.network },
     });
     return { executor, workdir: "/work" };
   }
@@ -300,15 +325,13 @@ async function makeRuntime(args: ReturnType<typeof parseArgs>, config: Config): 
 }
 
 function durableProvider(args: ReturnType<typeof parseArgs>, config: Config): ExecutorProvider {
-  const sandboxUrl = (args.flags.sandbox as string) ?? config.sandboxUrl;
-  if (sandboxUrl !== undefined) {
-    const token = (args.flags["sandbox-token"] as string) ?? config.sandboxToken;
-    if (token === undefined) fail("--sandbox requires --sandbox-token (or sandboxToken in config)");
+  const sandbox = resolveSandbox(args, config);
+  if (sandbox !== undefined) {
     return sandboxProvider({
-      baseURL: sandboxUrl,
-      token,
-      image: (args.flags["sandbox-image"] as string) ?? config.sandboxImage ?? "python:3.12-slim",
-      network: (args.flags["sandbox-network"] as "none" | "egress" | undefined) ?? config.sandboxNetwork ?? "none",
+      baseURL: sandbox.url,
+      token: sandbox.token,
+      image: sandbox.image,
+      network: sandbox.network,
     });
   }
   // Local durable runs: a persistent per-run workspace under the state
@@ -334,7 +357,7 @@ async function executePass(
   config: Config,
 ): Promise<RunOutcome | null> {
   const modelId = (args.flags.model as string) ?? config.model ?? "anthropic/claude-sonnet-5";
-  const usingSandbox = ((args.flags.sandbox as string) ?? config.sandboxUrl) !== undefined;
+  const usingSandbox = resolveSandbox(args, config) !== undefined;
   const wf = durableAgent({
     model: resolveModel(modelId),
     executor: durableProvider(args, config),
@@ -519,7 +542,7 @@ async function workerCommand(rest: string[]): Promise<void> {
   const runtime = await makeRuntime(args, config);
   if (runtime.kind !== "nucleus") fail("worker needs --store nucleus");
   const modelId = (args.flags.model as string) ?? config.model ?? "anthropic/claude-sonnet-5";
-  const usingSandbox = ((args.flags.sandbox as string) ?? config.sandboxUrl) !== undefined;
+  const usingSandbox = resolveSandbox(args, config) !== undefined;
   const gitToken = (args.flags["git-token"] as string) ?? process.env.SHIP_GIT_TOKEN ?? config.gitToken;
   // A teploy-deployed worker has no config file — everything is env. Intake
   // policies via SHIP_INTAKE_POLICIES (JSON, e.g. {"forgejo":"auto"}) merged
