@@ -18,7 +18,21 @@ import { dirname, join } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const { runAgent } = await import(join(here, "..", "dist", "index.js"));
-const { anthropic } = await import(join(here, "..", "node_modules", "@neutron-build", "ai", "dist", "anthropic", "index.js"));
+const { anthropic, createAnthropic } = await import(join(here, "..", "node_modules", "@neutron-build", "ai", "dist", "anthropic", "index.js"));
+
+// Route model calls through teploy-gateway when AI_GATEWAY_URL + _KEY are set
+// (so eval spend is tracked + capped centrally), otherwise call Anthropic
+// directly. Same shape as ship's own resolveModel — a gateway baseURL + the
+// project key, no gateway-specific adapter needed.
+function buildModel(id) {
+  const url = process.env.AI_GATEWAY_URL;
+  const key = process.env.AI_GATEWAY_KEY;
+  if (url && key) {
+    console.error(`  (routing through gateway ${url})`);
+    return createAnthropic({ baseURL: url, apiKey: key })(id, { cache: true });
+  }
+  return anthropic(id, { cache: true });
+}
 const { containerExecutor } = await import(join(here, "container-executor.mjs"));
 const { connectViaSSH, execCollect, startInstanceContainer } = await import(join(here, "docker-client.mjs"));
 
@@ -80,7 +94,7 @@ ${inst.problem_statement}`;
 
       const started = Date.now();
       const result = await runAgent({
-        model: anthropic(MODEL, { cache: true }),
+        model: buildModel(MODEL),
         executor,
         task,
         workdir: "/testbed",
