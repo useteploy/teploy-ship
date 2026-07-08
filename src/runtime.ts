@@ -25,6 +25,8 @@ export type { SpendStore } from "./spend.js";
 export { FileSpendStore, NucleusSpendStore, utcDay } from "./spend.js";
 export type { RepoMemoryStore, RepoNote } from "./repo-memory.js";
 export { FileRepoMemory, NucleusRepoMemory, loadRepoContext, runNote } from "./repo-memory.js";
+export type { ModelPricing, UsageLike } from "./pricing.js";
+export { costUSD, pricingFor } from "./pricing.js";
 
 /**
  * Where durable runs live. The file runtime keeps everything on this

@@ -1,16 +1,19 @@
 import { cancelRun, deliverEvent } from "@neutron-build/workflow";
 
+import { costUSD } from "teploy-ship/runtime";
 import type { RunMeta } from "teploy-ship/runtime";
 
 import { shipRuntime } from "../../lib/store.server.js";
-import { itemClass, toTimeline } from "../../lib/timeline.js";
-import type { TimelineItem } from "../../lib/timeline.js";
+import { itemClass, runOutcome, toTimeline } from "../../lib/timeline.js";
+import type { RunOutcome, TimelineItem } from "../../lib/timeline.js";
 
 export const config = { mode: "app" };
 
 interface RunData {
   meta: RunMeta | null;
   items: TimelineItem[];
+  outcome: RunOutcome;
+  costUSD: number;
   runId: string;
   eventCount: number;
 }
@@ -19,7 +22,19 @@ export async function loader({ params }: { params: { id: string } }): Promise<Ru
   const runtime = await shipRuntime();
   const runId = params.id;
   const [meta, events] = await Promise.all([runtime.loadMeta(runId), runtime.store.load(runId)]);
-  return { meta, items: toTimeline(events), runId, eventCount: events.length };
+  const outcome = runOutcome(events);
+  const cost = costUSD(meta?.model ?? "", outcome.usage);
+  return { meta, items: toTimeline(events), outcome, costUSD: cost, runId, eventCount: events.length };
+}
+
+/** A PR reference may be a full URL or a bare number; make it a link when we can. */
+function prLink(pr: string, repo?: string): { href?: string; label: string } {
+  if (/^https?:\/\//.test(pr)) return { href: pr, label: pr.replace(/^https?:\/\//, "") };
+  if (repo !== undefined) {
+    const base = repo.replace(/\.git$/, "");
+    return { href: `${base}/pulls/${pr}`, label: `PR #${pr}` };
+  }
+  return { label: `PR #${pr}` };
 }
 
 export async function action({
@@ -95,6 +110,29 @@ export default function RunDetail({ data }: { data: RunData }) {
             <span class={`status ${data.meta.status}`}>{data.meta.status}</span> · {data.meta.model} · updated{" "}
             {data.meta.updatedAt}
           </p>
+          {(data.outcome.pr !== undefined || data.outcome.usage !== undefined || data.outcome.repo !== undefined) && (
+            <div class="card" style="margin:12px 0">
+              <div class="row-actions" style="flex-wrap:wrap;gap:14px">
+                {data.outcome.pr !== undefined && (() => {
+                  const l = prLink(data.outcome.pr, data.outcome.repo);
+                  return <span>→ {l.href !== undefined ? <a href={l.href} target="_blank" rel="noreferrer">{l.label}</a> : l.label}</span>;
+                })()}
+                {data.outcome.repo !== undefined && (
+                  <span class="meta">{data.outcome.repo.replace(/^https?:\/\//, "").replace(/\.git$/, "")}</span>
+                )}
+                {data.costUSD > 0 && <span class="chip">~${data.costUSD.toFixed(4)}</span>}
+                {data.outcome.usage !== undefined && (
+                  <span class="meta">
+                    {data.outcome.usage.inputTokens} in / {data.outcome.usage.outputTokens} out
+                    {data.outcome.usage.cacheReadTokens !== undefined ? ` · ${data.outcome.usage.cacheReadTokens} cache` : ""}
+                  </span>
+                )}
+              </div>
+              {data.outcome.summary !== undefined && data.outcome.summary !== "" && (
+                <div style="margin-top:8px">{data.outcome.summary}</div>
+              )}
+            </div>
+          )}
           {(data.meta.eventName !== undefined || active) && (
             <form class="decide" method="post">
               <input type="hidden" name="reason" value="" />

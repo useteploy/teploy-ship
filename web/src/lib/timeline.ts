@@ -104,6 +104,38 @@ export function toTimeline(events: WorkflowEvent[]): TimelineItem[] {
   return items;
 }
 
+export interface Usage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+}
+
+export interface RunOutcome {
+  repo?: string;
+  pr?: string;
+  summary?: string;
+  usage?: Usage;
+}
+
+/** Pull the at-a-glance outcome (repo, PR, cost inputs, summary) out of the log. */
+export function runOutcome(events: WorkflowEvent[]): RunOutcome {
+  const out: RunOutcome = {};
+  for (const event of events) {
+    if (event.type === "run-started") {
+      const input = (event.data as { input?: { repo?: string } } | undefined)?.input;
+      if (input?.repo !== undefined) out.repo = input.repo;
+    } else if (event.type === "run-completed") {
+      const o = (event.data as { output?: { summary?: string; pr?: string; usage?: Usage } } | undefined)?.output;
+      if (o?.pr !== undefined && o.pr !== null) out.pr = o.pr;
+      if (o?.summary !== undefined) out.summary = o.summary;
+      if (o?.usage !== undefined) out.usage = o.usage;
+    }
+  }
+  return out;
+}
+
 export function itemClass(kind: TimelineItem["kind"]): string {
   switch (kind) {
     case "thought":
