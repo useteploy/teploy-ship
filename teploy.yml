@@ -67,6 +67,15 @@ env:
   #   SHIP_INTAKE_POLICIES={"forgejo":"auto"}
   # The daily count cap, concurrency ceiling, and per-source spend budget
   # still bound it (SHIP_DAILY_BUDGET_USD, SHIP_MAX_CONCURRENT_RUNS).
+  #
+  # Run durable worker tasks in a teploy-sandbox container (instead of the
+  # slim worker image, which has no python/curl) so repo tasks whose tests
+  # need other tools can complete. The daemon is a host systemd service, so
+  # containers reach it at the teploy bridge gateway (172.18.0.1). Set
+  # SHIP_SANDBOX_TOKEN via `teploy secret set`.
+  SHIP_SANDBOX_URL: http://172.18.0.1:7439
+  SHIP_SANDBOX_IMAGE: golang:1.24
+  SHIP_SANDBOX_NETWORK: egress
 
 # Durable state for the worker's file paths (nucleus mode needs little,
 # but the image declares VOLUME /data).
