@@ -83,11 +83,9 @@ function short(s: string, n: number): string {
   return s.length > n ? `${s.slice(0, n)}…` : s;
 }
 
-// Poll the inbox so new parked runs / proposals appear without a manual
-// refresh. Cheap: re-runs the loader via the framework data protocol.
-const POLL = `
-(function(){var last=null;setInterval(function(){fetch("/",{headers:{"X-Neutron-Data":"true","X-Neutron-Routes":"route:index.tsx"}}).then(function(r){return r.ok?r.text():null;}).then(function(t){if(t===null)return;if(last===null){last=t;return;}if(t!==last)location.reload();}).catch(function(){});},4000);})();
-`;
+// Live updates via the shared SSE helper (see _layout __shipLive): the server
+// pushes on any state change and this re-checks the inbox's own loader data.
+const POLL = `__shipLive("route:index.tsx");`;
 
 export default function Inbox({ data }: { data: InboxData }) {
   const nothing = data.parked.length === 0 && data.proposed.length === 0;

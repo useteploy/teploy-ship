@@ -130,6 +130,32 @@ button.deny { color: var(--red); border-color: var(--red); }
 // no request path, so mark the active nav link client-side).
 const NAV_ACTIVE = `(function(){var p=location.pathname;document.querySelectorAll('nav.nav a').forEach(function(a){var h=a.getAttribute('href');if(h==='/'?p==='/':p.indexOf(h)===0)a.classList.add('active');});})();`;
 
+// Live updates. A page calls __shipLive("route:<file>") to get pushed refreshes:
+// one EventSource to /events (server pushes on any state change) drives a
+// loader-data re-fetch that reloads only when THIS page's data changed. A slow
+// interval is the fallback when SSE is unavailable. Scroll position survives
+// the reload so watching a live run doesn't jump to the top.
+const SHIP_LIVE = `
+window.__shipLive = function (routeId) {
+  var SK = "ship-scroll:" + location.pathname;
+  var saved = sessionStorage.getItem(SK);
+  if (saved !== null) { sessionStorage.removeItem(SK); window.scrollTo(0, parseInt(saved, 10) || 0); }
+  var last = null;
+  function reload() { try { sessionStorage.setItem(SK, String(window.scrollY)); } catch (e) {} location.reload(); }
+  function check() {
+    fetch(location.pathname + location.search, { headers: { "X-Neutron-Data": "true", "X-Neutron-Routes": routeId } })
+      .then(function (r) { return r.ok ? r.text() : null; })
+      .then(function (t) { if (t === null) return; if (last === null) { last = t; return; } if (t !== last) reload(); })
+      .catch(function () {});
+  }
+  var es = null;
+  try { es = new EventSource("/events"); es.addEventListener("change", check); } catch (e) {}
+  var slow = setInterval(check, es ? 15000 : 4000);
+  if (slow.unref) slow.unref();
+  check();
+};
+`;
+
 export default function Layout({ children }: { children: ComponentChildren }) {
   return (
     <>
@@ -148,6 +174,7 @@ export default function Layout({ children }: { children: ComponentChildren }) {
       </header>
       <main>{children}</main>
       <script dangerouslySetInnerHTML={{ __html: NAV_ACTIVE }} />
+      <script dangerouslySetInnerHTML={{ __html: SHIP_LIVE }} />
     </>
   );
 }
