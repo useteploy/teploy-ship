@@ -118,7 +118,8 @@ export default function RunDetail({ data }: { data: RunData }) {
       ) : (
         <>
           <p class="meta">
-            <span class={`status ${data.meta.status}`}>{data.meta.status}</span> · {data.meta.model} · updated{" "}
+            <span class={`status ${data.meta.status}`}>{data.meta.status}</span> · {data.meta.model}
+            {data.meta.ranOn !== undefined && <> · ran on {data.meta.ranOn}</>} · updated{" "}
             {data.meta.updatedAt}
           </p>
           {(data.outcome.pr !== undefined || data.outcome.usage !== undefined || data.outcome.repo !== undefined) && (

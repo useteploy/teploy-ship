@@ -60,6 +60,8 @@ export interface RunMeta {
   eventName?: string;
   workspace?: string;
   model: string;
+  /** Host of the worker that most recently executed this run (fleet placement). */
+  ranOn?: string;
   createdAt: string;
   updatedAt: string;
 }

@@ -86,7 +86,7 @@ export default function RunsList({ data }: { data: RunsData }) {
                 <td><a href={`/runs/${run.runId}`}>{run.runId}</a></td>
                 <td><span class={`status ${run.status}`}>{run.status}</span></td>
                 <td>{short(run.task, 80)}</td>
-                <td class="meta">{run.model}</td>
+                <td class="meta">{run.model}{run.ranOn !== undefined ? ` · ${run.ranOn}` : ""}</td>
                 <td class="meta">{run.updatedAt}</td>
               </tr>
             ))}

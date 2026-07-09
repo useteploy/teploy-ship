@@ -167,6 +167,7 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
     ...(options.gitToken !== undefined ? { gitToken: options.gitToken } : {}),
     repoMemory: options.runtime.memory,
   });
+  const host = hostname();
   // Runs actively executing on THIS worker — reported as fleet load. The
   // scheduler's start/complete hooks fire for every run it claims (intake
   // auto-launches route through the scheduler too), so this counts them all.
@@ -185,6 +186,15 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
     onRunStart: (runId) => {
       activeRuns++;
       log(`[worker] picked up ${runId}`);
+      // Record where this run is executing so the dashboard can show placement.
+      void options.runtime
+        .loadMeta(runId)
+        .then((meta) => {
+          if (meta !== null && meta.ranOn !== host) {
+            return options.runtime.saveMeta({ ...meta, ranOn: host });
+          }
+        })
+        .catch(() => {});
     },
     onComplete: (runId, outcome) => {
       activeRuns = Math.max(0, activeRuns - 1);
@@ -284,7 +294,7 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
     options.runtime.fleet
       .heartbeat({
         owner: options.runtime.owner,
-        host: hostname(),
+        host,
         sandbox: sandboxLabel,
         maxConcurrent: maxConcurrentRuns,
         activeRuns,
