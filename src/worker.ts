@@ -205,8 +205,11 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
       void options.runtime
         .loadMeta(runId)
         .then((meta) => {
-          if (meta !== null && meta.status !== outcome.status) {
-            return options.runtime.saveMeta({ ...meta, status: outcome.status, updatedAt: new Date().toISOString() });
+          // Also stamp ranOn here — for a fast run this terminal save can win
+          // the race against onRunStart's placement write, so make it carry
+          // the placement too rather than clobber it.
+          if (meta !== null && (meta.status !== outcome.status || meta.ranOn !== host)) {
+            return options.runtime.saveMeta({ ...meta, status: outcome.status, ranOn: host, updatedAt: new Date().toISOString() });
           }
         })
         .catch((error) => log(`[worker] ${runId}: meta update failed: ${error instanceof Error ? error.message : String(error)}`));
