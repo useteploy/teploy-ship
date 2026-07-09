@@ -73,7 +73,7 @@ async function handleComment(body: string): Promise<Response> {
   const payload = JSON.parse(body) as {
     action?: string;
     comment?: { id?: number; body?: string };
-    issue?: { number?: number; title?: string; pull_request?: unknown };
+    issue?: { number?: number; title?: string; pull_request?: unknown; labels?: Array<{ name?: string }> };
     repository?: { full_name?: string; clone_url?: string };
   };
   if (payload.action !== "created") return json(200, { ok: true, skipped: "not a new comment" });
@@ -82,6 +82,12 @@ async function handleComment(body: string): Promise<Response> {
   }
   const text = payload.comment?.body ?? "";
   if (text.includes("[teploy-ship]")) return json(200, { ok: true, skipped: "own comment" });
+  // Gate on the `ship` label, same as issues — otherwise ANY commenter on ANY
+  // PR drives an agent run (with the git token) from their raw comment text.
+  const labels = payload.issue.labels?.map((l) => l.name ?? "") ?? [];
+  if (!labels.includes("ship")) {
+    return json(200, { ok: true, skipped: "PR not labeled ship" });
+  }
   if (payload.repository?.full_name === undefined || payload.issue.number === undefined || payload.comment?.id === undefined) {
     return json(400, { title: "payload missing repository/issue/comment" });
   }

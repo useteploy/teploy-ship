@@ -171,10 +171,12 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
   const host = hostname();
   // Opt-in: emit each completed run to Observe (no-op unless configured).
   const observe = makeObserveEmitter(log);
-  // Runs actively executing on THIS worker — reported as fleet load. The
-  // scheduler's start/complete hooks fire for every run it claims (intake
-  // auto-launches route through the scheduler too), so this counts them all.
-  let activeRuns = 0;
+  // Runs actively executing on THIS worker — reported as fleet load. A Set keyed
+  // by runId (not a counter) so it self-corrects: onRunStart fires only after we
+  // win the lease, and onComplete OR onError removes it — a run that throws
+  // (nondeterminism/store error) still gets cleaned up, and an error before the
+  // lease is won (which never added) is a harmless no-op delete.
+  const inflight = new Set<string>();
   const scheduler = new Scheduler({
     workflows: [wf as unknown as WorkflowDefinition<never, unknown>],
     store: options.runtime.store,
@@ -182,18 +184,20 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
     index: options.runtime.index,
     owner: options.runtime.owner,
     intervalMs: options.intervalMs ?? 5000,
-    onError: (runId, error) =>
-      log(`[worker] run ${runId}: ${error instanceof Error ? error.message : String(error)}`),
+    onError: (runId, error) => {
+      inflight.delete(runId);
+      log(`[worker] run ${runId}: ${error instanceof Error ? error.message : String(error)}`);
+    },
     onTickError: (error) =>
       log(`[worker] tick failed (store unreachable?): ${error instanceof Error ? error.message : String(error)}`),
     onRunStart: (runId) => {
-      activeRuns++;
+      inflight.add(runId);
       log(`[worker] picked up ${runId}`);
       // Record where this run is executing so the dashboard can show placement.
       void options.runtime.placement.set(runId, host).catch(() => {});
     },
     onComplete: (runId, outcome) => {
-      activeRuns = Math.max(0, activeRuns - 1);
+      inflight.delete(runId);
       log(`[worker] ${runId} → ${outcome.status}`);
       // Dogfood the run into Observe (no-op unless configured).
       if (observe.enabled) {
@@ -295,8 +299,18 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
     });
   };
 
+  // Reentrancy guard: a sweep can outlast intervalMs when Nucleus is slow, and
+  // two overlapping sweeps re-launch the same proposed task (duplicate PRs) and
+  // double-count its spend. Skip a tick if the previous sweep is still running.
+  let sweeping = false;
   const intakeTimer = setInterval(() => {
-    void sweep().catch((error) => log(`[worker] intake sweep: ${error instanceof Error ? error.message : String(error)}`));
+    if (sweeping) return;
+    sweeping = true;
+    void sweep()
+      .catch((error) => log(`[worker] intake sweep: ${error instanceof Error ? error.message : String(error)}`))
+      .finally(() => {
+        sweeping = false;
+      });
   }, options.intervalMs ?? 5000);
   intakeTimer.unref?.();
 
@@ -312,7 +326,7 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
         host,
         sandbox: sandboxLabel,
         maxConcurrent: maxConcurrentRuns,
-        activeRuns,
+        activeRuns: inflight.size,
         startedAt,
         lastSeen: new Date().toISOString(),
       })

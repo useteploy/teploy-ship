@@ -51,9 +51,10 @@ export class FileRepoMemory implements RepoMemoryStore {
   async record(note: Omit<RepoNote, "createdAt">): Promise<void> {
     await mkdir(this.#dir, { recursive: true });
     const full: RepoNote = { ...note, createdAt: new Date().toISOString() };
-    const path = this.#file(note.repo);
-    const existing = await readFile(path, "utf8").catch(() => "");
-    await writeFile(path, existing + JSON.stringify(full) + "\n");
+    // Append, not read-modify-write — two concurrent records must not clobber
+    // each other's note.
+    const { appendFile } = await import("node:fs/promises");
+    await appendFile(this.#file(note.repo), JSON.stringify(full) + "\n");
   }
 
   #parse(raw: string): RepoNote[] {
@@ -71,7 +72,12 @@ export class FileRepoMemory implements RepoMemoryStore {
 
   async recent(repo: string, limit: number): Promise<RepoNote[]> {
     const raw = await readFile(this.#file(repo), "utf8").catch(() => "");
-    return this.#parse(raw).reverse().slice(0, limit);
+    // Filter by note.repo: the filename is sanitized, so different repos can
+    // collide onto one file — never leak another repo's history into this one.
+    return this.#parse(raw)
+      .filter((n) => n.repo === repo)
+      .reverse()
+      .slice(0, limit);
   }
 
   async repos(): Promise<{ repo: string; count: number }[]> {
@@ -94,7 +100,7 @@ export class FileRepoMemory implements RepoMemoryStore {
   async remove(repo: string, createdAt: string): Promise<void> {
     const path = this.#file(repo);
     const raw = await readFile(path, "utf8").catch(() => "");
-    const kept = this.#parse(raw).filter((n) => n.createdAt !== createdAt);
+    const kept = this.#parse(raw).filter((n) => !(n.repo === repo && n.createdAt === createdAt));
     await writeFile(path, kept.map((n) => JSON.stringify(n)).join("\n") + (kept.length > 0 ? "\n" : ""));
   }
 }

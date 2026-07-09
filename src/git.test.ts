@@ -6,7 +6,23 @@ import { test } from "node:test";
 
 import { LocalExecutor } from "@neutron-build/agents";
 
-import { authenticatedUrl, commitAndPush, openPullRequest, parseRepoUrl, setupRepo } from "./git.js";
+import { assertGitSafe, authenticatedUrl, commitAndPush, openPullRequest, parseRepoUrl, setupRepo } from "./git.js";
+
+test("assertGitSafe rejects shell-active refs (command-injection defense)", () => {
+  // These are all valid git branch names but would execute under sh -c.
+  for (const bad of ["a$(id)", "a`id`b", "a;id", "a|id", "a&&id", "a b", "a>b", "a\nid", "-x", "..", "a/../b", "/lead", "trail/"]) {
+    assert.throws(() => assertGitSafe("branch", bad), new RegExp("unsafe git"), `should reject ${JSON.stringify(bad)}`);
+  }
+  // Legitimate names pass through unchanged.
+  for (const ok of ["main", "feat/x-1", "release-2.0", "ship/auth-race", "a_b.c"]) {
+    assert.equal(assertGitSafe("branch", ok), ok);
+  }
+});
+
+test("parseRepoUrl refuses an owner/repo with injection characters", () => {
+  assert.throws(() => parseRepoUrl("http://h/o/r$(id)"), /unsafe git/);
+  assert.throws(() => parseRepoUrl("http://h/ow;ner/repo"), /unsafe git/);
+});
 
 test("parseRepoUrl: forgejo and github, .git suffix, credentials URL", () => {
   const forgejo = parseRepoUrl("http://100.108.123.49:49152/Tyler/teploy-ship.git");

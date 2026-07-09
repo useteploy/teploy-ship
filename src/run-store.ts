@@ -43,7 +43,14 @@ export class FileEventStore implements EventStore {
     const events: WorkflowEvent[] = [];
     for (const line of raw.split("\n")) {
       if (line.trim() === "") continue;
-      const event = JSON.parse(line) as WorkflowEvent;
+      let event: WorkflowEvent;
+      try {
+        event = JSON.parse(line) as WorkflowEvent;
+      } catch {
+        // A torn tail line (crash mid-append) is an uncommitted event — skip
+        // it rather than letting one bad line make the run unloadable.
+        continue;
+      }
       if (seen.has(event.seq)) continue; // first writer wins, like the Nucleus store
       seen.add(event.seq);
       events.push(event);

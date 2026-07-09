@@ -81,8 +81,16 @@ export class NucleusPgwire {
   readonly document = {
     insert: async (collection: string, doc: Record<string, unknown>): Promise<number> => {
       await this.#ensureDocs();
-      const cols = ["collection", ...Object.keys(doc).map(column)];
-      const values = [collection, ...Object.values(doc).map(String)];
+      // Skip undefined/null fields rather than String()-ing them — otherwise an
+      // optional field (eventName, workspace, ranOn…) present-but-undefined gets
+      // stored as the literal "undefined"/"null" and reads back as truthy.
+      const cols = ["collection"];
+      const values: (string | null)[] = [collection];
+      for (const [key, value] of Object.entries(doc)) {
+        if (value === undefined || value === null) continue;
+        cols.push(column(key));
+        values.push(String(value));
+      }
       const placeholders = values.map((_, i) => `$${i + 1}`).join(", ");
       await this.#pool.query(
         `INSERT INTO ship_docs (${cols.join(", ")}) VALUES (${placeholders})`,
@@ -108,7 +116,11 @@ export class NucleusPgwire {
       const keys = Object.keys(update);
       if (keys.length === 0) return 0;
       const sets = keys.map((k, i) => `${column(k)} = $${i + 1}`).join(", ");
-      const setParams = keys.map((k) => String(update[k]));
+      // undefined/null → SQL NULL (clears the column), not the string "undefined".
+      const setParams = keys.map((k) => {
+        const v = update[k];
+        return v === undefined || v === null ? null : String(v);
+      });
       const { where, params } = whereClause(collection, filter, setParams.length);
       const result = await this.#pool.query(
         `UPDATE ship_docs SET ${sets} WHERE ${where}`,

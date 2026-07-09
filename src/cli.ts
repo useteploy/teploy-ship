@@ -133,6 +133,19 @@ function resolveModel(modelId: string): ModelAdapter {
     : openai(modelId.replace(/^openai\//, ""));
 }
 
+/**
+ * Parse a numeric flag, failing clearly on garbage instead of yielding NaN —
+ * which silently becomes setInterval(0) (a busy-spin hammering the store),
+ * zero-step runs, or an unbounded budget. Returns the fallback when absent.
+ */
+function numFlag(value: string | boolean | undefined, name: string, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (typeof value !== "string") fail(`--${name} needs a numeric value`);
+  const n = Number(value);
+  if (!Number.isFinite(n)) fail(`--${name} must be a number, got ${JSON.stringify(value)}`);
+  return n;
+}
+
 function fail(message: string): never {
   process.stderr.write(`${red("error:")} ${message}\n`);
   process.exit(2);
@@ -170,7 +183,7 @@ async function runCommand(rest: string[]): Promise<void> {
     executor,
     task,
     workdir,
-    maxSteps: args.flags["max-steps"] !== undefined ? Number(args.flags["max-steps"]) : 20,
+    maxSteps: numFlag(args.flags["max-steps"], "max-steps", 20),
     approveAction: defaultApprovalPolicy,
     onApprovalRequest: interactive ? (action) => promptApproval(action) : () => args.flags.yes === true,
     onEvent: args.flags.json === true ? undefined : renderEvent,
@@ -266,7 +279,7 @@ async function fixCommand(rest: string[]): Promise<void> {
     executor,
     task: fixPrompt({ task, branch: checkout.branch, base: (args.flags.base as string) ?? checkout.base, context }),
     workdir: ".",
-    maxSteps: args.flags["max-steps"] !== undefined ? Number(args.flags["max-steps"]) : 30,
+    maxSteps: numFlag(args.flags["max-steps"], "max-steps", 30),
     approveAction: defaultApprovalPolicy,
     onApprovalRequest: interactive ? (action) => promptApproval(action) : () => args.flags.yes === true,
     onEvent: args.flags.json === true ? undefined : renderEvent,
@@ -554,16 +567,16 @@ async function workerCommand(rest: string[]): Promise<void> {
     modelId,
     executor: durableProvider(args, config),
     workdir: usingSandbox ? "/work" : ".",
-    intervalMs: args.flags.interval !== undefined ? Number(args.flags.interval) * 1000 : 5000,
+    intervalMs: numFlag(args.flags.interval, "interval", 5) * 1000,
     ...(gitToken !== undefined ? { gitToken } : {}),
     ...(intakePolicies !== undefined ? { intakePolicies } : {}),
     ...(args.flags["max-concurrent"] !== undefined
-      ? { maxConcurrentRuns: Number(args.flags["max-concurrent"]) }
+      ? { maxConcurrentRuns: numFlag(args.flags["max-concurrent"], "max-concurrent", 0) }
       : config.maxConcurrentRuns !== undefined
         ? { maxConcurrentRuns: config.maxConcurrentRuns }
         : {}),
     ...(args.flags["daily-budget"] !== undefined
-      ? { dailyBudgetUSD: Number(args.flags["daily-budget"]) }
+      ? { dailyBudgetUSD: numFlag(args.flags["daily-budget"], "daily-budget", 0) }
       : config.dailyBudgetUSD !== undefined
         ? { dailyBudgetUSD: config.dailyBudgetUSD }
         : {}),
@@ -630,7 +643,7 @@ async function evalCommand(rest: string[]): Promise<void> {
   const args = parseArgs(rest);
   const modelId = (args.flags.model as string) ?? config.model ?? "anthropic/claude-sonnet-5";
   const model = resolveModel(modelId);
-  const repeats = args.flags.repeats !== undefined ? Number(args.flags.repeats) : 1;
+  const repeats = numFlag(args.flags.repeats, "repeats", 1);
   const suiteName = (args.flags.suite as string) ?? "builtin";
   const tasks: EvalTask[] =
     suiteName === "hard" ? hardSuite : suiteName === "extreme" ? extremeSuite : suiteName === "all" ? [...builtinSuite, ...hardSuite, ...extremeSuite] : builtinSuite;

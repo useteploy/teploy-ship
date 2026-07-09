@@ -20,6 +20,31 @@ export interface RepoRef {
 }
 
 /**
+ * Guard values that flow into a git command string. Branch names come from a
+ * PR's head/base ref — chosen by whoever opened the PR — and owner/repo from a
+ * clone URL; both are interpolated into commands run via `sh -c`. Git accepts
+ * many shell-active characters in a branch name ($(), backticks, ;, |, spaces),
+ * so refuse anything outside a conservative safe set BEFORE it reaches the
+ * shell. Rejects the run rather than executing attacker-controlled code.
+ */
+export function assertGitSafe(kind: string, value: string): string {
+  if (
+    value === "" ||
+    value.length > 255 ||
+    !/^[A-Za-z0-9._/-]+$/.test(value) ||
+    value.includes("..") ||
+    value.startsWith("-") ||
+    value.startsWith("/") ||
+    value.endsWith("/")
+  ) {
+    throw new Error(
+      `refusing unsafe git ${kind} ${JSON.stringify(value)} — only letters, digits and . _ / - are allowed`,
+    );
+  }
+  return value;
+}
+
+/**
  * Parse an http(s) repo URL. Anything on github.com speaks the GitHub
  * API; every other host is assumed to be Forgejo/Gitea (Teploy's world —
  * self-hosted first).
@@ -35,8 +60,8 @@ export function parseRepoUrl(url: string): RepoRef {
     return {
       kind: "forgejo",
       base: "file://",
-      owner: segments[segments.length - 2]!,
-      repo: segments[segments.length - 1]!,
+      owner: assertGitSafe("owner", segments[segments.length - 2]!),
+      repo: assertGitSafe("repo", segments[segments.length - 1]!),
       cloneUrl: parsed.pathname,
     };
   }
@@ -45,8 +70,8 @@ export function parseRepoUrl(url: string): RepoRef {
   }
   const segments = parsed.pathname.replace(/\.git$/, "").split("/").filter(Boolean);
   if (segments.length < 2) throw new Error(`repo URL needs /owner/repo: ${url}`);
-  const owner = segments[segments.length - 2]!;
-  const repo = segments[segments.length - 1]!;
+  const owner = assertGitSafe("owner", segments[segments.length - 2]!);
+  const repo = assertGitSafe("repo", segments[segments.length - 1]!);
   const base = `${parsed.protocol}//${parsed.host}`;
   return {
     kind: parsed.hostname === "github.com" ? "github" : "forgejo",
@@ -210,7 +235,9 @@ export async function resolvePr(
   if (data.head?.ref === undefined || data.base?.ref === undefined) {
     throw new Error(`PR #${pr} payload missing head/base`);
   }
-  return { branch: data.head.ref, base: data.base.ref };
+  // head/base refs are attacker-controlled (chosen by whoever opened the PR)
+  // and get interpolated into git shell commands — validate before use.
+  return { branch: assertGitSafe("branch", data.head.ref), base: assertGitSafe("base", data.base.ref) };
 }
 
 /** Clone and stand on an EXISTING PR head branch (review follow-ups). */

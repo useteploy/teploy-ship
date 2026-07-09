@@ -46,6 +46,12 @@ export async function action({ request }: { request: Request }): Promise<Respons
     }
     const text = payload.comment?.body ?? "";
     if (text.includes("[teploy-ship]")) return json(200, { ok: true, skipped: "own comment" });
+    // Gate on the `ship` label, same as issues — otherwise any commenter on any
+    // PR drives an agent run (with the git token) from their raw comment text.
+    const prLabels = payload.issue.labels?.map((l) => l.name ?? "") ?? [];
+    if (!prLabels.includes("ship")) {
+      return json(200, { ok: true, skipped: "PR not labeled ship" });
+    }
     if (payload.issue.number === undefined || payload.comment?.id === undefined) {
       return json(400, { title: "payload missing issue/comment" });
     }
