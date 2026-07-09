@@ -9,7 +9,7 @@ import { LocalExecutor } from "@neutron-build/agents";
 import type { AgentExecutor } from "@neutron-build/agents";
 import { MemoryEventStore, cancelRun, deliverEvent, executeRun } from "@neutron-build/workflow";
 
-import { approvalEvent, durableAgent } from "./durable.js";
+import { PLAN_EVENT, approvalEvent, durableAgent } from "./durable.js";
 import { FileRepoMemory } from "./repo-memory.js";
 import type { ExecutorProvider } from "./durable.js";
 import { defaultApprovalPolicy } from "./approval.js";
@@ -402,6 +402,106 @@ test("durable runs condense long histories in a recorded step and replay without
   const again = await executeRun({ workflow: wf, runId: "run-condense", store });
   assert.equal(again.status, "completed");
   assert.equal(summarizeCalls, before, "replay must not re-summarize");
+});
+
+test("plan-preview runs park on the plan and only execute after approval", async () => {
+  const { model, callCount } = reactiveModel([
+    "1. Write done.txt\n2. Verify it exists", // the plan (plain text)
+    "```bash\necho ok > done.txt\n```",
+    (obs) => (obs.includes("exit 0") ? "```finish\nplanned and done\n```" : "```bash\necho hmm\n```"),
+    (obs) => (obs.includes("Before finishing") ? "```finish\nplanned and done\n```" : "```bash\necho hmm\n```"),
+  ]);
+  const { provider, execCount } = await localProvider();
+  const wf = durableAgent({ model, executor: provider });
+  const store = new MemoryEventStore();
+
+  const parked = await executeRun({ workflow: wf, runId: "run-plan", store, input: { task: "make done.txt", plan: true } });
+  assert.equal(parked.status, "waiting");
+  assert.equal(parked.eventName, PLAN_EVENT);
+  assert.equal(execCount(), 0, "nothing executes before the plan is approved");
+  assert.equal(callCount(), 1, "exactly the plan call happened");
+  const events = await store.load("run-plan");
+  assert.ok(events.some((e) => e.type === "step-completed" && e.name === "plan-think"));
+
+  await deliverEvent(store, "run-plan", PLAN_EVENT, { approved: true });
+  const done = await executeRun({ workflow: wf, runId: "run-plan", store });
+  assert.equal(done.status, "completed");
+  assert.equal((done.output as { summary: string }).summary, "planned and done");
+});
+
+test("an edited plan replaces the agent's own; a denied plan ends the run untouched", async () => {
+  // edited: the agent must see the operator's version, flagged as edited
+  const edited = reactiveModel([
+    "1. Do it my way",
+    (obs) =>
+      obs.includes("EDITED") && obs.includes("do it the operator's way")
+        ? "```finish\nfollowed the edit\n```"
+        : "```bash\necho missed-the-edit\n```",
+    "```finish\nfollowed the edit\n```",
+  ]);
+  const { provider } = await localProvider();
+  const wf = durableAgent({ model: edited.model, executor: provider });
+  const store = new MemoryEventStore();
+  await executeRun({ workflow: wf, runId: "run-edit", store, input: { task: "t", plan: true } });
+  await deliverEvent(store, "run-edit", PLAN_EVENT, { approved: true, plan: "1. do it the operator's way" });
+  const done = await executeRun({ workflow: wf, runId: "run-edit", store });
+  assert.equal(done.status, "completed");
+  assert.equal((done.output as { summary: string }).summary, "followed the edit");
+
+  // denied: the run finishes with the operator's reason, zero work done
+  const denied = reactiveModel(["1. Plan to be denied"]);
+  const local = await localProvider();
+  const wf2 = durableAgent({ model: denied.model, executor: local.provider });
+  const store2 = new MemoryEventStore();
+  await executeRun({ workflow: wf2, runId: "run-deny", store: store2, input: { task: "t", plan: true } });
+  await deliverEvent(store2, "run-deny", PLAN_EVENT, { approved: false, reason: "wrong direction" });
+  const settled = await executeRun({ workflow: wf2, runId: "run-deny", store: store2 });
+  assert.equal(settled.status, "completed");
+  const output = settled.output as { summary: string; turns: number };
+  assert.match(output.summary, /Plan rejected.*wrong direction/);
+  assert.equal(output.turns, 0);
+  assert.equal(local.execCount(), 0, "a denied plan never executes anything");
+});
+
+test("steer notes drain into the next turn as a recorded step and never re-drain on replay", async () => {
+  let drains = 0;
+  const queue = [["skip the docs, focus on X"]];
+  const steer = {
+    drain: async (): Promise<string[]> => {
+      drains++;
+      return queue.shift() ?? [];
+    },
+  };
+  const { model } = reactiveModel([
+    // turn 0 sees the steer note as the latest user message before thinking
+    (obs) => (obs.includes("focus on X") ? "```bash\necho steered > x.txt\n```" : "```bash\necho unsteered\n```"),
+    (obs) => (obs.includes("exit 0") ? "```finish\nsteered\n```" : "```bash\necho hmm\n```"),
+    (obs) => (obs.includes("Before finishing") ? "```finish\nsteered\n```" : "```bash\necho hmm\n```"),
+  ]);
+  const { provider } = await localProvider();
+  const wf = durableAgent({ model, executor: provider, steer });
+  const store = new MemoryEventStore();
+
+  const outcome = await executeRun({ workflow: wf, runId: "run-steer", store, input: { task: "t", steer: true } });
+  assert.equal(outcome.status, "completed");
+  assert.equal((outcome.output as { summary: string }).summary, "steered");
+  const events = await store.load("run-steer");
+  assert.ok(events.some((e) => e.type === "step-completed" && e.name === "turn-0-steer"));
+
+  // replay: recorded steer steps, no live drains
+  const before = drains;
+  const again = await executeRun({ workflow: wf, runId: "run-steer", store });
+  assert.equal(again.status, "completed");
+  assert.equal(drains, before, "replay must not re-drain the steer store");
+
+  // runs without the input flag never touch the store (pre-feature logs stay replayable)
+  const plain = await localProvider();
+  const wfPlain = durableAgent({ model: reactiveModel(["```finish\nx\n```", "```finish\nx\n```"]).model, executor: plain.provider, steer });
+  const store2 = new MemoryEventStore();
+  const drainsBefore = drains;
+  await executeRun({ workflow: wfPlain, runId: "run-plain", store: store2, input: { task: "t" } });
+  assert.equal(drains, drainsBefore, "steer-less input skips the drain step entirely");
+  assert.ok(!(await store2.load("run-plain")).some((e) => e.name === "turn-0-steer"));
 });
 
 test("cancel settles a parked durable agent run as cancelled", async () => {

@@ -42,6 +42,22 @@ test("loadRepoContext: playbook from the tree + notes; empty when neither exists
   await withHidden.putFile(".ship/playbook.md", "hidden playbook rules");
   assert.match(await loadRepoContext(withHidden, { repo: "o/r" }), /hidden playbook rules/);
 
+  // ecosystem conventions are read too: AGENTS.md, CLAUDE.md, copilot-instructions
+  const withAgents = await fresh();
+  await withAgents.putFile("AGENTS.md", "agents.md conventions here");
+  assert.match(await loadRepoContext(withAgents, { repo: "o/r" }), /Repository playbook \(AGENTS\.md\)[\s\S]*agents\.md conventions/);
+  const withCopilot = await fresh();
+  await withCopilot.putFile(".github/copilot-instructions.md", "copilot rules");
+  assert.match(await loadRepoContext(withCopilot, { repo: "o/r" }), /copilot rules/);
+
+  // SHIP.md outranks the ecosystem files when both exist
+  const withBoth = await fresh();
+  await withBoth.putFile("AGENTS.md", "generic agent rules");
+  await withBoth.putFile("SHIP.md", "ship-specific rules");
+  const picked = await loadRepoContext(withBoth, { repo: "o/r" });
+  assert.match(picked, /ship-specific rules/);
+  assert.doesNotMatch(picked, /generic agent rules/);
+
   // notes are appended when a memory store is supplied
   const memory = new FileRepoMemory(await mkdtemp(join(tmpdir(), "mem-ctx-")));
   await memory.record({ repo: "o/r", note: "fixed the login bug → PR #1" });

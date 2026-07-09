@@ -18,6 +18,8 @@ import { FileFleetStore, NucleusFleetStore, FilePlacementStore, NucleusPlacement
 import type { FleetStore, PlacementStore } from "./fleet.js";
 import { FileRepoMemory, NucleusRepoMemory } from "./repo-memory.js";
 import type { RepoMemoryStore } from "./repo-memory.js";
+import { FileSteerStore, NucleusSteerStore } from "./steer.js";
+import type { SteerStore } from "./steer.js";
 import { NucleusPgwire } from "./nucleus-pgwire.js";
 import { FileEventStore, RunMetaStore } from "./run-store.js";
 import type { RunMeta } from "./run-store.js";
@@ -33,6 +35,10 @@ export type { FleetStore, WorkerInfo, PlacementStore } from "./fleet.js";
 export { FileFleetStore, NucleusFleetStore, FilePlacementStore, NucleusPlacementStore } from "./fleet.js";
 export type { RepoMemoryStore, RepoNote } from "./repo-memory.js";
 export { FileRepoMemory, NucleusRepoMemory, loadRepoContext, runNote } from "./repo-memory.js";
+export type { SteerStore, SteerNote } from "./steer.js";
+export { FileSteerStore, NucleusSteerStore } from "./steer.js";
+export { PLAN_EVENT } from "./durable.js";
+export type { PlanDecisionPayload } from "./durable.js";
 export type { ModelPricing, UsageLike } from "./pricing.js";
 export { costUSD, pricingFor } from "./pricing.js";
 
@@ -53,7 +59,7 @@ export interface ShipRuntime {
   execute(
     workflow: WorkflowDefinition<{ task: string }, unknown>,
     runId: string,
-    input?: { task: string },
+    input?: { task: string; repo?: string; pr?: number; plan?: boolean; steer?: boolean },
   ): Promise<RunOutcome | null>;
   saveMeta(meta: RunMeta): Promise<void>;
   loadMeta(runId: string): Promise<RunMeta | null>;
@@ -72,6 +78,8 @@ export interface ShipRuntime {
   placement: PlacementStore;
   /** Per-repo playbook memory (notes Ship records about its own runs). */
   memory: RepoMemoryStore;
+  /** Mid-run steering notes the dashboard sends into running runs. */
+  steer: SteerStore;
   close(): Promise<void>;
 }
 
@@ -87,6 +95,7 @@ export function fileRuntime(): ShipRuntime {
     fleet: new FileFleetStore(),
     placement: new FilePlacementStore(),
     memory: new FileRepoMemory(),
+    steer: new FileSteerStore(),
     execute: (workflow, runId, input) =>
       executeRun({ workflow, runId, store, ...(input !== undefined ? { input } : {}) }),
     saveMeta: (m) => meta.save(m),
@@ -145,6 +154,7 @@ export async function nucleusRuntime(url: string, owner: string): Promise<Nucleu
     fleet: new NucleusFleetStore(db),
     placement: new NucleusPlacementStore(db),
     memory: new NucleusRepoMemory(db),
+    steer: new NucleusSteerStore(db),
     async execute(workflow, runId, input) {
       const outcome = await executeRunExclusive({
         workflow,
@@ -187,7 +197,7 @@ export async function nucleusRuntime(url: string, owner: string): Promise<Nucleu
  */
 export async function enqueueRun(
   runtime: ShipRuntime,
-  options: { runId: string; task: string; model: string; repo?: string; pr?: number; workflowName?: string },
+  options: { runId: string; task: string; model: string; repo?: string; pr?: number; plan?: boolean; workflowName?: string },
 ): Promise<void> {
   const now = new Date().toISOString();
   await runtime.store.append(options.runId, {
@@ -201,6 +211,10 @@ export async function enqueueRun(
         task: options.task,
         ...(options.repo !== undefined ? { repo: options.repo } : {}),
         ...(options.pr !== undefined ? { pr: options.pr } : {}),
+        ...(options.plan === true ? { plan: true } : {}),
+        // Every newly-enqueued run is steerable; runs enqueued before the
+        // flag existed replay without steer steps (input-gated in durable).
+        steer: true,
       },
     },
   });

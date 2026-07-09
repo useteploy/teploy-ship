@@ -173,7 +173,16 @@ export class NucleusRepoMemory implements RepoMemoryStore {
   }
 }
 
-const PLAYBOOK_FILES = ["SHIP.md", ".ship/playbook.md"];
+// Ship's own files first, then the ecosystem's conventions (AGENTS.md is the
+// de-facto standard; Copilot/Claude files are read for the same reason). First
+// hit wins — a repo that commits SHIP.md is telling Ship something specific.
+const PLAYBOOK_FILES = [
+  "SHIP.md",
+  ".ship/playbook.md",
+  "AGENTS.md",
+  "CLAUDE.md",
+  ".github/copilot-instructions.md",
+];
 const PLAYBOOK_CAP = 4000;
 const NOTE_CAP = 300;
 const RECENT_NOTES = 5;

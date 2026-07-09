@@ -178,6 +178,7 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
     workdir: options.workdir,
     ...(options.gitToken !== undefined ? { gitToken: options.gitToken } : {}),
     repoMemory: options.runtime.memory,
+    steer: options.runtime.steer,
   });
   const host = hostname();
   // Opt-in: emit each completed run to Observe (no-op unless configured).

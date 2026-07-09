@@ -1,6 +1,6 @@
 import { cancelRun, deliverEvent } from "@neutron-build/workflow";
 
-import { costUSD } from "teploy-ship/runtime";
+import { PLAN_EVENT, costUSD } from "teploy-ship/runtime";
 import type { RunMeta } from "teploy-ship/runtime";
 
 import { shipRuntime } from "../../lib/store.server.js";
@@ -16,20 +16,51 @@ interface RunData {
   costUSD: number;
   runId: string;
   eventCount: number;
+  /** The agent's proposed plan, when this run is parked on plan approval. */
+  plan?: string;
+  /** Steerable run (input.steer): show the steer box while active. */
+  steerable: boolean;
+  /** Steer notes sent but not yet consumed by a turn. */
+  steerPending: string[];
+}
+
+/** The plan-think step's recorded text ({text, usage} or a bare string). */
+function planFrom(events: { type: string; name?: string; data?: unknown }[]): string | undefined {
+  const step = events.find((e) => e.type === "step-completed" && e.name === "plan-think");
+  if (step === undefined) return undefined;
+  const result = (step.data as { result?: unknown } | undefined)?.result;
+  if (typeof result === "string") return result;
+  const text = (result as { text?: unknown } | undefined)?.text;
+  return typeof text === "string" ? text : undefined;
 }
 
 export async function loader({ params }: { params: { id: string } }): Promise<RunData> {
   const runtime = await shipRuntime();
   const runId = params.id;
-  const [meta, events, ranOn] = await Promise.all([
+  const [meta, events, ranOn, steerNotes] = await Promise.all([
     runtime.loadMeta(runId),
     runtime.store.load(runId),
     runtime.placement.get(runId),
+    runtime.steer.pending(runId).catch(() => []),
   ]);
   if (meta !== null && ranOn !== null) meta.ranOn = ranOn;
   const outcome = runOutcome(events);
   const cost = costUSD(meta?.model ?? "", outcome.usage);
-  return { meta, items: toTimeline(events), outcome, costUSD: cost, runId, eventCount: events.length };
+  const started = events.find((e) => e.type === "run-started");
+  const steerable =
+    (started?.data as { input?: { steer?: boolean } } | undefined)?.input?.steer === true;
+  const plan = planFrom(events);
+  return {
+    meta,
+    items: toTimeline(events),
+    outcome,
+    costUSD: cost,
+    runId,
+    eventCount: events.length,
+    ...(plan !== undefined ? { plan } : {}),
+    steerable,
+    steerPending: steerNotes.map((n) => n.text),
+  };
 }
 
 /** A PR reference may be a full URL or a bare number; make it a link when we can. */
@@ -61,11 +92,20 @@ export async function action({
     await runtime.saveMeta({ ...meta, status: "cancelled", updatedAt: new Date().toISOString() });
     return new Response(null, { status: 302, headers: { location: `/runs/${runId}` } });
   }
+  // Mid-run steering: queue a note; the run's next turn drains it.
+  if (active && intent === "steer") {
+    const text = String(form.get("steer") ?? "").trim();
+    if (text !== "") await runtime.steer.add(runId, text);
+    return new Response(null, { status: 302, headers: { location: `/runs/${runId}` } });
+  }
   if (meta?.eventName !== undefined && (intent === "approve" || intent === "deny")) {
     const reason = String(form.get("reason") ?? "").trim();
+    // Plan approvals may carry an operator-edited plan (textarea).
+    const plan = meta.eventName === PLAN_EVENT ? String(form.get("plan") ?? "").trim() : "";
     await deliverEvent(runtime.store, runId, meta.eventName, {
       approved: intent === "approve",
       ...(reason !== "" ? { reason } : {}),
+      ...(plan !== "" ? { plan } : {}),
     });
     // Make the run due; the resident worker carries it from here. The web
     // process never executes the agent.
@@ -121,10 +161,33 @@ export default function RunDetail({ data }: { data: RunData }) {
               )}
             </div>
           )}
+          {data.meta.eventName === PLAN_EVENT && (
+            <div class="card attn" style="margin:12px 0">
+              <div class="kind" style="margin-bottom:8px">Plan review — the run is parked until you decide</div>
+              <form method="post">
+                <textarea
+                  name="plan"
+                  rows={Math.min(14, Math.max(4, (data.plan ?? "").split("\n").length + 1))}
+                  style="width:100%;box-sizing:border-box;font:inherit"
+                >
+                  {data.plan ?? ""}
+                </textarea>
+                <div class="row-actions" style="margin-top:8px">
+                  <button class="approve" type="submit" name="intent" value="approve">
+                    Approve plan
+                  </button>
+                  <button class="deny" type="submit" name="intent" value="deny">
+                    Deny
+                  </button>
+                  <span class="meta">edit the text before approving to redirect the plan</span>
+                </div>
+              </form>
+            </div>
+          )}
           {(data.meta.eventName !== undefined || active) && (
             <form class="decide" method="post">
               <input type="hidden" name="reason" value="" />
-              {data.meta.eventName !== undefined && (
+              {data.meta.eventName !== undefined && data.meta.eventName !== PLAN_EVENT && (
                 <>
                   <button class="approve" type="submit" name="intent" value="approve">
                     Approve
@@ -140,6 +203,19 @@ export default function RunDetail({ data }: { data: RunData }) {
                 </button>
               )}
             </form>
+          )}
+          {active && data.steerable && (
+            <form class="newrun" method="post" style="margin:12px 0">
+              <input type="text" name="steer" placeholder='steer the run, e.g. "skip the docs, focus on the parser"' />
+              <button type="submit" name="intent" value="steer">
+                Steer
+              </button>
+            </form>
+          )}
+          {data.steerPending.length > 0 && (
+            <p class="meta" style="margin:4px 0 0">
+              queued steering (lands on the next turn): {data.steerPending.join(" · ")}
+            </p>
           )}
           <ul class="timeline">
             {data.items.map((item, i) => (

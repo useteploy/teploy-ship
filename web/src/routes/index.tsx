@@ -79,7 +79,12 @@ export async function action({ request }: { request: Request }): Promise<Respons
   const task = String(form.get("task") ?? "").trim();
   if (task === "") return redirect("/");
   const runId = `run-${randomUUID().slice(0, 8)}`;
-  await enqueueRun(runtime, { runId, task, model: defaultModel() });
+  await enqueueRun(runtime, {
+    runId,
+    task,
+    model: defaultModel(),
+    ...(form.get("plan") === "on" ? { plan: true } : {}),
+  });
   return redirect(`/runs/${runId}`);
 }
 
@@ -107,6 +112,9 @@ export default function Inbox({ data }: { data: InboxData }) {
 
       <form class="newrun" method="post">
         <input type="text" name="task" placeholder='new task, e.g. "fix the failing test in api/"' />
+        <label class="meta" style="display:flex;align-items:center;gap:6px;white-space:nowrap">
+          <input type="checkbox" name="plan" /> plan first
+        </label>
         <button type="submit">Queue run</button>
       </form>
 

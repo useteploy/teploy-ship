@@ -44,6 +44,7 @@ Usage:
       [--sandbox <url> --sandbox-token <t> [--sandbox-image <img>] [--sandbox-network none|egress]]
       [--max-steps N] [--yes] [--json]
   teploy-ship run --durable "<task>"  durable run: parks on approvals, survives exits
+                     add --plan to review/approve the agent's plan before it acts
   teploy-ship runs                    list durable runs
   teploy-ship resume <run-id>         continue a durable run (after a crash or park)
   teploy-ship approve <run-id>        approve a parked action and continue
@@ -368,6 +369,7 @@ async function executePass(
   task: string,
   args: ReturnType<typeof parseArgs>,
   config: Config,
+  opts?: { plan?: boolean },
 ): Promise<RunOutcome | null> {
   const modelId = (args.flags.model as string) ?? config.model ?? "anthropic/claude-sonnet-5";
   const usingSandbox = resolveSandbox(args, config) !== undefined;
@@ -378,8 +380,14 @@ async function executePass(
     // Local workspaces root every path at the run's own dir, so "." is
     // the honest working directory to show the agent.
     workdir: usingSandbox ? "/work" : ".",
+    steer: runtime.steer,
   });
-  const outcome = await runtime.execute(wf, runId, { task });
+  // Input only matters on a fresh log (resume replays the recorded input).
+  const outcome = await runtime.execute(wf, runId, {
+    task,
+    steer: true,
+    ...(opts?.plan === true ? { plan: true } : {}),
+  });
   if (outcome === null) return null; // another executor holds the lease
   const previous = await runtime.loadMeta(runId);
   await runtime.saveMeta({
@@ -425,7 +433,9 @@ async function startDurable(task: string, args: ReturnType<typeof parseArgs>, co
   const runtime = await makeRuntime(args, config);
   const runId = `run-${randomUUID().slice(0, 8)}`;
   process.stderr.write(`${dim(`durable run ${runId}`)}\n`);
-  const outcome = await executePass(runtime, runId, task, args, config);
+  const outcome = await executePass(runtime, runId, task, args, config, {
+    ...(args.flags.plan === true ? { plan: true } : {}),
+  });
   reportOutcome(runId, outcome);
   await runtime.close();
   process.exit(outcome?.status === "failed" ? 1 : 0);

@@ -13,6 +13,7 @@ import { condenseIfNeeded, defaultCondenseConfig } from "./memory.js";
 import type { CondenseConfig } from "./memory.js";
 import { loadRepoContext, runNote } from "./repo-memory.js";
 import type { RepoMemoryStore } from "./repo-memory.js";
+import type { SteerStore } from "./steer.js";
 import type { ApprovalPolicy } from "./approval.js";
 import { formatObservation, systemPrompt } from "./prompt.js";
 
@@ -28,6 +29,20 @@ export interface DurableAgentInput {
   repo?: string;
   /** Review follow-up: work PR #pr's existing head branch and reply there. */
   pr?: number;
+  /**
+   * Plan preview: the run writes a plan first and PARKS on `PLAN_EVENT`
+   * before touching anything — deliver a PlanDecisionPayload (approve /
+   * approve-with-edits / deny) to continue. Opt-in per run; auto-launched
+   * intake runs stay execute-first.
+   */
+  plan?: boolean;
+  /**
+   * Mid-run steering: drain the steer store at the top of every turn (a
+   * recorded step) and feed the operator's notes to the agent. Gated on
+   * the RUN INPUT — not config — so runs enqueued before this feature
+   * replay without a step-sequence mismatch on any executor.
+   */
+  steer?: boolean;
 }
 
 export interface DurableAgentOutput {
@@ -96,7 +111,28 @@ export interface DurableAgentConfig {
    * enough to condense — don't flip it under in-flight runs.
    */
   condense?: CondenseConfig | false;
+  /**
+   * Where steer notes are drained from when input.steer is set. Absent
+   * store + steer-enabled input just drains empty — the step sequence
+   * stays identical across executors regardless of their wiring.
+   */
+  steer?: Pick<SteerStore, "drain">;
 }
+
+/** The event a plan-preview run parks on. Deliver a PlanDecisionPayload. */
+export const PLAN_EVENT = "plan-approval";
+
+export interface PlanDecisionPayload {
+  approved: boolean;
+  /** Operator-edited plan; when present (and non-empty) it replaces the agent's. */
+  plan?: string;
+  reason?: string;
+}
+
+const PLAN_REQUEST =
+  "Before doing any work: write a short numbered plan for this task — the steps you will take, " +
+  "the files you expect to touch, and how you will verify the result. Plain text only, NO code " +
+  "blocks and NO commands. The operator reviews this plan before you are allowed to act.";
 
 /** The event name a turn's approval-required action parks on. Deliver {approved, reason?}. */
 export function approvalEvent(turn: number): string {
@@ -175,10 +211,7 @@ export function durableAgent(
             : fixPrompt({ task: input.task, branch: checkout.branch, base: checkout.base, context: repoContext })
           : input.task;
 
-      let messages: Message[] = [
-        { role: "system", content: systemPrompt({ workdir, task }) },
-        { role: "user", content: "Begin. Work step by step and verify before finishing." },
-      ];
+      let messages: Message[] = [{ role: "system", content: systemPrompt({ workdir, task }) }];
       let anySuccessfulAction = false;
       let finishNudged = false;
       let failNudges = 0;
@@ -194,9 +227,63 @@ export function durableAgent(
         if (u.cacheWriteTokens !== undefined) usage.cacheWriteTokens = (usage.cacheWriteTokens ?? 0) + u.cacheWriteTokens;
       };
 
+      // Plan preview: think the plan, park on the operator's decision,
+      // then work under the approved (possibly edited) plan. The park
+      // reuses the approval machinery — snapshot before, restore after —
+      // so a plan reviewed days later still has its workspace.
+      if (input.plan === true) {
+        messages.push({ role: "user", content: PLAN_REQUEST });
+        const planStep = await ctx.step("plan-think", async () => {
+          const generated = await generateText({ model: config.model, messages });
+          return { text: generated.text, usage: generated.usage };
+        });
+        addUsage(planStep.usage);
+
+        const canSnapshot = config.executor.snapshot !== undefined && config.executor.createFrom !== undefined;
+        let parkImage: string | undefined;
+        if (canSnapshot) {
+          parkImage = await ctx.step("plan-snapshot", () => config.executor.snapshot!(handle));
+        }
+        const decision = await ctx.waitForEvent<PlanDecisionPayload>(PLAN_EVENT);
+        if (parkImage !== undefined) {
+          handle = await ctx.step("plan-restore", async () => (await config.executor.createFrom!(parkImage)).handle);
+          executor = config.executor.attach(handle);
+        }
+
+        if (!decision.approved) {
+          const reason = decision.reason !== undefined ? `: ${decision.reason}` : "";
+          return { status: "finished", summary: `Plan rejected by the operator${reason}.`, turns: 0, usage };
+        }
+        const edited =
+          typeof decision.plan === "string" &&
+          decision.plan.trim() !== "" &&
+          decision.plan.trim() !== planStep.text.trim();
+        messages.push({ role: "assistant", content: planStep.text.trim() === "" ? "(no plan)" : planStep.text });
+        messages.push({
+          role: "user",
+          content: edited
+            ? `The operator approved an EDITED version of your plan — follow THIS version, not your original:\n\n${decision.plan!.trim()}\n\nExecute it now, step by step, and verify before finishing.`
+            : "The operator approved your plan. Execute it now, step by step, and verify before finishing.",
+        });
+      } else {
+        messages.push({ role: "user", content: "Begin. Work step by step and verify before finishing." });
+      }
+
       const condense = config.condense === false ? null : (config.condense ?? defaultCondenseConfig);
 
       for (let turn = 0; turn < maxSteps; turn++) {
+        // Mid-run steering: drain the operator's pending notes as a
+        // recorded step (the store is read once, live; replay returns the
+        // recorded notes). Advisory — a store hiccup never fails the run.
+        if (input.steer === true) {
+          const steers = await ctx.step(`turn-${turn}-steer`, async () =>
+            config.steer !== undefined ? config.steer.drain(ctx.runId).catch(() => []) : [],
+          );
+          for (const text of steers) {
+            messages.push({ role: "user", content: `Operator steering — adjust course accordingly: ${text}` });
+          }
+        }
+
         if (condense !== null) {
           messages = await condenseIfNeeded(
             messages,
