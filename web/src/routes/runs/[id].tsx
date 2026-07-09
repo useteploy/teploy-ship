@@ -78,38 +78,9 @@ export async function action({
 // Poll via the framework's loader-data protocol (X-Neutron-Data): re-runs
 // this route's loader and returns its data as JSON. Any change in the
 // serialized data (new events, status flip) reloads the page.
-const POLL = `
-(function () {
-  // Restore scroll after a poll-triggered reload so watching a live run's
-  // timeline doesn't jump to the top on every new event.
-  var SK = "ship-scroll:" + location.pathname;
-  var saved = sessionStorage.getItem(SK);
-  if (saved !== null) {
-    sessionStorage.removeItem(SK);
-    window.scrollTo(0, parseInt(saved, 10) || 0);
-  }
-  var root = document.getElementById("run-root");
-  if (!root) return;
-  var status = root.getAttribute("data-run-status");
-  if (status === "completed" || status === "failed" || status === "cancelled") return;
-  var last = null;
-  setInterval(function () {
-    fetch(location.pathname, {
-      headers: { "X-Neutron-Data": "true", "X-Neutron-Routes": "route:runs/[id].tsx" },
-    })
-      .then(function (r) { return r.ok ? r.text() : null; })
-      .then(function (text) {
-        if (text === null) return;
-        if (last === null) { last = text; return; }
-        if (text !== last) {
-          sessionStorage.setItem(SK, String(window.scrollY));
-          location.reload();
-        }
-      })
-      .catch(function () {});
-  }, 3000);
-})();
-`;
+// Live updates via the shared SSE helper (scroll preserved). Only mounted for
+// an active run — a terminal run's timeline no longer changes.
+const POLL = `__shipLive("route:runs/[id].tsx");`;
 
 export default function RunDetail({ data }: { data: RunData }) {
   const active = data.meta !== null && !["completed", "failed", "cancelled"].includes(data.meta.status);

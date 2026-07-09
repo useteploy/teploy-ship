@@ -98,6 +98,7 @@ export default function RunsList({ data }: { data: RunsData }) {
         </table>
       )}
       <script dangerouslySetInnerHTML={{ __html: FILTER }} />
+      <script dangerouslySetInnerHTML={{ __html: `__shipLive("route:runs/index.tsx");` }} />
     </>
   );
 }

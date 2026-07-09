@@ -40,9 +40,7 @@ function ago(ms: number): string {
   return `${Math.round(m / 60)}h ago`;
 }
 
-const POLL = `
-(function(){var last=null;setInterval(function(){fetch("/fleet",{headers:{"X-Neutron-Data":"true","X-Neutron-Routes":"route:fleet.tsx"}}).then(function(r){return r.ok?r.text():null;}).then(function(t){if(t===null)return;if(last===null){last=t;return;}if(t!==last)location.reload();}).catch(function(){});},6000);})();
-`;
+const POLL = `__shipLive("route:fleet.tsx");`;
 
 export default function Fleet({ data }: { data: FleetData }) {
   const online = data.workers.filter((w) => w.online);
