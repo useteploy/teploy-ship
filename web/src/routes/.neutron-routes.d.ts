@@ -8,6 +8,7 @@ declare module "@neutron-build/core" {
     | "/health"
     | "/hooks/forgejo"
     | "/hooks/github"
+    | "/knowledge"
     | "/login"
     | "/runs"
     | `/runs/${string}`

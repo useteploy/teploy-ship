@@ -30,6 +30,10 @@ export interface RepoMemoryStore {
   record(note: Omit<RepoNote, "createdAt">): Promise<void>;
   /** Most recent first. */
   recent(repo: string, limit: number): Promise<RepoNote[]>;
+  /** Every repo that has notes, with its note count — for the dashboard. */
+  repos(): Promise<{ repo: string; count: number }[]>;
+  /** Delete a single note, keyed by repo + its createdAt timestamp. */
+  remove(repo: string, createdAt: string): Promise<void>;
 }
 
 /** File-backed memory: one JSONL per repo under the state dir. */
@@ -52,8 +56,7 @@ export class FileRepoMemory implements RepoMemoryStore {
     await writeFile(path, existing + JSON.stringify(full) + "\n");
   }
 
-  async recent(repo: string, limit: number): Promise<RepoNote[]> {
-    const raw = await readFile(this.#file(repo), "utf8").catch(() => "");
+  #parse(raw: string): RepoNote[] {
     const notes: RepoNote[] = [];
     for (const line of raw.split("\n")) {
       if (line.trim() === "") continue;
@@ -63,7 +66,36 @@ export class FileRepoMemory implements RepoMemoryStore {
         // torn tail line — skip
       }
     }
-    return notes.reverse().slice(0, limit);
+    return notes;
+  }
+
+  async recent(repo: string, limit: number): Promise<RepoNote[]> {
+    const raw = await readFile(this.#file(repo), "utf8").catch(() => "");
+    return this.#parse(raw).reverse().slice(0, limit);
+  }
+
+  async repos(): Promise<{ repo: string; count: number }[]> {
+    const { readdir } = await import("node:fs/promises");
+    let files: string[];
+    try {
+      files = await readdir(this.#dir);
+    } catch {
+      return [];
+    }
+    const counts = new Map<string, number>();
+    for (const file of files) {
+      if (!file.endsWith(".jsonl")) continue;
+      const raw = await readFile(join(this.#dir, file), "utf8").catch(() => "");
+      for (const note of this.#parse(raw)) counts.set(note.repo, (counts.get(note.repo) ?? 0) + 1);
+    }
+    return [...counts.entries()].map(([repo, count]) => ({ repo, count }));
+  }
+
+  async remove(repo: string, createdAt: string): Promise<void> {
+    const path = this.#file(repo);
+    const raw = await readFile(path, "utf8").catch(() => "");
+    const kept = this.#parse(raw).filter((n) => n.createdAt !== createdAt);
+    await writeFile(path, kept.map((n) => JSON.stringify(n)).join("\n") + (kept.length > 0 ? "\n" : ""));
   }
 }
 
@@ -115,6 +147,23 @@ export class NucleusRepoMemory implements RepoMemoryStore {
       })
       .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
       .slice(0, limit);
+  }
+
+  async repos(): Promise<{ repo: string; count: number }[]> {
+    await this.#ensure();
+    // Aggregate client-side — simple SELECT is the reliably-supported path.
+    const rows = await this.#db.query("SELECT repo FROM ship_memory");
+    const counts = new Map<string, number>();
+    for (const row of rows) {
+      const repo = String(row.repo);
+      counts.set(repo, (counts.get(repo) ?? 0) + 1);
+    }
+    return [...counts.entries()].map(([repo, count]) => ({ repo, count }));
+  }
+
+  async remove(repo: string, createdAt: string): Promise<void> {
+    await this.#ensure();
+    await this.#db.query("DELETE FROM ship_memory WHERE repo = $1 AND created_at = $2", [repo, createdAt]);
   }
 }
 
