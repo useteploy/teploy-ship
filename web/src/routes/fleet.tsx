@@ -1,0 +1,99 @@
+import type { WorkerInfo } from "teploy-ship/runtime";
+
+import { shipRuntime } from "../lib/store.server.js";
+
+export const config = { mode: "app" };
+
+// A worker with no heartbeat for this long is treated as gone (3 missed beats).
+const STALE_MS = 45_000;
+
+interface FleetWorker extends WorkerInfo {
+  online: boolean;
+  ageMs: number;
+}
+
+interface FleetData {
+  workers: FleetWorker[];
+  store: string;
+}
+
+export async function loader(): Promise<FleetData> {
+  const runtime = await shipRuntime();
+  const now = Date.now();
+  const list = await runtime.fleet.list();
+  const workers: FleetWorker[] = list
+    .map((w) => {
+      const seen = new Date(w.lastSeen).getTime();
+      const ageMs = Number.isFinite(seen) ? now - seen : Infinity;
+      return { ...w, online: ageMs < STALE_MS, ageMs };
+    })
+    .sort((a, b) => (a.online !== b.online ? (a.online ? -1 : 1) : a.host.localeCompare(b.host)));
+  return { workers, store: runtime.kind };
+}
+
+function ago(ms: number): string {
+  if (!Number.isFinite(ms)) return "never";
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m ago`;
+  return `${Math.round(m / 60)}h ago`;
+}
+
+const POLL = `
+(function(){var last=null;setInterval(function(){fetch("/fleet",{headers:{"X-Neutron-Data":"true","X-Neutron-Routes":"route:fleet.tsx"}}).then(function(r){return r.ok?r.text():null;}).then(function(t){if(t===null)return;if(last===null){last=t;return;}if(t!==last)location.reload();}).catch(function(){});},6000);})();
+`;
+
+export default function Fleet({ data }: { data: FleetData }) {
+  const online = data.workers.filter((w) => w.online);
+  const activeRuns = online.reduce((n, w) => n + w.activeRuns, 0);
+  const capacity = online.reduce((n, w) => n + w.maxConcurrent, 0);
+  const hosts = new Set(online.map((w) => w.host)).size;
+
+  return (
+    <>
+      <h1 class="page">Fleet</h1>
+      <p class="meta">
+        Workers claim runs from one shared queue via leases, so many can run at once across servers. · store: {data.store}
+        {data.store === "file" && " · file store runs no worker daemon — nothing to show here"}
+      </p>
+
+      {online.length > 0 && (
+        <div class="row-actions" style="gap:24px;flex-wrap:wrap;margin:6px 0 18px">
+          <span><b>{online.length}</b> <span class="meta">worker{online.length === 1 ? "" : "s"} online</span></span>
+          <span><b>{hosts}</b> <span class="meta">host{hosts === 1 ? "" : "s"}</span></span>
+          <span><b>{activeRuns}</b> <span class="meta">runs active</span></span>
+          <span><b>{activeRuns}/{capacity}</b> <span class="meta">capacity</span></span>
+        </div>
+      )}
+
+      {data.workers.length === 0 ? (
+        <p class="empty">No workers reporting.{data.store === "nucleus" ? " Start one with: teploy-ship worker" : ""}</p>
+      ) : (
+        data.workers.map((w) => {
+          const pct = w.maxConcurrent > 0 ? Math.min(100, (w.activeRuns / w.maxConcurrent) * 100) : 0;
+          const full = w.activeRuns >= w.maxConcurrent;
+          return (
+            <div key={w.owner} class="card" style={w.online ? "" : "opacity:.55"}>
+              <div class="row-actions" style="flex-wrap:wrap;gap:12px;align-items:center">
+                <span class={`status ${w.online ? "completed" : "failed"}`}>{w.online ? "online" : "stale"}</span>
+                <span style="font-weight:600">{w.host}</span>
+                <span class="chip">{w.sandbox === "host" ? "runs on host" : "sandbox"}</span>
+                <span style="flex:1" />
+                <span class="meta">{w.activeRuns}/{w.maxConcurrent} slots</span>
+                <span class="meta">seen {ago(w.ageMs)}</span>
+              </div>
+              <div style="margin-top:8px;height:6px;background:var(--bg);border-radius:4px;overflow:hidden">
+                <div style={`height:100%;width:${pct}%;background:${full ? "var(--yellow)" : "var(--green)"}`} />
+              </div>
+              <div class="meta" style="margin-top:8px;font-size:12px">
+                {w.owner}{w.sandbox !== "host" ? ` · ${w.sandbox}` : ""}
+              </div>
+            </div>
+          );
+        })
+      )}
+      <script dangerouslySetInnerHTML={{ __html: POLL }} />
+    </>
+  );
+}

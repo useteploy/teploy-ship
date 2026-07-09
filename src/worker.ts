@@ -3,6 +3,7 @@ import type { WorkflowDefinition, WorkflowEvent } from "@neutron-build/workflow"
 import type { ModelAdapter } from "@neutron-build/ai";
 
 import { randomUUID } from "node:crypto";
+import { hostname } from "node:os";
 
 import { durableAgent } from "./durable.js";
 import type { ExecutorProvider, RunUsage } from "./durable.js";
@@ -166,6 +167,10 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
     ...(options.gitToken !== undefined ? { gitToken: options.gitToken } : {}),
     repoMemory: options.runtime.memory,
   });
+  // Runs actively executing on THIS worker — reported as fleet load. The
+  // scheduler's start/complete hooks fire for every run it claims (intake
+  // auto-launches route through the scheduler too), so this counts them all.
+  let activeRuns = 0;
   const scheduler = new Scheduler({
     workflows: [wf as unknown as WorkflowDefinition<never, unknown>],
     store: options.runtime.store,
@@ -177,8 +182,12 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
       log(`[worker] run ${runId}: ${error instanceof Error ? error.message : String(error)}`),
     onTickError: (error) =>
       log(`[worker] tick failed (store unreachable?): ${error instanceof Error ? error.message : String(error)}`),
-    onRunStart: (runId) => log(`[worker] picked up ${runId}`),
+    onRunStart: (runId) => {
+      activeRuns++;
+      log(`[worker] picked up ${runId}`);
+    },
     onComplete: (runId, outcome) => {
+      activeRuns = Math.max(0, activeRuns - 1);
       log(`[worker] ${runId} → ${outcome.status}`);
       // The index is status-authoritative, but persist the terminal status
       // onto the raw meta doc too so it's self-consistent (accurate for
@@ -266,11 +275,33 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
   }, options.intervalMs ?? 5000);
   intakeTimer.unref?.();
 
+  // Fleet heartbeat: announce this worker's host, sandbox, capacity, and live
+  // load so the dashboard can show the fleet. Staleness (a dead process) is
+  // inferred from lastSeen, so the interval doubles as the liveness signal.
+  const startedAt = new Date().toISOString();
+  const sandboxLabel = process.env.SHIP_SANDBOX_URL ?? "host";
+  const beat = (): Promise<void> =>
+    options.runtime.fleet
+      .heartbeat({
+        owner: options.runtime.owner,
+        host: hostname(),
+        sandbox: sandboxLabel,
+        maxConcurrent: maxConcurrentRuns,
+        activeRuns,
+        startedAt,
+        lastSeen: new Date().toISOString(),
+      })
+      .catch((error) => log(`[worker] fleet heartbeat: ${error instanceof Error ? error.message : String(error)}`));
+  void beat();
+  const heartbeatTimer = setInterval(() => void beat(), 15000);
+  heartbeatTimer.unref?.();
+
   log(`[worker] watching for due runs as ${options.runtime.owner}`);
   return {
     scheduler,
     stop: () => {
       clearInterval(intakeTimer);
+      clearInterval(heartbeatTimer);
       scheduler.stop();
     },
   };
