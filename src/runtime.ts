@@ -14,8 +14,8 @@ import { FileSpendStore, NucleusSpendStore } from "./spend.js";
 import type { SpendStore } from "./spend.js";
 import { FilePolicyStore, NucleusPolicyStore } from "./policies.js";
 import type { PolicyStore } from "./policies.js";
-import { FileFleetStore, NucleusFleetStore } from "./fleet.js";
-import type { FleetStore } from "./fleet.js";
+import { FileFleetStore, NucleusFleetStore, FilePlacementStore, NucleusPlacementStore } from "./fleet.js";
+import type { FleetStore, PlacementStore } from "./fleet.js";
 import { FileRepoMemory, NucleusRepoMemory } from "./repo-memory.js";
 import type { RepoMemoryStore } from "./repo-memory.js";
 import { NucleusPgwire } from "./nucleus-pgwire.js";
@@ -29,8 +29,8 @@ export type { SpendStore, SpendEntry } from "./spend.js";
 export { FileSpendStore, NucleusSpendStore, utcDay } from "./spend.js";
 export type { PolicyStore, SourcePolicy } from "./policies.js";
 export { FilePolicyStore, NucleusPolicyStore } from "./policies.js";
-export type { FleetStore, WorkerInfo } from "./fleet.js";
-export { FileFleetStore, NucleusFleetStore } from "./fleet.js";
+export type { FleetStore, WorkerInfo, PlacementStore } from "./fleet.js";
+export { FileFleetStore, NucleusFleetStore, FilePlacementStore, NucleusPlacementStore } from "./fleet.js";
 export type { RepoMemoryStore, RepoNote } from "./repo-memory.js";
 export { FileRepoMemory, NucleusRepoMemory, loadRepoContext, runNote } from "./repo-memory.js";
 export type { ModelPricing, UsageLike } from "./pricing.js";
@@ -68,6 +68,8 @@ export interface ShipRuntime {
   policies: PolicyStore;
   /** Live registry of workers in the fleet (heartbeat + capacity/load). */
   fleet: FleetStore;
+  /** Which worker host executed each run (fleet placement). */
+  placement: PlacementStore;
   /** Per-repo playbook memory (notes Ship records about its own runs). */
   memory: RepoMemoryStore;
   close(): Promise<void>;
@@ -83,6 +85,7 @@ export function fileRuntime(): ShipRuntime {
     spend: new FileSpendStore(),
     policies: new FilePolicyStore(),
     fleet: new FileFleetStore(),
+    placement: new FilePlacementStore(),
     memory: new FileRepoMemory(),
     execute: (workflow, runId, input) =>
       executeRun({ workflow, runId, store, ...(input !== undefined ? { input } : {}) }),
@@ -140,6 +143,7 @@ export async function nucleusRuntime(url: string, owner: string): Promise<Nucleu
     spend: new NucleusSpendStore(db),
     policies: new NucleusPolicyStore(db),
     fleet: new NucleusFleetStore(db),
+    placement: new NucleusPlacementStore(db),
     memory: new NucleusRepoMemory(db),
     async execute(workflow, runId, input) {
       const outcome = await executeRunExclusive({

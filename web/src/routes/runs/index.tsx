@@ -10,7 +10,11 @@ interface RunsData {
 
 export async function loader(): Promise<RunsData> {
   const runtime = await shipRuntime();
-  const runs = await runtime.listMeta();
+  const [runs, places] = await Promise.all([runtime.listMeta(), runtime.placement.all()]);
+  for (const r of runs) {
+    const host = places[r.runId];
+    if (host !== undefined) r.ranOn = host;
+  }
   // Most-recent first.
   runs.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
   return { runs };

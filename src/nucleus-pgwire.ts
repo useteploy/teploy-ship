@@ -131,13 +131,10 @@ export class NucleusPgwire {
           task TEXT,
           model TEXT,
           workspace TEXT,
-          ran_on TEXT,
           created_at TEXT,
           updated_at TEXT
         )`,
       )
-      // Migrate tables created before ran_on existed; ignore if already added.
-      .then(() => this.#pool.query(`ALTER TABLE ship_docs ADD COLUMN ran_on TEXT`).catch(() => undefined))
       .then(() => undefined);
     return this.#docsReady;
   }
@@ -157,7 +154,6 @@ const COLUMNS: Record<string, string> = {
   task: "task",
   model: "model",
   workspace: "workspace",
-  ranOn: "ran_on",
   createdAt: "created_at",
   updatedAt: "updated_at",
 };

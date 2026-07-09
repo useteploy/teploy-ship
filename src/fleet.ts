@@ -29,6 +29,91 @@ export interface FleetStore {
   list(): Promise<WorkerInfo[]>;
 }
 
+/**
+ * Which worker host executed a run. Kept in its own table (not a ship_docs
+ * column) on purpose: Nucleus can't safely ALTER a populated table to add a
+ * column, but a fresh table whose column exists from CREATE is fine — the
+ * same pattern the fleet/spend/policy stores use.
+ */
+export interface PlacementStore {
+  set(runId: string, host: string): Promise<void>;
+  get(runId: string): Promise<string | null>;
+  all(): Promise<Record<string, string>>;
+}
+
+/** File-backed placement: one JSON mapping runId -> host. */
+export class FilePlacementStore implements PlacementStore {
+  #path: string;
+
+  constructor(dir = stateDir()) {
+    this.#path = join(dir, "placement.json");
+  }
+
+  async #read(): Promise<Record<string, string>> {
+    try {
+      return JSON.parse(await readFile(this.#path, "utf8"));
+    } catch {
+      return {};
+    }
+  }
+
+  async set(runId: string, host: string): Promise<void> {
+    await mkdir(stateDir(), { recursive: true });
+    const all = await this.#read();
+    all[runId] = host;
+    await writeFile(this.#path, JSON.stringify(all, null, 2));
+  }
+
+  async get(runId: string): Promise<string | null> {
+    return (await this.#read())[runId] ?? null;
+  }
+
+  async all(): Promise<Record<string, string>> {
+    return this.#read();
+  }
+}
+
+/** Nucleus-backed placement over a fresh ship_placement table. */
+export class NucleusPlacementStore implements PlacementStore {
+  #db: NucleusPgwire;
+  #ready: Promise<void> | null = null;
+
+  constructor(db: NucleusPgwire) {
+    this.#db = db;
+  }
+
+  #ensure(): Promise<void> {
+    this.#ready ??= this.#db
+      .query(`CREATE TABLE IF NOT EXISTS ship_placement (run_id TEXT, host TEXT)`)
+      .then(() => undefined);
+    return this.#ready;
+  }
+
+  async set(runId: string, host: string): Promise<void> {
+    await this.#ensure();
+    const existing = await this.#db.query("SELECT run_id FROM ship_placement WHERE run_id = $1", [runId]);
+    if (existing.length > 0) {
+      await this.#db.query("UPDATE ship_placement SET host = $1 WHERE run_id = $2", [host, runId]);
+    } else {
+      await this.#db.query("INSERT INTO ship_placement (run_id, host) VALUES ($1, $2)", [runId, host]);
+    }
+  }
+
+  async get(runId: string): Promise<string | null> {
+    await this.#ensure();
+    const rows = await this.#db.query("SELECT host FROM ship_placement WHERE run_id = $1", [runId]);
+    return rows.length > 0 ? String(rows[0]!.host) : null;
+  }
+
+  async all(): Promise<Record<string, string>> {
+    await this.#ensure();
+    const rows = await this.#db.query("SELECT run_id, host FROM ship_placement");
+    const map: Record<string, string> = {};
+    for (const r of rows) map[String(r.run_id)] = String(r.host);
+    return map;
+  }
+}
+
 /** File-backed: one JSON keyed by owner. Single-box only — file mode has no worker. */
 export class FileFleetStore implements FleetStore {
   #path: string;

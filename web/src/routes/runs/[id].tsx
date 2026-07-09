@@ -21,7 +21,12 @@ interface RunData {
 export async function loader({ params }: { params: { id: string } }): Promise<RunData> {
   const runtime = await shipRuntime();
   const runId = params.id;
-  const [meta, events] = await Promise.all([runtime.loadMeta(runId), runtime.store.load(runId)]);
+  const [meta, events, ranOn] = await Promise.all([
+    runtime.loadMeta(runId),
+    runtime.store.load(runId),
+    runtime.placement.get(runId),
+  ]);
+  if (meta !== null && ranOn !== null) meta.ranOn = ranOn;
   const outcome = runOutcome(events);
   const cost = costUSD(meta?.model ?? "", outcome.usage);
   return { meta, items: toTimeline(events), outcome, costUSD: cost, runId, eventCount: events.length };
