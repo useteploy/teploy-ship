@@ -14,6 +14,8 @@ import type { CondenseConfig } from "./memory.js";
 import { loadRepoContext, runNote } from "./repo-memory.js";
 import type { RepoMemoryStore } from "./repo-memory.js";
 import type { SteerStore } from "./steer.js";
+import { PLAN_EVENT } from "./plan.js";
+import type { PlanDecisionPayload } from "./plan.js";
 import type { ApprovalPolicy } from "./approval.js";
 import { formatObservation, systemPrompt } from "./prompt.js";
 
@@ -119,15 +121,8 @@ export interface DurableAgentConfig {
   steer?: Pick<SteerStore, "drain">;
 }
 
-/** The event a plan-preview run parks on. Deliver a PlanDecisionPayload. */
-export const PLAN_EVENT = "plan-approval";
-
-export interface PlanDecisionPayload {
-  approved: boolean;
-  /** Operator-edited plan; when present (and non-empty) it replaces the agent's. */
-  plan?: string;
-  reason?: string;
-}
+export { PLAN_EVENT } from "./plan.js";
+export type { PlanDecisionPayload } from "./plan.js";
 
 const PLAN_REQUEST =
   "Before doing any work: write a short numbered plan for this task — the steps you will take, " +

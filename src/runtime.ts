@@ -37,8 +37,8 @@ export type { RepoMemoryStore, RepoNote } from "./repo-memory.js";
 export { FileRepoMemory, NucleusRepoMemory, loadRepoContext, runNote } from "./repo-memory.js";
 export type { SteerStore, SteerNote } from "./steer.js";
 export { FileSteerStore, NucleusSteerStore } from "./steer.js";
-export { PLAN_EVENT } from "./durable.js";
-export type { PlanDecisionPayload } from "./durable.js";
+export { PLAN_EVENT } from "./plan.js";
+export type { PlanDecisionPayload } from "./plan.js";
 export type { ModelPricing, UsageLike } from "./pricing.js";
 export { costUSD, pricingFor } from "./pricing.js";
 
