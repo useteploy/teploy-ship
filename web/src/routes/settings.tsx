@@ -89,6 +89,20 @@ export async function loader(): Promise<SettingsData> {
         ],
       },
       {
+        title: "Observe (dogfood)",
+        rows: [
+          {
+            label: "emitter",
+            value: (process.env.OBSERVE_URL ?? "") !== "" && (process.env.OBSERVE_API_KEY ?? "") !== "" ? "enabled" : "disabled",
+            ok: (process.env.OBSERVE_URL ?? "") !== "" && (process.env.OBSERVE_API_KEY ?? "") !== "",
+            hint: "each completed run emits an LLM event to Observe",
+          },
+          safeUrl("OBSERVE_URL"),
+          secret("OBSERVE_API_KEY"),
+          value("OBSERVE_SITE", "from key"),
+        ],
+      },
+      {
         title: "Git & access",
         rows: [
           secret("FORGEJO_TOKEN"),

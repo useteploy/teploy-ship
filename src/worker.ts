@@ -12,6 +12,7 @@ import { enqueueRun } from "./runtime.js";
 import type { NucleusShipRuntime } from "./runtime.js";
 import type { IntakeStore, IntakePolicy, IntakeTask } from "./intake.js";
 import type { SourcePolicy } from "./policies.js";
+import { makeObserveEmitter } from "./observe.js";
 import type { SpendStore } from "./spend.js";
 import { utcDay } from "./spend.js";
 import { costUSD } from "./pricing.js";
@@ -168,6 +169,8 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
     repoMemory: options.runtime.memory,
   });
   const host = hostname();
+  // Opt-in: emit each completed run to Observe (no-op unless configured).
+  const observe = makeObserveEmitter(log);
   // Runs actively executing on THIS worker — reported as fleet load. The
   // scheduler's start/complete hooks fire for every run it claims (intake
   // auto-launches route through the scheduler too), so this counts them all.
@@ -192,6 +195,24 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
     onComplete: (runId, outcome) => {
       activeRuns = Math.max(0, activeRuns - 1);
       log(`[worker] ${runId} → ${outcome.status}`);
+      // Dogfood the run into Observe (no-op unless configured).
+      if (observe.enabled) {
+        void Promise.all([options.runtime.loadMeta(runId), options.runtime.store.load(runId)])
+          .then(([meta, events]) => {
+            const usage = readOutcome(events).usage;
+            const started = events.find((e) => e.type === "run-started");
+            const input = (started as { data?: { input?: { repo?: string; pr?: number } } } | undefined)?.data?.input;
+            observe.emitRun({
+              runId,
+              model: meta?.model ?? "",
+              status: outcome.status,
+              ...(usage !== undefined ? { usage } : {}),
+              ...(input?.repo !== undefined ? { repo: input.repo } : {}),
+              ...(input?.pr !== undefined ? { pr: input.pr } : {}),
+            });
+          })
+          .catch(() => {});
+      }
       // The index is status-authoritative, but persist the terminal status
       // onto the raw meta doc too so it's self-consistent (accurate for
       // direct reads / file mode, not just the index-overlaid reads).
