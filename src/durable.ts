@@ -14,6 +14,8 @@ import type { CondenseConfig } from "./memory.js";
 import { loadRepoContext, runNote } from "./repo-memory.js";
 import type { RepoMemoryStore } from "./repo-memory.js";
 import type { SteerStore } from "./steer.js";
+import { formatSearchHits } from "./code-index.js";
+import type { CodeSearch } from "./code-index.js";
 import { PLAN_EVENT } from "./plan.js";
 import type { PlanDecisionPayload } from "./plan.js";
 import type { ApprovalPolicy } from "./approval.js";
@@ -45,6 +47,13 @@ export interface DurableAgentInput {
    * replay without a step-sequence mismatch on any executor.
    */
   steer?: boolean;
+  /**
+   * Codebase indexing: repo runs refresh the Nucleus code index after
+   * clone (a recorded step) and the agent gets the ```search action.
+   * Input-gated like steer so pre-feature runs replay unchanged; the
+   * executing worker still needs codeSearch configured to do real work.
+   */
+  index?: boolean;
 }
 
 export interface DurableAgentOutput {
@@ -119,6 +128,12 @@ export interface DurableAgentConfig {
    * stays identical across executors regardless of their wiring.
    */
   steer?: Pick<SteerStore, "drain">;
+  /**
+   * The Nucleus code index behind ```search and the repo-index refresh.
+   * Like steer, its ABSENCE never changes the step sequence — steps run
+   * whenever input.index is set and record "unavailable" results.
+   */
+  codeSearch?: CodeSearch;
 }
 
 export { PLAN_EVENT } from "./plan.js";
@@ -187,17 +202,32 @@ export function durableAgent(
             : setupRepo(executor, { ref, token, runId: ctx.runId });
         });
       }
+      const repoKey = input.repo !== undefined ? repoKeyOf(input.repo) : null;
       // Playbook + recent-run notes, recorded so replay never re-reads
       // a tree or memory that has since changed.
       let repoContext = "";
-      if (checkout !== null && input.repo !== undefined) {
-        const repoKey = repoKeyOf(input.repo);
+      if (checkout !== null && repoKey !== null) {
         repoContext = await ctx.step("repo-context", () =>
           loadRepoContext(executor, {
             repo: repoKey,
             ...(config.repoMemory !== undefined ? { memory: config.repoMemory } : {}),
           }),
         );
+      }
+      // Refresh the Nucleus code index for this repo (incremental, hash
+      // diff). Input-gated; a worker without codeSearch records "disabled"
+      // so the step sequence never depends on executor wiring. Advisory —
+      // an index failure degrades ```search, never the run.
+      if (input.index === true && checkout !== null && repoKey !== null) {
+        await ctx.step("repo-index", async () => {
+          if (config.codeSearch === undefined) return "disabled (no code index configured on this worker)";
+          try {
+            const stats = await config.codeSearch.refresh(executor, repoKey);
+            return `${stats.indexed} files indexed (${stats.chunks} chunks), ${stats.removed} removed of ${stats.files} tracked${stats.capped ? " (capped)" : ""}`;
+          } catch (error) {
+            return `index refresh failed: ${error instanceof Error ? error.message : String(error)}`;
+          }
+        });
       }
       const task =
         checkout !== null
@@ -206,7 +236,8 @@ export function durableAgent(
             : fixPrompt({ task: input.task, branch: checkout.branch, base: checkout.base, context: repoContext })
           : input.task;
 
-      let messages: Message[] = [{ role: "system", content: systemPrompt({ workdir, task }) }];
+      const searchable = input.index === true && checkout !== null && config.codeSearch !== undefined;
+      let messages: Message[] = [{ role: "system", content: systemPrompt({ workdir, task, search: searchable }) }];
       let anySuccessfulAction = false;
       let finishNudged = false;
       let failNudges = 0;
@@ -346,6 +377,24 @@ export function durableAgent(
                 ? action.message
                 : "No code block found. Respond with exactly one fenced code block, or a ```finish block if done.",
           });
+          continue;
+        }
+
+        // Semantic retrieval: worker-side (Nucleus + embedder), recorded —
+        // replay returns the recorded hits on any executor, wired or not.
+        if (action.kind === "search") {
+          const query = action.query;
+          const observation = await ctx.step(`turn-${turn}-search`, async () => {
+            if (config.codeSearch === undefined || repoKey === null) {
+              return "Code search is not available in this run. Use grep/rg via ```bash instead.";
+            }
+            try {
+              return formatSearchHits(query, await config.codeSearch.search(repoKey, query));
+            } catch (error) {
+              return `Code search failed (${error instanceof Error ? error.message : String(error)}). Use grep/rg via \`\`\`bash instead.`;
+            }
+          });
+          messages.push({ role: "user", content: truncate(observation, maxObs) });
           continue;
         }
 

@@ -329,6 +329,101 @@ test("repo runs inject the playbook + memory into the prompt and record a note a
   assert.match(notes[0]!.note, /check the build → no PR/);
 });
 
+test("index-enabled repo runs refresh the code index and answer ```search from it", async () => {
+  // bare remote, mirroring the playbook test's fixture
+  const bareDir = await mkdtemp(join(tmpdir(), "durable-idx-bare-"));
+  const seedDir = await mkdtemp(join(tmpdir(), "durable-idx-seed-"));
+  const seeder = new LocalExecutor({ root: seedDir });
+  await seeder.exec(
+    `git init -q -b main . && git config user.email t@t && git config user.name t && printf 'export function retryBackoff() {}\\n' > lib.ts && git add -A && git commit -qm seed && git clone -q --bare . ${bareDir}/owner/repo.git`,
+  );
+
+  const refreshed: string[] = [];
+  const queries: string[] = [];
+  const codeSearch = {
+    async refresh(_executor: AgentExecutor, repo: string) {
+      refreshed.push(repo);
+      return { files: 1, indexed: 1, removed: 0, chunks: 1, capped: false };
+    },
+    async search(repo: string, query: string) {
+      queries.push(`${repo}:${query}`);
+      return [{ path: "lib.ts", start: 1, end: 1, text: "export function retryBackoff() {}", distance: 0.05 }];
+    },
+  };
+
+  const systems: string[] = [];
+  const model: ModelAdapter = {
+    provider: "scripted",
+    modelId: "s1",
+    async doGenerate(options): Promise<AdapterGenerateResult> {
+      systems.push(String(options.messages[0]?.content ?? ""));
+      const users = options.messages.filter((m) => m.role === "user").map((m) => String(m.content)).join("\n");
+      const asst = options.messages.filter((m) => m.role === "assistant").length;
+      const text =
+        asst === 0
+          ? "```search\nwhere is retry backoff?\n```"
+          : users.includes("lib.ts:1-1")
+            ? "```finish\nfound it in lib.ts\n```"
+            : "```bash\necho lost\n```";
+      return { content: [{ type: "text", text }], finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, raw: null };
+    },
+    async *doStream() {
+      throw new Error("unused");
+    },
+  };
+
+  const work = await mkdtemp(join(tmpdir(), "durable-idx-work-"));
+  const provider: ExecutorProvider = {
+    async create() {
+      return { handle: work };
+    },
+    attach(handle: string) {
+      return new LocalExecutor({ root: handle });
+    },
+  };
+
+  const wf = durableAgent({ model, executor: provider, workdir: ".", codeSearch });
+  const store = new MemoryEventStore();
+  const outcome = await executeRun({
+    workflow: wf,
+    runId: "run-idx",
+    store,
+    input: { task: "find retry backoff", repo: `file://${bareDir}/owner/repo.git`, index: true },
+  });
+  assert.equal(outcome.status, "completed");
+  assert.deepEqual(refreshed, ["owner/repo"], "the clone was indexed once, repo-scoped");
+  assert.deepEqual(queries, ["owner/repo:where is retry backoff?"]);
+  assert.match(systems[0] ?? "", /```search/, "the prompt advertises search when indexing is on");
+
+  const events = await store.load("run-idx");
+  assert.ok(events.some((e) => e.type === "step-completed" && e.name === "repo-index"));
+  assert.ok(events.some((e) => e.type === "step-completed" && e.name === "turn-0-search"));
+
+  // Without codeSearch config the same input degrades gracefully: steps
+  // still run (recording "unavailable"), the prompt doesn't advertise it.
+  const plainModel = reactiveModel(["```finish\nno search here\n```", "```finish\nno search here\n```"]);
+  const work2 = await mkdtemp(join(tmpdir(), "durable-idx-work2-"));
+  const provider2: ExecutorProvider = {
+    async create() {
+      return { handle: work2 };
+    },
+    attach(handle: string) {
+      return new LocalExecutor({ root: handle });
+    },
+  };
+  const wf2 = durableAgent({ model: plainModel.model, executor: provider2, workdir: "." });
+  const store2 = new MemoryEventStore();
+  const done2 = await executeRun({
+    workflow: wf2,
+    runId: "run-idx2",
+    store: store2,
+    input: { task: "t", repo: `file://${bareDir}/owner/repo.git`, index: true },
+  });
+  assert.equal(done2.status, "completed");
+  const idx2 = (await store2.load("run-idx2")).find((e) => e.type === "step-completed" && e.name === "repo-index");
+  assert.match(String((idx2?.data as { result?: unknown })?.result ?? ""), /disabled/);
+});
+
 test("pre-telemetry logs (bare-string think steps) still replay", async () => {
   // this file's reactiveModel consumes turns per LIVE call (process-local
   // index) — replayed turns consume nothing, so the script starts at the

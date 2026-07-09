@@ -28,7 +28,9 @@ import { formatReport, runEval } from "./eval.js";
 import type { EvalTask } from "./eval.js";
 import { stateDir } from "./run-store.js";
 import { fileRuntime, nucleusRuntime } from "./runtime.js";
-import type { ShipRuntime } from "./runtime.js";
+import type { NucleusShipRuntime, ShipRuntime } from "./runtime.js";
+import { NucleusCodeIndex } from "./code-index.js";
+import type { CodeSearch } from "./code-index.js";
 import { startWorker } from "./worker.js";
 import { costUSD } from "./pricing.js";
 import { builtinSuite } from "./tasks.js";
@@ -363,6 +365,26 @@ function durableProvider(args: ReturnType<typeof parseArgs>, config: Config): Ex
   };
 }
 
+/**
+ * The Nucleus code index, when this executor can do real work with it:
+ * a nucleus runtime + an embedding model (SHIP_EMBED_MODEL, served from
+ * SHIP_EMBED_URL — any OpenAI-compatible /v1/embeddings endpoint — with
+ * SHIP_EMBED_KEY, falling back to the gateway key). Absent config just
+ * means repo-index records "disabled" and ```search points at grep.
+ */
+function resolveCodeSearch(runtime: ShipRuntime): CodeSearch | undefined {
+  const modelId = process.env.SHIP_EMBED_MODEL;
+  if (modelId === undefined || modelId === "" || runtime.kind !== "nucleus") return undefined;
+  const baseURL = process.env.SHIP_EMBED_URL ?? process.env.AI_GATEWAY_URL;
+  const apiKey = process.env.SHIP_EMBED_KEY ?? process.env.AI_GATEWAY_KEY ?? process.env.OPENAI_API_KEY;
+  const provider = createOpenAI({
+    provider: "embeddings",
+    ...(baseURL !== undefined && baseURL !== "" ? { baseURL } : {}),
+    ...(apiKey !== undefined && apiKey !== "" ? { apiKey } : {}),
+  });
+  return new NucleusCodeIndex((runtime as NucleusShipRuntime).db, provider.embedding(modelId));
+}
+
 async function executePass(
   runtime: ShipRuntime,
   runId: string,
@@ -381,11 +403,16 @@ async function executePass(
     // the honest working directory to show the agent.
     workdir: usingSandbox ? "/work" : ".",
     steer: runtime.steer,
+    ...((): { codeSearch?: CodeSearch } => {
+      const codeSearch = resolveCodeSearch(runtime);
+      return codeSearch !== undefined ? { codeSearch } : {};
+    })(),
   });
   // Input only matters on a fresh log (resume replays the recorded input).
   const outcome = await runtime.execute(wf, runId, {
     task,
     steer: true,
+    index: true,
     ...(opts?.plan === true ? { plan: true } : {}),
   });
   if (outcome === null) return null; // another executor holds the lease
@@ -571,12 +598,14 @@ async function workerCommand(rest: string[]): Promise<void> {
   // policies via SHIP_INTAKE_POLICIES (JSON, e.g. {"forgejo":"auto"}) merged
   // over the file's; auto is still earned per source, never a default.
   const intakePolicies = resolveIntakePolicies(config);
+  const codeSearch = resolveCodeSearch(runtime);
   const worker = startWorker({
     runtime: runtime as import("./runtime.js").NucleusShipRuntime,
     model: resolveModel(modelId),
     modelId,
     executor: durableProvider(args, config),
     workdir: usingSandbox ? "/work" : ".",
+    ...(codeSearch !== undefined ? { codeSearch } : {}),
     intervalMs: numFlag(args.flags.interval, "interval", 5) * 1000,
     ...(gitToken !== undefined ? { gitToken } : {}),
     ...(intakePolicies !== undefined ? { intakePolicies } : {}),

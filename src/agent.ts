@@ -193,12 +193,16 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
       return { status: "finished", summary: action.message, steps, messages, usage };
     }
 
-    if (action.kind === "none" || action.kind === "invalid") {
+    if (action.kind === "none" || action.kind === "invalid" || action.kind === "search") {
       // No runnable action (or a malformed one): feed the reason back.
+      // ```search is a durable-run capability (it needs the Nucleus code
+      // index); the live loop points the model at grep instead.
       const nudge =
         action.kind === "invalid"
           ? action.message
-          : "No code block found. Respond with exactly one fenced code block (bash/python/edit/create), or a ```finish block if done.";
+          : action.kind === "search"
+            ? "Code search is not available in this session. Use grep/rg via ```bash instead."
+            : "No code block found. Respond with exactly one fenced code block (bash/python/edit/create), or a ```finish block if done.";
       messages.push({ role: "user", content: nudge });
       steps.push({ index, thought, action });
       emit({ type: "observation", step: index, text: nudge });

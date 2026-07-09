@@ -37,6 +37,8 @@ export type { RepoMemoryStore, RepoNote } from "./repo-memory.js";
 export { FileRepoMemory, NucleusRepoMemory, loadRepoContext, runNote } from "./repo-memory.js";
 export type { SteerStore, SteerNote } from "./steer.js";
 export { FileSteerStore, NucleusSteerStore } from "./steer.js";
+export type { CodeSearch, CodeSearchHit, RefreshStats } from "./code-index.js";
+export { NucleusCodeIndex } from "./code-index.js";
 export { PLAN_EVENT } from "./plan.js";
 export type { PlanDecisionPayload } from "./plan.js";
 export type { ModelPricing, UsageLike } from "./pricing.js";
@@ -59,7 +61,7 @@ export interface ShipRuntime {
   execute(
     workflow: WorkflowDefinition<{ task: string }, unknown>,
     runId: string,
-    input?: { task: string; repo?: string; pr?: number; plan?: boolean; steer?: boolean },
+    input?: { task: string; repo?: string; pr?: number; plan?: boolean; steer?: boolean; index?: boolean },
   ): Promise<RunOutcome | null>;
   saveMeta(meta: RunMeta): Promise<void>;
   loadMeta(runId: string): Promise<RunMeta | null>;
@@ -112,6 +114,8 @@ export interface NucleusShipRuntime extends ShipRuntime {
   index: RunIndex;
   leases: LeaseManager;
   owner: string;
+  /** The raw pgwire adapter — the code index builds on it directly. */
+  db: NucleusPgwire;
 }
 
 export async function nucleusRuntime(url: string, owner: string): Promise<NucleusShipRuntime> {
@@ -148,6 +152,7 @@ export async function nucleusRuntime(url: string, owner: string): Promise<Nucleu
     index,
     leases,
     owner,
+    db,
     intake: new NucleusIntakeStore(db),
     spend: new NucleusSpendStore(db),
     policies: new NucleusPolicyStore(db),
@@ -212,9 +217,12 @@ export async function enqueueRun(
         ...(options.repo !== undefined ? { repo: options.repo } : {}),
         ...(options.pr !== undefined ? { pr: options.pr } : {}),
         ...(options.plan === true ? { plan: true } : {}),
-        // Every newly-enqueued run is steerable; runs enqueued before the
-        // flag existed replay without steer steps (input-gated in durable).
+        // Every newly-enqueued run is steerable and index-eligible; runs
+        // enqueued before these flags existed replay without the extra
+        // steps (input-gated in durable). The executing worker's config
+        // decides whether indexing actually happens.
         steer: true,
+        index: true,
       },
     },
   });

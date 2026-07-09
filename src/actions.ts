@@ -7,6 +7,7 @@ export type Action =
   | { kind: "python"; code: string }
   | { kind: "edit"; file: string; search: string; replace: string }
   | { kind: "create"; file: string; content: string }
+  | { kind: "search"; query: string } // semantic code retrieval (repo runs with an index)
   | { kind: "finish"; message: string }
   | { kind: "invalid"; message: string } // recognized but malformed — feed the error back
   | { kind: "none" }; // no actionable block found — the model must retry
@@ -71,6 +72,11 @@ function parseFencedAction(text: string): { index: number; action: Action } | nu
       if (arg === "") return { index, action: { kind: "invalid", message: "```create needs a file path: ```create path/to/file" } };
       return { index, action: { kind: "create", file: arg, content: code } };
     }
+    if (lang === "search") {
+      const query = code.trim();
+      if (query === "") return { index, action: { kind: "invalid", message: "```search block needs a query in its body, e.g.\n```search\nwhere is retry backoff handled?\n```" } };
+      return { index, action: { kind: "search", query } };
+    }
     if (PYTHON_LANGS.has(lang)) {
       return { index, action: { kind: "python", code } };
     }
@@ -119,6 +125,8 @@ export function describeAction(action: Action): string {
       return `edit: ${action.file}`;
     case "create":
       return `create: ${action.file}`;
+    case "search":
+      return `search: ${firstLine(action.query)}`;
     case "finish":
       return "finish";
     case "invalid":

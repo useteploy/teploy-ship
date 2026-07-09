@@ -15,6 +15,7 @@ import type { SourcePolicy } from "./policies.js";
 import { makeObserveEmitter } from "./observe.js";
 import type { SpendStore } from "./spend.js";
 import { utcDay } from "./spend.js";
+import type { CodeSearch } from "./code-index.js";
 import { costUSD } from "./pricing.js";
 
 export type { IntakePolicy } from "./intake.js";
@@ -33,6 +34,8 @@ export interface WorkerOptions {
   gitToken?: string;
   /** Per-source intake policies; unlisted sources default to "propose". */
   intakePolicies?: Record<string, IntakePolicy>;
+  /** Nucleus code index behind repo-index refresh + the ```search action. */
+  codeSearch?: CodeSearch;
   /** Auto-launches allowed per source per day (default 10, process-local). */
   dailyAutoLimit?: number;
   /**
@@ -179,6 +182,7 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
     ...(options.gitToken !== undefined ? { gitToken: options.gitToken } : {}),
     repoMemory: options.runtime.memory,
     steer: options.runtime.steer,
+    ...(options.codeSearch !== undefined ? { codeSearch: options.codeSearch } : {}),
   });
   const host = hostname();
   // Opt-in: emit each completed run to Observe (no-op unless configured).

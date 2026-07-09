@@ -5,7 +5,17 @@
  * ~30% of agent quality that lives in prompt/recovery tuning is a
  * later-milestone concern, but the protocol has to be unambiguous now.
  */
-export function systemPrompt(options: { workdir: string; task: string }): string {
+export function systemPrompt(options: { workdir: string; task: string; search?: boolean }): string {
+  const searchDoc =
+    options.search === true
+      ? `
+
+- Search the repository's semantic code index (fast — prefer this over grepping around when you need to LOCATE something):
+\`\`\`search
+where is the retry backoff for failed deploys handled?
+\`\`\`
+`
+      : "";
   return `You are Teploy Agent, an autonomous coding agent working in a sandboxed Linux environment.
 
 Your working directory is ${options.workdir}. You act by writing code, one action per turn.
@@ -23,7 +33,7 @@ ls -la
 \`\`\`python
 data = load_something()
 print(len(data))
-\`\`\`
+\`\`\`${searchDoc}
 
 - Edit a file surgically (the SEARCH text must match the file exactly, ONCE — copy it verbatim, whitespace included):
 \`\`\`edit path/to/file.py

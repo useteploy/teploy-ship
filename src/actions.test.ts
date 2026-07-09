@@ -24,6 +24,14 @@ test("finish carries the summary", () => {
   });
 });
 
+test("parses a search action; empty query is invalid", () => {
+  assert.deepEqual(parseAction("Let me find it.\n```search\nwhere is retry backoff handled?\n```"), {
+    kind: "search",
+    query: "where is retry backoff handled?",
+  });
+  assert.equal(parseAction("```search\n\n```").kind, "invalid");
+});
+
 test("takes the FIRST actionable block (one action per turn)", () => {
   const action = parseAction("```bash\nfirst\n```\nthen\n```bash\nsecond\n```");
   assert.deepEqual(action, { kind: "bash", code: "first\n" });
