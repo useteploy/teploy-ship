@@ -5,3 +5,7 @@ e2e-tmp.mjs
 web/node_modules/
 web/dist/
 deploy/vendor/
+
+# Private notes (never committed)
+_internal/
+INTERNAL.md

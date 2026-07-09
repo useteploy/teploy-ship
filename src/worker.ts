@@ -67,7 +67,7 @@ function readOutcome(events: WorkflowEvent[]): { terminal: boolean; usage?: RunU
 }
 
 export interface IntakeSweepDeps {
-  intake: Pick<IntakeStore, "list" | "setState">;
+  intake: Pick<IntakeStore, "list" | "setState" | "claim">;
   spend: SpendStore;
   policies: Record<string, IntakePolicy>;
   dailyAutoLimit: number;
@@ -142,7 +142,18 @@ export async function sweepIntake(deps: IntakeSweepDeps): Promise<void> {
       }
     }
 
-    const runId = await deps.launch(task);
+    // Claim BEFORE launching: two workers sweeping the same proposed list
+    // must collapse to one run. Losing the claim just means another worker
+    // (or the web queue) got there first — skip, count nothing.
+    if (!(await deps.intake.claim(task.taskId))) continue;
+    let runId: string;
+    try {
+      runId = await deps.launch(task);
+    } catch (error) {
+      // Release the claim so a later sweep retries; then surface the error.
+      await deps.intake.setState(task.taskId, "proposed");
+      throw error;
+    }
     await deps.intake.setState(task.taskId, "launched", runId);
     deps.inFlight.set(runId, task.source);
     deps.launchedToday.set(task.source, { day: today, count: count + 1 });

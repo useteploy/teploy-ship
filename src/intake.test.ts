@@ -33,3 +33,21 @@ test("intake: propose dedupes on key, dismiss frees the key, launch links the ru
   const reopened = await store.propose({ source: "forgejo", kind: "issue", title: "y again", dedupeKey: "forgejo:o/r#2" });
   assert.equal(reopened.created, true);
 });
+
+test("intake: claim wins once on a proposed task and refuses everything else", async () => {
+  const store = new FileIntakeStore(await mkdtemp(join(tmpdir(), "intake-")));
+  const { task } = await store.propose({ source: "forgejo", kind: "issue", title: "z", dedupeKey: "forgejo:o/r#9" });
+
+  assert.equal(await store.claim(task.taskId), true, "first claim wins");
+  assert.equal((await store.get(task.taskId))?.state, "launched");
+  assert.equal(await store.claim(task.taskId), false, "a claimed task cannot be claimed again");
+
+  // Releasing (launch failed) makes it claimable again.
+  await store.setState(task.taskId, "proposed");
+  assert.equal(await store.claim(task.taskId), true);
+
+  const { task: gone } = await store.propose({ source: "forgejo", kind: "issue", title: "w", dedupeKey: "forgejo:o/r#10" });
+  await store.setState(gone.taskId, "dismissed");
+  assert.equal(await store.claim(gone.taskId), false, "dismissed tasks are not claimable");
+  assert.equal(await store.claim("task-missing"), false, "unknown ids are not claimable");
+});

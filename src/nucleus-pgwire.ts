@@ -31,6 +31,12 @@ export class NucleusPgwire {
     return result.rows as Record<string, unknown>[];
   }
 
+  /** Parameterized statement returning the affected-row count (conditional claims). */
+  async exec(sql: string, params: unknown[] = []): Promise<number> {
+    const result = await this.#pool.query(sql, params);
+    return result.rowCount ?? 0;
+  }
+
   async #fetchval<T>(sql: string, params: unknown[] = []): Promise<T | null> {
     const result = await this.#pool.query(sql, params);
     const row = result.rows[0] as Record<string, unknown> | undefined;

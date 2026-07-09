@@ -57,6 +57,14 @@ export interface IntakeStore {
   list(state?: IntakeTask["state"]): Promise<IntakeTask[]>;
   get(taskId: string): Promise<IntakeTask | null>;
   setState(taskId: string, state: IntakeTask["state"], runId?: string): Promise<void>;
+  /**
+   * Atomically transition proposed → launched; true iff THIS caller won.
+   * Every launcher (worker sweep, web queue) must claim before enqueueing
+   * a run, so two workers racing on the same proposed task collapse to
+   * one run instead of duplicate PRs. A claimer whose launch then fails
+   * must setState back to "proposed" to release the claim.
+   */
+  claim(taskId: string): Promise<boolean>;
 }
 
 function newTask(input: ProposeInput): IntakeTask {
@@ -129,6 +137,21 @@ export class FileIntakeStore implements IntakeStore {
     if (runId !== undefined) task.runId = runId;
     task.updatedAt = new Date().toISOString();
     await this.#write(task);
+  }
+
+  /**
+   * Best-effort in file mode: read-check-write is not atomic across
+   * processes, but file mode is the single-process dev path — multi-worker
+   * deployments run on the Nucleus store, where claim is a conditional
+   * UPDATE.
+   */
+  async claim(taskId: string): Promise<boolean> {
+    const task = await this.get(taskId);
+    if (task === null || task.state !== "proposed") return false;
+    task.state = "launched";
+    task.updatedAt = new Date().toISOString();
+    await this.#write(task);
+    return true;
   }
 }
 
@@ -241,5 +264,15 @@ export class NucleusIntakeStore implements IntakeStore {
         taskId,
       ]);
     }
+  }
+
+  /** Conditional UPDATE: the row count says whether this caller won the race. */
+  async claim(taskId: string): Promise<boolean> {
+    await this.#ensure();
+    const claimed = await this.#db.exec(
+      "UPDATE ship_tasks SET state = 'launched', updated_at = $1 WHERE task_id = $2 AND state = 'proposed'",
+      [new Date().toISOString(), taskId],
+    );
+    return claimed === 1;
   }
 }

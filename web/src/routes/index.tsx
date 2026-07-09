@@ -55,14 +55,22 @@ export async function action({ request }: { request: Request }): Promise<Respons
       await runtime.intake.setState(taskId, "dismissed");
       return redirect("/");
     }
+    // Claim first: a worker's auto-sweep may race this click; the claim's
+    // conditional update decides who launches (the loser is a no-op).
+    if (!(await runtime.intake.claim(taskId))) return redirect("/");
     const runId = `run-${randomUUID().slice(0, 8)}`;
-    await enqueueRun(runtime, {
-      runId,
-      task: task.pr !== undefined ? (task.detail ?? task.title) : task.detail !== undefined ? `${task.title}\n\n${task.detail}` : task.title,
-      model: defaultModel(),
-      ...(task.repo !== undefined ? { repo: task.repo } : {}),
-      ...(task.pr !== undefined ? { pr: task.pr } : {}),
-    });
+    try {
+      await enqueueRun(runtime, {
+        runId,
+        task: task.pr !== undefined ? (task.detail ?? task.title) : task.detail !== undefined ? `${task.title}\n\n${task.detail}` : task.title,
+        model: defaultModel(),
+        ...(task.repo !== undefined ? { repo: task.repo } : {}),
+        ...(task.pr !== undefined ? { pr: task.pr } : {}),
+      });
+    } catch (error) {
+      await runtime.intake.setState(taskId, "proposed");
+      throw error;
+    }
     await runtime.intake.setState(taskId, "launched", runId);
     return redirect(`/runs/${runId}`);
   }
