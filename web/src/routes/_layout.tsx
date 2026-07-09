@@ -165,6 +165,7 @@ export default function Layout({ children }: { children: ComponentChildren }) {
         <nav class="nav">
           <a href="/">Inbox</a>
           <a href="/runs">Runs</a>
+          <a href="/reviews">Reviews</a>
           <a href="/fleet">Fleet</a>
           <a href="/knowledge">Knowledge</a>
           <a href="/sources">Sources</a>

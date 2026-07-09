@@ -10,6 +10,7 @@ declare module "@neutron-build/core" {
     | "/hooks/github"
     | "/knowledge"
     | "/login"
+    | "/reviews"
     | "/runs"
     | `/runs/${string}`
     | "/settings"
