@@ -50,6 +50,10 @@ accessories:
       NUCLEUS_ALLOW_NO_AUTH: "1"
       NUCLEUS_ALLOW_INSECURE_CLUSTER: "1"
       NUCLEUS_ALLOW_INSECURE_REPLICATION: "1"
+      # Engine-wide memory budget (honored by nucleus >= 56a7f59; the engine
+      # rejects writes at 90% RSS of this, and its 512 MB default is too
+      # tight once real data is resident). Smoke box has 4 GB total.
+      NUCLEUS_MAX_MEMORY_MB: "1024"
     volumes:
       nucleus-data: /data
 
