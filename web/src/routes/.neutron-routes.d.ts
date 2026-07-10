@@ -8,6 +8,8 @@ declare module "@neutron-build/core" {
     | "/health"
     | "/hooks/forgejo"
     | "/hooks/github"
+    | "/hooks/linear"
+    | "/hooks/slack"
     | "/knowledge"
     | "/login"
     | "/reviews"

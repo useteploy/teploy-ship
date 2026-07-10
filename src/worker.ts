@@ -13,6 +13,7 @@ import type { NucleusShipRuntime } from "./runtime.js";
 import type { IntakeStore, IntakePolicy, IntakeTask } from "./intake.js";
 import type { SourcePolicy } from "./policies.js";
 import { makeObserveEmitter } from "./observe.js";
+import { slackNotifier } from "./notify.js";
 import type { SpendStore } from "./spend.js";
 import { utcDay } from "./spend.js";
 import type { CodeSearch } from "./code-index.js";
@@ -190,6 +191,8 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
   const host = hostname();
   // Opt-in: emit each completed run to Observe (no-op unless configured).
   const observe = makeObserveEmitter(log);
+  // Opt-in: ping Slack when a run parks or settles (SHIP_SLACK_WEBHOOK_URL).
+  const notify = slackNotifier({ log });
   // Runs actively executing on THIS worker — reported as fleet load. A Set keyed
   // by runId (not a counter) so it self-corrects: onRunStart fires only after we
   // win the lease, and onComplete OR onError removes it — a run that throws
@@ -218,6 +221,25 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
     onComplete: (runId, outcome) => {
       inflight.delete(runId);
       log(`[worker] ${runId} → ${outcome.status}`);
+      if (notify.enabled) {
+        if (outcome.status === "waiting") {
+          notify.runEvent({
+            runId,
+            status: outcome.status,
+            ...(outcome.eventName !== undefined ? { eventName: outcome.eventName } : {}),
+          });
+        } else {
+          // Terminal: include the PR link when the run opened one.
+          void options.runtime.store
+            .load(runId)
+            .then((events) => {
+              const done = events.find((e) => e.type === "run-completed");
+              const pr = (done?.data as { output?: { pr?: string } } | undefined)?.output?.pr;
+              notify.runEvent({ runId, status: outcome.status, ...(pr !== undefined ? { pr } : {}) });
+            })
+            .catch(() => notify.runEvent({ runId, status: outcome.status }));
+        }
+      }
       // Dogfood the run into Observe (no-op unless configured).
       if (observe.enabled) {
         void Promise.all([options.runtime.loadMeta(runId), options.runtime.store.load(runId)])

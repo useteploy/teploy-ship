@@ -1,3 +1,5 @@
+import { ciFixTaskFromWorkflowRun } from "teploy-ship/runtime";
+
 import { shipRuntime } from "../../lib/store.server.js";
 
 export const config = { mode: "app" };
@@ -34,6 +36,15 @@ export async function action({ request }: { request: Request }): Promise<Respons
   }
 
   const event = request.headers.get("x-gitea-event") ?? request.headers.get("x-forgejo-event") ?? "";
+  // A5: a failed workflow run on one of Ship's own PRs → review task
+  // (Forgejo's workflow_run payload mirrors GitHub's).
+  if (event === "workflow_run") {
+    const input = ciFixTaskFromWorkflowRun(JSON.parse(body));
+    if (input === null) return json(200, { ok: true, skipped: "not a failed run on a ship PR" });
+    const runtime = await shipRuntime();
+    const { created, task } = await runtime.intake.propose(input);
+    return json(200, { ok: true, taskId: task.taskId, created });
+  }
   if (event === "issue_comment") return handleComment(body);
   if (event !== "issues") return json(200, { ok: true, skipped: `event ${event}` });
 

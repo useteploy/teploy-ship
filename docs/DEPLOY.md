@@ -56,6 +56,28 @@ and a per-source daily spend budget (`SHIP_DAILY_BUDGET_USD`).
 PR review loop: any non-`[teploy-ship]` comment on a `ship`-labeled PR
 proposes a follow-up task; the run pushes to the PR branch and replies.
 
+### Slack and Linear
+
+- **Slack**: create an app with an `app_mention` event subscription
+  pointed at `/hooks/slack`, set `SHIP_SLACK_SIGNING_SECRET` (the app's
+  signing secret), and invite the bot. `@ship fix the flaky test
+  repo:https://…` proposes a task (the `repo:` token binds it to a
+  repository; without one it's a workspace task).
+- **Linear**: add a webhook for Issue events at `/hooks/linear` with
+  `SHIP_LINEAR_SIGNING_SECRET`. Issues labeled `ship` become tasks;
+  put `repo:<clone-url>` in the description to bind a repository.
+- **Notifications**: set `SHIP_SLACK_WEBHOOK_URL` (an incoming-webhook
+  URL) and `SHIP_PUBLIC_URL` — Ship pings the channel when a run parks
+  for approval/plan review and when it completes or fails, with a link.
+
+### CI auto-fix
+
+Subscribe the repo's webhook to **workflow run** events (same endpoint,
+same secret). A failed CI run on one of Ship's own PRs (head branch
+`ship/…`) proposes a review task carrying the failure context; the run
+reproduces the failure, fixes it on the PR branch, and pushes — deduped
+per failing SHA, so one red check is one fix attempt.
+
 ## 3. Sandbox (recommended for anything untrusted)
 
 The worker's default local executor is fine for code-fix tasks; the
