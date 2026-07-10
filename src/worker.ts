@@ -32,6 +32,8 @@ export interface WorkerOptions {
   intervalMs?: number;
   /** Deploy token for repo runs (clone/push/PR). */
   gitToken?: string;
+  /** Token used instead for github.com repos (SHIP_GITHUB_TOKEN). */
+  githubToken?: string;
   /** Per-source intake policies; unlisted sources default to "propose". */
   intakePolicies?: Record<string, IntakePolicy>;
   /** Nucleus code index behind repo-index refresh + the ```search action. */
@@ -180,6 +182,7 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
     approveAction: defaultApprovalPolicy,
     workdir: options.workdir,
     ...(options.gitToken !== undefined ? { gitToken: options.gitToken } : {}),
+    ...(options.githubToken !== undefined ? { githubToken: options.githubToken } : {}),
     repoMemory: options.runtime.memory,
     steer: options.runtime.steer,
     ...(options.codeSearch !== undefined ? { codeSearch: options.codeSearch } : {}),

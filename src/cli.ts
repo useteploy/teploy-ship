@@ -91,6 +91,8 @@ interface Config {
   store?: string;
   nucleusUrl?: string;
   gitToken?: string;
+  /** Token used instead for github.com repos (also SHIP_GITHUB_TOKEN). */
+  githubToken?: string;
   /** Per-source intake policies for the worker: { forgejo: "auto", … } */
   intake?: Record<string, "ignore" | "propose" | "auto">;
   /** Worker: max simultaneously-executing auto-launched runs (default 3). */
@@ -597,6 +599,7 @@ async function workerCommand(rest: string[]): Promise<void> {
   const modelId = (args.flags.model as string) ?? config.model ?? "anthropic/claude-sonnet-5";
   const usingSandbox = resolveSandbox(args, config) !== undefined;
   const gitToken = (args.flags["git-token"] as string) ?? process.env.SHIP_GIT_TOKEN ?? config.gitToken;
+  const githubToken = process.env.SHIP_GITHUB_TOKEN ?? config.githubToken;
   // A teploy-deployed worker has no config file — everything is env. Intake
   // policies via SHIP_INTAKE_POLICIES (JSON, e.g. {"forgejo":"auto"}) merged
   // over the file's; auto is still earned per source, never a default.
@@ -611,6 +614,7 @@ async function workerCommand(rest: string[]): Promise<void> {
     ...(codeSearch !== undefined ? { codeSearch } : {}),
     intervalMs: numFlag(args.flags.interval, "interval", 5) * 1000,
     ...(gitToken !== undefined ? { gitToken } : {}),
+    ...(githubToken !== undefined ? { githubToken } : {}),
     ...(intakePolicies !== undefined ? { intakePolicies } : {}),
     ...(args.flags["max-concurrent"] !== undefined
       ? { maxConcurrentRuns: numFlag(args.flags["max-concurrent"], "max-concurrent", 0) }

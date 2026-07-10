@@ -7,7 +7,7 @@ import type { WorkflowContext, WorkflowDefinition } from "@neutron-build/workflo
 
 import { executeAction } from "./agent.js";
 import { FINISH_NUDGE_FAILED, FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, parseAction } from "./actions.js";
-import { commentOnPr, commitAndPush, fixPrompt, openPullRequest, parseRepoUrl, reviewPrompt, setupRepo, setupRepoForPr } from "./git.js";
+import { commentOnPr, commitAndPush, fixPrompt, openPullRequest, parseRepoUrl, reviewPrompt, setupRepo, setupRepoForPr, tokenFor } from "./git.js";
 import type { RepoCheckout } from "./git.js";
 import { condenseIfNeeded, defaultCondenseConfig } from "./memory.js";
 import type { CondenseConfig } from "./memory.js";
@@ -119,6 +119,8 @@ export interface DurableAgentConfig {
   runTimeout?: string | number;
   /** Deploy token for repo runs (clone/push/PR). Required when input.repo is set. */
   gitToken?: string;
+  /** Token used instead for github.com repos (SHIP_GITHUB_TOKEN). */
+  githubToken?: string;
   /** Per-repo memory: recent-run notes injected into and recorded by repo runs. */
   repoMemory?: RepoMemoryStore;
   /**
@@ -200,7 +202,7 @@ export function durableAgent(
         const repoUrl = input.repo;
         checkout = await ctx.step("repo-setup", async () => {
           const ref = parseRepoUrl(repoUrl);
-          const token = config.gitToken ?? "";
+          const token = tokenFor(ref, config);
           // file:// remotes (tests, local mirrors) take no credentials
           if (token === "" && ref.base !== "file://") {
             throw new Error("repo run needs gitToken on the executing worker (SHIP_GIT_TOKEN)");
@@ -485,8 +487,8 @@ async function publishIfRepoRun(
   const repoUrl = input.repo;
   const co = checkout;
   const result = await ctx.step("repo-publish", async () => {
-    const token = config.gitToken ?? "";
     const ref = parseRepoUrl(repoUrl);
+    const token = tokenFor(ref, config);
     const pushed = await commitAndPush(executor, {
       ref,
       token,

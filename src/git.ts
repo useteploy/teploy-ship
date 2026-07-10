@@ -206,6 +206,18 @@ export async function openPullRequest(options: {
 }
 
 /** The task prompt wrapper for repo work — repo-aware, token-free. */
+/**
+ * Pick the credential for a repo's host: github.com repos use the GitHub
+ * token when one is configured (SHIP_GITHUB_TOKEN), everything else — and
+ * GitHub deploys that only set one credential — uses the default token.
+ */
+export function tokenFor(ref: RepoRef, tokens: { gitToken?: string; githubToken?: string }): string {
+  if (ref.kind === "github" && tokens.githubToken !== undefined && tokens.githubToken !== "") {
+    return tokens.githubToken;
+  }
+  return tokens.gitToken ?? "";
+}
+
 export function fixPrompt(options: { task: string; branch: string; base: string; context?: string }): string {
   const context = options.context !== undefined && options.context !== "" ? `\n\n${options.context}` : "";
   return `You are working in a git repository, already cloned at your working directory and checked out on branch ${options.branch} (branched from ${options.base}).${context}
