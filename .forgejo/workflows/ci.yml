@@ -1,0 +1,45 @@
+# CI on the Forgejo instance's own Actions (smoke-box runner, docker label).
+# The fiddly part this solves: ship's @neutron-build deps are pnpm `link:`s
+# into the sibling Neutron checkout — CI reproduces the workspace layout
+# (Teploy/teploy-ship + Neutron side by side) instead of vendoring.
+name: CI
+on:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: docker
+    steps:
+      - name: Checkout ship
+        uses: actions/checkout@v4
+        with:
+          path: Teploy/teploy-ship
+
+      - name: Checkout Neutron (linked workspace deps)
+        uses: actions/checkout@v4
+        with:
+          repository: Tyler/neutron
+          token: ${{ secrets.FORGEJO_TOKEN }}
+          path: Neutron
+
+      - name: Install pnpm
+        run: npm install -g pnpm@10
+
+      - name: Build Neutron TS packages
+        run: |
+          cd Neutron/typescript
+          pnpm install --frozen-lockfile
+          pnpm -r build
+
+      - name: Ship build + tests
+        run: |
+          cd Teploy/teploy-ship
+          pnpm install --frozen-lockfile
+          pnpm test
+
+      - name: Web production build
+        run: |
+          cd Teploy/teploy-ship/web
+          pnpm install --frozen-lockfile
+          pnpm run build
