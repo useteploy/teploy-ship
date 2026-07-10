@@ -116,8 +116,12 @@ function vectorLiteral(vector: number[]): string {
   return `'[${vector.join(",")}]'`;
 }
 
+// Standard-SQL string literal: quotes doubled, NUL stripped, backslashes
+// UNTOUCHED — Nucleus's inline literal parser treats backslash literally,
+// so doubling it corrupts JSON metadata (`\"` became `\\"`, ending the
+// JSON string early on any chunk containing a double quote).
 function textLiteral(s: string): string {
-  return `'${s.replace(/\\/g, "\\\\").replace(/'/g, "''").replace(/\0/g, "")}'`;
+  return `'${s.replace(/'/g, "''").replace(/\0/g, "")}'`;
 }
 
 /** Looks like binary content (NUL byte in the first 8KB)? */
