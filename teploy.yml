@@ -56,6 +56,11 @@ accessories:
 env:
   NUCLEUS_URL: postgres://nucleus@ship-nucleus:5432/nucleus
   SHIP_MODEL: anthropic/claude-sonnet-5
+  # Codebase indexing (A1): repo runs embed the clone into Nucleus vectors
+  # and the agent gets the ```search action. Embeddings ride the gateway's
+  # /v1/embeddings passthrough to its ollama accessory (nomic-embed-text,
+  # pulled once — see teploy-gateway/teploy.yml). Unset to disable indexing.
+  SHIP_EMBED_MODEL: ollama/nomic-embed-text
   # Route model calls through teploy-gateway, deployed as its own internal
   # teploy service (see teploy-gateway/teploy.yml) — reachable on the teploy
   # network at its app-name alias. Drop this to call providers directly.
