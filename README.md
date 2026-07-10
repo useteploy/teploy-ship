@@ -40,6 +40,12 @@ TTLs too. Config defaults live in `~/.config/teploy-ship/config.json`
 (model, sandboxUrl, sandboxToken, sandboxImage); set `AI_GATEWAY_URL` +
 `AI_GATEWAY_KEY` to route all model calls through teploy-gateway.
 
+## Self-hosting
+
+The full bring-up — dashboard + worker + Nucleus via one `teploy
+deploy`, webhook wiring, the default-deny sandbox, embeddings, and the
+security model — is in **[docs/DEPLOY.md](docs/DEPLOY.md)**.
+
 ## The stack it stands on
 
 | Layer | Provides |
