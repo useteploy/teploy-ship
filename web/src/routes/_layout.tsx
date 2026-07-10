@@ -24,9 +24,27 @@ export const middleware: MiddlewareFn = async (request, _context, next) => {
   const header = request.headers.get("authorization");
   const bearer = header?.startsWith("Bearer ") === true ? header.slice(7) : null;
   const cookie = request.headers.get("cookie") ?? "";
-  const cookieToken = /(?:^|;\s*)ship_token=([^;]+)/.exec(cookie)?.[1] ?? null;
+  const rawCookieToken = /(?:^|;\s*)ship_token=([^;]+)/.exec(cookie)?.[1] ?? null;
+  // A malformed %-sequence must read as a bad token (401), never a 500.
+  let cookieToken: string | null = null;
+  if (rawCookieToken !== null) {
+    try {
+      cookieToken = decodeURIComponent(rawCookieToken);
+    } catch {
+      cookieToken = null;
+    }
+  }
 
-  if (bearer === expected || (cookieToken !== null && decodeURIComponent(cookieToken) === expected)) {
+  // Constant-time comparison: token equality must not leak prefix length
+  // through response timing.
+  const { createHash, timingSafeEqual } = await import("node:crypto");
+  const matches = (presented: string | null): boolean => {
+    if (presented === null) return false;
+    const a = createHash("sha256").update(presented).digest();
+    const b = createHash("sha256").update(expected).digest();
+    return timingSafeEqual(a, b);
+  };
+  if (matches(bearer) || matches(cookieToken)) {
     return next();
   }
   if (request.headers.get("x-neutron-data") === "true") {

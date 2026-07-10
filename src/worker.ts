@@ -239,11 +239,15 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
       // The index is status-authoritative, but persist the terminal status
       // onto the raw meta doc too so it's self-consistent (accurate for
       // direct reads / file mode, not just the index-overlaid reads).
+      // UNCONDITIONAL: loadMeta overlays the index status, which the
+      // scheduler already recorded as this outcome — a "changed?" guard
+      // compares outcome to itself and never writes (the raw doc kept its
+      // stale pre-terminal status forever).
       void options.runtime.placement.set(runId, host).catch(() => {});
       void options.runtime
         .loadMeta(runId)
         .then((meta) => {
-          if (meta !== null && meta.status !== outcome.status) {
+          if (meta !== null) {
             return options.runtime.saveMeta({ ...meta, status: outcome.status, updatedAt: new Date().toISOString() });
           }
         })

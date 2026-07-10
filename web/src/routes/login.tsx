@@ -5,7 +5,11 @@ export const config = { mode: "app" };
 export async function action({ request }: { request: Request }): Promise<Response | { error: string }> {
   const form = await request.formData();
   const token = String(form.get("token") ?? "");
-  if (token !== webToken()) {
+  // Constant-time: hash both sides so length differences don't short-circuit.
+  const { createHash, timingSafeEqual } = await import("node:crypto");
+  const presented = createHash("sha256").update(token).digest();
+  const expected = createHash("sha256").update(webToken()).digest();
+  if (!timingSafeEqual(presented, expected)) {
     return { error: "Wrong token." };
   }
   const cookie = [

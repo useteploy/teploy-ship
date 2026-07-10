@@ -98,30 +98,17 @@ function chunkId(repo: string, path: string, index: number): string {
 }
 
 /**
- * Statements touching the vector table use NO $N parameters at all:
- * Nucleus's prepared-statement AST fast-path corrupts VECTOR() whenever
- * the statement carries any parameter — even inline vector literals in
- * the same statement come back with garbage distances (repro: SELECT
- * VECTOR_DISTANCE(VECTOR('[1,0,0]'), VECTOR('[0,1,0]'), 'cosine'), $1
- * → 0.992, without $1 → 1.0 exactly; found 2026-07-09, tracked as a
- * Nucleus dogfood finding). Until that's fixed upstream, every value is
- * inlined: vectors are validated-finite numbers, and text is escaped
- * with the same rules Nucleus's own substitution applies (quotes and
- * backslashes doubled, NUL stripped).
+ * REQUIRES Nucleus >= c22219d (2026-07-09): older engines corrupt
+ * VECTOR() values in any parameterized statement (dogfood finding #30)
+ * and silently ignore ORDER BY on select-list aliases (#31). Both are
+ * fixed upstream; ORDER BY still uses the full expression (harmless and
+ * one less thing to depend on).
  */
 function vectorLiteral(vector: number[]): string {
   for (const x of vector) {
     if (typeof x !== "number" || !Number.isFinite(x)) throw new Error("embedding contains a non-finite value");
   }
-  return `'[${vector.join(",")}]'`;
-}
-
-// Standard-SQL string literal: quotes doubled, NUL stripped, backslashes
-// UNTOUCHED — Nucleus's inline literal parser treats backslash literally,
-// so doubling it corrupts JSON metadata (`\"` became `\\"`, ending the
-// JSON string early on any chunk containing a double quote).
-function textLiteral(s: string): string {
-  return `'${s.replace(/'/g, "''").replace(/\0/g, "")}'`;
+  return `[${vector.join(",")}]`;
 }
 
 /** Looks like binary content (NUL byte in the first 8KB)? */
@@ -171,9 +158,7 @@ export class NucleusCodeIndex implements CodeSearch {
 
   async #deleteFileChunks(repo: string, path: string, count: number): Promise<void> {
     for (let i = 0; i < count; i++) {
-      await this.#db
-        .query(`DELETE FROM ship_code_chunks WHERE id = ${textLiteral(chunkId(repo, path, i))}`)
-        .catch(() => {});
+      await this.#db.query("DELETE FROM ship_code_chunks WHERE id = $1", [chunkId(repo, path, i)]).catch(() => {});
     }
   }
 
@@ -226,10 +211,12 @@ export class NucleusCodeIndex implements CodeSearch {
           await this.#ensureChunks(vector.length);
           const id = chunkId(repo, path, offset + i);
           const meta = JSON.stringify({ repo, path, start: batch[i]!.start, end: batch[i]!.end, text: batch[i]!.text });
-          await this.#db.query(`DELETE FROM ship_code_chunks WHERE id = ${textLiteral(id)}`).catch(() => {});
-          await this.#db.query(
-            `INSERT INTO ship_code_chunks (id, embedding, metadata) VALUES (${textLiteral(id)}, VECTOR(${vectorLiteral(vector)}), ${textLiteral(meta)})`,
-          );
+          await this.#db.query("DELETE FROM ship_code_chunks WHERE id = $1", [id]).catch(() => {});
+          await this.#db.query("INSERT INTO ship_code_chunks (id, embedding, metadata) VALUES ($1, VECTOR($2), $3)", [
+            id,
+            vectorLiteral(vector),
+            meta,
+          ]);
         }
       }
 
@@ -262,12 +249,11 @@ export class NucleusCodeIndex implements CodeSearch {
     if (vector === undefined || vector.length === 0) return [];
     await this.#ensureChunks(vector.length);
     const k = Math.max(1, Math.trunc(limit));
-    // ORDER BY repeats the expression: Nucleus silently ignores ORDER BY
-    // on a select-list alias (second dogfood finding, same date).
-    const dist = `VECTOR_DISTANCE(embedding, VECTOR(${vectorLiteral(vector)}), 'cosine')`;
+    const dist = "VECTOR_DISTANCE(embedding, VECTOR($1), 'cosine')";
     const rows = await this.#db.query(
       `SELECT id, metadata, ${dist} AS distance
-       FROM ship_code_chunks WHERE metadata->>'repo' = ${textLiteral(repo)} ORDER BY ${dist} LIMIT ${k}`,
+       FROM ship_code_chunks WHERE metadata->>'repo' = $2 ORDER BY ${dist} LIMIT ${k}`,
+      [vectorLiteral(vector), repo],
     );
     return rows.map((row) => {
       const meta = (typeof row.metadata === "string" ? JSON.parse(row.metadata) : (row.metadata ?? {})) as {
