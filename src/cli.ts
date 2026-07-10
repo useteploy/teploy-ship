@@ -22,6 +22,7 @@ import { commitAndPush, fixPrompt, openPullRequest, parseRepoUrl, setupRepo } fr
 import { loadRepoContext, runNote } from "./repo-memory.js";
 import { runAgent } from "./agent.js";
 import { defaultApprovalPolicy } from "./approval.js";
+import { secretEnvNames } from "./guard.js";
 import { durableAgent, sandboxProvider } from "./durable.js";
 import type { ExecutorProvider } from "./durable.js";
 import { formatReport, runEval } from "./eval.js";
@@ -244,7 +245,7 @@ async function makeExecutor(
   const workdir = join(stateDir(), "workspaces", `live-${Date.now()}`);
   mkdirSync(workdir, { recursive: true });
   process.stderr.write(dim(`workspace: ${workdir}\n`));
-  return { executor: new LocalExecutor({ root: workdir }), workdir };
+  return { executor: new LocalExecutor({ root: workdir, envDenylist: secretEnvNames() }), workdir };
 }
 
 // ---------------------------------------------------------------------------
@@ -360,7 +361,8 @@ function durableProvider(args: ReturnType<typeof parseArgs>, config: Config): Ex
       return { handle: dir };
     },
     attach(handle: string) {
-      return new LocalExecutor({ root: handle });
+      // Secret scoping: the worker's own tokens never reach agent commands.
+      return new LocalExecutor({ root: handle, envDenylist: secretEnvNames() });
     },
   };
 }
@@ -413,6 +415,7 @@ async function executePass(
     task,
     steer: true,
     index: true,
+    guard: true,
     ...(opts?.plan === true ? { plan: true } : {}),
   });
   if (outcome === null) return null; // another executor holds the lease

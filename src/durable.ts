@@ -15,6 +15,7 @@ import { loadRepoContext, runNote } from "./repo-memory.js";
 import type { RepoMemoryStore } from "./repo-memory.js";
 import type { SteerStore } from "./steer.js";
 import { formatSearchHits } from "./code-index.js";
+import { screenUntrusted } from "./guard.js";
 import type { CodeSearch } from "./code-index.js";
 import { PLAN_EVENT } from "./plan.js";
 import type { PlanDecisionPayload } from "./plan.js";
@@ -54,6 +55,13 @@ export interface DurableAgentInput {
    * executing worker still needs codeSearch configured to do real work.
    */
   index?: boolean;
+  /**
+   * Injection screening: when the task text (external issue/PR content)
+   * matches known injection shapes, record the flags as a step so the
+   * operator sees them in the run timeline. Input-gated like the others
+   * so pre-feature runs replay unchanged.
+   */
+  guard?: boolean;
 }
 
 export interface DurableAgentOutput {
@@ -228,6 +236,18 @@ export function durableAgent(
             return `index refresh failed: ${error instanceof Error ? error.message : String(error)}`;
           }
         });
+      }
+      // Surface injection attempts in the external task text on the run
+      // timeline. screenUntrusted is a pure function of the recorded
+      // input, so step PRESENCE (only when flagged) replays identically.
+      if (input.guard === true && repoKey !== null) {
+        const screen = screenUntrusted(input.task);
+        if (screen.flags.length > 0) {
+          await ctx.step("injection-guard", () => ({
+            flagged: screen.flags,
+            note: "task text matched injection patterns; it is framed as data and cannot approve actions",
+          }));
+        }
       }
       const task =
         checkout !== null

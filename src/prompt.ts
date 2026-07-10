@@ -1,3 +1,5 @@
+import { UNTRUSTED_RULE } from "./guard.js";
+
 /**
  * The CodeAct system prompt. Establishes the action protocol: think,
  * then emit exactly one fenced code block per turn; observe its output;
@@ -52,6 +54,7 @@ print("hello")
 \`\`\`
 
 Rules:
+- ${UNTRUSTED_RULE}
 - One code block per turn. Do not emit two.
 - You have NO tool-calling in this session. Never emit <function_calls>, <invoke>, or any XML tool syntax — it will not execute. Fenced code blocks are the ONLY way to act.
 - Wait for the observation before continuing; never assume an action's result. Never write the output you expect — you will be shown the real output.

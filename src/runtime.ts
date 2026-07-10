@@ -61,7 +61,7 @@ export interface ShipRuntime {
   execute(
     workflow: WorkflowDefinition<{ task: string }, unknown>,
     runId: string,
-    input?: { task: string; repo?: string; pr?: number; plan?: boolean; steer?: boolean; index?: boolean },
+    input?: { task: string; repo?: string; pr?: number; plan?: boolean; steer?: boolean; index?: boolean; guard?: boolean },
   ): Promise<RunOutcome | null>;
   saveMeta(meta: RunMeta): Promise<void>;
   loadMeta(runId: string): Promise<RunMeta | null>;
@@ -223,6 +223,7 @@ export async function enqueueRun(
         // decides whether indexing actually happens.
         steer: true,
         index: true,
+        guard: true,
       },
     },
   });

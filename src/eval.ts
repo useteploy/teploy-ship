@@ -7,6 +7,7 @@ import { LocalExecutor } from "@neutron-build/agents";
 import type { AgentExecutor } from "@neutron-build/agents";
 
 import { runAgent } from "./agent.js";
+import { secretEnvNames } from "./guard.js";
 import type { AgentResult, RunAgentOptions } from "./agent.js";
 
 /** Outcome of an independent verification check. */
@@ -153,7 +154,7 @@ function report(results: EvalRunResult[], totalTasks: number): EvalReport {
 export async function localEvalExecutor(): Promise<EvalExecutor> {
   const root = await mkdtemp(join(tmpdir(), "teploy-eval-"));
   return {
-    executor: new LocalExecutor({ root }),
+    executor: new LocalExecutor({ root, envDenylist: secretEnvNames() }),
     workdir: root,
     cleanup: () => rm(root, { recursive: true, force: true }),
   };
