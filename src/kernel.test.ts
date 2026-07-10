@@ -96,6 +96,10 @@ test("stopKernel actually kills the process", async () => {
   await ensureKernel(executor);
   await runCell(executor, "c1", "a = 1", 20000);
   await stopKernel(executor);
-  const alive = await executor.exec('kill -0 "$(cat .teploy-agent/kernel/kernel.pid)" 2>/dev/null && echo alive || echo dead');
+  // Bare kill -0 false-positives when the pid is recycled (dense container
+  // PID spaces) — assert OUR kernel is gone, not that the pid is unused.
+  const alive = await executor.exec(
+    'p="$(cat .teploy-agent/kernel/kernel.pid)"; if [ -r "/proc/$p/cmdline" ] && tr "\\0" " " < "/proc/$p/cmdline" | grep -q kernel.py; then echo alive; elif [ ! -d /proc ] && kill -0 "$p" 2>/dev/null; then echo alive; else echo dead; fi',
+  );
   assert.match(alive.stdout, /dead/);
 });

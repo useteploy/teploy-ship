@@ -54,14 +54,22 @@ while not os.path.exists(os.path.join(base, "kernel.stop")):
 /**
  * Start the kernel if it isn't already running. Stale pid files (kernel
  * died with its container; a restored snapshot carries the old file) are
- * detected with kill -0 and replaced. Returns false when the workspace
- * cannot run the kernel at all (no python3) — callers fall back to
- * per-file execution.
+ * detected and replaced. Liveness is NOT just kill -0: in containers and
+ * on snapshot-restore, small dense PID spaces recycle the old pid onto an
+ * unrelated process, so on Linux the check also demands /proc/<pid>/cmdline
+ * mention kernel.py (elsewhere, ps -o command; bare kill -0 is the last
+ * resort). Returns false when the workspace cannot run the kernel at all
+ * (no python3) — callers fall back to per-file execution.
  */
 export async function ensureKernel(executor: AgentExecutor): Promise<boolean> {
+  const isOurs =
+    `p="$(cat ${DIR}/kernel.pid 2>/dev/null)"; [ -n "$p" ] && kill -0 "$p" 2>/dev/null && ` +
+    `{ if [ -r "/proc/$p/cmdline" ]; then tr '\\0' ' ' < "/proc/$p/cmdline" | grep -q kernel.py; ` +
+    `elif command -v ps >/dev/null 2>&1; then ps -p "$p" -o command= 2>/dev/null | grep -q kernel.py; ` +
+    `else true; fi; }`;
   const result = await executor.exec(
     `mkdir -p ${DIR} && rm -f ${DIR}/kernel.stop && ` +
-      `if [ -f ${DIR}/kernel.pid ] && kill -0 "$(cat ${DIR}/kernel.pid)" 2>/dev/null; then echo alive; ` +
+      `if ${isOurs}; then echo alive; ` +
       `else command -v python3 >/dev/null 2>&1 || exit 9; ` +
       `nohup python3 ${DIR}/kernel.py > ${DIR}/kernel.log 2>&1 & echo $! > ${DIR}/kernel.pid; echo started; fi`,
     { timeoutMs: 15000 },
