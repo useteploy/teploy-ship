@@ -30,7 +30,9 @@ jobs:
         run: |
           cd Neutron/typescript
           pnpm install --frozen-lockfile
-          pnpm -r build
+          # packages only — apps/examples need the built CLI on PATH and
+          # are irrelevant to ship
+          pnpm --filter "./packages/*" build
 
       - name: Ship build + tests
         run: |
