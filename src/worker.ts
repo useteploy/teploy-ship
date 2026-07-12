@@ -305,11 +305,19 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
     // Re-read the live policies each tick so dashboard edits take effect
     // without a worker restart. Store wins over the env seed; a per-source
     // budget in the store overrides the global default.
-    let stored: SourcePolicy[] = [];
+    //
+    // FAIL CLOSED on a read failure: auto-launching with only the env
+    // defaults means auto-launching without the per-source budget caps the
+    // operator set in the store — a degraded DB must never widen spend
+    // authority. Proposals just wait; the sweep retries within seconds.
+    let stored: SourcePolicy[];
     try {
       stored = await options.runtime.policies.list();
     } catch (err) {
-      log(`[worker] policy read failed, using env defaults: ${err instanceof Error ? err.message : String(err)}`);
+      log(
+        `[worker] policy read failed; skipping auto-launch this sweep (fail closed): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return;
     }
     const policies: Record<string, IntakePolicy> = { ...envPolicies };
     const storeBudgets: Record<string, number> = {};

@@ -23,6 +23,15 @@ export class NucleusPgwire {
 
   constructor(url: string) {
     this.#pool = new pg.Pool({ connectionString: url, max: 4 });
+    // An idle pooled connection dying (engine restart, accessory upgrade)
+    // emits 'error' on the pool; unhandled, that event CRASHES the process.
+    // Bit live 2026-07-10: a nucleus accessory upgrade took the worker down
+    // with "Unhandled 'error' event on BoundPool". In-flight queries still
+    // reject through their own promises — this handler only absorbs the
+    // idle-client death so the pool can mint fresh connections.
+    this.#pool.on("error", (err) => {
+      console.error(`[nucleus-pgwire] pool connection error (will reconnect): ${err.message}`);
+    });
   }
 
   /** Raw parameterized query — rows as objects. The intake store builds on this. */
