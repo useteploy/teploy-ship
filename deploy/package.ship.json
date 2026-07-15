@@ -7,9 +7,9 @@
     "teploy-ship": "./dist/cli.js"
   },
   "dependencies": {
-    "@neutron-build/agents": "file:./vendor/neutron-build-agents-0.1.0.tgz",
-    "@neutron-build/ai": "file:./vendor/neutron-build-ai-0.1.0.tgz",
-    "@neutron-build/workflow": "file:./vendor/neutron-build-workflow-0.1.0.tgz",
+    "@neutron-build/agents": "^0.1.0",
+    "@neutron-build/ai": "^0.1.0",
+    "@neutron-build/workflow": "^0.1.0",
     "pg": "^8.16.0"
   },
   "exports": {

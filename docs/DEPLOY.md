@@ -16,13 +16,12 @@ optional gateway and sandbox daemon complete the production shape.
 ## 1. Bring-up
 
 Prereqs on your machine: the `teploy` CLI pointed at your server
-(`servers.yml`), Node 22 + pnpm, and the Neutron checkout as a sibling
-(`../../Neutron`) — ship's SDK deps are workspace links.
+(`servers.yml`), Node 22, pnpm, and Docker. The deployment image installs its
+Neutron SDK dependencies from the public npm registry.
 
 ```sh
 # build what the image copies in
 pnpm run build && (cd web && pnpm run build)
-bash -c 'rm -rf deploy/vendor && mkdir -p deploy/vendor && for p in neutron-ai neutron-workflow neutron-agents neutron neutron-cli; do (cd ../../Neutron/typescript/packages/$p && pnpm pack --pack-destination "$OLDPWD/deploy/vendor" >/dev/null); done'
 
 # secrets (once; injected into web + worker on every deploy)
 teploy secret set SHIP_WEB_TOKEN=<dashboard login/bearer>
