@@ -31,9 +31,9 @@
     "start": "node dist/cli.js"
   },
   "dependencies": {
-    "@neutron-build/agents": "link:../../Neutron/typescript/packages/neutron-agents",
-    "@neutron-build/ai": "link:../../Neutron/typescript/packages/neutron-ai",
-    "@neutron-build/workflow": "link:../../Neutron/typescript/packages/neutron-workflow",
+    "@neutron-build/agents": "^0.1.0",
+    "@neutron-build/ai": "^0.1.0",
+    "@neutron-build/workflow": "^0.1.0",
     "pg": "^8.16.0"
   },
   "devDependencies": {

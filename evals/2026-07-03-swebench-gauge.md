@@ -53,7 +53,7 @@ and produced no committed change. From the logs:
 
 ## Setup (reproducible)
 
-- Box: tyler@192.168.1.115 (x86_64, Docker 29.6.1), swebench 4.1.0 venv
+- Box: local dev machine (x86_64, Docker 29.6.1), swebench 4.1.0 venv
   at /tmp/sweb.
 - Instances gold-validated first (`-p gold`): flask-4045 ✓,
   requests-2317 ✓, requests-3362 ✓. (Original pick psf__requests-863

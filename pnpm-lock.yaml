@@ -9,21 +9,21 @@ importers:
   .:
     dependencies:
       '@neutron-build/agents':
-        specifier: link:../../Neutron/typescript/packages/neutron-agents
-        version: link:../../Neutron/typescript/packages/neutron-agents
+        specifier: ^0.1.0
+        version: 0.1.0(@neutron-build/ai@0.1.0)(@neutron-build/workflow@0.1.0(@neutron-build/ai@0.1.0))
       '@neutron-build/ai':
-        specifier: link:../../Neutron/typescript/packages/neutron-ai
-        version: link:../../Neutron/typescript/packages/neutron-ai
+        specifier: ^0.1.0
+        version: 0.1.0
       '@neutron-build/workflow':
-        specifier: link:../../Neutron/typescript/packages/neutron-workflow
-        version: link:../../Neutron/typescript/packages/neutron-workflow
+        specifier: ^0.1.0
+        version: 0.1.0(@neutron-build/ai@0.1.0)
       pg:
         specifier: ^8.16.0
         version: 8.22.0
     devDependencies:
       '@types/node':
         specifier: ^22.10.7
-        version: 22.20.0
+        version: 22.20.1
       '@types/pg':
         specifier: ^8.15.0
         version: 8.20.0
@@ -59,6 +59,34 @@ packages:
   '@js-sdsl/ordered-map@4.4.2':
     resolution: {integrity: sha512-iUKgm52T8HOE/makSxjqoWhe95ZJA1/G1sYsGev2JDKUSS14KAgg1LHb+Ba+IPow0xflbnSkOsZcO08C7w1gYw==}
 
+  '@neutron-build/agents@0.1.0':
+    resolution: {integrity: sha512-uJGeQV/WuVr+1BHpgSJ29cZLhhYDTWddTzfUENG1VFQnNT3fAqvVhHVzcYyc6BHYU0TNfimy6pVky7EJa4CeJw==}
+    engines: {node: '>=20'}
+    peerDependencies:
+      '@neutron-build/ai': ^0.1.0
+      '@neutron-build/workflow': ^0.1.0
+    peerDependenciesMeta:
+      '@neutron-build/workflow':
+        optional: true
+
+  '@neutron-build/ai@0.1.0':
+    resolution: {integrity: sha512-2Pu8WRAyiDE7ZZemrPkmMqcg+iJZSqeu61HL7vbtXgZw85gTzCm/XYCVzYCq/EmeQ+HWUGz/PSBfITXz33HFJw==}
+    engines: {node: '>=20'}
+    peerDependencies:
+      preact: ^10.0.0
+    peerDependenciesMeta:
+      preact:
+        optional: true
+
+  '@neutron-build/workflow@0.1.0':
+    resolution: {integrity: sha512-7bEnHCzBLP6wrjmOdDp7lCh8xbFPCpuHFq3KJLsPBFsZa//k7V8Br2PQqjNrmLTKi3KEKy6O6stGyjG+4I07cQ==}
+    engines: {node: '>=20'}
+    peerDependencies:
+      '@neutron-build/ai': ^0.1.0
+    peerDependenciesMeta:
+      '@neutron-build/ai':
+        optional: true
+
   '@protobufjs/aspromise@1.1.2':
     resolution: {integrity: sha512-j+gKExEuLmKwvz3OgROXtrJ2UG2x8Ch2YZUxahh+s1F2HZ+wAceUNLkvy6zKCPVRkU++ZWQrdxsUeQXmcg4uoQ==}
 
@@ -83,11 +111,11 @@ packages:
   '@protobufjs/pool@1.1.0':
     resolution: {integrity: sha512-0kELaGSIDBKvcgS4zkjz1PeddatrjYcmMWOlAuAPwAeccUrPHdUqo/J6LiymHHEiJT5NrF1UVwxY14f+fy4WQw==}
 
-  '@protobufjs/utf8@1.1.1':
-    resolution: {integrity: sha512-oOAWABowe8EAbMyWKM0tYDKi8Yaox52D+HWZhAIJqQXbqe0xI/GV7FhLWqlEKreMkfDjshR5FKgi3mnle0h6Eg==}
+  '@protobufjs/utf8@1.1.2':
+    resolution: {integrity: sha512-b1UQwcEZ4yCnMCD8DAL1VlbvBJE9/IX4FTIp7BG1xYpf29SLazLSrqUkj4w7Y5y7cCVP6E5tcqqcI0xemPkHug==}
 
-  '@types/node@22.20.0':
-    resolution: {integrity: sha512-QWlFW2wf3nTjC13/DqRnBpR4ZO36VJH/JVBkA/vcnmbTBNQIlnObqyqZE1tUR7+Ni23Lda8R1BxMfbXRpCUx5g==}
+  '@types/node@22.20.1':
+    resolution: {integrity: sha512-EANqOCF9QFyra+4pfxUcX9STKJpCLjMbObVzljIJomAWSnuSIEAvyzEU53GaajbXJEgdh0iEcPL+DGvpUd4k1Q==}
 
   '@types/pg@8.20.0':
     resolution: {integrity: sha512-bEPFOaMAHTEP1EzpvHTbmwR8UsFyHSKsRisLIHVMXnpNefSbGA1bD6CVy+qKjGSqmZqNqBDV2azOBo8TgkcVow==}
@@ -119,8 +147,8 @@ packages:
       bare-abort-controller:
         optional: true
 
-  bare-fs@4.7.3:
-    resolution: {integrity: sha512-xRgplks8SvcKkdlv2M6Z2LZmRsmqd+x0nXXGXeMEjwdibj1HSDrlnqBRLeYdMvsgCox7Bq0e+DHwfczOfsn6IA==}
+  bare-fs@4.7.4:
+    resolution: {integrity: sha512-y1kC+ffIx/tPLdTE693uNjHfzTfr+ravR5tvWlMXe25nELbkqV400S71qHDwbkAQ1FVEZobB1NFRzFbCCcyBCQ==}
     engines: {bare: '>=1.16.0'}
     peerDependencies:
       bare-buffer: '*'
@@ -128,12 +156,8 @@ packages:
       bare-buffer:
         optional: true
 
-  bare-os@3.9.3:
-    resolution: {integrity: sha512-fF4Q7QsyKVF5Rj0qvI8BgUNjqzC2JvQlpTaPLjVJVxYVUX5Zr9un+y3w1HmA4nNKdFmRBT8z/WmrjvXzXVerKQ==}
-    engines: {bare: '>=1.14.0'}
-
-  bare-path@3.0.1:
-    resolution: {integrity: sha512-ghj2DSK/2e99a1anTVPCV4m4YIYtrbXhfM7V3D7XZLOTsybnYyaJloymGqssQc8l/or0UoDyRtNQkmkEF/ysgQ==}
+  bare-path@3.1.1:
+    resolution: {integrity: sha512-JprUlveX3QjApC1cTpsUOiscADftCGVWkzitbHsRqv84hzYwYHw2mbluddsq5TvI8mH/8Ov1f4BiMAdcB0oYnQ==}
 
   bare-stream@2.13.3:
     resolution: {integrity: sha512-Kc+brLqvEqGkjyfiwJmImAOqLZL7OsoLKuavx+hJjgVV3nLTOjloJyPMFxjUPerGGHrNH0fLU06jjykMLWrERQ==}
@@ -428,6 +452,18 @@ snapshots:
 
   '@js-sdsl/ordered-map@4.4.2': {}
 
+  '@neutron-build/agents@0.1.0(@neutron-build/ai@0.1.0)(@neutron-build/workflow@0.1.0(@neutron-build/ai@0.1.0))':
+    dependencies:
+      '@neutron-build/ai': 0.1.0
+    optionalDependencies:
+      '@neutron-build/workflow': 0.1.0(@neutron-build/ai@0.1.0)
+
+  '@neutron-build/ai@0.1.0': {}
+
+  '@neutron-build/workflow@0.1.0(@neutron-build/ai@0.1.0)':
+    optionalDependencies:
+      '@neutron-build/ai': 0.1.0
+
   '@protobufjs/aspromise@1.1.2': {}
 
   '@protobufjs/base64@1.1.2': {}
@@ -446,15 +482,15 @@ snapshots:
 
   '@protobufjs/pool@1.1.0': {}
 
-  '@protobufjs/utf8@1.1.1': {}
+  '@protobufjs/utf8@1.1.2': {}
 
-  '@types/node@22.20.0':
+  '@types/node@22.20.1':
     dependencies:
       undici-types: 6.21.0
 
   '@types/pg@8.20.0':
     dependencies:
-      '@types/node': 22.20.0
+      '@types/node': 22.20.1
       pg-protocol: 1.15.0
       pg-types: 2.2.0
 
@@ -472,10 +508,10 @@ snapshots:
 
   bare-events@2.9.1: {}
 
-  bare-fs@4.7.3:
+  bare-fs@4.7.4:
     dependencies:
       bare-events: 2.9.1
-      bare-path: 3.0.1
+      bare-path: 3.1.1
       bare-stream: 2.13.3(bare-events@2.9.1)
       bare-url: 2.4.5
       fast-fifo: 1.3.2
@@ -483,11 +519,7 @@ snapshots:
       - bare-abort-controller
       - react-native-b4a
 
-  bare-os@3.9.3: {}
-
-  bare-path@3.0.1:
-    dependencies:
-      bare-os: 3.9.3
+  bare-path@3.1.1: {}
 
   bare-stream@2.13.3(bare-events@2.9.1):
     dependencies:
@@ -501,7 +533,7 @@ snapshots:
 
   bare-url@2.4.5:
     dependencies:
-      bare-path: 3.0.1
+      bare-path: 3.1.1
 
   base64-js@1.5.1: {}
 
@@ -663,8 +695,8 @@ snapshots:
       '@protobufjs/float': 1.0.2
       '@protobufjs/path': 1.1.2
       '@protobufjs/pool': 1.1.0
-      '@protobufjs/utf8': 1.1.1
-      '@types/node': 22.20.0
+      '@protobufjs/utf8': 1.1.2
+      '@types/node': 22.20.1
       long: 5.3.2
 
   pump@3.0.4:
@@ -737,7 +769,7 @@ snapshots:
   tar-stream@3.2.0:
     dependencies:
       b4a: 1.8.1
-      bare-fs: 4.7.3
+      bare-fs: 4.7.4
       fast-fifo: 1.3.2
       streamx: 2.28.0
     transitivePeerDependencies:

@@ -165,8 +165,3 @@ model for a baseline, then grow the benchmark and tune against it; a
 persistent execution kernel, a structured file-editor action, and
 sandbox snapshots.
 
-## Note
-
-Depends on unpublished local `@neutron-build/*` packages via pnpm
-`link:`. Publish those (or switch to workspace resolution) before
-building this repo on another machine.

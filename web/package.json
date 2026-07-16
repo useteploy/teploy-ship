@@ -9,8 +9,8 @@
     "preview": "neutron-ts preview"
   },
   "dependencies": {
-    "@neutron-build/cli": "link:../../../Neutron/typescript/packages/neutron-cli",
-    "@neutron-build/core": "link:../../../Neutron/typescript/packages/neutron",
+    "@neutron-build/cli": "^0.1.4",
+    "@neutron-build/core": "^0.1.5",
     "preact": "10.25.4",
     "teploy-ship": "link:.."
   },
