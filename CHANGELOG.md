@@ -43,6 +43,30 @@ All notable changes to Teploy Ship are recorded here.
   `https://<your-ship-host>/oidc/callback` as the redirect URI. The login page
   shows an SSO button when it's configured.
 
+### Fixed
+- The session cookie was `SameSite=Strict`, which the SSO callback cannot
+  survive. The callback sets the cookie and redirects to `/`, and that hop is
+  the tail of a cross-site redirect chain starting at the identity provider —
+  browsers withhold a Strict cookie on a cross-site-initiated top-level
+  navigation, so the user would have landed on `/` with no session, bounced to
+  `/login`, and appeared signed in only after a manual reload. Now `Lax`, which
+  is still withheld on cross-origin POST. Password login never leaves the site,
+  which is why Strict looked correct until SSO existed.
+- `X-Forwarded-Proto`/`X-Forwarded-Host` were believed from any caller. Since
+  the shipped `teploy.yml` uses `ingress: host`, the web process is published
+  directly at `<server-ip>:7460` with no proxy in front, so those headers were
+  client input — and the scheme derived from them decides whether the session
+  cookie gets `Secure`. Sending `X-Forwarded-Proto: http` was enough to have
+  sessions issued without it. The origin is now taken from `SHIP_PUBLIC_URL`
+  when set, then from the forwarded headers only if `SHIP_TRUST_PROXY` is set,
+  and otherwise from the request itself. (Dash gates the same logic on the peer
+  IP against a trusted-proxy CIDR list; the web layer here only sees a
+  `Request`, so the operator declares it rather than Ship inferring it.)
+- Added an Origin/`Sec-Fetch-Site` check on state-changing requests, matching
+  dash. `SameSite=Lax` already blocks the ordinary CSRF case; this covers a
+  browser or intermediary that doesn't enforce it. Bearer callers send neither
+  header and are unaffected — a bearer token is never attached ambiently.
+
 First public release.
 
 ### What Ship is

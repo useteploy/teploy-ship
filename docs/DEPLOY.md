@@ -79,6 +79,26 @@ login stays available as the break-glass path. Register
 | `SHIP_OIDC_VIEWER_GROUP` | _(none)_ | Group whose members become `viewer`. |
 | `SHIP_OIDC_DEFAULT_ROLE` | `viewer` | Role for an authenticated user matching no role claim or group (least privilege). |
 
+### Telling Ship its public address
+
+Ship derives the origin it was reached on to build the OIDC redirect URI and
+to decide whether session cookies get the `Secure` attribute.
+
+`X-Forwarded-Proto` and `X-Forwarded-Host` are only believed when
+`SHIP_TRUST_PROXY` is set — the shipped `teploy.yml` uses `ingress: host`, so
+the web process is published straight at `<server-ip>:7460` with nothing in
+front of it, and those headers are whatever the caller typed. Left untrusted,
+`X-Forwarded-Proto: http` from any client would be enough to have session
+cookies minted without `Secure`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `SHIP_PUBLIC_URL` | _(none)_ | The external URL Ship is reached at, e.g. `https://ship.example.com`. Authoritative when set — use this behind a proxy in preference to `SHIP_TRUST_PROXY`. Also makes run links in notifications clickable and shows full webhook URLs on `/sources`. |
+| `SHIP_TRUST_PROXY` | _(unset)_ | Set to `1` to believe `X-Forwarded-Proto`/`X-Forwarded-Host`. Only set this when a reverse proxy you control is the sole path to Ship. |
+
+If you terminate TLS at a proxy, set one of these — otherwise Ship sees a
+plain-HTTP request and will not mark the session cookie `Secure`.
+
 Role resolution order: a recognized `teploy_role` claim wins; otherwise
 groups are matched (admin > editor > viewer); otherwise the default role.
 SSO users are not stored locally — their role comes fresh from the IdP on

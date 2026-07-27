@@ -1,7 +1,7 @@
 import type { ComponentChildren } from "preact";
 import type { MiddlewareFn } from "@neutron-build/core";
 
-import { currentUser, requiredRole, roleAllows } from "../lib/session.server.js";
+import { currentUser, requiredRole, roleAllows, sameOrigin, isMutating } from "../lib/session.server.js";
 import { teployNav } from "../lib/nav.server.js";
 import type { NavData } from "../lib/nav.server.js";
 
@@ -44,6 +44,24 @@ export const middleware: MiddlewareFn = async (request, _context, next) => {
       });
     }
     return new Response(null, { status: 302, headers: { location: "/login" } });
+  }
+
+  // CSRF — reject cross-origin state-changing requests. SameSite=Lax on the
+  // session cookie already blocks the ordinary case; this covers a browser or
+  // intermediary that does not enforce it. Bearer callers send neither Origin
+  // nor Sec-Fetch-Site and so pass, which is correct: a bearer token is never
+  // attached ambiently, so it cannot be ridden by a third-party page.
+  if (isMutating(request.method) && !sameOrigin(request)) {
+    if (isData) {
+      return new Response(JSON.stringify({ title: "Cross-origin request blocked", status: 403 }), {
+        status: 403,
+        headers: { "content-type": "application/problem+json" },
+      });
+    }
+    return new Response("Cross-origin request blocked.", {
+      status: 403,
+      headers: { "content-type": "text/plain; charset=utf-8" },
+    });
   }
 
   // RBAC — authenticated but possibly under-privileged for this route.

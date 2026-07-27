@@ -161,14 +161,58 @@ export async function authenticate(username: string, password: string): Promise<
   return null;
 }
 
+/**
+ * SameSite is Lax, not Strict, because the SSO callback cannot work under
+ * Strict: `handleCallback` sets this cookie and redirects to "/", and that last
+ * hop is the tail of a cross-site redirect chain that began at the IdP.
+ * Browsers withhold Strict cookies on a cross-site-initiated top-level
+ * navigation, so the user would land on "/" with no cookie, bounce back to
+ * /login, and only appear signed in after a manual reload. Password login never
+ * leaves the site, which is why Strict looked fine.
+ *
+ * Lax is not a CSRF regression: it is still withheld on cross-site POST, which
+ * is every mutation Ship has. `sameOrigin` below covers what SameSite alone
+ * does not, matching what dash already does.
+ */
 export function sessionSetCookie(p: Principal, secure: boolean, kind: SessionKind = "pw"): string {
   const parts = [
     `${SESSION_COOKIE}=${signSession(p, kind)}`,
     "Path=/",
     "HttpOnly",
-    "SameSite=Strict",
+    "SameSite=Lax",
     `Max-Age=${SESSION_TTL_S}`,
   ];
   if (secure) parts.push("Secure");
   return parts.join("; ");
+}
+
+/**
+ * Whether a state-changing request came from our own origin.
+ *
+ * Belt-and-braces alongside SameSite=Lax, for a browser or intermediary that
+ * does not enforce it. Fetch Metadata is preferred when present; "none" is a
+ * user-initiated navigation (address bar, bookmark), which is not CSRF. A
+ * request carrying neither header is not a browser form post, so it is not the
+ * CSRF case — API callers authenticate with a bearer token, which is never
+ * attached ambiently.
+ */
+export function sameOrigin(request: Request): boolean {
+  const site = request.headers.get("sec-fetch-site");
+  if (site !== null && site !== "") return site === "same-origin" || site === "none";
+
+  const origin = request.headers.get("origin");
+  if (origin !== null && origin !== "") {
+    try {
+      return new URL(origin).host === (request.headers.get("host") ?? new URL(request.url).host);
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Methods that can change state, and so need the cross-origin check. */
+export function isMutating(method: string): boolean {
+  const m = method.toUpperCase();
+  return m !== "GET" && m !== "HEAD" && m !== "OPTIONS";
 }

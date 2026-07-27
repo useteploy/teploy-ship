@@ -107,11 +107,52 @@ async function provider(cfg: OIDCConfig): Promise<client.Configuration> {
 
 // ── Request helpers ────────────────────────────────────────────────────────
 
-function publicOrigin(request: Request): string {
+/**
+ * The origin a browser actually reached us on.
+ *
+ * `X-Forwarded-*` is client input unless something in front of us overwrites
+ * it, and Ship's shipped teploy.yml uses `ingress: host` — the web process is
+ * published straight at <server-ip>:7460 with no proxy at all. Believing those
+ * headers unconditionally therefore let any caller pick the scheme, and
+ * `isSecure` feeds the cookie's `Secure` attribute: `X-Forwarded-Proto: http`
+ * was enough to have session cookies minted without it.
+ *
+ * So, in order: an explicitly configured public URL wins (SHIP_PUBLIC_URL, the
+ * same var the notifier and /sources already use); then the forwarded headers,
+ * but only when the operator has said a proxy is in front (SHIP_TRUST_PROXY);
+ * otherwise what the request itself claims.
+ *
+ * Dash gates the identical logic on the peer IP against a trusted-proxy CIDR
+ * list. That is the better check and this should match it, but the web layer
+ * here only ever sees a `Request` — Neutron's middleware context carries no
+ * peer address — so the operator states it instead of us inferring it.
+ */
+export function publicOrigin(request: Request): string {
+  const configured = env("SHIP_PUBLIC_URL");
+  if (configured !== "") {
+    try {
+      const u = new URL(configured);
+      return `${u.protocol.replace(":", "")}://${u.host}`;
+    } catch {
+      // Malformed value: fall through rather than fail the login outright.
+    }
+  }
+
   const url = new URL(request.url);
-  const proto = (request.headers.get("x-forwarded-proto")?.split(",")[0].trim()) || url.protocol.replace(":", "");
-  const host = (request.headers.get("x-forwarded-host")?.split(",")[0].trim()) || request.headers.get("host") || url.host;
-  return `${proto}://${host}`;
+  if (trustProxy()) {
+    const proto = request.headers.get("x-forwarded-proto")?.split(",")[0].trim();
+    const host = request.headers.get("x-forwarded-host")?.split(",")[0].trim();
+    if (proto !== undefined && proto !== "" && host !== undefined && host !== "") {
+      return `${proto}://${host}`;
+    }
+  }
+  return `${url.protocol.replace(":", "")}://${request.headers.get("host") || url.host}`;
+}
+
+/** Whether a reverse proxy in front of Ship is authoritative for scheme/host. */
+function trustProxy(): boolean {
+  const raw = env("SHIP_TRUST_PROXY").toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes";
 }
 
 function redirectUri(request: Request, cfg: OIDCConfig): string {
