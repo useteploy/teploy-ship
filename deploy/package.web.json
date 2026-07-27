@@ -7,6 +7,7 @@
     "@neutron-build/cli": "^0.1.4",
     "@neutron-build/core": "^0.1.5",
     "@preact/preset-vite": "^2.9.4",
+    "openid-client": "^6.8.4",
     "preact": "10.25.4",
     "teploy-ship": "file:..",
     "vite": "^6.0.7"

@@ -4,7 +4,7 @@ declare module "@neutron-build/core" {
     paths:
     | "/"
     | "/account"
-    | "/api/runs/[id]/decide"
+    | "/api/runs/decide"
     | "/events"
     | "/fleet"
     | "/health"

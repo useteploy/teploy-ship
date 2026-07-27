@@ -2,9 +2,8 @@ import { deliverEvent } from "@neutron-build/workflow";
 
 import { PLAN_EVENT } from "teploy-ship/plan";
 
-import { currentUser } from "../../../../lib/session.server.js";
-import { roleAllows } from "../../../../lib/session.server.js";
-import { shipRuntime } from "../../../../lib/store.server.js";
+import { currentUser, roleAllows } from "../../../lib/session.server.js";
+import { shipRuntime } from "../../../lib/store.server.js";
 
 export const config = { mode: "app" };
 
@@ -31,8 +30,20 @@ export const config = { mode: "app" };
  * on a DIFFERENT action, and the stale approval arrives. Delivering it would
  * approve something nobody looked at. So a caller may pin `event_name`, and a
  * mismatch is a 409 rather than a silent misapplication.
+ *
+ * WHY run_id IS IN THE BODY, not the path. The obvious shape,
+ * /api/runs/[id]/decide, does not work: Neutron's route generator only treats a
+ * `[param]` as dynamic when it is the LAST segment. Mid-path it is emitted as a
+ * literal — the generated route table showed "/api/runs/[id]/decide" as a plain
+ * string while runs/[id].tsx correctly produced `/runs/${string}` — so the route
+ * registered but matched only the literal URL, and every real call 404'd with no
+ * build error or warning. Putting the id alongside the other decision fields
+ * avoids the limitation and reads better anyway: approved, reason, event_name and
+ * run_id are one decision, not a path plus a payload.
  */
 interface DecideBody {
+  /** Which run to decide. Required — see the note above on why it is not a path param. */
+  run_id?: string;
   approved?: boolean;
   reason?: string;
   /** Optional operator-edited plan, honoured only on a plan approval. */
@@ -41,13 +52,7 @@ interface DecideBody {
   event_name?: string;
 }
 
-export async function action({
-  request,
-  params,
-}: {
-  request: Request;
-  params: { id: string };
-}): Promise<Response> {
+export async function action({ request }: { request: Request }): Promise<Response> {
   if (request.method !== "POST") {
     return json(405, { error: "method not allowed — POST only" });
   }
@@ -70,8 +75,11 @@ export async function action({
     // Not defaulted: a missing field must never be read as "approved".
     return json(400, { error: '"approved" is required and must be a boolean' });
   }
+  const runId = (body.run_id ?? "").trim();
+  if (runId === "") {
+    return json(400, { error: '"run_id" is required' });
+  }
 
-  const runId = params.id;
   const runtime = await shipRuntime();
   const meta = await runtime.loadMeta(runId);
   if (meta === null) {
@@ -120,4 +128,12 @@ function json(status: number, body: unknown): Response {
     status,
     headers: { "content-type": "application/json" },
   });
+}
+
+// A route with only an action still needs a default export, or the router does
+// not register it and every request 404s — no build error, no warning, just a
+// missing route. Same stub the webhook receivers use (hooks/forgejo.tsx).
+// Nothing ever renders it: this path is POST-only and returns JSON.
+export default function Never() {
+  return null;
 }
