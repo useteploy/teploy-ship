@@ -1,9 +1,11 @@
+import type { ActionArgs } from "@neutron-build/core";
+
 import { deliverEvent } from "@neutron-build/workflow";
 
 import { PLAN_EVENT } from "teploy-ship/plan";
 
-import { currentUser, roleAllows } from "../../../lib/session.server.js";
-import { shipRuntime } from "../../../lib/store.server.js";
+import { currentUser, roleAllows } from "../../../../lib/session.server.js";
+import { shipRuntime } from "../../../../lib/store.server.js";
 
 export const config = { mode: "app" };
 
@@ -31,19 +33,14 @@ export const config = { mode: "app" };
  * approve something nobody looked at. So a caller may pin `event_name`, and a
  * mismatch is a 409 rather than a silent misapplication.
  *
- * WHY run_id IS IN THE BODY, not the path. The obvious shape,
- * /api/runs/[id]/decide, does not work: Neutron's route generator only treats a
- * `[param]` as dynamic when it is the LAST segment. Mid-path it is emitted as a
- * literal — the generated route table showed "/api/runs/[id]/decide" as a plain
- * string while runs/[id].tsx correctly produced `/runs/${string}` — so the route
- * registered but matched only the literal URL, and every real call 404'd with no
- * build error or warning. Putting the id alongside the other decision fields
- * avoids the limitation and reads better anyway: approved, reason, event_name and
- * run_id are one decision, not a path plus a payload.
+ * The run id is a path param. It briefly was not: Neutron only ran the LAST
+ * segment of a route through its param rule, so a `[id]` DIRECTORY was emitted
+ * as a literal and every real call 404'd with no build error. Fixed in
+ * @neutron-build/core 0.1.8, which also made that class of broken route table a
+ * build error rather than a 404 found in production. This route requires that
+ * version — see the floor in web/package.json.
  */
 interface DecideBody {
-  /** Which run to decide. Required — see the note above on why it is not a path param. */
-  run_id?: string;
   approved?: boolean;
   reason?: string;
   /** Optional operator-edited plan, honoured only on a plan approval. */
@@ -52,7 +49,7 @@ interface DecideBody {
   event_name?: string;
 }
 
-export async function action({ request }: { request: Request }): Promise<Response> {
+export async function action({ request, params }: ActionArgs): Promise<Response> {
   if (request.method !== "POST") {
     return json(405, { error: "method not allowed — POST only" });
   }
@@ -75,9 +72,9 @@ export async function action({ request }: { request: Request }): Promise<Respons
     // Not defaulted: a missing field must never be read as "approved".
     return json(400, { error: '"approved" is required and must be a boolean' });
   }
-  const runId = (body.run_id ?? "").trim();
+  const runId = (params.id ?? "").trim();
   if (runId === "") {
-    return json(400, { error: '"run_id" is required' });
+    return json(400, { error: "missing run id in the path" });
   }
 
   const runtime = await shipRuntime();

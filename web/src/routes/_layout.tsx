@@ -34,7 +34,10 @@ export const middleware: MiddlewareFn = async (request, _context, next) => {
   // /oidc/* is the SSO handshake — it carries no session yet and must be reachable.
   if (path === "/login" || path === "/health" || path.startsWith("/hooks/") || path.startsWith("/oidc/") || path.startsWith("/assets/") || path === "/favicon.ico") return next();
 
-  const isData = request.headers.get("x-neutron-data") === "true";
+  // /api/* is a machine surface: answer it with a status, never a redirect to a
+  // login page a program cannot fill in. Its routes document 401/403 and a
+  // caller that followed a 302 would parse the login HTML as its result.
+  const isData = request.headers.get("x-neutron-data") === "true" || path.startsWith("/api/");
   const principal = await currentUser(request);
   if (principal === null) {
     if (isData) {

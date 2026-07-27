@@ -42,6 +42,22 @@ All notable changes to Teploy Ship are recorded here.
   `_ADMIN_GROUP`/`_EDITOR_GROUP`/`_VIEWER_GROUP`, `_DEFAULT_ROLE`); register
   `https://<your-ship-host>/oidc/callback` as the redirect URI. The login page
   shows an SSO button when it's configured.
+- Machine-callable approve/deny for a parked run:
+  `POST /api/runs/<run-id>/decide`, JSON in and JSON out, authenticated with
+  the existing `Authorization: Bearer <SHIP_WEB_TOKEN>` and requiring the
+  editor role. The dashboard form on `runs/[id]` is the right surface for a
+  person and the wrong one for a program, which would otherwise have to post
+  form fields and parse a 302. Body: `approved` (required boolean), optional
+  `reason`, optional `plan` (honoured only on a plan approval), and optional
+  `event_name` to pin the decision to the park the caller actually saw — if the
+  run has since parked on something else that is a 409, not a silent approval
+  of something nobody looked at. Reuses the same
+  deliverEvent → markWake → saveMeta primitive the form does, rather than a
+  second resume path that would rot. Requires `@neutron-build/core` 0.1.8.
+- `/api/*` now answers unauthenticated requests with `401` and a problem+json
+  body instead of redirecting to `/login`. A program cannot fill in a login
+  page, and a caller following the 302 would have parsed the login HTML as its
+  result. Page routes still redirect.
 
 ### Fixed
 - The session cookie was `SameSite=Strict`, which the SSO callback cannot
