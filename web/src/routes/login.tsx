@@ -1,37 +1,55 @@
-import { webToken } from "../lib/store.server.js";
+import { authenticate, sessionSetCookie } from "../lib/session.server.js";
+import { oidcEnabled, oidcLabel } from "../lib/oidc.server.js";
 
 export const config = { mode: "app" };
 
+export function loader(): { sso: { label: string } | null } {
+  return { sso: oidcEnabled() ? { label: oidcLabel() } : null };
+}
+
 export async function action({ request }: { request: Request }): Promise<Response | { error: string }> {
   const form = await request.formData();
-  const token = String(form.get("token") ?? "");
-  // Constant-time: hash both sides so length differences don't short-circuit.
-  const { createHash, timingSafeEqual } = await import("node:crypto");
-  const presented = createHash("sha256").update(token).digest();
-  const expected = createHash("sha256").update(webToken()).digest();
-  if (!timingSafeEqual(presented, expected)) {
-    return { error: "Wrong token." };
+  const username = String(form.get("username") ?? "");
+  const password = String(form.get("password") ?? "");
+  const principal = await authenticate(username, password);
+  if (principal === null) {
+    return { error: "Wrong username or password." };
   }
-  const cookie = [
-    `ship_token=${encodeURIComponent(token)}`,
-    "Path=/",
-    "HttpOnly",
-    "SameSite=Strict",
-    `Max-Age=${60 * 60 * 24 * 30}`,
-  ].join("; ");
+  const proto = request.headers.get("x-forwarded-proto") ?? new URL(request.url).protocol.replace(":", "");
+  const cookie = sessionSetCookie(principal, proto === "https");
   return new Response(null, { status: 302, headers: { location: "/", "set-cookie": cookie } });
 }
 
-export default function Login({ actionData }: { actionData?: { error?: string } }) {
+export default function Login({ data, actionData }: { data?: { sso: { label: string } | null }; actionData?: { error?: string } }) {
+  const sso = data?.sso ?? null;
+  const urlError = typeof location !== "undefined" ? new URLSearchParams(location.search).get("error") : null;
+  const error = actionData?.error ?? urlError ?? undefined;
   return (
     <div class="login">
       <h1>Teploy Ship</h1>
-      <p class="meta">Enter the access token this server was started with.</p>
+      <p class="meta">Sign in to manage runs and approvals.</p>
+      {sso !== null && (
+        <>
+          <a href="/oidc/login" class="sso-btn">{sso.label}</a>
+          <div class="sso-divider">or</div>
+        </>
+      )}
       <form method="post">
-        <input type="password" name="token" placeholder="access token" autofocus />
-        {actionData?.error !== undefined && <p style="color: var(--red)">{actionData.error}</p>}
+        <input type="text" name="username" placeholder="username" autocomplete="username" autofocus />
+        <input type="password" name="password" placeholder="password" autocomplete="current-password" />
+        {error !== undefined && <p style="color: var(--red)">{error}</p>}
         <button type="submit">Sign in</button>
       </form>
+      <p class="meta" style="margin-top:14px">
+        First sign-in: use any username with the server's access token, then create accounts in Settings.
+      </p>
+      <style dangerouslySetInnerHTML={{ __html: `
+        .sso-btn { display:block; text-align:center; padding:9px 10px; margin:10px 0 4px;
+          border:1px solid var(--border); border-radius:6px; color:var(--text); text-decoration:none; }
+        .sso-btn:hover { border-color:var(--dim); text-decoration:none; }
+        .sso-divider { display:flex; align-items:center; gap:10px; color:var(--dim); font-size:12px; margin:10px 0; }
+        .sso-divider::before, .sso-divider::after { content:""; flex:1; height:1px; background:var(--border); }
+      ` }} />
     </div>
   );
 }

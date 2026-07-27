@@ -1,16 +1,29 @@
 import type { ComponentChildren } from "preact";
 import type { MiddlewareFn } from "@neutron-build/core";
 
-import { webToken } from "../lib/store.server.js";
+import { currentUser, requiredRole, roleAllows } from "../lib/session.server.js";
+import { teployNav } from "../lib/nav.server.js";
+import type { NavData } from "../lib/nav.server.js";
+
+/** Cross-product dashboard switcher config (top-left). Server-side loader so it
+ * renders with SSR and never causes a hydration mismatch. */
+export function loader(): { nav: NavData } {
+  return { nav: teployNav("ship") };
+}
 
 /**
- * Single-token auth for the whole surface, exported from the root layout
- * because that is where the framework actually collects middleware (route
- * and layout modules — the documented global src/middleware.ts is not
- * loaded by either server; recorded as a framework-excellence finding).
- * A web approve button is remote code approval, so nothing is served
- * unauthenticated: requests need `Authorization: Bearer <token>` (API
- * callers) or the `ship_token` cookie set by /login.
+ * Identity + RBAC for the whole surface (Teploy RBAC contract:
+ * admin/editor/viewer), exported from the root layout because that is where
+ * the framework actually collects middleware (route and layout modules — the
+ * documented global src/middleware.ts is not loaded by either server; recorded
+ * as a framework-excellence finding).
+ *
+ * A web approve button is remote code + spend approval, so nothing is served
+ * unauthenticated, and the role gate fails closed. Authentication is a Bearer
+ * SHIP_WEB_TOKEN (API/bootstrap → admin), a signed ship_session cookie (a
+ * logged-in user carrying their role), or a legacy ship_token cookie
+ * (back-compat → admin). Roles: reads need viewer, mutations need editor,
+ * settings/sources/users need admin.
  */
 export const middleware: MiddlewareFn = async (request, _context, next) => {
   const url = new URL(request.url);
@@ -18,42 +31,36 @@ export const middleware: MiddlewareFn = async (request, _context, next) => {
   // /hooks/* authenticates via webhook HMAC inside the route, not bearer;
   // /health is the family-convention liveness probe (teploy's deploy gate
   // polls it before any login could exist).
-  if (path === "/login" || path === "/health" || path.startsWith("/hooks/") || path.startsWith("/assets/") || path === "/favicon.ico") return next();
+  // /oidc/* is the SSO handshake — it carries no session yet and must be reachable.
+  if (path === "/login" || path === "/health" || path.startsWith("/hooks/") || path.startsWith("/oidc/") || path.startsWith("/assets/") || path === "/favicon.ico") return next();
 
-  const expected = webToken();
-  const header = request.headers.get("authorization");
-  const bearer = header?.startsWith("Bearer ") === true ? header.slice(7) : null;
-  const cookie = request.headers.get("cookie") ?? "";
-  const rawCookieToken = /(?:^|;\s*)ship_token=([^;]+)/.exec(cookie)?.[1] ?? null;
-  // A malformed %-sequence must read as a bad token (401), never a 500.
-  let cookieToken: string | null = null;
-  if (rawCookieToken !== null) {
-    try {
-      cookieToken = decodeURIComponent(rawCookieToken);
-    } catch {
-      cookieToken = null;
+  const isData = request.headers.get("x-neutron-data") === "true";
+  const principal = await currentUser(request);
+  if (principal === null) {
+    if (isData) {
+      return new Response(JSON.stringify({ title: "Unauthorized", status: 401 }), {
+        status: 401,
+        headers: { "content-type": "application/problem+json" },
+      });
     }
+    return new Response(null, { status: 302, headers: { location: "/login" } });
   }
 
-  // Constant-time comparison: token equality must not leak prefix length
-  // through response timing.
-  const { createHash, timingSafeEqual } = await import("node:crypto");
-  const matches = (presented: string | null): boolean => {
-    if (presented === null) return false;
-    const a = createHash("sha256").update(presented).digest();
-    const b = createHash("sha256").update(expected).digest();
-    return timingSafeEqual(a, b);
-  };
-  if (matches(bearer) || matches(cookieToken)) {
-    return next();
-  }
-  if (request.headers.get("x-neutron-data") === "true") {
-    return new Response(JSON.stringify({ title: "Unauthorized", status: 401 }), {
-      status: 401,
-      headers: { "content-type": "application/problem+json" },
+  // RBAC — authenticated but possibly under-privileged for this route.
+  const need = requiredRole(request.method, path);
+  if (!roleAllows(principal.role, need)) {
+    if (isData) {
+      return new Response(JSON.stringify({ title: "Forbidden", status: 403, detail: `requires the ${need} role` }), {
+        status: 403,
+        headers: { "content-type": "application/problem+json" },
+      });
+    }
+    return new Response(`Forbidden — this action requires the ${need} role.`, {
+      status: 403,
+      headers: { "content-type": "text/plain; charset=utf-8" },
     });
   }
-  return new Response(null, { status: 302, headers: { location: "/login" } });
+  return next();
 };
 
 /**
@@ -75,6 +82,18 @@ header.top { display: flex; align-items: center; gap: 22px;
   padding: 12px 20px; border-bottom: 1px solid var(--border);
   position: sticky; top: 0; background: var(--bg); z-index: 10; }
 header.top .brand { font-weight: 700; color: var(--text); letter-spacing: .04em; font-size: 13px; }
+details.switcher { position: relative; }
+details.switcher > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 6px;
+  padding: 5px 10px; border: 1px solid var(--border); border-radius: 6px; color: var(--dim); font-size: 13px; }
+details.switcher > summary::-webkit-details-marker { display: none; }
+details.switcher > summary:hover { color: var(--text); border-color: var(--dim); }
+details.switcher .caret { font-size: 10px; opacity: .7; }
+details.switcher .switcher-menu { position: absolute; left: 0; top: 100%; margin-top: 4px; z-index: 30;
+  min-width: 150px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0,0,0,.4); overflow: hidden; }
+details.switcher .switcher-item { display: block; padding: 8px 12px; font-size: 13px; color: var(--text); text-decoration: none; }
+details.switcher a.switcher-item:hover { background: var(--bg); text-decoration: none; }
+details.switcher .switcher-item.current { color: var(--dim); font-weight: 600; }
 header.top nav.nav { display: flex; gap: 4px; }
 header.top nav.nav a { color: var(--dim); padding: 5px 11px; border-radius: 6px; font-size: 13px; }
 header.top nav.nav a:hover { color: var(--text); background: var(--panel); text-decoration: none; }
@@ -174,11 +193,27 @@ window.__shipLive = function (routeId) {
 };
 `;
 
-export default function Layout({ children }: { children: ComponentChildren }) {
+export default function Layout({ children, data }: { children: ComponentChildren; data?: { nav: NavData } }) {
+  const nav = data?.nav;
+  const showSwitcher = nav !== undefined && nav.apps.some((a) => a.url !== "");
   return (
     <>
       <style dangerouslySetInnerHTML={{ __html: CSS }} />
       <header class="top">
+        {showSwitcher && nav !== undefined && (
+          <details class="switcher">
+            <summary>{nav.apps.find((a) => a.key === nav.current)?.label ?? "Teploy"}<span class="caret">▾</span></summary>
+            <div class="switcher-menu">
+              {nav.apps.map((a) =>
+                a.key === nav.current ? (
+                  <span class="switcher-item current">{a.label}</span>
+                ) : (
+                  <a class="switcher-item" href={a.url}>{a.label}</a>
+                ),
+              )}
+            </div>
+          </details>
+        )}
         <a href="/" class="brand">TEPLOY SHIP</a>
         <nav class="nav">
           <a href="/">Inbox</a>
@@ -189,6 +224,7 @@ export default function Layout({ children }: { children: ComponentChildren }) {
           <a href="/sources">Sources</a>
           <a href="/spend">Spend</a>
           <a href="/settings">Settings</a>
+          <a href="/account">Account</a>
         </nav>
         <span class="spacer" />
       </header>

@@ -20,6 +20,8 @@ import { FileRepoMemory, NucleusRepoMemory } from "./repo-memory.js";
 import type { RepoMemoryStore } from "./repo-memory.js";
 import { FileSteerStore, NucleusSteerStore } from "./steer.js";
 import type { SteerStore } from "./steer.js";
+import { FileUserStore, NucleusUserStore } from "./users.js";
+import type { UserStore } from "./users.js";
 import { NucleusPgwire } from "./nucleus-pgwire.js";
 import { FileEventStore, RunMetaStore } from "./run-store.js";
 import type { RunMeta } from "./run-store.js";
@@ -37,6 +39,18 @@ export type { RepoMemoryStore, RepoNote } from "./repo-memory.js";
 export { FileRepoMemory, NucleusRepoMemory, loadRepoContext, runNote } from "./repo-memory.js";
 export type { SteerStore, SteerNote } from "./steer.js";
 export { FileSteerStore, NucleusSteerStore } from "./steer.js";
+export type { UserStore, ShipUser, UserView, Role } from "./users.js";
+export {
+  FileUserStore,
+  NucleusUserStore,
+  normalizeRole,
+  roleAllows,
+  hashPassword,
+  verifyPassword,
+  ROLE_ADMIN,
+  ROLE_EDITOR,
+  ROLE_VIEWER,
+} from "./users.js";
 export type { CodeSearch, CodeSearchHit, RefreshStats } from "./code-index.js";
 export { NucleusCodeIndex } from "./code-index.js";
 export { parseRepoToken, slackTaskFromMention, linearTaskFromIssue, ciFixTaskFromWorkflowRun } from "./intake-sources.js";
@@ -85,6 +99,8 @@ export interface ShipRuntime {
   memory: RepoMemoryStore;
   /** Mid-run steering notes the dashboard sends into running runs. */
   steer: SteerStore;
+  /** Local dashboard accounts + roles (Teploy RBAC contract). */
+  users: UserStore;
   close(): Promise<void>;
 }
 
@@ -101,6 +117,7 @@ export function fileRuntime(): ShipRuntime {
     placement: new FilePlacementStore(),
     memory: new FileRepoMemory(),
     steer: new FileSteerStore(),
+    users: new FileUserStore(),
     execute: (workflow, runId, input) =>
       executeRun({ workflow, runId, store, ...(input !== undefined ? { input } : {}) }),
     saveMeta: (m) => meta.save(m),
@@ -163,6 +180,7 @@ export async function nucleusRuntime(url: string, owner: string): Promise<Nucleu
     placement: new NucleusPlacementStore(db),
     memory: new NucleusRepoMemory(db),
     steer: new NucleusSteerStore(db),
+    users: new NucleusUserStore(db),
     async execute(workflow, runId, input) {
       const outcome = await executeRunExclusive({
         workflow,
