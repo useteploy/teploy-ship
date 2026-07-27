@@ -3,6 +3,8 @@ declare module "@neutron-build/core" {
   interface NeutronGeneratedRouteMap {
     paths:
     | "/"
+    | "/account"
+    | "/api/runs/decide"
     | "/events"
     | "/fleet"
     | "/health"
@@ -12,6 +14,8 @@ declare module "@neutron-build/core" {
     | "/hooks/slack"
     | "/knowledge"
     | "/login"
+    | "/oidc/callback"
+    | "/oidc/login"
     | "/reviews"
     | "/runs"
     | `/runs/${string}`
