@@ -35,7 +35,103 @@ teploy deploy
 
 The dashboard is at `<server>:7460` (`ingress: host` — firewall it to
 your VPN/tailnet, e.g. `ufw allow from 100.64.0.0/10 to any port 7460`).
-Log in with `SHIP_WEB_TOKEN`.
+Log in with `SHIP_WEB_TOKEN`, then add named accounts (below) so people
+stop sharing it.
+
+## 1b. Accounts and roles
+
+`SHIP_WEB_TOKEN` stays valid as an admin master credential and as the API
+bearer, but the dashboard is multi-user: named accounts with the canonical
+Teploy roles.
+
+| Role | Can |
+|---|---|
+| `admin` | everything, including managing accounts |
+| `editor` | start runs, approve/deny parked runs, change settings |
+| `viewer` | read-only |
+
+Create accounts in Settings → Users (Account has self-service password
+change). Passwords are scrypt-hashed; sessions are stateless signed
+cookies and a local user's role is re-read from the store on every
+request, so a demotion takes effect immediately.
+
+### Single sign-on (OIDC)
+
+Optional and off by default. Set `SHIP_OIDC_ISSUER` and
+`SHIP_OIDC_CLIENT_ID` and the login page offers an SSO button; Ship acts
+as an OpenID Connect relying party (authorization code + PKCE). Password
+login stays available as the break-glass path. Register
+`https://<your-ship-host>/oidc/callback` as the redirect URI.
+
+| Variable | Default | Description |
+|---|---|---|
+| `SHIP_OIDC_ISSUER` | _(none)_ | IdP issuer URL (discovery base). Required to enable SSO. |
+| `SHIP_OIDC_CLIENT_ID` | _(none)_ | OAuth client ID. Required to enable SSO. |
+| `SHIP_OIDC_CLIENT_SECRET` | _(none)_ | OAuth client secret. Omit for a public (PKCE-only) client. |
+| `SHIP_OIDC_REDIRECT_URL` | _(derived)_ | Callback URL. Derived from the request Host when unset; set it explicitly behind a proxy that rewrites Host. Must be `.../oidc/callback`. |
+| `SHIP_OIDC_SCOPES` | `openid profile email` | Space/comma-separated scopes (`openid` is always included). Add `groups` for group-based role mapping. |
+| `SHIP_OIDC_LABEL` | `Single sign-on` | Text on the SSO button. |
+| `SHIP_OIDC_USERNAME_CLAIM` | `preferred_username` | Claim used as the username (falls back to `email`, then `sub`). |
+| `SHIP_OIDC_ROLE_CLAIM` | `teploy_role` | Claim carrying the role directly (`admin`/`editor`/`viewer`). Checked first. |
+| `SHIP_OIDC_GROUPS_CLAIM` | `groups` | Claim listing the user's groups, used when no direct role claim matches. |
+| `SHIP_OIDC_ADMIN_GROUP` | _(none)_ | Group whose members become `admin`. |
+| `SHIP_OIDC_EDITOR_GROUP` | _(none)_ | Group whose members become `editor`. |
+| `SHIP_OIDC_VIEWER_GROUP` | _(none)_ | Group whose members become `viewer`. |
+| `SHIP_OIDC_DEFAULT_ROLE` | `viewer` | Role for an authenticated user matching no role claim or group (least privilege). |
+
+Role resolution order: a recognized `teploy_role` claim wins; otherwise
+groups are matched (admin > editor > viewer); otherwise the default role.
+SSO users are not stored locally — their role comes fresh from the IdP on
+every login, so manage them in your IdP.
+
+### Self-hosted identity providers
+
+Any OIDC provider works. Two are worth calling out because if you already
+run Teploy you probably already run one of them, so SSO costs you no new
+software.
+
+**Forgejo** (or Gitea) is a full OIDC provider. Its discovery document
+advertises `openid profile email groups` and a `groups` claim.
+
+1. Register an OAuth2 application — Site Administration → Applications for
+   an org-wide one, or user Settings → Applications for a personal one.
+   Set the redirect URI to `https://<your-ship-host>/oidc/callback`.
+2. Point Ship at it:
+
+```sh
+teploy secret set SHIP_OIDC_ISSUER=https://forgejo.example.com
+teploy secret set SHIP_OIDC_CLIENT_ID=<client id>
+teploy secret set SHIP_OIDC_CLIENT_SECRET=<client secret>
+teploy secret set SHIP_OIDC_SCOPES="openid profile email groups"
+teploy secret set SHIP_OIDC_ADMIN_GROUP=platform:owners
+teploy secret set SHIP_OIDC_EDITOR_GROUP=platform:deployers
+```
+
+- Request `groups` explicitly. It is not in the default scopes, and
+  without it no group matches, so every user lands on
+  `SHIP_OIDC_DEFAULT_ROLE`.
+- Forgejo emits one entry per org (`platform`) and one per team
+  (`platform:deployers`). Group comparison is exact and case-sensitive,
+  so copy the names as Forgejo spells them.
+- Forgejo cannot mint a custom claim, so leave `ROLE_CLAIM` at its
+  default and map roles by group.
+- Each dashboard needs its own OAuth2 application because the redirect
+  URIs differ, but Dash, Observe, and Ship can all map against the same
+  orgs and teams.
+
+**OpenBao** also serves OIDC (`identity/oidc/provider`), which is
+convenient if you already run it for `teploy secret --provider openbao`.
+Create a provider, an assignment, and a client, then use the provider's
+discovery URL as the issuer:
+
+```sh
+teploy secret set SHIP_OIDC_ISSUER=https://openbao.example.com/v1/identity/oidc/provider/teploy
+```
+
+Map roles with a scope template that emits a `groups` array (matched as
+above), or one that emits a `teploy_role` string — OpenBao can produce a
+custom claim, so the direct role claim is available here and takes
+precedence over groups.
 
 ## 2. Connect a source
 
