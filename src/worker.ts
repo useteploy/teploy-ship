@@ -13,7 +13,7 @@ import type { NucleusShipRuntime } from "./runtime.js";
 import type { IntakeStore, IntakePolicy, IntakeTask } from "./intake.js";
 import type { SourcePolicy } from "./policies.js";
 import { makeObserveEmitter } from "./observe.js";
-import { slackNotifier } from "./notify.js";
+import { multiNotifier, slackNotifier, webhookNotifier } from "./notify.js";
 import type { SpendStore } from "./spend.js";
 import { utcDay } from "./spend.js";
 import type { CodeSearch } from "./code-index.js";
@@ -191,8 +191,11 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
   const host = hostname();
   // Opt-in: emit each completed run to Observe (no-op unless configured).
   const observe = makeObserveEmitter(log);
-  // Opt-in: ping Slack when a run parks or settles (SHIP_SLACK_WEBHOOK_URL).
-  const notify = slackNotifier({ log });
+  // Opt-in: tell someone when a run parks or settles. Slack gets prose for a
+  // person (SHIP_SLACK_WEBHOOK_URL); the signed webhook gets a record for a
+  // program (SHIP_NOTIFY_URL + SHIP_NOTIFY_SECRET) — that is the one a
+  // workspace consumes to offer an approve button. Either, both, or neither.
+  const notify = multiNotifier([slackNotifier({ log }), webhookNotifier({ log })]);
   // Runs actively executing on THIS worker — reported as fleet load. A Set keyed
   // by runId (not a counter) so it self-corrects: onRunStart fires only after we
   // win the lease, and onComplete OR onError removes it — a run that throws
@@ -222,23 +225,43 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
       inflight.delete(runId);
       log(`[worker] ${runId} → ${outcome.status}`);
       if (notify.enabled) {
-        if (outcome.status === "waiting") {
-          notify.runEvent({
-            runId,
-            status: outcome.status,
-            ...(outcome.eventName !== undefined ? { eventName: outcome.eventName } : {}),
-          });
-        } else {
-          // Terminal: include the PR link when the run opened one.
-          void options.runtime.store
-            .load(runId)
-            .then((events) => {
-              const done = events.find((e) => e.type === "run-completed");
-              const pr = (done?.data as { output?: { pr?: string } } | undefined)?.output?.pr;
-              notify.runEvent({ runId, status: outcome.status, ...(pr !== undefined ? { pr } : {}) });
-            })
-            .catch(() => notify.runEvent({ runId, status: outcome.status }));
-        }
+        // Both branches read the event log for context. The park branch used to
+        // skip that, but a parked run is exactly the one a consumer must be able
+        // to route and describe — "run-7f3a is waiting" with no repo and no task
+        // is an approval request nobody can act on. One store read per park is
+        // cheap; parks are rare by construction.
+        void options.runtime.store
+          .load(runId)
+          .then((events) => {
+            const started = events.find((e) => e.type === "run-started");
+            const input = (started as { data?: { input?: { repo?: string; task?: string } } } | undefined)?.data?.input;
+            const context = {
+              ...(input?.repo !== undefined ? { repo: input.repo } : {}),
+              ...(input?.task !== undefined ? { task: input.task } : {}),
+            };
+            if (outcome.status === "waiting") {
+              notify.runEvent({
+                runId,
+                status: outcome.status,
+                ...(outcome.eventName !== undefined ? { eventName: outcome.eventName } : {}),
+                ...context,
+              });
+              return;
+            }
+            // Terminal: include the PR link when the run opened one.
+            const done = events.find((e) => e.type === "run-completed");
+            const pr = (done?.data as { output?: { pr?: string } } | undefined)?.output?.pr;
+            notify.runEvent({ runId, status: outcome.status, ...(pr !== undefined ? { pr } : {}), ...context });
+          })
+          // A store read failure must not lose the notification entirely — a
+          // bare status still tells a consumer the run needs attention.
+          .catch(() =>
+            notify.runEvent({
+              runId,
+              status: outcome.status,
+              ...(outcome.status === "waiting" && outcome.eventName !== undefined ? { eventName: outcome.eventName } : {}),
+            }),
+          );
       }
       // Dogfood the run into Observe (no-op unless configured).
       if (observe.enabled) {
