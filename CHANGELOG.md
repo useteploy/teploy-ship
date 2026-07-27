@@ -2,7 +2,46 @@
 
 All notable changes to Teploy Ship are recorded here.
 
-## v0.1.0 — 2026-07-15
+## [Unreleased]
+
+### Added
+- Teams and roles (Teploy RBAC contract: admin/editor/viewer). Ship's single
+  shared `SHIP_WEB_TOKEN` becomes multi-user: username/password accounts with
+  three roles — **admin** (manage users, sources, secrets), **editor** (approve
+  runs, launch work, mid-run steer), **viewer** (read-only). Since the approve
+  button is remote code + spend approval, this gates *who can approve* vs who
+  can only watch. Accounts persist in the runtime (file or Nucleus) via a new
+  user store; passwords hashed with Node's built-in scrypt. Login now takes a
+  username; the `SHIP_WEB_TOKEN` remains an **admin master credential** (login
+  fallback + API bearer) so operators are never locked out and existing API
+  callers keep working. Sessions are stateless signed cookies whose role is
+  re-derived from the store on every request — so a demotion or removal takes
+  effect immediately, not when the cookie expires. Manage accounts in Settings
+  (admin only); change your own password in Account. Roles are modeled to map
+  1:1 to a future OIDC claim for Phase 2 SSO federation.
+- Cross-product dashboard switcher. A top-left dropdown lets you jump between the
+  deployed Teploy dashboards — Dash, Observe, and Ship. Configure the sibling
+  URLs with `TEPLOY_NAV_DASH_URL` and `TEPLOY_NAV_OBSERVE_URL` (same env
+  convention across all three products); the switcher only appears once at least
+  one sibling URL is set.
+- Single sign-on (OIDC). Ship can act as an OpenID Connect relying party:
+  delegate login to your own identity provider (Okta, Azure AD/Entra, Google
+  Workspace, Keycloak, Authentik — "generic OIDC") or to Teploy Platform acting
+  as the IdP for Cloud. The IdP authenticates the user; Ship verifies the signed
+  ID token (authorization-code flow with PKCE, state, and nonce via
+  `openid-client`) and maps a claim to the same admin/editor/viewer roles — a
+  `teploy_role` claim wins, otherwise a group claim is matched to configured
+  admin/editor/viewer groups, otherwise a configurable default (viewer). It then
+  mints Ship's normal signed-cookie session (marked as an SSO session, whose
+  role is carried in the tamper-proof cookie and re-read from the IdP on each
+  login). Ship stays stateless — the in-flight state/nonce/PKCE verifier ride in
+  a short-lived signed cookie, not a server store. Username/password login
+  remains the break-glass path. Enable with `SHIP_OIDC_ISSUER` +
+  `SHIP_OIDC_CLIENT_ID` (plus `_CLIENT_SECRET`, optional `_REDIRECT_URL`,
+  `_SCOPES`, `_LABEL`, `_USERNAME_CLAIM`, `_ROLE_CLAIM`, `_GROUPS_CLAIM`,
+  `_ADMIN_GROUP`/`_EDITOR_GROUP`/`_VIEWER_GROUP`, `_DEFAULT_ROLE`); register
+  `https://<your-ship-host>/oidc/callback` as the redirect URI. The login page
+  shows an SSO button when it's configured.
 
 First public release.
 

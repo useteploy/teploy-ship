@@ -6,16 +6,19 @@
   "scripts": {
     "dev": "neutron-ts dev",
     "build": "neutron-ts build && node -e \"require('node:fs').rmSync('dist/index.html')\"",
-    "preview": "neutron-ts preview"
+    "preview": "neutron-ts preview",
+    "test": "node --import tsx --test \"src/**/*.test.ts\""
   },
   "dependencies": {
     "@neutron-build/cli": "^0.1.4",
     "@neutron-build/core": "^0.1.5",
+    "openid-client": "^6.8.4",
     "preact": "10.25.4",
     "teploy-ship": "link:.."
   },
   "devDependencies": {
     "@preact/preset-vite": "^2.9.4",
+    "tsx": "^4.23.1",
     "typescript": "^5.7.2",
     "vite": "^6.0.7"
   }
