@@ -130,6 +130,13 @@ a:hover { text-decoration: underline; }
 header.top { display: flex; align-items: center; gap: 22px; min-height: 55px;
   padding: 10px 20px; border-bottom: 1px solid var(--border);
   position: sticky; top: 0; background: var(--bg); z-index: 10; }
+/* Loading bar: a light sweeping left to right along the header's bottom rule,
+   matching teploy-dash. Ship navigates with real page loads, so it starts on a
+   link click and rides until the next document replaces it. */
+header.top .load-bar { position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; width: 0;
+  opacity: 0; z-index: 2; pointer-events: none;
+  background: linear-gradient(90deg, transparent, var(--accent, #58a6ff) 45%, #dceaff);
+  transition: width .4s cubic-bezier(.1,.75,.25,1), opacity .25s ease; }
 header.top .brand-group { display: flex; flex: 0 0 auto; align-items: center; gap: 9px; }
 header.top .brand { font-weight: 700; color: var(--text); letter-spacing: -.01em; font-size: 14px; }
 header.top .switcher-static { display: inline-flex; align-items: center; padding: 5px 10px; border: 1px solid var(--border, #30363d);
@@ -222,6 +229,38 @@ button.deny { color: var(--red); border-color: var(--red); }
 // loader-data re-fetch that reloads only when THIS page's data changed. A slow
 // interval is the fallback when SSE is unavailable. Scroll position survives
 // the reload so watching a live run doesn't jump to the top.
+/* Ship navigates by real page loads, so there is no request to wrap the way
+   dash wraps its fetches. Start the sweep on the intent to navigate — an
+   internal link click or a form submit — and let the next document replace it.
+   A cancelled navigation (same page, or the user coming back) fades it out so
+   the bar never sticks at 90%. */
+const NAV_PROGRESS = `(function(){
+  var el=document.getElementById('load-bar'); if(!el) return;
+  var t1,t2;
+  function start(){
+    clearTimeout(t1); clearTimeout(t2);
+    el.style.transition='none'; el.style.width='0%'; el.style.opacity='1';
+    void el.offsetWidth; el.style.transition=''; el.style.width='90%';
+  }
+  function stop(){
+    el.style.width='100%';
+    t1=setTimeout(function(){ el.style.opacity='0'; t2=setTimeout(function(){ el.style.width='0%'; },300); },220);
+  }
+  document.addEventListener('click',function(e){
+    var a=e.target && e.target.closest ? e.target.closest('a') : null;
+    if(!a) return;
+    var href=a.getAttribute('href')||'';
+    if(a.target==='_blank'||a.hasAttribute('download')) return;
+    if(href===''||href.charAt(0)==='#') return;
+    if(/^[a-z]+:/i.test(href) && a.origin!==location.origin) return;   // external
+    if(a.href===location.href) return;                                  // same page
+    start();
+  },true);
+  document.addEventListener('submit',function(){ start(); },true);
+  // Restored from bfcache, or the navigation never happened.
+  window.addEventListener('pageshow',function(){ stop(); });
+})();`;
+
 const SHIP_LIVE = `
 window.__shipLive = function (routeId) {
   var SK = "ship-scroll:" + location.pathname;
@@ -286,8 +325,10 @@ export default function Layout({ children, data }: { children: ComponentChildren
           </nav>
         )}
         <span class="spacer" />
+        <span class="load-bar" id="load-bar" />
       </header>
       <main>{children}</main>
+      <script dangerouslySetInnerHTML={{ __html: NAV_PROGRESS }} />
       <script dangerouslySetInnerHTML={{ __html: SHIP_LIVE }} />
     </>
   );
