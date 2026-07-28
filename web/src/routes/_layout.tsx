@@ -118,12 +118,16 @@ export const middleware: MiddlewareFn = async (request, _context, next) => {
  */
 const CSS = `
 :root {
+  /* Neutron paints <html> from --neutron-bg (default #0A0A0A). Left unset it
+     shows below a short page as a black band, as if the document ended. */
+  --neutron-bg: #0d1117;
   --bg: #0d1117; --panel: #161b22; --border: #30363d;
   --text: #e6edf3; --dim: #8b949e;
   --green: #3fb950; --yellow: #d29922; --red: #f85149; --blue: #58a6ff;
 }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--text);
+html { background: var(--bg); }
+body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text);
   font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 a { color: var(--blue); text-decoration: none; }
 a:hover { text-decoration: underline; }
@@ -246,6 +250,53 @@ const NAV_PROGRESS = `(function(){
     el.style.width='100%';
     t1=setTimeout(function(){ el.style.opacity='0'; t2=setTimeout(function(){ el.style.width='0%'; },300); },220);
   }
+  // The layout is server-rendered once and survives client-side route changes,
+  // so the active link has to be re-marked here — the server's value goes stale
+  // the moment the router swaps a page without re-rendering the header.
+  function syncActive(){
+    var links=document.querySelectorAll('header.top nav.nav a');
+    var path=location.pathname, best=null, i;
+    for(i=0;i<links.length;i++){
+      var h=links[i].getAttribute('href')||'';
+      var hit = h==='/' ? path==='/' : (path===h || path.indexOf(h+'/')===0);
+      if(hit && (best===null || h.length>best.length)) best=h;
+    }
+    for(i=0;i<links.length;i++){
+      links[i].classList.toggle('active',(links[i].getAttribute('href')||'')===best);
+    }
+  }
+  ['pushState','replaceState'].forEach(function(m){
+    var orig=history[m];
+    history[m]=function(){ var r=orig.apply(this,arguments); syncActive(); return r; };
+  });
+  window.addEventListener('popstate',syncActive);
+  syncActive();
+
+  var KEY='ship-nav-progress';
+  var watch;
+  // Two navigation styles have to finish the sweep. Client-side routing keeps
+  // this document alive, so watch for the URL to change and complete here. A
+  // real page load destroys it instead, so leave a flag the next document
+  // picks up. Whichever happens first clears the other's bookkeeping.
+  function begin(){
+    try{ sessionStorage.setItem(KEY,'1'); }catch(e){}
+    start();
+    var from=location.href, ticks=0;
+    clearInterval(watch);
+    watch=setInterval(function(){
+      ticks++;
+      if(location.href!==from){
+        clearInterval(watch);
+        try{ sessionStorage.removeItem(KEY); }catch(e){}
+        syncActive();
+        setTimeout(stop, 32);
+      } else if(ticks>160){        // 8s ceiling: never strand the bar on screen
+        clearInterval(watch);
+        try{ sessionStorage.removeItem(KEY); }catch(e){}
+        stop();
+      }
+    },50);
+  }
   document.addEventListener('click',function(e){
     var a=e.target && e.target.closest ? e.target.closest('a') : null;
     if(!a) return;
@@ -254,11 +305,19 @@ const NAV_PROGRESS = `(function(){
     if(href===''||href.charAt(0)==='#') return;
     if(/^[a-z]+:/i.test(href) && a.origin!==location.origin) return;   // external
     if(a.href===location.href) return;                                  // same page
-    start();
+    begin();
   },true);
-  document.addEventListener('submit',function(){ start(); },true);
-  // Restored from bfcache, or the navigation never happened.
-  window.addEventListener('pageshow',function(){ stop(); });
+  document.addEventListener('submit',function(){ begin(); },true);
+  // Full page load: the document that started the sweep is gone, so finish it
+  // here. Runs inline as this script parses — the header is already above it.
+  var pending=null;
+  try{ pending=sessionStorage.getItem(KEY); if(pending) sessionStorage.removeItem(KEY); }catch(e){}
+  if(pending){
+    el.style.transition='none'; el.style.width='90%'; el.style.opacity='1';
+    void el.offsetWidth; el.style.transition='';
+    setTimeout(stop, 32);
+  }
+  window.addEventListener('pageshow',function(e){ if(e.persisted) stop(); });
 })();`;
 
 const SHIP_LIVE = `
@@ -327,9 +386,9 @@ export default function Layout({ children, data }: { children: ComponentChildren
         <span class="spacer" />
         <span class="load-bar" id="load-bar" />
       </header>
-      <main>{children}</main>
       <script dangerouslySetInnerHTML={{ __html: NAV_PROGRESS }} />
       <script dangerouslySetInnerHTML={{ __html: SHIP_LIVE }} />
+      <main>{children}</main>
     </>
   );
 }
