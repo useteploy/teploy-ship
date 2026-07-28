@@ -102,7 +102,9 @@ a:hover { text-decoration: underline; }
 header.top { display: flex; align-items: center; gap: 22px;
   padding: 12px 20px; border-bottom: 1px solid var(--border);
   position: sticky; top: 0; background: var(--bg); z-index: 10; }
-header.top .brand { font-weight: 700; color: var(--text); letter-spacing: .04em; font-size: 13px; }
+header.top .brand { font-weight: 700; color: var(--text); letter-spacing: -.01em; font-size: 14px; margin-right: 4px; }
+header.top .switcher-static { display: inline-flex; align-items: center; padding: 4px 9px; border: 1px solid var(--border, #30363d);
+  border-radius: 6px; font-size: 13px; font-weight: 600; color: var(--text); }
 details.switcher { position: relative; }
 details.switcher > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 6px;
   padding: 5px 10px; border: 1px solid var(--border); border-radius: 6px; color: var(--dim); font-size: 13px; }
@@ -221,9 +223,12 @@ export default function Layout({ children, data }: { children: ComponentChildren
     <>
       <style dangerouslySetInnerHTML={{ __html: CSS }} />
       <header class="top">
-        {showSwitcher && nav !== undefined && (
+        <a href="/" class="brand">Teploy</a>
+        {/* Always name the current product; only offer the dropdown when a
+            sibling dashboard is actually reachable. */}
+        {showSwitcher && nav !== undefined ? (
           <details class="switcher">
-            <summary>{nav.apps.find((a) => a.key === nav.current)?.label ?? "Teploy"}<span class="caret">▾</span></summary>
+            <summary>{nav.apps.find((a) => a.key === nav.current)?.label ?? "Ship"}<span class="caret">▾</span></summary>
             <div class="switcher-menu">
               {nav.apps.map((a) =>
                 a.key === nav.current ? (
@@ -234,8 +239,9 @@ export default function Layout({ children, data }: { children: ComponentChildren
               )}
             </div>
           </details>
+        ) : (
+          <span class="switcher-static">Ship</span>
         )}
-        <a href="/" class="brand">TEPLOY SHIP</a>
         <nav class="nav">
           <a href="/">Inbox</a>
           <a href="/runs">Runs</a>
