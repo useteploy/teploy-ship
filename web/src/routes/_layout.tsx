@@ -1,4 +1,5 @@
 import type { ComponentChildren } from "preact";
+import faviconUrl from "../favicon.svg?url";
 import type { MiddlewareFn } from "@neutron-build/core";
 
 import { currentUser, requiredRole, roleAllows, sameOrigin, isMutating } from "../lib/session.server.js";
@@ -217,6 +218,12 @@ window.__shipLive = function (routeId) {
 };
 `;
 
+/** Tab icon. Emitted as a raw head fragment — the node adapter serves /assets/
+ *  but not publicDir files at the dist root, so the icon rides the bundle. */
+export function head() {
+  return `<link rel="icon" type="image/svg+xml" href="${faviconUrl}" />`;
+}
+
 export default function Layout({ children, data }: { children: ComponentChildren; data?: { nav: NavData } }) {
   const nav = data?.nav;
   const showSwitcher = nav !== undefined && nav.apps.some((a) => a.url !== "");
@@ -232,13 +239,10 @@ export default function Layout({ children, data }: { children: ComponentChildren
           <details class="switcher">
             <summary>{nav.apps.find((a) => a.key === nav.current)?.label ?? "Ship"}<span class="caret">▾</span></summary>
             <div class="switcher-menu">
-              {nav.apps.map((a) =>
-                a.key === nav.current ? (
-                  <span class="switcher-item current">{a.label}</span>
-                ) : (
-                  <a class="switcher-item" href={a.url}>{a.label}</a>
-                ),
-              )}
+              {/* Only the other dashboards — the chip already names this one. */}
+              {nav.apps.filter((a) => a.url !== "").map((a) => (
+                <a class="switcher-item" href={a.url}>{a.label}</a>
+              ))}
             </div>
           </details>
         ) : (
