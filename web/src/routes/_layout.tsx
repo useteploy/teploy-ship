@@ -8,8 +8,35 @@ import type { NavData } from "../lib/nav.server.js";
 
 /** Cross-product dashboard switcher config (top-left). Server-side loader so it
  * renders with SSR and never causes a hydration mismatch. */
-export async function loader({ request }: { request: Request }): Promise<{ nav: NavData; signedIn: boolean }> {
-  return { nav: teployNav("ship"), signedIn: (await currentUser(request)) !== null };
+export async function loader({ request }: { request: Request }): Promise<{ nav: NavData; signedIn: boolean; path: string }> {
+  return {
+    nav: teployNav("ship"),
+    signedIn: (await currentUser(request)) !== null,
+    path: new URL(request.url).pathname,
+  };
+}
+
+/** Nav links, with the one owning `path` marked. Longest href wins so "/runs"
+ *  is not shadowed by "/". */
+const NAV_LINKS = [
+  { href: "/", label: "Inbox" },
+  { href: "/runs", label: "Runs" },
+  { href: "/reviews", label: "Reviews" },
+  { href: "/fleet", label: "Fleet" },
+  { href: "/knowledge", label: "Knowledge" },
+  { href: "/sources", label: "Sources" },
+  { href: "/spend", label: "Spend" },
+  { href: "/settings", label: "Settings" },
+  { href: "/account", label: "Account" },
+];
+
+function activeHref(path: string): string | null {
+  let best: string | null = null;
+  for (const l of NAV_LINKS) {
+    const hit = l.href === "/" ? path === "/" : path === l.href || path.startsWith(l.href + "/");
+    if (hit && (best === null || l.href.length > best.length)) best = l.href;
+  }
+  return best;
 }
 
 /**
@@ -190,8 +217,6 @@ button.deny { color: var(--red); border-color: var(--red); }
 // the fragment, which browsers apply from body just fine.
 // Highlight the current section (the layout renders as a fragment and has
 // no request path, so mark the active nav link client-side).
-const NAV_ACTIVE = `(function(){var p=location.pathname;document.querySelectorAll('nav.nav a').forEach(function(a){var h=a.getAttribute('href');if(h==='/'?p==='/':p.indexOf(h)===0)a.classList.add('active');});})();`;
-
 // Live updates. A page calls __shipLive("route:<file>") to get pushed refreshes:
 // one EventSource to /events (server pushes on any state change) drives a
 // loader-data re-fetch that reloads only when THIS page's data changed. A slow
@@ -224,11 +249,12 @@ export function head() {
   return `<link rel="icon" type="image/svg+xml" href="${faviconUrl}" />`;
 }
 
-export default function Layout({ children, data }: { children: ComponentChildren; data?: { nav: NavData; signedIn?: boolean } }) {
+export default function Layout({ children, data }: { children: ComponentChildren; data?: { nav: NavData; signedIn?: boolean; path?: string } }) {
   const nav = data?.nav;
   // /login renders inside this layout, so without this the sign-in page shows
   // the full app nav — every link bounces straight back to /login.
   const signedIn = data?.signedIn === true;
+  const current = activeHref(data?.path ?? "/");
   const showSwitcher = nav !== undefined && nav.apps.some((a) => a.url !== "");
   return (
     <>
@@ -254,21 +280,14 @@ export default function Layout({ children, data }: { children: ComponentChildren
         </div>
         {signedIn && (
           <nav class="nav">
-            <a href="/">Inbox</a>
-            <a href="/runs">Runs</a>
-            <a href="/reviews">Reviews</a>
-            <a href="/fleet">Fleet</a>
-            <a href="/knowledge">Knowledge</a>
-            <a href="/sources">Sources</a>
-            <a href="/spend">Spend</a>
-            <a href="/settings">Settings</a>
-            <a href="/account">Account</a>
+            {NAV_LINKS.map((l) => (
+              <a href={l.href} class={l.href === current ? "active" : undefined}>{l.label}</a>
+            ))}
           </nav>
         )}
         <span class="spacer" />
       </header>
       <main>{children}</main>
-      <script dangerouslySetInnerHTML={{ __html: NAV_ACTIVE }} />
       <script dangerouslySetInnerHTML={{ __html: SHIP_LIVE }} />
     </>
   );
