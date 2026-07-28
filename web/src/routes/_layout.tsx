@@ -99,12 +99,13 @@ body { margin: 0; background: var(--bg); color: var(--text);
   font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 a { color: var(--blue); text-decoration: none; }
 a:hover { text-decoration: underline; }
-header.top { display: flex; align-items: center; gap: 22px;
-  padding: 12px 20px; border-bottom: 1px solid var(--border);
+header.top { display: flex; align-items: center; gap: 22px; min-height: 55px;
+  padding: 10px 20px; border-bottom: 1px solid var(--border);
   position: sticky; top: 0; background: var(--bg); z-index: 10; }
-header.top .brand { font-weight: 700; color: var(--text); letter-spacing: -.01em; font-size: 14px; margin-right: 4px; }
-header.top .switcher-static { display: inline-flex; align-items: center; padding: 4px 9px; border: 1px solid var(--border, #30363d);
-  border-radius: 6px; font-size: 13px; font-weight: 600; color: var(--text); }
+header.top .brand-group { display: flex; flex: 0 0 auto; align-items: center; gap: 9px; }
+header.top .brand { font-weight: 700; color: var(--text); letter-spacing: -.01em; font-size: 14px; }
+header.top .switcher-static { display: inline-flex; align-items: center; padding: 5px 10px; border: 1px solid var(--border, #30363d);
+  border-radius: 6px; font-size: 13px; font-weight: 600; line-height: 1.35; color: var(--text); }
 details.switcher { position: relative; }
 details.switcher > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 6px;
   padding: 5px 10px; border: 1px solid var(--border); border-radius: 6px; color: var(--dim); font-size: 13px; }
@@ -223,6 +224,7 @@ export default function Layout({ children, data }: { children: ComponentChildren
     <>
       <style dangerouslySetInnerHTML={{ __html: CSS }} />
       <header class="top">
+        <div class="brand-group">
         <a href="/" class="brand">Teploy</a>
         {/* Always name the current product; only offer the dropdown when a
             sibling dashboard is actually reachable. */}
@@ -242,6 +244,7 @@ export default function Layout({ children, data }: { children: ComponentChildren
         ) : (
           <span class="switcher-static">Ship</span>
         )}
+        </div>
         <nav class="nav">
           <a href="/">Inbox</a>
           <a href="/runs">Runs</a>
