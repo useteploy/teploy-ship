@@ -47,7 +47,9 @@ export default function Login({ data, actionData }: { data?: { sso: { label: str
         <button type="submit">Sign in</button>
       </form>
       <p class="meta" style="margin-top:14px">
-        First sign-in: use any username with the server's access token, then create accounts in Settings.
+        First sign-in: use any username, and <code>SHIP_WEB_TOKEN</code> as the
+        password — read it with <code>teploy secret get SHIP_WEB_TOKEN</code>.
+        Then create named accounts in Settings.
       </p>
       <style dangerouslySetInnerHTML={{ __html: `
         .sso-btn { display:block; text-align:center; padding:9px 10px; margin:10px 0 4px;
