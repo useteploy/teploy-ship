@@ -57,11 +57,26 @@ function execBody(result: unknown): { body: string; exitCode?: number } {
   const r = result as { exitCode?: number; stdout?: string; stderr?: string } | string | undefined;
   if (typeof r === "object" && r !== null && "exitCode" in r) {
     const parts: string[] = [];
-    if (r.stdout !== undefined && r.stdout !== "") parts.push(r.stdout);
-    if (r.stderr !== undefined && r.stderr !== "") parts.push(`stderr:\n${r.stderr}`);
-    return { body: parts.join("\n"), ...(r.exitCode !== undefined ? { exitCode: r.exitCode } : {}) };
+    if (typeof r.stdout === "string" && r.stdout !== "") parts.push(r.stdout);
+    if (typeof r.stderr === "string" && r.stderr !== "") parts.push(`stderr:\n${r.stderr}`);
+    return { body: parts.join("\n"), ...(typeof r.exitCode === "number" ? { exitCode: r.exitCode } : {}) };
   }
   return { body: String(r ?? "") };
+}
+
+/**
+ * Render any recorded result as a string. JSON.stringify returns undefined for
+ * undefined and throws on a BigInt or a cycle, and the renderer measures
+ * body.length — so one malformed event must not be able to 500 a whole run
+ * page. Never throws, always a string.
+ */
+function asText(value: unknown): string {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2) ?? String(value);
+  } catch {
+    return String(value);
+  }
 }
 
 /** True for a step whose recorded result carries no information worth a row. */
@@ -142,16 +157,16 @@ export function toTimeline(events: WorkflowEvent[]): TimelineItem[] {
             turn.endedAt = at;
           } else if (!isEmptyResult(result)) {
             // A steer note that actually landed, or search hits — worth showing.
-            const extra = typeof result === "string" ? result : JSON.stringify(result, null, 2);
+            const extra = asText(result);
             turn.output = turn.output === "" ? extra : `${turn.output}\n\n${part.part}:\n${extra}`;
             turn.endedAt = at;
           }
           break;
         }
         if (name === "sandbox" || /-snapshot$/.test(name) || /-restore$/.test(name)) {
-          items.push({ kind: "note", title: name, body: String(result ?? ""), at });
+          items.push({ kind: "note", title: name, body: asText(result ?? ""), at });
         } else if (!isEmptyResult(result)) {
-          items.push({ kind: "note", title: name, body: typeof result === "string" ? result : JSON.stringify(result, null, 2), at });
+          items.push({ kind: "note", title: name, body: asText(result), at });
         }
         break;
       }

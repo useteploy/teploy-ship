@@ -409,3 +409,42 @@ export default function Layout({ children, data }: { children: ComponentChildren
     </>
   );
 }
+
+/**
+ * Every route falls back to this when a loader or a component throws — the
+ * framework walks up to the nearest layout boundary, so one export covers the
+ * whole surface. Without it a failure rendered a bare "Application Error" page
+ * with the message suppressed in production AND nothing written to the
+ * container log, which left a 500 with no way to tell what broke.
+ *
+ * The message is shown deliberately: this is a self-hosted operator tool behind
+ * auth, and a nameless error is worse than a candid one. The stack is not.
+ */
+export function ErrorBoundary({ error }: { error: Error }) {
+  // Server-side render, so this reaches the container log — the one place an
+  // operator can actually go looking after the fact.
+  console.error(`[ship] render failed: ${error?.message ?? String(error)}`, error?.stack ?? "");
+  return (
+    <>
+      <style dangerouslySetInnerHTML={{ __html: CSS }} />
+      <header class="top">
+        <div class="brand-group">
+          <a href="/" class="brand">Teploy</a>
+          <span class="switcher-static">Ship</span>
+        </div>
+      </header>
+      <main>
+        <h1 class="page">Something broke on this page</h1>
+        <p class="meta">
+          The rest of Ship is unaffected — runs keep executing on the worker, which is a separate process.
+        </p>
+        <div class="card attn" style="margin:12px 0">
+          <pre style="margin:0;white-space:pre-wrap;word-break:break-word">{error?.message ?? String(error)}</pre>
+        </div>
+        <p class="meta">
+          <a href="/">Back to the inbox</a> · <a href="/runs">All runs</a>
+        </p>
+      </main>
+    </>
+  );
+}
