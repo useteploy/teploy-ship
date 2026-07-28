@@ -8,8 +8,8 @@ import type { NavData } from "../lib/nav.server.js";
 
 /** Cross-product dashboard switcher config (top-left). Server-side loader so it
  * renders with SSR and never causes a hydration mismatch. */
-export function loader(): { nav: NavData } {
-  return { nav: teployNav("ship") };
+export async function loader({ request }: { request: Request }): Promise<{ nav: NavData; signedIn: boolean }> {
+  return { nav: teployNav("ship"), signedIn: (await currentUser(request)) !== null };
 }
 
 /**
@@ -224,8 +224,11 @@ export function head() {
   return `<link rel="icon" type="image/svg+xml" href="${faviconUrl}" />`;
 }
 
-export default function Layout({ children, data }: { children: ComponentChildren; data?: { nav: NavData } }) {
+export default function Layout({ children, data }: { children: ComponentChildren; data?: { nav: NavData; signedIn?: boolean } }) {
   const nav = data?.nav;
+  // /login renders inside this layout, so without this the sign-in page shows
+  // the full app nav — every link bounces straight back to /login.
+  const signedIn = data?.signedIn === true;
   const showSwitcher = nav !== undefined && nav.apps.some((a) => a.url !== "");
   return (
     <>
@@ -249,17 +252,19 @@ export default function Layout({ children, data }: { children: ComponentChildren
           <span class="switcher-static">Ship</span>
         )}
         </div>
-        <nav class="nav">
-          <a href="/">Inbox</a>
-          <a href="/runs">Runs</a>
-          <a href="/reviews">Reviews</a>
-          <a href="/fleet">Fleet</a>
-          <a href="/knowledge">Knowledge</a>
-          <a href="/sources">Sources</a>
-          <a href="/spend">Spend</a>
-          <a href="/settings">Settings</a>
-          <a href="/account">Account</a>
-        </nav>
+        {signedIn && (
+          <nav class="nav">
+            <a href="/">Inbox</a>
+            <a href="/runs">Runs</a>
+            <a href="/reviews">Reviews</a>
+            <a href="/fleet">Fleet</a>
+            <a href="/knowledge">Knowledge</a>
+            <a href="/sources">Sources</a>
+            <a href="/spend">Spend</a>
+            <a href="/settings">Settings</a>
+            <a href="/account">Account</a>
+          </nav>
+        )}
         <span class="spacer" />
       </header>
       <main>{children}</main>
