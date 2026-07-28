@@ -1,9 +1,15 @@
-import { authenticate, sessionSetCookie } from "../lib/session.server.js";
+import { authenticate, sessionSetCookie, currentUser } from "../lib/session.server.js";
 import { oidcEnabled, oidcLabel } from "../lib/oidc.server.js";
 
 export const config = { mode: "app" };
 
-export function loader(): { sso: { label: string } | null } {
+export async function loader({ request }: { request: Request }): Promise<Response | { sso: { label: string } | null }> {
+  // Already signed in: the layout lets /login through unauthenticated, so
+  // without this an authenticated visitor is shown a sign-in form while every
+  // nav link works — indistinguishable from being signed out.
+  if ((await currentUser(request)) !== null) {
+    return new Response(null, { status: 302, headers: { location: "/" } });
+  }
   return { sso: oidcEnabled() ? { label: oidcLabel() } : null };
 }
 
