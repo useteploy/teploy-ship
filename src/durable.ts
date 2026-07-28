@@ -111,6 +111,7 @@ export interface DurableAgentConfig {
   /** Deterministic classifier: "required" actions park the run on an approval event. */
   approveAction?: ApprovalPolicy;
   workdir?: string;
+  /** Turn budget for a run (default 40). See the note at its use site. */
   maxSteps?: number;
   actionTimeoutMs?: number;
   maxObservationChars?: number;
@@ -185,7 +186,12 @@ export function durableAgent(
   config: DurableAgentConfig,
 ): WorkflowDefinition<DurableAgentInput, DurableAgentOutput> {
   const workdir = config.workdir ?? "/work";
-  const maxSteps = config.maxSteps ?? 20;
+  // 40, not 20. Nothing outside the eval harness ever set this, so every
+  // webhook-, Inbox- and sweep-launched run was capped at twenty model turns
+  // — enough to lose a real task to the ceiling rather than to the work (the
+  // SWE-bench gauge recorded a run spending its last ten steps just locating
+  // pytest). Cost is bounded by the daily spend caps, not by this.
+  const maxSteps = config.maxSteps ?? 40;
   const maxObs = config.maxObservationChars ?? 8000;
 
   return workflow<DurableAgentInput, DurableAgentOutput>(

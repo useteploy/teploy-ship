@@ -25,8 +25,16 @@ export interface WorkerInfo {
 export interface FleetStore {
   /** Upsert this worker's liveness/load. Called on an interval by the worker. */
   heartbeat(info: WorkerInfo): Promise<void>;
-  /** Every worker ever seen; callers decide staleness from lastSeen. */
+  /** Every worker still retained; callers decide staleness from lastSeen. */
   list(): Promise<WorkerInfo[]>;
+  /**
+   * Forget workers whose last heartbeat predates `before`, returning how many
+   * went. Without this the registry keeps every worker that ever ran: the
+   * Fleet page fills with hosts last seen weeks ago and the table grows without
+   * bound. Retention is long enough that a box down for a while still shows as
+   * stale rather than silently vanishing.
+   */
+  prune(before: Date): Promise<number>;
 }
 
 /**
@@ -140,6 +148,23 @@ export class FileFleetStore implements FleetStore {
   async list(): Promise<WorkerInfo[]> {
     return Object.values(await this.#read());
   }
+
+  async prune(before: Date): Promise<number> {
+    const all = await this.#read();
+    const cutoff = before.getTime();
+    const kept: Record<string, WorkerInfo> = {};
+    let dropped = 0;
+    for (const [owner, info] of Object.entries(all)) {
+      const seen = new Date(info.lastSeen).getTime();
+      if (Number.isFinite(seen) && seen < cutoff) dropped++;
+      else kept[owner] = info;
+    }
+    if (dropped > 0) {
+      await mkdir(stateDir(), { recursive: true });
+      await writeFile(this.#path, JSON.stringify(kept, null, 2));
+    }
+    return dropped;
+  }
 }
 
 /** Nucleus-backed over the pgwire adapter's ship_fleet table. */
@@ -206,5 +231,16 @@ export class NucleusFleetStore implements FleetStore {
       startedAt: String(r.started_at),
       lastSeen: String(r.last_seen),
     }));
+  }
+
+  async prune(before: Date): Promise<number> {
+    await this.#ensure();
+    // last_seen is a TEXT ISO-8601 UTC timestamp, so lexical ordering is
+    // chronological ordering and a plain string comparison is correct.
+    const cutoff = before.toISOString();
+    const doomed = await this.#db.query("SELECT owner FROM ship_fleet WHERE last_seen < $1", [cutoff]);
+    if (doomed.length === 0) return 0;
+    await this.#db.query("DELETE FROM ship_fleet WHERE last_seen < $1", [cutoff]);
+    return doomed.length;
   }
 }

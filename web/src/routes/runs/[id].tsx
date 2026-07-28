@@ -7,7 +7,7 @@ import { costUSD } from "teploy-ship/runtime";
 import type { RunMeta } from "teploy-ship/runtime";
 
 import { shipRuntime } from "../../lib/store.server.js";
-import { itemClass, runOutcome, toTimeline } from "../../lib/timeline.js";
+import { itemClass, runOutcome, since, took, toTimeline } from "../../lib/timeline.js";
 import type { RunOutcome, TimelineItem } from "../../lib/timeline.js";
 
 export const config = { mode: "app" };
@@ -221,14 +221,56 @@ export default function RunDetail({ data }: { data: RunData }) {
             </p>
           )}
           <ul class="timeline">
-            {data.items.map((item, i) => (
-              <li key={i} class={itemClass(item.kind)}>
-                <div class="kind">
-                  {item.title} <span style="float: right">{item.at}</span>
-                </div>
-                {item.body !== "" && <pre>{item.body}</pre>}
-              </li>
-            ))}
+            {data.items.map((item, i) => {
+              const elapsed = data.items.length > 0 ? since(data.items[0]!.at, item.at) : "";
+              // A turn collapses to one line: what it ran, how it exited, how
+              // long it took. The reasoning and the output are one click away
+              // rather than always on screen.
+              if (item.kind === "turn") {
+                return (
+                  <li key={i} class="turn">
+                    <details>
+                      <summary>
+                        <span class="turn-name">{item.title}</span>
+                        <code class="turn-action">{item.summary !== undefined && item.summary !== "" ? item.summary : "(no action)"}</code>
+                        <span class="turn-meta">
+                          {item.exitCode !== undefined && (
+                            <span class={item.exitCode === 0 ? "ok" : "bad"}>exit {item.exitCode}</span>
+                          )}
+                          {item.durationMs !== undefined && <span> {took(item.durationMs)}</span>}
+                          <span> {elapsed}</span>
+                        </span>
+                      </summary>
+                      {item.thought !== undefined && item.thought !== "" && <pre class="turn-thought">{item.thought}</pre>}
+                      {item.body !== "" && <pre>{item.body}</pre>}
+                    </details>
+                  </li>
+                );
+              }
+              // Long context blobs (the repo briefing, mostly) get the same
+              // treatment so they stop burying the run.
+              if (item.body.length > 600) {
+                return (
+                  <li key={i} class={itemClass(item.kind)}>
+                    <details>
+                      <summary>
+                        <span class="turn-name">{item.title}</span>
+                        <span class="turn-meta">{item.body.length.toLocaleString()} chars · {elapsed}</span>
+                      </summary>
+                      <pre>{item.body}</pre>
+                    </details>
+                  </li>
+                );
+              }
+              return (
+                <li key={i} class={itemClass(item.kind)}>
+                  <div class="kind">
+                    {item.title} <span style="float: right">{elapsed}</span>
+                  </div>
+                  {item.body !== "" && <pre>{item.body}</pre>}
+                </li>
+              );
+            })}
           </ul>
           {active && <script dangerouslySetInnerHTML={{ __html: POLL }} />}
         </>

@@ -56,6 +56,13 @@ export interface WorkerOptions {
   dailyBudgetUSD?: number;
   /** Per-source budget overrides (USD/day) taking precedence over dailyBudgetUSD. */
   intakeBudgets?: Record<string, number>;
+  /**
+   * Turn budget for a durable run (default 40, or SHIP_MAX_STEPS). Every
+   * webhook-, Inbox- and sweep-launched run shares this ceiling; the daily
+   * spend caps are what actually bound cost, so this only needs to be high
+   * enough that real work is not cut off mid-task.
+   */
+  maxSteps?: number;
   log?: (line: string) => void;
 }
 
@@ -80,14 +87,12 @@ export interface IntakeSweepDeps {
   maxConcurrentRuns: number;
   /** Per-source daily budget in USD; <= 0 disables the cap for that source. */
   budgetFor: (source: string) => number;
-  /** Model id used to price a completed run's usage. */
-  modelId: string;
   /** Process-local per-source launch counters (bucketed by UTC day). */
   launchedToday: Map<string, { day: string; count: number }>;
   /** Runs this worker launched that may still be executing: runId -> source. */
   inFlight: Map<string, string>;
-  /** Terminal-check + usage for a launched run (from its event log). */
-  outcomeOf: (runId: string) => Promise<{ terminal: boolean; usage?: RunUsage }>;
+  /** Terminal-check for a launched run (from its event log). */
+  outcomeOf: (runId: string) => Promise<{ terminal: boolean }>;
   /** Enqueue a proposed task as a run; returns the new runId. */
   launch: (task: IntakeTask) => Promise<string>;
   now: () => Date;
@@ -96,8 +101,8 @@ export interface IntakeSweepDeps {
 
 /**
  * One intake sweep, factored out of the resident worker so both caps are
- * unit-testable. It (1) settles spend for in-flight runs that finished and
- * frees their concurrency slot, then (2) auto-launches proposed tasks for
+ * unit-testable. It (1) frees the concurrency slot of any in-flight run that
+ * finished, then (2) auto-launches proposed tasks for
  * "auto" sources bounded by three independent limits: the count cap, the
  * global concurrency ceiling, and the per-source daily spend budget. A
  * task blocked by any cap stays proposed for a later sweep.
@@ -105,15 +110,13 @@ export interface IntakeSweepDeps {
 export async function sweepIntake(deps: IntakeSweepDeps): Promise<void> {
   const today = utcDay(deps.now());
 
-  // 1) Reconcile: record spend for finished runs and release their slots.
-  for (const [runId, source] of [...deps.inFlight]) {
+  // 1) Release the concurrency slot of any auto-launched run that finished.
+  // Spend is NOT settled here — the worker's onComplete does that for every
+  // run, whatever launched it. Settling in both places would double-count the
+  // auto-launched ones.
+  for (const [runId] of [...deps.inFlight]) {
     const outcome = await deps.outcomeOf(runId);
     if (!outcome.terminal) continue;
-    const cost = costUSD(deps.modelId, outcome.usage);
-    if (cost > 0) {
-      await deps.spend.add(source, today, cost);
-      deps.log(`[worker] intake: ${runId} (${source}) cost $${cost.toFixed(4)} recorded to ${today}`);
-    }
     deps.inFlight.delete(runId);
   }
 
@@ -177,7 +180,10 @@ export async function sweepIntake(deps: IntakeSweepDeps): Promise<void> {
  */
 export function startWorker(options: WorkerOptions): { scheduler: Scheduler; stop: () => void } {
   const log = options.log ?? ((line: string) => process.stderr.write(line + "\n"));
+  const envMaxSteps = Number(process.env.SHIP_MAX_STEPS);
+  const maxSteps = options.maxSteps ?? (Number.isFinite(envMaxSteps) && envMaxSteps > 0 ? envMaxSteps : undefined);
   const wf = durableAgent({
+    ...(maxSteps !== undefined ? { maxSteps } : {}),
     model: options.model,
     executor: options.executor,
     approveAction: defaultApprovalPolicy,
@@ -224,6 +230,26 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
     onComplete: (runId, outcome) => {
       inflight.delete(runId);
       log(`[worker] ${runId} → ${outcome.status}`);
+      // Settle spend for every run this worker finishes. This used to live in
+      // the intake sweep, which only reconciled runs it had auto-launched and
+      // was tracking in memory — so a run started from the Inbox never had its
+      // cost recorded and never counted against a budget, on a product whose
+      // pitch is cost transparency. Completion is the one point every durable
+      // run passes through regardless of how it was launched.
+      void (async () => {
+        const [meta, events] = await Promise.all([options.runtime.loadMeta(runId), options.runtime.store.load(runId)]);
+        const settled = readOutcome(events);
+        if (!settled.terminal) return; // a park is not a finish
+        const source = meta?.source;
+        if (source === undefined || source === "") return; // pre-source run; nothing to attribute
+        const cost = costUSD(meta?.model ?? modelId, settled.usage);
+        if (cost <= 0) return;
+        const day = utcDay(new Date());
+        await options.runtime.spend.add(source, day, cost);
+        log(`[worker] ${runId} (${source}) cost $${cost.toFixed(4)} recorded to ${day}`);
+      })().catch((error) =>
+        log(`[worker] ${runId}: spend settle failed: ${error instanceof Error ? error.message : String(error)}`),
+      );
       if (notify.enabled) {
         // Both branches read the event log for context. The park branch used to
         // skip that, but a parked run is exactly the one a consumer must be able
@@ -355,7 +381,6 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
       dailyAutoLimit: options.dailyAutoLimit ?? 10,
       maxConcurrentRuns,
       budgetFor: (source) => storeBudgets[source] ?? budgets[source] ?? defaultBudget,
-      modelId,
       launchedToday,
       inFlight,
       outcomeOf: async (runId) => readOutcome(await options.runtime.store.load(runId)),
@@ -365,6 +390,7 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
           runId,
           task: task.detail !== undefined ? `${task.title}\n\n${task.detail}` : task.title,
           model: modelId,
+          source: task.source,
           ...(task.repo !== undefined ? { repo: task.repo } : {}),
           ...(task.pr !== undefined ? { pr: task.pr } : {}),
         });
@@ -411,12 +437,30 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
   const heartbeatTimer = setInterval(() => void beat(), 15000);
   heartbeatTimer.unref?.();
 
+  // Retire workers that stopped heartbeating a long time ago. The registry
+  // keeps every worker it has ever seen, so without this the Fleet page slowly
+  // fills with dead hosts (ours had entries last seen 400+ hours back) and the
+  // table never stops growing. A day is far past the 45s staleness mark, so a
+  // box that is merely down still shows up as stale before it is forgotten.
+  const retentionMs = 24 * 60 * 60 * 1000;
+  const reap = (): Promise<void> =>
+    options.runtime.fleet
+      .prune(new Date(Date.now() - retentionMs))
+      .then((dropped) => {
+        if (dropped > 0) log(`[worker] fleet: retired ${dropped} worker(s) unseen for over 24h`);
+      })
+      .catch((error) => log(`[worker] fleet prune: ${error instanceof Error ? error.message : String(error)}`));
+  void reap();
+  const reapTimer = setInterval(() => void reap(), 60 * 60 * 1000);
+  reapTimer.unref?.();
+
   log(`[worker] watching for due runs as ${options.runtime.owner}`);
   return {
     scheduler,
     stop: () => {
       clearInterval(intakeTimer);
       clearInterval(heartbeatTimer);
+      clearInterval(reapTimer);
       scheduler.stop();
     },
   };

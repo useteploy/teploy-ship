@@ -77,6 +77,10 @@ env:
   # The daily count cap, concurrency ceiling, and per-source spend budget
   # still bound it (SHIP_DAILY_BUDGET_USD, SHIP_MAX_CONCURRENT_RUNS).
   #
+  # SHIP_MAX_STEPS caps how many model turns one durable run gets (default
+  # 40). Raise it for repos where tasks need more exploration; the spend
+  # caps above are what actually bound cost.
+  #
   # Run durable worker tasks in a teploy-sandbox container (instead of the
   # slim worker image, which has no python/curl) so repo tasks whose tests
   # need other tools can complete. The daemon is a host systemd service, so

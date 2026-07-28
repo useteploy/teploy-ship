@@ -223,7 +223,17 @@ export async function nucleusRuntime(url: string, owner: string): Promise<Nucleu
  */
 export async function enqueueRun(
   runtime: ShipRuntime,
-  options: { runId: string; task: string; model: string; repo?: string; pr?: number; plan?: boolean; workflowName?: string },
+  options: {
+    runId: string;
+    task: string;
+    model: string;
+    repo?: string;
+    pr?: number;
+    plan?: boolean;
+    workflowName?: string;
+    /** Intake source, recorded so completion can settle spend against it. */
+    source?: string;
+  },
 ): Promise<void> {
   const now = new Date().toISOString();
   await runtime.store.append(options.runId, {
@@ -253,6 +263,7 @@ export async function enqueueRun(
     task: options.task,
     model: options.model,
     status: "queued",
+    ...(options.source !== undefined ? { source: options.source } : {}),
     createdAt: now,
     updatedAt: now,
   });

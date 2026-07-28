@@ -205,12 +205,25 @@ button.deny { color: var(--red); border-color: var(--red); }
 .timeline .kind { font-size: 12px; color: var(--dim); margin-bottom: 4px; }
 .timeline pre { margin: 6px 0 0; white-space: pre-wrap; word-break: break-word;
   font: 13px/1.45 inherit; color: var(--text); max-height: 340px; overflow-y: auto; }
-.timeline li.thought { border-left: 3px solid var(--dim); }
-.timeline li.action { border-left: 3px solid var(--blue); }
+.timeline li.turn { border-left: 3px solid var(--blue); padding: 0; }
 .timeline li.observation { border-left: 3px solid #6e7681; }
 .timeline li.approval { border-left: 3px solid var(--yellow); }
 .timeline li.done { border-left: 3px solid var(--green); }
 .timeline li.error { border-left: 3px solid var(--red); }
+/* A collapsed turn is one scannable line: what ran, how it exited, how long. */
+.timeline summary { display: flex; align-items: baseline; gap: 10px; cursor: pointer;
+  padding: 9px 14px; list-style: none; }
+.timeline summary::-webkit-details-marker { display: none; }
+.timeline summary:hover { background: var(--panel-hover, rgba(255,255,255,0.03)); }
+.timeline details[open] summary { border-bottom: 1px solid var(--border); }
+.timeline details > pre { margin: 0; padding: 10px 14px; border-radius: 0; }
+.turn-name { color: var(--dim); font-size: 12px; flex: 0 0 auto; }
+.turn-action { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-size: 13px; color: var(--text); }
+.turn-meta { flex: 0 0 auto; font-size: 12px; color: var(--dim); }
+.turn-meta .ok { color: var(--green); }
+.turn-meta .bad { color: var(--red); }
+.turn-thought { color: var(--dim); border-bottom: 1px solid var(--border); }
 .meta { color: var(--dim); font-size: 12px; margin: 4px 0 14px; }
 .decide { display: flex; gap: 10px; margin: 14px 0; }
 .login { max-width: 380px; margin: 12vh auto; }

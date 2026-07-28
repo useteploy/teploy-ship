@@ -64,6 +64,7 @@ export async function action({ request }: { request: Request }): Promise<Respons
         runId,
         task: task.pr !== undefined ? (task.detail ?? task.title) : task.detail !== undefined ? `${task.title}\n\n${task.detail}` : task.title,
         model: defaultModel(),
+        source: task.source,
         ...(task.repo !== undefined ? { repo: task.repo } : {}),
         ...(task.pr !== undefined ? { pr: task.pr } : {}),
       });
@@ -78,11 +79,14 @@ export async function action({ request }: { request: Request }): Promise<Respons
   // Quick new run.
   const task = String(form.get("task") ?? "").trim();
   if (task === "") return redirect("/");
+  const repo = String(form.get("repo") ?? "").trim();
   const runId = `run-${randomUUID().slice(0, 8)}`;
   await enqueueRun(runtime, {
     runId,
     task,
     model: defaultModel(),
+    source: "manual",
+    ...(repo !== "" ? { repo } : {}),
     ...(form.get("plan") === "on" ? { plan: true } : {}),
   });
   return redirect(`/runs/${runId}`);
@@ -110,8 +114,12 @@ export default function Inbox({ data }: { data: InboxData }) {
         {data.store === "file" && " · file store has no worker — resume queued runs from the CLI"}
       </p>
 
+      {/* Without a repo the run gets an empty sandbox: nothing to read, nothing
+          to change, no PR at the end. Optional, because a bare task is still
+          useful for one-off scratch work. */}
       <form class="newrun" method="post">
         <input type="text" name="task" placeholder='new task, e.g. "fix the failing test in api/"' />
+        <input type="text" name="repo" placeholder="repo URL (optional)" />
         <label class="meta" style="display:flex;align-items:center;gap:6px;white-space:nowrap">
           <input type="checkbox" name="plan" /> plan first
         </label>

@@ -67,6 +67,13 @@ export interface RunMeta {
   eventName?: string;
   workspace?: string;
   model: string;
+  /**
+   * Intake source this run came from ("github", "slack", "manual", …). Recorded
+   * at enqueue so the worker can attribute the run's cost when it finishes:
+   * spend is settled per source, and without this only auto-launched runs —
+   * the ones the sweep happened to be tracking in memory — were ever counted.
+   */
+  source?: string;
   /** Host of the worker that most recently executed this run (fleet placement). */
   ranOn?: string;
   createdAt: string;
