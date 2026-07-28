@@ -146,11 +146,15 @@ header.top .brand { font-weight: 700; color: var(--text); letter-spacing: -.01em
 header.top .switcher-static { display: inline-flex; align-items: center; padding: 5px 10px; border: 1px solid var(--border, #30363d);
   border-radius: 6px; font-size: 13px; font-weight: 600; line-height: 1.35; color: var(--text); }
 details.switcher { position: relative; }
+/* Same metrics as dash and observe (and as .switcher-static right above): 13px
+   at 600 with line-height 1.35 lands the chip at 30px tall. Without the weight
+   and line-height this one rendered 32px and lighter than the other two. */
 details.switcher > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 6px;
-  padding: 5px 10px; border: 1px solid var(--border); border-radius: 6px; color: var(--dim); font-size: 13px; }
+  padding: 5px 10px; border: 1px solid var(--border); border-radius: 6px; color: var(--text);
+  font-size: 13px; font-weight: 600; line-height: 1.35; }
 details.switcher > summary::-webkit-details-marker { display: none; }
 details.switcher > summary:hover { color: var(--text); border-color: var(--dim); }
-details.switcher .caret { font-size: 10px; opacity: .7; }
+details.switcher .caret { font-size: 9px; opacity: .55; }
 details.switcher .switcher-menu { position: absolute; left: 0; top: 100%; margin-top: 4px; z-index: 30;
   min-width: 150px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
   box-shadow: 0 6px 24px rgba(0,0,0,.4); overflow: hidden; }
