@@ -28,6 +28,7 @@ import type { ExecutorProvider } from "./durable.js";
 import { formatReport, runEval } from "./eval.js";
 import type { EvalTask } from "./eval.js";
 import { stateDir } from "./run-store.js";
+import { buildFeed } from "./inbox.js";
 import { fileRuntime, nucleusRuntime } from "./runtime.js";
 import type { NucleusShipRuntime, ShipRuntime } from "./runtime.js";
 import { NucleusCodeIndex } from "./code-index.js";
@@ -54,6 +55,8 @@ Usage:
       [--handoff]                     deliver the decision, let a worker finish the run
   teploy-ship deny <run-id> [reason]  deny a parked action and continue
   teploy-ship cancel <run-id> [reason]  stop a durable run (parked or mid-flight)
+  teploy-ship inbox                   what needs a decision, newest state first
+      [--json]                        teploy.inbox/v1 feed (for the inbox TUI)
   teploy-ship fix --repo <url> "<task>"  clone, fix on a branch, push, open a PR
       [--git-token <t>]               also SHIP_GIT_TOKEN or gitToken in config
       [--base <branch>]               PR target (default: repo default branch)
@@ -559,6 +562,53 @@ async function runsCommand(rest: string[]): Promise<void> {
 }
 
 /**
+ * The teploy.inbox/v1 producer. `--json` is the contract envelope the inbox
+ * TUI consumes; bare `inbox` renders the same feed for a human, which is what
+ * `runs` should have been for the one question that actually matters — what is
+ * waiting on me.
+ */
+async function inboxCommand(rest: string[]): Promise<void> {
+  const args = parseArgs(rest);
+  const runtime = await makeRuntime(args, loadConfig());
+  const publicUrl = process.env.SHIP_PUBLIC_URL;
+  let feed;
+  try {
+    feed = await buildFeed(await runtime.listMeta(), {
+      loadEvents: (runId) => runtime.store.load(runId),
+      ...(publicUrl !== undefined && publicUrl !== "" ? { webBase: publicUrl } : {}),
+    });
+  } finally {
+    await runtime.close();
+  }
+
+  if (args.flags.json === true) {
+    process.stdout.write(JSON.stringify(feed, null, 2) + "\n");
+    return;
+  }
+
+  const decisions = feed.items.filter((item) => item.attention === "decision");
+  if (feed.items.length === 0) {
+    process.stderr.write(dim("inbox empty\n"));
+    return;
+  }
+  for (const item of feed.items) {
+    const tag =
+      item.attention === "decision" ? yellow("decision") : item.attention === "failure" ? red("failure ") : dim("info    ");
+    process.stdout.write(`${tag}  ${bold(item.id)}  ${item.title.slice(0, 60)}\n`);
+    if (item.needs === undefined) continue;
+    process.stdout.write(`          ${item.needs.prompt}\n`);
+    for (const action of item.needs.actions) {
+      process.stdout.write(`          ${dim(action.run.join(" "))}\n`);
+    }
+  }
+  process.stderr.write(
+    decisions.length === 0
+      ? dim(`\nnothing waiting on you (${feed.items.length} shown)\n`)
+      : `\n${yellow(`${decisions.length} waiting on you`)}${feed.truncated === true ? dim(" — older finished runs omitted") : ""}\n`,
+  );
+}
+
+/**
  * Per-source intake policies from the config file, with SHIP_INTAKE_POLICIES
  * (a JSON object like {"forgejo":"auto"}) merged over them — the only way to
  * set them on a teploy-deployed worker, which has no config file. Returns
@@ -723,6 +773,8 @@ async function main(): Promise<void> {
       return decideCommand(rest, false);
     case "cancel":
       return cancelCommand(rest);
+    case "inbox":
+      return inboxCommand(rest);
     case "fix":
       return fixCommand(rest);
     case "worker":
