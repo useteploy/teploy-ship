@@ -159,5 +159,16 @@ export const FINISH_NUDGE_NO_WORK =
 export const FINISH_NUDGE_FAILED =
   "Your most recent executed command FAILED. The task is NOT done: fix the problem in the actual files, run a command that proves it works (tests pass, program runs), and only then finish.";
 
+/**
+ * The second hold, and the one that makes the gate evidence-based rather than
+ * ceremonial. The old gate asked the agent to verify and then accepted the very
+ * next finish — including one that ran nothing in between, which is exactly the
+ * hallucinated-verification failure it was built to stop. This fires only when
+ * the agent came back with a finish having executed NOTHING successfully since
+ * being asked to prove its work. Bounded: it is asked once, then honoured.
+ */
+export const FINISH_NUDGE_NO_EVIDENCE =
+  "You did not run anything between being asked to verify and finishing again — so nothing has been demonstrated. Run one command that actually proves the task is done (execute the tests, run the program, read back the files you created) and show its real output. If you genuinely cannot verify, say so explicitly in your finish message instead of implying success.";
+
 export const FINISH_NUDGE_VERIFY =
   "Before finishing, verify your work. Re-read the task, then run one command that PROVES each artifact or change it requires actually exists and is correct (list or cat the files you claim to have created, run the tests, execute the program). If any check fails or anything is missing, fix it before finishing. If everything is already proven, finish again.";

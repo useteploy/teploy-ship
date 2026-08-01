@@ -155,7 +155,9 @@ test("python variables persist across actions through the loop (kernel)", async 
     "```python\ntotal = sum(range(11))\nprint('computed')\n```",
     (obs) => (obs.includes("computed") ? "```python\nprint(f'total={total}')\n```" : "```finish\nno-compute\n```"),
     (obs) => (obs.includes("total=55") ? "```finish\nkernel state persisted.\n```" : "```finish\nstate lost!\n```"),
-    (obs) => (obs.includes("Before finishing") ? "```finish\nkernel state persisted.\n```" : "```finish\nstate lost!\n```"),
+    // Prove it when asked: re-read the namespace instead of repeating the claim.
+    (obs) => (obs.includes("Before finishing") ? "```python\nprint(f'total={total}')\n```" : "```finish\nstate lost!\n```"),
+    (obs) => (obs.includes("total=55") ? "```finish\nkernel state persisted.\n```" : "```finish\nstate lost!\n```"),
   ]);
   const result = await runAgent({ model, executor, task: "sum with state", recovery: false, condense: false });
   assert.equal(result.summary, "kernel state persisted.");
@@ -168,7 +170,10 @@ test("edit and create actions work through the loop with real verification", asy
     "```edit greet.py\n<<<<<<< SEARCH\n    return \"helo\"\n=======\n    return \"hello\"\n>>>>>>> REPLACE\n```",
     "```bash\npython3 -c \"import greet; print(greet.greet())\"\n```",
     (obs) => (obs.includes("hello") ? "```finish\nedited and verified.\n```" : "```finish\nedit failed\n```"),
-    (obs) => (obs.includes("Before finishing") ? "```finish\nedited and verified.\n```" : "```finish\nedit failed\n```"),
+    // The gate asks for proof, so prove it — re-run the program rather than
+    // just asserting again (a finish with nothing executed is held once more).
+    (obs) => (obs.includes("Before finishing") ? '```bash\npython3 -c "import greet; print(greet.greet())"\n```' : "```finish\nedit failed\n```"),
+    (obs) => (obs.includes("hello") ? "```finish\nedited and verified.\n```" : "```finish\nedit failed\n```"),
   ]);
   const result = await runAgent({ model, executor, task: "fix the typo", recovery: false, condense: false });
   assert.equal(result.summary, "edited and verified.");
@@ -262,22 +267,44 @@ test("the live loop condenses an overgrown conversation before the next model ca
   assert.ok(sawCondensed, "an overgrown conversation should have been condensed before a later model call");
 });
 
-test("verified-finish guard: an immediate finish is nudged once, then honored", async () => {
+test("verified-finish guard: an immediate finish is held twice, then honored", async () => {
   const executor = await localExecutor();
   const { model, calls } = scriptedModel([
     "```finish\nAll done! (nothing was actually done)\n```", // premature — nudged
-    "```finish\nStill claiming done.\n```", // second finish honored (no infinite refusal)
+    "```finish\nStill claiming done.\n```", // still nothing executed — held again
+    "```finish\nStill claiming done.\n```", // honored: the gate always terminates
   ]);
   const result = await runAgent({ model, executor, task: "do something", recovery: false, condense: false });
   assert.equal(result.status, "finished");
-  assert.equal(result.steps.length, 2);
+  assert.equal(result.steps.length, 3);
   assert.equal(result.steps[0]?.action.kind, "finish"); // rejected first attempt recorded
-  // the nudge reached the model on the second call
-  const nudge = calls[1]?.messages.at(-1);
-  assert.match(String(nudge?.content), /finishing without having successfully executed/);
+  assert.match(String(calls[1]?.messages.at(-1)?.content), /finishing without having successfully executed/);
+  assert.match(String(calls[2]?.messages.at(-1)?.content), /did not run anything between being asked to verify/);
 });
 
-test("verified-finish guard: first finish after work gets ONE verify nudge, second is honored", async () => {
+test("TS-002: finishing twice without executing anything does not pass the gate on the second try", async () => {
+  const executor = await localExecutor();
+  const nudges: string[] = [];
+  const { model } = scriptedModel([
+    "```bash\necho work\n```",
+    "```finish\nDone.\n```",
+    (obs) => {
+      nudges.push(obs);
+      return "```finish\nDone, I promise.\n```"; // nothing ran in between
+    },
+    (obs) => {
+      nudges.push(obs);
+      return "```finish\nDone.\n```";
+    },
+  ]);
+  const result = await runAgent({ model, executor, task: "work", recovery: false, condense: false });
+  assert.equal(result.status, "finished");
+  assert.match(nudges[0] ?? "", /Before finishing, verify your work/);
+  assert.match(nudges[1] ?? "", /did not run anything between being asked to verify/);
+  assert.equal(result.steps.length, 4, "two holds, then honored — bounded, never a refusal loop");
+});
+
+test("verified-finish guard: an agent that ACTUALLY verifies is honored on its second finish", async () => {
   const executor = await localExecutor();
   const nudges: string[] = [];
   const { model } = scriptedModel([
@@ -285,15 +312,16 @@ test("verified-finish guard: first finish after work gets ONE verify nudge, seco
     "```finish\nDid the work.\n```",
     (obs) => {
       nudges.push(obs);
-      return "```finish\nDid the work.\n```";
+      return "```bash\necho proof-it-works\n```"; // real verification, as asked
     },
+    "```finish\nDid the work.\n```",
   ]);
   const result = await runAgent({ model, executor, task: "work", recovery: false, condense: false });
   assert.equal(result.status, "finished");
   assert.equal(result.summary, "Did the work.");
   // the deliverable-verification nudge (not the do-the-work one) was sent
   assert.match(nudges[0] ?? "", /Before finishing, verify your work/);
-  assert.equal(result.steps.length, 3);
+  assert.equal(result.steps.length, 4, "verifying costs one turn and is then accepted");
 });
 
 test("critic pass (options.critic): a rejected finish is sent back once, then the retry is honored", async () => {
@@ -303,7 +331,8 @@ test("critic pass (options.critic): a rejected finish is sent back once, then th
   const { model, calls } = scriptedModel([
     "```bash\necho changed > f.txt\n```", // a real change -> a non-empty diff for the critic to review
     "```finish\nfirst claim\n```", // held by the verify nudge
-    "```finish\nsecond claim\n```", // verify nudge already spent -> the critic pass runs
+    "```bash\ncat f.txt\n```", // verified, as asked — clears the evidence gate
+    "```finish\nsecond claim\n```", // verify nudge spent + evidence shown -> the critic pass runs
     "Needs more work: the change is incomplete.", // critic's verdict — no APPROVE, so it's a rejection
     (obs) => {
       nudges.push(obs);
@@ -313,9 +342,9 @@ test("critic pass (options.critic): a rejected finish is sent back once, then th
   const result = await runAgent({ model, executor, task: "improve f.txt", critic: true, recovery: false, condense: false });
   assert.equal(result.status, "finished");
   assert.equal(result.summary, "third claim");
-  // exactly 5 model calls: 1 bash + 3 finish attempts + 1 critic review
-  // (bounded to a single critic-triggered retry, never a loop)
-  assert.equal(calls.length, 5);
+  // 2 bash + 3 finish attempts + 1 critic review; bounded to a single
+  // critic-triggered retry, never a loop.
+  assert.equal(calls.length, 6);
   assert.match(nudges[0] ?? "", /independent review of your changes found problems/);
 });
 
@@ -325,13 +354,14 @@ test("critic pass approves and the run finishes without a retry", async () => {
   const { model, calls } = scriptedModel([
     "```bash\necho changed > f.txt\n```",
     "```finish\nfirst claim\n```",
+    "```bash\ncat f.txt\n```", // verification, clearing the evidence gate
     "```finish\nsecond claim\n```", // the critic pass runs and approves
     "Looks correct.\nAPPROVE",
   ]);
   const result = await runAgent({ model, executor, task: "improve f.txt", critic: true, recovery: false, condense: false });
   assert.equal(result.status, "finished");
   assert.equal(result.summary, "second claim");
-  assert.equal(calls.length, 4);
+  assert.equal(calls.length, 5);
 });
 
 test("critic pass is off by default: no extra review call even with a real diff", async () => {
@@ -340,12 +370,13 @@ test("critic pass is off by default: no extra review call even with a real diff"
   const { model, calls } = scriptedModel([
     "```bash\necho changed > f.txt\n```",
     "```finish\nfirst claim\n```",
+    "```bash\ncat f.txt\n```",
     "```finish\nsecond claim\n```", // honored: critic was never requested
   ]);
   const result = await runAgent({ model, executor, task: "improve f.txt", recovery: false, condense: false });
   assert.equal(result.status, "finished");
   assert.equal(result.summary, "second claim");
-  assert.equal(calls.length, 3, "no critic call without options.critic");
+  assert.equal(calls.length, 4, "no critic call without options.critic");
 });
 
 test("verified-finish guard: a finish on the final step is honored immediately", async () => {

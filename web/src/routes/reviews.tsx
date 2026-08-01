@@ -41,11 +41,19 @@ export async function loader(): Promise<ReviewsData> {
   return { threads, store: runtime.kind };
 }
 
+/**
+ * GitHub uses /pull/<n> for the human-facing PR page; Forgejo and Gitea use
+ * /pulls/<n>. The generic shape 404'd for every GitHub PR Ship linked to.
+ */
+function prPathSegment(base: string): string {
+  return /(^|\/\/)([^/]*\.)?github\.com(\/|$)/.test(base) ? "pull" : "pulls";
+}
+
 /** Link to the PR when we can build one from the clone URL. */
 function prLink(repo: string | undefined, pr: number): { href?: string; label: string } {
   if (repo === undefined) return { label: `PR #${pr}` };
   const base = repo.replace(/^https?:\/\//, "https://").replace(/\.git$/, "");
-  return { href: `${base}/pulls/${pr}`, label: `PR #${pr}` };
+  return { href: `${base}/${prPathSegment(base)}/${pr}`, label: `PR #${pr}` };
 }
 
 function shortRepo(r: string | undefined): string {

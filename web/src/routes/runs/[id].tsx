@@ -86,12 +86,20 @@ function redirectTo(location: string): Response {
   return new Response(null, { status: 302, headers: { location } });
 }
 
+/**
+ * GitHub uses /pull/<n> for the human-facing PR page; Forgejo and Gitea use
+ * /pulls/<n>. The generic shape 404'd for every GitHub PR Ship linked to.
+ */
+function prPathSegment(base: string): string {
+  return /(^|\/\/)([^/]*\.)?github\.com(\/|$)/.test(base) ? "pull" : "pulls";
+}
+
 /** A PR reference may be a full URL or a bare number; make it a link when we can. */
 function prLink(pr: string, repo?: string): { href?: string; label: string } {
   if (/^https?:\/\//.test(pr)) return { href: pr, label: pr.replace(/^https?:\/\//, "") };
   if (repo !== undefined) {
     const base = repo.replace(/\.git$/, "");
-    return { href: `${base}/pulls/${pr}`, label: `PR #${pr}` };
+    return { href: `${base}/${prPathSegment(base)}/${pr}`, label: `PR #${pr}` };
   }
   return { label: `PR #${pr}` };
 }

@@ -1,6 +1,8 @@
 import type { AgentExecutor } from "@neutron-build/agents";
 
 import { frameUntrusted } from "./guard.js";
+import { publishLimitsFromEnv, screenPublication } from "./publish-policy.js";
+import type { PublishLimits, PublishScreen } from "./publish-policy.js";
 
 /**
  * The git verb's plumbing. Everything here is HARNESS-side: the token is
@@ -110,6 +112,14 @@ export interface RepoCheckout {
   branch: string;
   /** The default branch PRs target. */
   base: string;
+  /**
+   * Clone URL of the repository the head branch actually lives in, set only
+   * when it is NOT the base repo (i.e. the PR came from a fork). Absent for
+   * same-repo PRs and for fresh work branches.
+   */
+  headRepo?: string;
+  /** Exact head commit at resolve time — what the review feedback was about. */
+  headSha?: string;
 }
 
 /**
@@ -141,21 +151,91 @@ export async function setupRepo(
  * commit happens harness-side so the agent never needs git etiquette —
  * its deliverable is the edited tree, exactly like the SWE-bench path.
  */
+export type PushResult =
+  | { kind: "pushed"; sha: string }
+  | { kind: "empty" }
+  /** The diff broke a publication limit; nothing was committed or pushed. */
+  | { kind: "refused"; screen: PublishScreen };
+
 export async function commitAndPush(
   executor: AgentExecutor,
-  options: { ref: RepoRef; token: string; checkout: RepoCheckout; message: string },
-): Promise<{ sha: string } | null> {
+  options: {
+    ref: RepoRef;
+    token: string;
+    checkout: RepoCheckout;
+    message: string;
+    /** Structural limits applied before anything is committed. */
+    limits?: PublishLimits;
+    /** Credential for the head repository when it is a fork (see setupRepoForPr). */
+    headToken?: string;
+  },
+): Promise<PushResult> {
   const { ref, token, checkout, message } = options;
   const status = await git(executor, "git status --porcelain");
   if (status !== "") {
+    // Stage first so the policy screens exactly what would be committed.
+    await git(executor, "git add -A");
+    const screen = await screenPublication(executor, options.limits ?? publishLimitsFromEnv());
+    if (!screen.ok) {
+      // Leave the tree staged but unpushed: the operator can still inspect the
+      // run, and nothing reached the destination repository.
+      return { kind: "refused", screen };
+    }
     const safe = message.replace(/'/g, "'\\''");
-    await git(executor, `git add -A && git commit -m '${safe}'`);
+    await git(executor, `git commit -m '${safe}'`);
   }
   const ahead = await git(executor, `git rev-list --count origin/${checkout.base}..HEAD`);
-  if (ahead === "0") return null;
+  if (ahead === "0") return { kind: "empty" };
   const sha = await git(executor, "git rev-parse HEAD");
-  await git(executor, `git push ${authenticatedUrl(ref, token)} HEAD:refs/heads/${checkout.branch} 2>&1`, 300_000);
-  return { sha };
+  // A fork PR's branch lives in the fork; pushing it to the base repo would
+  // create a branch nobody asked for and leave the PR untouched.
+  const target = checkout.headRepo !== undefined ? parseRepoUrl(checkout.headRepo) : ref;
+  const targetToken = checkout.headRepo !== undefined ? (options.headToken ?? "") : token;
+  // Pushing the same commit twice is a no-op, which is what makes the publish
+  // step safe to replay after a crash between the push and the PR call.
+  await git(executor, `git push ${authenticatedUrl(target, targetToken)} HEAD:refs/heads/${checkout.branch} 2>&1`, 300_000);
+  return { kind: "pushed", sha };
+}
+
+/**
+ * An already-open PR for this head branch, if there is one.
+ *
+ * Publication is one recorded workflow step covering push + PR + comment +
+ * memory, and a crash anywhere in it replays the whole callback. The push is
+ * naturally idempotent (same commit), but a second POST to /pulls either opens
+ * a duplicate PR or fails the run for a PR that was in fact created. Looking
+ * first makes the replay converge instead.
+ */
+export async function findOpenPullRequest(options: {
+  ref: RepoRef;
+  token: string;
+  head: string;
+  owner: string;
+  fetchImpl?: typeof fetch;
+}): Promise<PullRequest | null> {
+  const { ref, token, head, owner } = options;
+  const doFetch = options.fetchImpl ?? fetch;
+  const endpoint =
+    ref.kind === "github"
+      ? `https://api.github.com/repos/${ref.owner}/${ref.repo}/pulls?state=open&head=${encodeURIComponent(`${owner}:${head}`)}`
+      : `${ref.base}/api/v1/repos/${ref.owner}/${ref.repo}/pulls?state=open`;
+  const response = await doFetch(endpoint, {
+    headers: {
+      authorization: ref.kind === "github" ? `Bearer ${token}` : `token ${token}`,
+      ...(ref.kind === "github" ? { accept: "application/vnd.github+json" } : {}),
+    },
+  });
+  if (!response.ok) return null; // best effort — a failed lookup must not block publishing
+  const list = (await response.json().catch(() => [])) as Array<{
+    number?: number;
+    html_url?: string;
+    url?: string;
+    head?: { ref?: string };
+  }>;
+  if (!Array.isArray(list)) return null;
+  const match = list.find((pr) => pr.head?.ref === head || ref.kind === "github");
+  if (match?.number === undefined) return null;
+  return { number: match.number, url: match.html_url ?? match.url ?? pullRequestUrl(ref, match.number) };
 }
 
 /**
@@ -179,6 +259,18 @@ export interface PullRequest {
 }
 
 /**
+ * The human-facing URL for a pull request.
+ *
+ * GitHub's path is /pull/<n>; Forgejo and Gitea use /pulls/<n>. Ship already
+ * knows which host it is talking to, and the generic /pulls/ shape produced a
+ * 404 for every GitHub PR it linked.
+ */
+export function pullRequestUrl(ref: RepoRef, pr: number): string {
+  const segment = ref.kind === "github" ? "pull" : "pulls";
+  return `${ref.base}/${ref.owner}/${ref.repo}/${segment}/${pr}`;
+}
+
+/**
  * Open the PR over the host's API. Forgejo and GitHub use the same
  * payload shape for this endpoint; only the base path and auth header
  * differ.
@@ -190,10 +282,20 @@ export async function openPullRequest(options: {
   base: string;
   title: string;
   body: string;
+  /**
+   * Mark the PR as not-finished. A run that hit its turn or cost ceiling can
+   * still carry real work, so Ship publishes it — but a reviewer (and any merge
+   * automation downstream) must be able to tell it apart from a completed task.
+   * GitHub takes a `draft` flag; Forgejo/Gitea use a "WIP:" title prefix, which
+   * their UI and merge button both honour.
+   */
+  draft?: boolean;
   fetchImpl?: typeof fetch;
 }): Promise<PullRequest> {
   const { ref, token } = options;
   const doFetch = options.fetchImpl ?? fetch;
+  const draft = options.draft === true;
+  const title = draft && ref.kind !== "github" ? `WIP: ${options.title}` : options.title;
   const endpoint =
     ref.kind === "github"
       ? `https://api.github.com/repos/${ref.owner}/${ref.repo}/pulls`
@@ -206,10 +308,11 @@ export async function openPullRequest(options: {
       ...(ref.kind === "github" ? { accept: "application/vnd.github+json" } : {}),
     },
     body: JSON.stringify({
-      title: options.title,
+      title,
       body: options.body,
       head: options.head,
       base: options.base,
+      ...(draft && ref.kind === "github" ? { draft: true } : {}),
     }),
   });
   if (!response.ok) {
@@ -239,7 +342,15 @@ Requirements:
 - Keep the change minimal and in the style of the surrounding code.`;
 }
 
-/** Head/base of an open PR, resolved worker-side (token never leaves it). */
+/**
+ * Head/base of an open PR, resolved worker-side (token never leaves it).
+ *
+ * The head REPOSITORY matters, not just the branch name: a PR opened from a
+ * fork has its head branch in the fork, not in the base repo. Fetching that
+ * branch from the base origin fails unless the base happens to have a branch
+ * with the same name — which is worse than failing, because it would check out
+ * somebody else's code under the PR's name.
+ */
 export async function resolvePr(
   ref: RepoRef,
   token: string,
@@ -254,19 +365,33 @@ export async function resolvePr(
     headers: { authorization: ref.kind === "github" ? `Bearer ${token}` : `token ${token}` },
   });
   if (!response.ok) throw new Error(`PR #${pr} lookup failed (${response.status})`);
-  const data = (await response.json()) as { head?: { ref?: string }; base?: { ref?: string } };
+  const data = (await response.json()) as {
+    head?: { ref?: string; sha?: string; repo?: { clone_url?: string; html_url?: string; full_name?: string } };
+    base?: { ref?: string; repo?: { clone_url?: string; full_name?: string } };
+  };
   if (data.head?.ref === undefined || data.base?.ref === undefined) {
     throw new Error(`PR #${pr} payload missing head/base`);
   }
   // head/base refs are attacker-controlled (chosen by whoever opened the PR)
   // and get interpolated into git shell commands — validate before use.
-  return { branch: assertGitSafe("branch", data.head.ref), base: assertGitSafe("base", data.base.ref) };
+  const checkout: RepoCheckout = {
+    branch: assertGitSafe("branch", data.head.ref),
+    base: assertGitSafe("base", data.base.ref),
+  };
+  const headClone = data.head.repo?.clone_url ?? data.head.repo?.html_url;
+  const baseFull = data.base.repo?.full_name;
+  const headFull = data.head.repo?.full_name;
+  if (headClone !== undefined && headFull !== undefined && headFull !== baseFull) {
+    checkout.headRepo = headClone;
+  }
+  if (data.head.sha !== undefined) checkout.headSha = assertGitSafe("sha", data.head.sha);
+  return checkout;
 }
 
 /** Clone and stand on an EXISTING PR head branch (review follow-ups). */
 export async function setupRepoForPr(
   executor: AgentExecutor,
-  options: { ref: RepoRef; token: string; pr: number },
+  options: { ref: RepoRef; token: string; pr: number; headToken?: string },
 ): Promise<RepoCheckout> {
   const { ref, token, pr } = options;
   const checkout = await resolvePr(ref, token, pr);
@@ -276,9 +401,16 @@ export async function setupRepoForPr(
   await git(executor, 'echo ".teploy-agent/" >> .git/info/exclude');
   // A shallow clone only has the default branch; fetch the PR head into a
   // real local ref (plain \`fetch origin <branch>\` stops at FETCH_HEAD).
+  //
+  // For a fork PR the head branch is in the FORK, so fetch from there. The fork
+  // is a different origin, which means the allowlist has to cover it too — the
+  // caller resolves the credential for it rather than reusing the base repo's
+  // blindly (a fork is chosen by whoever opened the PR).
+  const source = checkout.headRepo !== undefined ? parseRepoUrl(checkout.headRepo) : ref;
+  const sourceToken = checkout.headRepo !== undefined ? (options.headToken ?? "") : token;
   await git(
     executor,
-    `git fetch --depth 50 ${authenticatedUrl(ref, token)} ${checkout.branch}:${checkout.branch} 2>&1 && git checkout ${checkout.branch}`,
+    `git fetch --depth 50 ${authenticatedUrl(source, sourceToken)} ${checkout.branch}:${checkout.branch} 2>&1 && git checkout ${checkout.branch}`,
     300_000,
   );
   return checkout;

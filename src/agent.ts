@@ -3,7 +3,7 @@ import type { Message, ModelAdapter, Usage } from "@neutron-build/ai";
 import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 
 import type { Action } from "./actions.js";
-import { FINISH_NUDGE_FAILED, FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, describeAction, parseAction } from "./actions.js";
+import { FINISH_NUDGE_FAILED, FINISH_NUDGE_NO_EVIDENCE, FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, describeAction, parseAction } from "./actions.js";
 import type { ApprovalPolicy } from "./approval.js";
 import { criticFeedback, isApproved, reviewWork } from "./critic.js";
 import { workingDiff } from "./git.js";
@@ -138,6 +138,9 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
   let kernelUsed = false;
   let anySuccessfulAction = false;
   let finishNudged = false;
+  let evidenceNudged = false;
+  /** Executions (successful or not) since the verify nudge was issued. */
+  let execsSinceNudge = 0;
   let failNudges = 0;
   let lastExecFailed = false;
   let criticDone = false;
@@ -189,10 +192,17 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
         let nudge: string | null = null;
         if (!finishNudged) {
           finishNudged = true;
+          execsSinceNudge = 0;
           nudge = anySuccessfulAction ? FINISH_NUDGE_VERIFY : FINISH_NUDGE_NO_WORK;
         } else if (lastExecFailed && failNudges < 2) {
           failNudges += 1;
           nudge = FINISH_NUDGE_FAILED;
+        } else if (!evidenceNudged && execsSinceNudge === 0) {
+          // Asked to prove the work and came back having run NOTHING. This is
+          // the hallucinated-verification finish the gate exists to catch; the
+          // old gate accepted it because it only ever held the first finish.
+          evidenceNudged = true;
+          nudge = FINISH_NUDGE_NO_EVIDENCE;
         } else if (options.critic === true && !criticDone) {
           criticDone = true;
           // The critic is a safety net over a run that already succeeded, so
@@ -271,6 +281,7 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
     }
 
     if (result.exitCode === 0) anySuccessfulAction = true;
+    execsSinceNudge += 1;
     lastExecFailed = result.exitCode !== 0;
     const observation = truncate(formatObservation(result), maxObs);
     messages.push({ role: "user", content: observation });

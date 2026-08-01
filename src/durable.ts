@@ -6,9 +6,23 @@ import { workflow } from "@neutron-build/workflow";
 import type { WorkflowContext, WorkflowDefinition } from "@neutron-build/workflow";
 
 import { executeAction } from "./agent.js";
-import { FINISH_NUDGE_FAILED, FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, parseAction } from "./actions.js";
+import { FINISH_NUDGE_FAILED, FINISH_NUDGE_NO_EVIDENCE, FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, parseAction } from "./actions.js";
 import { criticFeedback, isApproved, reviewWork } from "./critic.js";
-import { commentOnPr, commitAndPush, fixPrompt, openPullRequest, parseRepoUrl, reviewPrompt, setupRepo, setupRepoForPr, workingDiff } from "./git.js";
+import {
+  commentOnPr,
+  commitAndPush,
+  findOpenPullRequest,
+  fixPrompt,
+  openPullRequest,
+  parseRepoUrl,
+  pullRequestUrl,
+  reviewPrompt,
+  setupRepo,
+  setupRepoForPr,
+  resolvePr,
+  workingDiff,
+} from "./git.js";
+import { refusalMessage } from "./publish-policy.js";
 import type { RepoCheckout } from "./git.js";
 import { assertRepoAllowed, credentialFor, policyFromEnv } from "./repo-policy.js";
 import type { RepoPolicyConfig, RepoTrust } from "./repo-policy.js";
@@ -274,9 +288,15 @@ export function durableAgent(
           if (token === "" && ref.base !== "file://") {
             throw new Error("repo run needs a git credential on the executing worker (SHIP_GIT_TOKEN or SHIP_GIT_TOKENS)");
           }
-          return input.pr !== undefined
-            ? setupRepoForPr(executor, { ref, token, pr: input.pr })
-            : setupRepo(executor, { ref, token, runId: ctx.runId });
+          if (input.pr === undefined) return setupRepo(executor, { ref, token, runId: ctx.runId });
+          // A fork PR's head branch lives in another repository, which the
+          // allowlist has to cover too — resolve its credential the same way.
+          const resolved = await resolvePr(ref, token, input.pr);
+          const headToken =
+            resolved.headRepo !== undefined
+              ? credentialFor(assertRepoAllowed(resolved.headRepo, { trust: "external", config: repoPolicy }), repoPolicy)
+              : "";
+          return setupRepoForPr(executor, { ref, token, pr: input.pr, ...(headToken !== "" ? { headToken } : {}) });
         });
       }
       const repoKey = input.repo !== undefined ? repoKeyOf(input.repo) : null;
@@ -329,6 +349,9 @@ export function durableAgent(
       let messages: Message[] = [{ role: "system", content: systemPrompt({ workdir, task, search: searchable }) }];
       let anySuccessfulAction = false;
       let finishNudged = false;
+      let evidenceNudged = false;
+      /** Executions (successful or not) since the verify nudge was issued. */
+      let execsSinceNudge = 0;
       let failNudges = 0;
       let lastExecFailed = false;
       let criticDone = false;
@@ -395,7 +418,7 @@ export function durableAgent(
         if (maxRunCostUSD > 0 && costUSD(modelId, usage) >= maxRunCostUSD) {
           const spent = costUSD(modelId, usage);
           const summary = `Stopped at the $${maxRunCostUSD.toFixed(2)} per-run cost ceiling (spent ~$${spent.toFixed(2)}) after ${turn} turns.`;
-          const pr = await publishIfRepoRun(ctx, executor, config, input, checkout, summary, repoPolicy);
+          const pr = await publishIfRepoRun(ctx, executor, config, input, checkout, summary, repoPolicy, true);
           return { status: "budget-exhausted", summary, turns: turn, usage, ...(pr !== null ? { pr } : {}) };
         }
         // Mid-run steering: drain the operator's pending notes as a
@@ -456,10 +479,16 @@ export function durableAgent(
             let nudge: string | null = null;
             if (!finishNudged) {
               finishNudged = true;
+              execsSinceNudge = 0;
               nudge = anySuccessfulAction ? FINISH_NUDGE_VERIFY : FINISH_NUDGE_NO_WORK;
             } else if (lastExecFailed && failNudges < 2) {
               failNudges += 1;
               nudge = FINISH_NUDGE_FAILED;
+            } else if (!evidenceNudged && execsSinceNudge === 0) {
+              // Asked to prove the work and came back having run NOTHING — the
+              // hallucinated-verification finish the gate exists to catch.
+              evidenceNudged = true;
+              nudge = FINISH_NUDGE_NO_EVIDENCE;
             } else if (input.critic === true && checkout !== null && !criticDone) {
               criticDone = true;
               // Both failures are caught INSIDE the step, so the step always
@@ -562,13 +591,17 @@ export function durableAgent(
           executeAction(executor, action, config.actionTimeoutMs, `t${turn}`),
         );
         if (result.exitCode === 0) anySuccessfulAction = true;
+        execsSinceNudge += 1;
         lastExecFailed = result.exitCode !== 0;
         messages.push({ role: "user", content: truncate(formatObservation(result), maxObs) });
       }
 
       // Non-empty diffs are published even off a max-steps exit — real
       // fixes die in runs that never got to say finish (SWE-bench lesson).
-      const pr = await publishIfRepoRun(ctx, executor, config, input, checkout, `Reached the ${maxSteps}-turn limit.`, repoPolicy);
+      // Non-empty diffs are still published off a max-steps exit — real fixes
+      // died in runs that never got to say finish — but as a DRAFT, because
+      // "ran out of turns" and "done" must not look alike to a reviewer.
+      const pr = await publishIfRepoRun(ctx, executor, config, input, checkout, `Reached the ${maxSteps}-turn limit.`, repoPolicy, true);
       return { status: "max-steps", summary: `Reached the ${maxSteps}-turn limit.`, turns: maxSteps, usage, ...(pr !== null ? { pr } : {}) };
     },
     config.runTimeout !== undefined ? { timeout: config.runTimeout } : {},
@@ -580,7 +613,22 @@ function repoKeyOf(repoUrl: string): string {
   return `${ref.owner}/${ref.repo}`;
 }
 
-/** Recorded publish step for repo runs: commit, push, open the PR. */
+/**
+ * Publish a repo run's work: commit, push, open or update the PR, remember it.
+ *
+ * Split into SEPARATE recorded steps on purpose. As one step, a crash anywhere
+ * inside replayed the whole callback: the push is idempotent (same commit), but
+ * a second PR POST opens a duplicate or fails the run for a PR that was in fact
+ * created, and the comment and the memory note would both be written twice.
+ * With one step per external effect, replay resumes at the first one that never
+ * completed — and the PR step additionally looks for an existing PR before
+ * creating one, so even a crash BETWEEN the API call and the step record
+ * converges instead of duplicating.
+ *
+ * `incomplete` marks work that stopped at a limit rather than at a finish: it
+ * becomes a draft/WIP pull request so a reviewer, and any merge automation,
+ * can tell the difference.
+ */
 async function publishIfRepoRun(
   ctx: WorkflowContext,
   executor: AgentExecutor,
@@ -589,58 +637,101 @@ async function publishIfRepoRun(
   checkout: RepoCheckout | null,
   summary: string,
   policy: RepoPolicyConfig,
+  incomplete = false,
 ): Promise<string | null> {
   if (checkout === null || input.repo === undefined) return null;
   const repoUrl = input.repo;
   const co = checkout;
-  const result = await ctx.step("repo-publish", async () => {
-    const ref = assertRepoAllowed(repoUrl, { trust: input.trust ?? "operator", config: policy });
-    const token = credentialFor(ref, policy);
-    const pushed = await commitAndPush(executor, {
+  const ref = assertRepoAllowed(repoUrl, { trust: input.trust ?? "operator", config: policy });
+  const token = credentialFor(ref, policy);
+  const headToken = co.headRepo !== undefined ? credentialFor(parseRepoUrl(co.headRepo), policy) : "";
+
+  // 1. Commit + push. Screened first; a refusal is recorded and stops here.
+  const push = await ctx.step("repo-push", async () => {
+    const result = await commitAndPush(executor, {
       ref,
       token,
       checkout: co,
       message: `${input.task.slice(0, 68)}\n\nTeploy Ship ${ctx.runId}`,
+      ...(headToken !== "" ? { headToken } : {}),
     });
-    // Review follow-up: the PR already exists — push updated it; reply
-    // on the thread (marker doubles as the self-trigger guard).
-    const remember = async (pr?: string): Promise<void> => {
-      if (config.repoMemory === undefined) return;
-      await config.repoMemory
-        .record({
+    return result.kind === "refused"
+      ? { kind: "refused" as const, message: refusalMessage(result.screen) }
+      : result.kind === "pushed"
+        ? { kind: "pushed" as const, sha: result.sha }
+        : { kind: "empty" as const };
+  });
+
+  const remember = async (pr?: string): Promise<void> => {
+    if (config.repoMemory === undefined) return;
+    // Its own step: the memory write is an external effect like the others, and
+    // replaying it would duplicate the note.
+    await ctx.step("repo-memory", async () => {
+      await config
+        .repoMemory!.record({
           repo: `${ref.owner}/${ref.repo}`,
           note: runNote({ task: input.task, summary, ...(pr !== undefined ? { pr } : {}) }),
           runId: ctx.runId,
         })
         .catch(() => {}); // memory is advisory — never fail a publish over it
-    };
-    if (input.pr !== undefined) {
-      const prUrl = `${ref.base}/${ref.owner}/${ref.repo}/pulls/${input.pr}`;
-      if (pushed === null) {
-        await commentOnPr(ref, token, input.pr, `No code change was needed for this feedback (run ${ctx.runId}).\n\n${summary.slice(0, 800)}`);
-        await remember(prUrl);
-        return { pr: prUrl };
-      }
-      await commentOnPr(ref, token, input.pr, `Pushed ${pushed.sha.slice(0, 10)} addressing this (run ${ctx.runId}).\n\n${summary.slice(0, 800)}`);
-      await remember(prUrl);
-      return { pr: prUrl };
-    }
-    if (pushed === null) {
-      await remember();
-      return { pr: null };
-    }
-    const pr = await openPullRequest({
+      return true;
+    });
+  };
+
+  // Review follow-up: the PR already exists — the push updated it; reply there.
+  if (input.pr !== undefined) {
+    const prUrl = pullRequestUrl(ref, input.pr);
+    const body =
+      push.kind === "refused"
+        ? push.message
+        : push.kind === "empty"
+          ? `No code change was needed for this feedback (run ${ctx.runId}).\n\n${summary.slice(0, 800)}`
+          : `Pushed ${push.sha.slice(0, 10)} addressing this (run ${ctx.runId}).\n\n${summary.slice(0, 800)}`;
+    await ctx.step("repo-comment", async () => {
+      await commentOnPr(ref, token, input.pr!, body);
+      return true;
+    });
+    await remember(prUrl);
+    return prUrl;
+  }
+
+  if (push.kind === "refused") {
+    // Nothing to link: the diff never left the sandbox. The reason is on the
+    // run's timeline via the recorded step.
+    await remember();
+    return null;
+  }
+  if (push.kind === "empty") {
+    await remember();
+    return null;
+  }
+
+  const pr = await ctx.step("repo-pr", async () => {
+    const existing = await findOpenPullRequest({ ref, token, head: co.branch, owner: ref.owner }).catch(() => null);
+    if (existing !== null) return { url: existing.url };
+    const created = await openPullRequest({
       ref,
       token,
       head: co.branch,
       base: co.base,
-      title: input.task.length > 72 ? `${input.task.slice(0, 72)}…` : input.task,
-      body: `${summary}\n\n---\nTask: ${input.task}\nRun: ${ctx.runId}\nGenerated by Teploy Ship.`,
+      draft: incomplete,
+      title: prTitle(input.task, incomplete),
+      body:
+        `${summary}\n\n---\nTask: ${input.task}\nRun: ${ctx.runId}\nGenerated by Teploy Ship.` +
+        (incomplete
+          ? `\n\n**This run did not finish** — it stopped at a limit, so the change may be partial. Review before merging.`
+          : ""),
     });
-    await remember(pr.url);
-    return { pr: pr.url };
+    return { url: created.url };
   });
-  return (result as { pr: string | null }).pr;
+  await remember(pr.url);
+  return pr.url;
+}
+
+function prTitle(task: string, incomplete: boolean): string {
+  const prefix = incomplete ? "[incomplete] " : "";
+  const room = 72 - prefix.length;
+  return `${prefix}${task.length > room ? `${task.slice(0, room)}…` : task}`;
 }
 
 /**

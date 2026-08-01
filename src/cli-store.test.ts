@@ -76,7 +76,8 @@ test("durable park -> approve -> resume works across store instances (separate C
         "```bash\nrm -rf build\n```", // parks
         (obs) => (obs.includes("exit 0") ? "```bash\ntest ! -d build && echo gone\n```" : "```finish\nbad\n```"),
         (obs) => (obs.includes("gone") ? "```finish\ncleaned.\n```" : "```finish\nnot-gone\n```"),
-        (obs) => (obs.includes("Before finishing") ? "```finish\ncleaned.\n```" : "```finish\nnot-gone\n```"),
+        (obs) => (obs.includes("Before finishing") ? "```bash\ntest ! -d build && echo gone\n```" : "```finish\nnot-gone\n```"),
+        (obs) => (obs.includes("gone") ? "```finish\ncleaned.\n```" : "```finish\nnot-gone\n```"),
       ]),
       executor: provider,
       approveAction: defaultApprovalPolicy,
@@ -93,7 +94,7 @@ test("durable park -> approve -> resume works across store instances (separate C
   const second = await executeRun({ workflow: makeWf(), runId: "r1", store: new FileEventStore(dir), input: { task: "clean" } });
   assert.equal(second.status, "completed");
   const { usage: uOut, ...outRest } = second.output as Record<string, unknown>;
-  assert.deepEqual(outRest, { status: "finished", summary: "cleaned.", turns: 5 });
+  assert.deepEqual(outRest, { status: "finished", summary: "cleaned.", turns: 6 });
 });
 
 test("RunMetaStore saves, lists newest-first, and tracks the parked event", async () => {
@@ -112,17 +113,24 @@ test("RunMetaStore saves, lists newest-first, and tracks the parked event", asyn
 test("runAgent aggregates usage across calls, cache fields included", async () => {
   const executor = new LocalExecutor({ root: await mkdtemp(join(tmpdir(), "ship-usage-")) });
   const result = await runAgent({
-    model: reactiveModel(["```bash\necho one\n```", "```bash\necho two\n```", "```finish\ndone\n```", "```finish\ndone\n```"]),
+    model: reactiveModel([
+      "```bash\necho one\n```",
+      "```bash\necho two\n```",
+      "```finish\ndone\n```",
+      "```bash\necho verified\n```", // proof, as the finish gate asks
+      "```finish\ndone\n```",
+    ]),
     executor,
     task: "count",
     recovery: false,
     condense: false,
   });
-  // four model calls (finish is verify-nudged once) at 10/5/15 + 100 cache-read each
-  assert.equal(result.usage.inputTokens, 40);
-  assert.equal(result.usage.outputTokens, 20);
-  assert.equal(result.usage.totalTokens, 60);
-  assert.equal(result.usage.cacheReadTokens, 400);
+  // five model calls (finish is verify-nudged, then proven) at 10/5/15 + 100
+  // cache-read each
+  assert.equal(result.usage.inputTokens, 50);
+  assert.equal(result.usage.outputTokens, 25);
+  assert.equal(result.usage.totalTokens, 75);
+  assert.equal(result.usage.cacheReadTokens, 500);
 });
 
 test("parseArgs: boolean flags, value flags, positionals", () => {
