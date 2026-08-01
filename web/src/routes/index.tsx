@@ -37,12 +37,19 @@ export async function action({ request }: { request: Request }): Promise<Respons
   // web process never executes the agent.)
   if (intent === "approve" || intent === "deny") {
     const runId = String(form.get("runId") ?? "");
-    const meta = await runtime.loadMeta(runId);
-    if (meta?.eventName !== undefined) {
-      await deliverEvent(runtime.store, runId, meta.eventName, { approved: intent === "approve" });
-      await runtime.markWake?.(runId);
-      await runtime.saveMeta({ ...meta, status: "wake", updatedAt: new Date().toISOString() });
+    // Same binding rule as the run page: the decision names the park the
+    // operator saw, and the claim decides a single winner. A stale inbox card
+    // must never approve a park that appeared after it was rendered.
+    const reviewed = String(form.get("eventName") ?? "");
+    if (reviewed === "") return redirect("/");
+    if (!(await runtime.claimDecision(runId, reviewed))) return redirect("/?decision=taken");
+    try {
+      await deliverEvent(runtime.store, runId, reviewed, { approved: intent === "approve" });
+    } catch (error) {
+      await runtime.releaseDecision(runId, reviewed).catch(() => {});
+      throw error;
     }
+    await runtime.markWake?.(runId);
     return redirect("/");
   }
 
@@ -65,6 +72,9 @@ export async function action({ request }: { request: Request }): Promise<Respons
         task: task.pr !== undefined ? (task.detail ?? task.title) : task.detail !== undefined ? `${task.title}\n\n${task.detail}` : task.title,
         model: defaultModel(),
         source: task.source,
+        // A launch click approves running the task, not the origin it names:
+        // the repo came from a webhook or chat payload either way.
+        trust: task.source === "manual" ? "operator" : "external",
         ...(task.repo !== undefined ? { repo: task.repo } : {}),
         ...(task.pr !== undefined ? { pr: task.pr } : {}),
       });
@@ -86,6 +96,8 @@ export async function action({ request }: { request: Request }): Promise<Respons
     task,
     model: defaultModel(),
     source: "manual",
+    // An authenticated editor typed this URL into the form.
+    trust: "operator",
     ...(repo !== "" ? { repo } : {}),
     ...(form.get("plan") === "on" ? { plan: true } : {}),
   });
@@ -140,6 +152,8 @@ export default function Inbox({ data }: { data: InboxData }) {
               <span class="spacer" style="flex:1" />
               <form method="post" class="row-actions">
                 <input type="hidden" name="runId" value={r.runId} />
+                {/* Binds the decision to the park this card was rendered from. */}
+                <input type="hidden" name="eventName" value={r.eventName ?? ""} />
                 <button class="approve sm" type="submit" name="intent" value="approve">Approve</button>
                 <button class="deny sm" type="submit" name="intent" value="deny">Deny</button>
               </form>

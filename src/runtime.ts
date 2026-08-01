@@ -22,7 +22,13 @@ import { FileSteerStore, NucleusSteerStore } from "./steer.js";
 import type { SteerStore } from "./steer.js";
 import { FileUserStore, NucleusUserStore } from "./users.js";
 import type { UserStore } from "./users.js";
+import { FileDeliveryLog, NucleusDeliveryLog } from "./deliveries.js";
+import type { DeliveryLog } from "./deliveries.js";
 import { NucleusPgwire } from "./nucleus-pgwire.js";
+import { migrate } from "./migrations.js";
+import { assertRepoAllowed } from "./repo-policy.js";
+import type { RepoTrust } from "./repo-policy.js";
+import type { ProposeInput as IntakeProposeInput, IntakeTask as IntakeTaskType } from "./intake.js";
 import { FileEventStore, RunMetaStore } from "./run-store.js";
 import type { RunMeta } from "./run-store.js";
 
@@ -39,6 +45,8 @@ export type { RepoMemoryStore, RepoNote } from "./repo-memory.js";
 export { FileRepoMemory, NucleusRepoMemory, loadRepoContext, runNote } from "./repo-memory.js";
 export type { SteerStore, SteerNote } from "./steer.js";
 export { FileSteerStore, NucleusSteerStore } from "./steer.js";
+export type { DeliveryLog } from "./deliveries.js";
+export { FileDeliveryLog, NucleusDeliveryLog, DELIVERY_TTL_S } from "./deliveries.js";
 export type { UserStore, ShipUser, UserView, Role } from "./users.js";
 export {
   FileUserStore,
@@ -54,12 +62,22 @@ export {
 export type { CodeSearch, CodeSearchHit, RefreshStats } from "./code-index.js";
 export { NucleusCodeIndex } from "./code-index.js";
 export { parseRepoToken, slackTaskFromMention, linearTaskFromIssue, ciFixTaskFromWorkflowRun } from "./intake-sources.js";
+export type { RepoTrust, RepoPolicyConfig, RepoAllowEntry } from "./repo-policy.js";
+export {
+  RepoNotAllowedError,
+  assertRepoAllowed,
+  credentialFor,
+  isAllowed,
+  parseAllowlist,
+  parseOriginTokens,
+  policyFromEnv,
+} from "./repo-policy.js";
 export type { Notifier, RunNotification } from "./notify.js";
 export { formatRunNotification, notifiable, slackNotifier } from "./notify.js";
 export { PLAN_EVENT } from "./plan.js";
 export type { PlanDecisionPayload } from "./plan.js";
 export type { ModelPricing, UsageLike } from "./pricing.js";
-export { costUSD, pricingFor } from "./pricing.js";
+export { costUSD, pricingFor, isPricedModel, UNKNOWN_MODEL_PRICING } from "./pricing.js";
 
 /**
  * Where durable runs live. The file runtime keeps everything on this
@@ -78,7 +96,7 @@ export interface ShipRuntime {
   execute(
     workflow: WorkflowDefinition<{ task: string }, unknown>,
     runId: string,
-    input?: { task: string; repo?: string; pr?: number; plan?: boolean; steer?: boolean; index?: boolean; guard?: boolean; critic?: boolean },
+    input?: { task: string; repo?: string; trust?: RepoTrust; pr?: number; plan?: boolean; steer?: boolean; index?: boolean; guard?: boolean; critic?: boolean },
   ): Promise<RunOutcome | null>;
   saveMeta(meta: RunMeta): Promise<void>;
   loadMeta(runId: string): Promise<RunMeta | null>;
@@ -101,6 +119,17 @@ export interface ShipRuntime {
   steer: SteerStore;
   /** Local dashboard accounts + roles (Teploy RBAC contract). */
   users: UserStore;
+  /** Seen webhook deliveries — replay protection for the public hook routes. */
+  deliveries: DeliveryLog;
+  /**
+   * Atomically take ownership of the decision a parked run is waiting on.
+   * True iff THIS caller won: the run's eventName is cleared as part of the
+   * same conditional write, so two operators submitting opposite decisions on
+   * the same park cannot both deliver. Losers must not call deliverEvent.
+   */
+  claimDecision(runId: string, eventName: string): Promise<boolean>;
+  /** Put back an eventName after a claim whose delivery then failed. */
+  releaseDecision(runId: string, eventName: string): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -118,6 +147,21 @@ export function fileRuntime(): ShipRuntime {
     memory: new FileRepoMemory(),
     steer: new FileSteerStore(),
     users: new FileUserStore(),
+    deliveries: new FileDeliveryLog(),
+    // File mode is single-process by construction, so read-check-write is the
+    // honest implementation; the Nucleus path below is the real atomic one.
+    claimDecision: async (runId, eventName) => {
+      const current = await meta.load(runId);
+      if (current === null || current.eventName !== eventName) return false;
+      const { eventName: _drop, ...rest } = current;
+      await meta.save({ ...rest, updatedAt: new Date().toISOString() });
+      return true;
+    },
+    releaseDecision: async (runId, eventName) => {
+      const current = await meta.load(runId);
+      if (current === null) return;
+      await meta.save({ ...current, eventName, updatedAt: new Date().toISOString() });
+    },
     execute: (workflow, runId, input) =>
       executeRun({ workflow, runId, store, ...(input !== undefined ? { input } : {}) }),
     saveMeta: (m) => meta.save(m),
@@ -138,8 +182,17 @@ export interface NucleusShipRuntime extends ShipRuntime {
   db: NucleusPgwire;
 }
 
-export async function nucleusRuntime(url: string, owner: string): Promise<NucleusShipRuntime> {
+export async function nucleusRuntime(
+  url: string,
+  owner: string,
+  options?: { log?: (line: string) => void },
+): Promise<NucleusShipRuntime> {
   const db = new NucleusPgwire(url, owner);
+  // Bring the shared schema to the shape this binary expects BEFORE handing
+  // back a runtime. A rolling deploy runs old and new processes against one
+  // Nucleus, so this must be safe to call concurrently (it takes a KV lock)
+  // and safe to call when nothing is pending (it is a no-op then).
+  await migrate(db, options?.log ?? (() => {}));
   const store = new NucleusEventStore(db.streams, { prefix: "ship" });
   const index = new RunIndex(db.document, { collection: "ship_runs" });
   const leases = new LeaseManager(db.kv, { prefix: "ship:lease", ttlSeconds: 60 });
@@ -181,6 +234,24 @@ export async function nucleusRuntime(url: string, owner: string): Promise<Nucleu
     memory: new NucleusRepoMemory(db),
     steer: new NucleusSteerStore(db),
     users: new NucleusUserStore(db),
+    deliveries: new NucleusDeliveryLog(db),
+    /**
+     * One conditional UPDATE decides the winner: the filter includes the
+     * eventName the caller believes is parked, so a stale tab (or a second
+     * admin) updates zero rows and is told to look again. Clearing eventName
+     * in the same statement is what makes it a claim rather than a check.
+     */
+    async claimDecision(runId, eventName) {
+      const updated = await db.document.update(
+        META_COLLECTION,
+        { runId, eventName },
+        { eventName: null, status: "wake", updatedAt: new Date().toISOString() },
+      );
+      return updated > 0;
+    },
+    async releaseDecision(runId, eventName) {
+      await db.document.update(META_COLLECTION, { runId }, { eventName, status: "waiting" });
+    },
     async execute(workflow, runId, input) {
       const outcome = await executeRunExclusive({
         workflow,
@@ -214,6 +285,28 @@ export async function nucleusRuntime(url: string, owner: string): Promise<Nucleu
 }
 
 /**
+ * Propose a task whose repository binding came from OUTSIDE Ship — a webhook
+ * body, a chat message, an issue description. Every public intake surface must
+ * go through this rather than calling `intake.propose` directly, because the
+ * repository URL in those payloads is attacker-influenced and would otherwise
+ * become a run that points a deploy token at an arbitrary origin (see
+ * repo-policy.ts).
+ *
+ * Throws RepoNotAllowedError for a repo the policy refuses; the caller turns
+ * that into a 403 so the sender learns the hook is configured too narrowly
+ * rather than silently getting no run.
+ */
+export async function proposeExternal(
+  runtime: Pick<ShipRuntime, "intake">,
+  input: IntakeProposeInput,
+): Promise<{ created: boolean; task: IntakeTaskType }> {
+  if (input.repo !== undefined && input.repo !== "") {
+    assertRepoAllowed(input.repo, { trust: "external" });
+  }
+  return runtime.intake.propose(input);
+}
+
+/**
  * Enqueue a run without executing it: append the run-started event
  * (exactly the shape executeRun writes on an empty log) and flag the run
  * due. A resident worker picks it up on its next tick; with the file
@@ -235,6 +328,12 @@ export async function enqueueRun(
     workflowName?: string;
     /** Intake source, recorded so completion can settle spend against it. */
     source?: string;
+    /**
+     * Where `repo` came from. Defaults to "external" — the safe assumption for
+     * a queued run, since the surfaces that KNOW a human typed the URL (the CLI
+     * and the dashboard's new-run form) can say so explicitly.
+     */
+    trust?: RepoTrust;
   },
 ): Promise<void> {
   const now = new Date().toISOString();
@@ -248,6 +347,7 @@ export async function enqueueRun(
       input: {
         task: options.task,
         ...(options.repo !== undefined ? { repo: options.repo } : {}),
+        ...(options.repo !== undefined ? { trust: options.trust ?? "external" } : {}),
         ...(options.pr !== undefined ? { pr: options.pr } : {}),
         ...(options.plan === true ? { plan: true } : {}),
         ...(options.critic === true ? { critic: true } : {}),

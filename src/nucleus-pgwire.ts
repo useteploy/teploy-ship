@@ -188,6 +188,8 @@ export class NucleusPgwire {
           task TEXT,
           model TEXT,
           workspace TEXT,
+          source TEXT,
+          ran_on TEXT,
           created_at TEXT,
           updated_at TEXT
         )`,
@@ -201,7 +203,16 @@ export class NucleusPgwire {
   }
 }
 
-/** Union of RunRecord and RunMeta fields — the only docs the runtime stores. */
+/**
+ * Union of RunRecord and RunMeta fields — the only docs the runtime stores.
+ *
+ * This map is load-bearing and easy to forget: column() THROWS on an unmapped
+ * key, and saveMeta hands it the whole RunMeta. Adding a field to RunMeta
+ * without adding it here takes down every write that carries the new field
+ * (`source` did exactly that — see migration 001). Anything added here also
+ * needs a column in the ship_docs DDL above AND a migration, because Nucleus
+ * cannot ALTER a populated table.
+ */
 const COLUMNS: Record<string, string> = {
   runId: "run_id",
   workflow: "workflow",
@@ -211,9 +222,14 @@ const COLUMNS: Record<string, string> = {
   task: "task",
   model: "model",
   workspace: "workspace",
+  source: "source",
+  ranOn: "ran_on",
   createdAt: "created_at",
   updatedAt: "updated_at",
 };
+
+/** Every RunMeta/RunRecord field this store can persist. */
+export const DOC_FIELDS: readonly string[] = Object.keys(COLUMNS);
 
 function column(key: string): string {
   const col = COLUMNS[key];

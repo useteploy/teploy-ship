@@ -45,7 +45,12 @@ interface DecideBody {
   reason?: string;
   /** Optional operator-edited plan, honoured only on a plan approval. */
   plan?: string;
-  /** Pin the decision to the park the caller saw. Mismatch → 409. */
+  /**
+   * The park this decision is for. REQUIRED: a decision that names no target
+   * is a decision applied to whatever happens to be waiting, and this endpoint
+   * approves remote code execution. A mismatch (or a run that has moved on) is
+   * a 409 naming the current event, so a caller can re-review and retry.
+   */
   event_name?: string;
 }
 
@@ -88,7 +93,13 @@ export async function action({ request, params }: ActionArgs): Promise<Response>
     // nothing happened.
     return json(409, { error: `run ${runId} is not waiting for a decision`, status: meta.status });
   }
-  if (body.event_name !== undefined && body.event_name !== meta.eventName) {
+  if (typeof body.event_name !== "string" || body.event_name.trim() === "") {
+    return json(400, {
+      error: '"event_name" is required — name the decision you reviewed',
+      waiting_on: meta.eventName,
+    });
+  }
+  if (body.event_name !== meta.eventName) {
     return json(409, {
       error: "this run has moved on to a different decision since you saw it",
       expected: body.event_name,
@@ -101,21 +112,31 @@ export async function action({ request, params }: ActionArgs): Promise<Response>
   // matching the form's behaviour exactly.
   const plan = meta.eventName === PLAN_EVENT ? (body.plan ?? "").trim() : "";
 
-  await deliverEvent(runtime.store, runId, meta.eventName, {
-    approved: body.approved,
-    ...(reason !== "" ? { reason } : {}),
-    ...(plan !== "" ? { plan } : {}),
-  });
+  // Atomic claim before delivery: two callers deciding the same park must not
+  // both deliver, and the loser must be told rather than shown a success it
+  // did not cause.
+  if (!(await runtime.claimDecision(runId, body.event_name))) {
+    return json(409, { error: "another decision for this park was applied first", waiting_on: meta.eventName });
+  }
+  try {
+    await deliverEvent(runtime.store, runId, body.event_name, {
+      approved: body.approved,
+      ...(reason !== "" ? { reason } : {}),
+      ...(plan !== "" ? { plan } : {}),
+    });
+  } catch (error) {
+    await runtime.releaseDecision(runId, body.event_name).catch(() => {});
+    throw error;
+  }
   // Make the run due; the resident worker carries it from here. This process
-  // never executes the agent.
+  // never executes the agent. (The claim already recorded the status change.)
   await runtime.markWake?.(runId);
-  await runtime.saveMeta({ ...meta, status: "wake", updatedAt: new Date().toISOString() });
 
   return json(200, {
     ok: true,
     run_id: runId,
     decision: body.approved ? "approved" : "denied",
-    delivered_to: meta.eventName,
+    delivered_to: body.event_name,
     status: "wake",
   });
 }

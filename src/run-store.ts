@@ -80,6 +80,36 @@ export interface RunMeta {
   updatedAt: string;
 }
 
+/**
+ * Every RunMeta field, as data. The Nucleus store persists a RunMeta through a
+ * hand-written column map that THROWS on an unmapped key, so a field added to
+ * the interface and nowhere else silently breaks every write that carries it
+ * (`source` did, and it blocked all run creation until migration 001).
+ *
+ * The two lines below make that impossible to repeat: `satisfies` proves every
+ * entry is a real RunMeta key, the Missing check fails the BUILD if a key is
+ * absent from the list, and a unit test asserts this list is a subset of the
+ * Nucleus column map. Add a field to RunMeta and all three have to be satisfied
+ * before it compiles and passes.
+ */
+export const RUN_META_FIELDS = [
+  "runId",
+  "task",
+  "status",
+  "eventName",
+  "workspace",
+  "model",
+  "source",
+  "ranOn",
+  "createdAt",
+  "updatedAt",
+] as const satisfies readonly (keyof RunMeta)[];
+
+type UnmappedRunMetaField = Exclude<keyof RunMeta, (typeof RUN_META_FIELDS)[number]>;
+// Compile error names the missing field if RUN_META_FIELDS falls behind RunMeta.
+const _runMetaFieldsAreExhaustive: UnmappedRunMetaField extends never ? true : never = true;
+void _runMetaFieldsAreExhaustive;
+
 export class RunMetaStore {
   #dir: string;
 

@@ -18,7 +18,10 @@ import { cancelRun, deliverEvent } from "@neutron-build/workflow";
 import type { RunOutcome } from "@neutron-build/workflow";
 
 import { parseArgs } from "./args.js";
-import { commitAndPush, fixPrompt, openPullRequest, parseRepoUrl, setupRepo } from "./git.js";
+import { commitAndPush, fixPrompt, openPullRequest, setupRepo } from "./git.js";
+import type { RepoRef } from "./git.js";
+import { assertRepoAllowed, credentialFor, policyFromEnv } from "./repo-policy.js";
+import type { RepoPolicyConfig } from "./repo-policy.js";
 import { loadRepoContext, runNote } from "./repo-memory.js";
 import { runAgent } from "./agent.js";
 import { defaultApprovalPolicy } from "./approval.js";
@@ -34,7 +37,7 @@ import type { NucleusShipRuntime, ShipRuntime } from "./runtime.js";
 import { NucleusCodeIndex } from "./code-index.js";
 import type { CodeSearch } from "./code-index.js";
 import { startWorker } from "./worker.js";
-import { costUSD } from "./pricing.js";
+import { costUSD, isPricedModel } from "./pricing.js";
 import { builtinSuite } from "./tasks.js";
 import { hardSuite } from "./hard-tasks.js";
 import { extremeSuite } from "./extreme-tasks.js";
@@ -108,10 +111,17 @@ interface Config {
   intakeBudgets?: Record<string, number>;
 }
 
-/** One-line usage summary with an estimated cost tail when the model is priced. */
+/**
+ * One-line usage summary with the cost tail. An unpriced model is marked as a
+ * guess rather than shown as a fact — costUSD estimates it at the highest known
+ * rate so the spend cap cannot fail open, and presenting that as a real price
+ * would be misleading.
+ */
 function usageLine(modelId: string, usage: Parameters<typeof renderUsage>[0]): string {
   const cost = costUSD(modelId, usage);
-  return cost > 0 ? `${renderUsage(usage)} · ~$${cost.toFixed(4)}` : renderUsage(usage);
+  if (cost <= 0) return renderUsage(usage);
+  const tail = isPricedModel(modelId) ? `~$${cost.toFixed(4)}` : `≤$${cost.toFixed(4)} (model not priced)`;
+  return `${renderUsage(usage)} · ${tail}`;
 }
 
 function loadConfig(): Config {
@@ -267,10 +277,25 @@ async function fixCommand(rest: string[]): Promise<void> {
   if (task === undefined || task === "") fail('a task is required: teploy-ship fix --repo <url> "make the failing test pass"');
   const repoUrl = args.flags.repo as string | undefined;
   if (repoUrl === undefined) fail("--repo <url> is required");
-  const token = (args.flags["git-token"] as string) ?? process.env.SHIP_GIT_TOKEN ?? config.gitToken;
-  if (token === undefined || token === "") fail("a git token is required: --git-token, SHIP_GIT_TOKEN, or gitToken in config");
 
-  const ref = parseRepoUrl(repoUrl);
+  // An operator typed this URL, so it is allowed when no allowlist is set —
+  // but when one IS set it binds here too, and credentialFor refuses to hand a
+  // token to an origin outside it either way.
+  const repoPolicy: RepoPolicyConfig = {
+    ...policyFromEnv(),
+    ...(config.gitToken !== undefined ? { gitToken: config.gitToken } : {}),
+    ...(config.githubToken !== undefined ? { githubToken: config.githubToken } : {}),
+    ...(typeof args.flags["git-token"] === "string" ? { gitToken: args.flags["git-token"] } : {}),
+  };
+  let ref: RepoRef;
+  let token: string;
+  try {
+    ref = assertRepoAllowed(repoUrl, { trust: "operator", config: repoPolicy });
+    token = credentialFor(ref, repoPolicy);
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
+  }
+  if (token === "") fail("a git token is required: --git-token, SHIP_GIT_TOKEN, SHIP_GIT_TOKENS, or gitToken in config");
   const runId = `run-${randomUUID().slice(0, 8)}`;
   const modelId = (args.flags.model as string) ?? config.model ?? "anthropic/claude-sonnet-5";
   const model = resolveModel(modelId);
@@ -507,10 +532,23 @@ async function decideCommand(rest: string[], approved: boolean): Promise<void> {
   if (meta.eventName === undefined) fail(`run ${runId} is not waiting for approval (status: ${meta.status})`);
 
   const reason = args.positional[1];
-  await deliverEvent(runtime.store, runId, meta.eventName, {
-    approved,
-    ...(reason !== undefined ? { reason } : {}),
-  });
+  // Claim the park before delivering: another operator (or the dashboard) may
+  // be answering the same one, and two decisions reaching one run is worse
+  // than being told to look again.
+  const eventName = meta.eventName;
+  if (!(await runtime.claimDecision(runId, eventName))) {
+    await runtime.close();
+    fail(`run ${runId} is no longer waiting on ${eventName} — someone decided it first. Check: teploy-ship runs`);
+  }
+  try {
+    await deliverEvent(runtime.store, runId, eventName, {
+      approved,
+      ...(reason !== undefined ? { reason } : {}),
+    });
+  } catch (error) {
+    await runtime.releaseDecision(runId, eventName).catch(() => {});
+    throw error;
+  }
   // Flag the run due so a resident worker can take it; racing is safe —
   // whoever wins the lease continues, the other reports the handoff.
   await runtime.markWake?.(runId);
@@ -671,6 +709,11 @@ async function workerCommand(rest: string[]): Promise<void> {
     intervalMs: numFlag(args.flags.interval, "interval", 5) * 1000,
     ...(gitToken !== undefined ? { gitToken } : {}),
     ...(githubToken !== undefined ? { githubToken } : {}),
+    repoPolicy: {
+      ...policyFromEnv(),
+      ...(gitToken !== undefined ? { gitToken } : {}),
+      ...(githubToken !== undefined ? { githubToken } : {}),
+    },
     ...(intakePolicies !== undefined ? { intakePolicies } : {}),
     ...(args.flags["max-concurrent"] !== undefined
       ? { maxConcurrentRuns: numFlag(args.flags["max-concurrent"], "max-concurrent", 0) }

@@ -8,8 +8,10 @@ import type { WorkflowContext, WorkflowDefinition } from "@neutron-build/workflo
 import { executeAction } from "./agent.js";
 import { FINISH_NUDGE_FAILED, FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, parseAction } from "./actions.js";
 import { criticFeedback, isApproved, reviewWork } from "./critic.js";
-import { commentOnPr, commitAndPush, fixPrompt, openPullRequest, parseRepoUrl, reviewPrompt, setupRepo, setupRepoForPr, tokenFor, workingDiff } from "./git.js";
+import { commentOnPr, commitAndPush, fixPrompt, openPullRequest, parseRepoUrl, reviewPrompt, setupRepo, setupRepoForPr, workingDiff } from "./git.js";
 import type { RepoCheckout } from "./git.js";
+import { assertRepoAllowed, credentialFor, policyFromEnv } from "./repo-policy.js";
+import type { RepoPolicyConfig, RepoTrust } from "./repo-policy.js";
 import { condenseIfNeeded, defaultCondenseConfig } from "./memory.js";
 import type { CondenseConfig } from "./memory.js";
 import { loadRepoContext, runNote } from "./repo-memory.js";
@@ -22,6 +24,7 @@ import { PLAN_EVENT } from "./plan.js";
 import type { PlanDecisionPayload } from "./plan.js";
 import type { ApprovalPolicy } from "./approval.js";
 import { formatObservation, systemPrompt } from "./prompt.js";
+import { costUSD } from "./pricing.js";
 
 export interface DurableAgentInput {
   task: string;
@@ -35,6 +38,14 @@ export interface DurableAgentInput {
   repo?: string;
   /** Review follow-up: work PR #pr's existing head branch and reply there. */
   pr?: number;
+  /**
+   * Where `repo` came from. "external" (webhook, chat, issue text) may only
+   * name an allowlisted origin; "operator" (an authenticated human typed it)
+   * is additionally allowed when no allowlist is configured. Absent means
+   * operator, so runs enqueued before this field existed replay unchanged.
+   * See repo-policy.ts.
+   */
+  trust?: RepoTrust;
   /**
    * Plan preview: the run writes a plan first and PARKS on `PLAN_EVENT`
    * before touching anything — deliver a PlanDecisionPayload (approve /
@@ -77,7 +88,14 @@ export interface DurableAgentInput {
 }
 
 export interface DurableAgentOutput {
-  status: "finished" | "max-steps";
+  /**
+   * "plan-rejected" is terminal-but-not-success: the operator denied the plan,
+   * so nothing was built. It used to report "finished", which made a refusal
+   * indistinguishable from a completed task in dashboards, metrics and
+   * notifications. "budget-exhausted" likewise records that the run was stopped
+   * by its cost ceiling rather than by finishing or running out of turns.
+   */
+  status: "finished" | "max-steps" | "plan-rejected" | "budget-exhausted";
   summary: string;
   turns: number;
   /** PR opened by a repo run (absent for workspace runs or empty diffs). */
@@ -125,6 +143,20 @@ export interface DurableAgentConfig {
   workdir?: string;
   /** Turn budget for a run (default 40). See the note at its use site. */
   maxSteps?: number;
+  /**
+   * Model id for pricing this run's usage. Only needed for the per-run cost
+   * ceiling below; the adapter itself carries no id we can price from.
+   */
+  modelId?: string;
+  /**
+   * Hard per-run spend ceiling in USD (0 or absent disables it). Turn count is
+   * a poor proxy for cost — one turn can carry a huge context, a condensation
+   * call and a critic pass — so a run that is expensive rather than long was
+   * previously bounded by nothing until the DAILY cap noticed after the fact.
+   * Checked before each model call; crossing it ends the run as
+   * "budget-exhausted" with whatever work exists published as normal.
+   */
+  maxRunCostUSD?: number;
   actionTimeoutMs?: number;
   maxObservationChars?: number;
   name?: string;
@@ -134,6 +166,11 @@ export interface DurableAgentConfig {
   gitToken?: string;
   /** Token used instead for github.com repos (SHIP_GITHUB_TOKEN). */
   githubToken?: string;
+  /**
+   * Repository allowlist + per-origin credentials. Defaults to the process
+   * environment; gitToken/githubToken above fold into it as the fallbacks.
+   */
+  repoPolicy?: RepoPolicyConfig;
   /** Per-repo memory: recent-run notes injected into and recorded by repo runs. */
   repoMemory?: RepoMemoryStore;
   /**
@@ -205,6 +242,14 @@ export function durableAgent(
   // pytest). Cost is bounded by the daily spend caps, not by this.
   const maxSteps = config.maxSteps ?? 40;
   const maxObs = config.maxObservationChars ?? 8000;
+  // Single-token config folds into the policy so credential selection and the
+  // allowlist are one lookup rather than two places that can disagree.
+  const repoPolicy: RepoPolicyConfig = {
+    ...policyFromEnv(),
+    ...config.repoPolicy,
+    ...(config.gitToken !== undefined ? { gitToken: config.gitToken } : {}),
+    ...(config.githubToken !== undefined ? { githubToken: config.githubToken } : {}),
+  };
 
   return workflow<DurableAgentInput, DurableAgentOutput>(
     config.name ?? "coding-agent",
@@ -219,11 +264,15 @@ export function durableAgent(
       if (input.repo !== undefined) {
         const repoUrl = input.repo;
         checkout = await ctx.step("repo-setup", async () => {
-          const ref = parseRepoUrl(repoUrl);
-          const token = tokenFor(ref, config);
+          // The last gate before a credential meets an origin. Intake screens
+          // the URL too, but this run may have been enqueued by an older
+          // binary or a surface that forgot to — so the check that actually
+          // guards the token lives next to the token.
+          const ref = assertRepoAllowed(repoUrl, { trust: input.trust ?? "operator", config: repoPolicy });
+          const token = credentialFor(ref, repoPolicy);
           // file:// remotes (tests, local mirrors) take no credentials
           if (token === "" && ref.base !== "file://") {
-            throw new Error("repo run needs gitToken on the executing worker (SHIP_GIT_TOKEN)");
+            throw new Error("repo run needs a git credential on the executing worker (SHIP_GIT_TOKEN or SHIP_GIT_TOKENS)");
           }
           return input.pr !== undefined
             ? setupRepoForPr(executor, { ref, token, pr: input.pr })
@@ -284,6 +333,8 @@ export function durableAgent(
       let lastExecFailed = false;
       let criticDone = false;
 
+      const maxRunCostUSD = config.maxRunCostUSD ?? 0;
+      const modelId = config.modelId ?? "";
       const usage: RunUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
       const addUsage = (u: Partial<RunUsage> | undefined): void => {
         if (u === undefined) return;
@@ -319,7 +370,7 @@ export function durableAgent(
 
         if (!decision.approved) {
           const reason = decision.reason !== undefined ? `: ${decision.reason}` : "";
-          return { status: "finished", summary: `Plan rejected by the operator${reason}.`, turns: 0, usage };
+          return { status: "plan-rejected", summary: `Plan rejected by the operator${reason}.`, turns: 0, usage };
         }
         const edited =
           typeof decision.plan === "string" &&
@@ -339,6 +390,14 @@ export function durableAgent(
       const condense = config.condense === false ? null : (config.condense ?? defaultCondenseConfig);
 
       for (let turn = 0; turn < maxSteps; turn++) {
+        // Cost ceiling, checked before spending more. Derived purely from
+        // replayed step usage, so a resumed run stops at the same turn.
+        if (maxRunCostUSD > 0 && costUSD(modelId, usage) >= maxRunCostUSD) {
+          const spent = costUSD(modelId, usage);
+          const summary = `Stopped at the $${maxRunCostUSD.toFixed(2)} per-run cost ceiling (spent ~$${spent.toFixed(2)}) after ${turn} turns.`;
+          const pr = await publishIfRepoRun(ctx, executor, config, input, checkout, summary, repoPolicy);
+          return { status: "budget-exhausted", summary, turns: turn, usage, ...(pr !== null ? { pr } : {}) };
+        }
         // Mid-run steering: drain the operator's pending notes as a
         // recorded step (the store is read once, live; replay returns the
         // recorded notes). Advisory — a store hiccup never fails the run.
@@ -435,7 +494,7 @@ export function durableAgent(
               continue;
             }
           }
-          const pr = await publishIfRepoRun(ctx, executor, config, input, checkout, action.message);
+          const pr = await publishIfRepoRun(ctx, executor, config, input, checkout, action.message, repoPolicy);
           return { status: "finished", summary: action.message, turns: turn + 1, usage, ...(pr !== null ? { pr } : {}) };
         }
         if (action.kind === "none" || action.kind === "invalid") {
@@ -509,7 +568,7 @@ export function durableAgent(
 
       // Non-empty diffs are published even off a max-steps exit — real
       // fixes die in runs that never got to say finish (SWE-bench lesson).
-      const pr = await publishIfRepoRun(ctx, executor, config, input, checkout, `Reached the ${maxSteps}-turn limit.`);
+      const pr = await publishIfRepoRun(ctx, executor, config, input, checkout, `Reached the ${maxSteps}-turn limit.`, repoPolicy);
       return { status: "max-steps", summary: `Reached the ${maxSteps}-turn limit.`, turns: maxSteps, usage, ...(pr !== null ? { pr } : {}) };
     },
     config.runTimeout !== undefined ? { timeout: config.runTimeout } : {},
@@ -529,13 +588,14 @@ async function publishIfRepoRun(
   input: DurableAgentInput,
   checkout: RepoCheckout | null,
   summary: string,
+  policy: RepoPolicyConfig,
 ): Promise<string | null> {
   if (checkout === null || input.repo === undefined) return null;
   const repoUrl = input.repo;
   const co = checkout;
   const result = await ctx.step("repo-publish", async () => {
-    const ref = parseRepoUrl(repoUrl);
-    const token = tokenFor(ref, config);
+    const ref = assertRepoAllowed(repoUrl, { trust: input.trust ?? "operator", config: policy });
+    const token = credentialFor(ref, policy);
     const pushed = await commitAndPush(executor, {
       ref,
       token,

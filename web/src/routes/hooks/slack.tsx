@@ -1,6 +1,6 @@
 import { slackTaskFromMention } from "teploy-ship/runtime";
 
-import { shipRuntime } from "../../lib/store.server.js";
+import { BodyTooLarge, claimDelivery, json, parseJson, proposeFromWebhook, readCappedBody } from "../../lib/webhook.server.js";
 
 export const config = { mode: "app" };
 
@@ -19,7 +19,13 @@ export async function action({ request }: { request: Request }): Promise<Respons
     return json(503, { title: "slack intake disabled: SHIP_SLACK_SIGNING_SECRET is not set" });
   }
   const { createHmac, timingSafeEqual } = await import("node:crypto");
-  const body = await request.text();
+  let body: string;
+  try {
+    body = await readCappedBody(request);
+  } catch (error) {
+    if (error instanceof BodyTooLarge) return json(413, { title: "payload too large" });
+    throw error;
+  }
 
   const timestamp = request.headers.get("x-slack-request-timestamp") ?? "";
   const age = Math.abs(Date.now() / 1000 - Number(timestamp));
@@ -32,11 +38,12 @@ export async function action({ request }: { request: Request }): Promise<Respons
     return json(401, { title: "bad slack signature" });
   }
 
-  const payload = JSON.parse(body) as {
+  const payload = parseJson<{
     type?: string;
     challenge?: string;
     event?: { type?: string; text?: string; channel?: string; ts?: string; bot_id?: string };
-  };
+  }>(body);
+  if (payload === null) return json(400, { title: "malformed JSON body" });
   if (payload.type === "url_verification") {
     return json(200, { challenge: payload.challenge ?? "" });
   }
@@ -49,14 +56,10 @@ export async function action({ request }: { request: Request }): Promise<Respons
 
   const input = slackTaskFromMention(payload.event);
   if (input === null) return json(200, { ok: true, skipped: "empty mention" });
-  const runtime = await shipRuntime();
-  const { created, task } = await runtime.intake.propose(input);
-  return json(200, { ok: true, taskId: task.taskId, created });
-}
-
-function json(status: number, body: unknown): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
+  // Slack's five-minute window bounds replay but does not prevent it; the
+  // message's channel+ts is a stable per-delivery identity.
+  if (!(await claimDelivery("slack", `${payload.event.channel ?? ""}:${payload.event.ts ?? ""}`))) {
+    return json(200, { ok: true, skipped: "duplicate delivery" });
+  }
+  return proposeFromWebhook(input);
 }

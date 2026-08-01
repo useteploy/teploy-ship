@@ -16,8 +16,11 @@ import { makeObserveEmitter } from "./observe.js";
 import { multiNotifier, slackNotifier, webhookNotifier } from "./notify.js";
 import type { SpendStore } from "./spend.js";
 import { utcDay } from "./spend.js";
+import { NucleusAdmission } from "./admission.js";
+import type { AdmissionControl } from "./admission.js";
+import type { RepoPolicyConfig } from "./repo-policy.js";
 import type { CodeSearch } from "./code-index.js";
-import { costUSD } from "./pricing.js";
+import { costUSD, isPricedModel } from "./pricing.js";
 
 export type { IntakePolicy } from "./intake.js";
 
@@ -35,6 +38,8 @@ export interface WorkerOptions {
   gitToken?: string;
   /** Token used instead for github.com repos (SHIP_GITHUB_TOKEN). */
   githubToken?: string;
+  /** Repository allowlist + per-origin credentials (defaults to the environment). */
+  repoPolicy?: RepoPolicyConfig;
   /** Per-source intake policies; unlisted sources default to "propose". */
   intakePolicies?: Record<string, IntakePolicy>;
   /** Nucleus code index behind repo-index refresh + the ```search action. */
@@ -56,6 +61,16 @@ export interface WorkerOptions {
   dailyBudgetUSD?: number;
   /** Per-source budget overrides (USD/day) taking precedence over dailyBudgetUSD. */
   intakeBudgets?: Record<string, number>;
+  /** Fleet-wide admission control. Defaults to the Nucleus-backed implementation. */
+  admission?: AdmissionControl;
+  /** Hard per-run spend ceiling in USD (0 = off, or SHIP_MAX_RUN_COST_USD). */
+  maxRunCostUSD?: number;
+  /**
+   * Budget held per in-flight run until its real cost is known (default 0.50,
+   * or SHIP_ESTIMATED_RUN_COST_USD). Only affects how conservatively the daily
+   * budget admits concurrent launches; settlement always records actual cost.
+   */
+  estimatedRunCostUSD?: number;
   /**
    * Turn budget for a durable run (default 40, or SHIP_MAX_STEPS). Every
    * webhook-, Inbox- and sweep-launched run shares this ceiling; the daily
@@ -66,8 +81,35 @@ export interface WorkerOptions {
   log?: (line: string) => void;
 }
 
+/**
+ * Sum every model call recorded in a run's step log.
+ *
+ * A completed run reports its own total in the workflow output, but a FAILED or
+ * CANCELLED one never gets to return anything — and those runs still made paid
+ * model calls. Reading usage out of the recorded steps means cost is recovered
+ * from whatever the run got through, which is what a spend cap has to count.
+ * Steps that record usage: turn-N-think, turn-N-condense, turn-N-critic,
+ * plan-think — all of them shaped { text, usage }.
+ */
+export function usageFromEvents(events: WorkflowEvent[]): RunUsage | undefined {
+  const total: RunUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+  let found = false;
+  for (const event of events) {
+    if (event.type !== "step-completed") continue;
+    const usage = (event.data as { result?: { usage?: RunUsage } } | undefined)?.result?.usage;
+    if (usage === undefined || typeof usage !== "object") continue;
+    found = true;
+    total.inputTokens += usage.inputTokens ?? 0;
+    total.outputTokens += usage.outputTokens ?? 0;
+    total.totalTokens += usage.totalTokens ?? 0;
+    if (usage.cacheReadTokens !== undefined) total.cacheReadTokens = (total.cacheReadTokens ?? 0) + usage.cacheReadTokens;
+    if (usage.cacheWriteTokens !== undefined) total.cacheWriteTokens = (total.cacheWriteTokens ?? 0) + usage.cacheWriteTokens;
+  }
+  return found ? total : undefined;
+}
+
 /** Extract terminal status + summed usage from a run's event log. */
-function readOutcome(events: WorkflowEvent[]): { terminal: boolean; usage?: RunUsage } {
+export function readOutcome(events: WorkflowEvent[]): { terminal: boolean; usage?: RunUsage } {
   const terminal = events.find(
     (e) => e.type === "run-completed" || e.type === "run-failed" || e.type === "run-cancelled",
   );
@@ -76,48 +118,59 @@ function readOutcome(events: WorkflowEvent[]): { terminal: boolean; usage?: RunU
     const usage = (terminal.data as { output?: { usage?: RunUsage } } | undefined)?.output?.usage;
     if (usage !== undefined) return { terminal: true, usage };
   }
-  return { terminal: true };
+  // Failed/cancelled (or a completed run from before usage was reported):
+  // reconstruct from the steps so the spend is not silently written off.
+  const reconstructed = usageFromEvents(events);
+  return reconstructed !== undefined ? { terminal: true, usage: reconstructed } : { terminal: true };
 }
 
 export interface IntakeSweepDeps {
   intake: Pick<IntakeStore, "list" | "setState" | "claim">;
   spend: SpendStore;
+  /** Fleet-wide slots and counters (see admission.ts). */
+  admission: AdmissionControl;
   policies: Record<string, IntakePolicy>;
   dailyAutoLimit: number;
   maxConcurrentRuns: number;
   /** Per-source daily budget in USD; <= 0 disables the cap for that source. */
   budgetFor: (source: string) => number;
-  /** Process-local per-source launch counters (bucketed by UTC day). */
-  launchedToday: Map<string, { day: string; count: number }>;
+  /** What one run is assumed to cost while it is in flight (budget reservation). */
+  estimatedRunCostUSD: number;
   /** Runs this worker launched that may still be executing: runId -> source. */
   inFlight: Map<string, string>;
   /** Terminal-check for a launched run (from its event log). */
   outcomeOf: (runId: string) => Promise<{ terminal: boolean }>;
-  /** Enqueue a proposed task as a run; returns the new runId. */
-  launch: (task: IntakeTask) => Promise<string>;
+  /** Enqueue a proposed task as a run under a runId the caller already reserved against. */
+  launch: (task: IntakeTask, runId: string) => Promise<void>;
+  /** Mint a run id. Injected so tests are deterministic. */
+  newRunId: () => string;
   now: () => Date;
   log: (line: string) => void;
 }
 
 /**
- * One intake sweep, factored out of the resident worker so both caps are
- * unit-testable. It (1) frees the concurrency slot of any in-flight run that
- * finished, then (2) auto-launches proposed tasks for
- * "auto" sources bounded by three independent limits: the count cap, the
- * global concurrency ceiling, and the per-source daily spend budget. A
- * task blocked by any cap stays proposed for a later sweep.
+ * One intake sweep. It (1) releases the fleet resources of any run this worker
+ * launched that has since finished, then (2) auto-launches proposed tasks for
+ * "auto" sources under three limits that are now FLEET-WIDE rather than
+ * per-process: the daily launch count, the concurrency ceiling, and the
+ * per-source daily spend budget. A task blocked by any of them stays proposed.
+ *
+ * Acquisition order is chosen so a late refusal can be undone. The task claim
+ * and the concurrency slot are both releasable, and the budget hold is
+ * releasable; the daily launch count is NOT (it is a one-way counter), so it is
+ * taken last, immediately before the launch that consumes it.
  */
 export async function sweepIntake(deps: IntakeSweepDeps): Promise<void> {
   const today = utcDay(deps.now());
 
-  // 1) Release the concurrency slot of any auto-launched run that finished.
+  // 1) A finished run gives back its concurrency slot and its budget hold.
   // Spend is NOT settled here — the worker's onComplete does that for every
-  // run, whatever launched it. Settling in both places would double-count the
-  // auto-launched ones.
+  // run, whatever launched it. Settling in both places would double-count.
   for (const [runId] of [...deps.inFlight]) {
     const outcome = await deps.outcomeOf(runId);
     if (!outcome.terminal) continue;
     deps.inFlight.delete(runId);
+    await deps.admission.releaseSlot(runId);
   }
 
   // 2) Launch, if any source is configured "auto".
@@ -126,47 +179,59 @@ export async function sweepIntake(deps: IntakeSweepDeps): Promise<void> {
   for (const task of await deps.intake.list("proposed")) {
     if (deps.policies[task.source] !== "auto") continue;
 
-    if (deps.inFlight.size >= deps.maxConcurrentRuns) {
-      deps.log(
-        `[worker] intake: at concurrency ceiling (${deps.maxConcurrentRuns} in flight); ${task.taskId} stays proposed`,
-      );
-      break; // no slots left for any source this sweep
-    }
+    // Claim first: two workers sweeping the same proposed list must collapse to
+    // one run. Losing just means someone else got there — take no resources.
+    if (!(await deps.intake.claim(task.taskId))) continue;
 
-    const counter = deps.launchedToday.get(task.source);
-    const count = counter?.day === today ? counter.count : 0;
-    if (count >= deps.dailyAutoLimit) {
-      deps.log(`[worker] intake: ${task.source} hit the daily auto cap (${deps.dailyAutoLimit}); ${task.taskId} stays proposed`);
-      continue;
-    }
-
-    const budget = deps.budgetFor(task.source);
-    if (budget > 0) {
-      const spent = await deps.spend.get(task.source, today);
-      if (spent >= budget) {
+    const runId = deps.newRunId();
+    let slotTaken = false;
+    let holdTaken = false;
+    try {
+      if (!(await deps.admission.acquireSlot(runId, deps.maxConcurrentRuns))) {
         deps.log(
-          `[worker] intake: ${task.source} hit the daily budget cap ($${budget.toFixed(2)}; spent $${spent.toFixed(2)}); ${task.taskId} stays proposed`,
+          `[worker] intake: fleet at the concurrency ceiling (${deps.maxConcurrentRuns}); ${task.taskId} stays proposed`,
         );
+        await deps.intake.setState(task.taskId, "proposed");
+        break; // no slots for anyone this sweep
+      }
+      slotTaken = true;
+
+      const budget = deps.budgetFor(task.source);
+      if (budget > 0) {
+        // Reserve BEFORE reading the total, so two workers admitting at once
+        // see each other's commitment instead of both reading the same room.
+        await deps.spend.reserve(runId, task.source, today, deps.estimatedRunCostUSD);
+        holdTaken = true;
+        const committed = await deps.spend.get(task.source, today);
+        if (committed > budget) {
+          deps.log(
+            `[worker] intake: ${task.source} would exceed its daily budget ($${budget.toFixed(2)}; committed $${committed.toFixed(2)}); ${task.taskId} stays proposed`,
+          );
+          await deps.intake.setState(task.taskId, "proposed");
+          continue;
+        }
+      }
+
+      if (!(await deps.admission.takeDailyLaunch(task.source, today, deps.dailyAutoLimit))) {
+        deps.log(`[worker] intake: ${task.source} hit the daily auto cap (${deps.dailyAutoLimit}); ${task.taskId} stays proposed`);
+        await deps.intake.setState(task.taskId, "proposed");
         continue;
       }
-    }
 
-    // Claim BEFORE launching: two workers sweeping the same proposed list
-    // must collapse to one run. Losing the claim just means another worker
-    // (or the web queue) got there first — skip, count nothing.
-    if (!(await deps.intake.claim(task.taskId))) continue;
-    let runId: string;
-    try {
-      runId = await deps.launch(task);
+      await deps.launch(task, runId);
+      await deps.intake.setState(task.taskId, "launched", runId);
+      deps.inFlight.set(runId, task.source);
+      slotTaken = false; // the run owns it now; released when it finishes
+      holdTaken = false; // released at settlement
+      deps.log(`[worker] intake: auto-launched ${task.taskId} (${task.source}) as ${runId}`);
     } catch (error) {
-      // Release the claim so a later sweep retries; then surface the error.
-      await deps.intake.setState(task.taskId, "proposed");
+      // Put everything back so a later sweep can retry cleanly, then surface it.
+      await deps.intake.setState(task.taskId, "proposed").catch(() => {});
       throw error;
+    } finally {
+      if (slotTaken) await deps.admission.releaseSlot(runId).catch(() => {});
+      if (holdTaken) await deps.spend.release(runId).catch(() => {});
     }
-    await deps.intake.setState(task.taskId, "launched", runId);
-    deps.inFlight.set(runId, task.source);
-    deps.launchedToday.set(task.source, { day: today, count: count + 1 });
-    deps.log(`[worker] intake: auto-launched ${task.taskId} (${task.source}) as ${runId}`);
   }
 }
 
@@ -182,14 +247,25 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
   const log = options.log ?? ((line: string) => process.stderr.write(line + "\n"));
   const envMaxSteps = Number(process.env.SHIP_MAX_STEPS);
   const maxSteps = options.maxSteps ?? (Number.isFinite(envMaxSteps) && envMaxSteps > 0 ? envMaxSteps : undefined);
+  const envNum = (name: string): number | undefined => {
+    const raw = process.env[name];
+    if (raw === undefined || raw === "") return undefined;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : undefined;
+  };
   const wf = durableAgent({
     ...(maxSteps !== undefined ? { maxSteps } : {}),
     model: options.model,
+    ...(options.modelId !== undefined ? { modelId: options.modelId } : {}),
+    // Per-run cost ceiling (SHIP_MAX_RUN_COST_USD). Off unless configured —
+    // the daily caps remain the primary bound; this stops ONE pathological run.
+    maxRunCostUSD: options.maxRunCostUSD ?? envNum("SHIP_MAX_RUN_COST_USD") ?? 0,
     executor: options.executor,
     approveAction: defaultApprovalPolicy,
     workdir: options.workdir,
     ...(options.gitToken !== undefined ? { gitToken: options.gitToken } : {}),
     ...(options.githubToken !== undefined ? { githubToken: options.githubToken } : {}),
+    ...(options.repoPolicy !== undefined ? { repoPolicy: options.repoPolicy } : {}),
     repoMemory: options.runtime.memory,
     steer: options.runtime.steer,
     ...(options.codeSearch !== undefined ? { codeSearch: options.codeSearch } : {}),
@@ -240,10 +316,19 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
         const [meta, events] = await Promise.all([options.runtime.loadMeta(runId), options.runtime.store.load(runId)]);
         const settled = readOutcome(events);
         if (!settled.terminal) return; // a park is not a finish
+        // The fleet resources this run held come back whatever the outcome was.
+        await admission.releaseSlot(runId);
+        await options.runtime.spend.release(runId).catch(() => {});
         const source = meta?.source;
         if (source === undefined || source === "") return; // pre-source run; nothing to attribute
-        const cost = costUSD(meta?.model ?? modelId, settled.usage);
+        const model = meta?.model ?? modelId;
+        const cost = costUSD(model, settled.usage);
         if (cost <= 0) return;
+        if (!isPricedModel(model)) {
+          // Loud, because the number below is a conservative guess and the
+          // budget cap is now enforcing against it. Add the model to pricing.ts.
+          log(`[worker] ${runId}: model ${model} is not in the pricing table — charging the highest known rate`);
+        }
         const day = utcDay(new Date());
         await options.runtime.spend.add(source, day, cost);
         log(`[worker] ${runId} (${source}) cost $${cost.toFixed(4)} recorded to ${day}`);
@@ -334,7 +419,12 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
     return Number.isFinite(n) ? n : undefined;
   };
   const modelId = options.modelId ?? "worker-default";
+  const admission = options.admission ?? new NucleusAdmission(options.runtime.db);
   const maxConcurrentRuns = options.maxConcurrentRuns ?? envInt("SHIP_MAX_CONCURRENT_RUNS") ?? 3;
+  // What a run is assumed to cost while it is in flight. Held against the
+  // source's daily budget from admission until settlement replaces it with the
+  // real number, so a burst of launches cannot all pass the same budget read.
+  const estimatedRunCostUSD = options.estimatedRunCostUSD ?? envInt("SHIP_ESTIMATED_RUN_COST_USD") ?? 0.5;
   const defaultBudget = options.dailyBudgetUSD ?? envInt("SHIP_DAILY_BUDGET_USD") ?? 10;
   const budgets = options.intakeBudgets ?? {};
   const envPolicies = options.intakePolicies ?? {};
@@ -346,8 +436,7 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
     .seed(envPolicies)
     .catch((err) => log(`[worker] policy seed failed: ${err instanceof Error ? err.message : String(err)}`));
 
-  // Intake sweep state, process-local across ticks.
-  const launchedToday = new Map<string, { day: string; count: number }>();
+  // Runs this worker launched and is still holding fleet resources for.
   const inFlight = new Map<string, string>();
 
   const sweep = async (): Promise<void> => {
@@ -377,24 +466,27 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
     return sweepIntake({
       intake: options.runtime.intake,
       spend: options.runtime.spend,
+      admission,
       policies,
-      dailyAutoLimit: options.dailyAutoLimit ?? 10,
+      dailyAutoLimit: options.dailyAutoLimit ?? envInt("SHIP_DAILY_AUTO_LIMIT") ?? 10,
       maxConcurrentRuns,
       budgetFor: (source) => storeBudgets[source] ?? budgets[source] ?? defaultBudget,
-      launchedToday,
+      estimatedRunCostUSD,
       inFlight,
       outcomeOf: async (runId) => readOutcome(await options.runtime.store.load(runId)),
-      launch: async (task) => {
-        const runId = `run-${randomUUID().slice(0, 8)}`;
+      newRunId: () => `run-${randomUUID().slice(0, 8)}`,
+      launch: async (task, runId) => {
         await enqueueRun(options.runtime, {
           runId,
           task: task.detail !== undefined ? `${task.title}\n\n${task.detail}` : task.title,
           model: modelId,
           source: task.source,
+          // A swept task was proposed by a webhook, a chat message, or an
+          // issue body — never by a human typing into this process.
+          trust: "external",
           ...(task.repo !== undefined ? { repo: task.repo } : {}),
           ...(task.pr !== undefined ? { pr: task.pr } : {}),
         });
-        return runId;
       },
       now: () => new Date(),
       log,
@@ -422,7 +514,12 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
   const startedAt = new Date().toISOString();
   const sandboxLabel = process.env.SHIP_SANDBOX_URL ?? "host";
   const beat = (): Promise<void> =>
-    options.runtime.fleet
+    // Renewing first: a concurrency slot carries a TTL so a dead worker cannot
+    // wedge the fleet, which means a LIVE worker has to keep saying it is alive.
+    admission
+      .renewSlots()
+      .catch(() => {})
+      .then(() => options.runtime.fleet
       .heartbeat({
         owner: options.runtime.owner,
         host,
@@ -431,7 +528,7 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
         activeRuns: inflight.size,
         startedAt,
         lastSeen: new Date().toISOString(),
-      })
+      }))
       .catch((error) => log(`[worker] fleet heartbeat: ${error instanceof Error ? error.message : String(error)}`));
   void beat();
   const heartbeatTimer = setInterval(() => void beat(), 15000);

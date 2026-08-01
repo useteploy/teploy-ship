@@ -1,6 +1,6 @@
 import { ciFixTaskFromWorkflowRun } from "teploy-ship/runtime";
 
-import { shipRuntime } from "../../lib/store.server.js";
+import { BodyTooLarge, claimDelivery, firstHeader, json, parseJson, proposeFromWebhook, readCappedBody } from "../../lib/webhook.server.js";
 
 export const config = { mode: "app" };
 
@@ -17,23 +17,34 @@ export async function action({ request }: { request: Request }): Promise<Respons
     return json(503, { title: "webhook disabled: SHIP_WEBHOOK_SECRET is not set" });
   }
   const { createHmac, timingSafeEqual } = await import("node:crypto");
-  const body = await request.text();
+  // Capped before the HMAC — see the note in the Forgejo receiver.
+  let body: string;
+  try {
+    body = await readCappedBody(request);
+  } catch (error) {
+    if (error instanceof BodyTooLarge) return json(413, { title: "payload too large" });
+    throw error;
+  }
   const signature = request.headers.get("x-hub-signature-256") ?? "";
   const expected = `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`;
   if (signature.length !== expected.length || !timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {
     return json(401, { title: "bad webhook signature" });
   }
 
+  if (!(await claimDelivery("github", firstHeader(request, "x-github-delivery")))) {
+    return json(200, { ok: true, skipped: "duplicate delivery" });
+  }
+
   const event = request.headers.get("x-github-event") ?? "";
   // A5: a failed workflow run on one of Ship's own PRs → review task.
   if (event === "workflow_run") {
-    const input = ciFixTaskFromWorkflowRun(JSON.parse(body));
+    const runPayload = parseJson<Parameters<typeof ciFixTaskFromWorkflowRun>[0]>(body);
+    if (runPayload === null) return json(400, { title: "malformed JSON body" });
+    const input = ciFixTaskFromWorkflowRun(runPayload);
     if (input === null) return json(200, { ok: true, skipped: "not a failed run on a ship PR" });
-    const runtime = await shipRuntime();
-    const { created, task } = await runtime.intake.propose(input);
-    return json(200, { ok: true, taskId: task.taskId, created });
+    return proposeFromWebhook(input);
   }
-  const payload = JSON.parse(body) as {
+  const payload = parseJson<{
     action?: string;
     issue?: {
       number?: number;
@@ -44,7 +55,8 @@ export async function action({ request }: { request: Request }): Promise<Respons
     };
     comment?: { id?: number; body?: string };
     repository?: { full_name?: string; clone_url?: string };
-  };
+  }>(body);
+  if (payload === null) return json(400, { title: "malformed JSON body" });
   if (payload.repository?.full_name === undefined) return json(400, { title: "payload missing repository" });
   const repo = payload.repository.clone_url;
   const fullName = payload.repository.full_name;
@@ -65,8 +77,7 @@ export async function action({ request }: { request: Request }): Promise<Respons
     if (payload.issue.number === undefined || payload.comment?.id === undefined) {
       return json(400, { title: "payload missing issue/comment" });
     }
-    const runtime = await shipRuntime();
-    const { created, task } = await runtime.intake.propose({
+    return proposeFromWebhook({
       source: "github",
       kind: "review",
       ...(repo !== undefined ? { repo } : {}),
@@ -75,7 +86,6 @@ export async function action({ request }: { request: Request }): Promise<Respons
       detail: text,
       dedupeKey: `github:${fullName}#comment-${payload.comment.id}`,
     });
-    return json(created ? 201 : 200, { ok: true, taskId: task.taskId, created });
   }
 
   if (event !== "issues") return json(200, { ok: true, skipped: `event ${event}` });
@@ -86,8 +96,7 @@ export async function action({ request }: { request: Request }): Promise<Respons
   }
   if (payload.issue?.number === undefined) return json(400, { title: "payload missing issue" });
 
-  const runtime = await shipRuntime();
-  const { created, task } = await runtime.intake.propose({
+  return proposeFromWebhook({
     source: "github",
     kind: "issue",
     ...(repo !== undefined ? { repo } : {}),
@@ -97,11 +106,6 @@ export async function action({ request }: { request: Request }): Promise<Respons
       : {}),
     dedupeKey: `github:${fullName}#${payload.issue.number}`,
   });
-  return json(created ? 201 : 200, { ok: true, taskId: task.taskId, created });
-}
-
-function json(status: number, body: unknown): Response {
-  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
 export default function Never() {

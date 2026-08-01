@@ -3,7 +3,7 @@ import { cancelRun, deliverEvent } from "@neutron-build/workflow";
 // PLAN_EVENT comes from the dependency-free plan module: it's used in the
 // component (client bundle), where teploy-ship/runtime (node-only) can't go.
 import { PLAN_EVENT } from "teploy-ship/plan";
-import { costUSD } from "teploy-ship/runtime";
+import { costUSD, isPricedModel } from "teploy-ship/runtime";
 import type { RunMeta } from "teploy-ship/runtime";
 
 import { shipRuntime } from "../../lib/store.server.js";
@@ -18,6 +18,8 @@ interface RunData {
   items: TimelineItem[];
   outcome: RunOutcome;
   costUSD: number;
+  /** False when the model is absent from the pricing table and the cost is a ceiling, not a price. */
+  costPriced: boolean;
   runId: string;
   eventCount: number;
   /** The agent's proposed plan, when this run is parked on plan approval. */
@@ -65,6 +67,7 @@ export async function loader({ params }: { params: { id: string } }): Promise<Ru
       items: toTimeline(events),
       outcome,
       costUSD: cost,
+      costPriced: isPricedModel(meta?.model ?? ""),
       runId,
       eventCount: events.length,
       ...(plan !== undefined ? { plan } : {}),
@@ -77,6 +80,10 @@ export async function loader({ params }: { params: { id: string } }): Promise<Ru
     span.end("error");
     throw err;
   }
+}
+
+function redirectTo(location: string): Response {
+  return new Response(null, { status: 302, headers: { location } });
 }
 
 /** A PR reference may be a full URL or a bare number; make it a link when we can. */
@@ -106,29 +113,51 @@ export async function action({
     await cancelRun(runtime.store, runId, "cancelled from the dashboard").catch(() => {});
     await runtime.markWake?.(runId);
     await runtime.saveMeta({ ...meta, status: "cancelled", updatedAt: new Date().toISOString() });
-    return new Response(null, { status: 302, headers: { location: `/runs/${runId}` } });
+    return redirectTo(`/runs/${runId}`);
   }
   // Mid-run steering: queue a note; the run's next turn drains it.
   if (active && intent === "steer") {
     const text = String(form.get("steer") ?? "").trim();
     if (text !== "") await runtime.steer.add(runId, text);
-    return new Response(null, { status: 302, headers: { location: `/runs/${runId}` } });
+    return redirectTo(`/runs/${runId}`);
   }
   if (meta?.eventName !== undefined && (intent === "approve" || intent === "deny")) {
+    // The decision is bound to the park the operator actually looked at. Without
+    // this, a tab left open while the run advanced to a DIFFERENT parked action
+    // would approve that one instead: the action re-read meta at submit time and
+    // delivered to whatever was waiting. Approving is remote code execution, so
+    // "whatever is waiting" is not an acceptable target.
+    const reviewed = String(form.get("eventName") ?? "");
+    if (reviewed === "" || reviewed !== meta.eventName) {
+      return redirectTo(`/runs/${runId}?decision=stale`);
+    }
+    // One winner: the claim clears eventName conditionally, so a second admin
+    // submitting the opposite decision on the same park loses here rather than
+    // both decisions reaching the run.
+    if (!(await runtime.claimDecision(runId, reviewed))) {
+      return redirectTo(`/runs/${runId}?decision=taken`);
+    }
     const reason = String(form.get("reason") ?? "").trim();
     // Plan approvals may carry an operator-edited plan (textarea).
-    const plan = meta.eventName === PLAN_EVENT ? String(form.get("plan") ?? "").trim() : "";
-    await deliverEvent(runtime.store, runId, meta.eventName, {
-      approved: intent === "approve",
-      ...(reason !== "" ? { reason } : {}),
-      ...(plan !== "" ? { plan } : {}),
-    });
+    const plan = reviewed === PLAN_EVENT ? String(form.get("plan") ?? "").trim() : "";
+    try {
+      await deliverEvent(runtime.store, runId, reviewed, {
+        approved: intent === "approve",
+        ...(reason !== "" ? { reason } : {}),
+        ...(plan !== "" ? { plan } : {}),
+      });
+    } catch (error) {
+      // The claim already moved the run out of "waiting"; put it back so the
+      // decision can be retried rather than leaving a park nobody can answer.
+      await runtime.releaseDecision(runId, reviewed).catch(() => {});
+      throw error;
+    }
     // Make the run due; the resident worker carries it from here. The web
-    // process never executes the agent.
+    // process never executes the agent. (claimDecision already recorded the
+    // status transition, so there is no second, non-atomic saveMeta.)
     await runtime.markWake?.(runId);
-    await runtime.saveMeta({ ...meta, status: "wake", updatedAt: new Date().toISOString() });
   }
-  return new Response(null, { status: 302, headers: { location: `/runs/${runId}` } });
+  return redirectTo(`/runs/${runId}`);
 }
 
 // Poll via the framework's loader-data protocol (X-Neutron-Data): re-runs
@@ -140,8 +169,19 @@ const POLL = `__shipLive("route:runs/[id].tsx");`;
 
 export default function RunDetail({ data }: { data: RunData }) {
   const active = data.meta !== null && !["completed", "failed", "cancelled"].includes(data.meta.status);
+  const decision = typeof location !== "undefined" ? new URLSearchParams(location.search).get("decision") : null;
   return (
     <div id="run-root" data-event-count={String(data.eventCount)} data-run-status={data.meta?.status ?? "unknown"}>
+      {decision === "stale" && (
+        <p class="card attn" style="margin:12px 0;color:var(--yellow)">
+          Not applied — this run moved on to a different decision after the page was loaded. Review the current one below.
+        </p>
+      )}
+      {decision === "taken" && (
+        <p class="card attn" style="margin:12px 0;color:var(--yellow)">
+          Not applied — someone else decided this one first.
+        </p>
+      )}
       <h1 class="page">
         <a href="/runs">runs</a> / {data.runId}
       </h1>
@@ -164,7 +204,12 @@ export default function RunDetail({ data }: { data: RunData }) {
                 {data.outcome.repo !== undefined && (
                   <span class="meta">{data.outcome.repo.replace(/^https?:\/\//, "").replace(/\.git$/, "")}</span>
                 )}
-                {data.costUSD > 0 && <span class="chip">~${data.costUSD.toFixed(4)}</span>}
+                {data.costUSD > 0 && (
+                  <span class="chip" title={data.costPriced ? "estimated from list prices" : "this model is not in the pricing table — upper bound at the highest known rate"}>
+                    {data.costPriced ? "~" : "≤"}${data.costUSD.toFixed(4)}
+                    {!data.costPriced && <span class="meta"> unpriced</span>}
+                  </span>
+                )}
                 {data.outcome.usage !== undefined && (
                   <span class="meta">
                     {data.outcome.usage.inputTokens} in / {data.outcome.usage.outputTokens} out
@@ -181,6 +226,8 @@ export default function RunDetail({ data }: { data: RunData }) {
             <div class="card attn" style="margin:12px 0">
               <div class="kind" style="margin-bottom:8px">Plan review — the run is parked until you decide</div>
               <form method="post">
+                {/* Binds this decision to the park being displayed — see the action. */}
+                <input type="hidden" name="eventName" value={data.meta.eventName} />
                 <textarea
                   name="plan"
                   rows={Math.min(14, Math.max(4, (data.plan ?? "").split("\n").length + 1))}
@@ -203,6 +250,9 @@ export default function RunDetail({ data }: { data: RunData }) {
           {(data.meta.eventName !== undefined || active) && (
             <form class="decide" method="post">
               <input type="hidden" name="reason" value="" />
+              {data.meta.eventName !== undefined && (
+                <input type="hidden" name="eventName" value={data.meta.eventName} />
+              )}
               {data.meta.eventName !== undefined && data.meta.eventName !== PLAN_EVENT && (
                 <>
                   <button class="approve" type="submit" name="intent" value="approve">

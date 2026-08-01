@@ -41,6 +41,7 @@ export interface UsageLike {
 // DeepSeek list a discounted cached-input rate and no separate write.
 export const PRICING: Record<string, ModelPricing> = {
   // Anthropic — Claude
+  "claude-opus-5": { inputPer1M: 5, outputPer1M: 25, cacheReadPer1M: 0.5, cacheWritePer1M: 6.25 },
   "claude-opus-4-8": { inputPer1M: 5, outputPer1M: 25, cacheReadPer1M: 0.5, cacheWritePer1M: 6.25 },
   "claude-opus-4-7": { inputPer1M: 5, outputPer1M: 25, cacheReadPer1M: 0.5, cacheWritePer1M: 6.25 },
   "claude-opus-4-6": { inputPer1M: 5, outputPer1M: 25, cacheReadPer1M: 0.5, cacheWritePer1M: 6.25 },
@@ -85,15 +86,43 @@ export function pricingFor(modelId: string): ModelPricing | undefined {
   return PRICING[normalizeModelId(modelId)];
 }
 
+/** Is this model in the table, or are we about to estimate its cost? */
+export function isPricedModel(modelId: string): boolean {
+  return pricingFor(modelId) !== undefined;
+}
+
 /**
- * Dollar cost of a single run/step from its usage. Returns 0 for an
- * unknown model or absent usage — never throws, so it is safe to call on
- * a hot enforcement path.
+ * The rate used for a model the table does not know: the most expensive entry
+ * on every axis.
+ *
+ * This exists because the spend cap is a SAFETY control, and the old behaviour
+ * — unknown model costs $0 — made it fail OPEN. A newly released model, a
+ * gateway alias, a revision suffix, or a typo in SHIP_MODEL would burn real
+ * provider spend while Ship recorded nothing and kept auto-launching. Guessing
+ * high can only refuse work early, which is the recoverable direction; guessing
+ * zero removes the cap entirely.
+ */
+export const UNKNOWN_MODEL_PRICING: ModelPricing = (() => {
+  const entries = Object.values(PRICING);
+  return {
+    inputPer1M: Math.max(...entries.map((p) => p.inputPer1M)),
+    outputPer1M: Math.max(...entries.map((p) => p.outputPer1M)),
+    cacheReadPer1M: Math.max(...entries.map((p) => p.cacheReadPer1M ?? 0)),
+    cacheWritePer1M: Math.max(...entries.map((p) => p.cacheWritePer1M ?? 0)),
+  };
+})();
+
+/**
+ * Dollar cost of a run/step from its usage. An unknown model is priced at
+ * {@link UNKNOWN_MODEL_PRICING} rather than free — see the note there. Absent
+ * usage is genuinely 0. Never throws; it is called on the enforcement path.
+ *
+ * Callers that want to SHOW the number should also check {@link isPricedModel}
+ * and mark it as an estimate.
  */
 export function costUSD(modelId: string, usage: UsageLike | undefined): number {
   if (usage === undefined) return 0;
-  const price = pricingFor(modelId);
-  if (price === undefined) return 0;
+  const price = pricingFor(modelId) ?? UNKNOWN_MODEL_PRICING;
   const input = usage.inputTokens ?? 0;
   const output = usage.outputTokens ?? 0;
   const cacheRead = usage.cacheReadTokens ?? 0;

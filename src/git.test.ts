@@ -6,7 +6,8 @@ import { test } from "node:test";
 
 import { LocalExecutor } from "@neutron-build/agents";
 
-import { assertGitSafe, authenticatedUrl, commitAndPush, openPullRequest, parseRepoUrl, setupRepo, tokenFor } from "./git.js";
+import { assertGitSafe, authenticatedUrl, commitAndPush, openPullRequest, parseRepoUrl, setupRepo } from "./git.js";
+import { credentialFor } from "./repo-policy.js";
 
 test("assertGitSafe rejects shell-active refs (command-injection defense)", () => {
   // These are all valid git branch names but would execute under sh -c.
@@ -107,11 +108,11 @@ test("openPullRequest hits the right endpoint per host kind", async () => {
   );
 });
 
-test("tokenFor picks the GitHub token for github.com, default elsewhere", () => {
+test("credentialFor picks the GitHub token for github.com, default elsewhere", () => {
   const github = parseRepoUrl("https://github.com/o/r");
   const forgejo = parseRepoUrl("http://100.108.123.49:49152/o/r.git");
-  assert.equal(tokenFor(github, { gitToken: "fj", githubToken: "gh" }), "gh");
-  assert.equal(tokenFor(github, { gitToken: "fj" }), "fj", "single-token deploys keep working");
-  assert.equal(tokenFor(forgejo, { gitToken: "fj", githubToken: "gh" }), "fj");
-  assert.equal(tokenFor(forgejo, {}), "");
+  assert.equal(credentialFor(github, { gitToken: "fj", githubToken: "gh" }), "gh");
+  assert.equal(credentialFor(github, { gitToken: "fj" }), "fj", "single-token deploys keep working");
+  assert.equal(credentialFor(forgejo, { gitToken: "fj", githubToken: "gh" }), "fj");
+  assert.equal(credentialFor(forgejo, {}), "");
 });
