@@ -3,6 +3,7 @@ import faviconUrl from "../favicon.svg?url";
 import type { MiddlewareFn } from "@neutron-build/core";
 
 import { currentUser, requiredRole, roleAllows, sameOrigin, isMutating } from "../lib/session.server.js";
+import { publicOrigin } from "../lib/oidc.server.js";
 import { teployNav } from "../lib/nav.server.js";
 import type { NavData } from "../lib/nav.server.js";
 import { installProcessErrorHooks, reportError } from "../lib/observe.server.js";
@@ -66,7 +67,9 @@ export const middleware: MiddlewareFn = async (request, _context, next) => {
   // /health is the family-convention liveness probe (teploy's deploy gate
   // polls it before any login could exist).
   // /oidc/* is the SSO handshake — it carries no session yet and must be reachable.
-  if (path === "/login" || path === "/health" || path.startsWith("/hooks/") || path.startsWith("/oidc/") || path.startsWith("/assets/") || path === "/favicon.ico") return next();
+  if (path === "/login" || path === "/health" || path.startsWith("/hooks/") || path.startsWith("/oidc/") || path.startsWith("/assets/") || path === "/favicon.ico") {
+    return withSecurityHeaders(await next(), request);
+  }
 
   // /api/* is a machine surface: answer it with a status, never a redirect to a
   // login page a program cannot fill in. Its routes document 401/403 and a
@@ -115,8 +118,49 @@ export const middleware: MiddlewareFn = async (request, _context, next) => {
       headers: { "content-type": "text/plain; charset=utf-8" },
     });
   }
-  return next();
+  return withSecurityHeaders(await next(), request);
 };
+
+/**
+ * Response boundary for an operations console.
+ *
+ * The dashboard approves remote code execution and spend, and it set no
+ * response security headers at all. SameSite=Lax covers the common CSRF case,
+ * but framing, MIME sniffing, referrer leakage and injected script are separate
+ * problems with separate answers — and `frame-ancestors 'none'` is the explicit
+ * decision this surface should be making rather than inheriting.
+ *
+ * The CSP allows inline styles and scripts because the app ships both (the live
+ * updater and the inline stylesheet); it still forbids loading anything from
+ * another origin, which is the part that matters for a self-hosted console.
+ */
+function withSecurityHeaders(response: Response, request: Request): Response {
+  const headers = new Headers(response.headers);
+  headers.set(
+    "content-security-policy",
+    [
+      "default-src 'self'",
+      "base-uri 'self'",
+      "form-action 'self'",
+      "frame-ancestors 'none'",
+      "object-src 'none'",
+      "img-src 'self' data:",
+      "style-src 'self' 'unsafe-inline'",
+      "script-src 'self' 'unsafe-inline'",
+      "connect-src 'self'",
+    ].join("; "),
+  );
+  headers.set("x-content-type-options", "nosniff");
+  headers.set("x-frame-options", "DENY");
+  headers.set("referrer-policy", "no-referrer");
+  headers.set("permissions-policy", "camera=(), microphone=(), geolocation=(), payment=()");
+  // Only on an HTTPS deployment: sending HSTS from a plain-HTTP tailnet box
+  // would strand it behind a browser-pinned upgrade it cannot satisfy.
+  if (publicOrigin(request).startsWith("https://")) {
+    headers.set("strict-transport-security", "max-age=31536000; includeSubDomains");
+  }
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
 
 /**
  * App shell. Styles are inline and minimal on purpose — this is an

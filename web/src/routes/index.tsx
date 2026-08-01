@@ -18,6 +18,7 @@ interface InboxData {
   model: string;
 }
 
+// "cancelling" is a request in flight, not an outcome.
 const TERMINAL = ["completed", "failed", "cancelled"];
 
 export async function loader(): Promise<InboxData> {

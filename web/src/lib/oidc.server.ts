@@ -150,7 +150,7 @@ export function publicOrigin(request: Request): string {
 }
 
 /** Whether a reverse proxy in front of Ship is authoritative for scheme/host. */
-function trustProxy(): boolean {
+export function trustProxy(): boolean {
   const raw = env("SHIP_TRUST_PROXY").toLowerCase();
   return raw === "1" || raw === "true" || raw === "yes";
 }
@@ -310,10 +310,21 @@ export async function handleCallback(request: Request): Promise<Response> {
   // "token" is the reserved bootstrap/bearer identity — never let SSO mint it.
   if (username.toLowerCase() === "token") return fail(request, "SSO username is reserved");
 
+  // The principal is issuer + subject, which is the only identity an OIDC
+  // provider promises is stable and unique. preferred_username can be changed
+  // by its owner, reused after an account is deleted, and collides across two
+  // IdPs — so audit history keyed on it is ambiguous, and any future per-user
+  // record could be inherited by whoever holds the name next. The display name
+  // stays the friendly one; the KEY does not.
+  const subject = typeof claims.sub === "string" ? claims.sub : "";
+  const issuer = typeof claims.iss === "string" ? claims.iss : cfg.issuer;
+  if (subject === "") return fail(request, "SSO identity has no subject claim");
+  const principal = `${issuer}#${subject}`;
+
   const role = resolveRole(claims, cfg);
   const secure = isSecure(request);
   const headers = new Headers({ location: "/" });
-  headers.append("set-cookie", sessionSetCookie({ user: username, role }, secure, "sso"));
+  headers.append("set-cookie", sessionSetCookie({ user: principal, display: username, role }, secure, "sso"));
   headers.append("set-cookie", flowClearCookie(secure));
   return new Response(null, { status: 302, headers });
 }

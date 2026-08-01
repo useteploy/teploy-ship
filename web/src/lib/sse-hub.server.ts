@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { shipRuntime } from "./store.server.js";
 
 /**
@@ -15,20 +17,34 @@ import { shipRuntime } from "./store.server.js";
  */
 type Subscriber = (version: string) => void;
 
+/** How many recent runs the change signal watches. */
+const CHANGE_WINDOW = 200;
+
 const subscribers = new Set<Subscriber>();
 let timer: ReturnType<typeof setInterval> | null = null;
 let lastVersion = "";
 
+/**
+ * State digest.
+ *
+ * This was a 32-bit DJB2, which collides readily on strings of this size —
+ * and a collision here is not a cosmetic problem: it means a real state change
+ * emits nothing, so the dashboard silently stops updating until something else
+ * changes. A cryptographic digest costs microseconds on a string this size and
+ * removes the failure mode rather than making it rarer.
+ */
 function hash(s: string): string {
-  let h = 5381;
-  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
-  return h.toString(36);
+  return createHash("sha256").update(s).digest("base64url").slice(0, 22);
 }
 
 async function computeVersion(): Promise<string> {
   const runtime = await shipRuntime();
+  // Bounded: this runs every 2s per web process forever, and listMeta over the
+  // full run history is exactly the read that gets slower the longer Ship has
+  // been useful. The dashboard only ever shows recent runs, so the change
+  // signal only has to cover them.
   const [runs, proposed, fleet] = await Promise.all([
-    runtime.listMeta(),
+    runtime.listMeta({ limit: CHANGE_WINDOW }),
     runtime.intake.list("proposed"),
     runtime.fleet.list(),
   ]);

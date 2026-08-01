@@ -116,11 +116,24 @@ export async function action({
   const runtime = await shipRuntime();
   const runId = params.id;
   const meta = await runtime.loadMeta(runId);
-  const active = meta !== null && !["completed", "failed", "cancelled"].includes(meta.status);
+  // "cancelling" is not terminal — the executor has not settled it yet — but a
+  // second cancel click while one is pending is noise, so it is not active
+  // either for the purposes of offering the button.
+  const active = meta !== null && !["completed", "failed", "cancelled", "cancelling"].includes(meta.status);
   if (active && intent === "cancel") {
-    await cancelRun(runtime.store, runId, "cancelled from the dashboard").catch(() => {});
+    // Only claim what actually happened. The old code swallowed a failed
+    // cancelRun and then wrote terminal "cancelled" metadata anyway, so the UI
+    // reported a stopped run while the worker kept executing it — and
+    // publication could still be in progress.
+    try {
+      await cancelRun(runtime.store, runId, "cancelled from the dashboard");
+    } catch {
+      return redirectTo(`/runs/${runId}?cancel=failed`);
+    }
     await runtime.markWake?.(runId);
-    await runtime.saveMeta({ ...meta, status: "cancelled", updatedAt: new Date().toISOString() });
+    // "cancelling", not "cancelled": the request is recorded, and the executor
+    // settles it at its next checkpoint. The run page shows the difference.
+    await runtime.saveMeta({ ...meta, status: "cancelling", updatedAt: new Date().toISOString() });
     return redirectTo(`/runs/${runId}`);
   }
   // Mid-run steering: queue a note; the run's next turn drains it.
@@ -176,13 +189,23 @@ export async function action({
 const POLL = `__shipLive("route:runs/[id].tsx");`;
 
 export default function RunDetail({ data }: { data: RunData }) {
-  const active = data.meta !== null && !["completed", "failed", "cancelled"].includes(data.meta.status);
+  const active = data.meta !== null && !["completed", "failed", "cancelled", "cancelling"].includes(data.meta.status);
   const decision = typeof location !== "undefined" ? new URLSearchParams(location.search).get("decision") : null;
   return (
     <div id="run-root" data-event-count={String(data.eventCount)} data-run-status={data.meta?.status ?? "unknown"}>
       {decision === "stale" && (
         <p class="card attn" style="margin:12px 0;color:var(--yellow)">
           Not applied — this run moved on to a different decision after the page was loaded. Review the current one below.
+        </p>
+      )}
+      {data.meta?.status === "cancelling" && (
+        <p class="card attn" style="margin:12px 0;color:var(--yellow)">
+          Cancellation requested — the executor settles it at its next checkpoint.
+        </p>
+      )}
+      {typeof location !== "undefined" && new URLSearchParams(location.search).get("cancel") === "failed" && (
+        <p class="card attn" style="margin:12px 0;color:var(--red)">
+          Cancellation was not recorded — the store rejected it. The run is still going; try again.
         </p>
       )}
       {decision === "taken" && (

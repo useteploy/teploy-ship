@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 process.env.SHIP_WEB_TOKEN ??= "test-token";
 
-const { sessionSetCookie, sameOrigin, isMutating } = await import("./session.server.js");
+const { sessionSetCookie, sameOrigin, isMutating, signSession, verifySession } = await import("./session.server.js");
 const { publicOrigin } = await import("./oidc.server.js");
 
 function req(headers: Record<string, string>, url = "http://ship.internal:7460/runs"): Request {
@@ -101,4 +101,40 @@ test("a malformed SHIP_PUBLIC_URL falls through instead of failing the login", (
   t.after(() => delete process.env.SHIP_PUBLIC_URL);
   process.env.SHIP_PUBLIC_URL = "notaurl";
   assert.equal(publicOrigin(req({ host: "ship.internal:7460" })), "http://ship.internal:7460");
+});
+
+test("TS-031: rotating SHIP_WEB_TOKEN kills master-credential sessions", () => {
+  process.env.SHIP_SESSION_SECRET = "a-stable-session-secret";
+  process.env.SHIP_WEB_TOKEN = "original-token";
+  const cookie = signSession({ user: "token", role: "admin" });
+  assert.equal(verifySession(cookie)?.user, "token", "valid while the credential is current");
+
+  // The documented reason for SHIP_SESSION_SECRET is that sessions survive a
+  // token rotation — which also meant a session minted from a LEAKED token
+  // stayed admin for the full 30-day cookie life. Rotation is now revocation
+  // for that identity.
+  process.env.SHIP_WEB_TOKEN = "rotated-token";
+  assert.equal(verifySession(cookie), null, "a session from the old credential is dead");
+
+  // Ordinary account sessions are NOT pinned, so rotation does not sign
+  // everyone out — their role is re-read from the store on every request.
+  process.env.SHIP_WEB_TOKEN = "original-token";
+  const userCookie = signSession({ user: "tyler", role: "editor" });
+  process.env.SHIP_WEB_TOKEN = "rotated-token";
+  assert.equal(verifySession(userCookie)?.user, "tyler");
+});
+
+test("TS-031: an SSO session stops being trusted once its re-auth window passes", () => {
+  process.env.SHIP_SESSION_SECRET = "a-stable-session-secret";
+  process.env.SHIP_WEB_TOKEN = "t";
+  const now = Date.UTC(2026, 7, 1);
+  const cookie = signSession({ user: "https://idp.test#user-1", display: "tyler", role: "admin" }, "sso", now);
+
+  const fresh = verifySession(cookie, now + 60_000);
+  assert.equal(fresh?.role, "admin");
+  assert.equal(fresh?.display, "tyler", "the friendly name still rides along for display");
+
+  // The IdP is where group membership and account status live; a role asserted
+  // at login must not stay authoritative for 30 days.
+  assert.equal(verifySession(cookie, now + 13 * 60 * 60 * 1000), null, "past the window, sign in again");
 });

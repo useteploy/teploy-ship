@@ -36,22 +36,29 @@ function value(name: string, fallback = "not set"): Row {
   return { label: name, value: v !== undefined && v !== "" ? v : fallback, ok: v !== undefined && v !== "" };
 }
 
-/** A URL with any embedded credentials stripped. */
+/**
+ * A URL with any embedded credentials stripped.
+ *
+ * A value that does not parse is NOT shown. It used to fall through unchanged,
+ * so a malformed connection string — the exact shape that carries a password in
+ * the middle of it — was printed verbatim to everyone who can read this page.
+ * An unparseable value tells the operator nothing useful anyway; that it is set
+ * and malformed is the whole message.
+ */
 function safeUrl(name: string): Row {
   const raw = process.env[name];
   if (raw === undefined || raw === "") return { label: name, value: "not set" };
-  let shown = raw;
   try {
     const u = new URL(raw);
     if (u.password !== "" || u.username !== "") {
       u.password = "";
       u.username = u.username !== "" ? "***" : "";
-      shown = u.toString();
+      return { label: name, value: u.toString(), ok: true };
     }
+    return { label: name, value: raw, ok: true };
   } catch {
-    /* leave as-is if unparseable */
+    return { label: name, value: "set, but not a valid URL (hidden — it may contain a credential)", ok: false };
   }
-  return { label: name, value: shown, ok: true };
 }
 
 export async function loader({ request }: { request: Request }): Promise<SettingsData> {
@@ -133,6 +140,22 @@ async function guardLastAdmin(runtime: ShipRuntime, username: string, newRole: R
   }
 }
 
+/**
+ * Re-check the last-admin rule AFTER the change and undo it if it was broken.
+ *
+ * The check above reads the user list and then acts, so two admins demoting
+ * each other at the same moment both saw two admins and both committed,
+ * leaving zero. There is no transaction across these stores to lean on, so the
+ * rule is enforced by verifying the postcondition and rolling back — which is
+ * safe because the only thing being restored is the role we just replaced.
+ */
+async function ensureAdminRemains(runtime: ShipRuntime, undo: () => Promise<void>): Promise<void> {
+  const after = await runtime.users.list();
+  if (after.some((u) => u.role === "admin")) return;
+  await undo().catch(() => {});
+  throw new Error("cannot remove or demote the last admin (another admin was changed at the same time)");
+}
+
 export async function action({ request }: { request: Request }): Promise<{ error?: string; ok?: string }> {
   const runtime = await shipRuntime();
   const form = await request.formData();
@@ -145,8 +168,10 @@ export async function action({ request }: { request: Request }): Promise<{ error
     }
     if (intent === "role") {
       const role = normalizeRole(String(form.get("role") ?? "viewer"));
+      const before = (await runtime.users.get(username))?.role;
       await guardLastAdmin(runtime, username, role);
       await runtime.users.setRole(username, role);
+      if (before !== undefined) await ensureAdminRemains(runtime, () => runtime.users.setRole(username, before));
       return { ok: `${username} is now ${role}.` };
     }
     if (intent === "password") {
@@ -156,6 +181,16 @@ export async function action({ request }: { request: Request }): Promise<{ error
     if (intent === "delete") {
       await guardLastAdmin(runtime, username, null);
       await runtime.users.remove(username);
+      // No undo for a deletion (the password hash is gone), so the recovery is
+      // to restore SOME admin: the operator still has the master credential.
+      const after = await runtime.users.list();
+      if (!after.some((u) => u.role === "admin")) {
+        return {
+          error:
+            `Removed ${username}, but that left no admin account — another admin was changed at the same time. ` +
+            `Sign in with SHIP_WEB_TOKEN and promote someone.`,
+        };
+      }
       return { ok: `Removed ${username}.` };
     }
     return { error: "Unknown action." };

@@ -3,6 +3,7 @@ import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { normalizeRole, roleAllows } from "teploy-ship/runtime";
 import type { Role } from "teploy-ship/runtime";
 
+import { publicOrigin } from "./oidc.server.js";
 import { shipRuntime, webToken } from "./store.server.js";
 
 /**
@@ -20,7 +21,15 @@ import { shipRuntime, webToken } from "./store.server.js";
  */
 
 export interface Principal {
+  /**
+   * Stable identity. For SSO this is `issuer#sub`, not the username: usernames
+   * change, get reused, and collide across providers, so anything keyed on one
+   * (audit trails, ownership, per-user settings) silently follows the name
+   * rather than the person.
+   */
   user: string;
+  /** Friendly name for display. Falls back to `user`. */
+  display?: string;
   role: Role;
 }
 
@@ -36,6 +45,16 @@ export interface Session extends Principal {
 
 export const SESSION_COOKIE = "ship_session";
 const SESSION_TTL_S = 60 * 60 * 24 * 30;
+/**
+ * How long an SSO session may act on the role the IdP asserted at login.
+ *
+ * The role rides in the signed cookie, so a group removal, a disabled account,
+ * or a demotion at the IdP had no effect until the cookie expired — up to 30
+ * days of authority the IdP had already revoked. Bounding re-authentication
+ * separately from cookie lifetime keeps the IdP roughly authoritative without
+ * a server-side session store.
+ */
+const SSO_REAUTH_S = 60 * 60 * 12;
 
 export { roleAllows };
 
@@ -44,6 +63,22 @@ function sessionSecret(): Buffer {
   // SHIP_SESSION_SECRET overrides so sessions can survive a token rotation.
   const base = process.env.SHIP_SESSION_SECRET ?? webToken();
   return createHash("sha256").update(`ship-session:${base}`).digest();
+}
+
+/**
+ * Fingerprint of the CURRENT master credential, stamped into every session.
+ *
+ * With SHIP_SESSION_SECRET set, session signatures stopped depending on
+ * SHIP_WEB_TOKEN — which is the documented point (sessions survive a token
+ * rotation) but had a consequence nobody wanted: a session minted with a
+ * LEAKED token stayed valid, as unconditional admin, for the full 30-day
+ * cookie lifetime. Rotation was not revocation. Sessions established via the
+ * master credential now carry its fingerprint and die the moment it changes;
+ * ordinary account sessions are unaffected, so rotation still does not log
+ * everyone out.
+ */
+function credentialVersion(): string {
+  return createHash("sha256").update(webToken()).digest("base64url").slice(0, 16);
 }
 
 /** Constant-time comparison against the server web token. */
@@ -58,7 +93,20 @@ export function tokenMatches(presented: string | null): boolean {
 
 export function signSession(p: Principal, kind: SessionKind = "pw", now = Date.now()): string {
   const exp = Math.floor(now / 1000) + SESSION_TTL_S;
-  const payload = Buffer.from(JSON.stringify({ u: p.user, r: p.role, k: kind, exp })).toString("base64url");
+  const payload = Buffer.from(
+    JSON.stringify({
+      u: p.user,
+      ...(p.display !== undefined && p.display !== p.user ? { d: p.display } : {}),
+      r: p.role,
+      k: kind,
+      exp,
+      // Only the master-credential identity is pinned to the token; pinning
+      // account sessions would make rotation log every user out for nothing.
+      ...(p.user === "token" ? { cv: credentialVersion() } : {}),
+      // When the IdP's assertion must be refreshed (SSO only).
+      ...(kind === "sso" ? { rv: Math.floor(now / 1000) + SSO_REAUTH_S } : {}),
+    }),
+  ).toString("base64url");
   const sig = createHmac("sha256", sessionSecret()).update(payload).digest("base64url");
   return `${payload}.${sig}`;
 }
@@ -78,11 +126,30 @@ export function verifySession(token: string | null, now = Date.now()): Session |
   }
   if (presented.length !== expected.length || !timingSafeEqual(presented, expected)) return null;
   try {
-    const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { u?: string; r?: string; k?: string; exp?: number };
-    if (typeof claims.exp !== "number" || claims.exp < Math.floor(now / 1000)) return null;
+    const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as {
+      u?: string;
+      r?: string;
+      k?: string;
+      exp?: number;
+      cv?: string;
+      rv?: number;
+      d?: string;
+    };
+    const seconds = Math.floor(now / 1000);
+    if (typeof claims.exp !== "number" || claims.exp < seconds) return null;
     if (typeof claims.u !== "string") return null;
+    // A master-credential session dies with the credential it was minted from.
+    if (claims.u === "token" && claims.cv !== credentialVersion()) return null;
     const kind: SessionKind = claims.k === "sso" ? "sso" : "pw";
-    return { user: claims.u, role: normalizeRole(claims.r), kind };
+    // An SSO session past its re-auth window has to go back to the IdP, which
+    // is where role and account status actually live.
+    if (kind === "sso" && (typeof claims.rv !== "number" || claims.rv < seconds)) return null;
+    return {
+      user: claims.u,
+      ...(typeof claims.d === "string" ? { display: claims.d } : {}),
+      role: normalizeRole(claims.r),
+      kind,
+    };
   } catch {
     return null;
   }
@@ -118,7 +185,9 @@ export async function currentUser(request: Request): Promise<Principal | null> {
     // SSO sessions have no local account: the IdP is authoritative per-login and
     // the role rides in the tamper-proof signed cookie. Trust it (bounded by the
     // cookie TTL); re-authentication re-reads the role from the IdP.
-    if (session.kind === "sso") return { user: session.user, role: session.role };
+    if (session.kind === "sso") {
+      return { user: session.user, ...(session.display !== undefined ? { display: session.display } : {}), role: session.role };
+    }
     const runtime = await shipRuntime();
     const stored = await runtime.users.get(session.user);
     if (stored !== null) return { user: stored.username, role: stored.role };
@@ -174,6 +243,20 @@ export async function authenticate(username: string, password: string): Promise<
  * is every mutation Ship has. `sameOrigin` below covers what SameSite alone
  * does not, matching what dash already does.
  */
+/**
+ * Whether the browser reached us over HTTPS.
+ *
+ * Shared with the OIDC flow deliberately. Password login used to read
+ * `X-Forwarded-Proto` unconditionally to decide the cookie's Secure attribute,
+ * which is the exact header-downgrade the OIDC code documents defending
+ * against: a proxy that forwards rather than overwrites the client's header,
+ * or a directly reachable backend, could mint a privileged session cookie
+ * WITHOUT Secure on an HTTPS deployment.
+ */
+export function requestIsSecure(request: Request): boolean {
+  return publicOrigin(request).startsWith("https://");
+}
+
 export function sessionSetCookie(p: Principal, secure: boolean, kind: SessionKind = "pw"): string {
   const parts = [
     `${SESSION_COOKIE}=${signSession(p, kind)}`,

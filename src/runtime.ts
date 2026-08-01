@@ -104,9 +104,24 @@ export interface ShipRuntime {
   ): Promise<RunOutcome | null>;
   saveMeta(meta: RunMeta): Promise<void>;
   loadMeta(runId: string): Promise<RunMeta | null>;
-  listMeta(): Promise<RunMeta[]>;
+  /**
+   * Recent runs, newest first.
+   *
+   * Bounded on purpose. Every dashboard page, the SSE change poller (every two
+   * seconds, per web process) and the health probe called this with no limit,
+   * so the cost of each grew with the total number of runs Ship had ever done —
+   * fine for a demo, a latency and memory problem for a service that is
+   * supposed to run unattended for months.
+   */
+  listMeta(options?: { limit?: number }): Promise<RunMeta[]>;
   /** Flag a parked run due so a resident worker picks it up (nucleus only). */
   markWake?(runId: string): Promise<void>;
+  /**
+   * Constant-time reachability probe for the health endpoint. Deliberately not
+   * a data read: the check has to stay cheap as history grows, and cheapest
+   * exactly when the system is struggling.
+   */
+  ping(): Promise<void>;
   /** The intake queue: proposed tasks awaiting launch. */
   intake: IntakeStore;
   /** Per-source, per-UTC-day spend ledger backing the worker's budget cap. */
@@ -173,12 +188,19 @@ export function fileRuntime(): ShipRuntime {
       executeRun({ workflow, runId, store, ...(input !== undefined ? { input } : {}) }),
     saveMeta: (m) => meta.save(m),
     loadMeta: (runId) => meta.load(runId),
-    listMeta: () => meta.list(),
+    listMeta: (options) => meta.list(options),
+    ping: async () => {
+      // File mode is reachable if its state directory is.
+      await meta.list({ limit: 1 });
+    },
     close: async () => {},
   };
 }
 
 const META_COLLECTION = "ship_meta";
+
+/** Runs returned when a caller does not say. Enough for every dashboard view. */
+export const DEFAULT_LIST_LIMIT = 200;
 
 /** The nucleus runtime plus the raw pieces the worker's scheduler needs. */
 export interface NucleusShipRuntime extends ShipRuntime {
@@ -294,15 +316,20 @@ export async function nucleusRuntime(
       const records = await db.document.find("ship_runs", { runId });
       return toMeta(docs[0]!, records[0]);
     },
-    async listMeta() {
+    async listMeta(options) {
+      const limit = Math.max(1, Math.trunc(options?.limit ?? DEFAULT_LIST_LIMIT));
       const docs = await db.document.find(META_COLLECTION, {});
       const records = await db.document.find("ship_runs", {});
       const byRun = new Map(records.map((r) => [r.runId as string, r]));
       return docs
         .map((doc) => toMeta(doc, byRun.get((doc as { runId?: string }).runId ?? "")))
-        .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+        .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
+        .slice(0, limit);
     },
     markWake: (runId) => index.markWake(runId),
+    ping: async () => {
+      await db.query("SELECT 1");
+    },
     close: () => db.close(),
   };
 }

@@ -158,7 +158,7 @@ export class RunMetaStore {
     return readJsonFile<RunMeta | null>(this.#path(runId), null);
   }
 
-  async list(): Promise<RunMeta[]> {
+  async list(options?: { limit?: number }): Promise<RunMeta[]> {
     let entries: string[];
     try {
       entries = await readdir(this.#dir);
@@ -174,6 +174,8 @@ export class RunMetaStore {
         // skip unreadable meta
       }
     }
-    return metas.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    metas.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    const limit = options?.limit;
+    return limit !== undefined ? metas.slice(0, Math.max(1, Math.trunc(limit))) : metas;
   }
 }

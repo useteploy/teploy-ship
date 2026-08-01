@@ -1,5 +1,6 @@
-import { authenticate, sessionSetCookie, currentUser } from "../lib/session.server.js";
-import { oidcEnabled, oidcLabel } from "../lib/oidc.server.js";
+import { authenticate, requestIsSecure, sessionSetCookie, currentUser } from "../lib/session.server.js";
+import { oidcEnabled, oidcLabel, trustProxy } from "../lib/oidc.server.js";
+import { checkRateLimit, clearRateLimit, clientKey, withVerifySlot } from "../lib/ratelimit.server.js";
 
 export const config = { mode: "app" };
 
@@ -17,12 +18,31 @@ export async function action({ request }: { request: Request }): Promise<Respons
   const form = await request.formData();
   const username = String(form.get("username") ?? "");
   const password = String(form.get("password") ?? "");
-  const principal = await authenticate(username, password);
+
+  // Two limits, for two different problems. The per-key window bounds password
+  // GUESSING; the concurrency slot bounds the CPU an unauthenticated caller can
+  // make this process spend, because every attempt (including a miss, by
+  // design) runs scrypt on the shared threadpool and would otherwise starve the
+  // store I/O the rest of the dashboard depends on.
+  const key = `${clientKey(request, trustProxy())}|${username.toLowerCase()}`;
+  const limit = checkRateLimit(key);
+  if (!limit.allowed) {
+    return { error: `Too many attempts. Try again in ${limit.retryAfterSeconds ?? 300} seconds.` };
+  }
+  const verified = await withVerifySlot(() => authenticate(username, password));
+  if (verified.shed) {
+    return { error: "The server is busy verifying sign-ins. Try again in a moment." };
+  }
+  const principal = verified.value;
   if (principal === null) {
     return { error: "Wrong username or password." };
   }
-  const proto = request.headers.get("x-forwarded-proto") ?? new URL(request.url).protocol.replace(":", "");
-  const cookie = sessionSetCookie(principal, proto === "https");
+  // A legitimate user who mistyped twice is not an attacker.
+  clearRateLimit(key);
+  // The same trusted-proxy ladder OIDC uses. Reading X-Forwarded-Proto
+  // unconditionally let a caller choose the scheme and strip Secure from a
+  // privileged cookie on an HTTPS deployment.
+  const cookie = sessionSetCookie(principal, requestIsSecure(request));
   return new Response(null, { status: 302, headers: { location: "/", "set-cookie": cookie } });
 }
 
