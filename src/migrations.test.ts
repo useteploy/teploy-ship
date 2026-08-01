@@ -128,3 +128,70 @@ test("a process that loses the migration lock proceeds instead of racing", async
   assert.deepEqual(await migrate(db), []);
   assert.doesNotMatch(db.sql.join("\n"), /RENAME TO/);
 });
+
+/** Column names from a `CREATE TABLE [IF NOT EXISTS] <table> ( … )` in some source text. */
+function columnsOf(source: string, table: string): string[] | null {
+  const re = new RegExp(`CREATE TABLE (?:IF NOT EXISTS )?${table} \\(([^)]*)\\)`, "s");
+  const body = re.exec(source)?.[1];
+  if (body === undefined) return null;
+  return body
+    .split(",")
+    .map((line) => line.trim().split(/\s+/)[0] ?? "")
+    .filter((name) => name !== "")
+    .sort();
+}
+
+/**
+ * The guard for the mistake that produced migrations 002 and 003: a column was
+ * added to a store's CREATE TABLE and nowhere else. A FRESH install picks it up
+ * (the DDL has it) and an EXISTING one does not, because CREATE TABLE IF NOT
+ * EXISTS is a no-op on a table that is already there — so the change works
+ * perfectly in development and breaks on every real deployment.
+ *
+ * A migration's new-table shape must therefore match the store's DDL exactly.
+ * Add a column to one and this fails until you add it to the other.
+ */
+test("each migrated table's shape matches the store DDL that creates it fresh", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const read = async (relative: string): Promise<string> =>
+    readFile(new URL(`../src/${relative}`, import.meta.url), "utf8");
+  const migrationSource = await read("migrations.ts");
+
+  const owners: Array<{ table: string; file: string }> = [
+    { table: "ship_docs", file: "nucleus-pgwire.ts" },
+    { table: "ship_steer", file: "steer.ts" },
+    { table: "ship_memory", file: "repo-memory.ts" },
+  ];
+
+  for (const { table, file } of owners) {
+    const fromStore = columnsOf(await read(file), table);
+    const fromMigration = columnsOf(migrationSource, table);
+    assert.notEqual(fromStore, null, `${file} should create ${table}`);
+    assert.notEqual(fromMigration, null, `${table} should have a migration rebuilding it`);
+    assert.deepEqual(
+      fromMigration,
+      fromStore,
+      `${table}: the migration and the store DDL disagree. A column added to one and not the other ` +
+        `works on a fresh install and breaks every existing deployment.`,
+    );
+  }
+});
+
+test("migrations 002 and 003 rebuild aside and copy, never dropping data", async () => {
+  const db = fakeDb({
+    existingTables: new Set(["ship_steer", "ship_memory"]),
+    columns: {
+      ship_steer: ["note_id", "run_id", "text", "created_at", "consumed"],
+      ship_memory: ["repo", "note", "run_id", "created_at"],
+    },
+  });
+  const applied = await migrate(db);
+  assert.deepEqual(applied, ["002-ship-steer-consumed-turn", "003-ship-memory-note-id"]);
+
+  const joined = db.sql.join("\n");
+  assert.match(joined, /ALTER TABLE ship_steer RENAME TO ship_steer_002/);
+  assert.match(joined, /ALTER TABLE ship_memory RENAME TO ship_memory_003/);
+  assert.match(joined, /INSERT INTO ship_steer \(.*\) SELECT .* FROM ship_steer_002/);
+  assert.match(joined, /INSERT INTO ship_memory \(.*\) SELECT .* FROM ship_memory_003/);
+  assert.doesNotMatch(joined, /DROP TABLE|TRUNCATE/i);
+});

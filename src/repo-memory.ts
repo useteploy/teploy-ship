@@ -21,6 +21,9 @@ import { stateDir } from "./run-store.js";
  *    as "recent history" so later runs know what already happened.
  */
 
+/** Marks a note that predates note_id (see migration 003). */
+export const LEGACY_NOTE_PREFIX = "legacy:";
+
 export interface RepoNote {
   /**
    * Stable identity for the note.
@@ -173,11 +176,18 @@ export class NucleusRepoMemory implements RepoMemoryStore {
       [repo],
     );
     return rows.map((row) => {
+      const createdAt = String(row.created_at);
       const note: RepoNote = {
-        noteId: row.note_id !== null && row.note_id !== undefined ? String(row.note_id) : "",
+        // Rows written before note_id existed (migration 003 copies them
+        // forward with a NULL) get a stable synthetic handle, so they stay
+        // listable and deletable instead of becoming undeletable clutter.
+        noteId:
+          row.note_id !== null && row.note_id !== undefined && String(row.note_id) !== ""
+            ? String(row.note_id)
+            : `${LEGACY_NOTE_PREFIX}${createdAt}`,
         repo: String(row.repo),
         note: String(row.note),
-        createdAt: String(row.created_at),
+        createdAt,
       };
       if (row.run_id !== null && row.run_id !== undefined) note.runId = String(row.run_id);
       return note;
@@ -198,6 +208,15 @@ export class NucleusRepoMemory implements RepoMemoryStore {
 
   async remove(noteId: string): Promise<void> {
     await this.#ensure();
+    if (noteId.startsWith(LEGACY_NOTE_PREFIX)) {
+      // A pre-migration row has no identity of its own; fall back to the old
+      // timestamp key. It keeps that key's flaw (same-millisecond siblings go
+      // together) but only for rows that already existed.
+      await this.#db.query("DELETE FROM ship_memory WHERE created_at = $1 AND note_id IS NULL", [
+        noteId.slice(LEGACY_NOTE_PREFIX.length),
+      ]);
+      return;
+    }
     await this.#db.query("DELETE FROM ship_memory WHERE note_id = $1", [noteId]);
   }
 }

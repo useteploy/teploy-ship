@@ -98,7 +98,74 @@ const docsSourceColumn: Migration = {
   },
 };
 
-export const MIGRATIONS: Migration[] = [docsSourceColumn];
+/**
+ * 002 — ship_steer gained `consumed_turn`, which makes a drain idempotent
+ * across replay. On an existing deployment the table predates the column, so
+ * the drain UPDATE referenced a column that was not there — and because the
+ * durable loop catches a steer failure (correctly: a store hiccup must not kill
+ * a run), mid-run steering would have stopped working in complete silence.
+ */
+const steerConsumedTurn: Migration = {
+  id: "002-ship-steer-consumed-turn",
+  description: "add consumed_turn to ship_steer (rename-aside + copy)",
+  async needed(db) {
+    if (!(await tableExists(db, "ship_steer"))) return false;
+    return !(await hasColumns(db, "ship_steer", ["consumed_turn"]));
+  },
+  async run(db) {
+    const aside = "ship_steer_002";
+    const cols = "note_id, run_id, text, created_at, consumed";
+    await db.query(`ALTER TABLE ship_steer RENAME TO ${aside}`);
+    await db.query(
+      `CREATE TABLE ship_steer (
+        note_id TEXT,
+        run_id TEXT,
+        text TEXT,
+        created_at TEXT,
+        consumed TEXT,
+        consumed_turn TEXT
+      )`,
+    );
+    await db.query(`INSERT INTO ship_steer (${cols}) SELECT ${cols} FROM ${aside}`);
+  },
+};
+
+/**
+ * 003 — ship_memory gained `note_id`, so a note can be deleted by identity
+ * rather than by (repo, createdAt), which removed every sibling written in the
+ * same millisecond.
+ *
+ * This one was the dangerous omission: `recent()` selects note_id, and
+ * loadRepoContext calls it INSIDE the repo-context step without catching — so
+ * on an existing deployment every repo run would have failed outright at that
+ * step. Legacy rows keep a NULL note_id; the store synthesises a stable
+ * `legacy:<createdAt>` handle for them so they remain listable and deletable.
+ */
+const memoryNoteId: Migration = {
+  id: "003-ship-memory-note-id",
+  description: "add note_id to ship_memory (rename-aside + copy)",
+  async needed(db) {
+    if (!(await tableExists(db, "ship_memory"))) return false;
+    return !(await hasColumns(db, "ship_memory", ["note_id"]));
+  },
+  async run(db) {
+    const aside = "ship_memory_003";
+    const cols = "repo, note, run_id, created_at";
+    await db.query(`ALTER TABLE ship_memory RENAME TO ${aside}`);
+    await db.query(
+      `CREATE TABLE ship_memory (
+        note_id TEXT,
+        repo TEXT,
+        note TEXT,
+        run_id TEXT,
+        created_at TEXT
+      )`,
+    );
+    await db.query(`INSERT INTO ship_memory (${cols}) SELECT ${cols} FROM ${aside}`);
+  },
+};
+
+export const MIGRATIONS: Migration[] = [docsSourceColumn, steerConsumedTurn, memoryNoteId];
 
 /**
  * Apply every pending migration. Returns the ids applied by THIS call (empty
