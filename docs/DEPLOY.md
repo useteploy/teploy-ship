@@ -193,10 +193,22 @@ same secret). A failed CI run on one of Ship's own PRs (head branch
 reproduces the failure, fixes it on the PR branch, and pushes — deduped
 per failing SHA, so one red check is one fix attempt.
 
-## 3. Sandbox (recommended for anything untrusted)
+## 3. Sandbox (required for a worker)
 
-The worker's default local executor is fine for code-fix tasks; the
-sandbox daemon gives every run its own container with **default-deny
+`teploy-ship worker` refuses to start without one, and that is deliberate.
+A worker exists to run work that arrived from somewhere else — a webhook, a
+chat message, an issue body — and the approval policy is a list of command
+regexes, not a boundary: the same effects are one `node -e`, `nc`,
+`find -delete` or `getattr(os, "sys"+"tem")` away, and the agent writes the
+commands. On the local executor the blast radius is the host and everything
+the worker process can reach.
+
+`SHIP_ALLOW_UNSANDBOXED_INTAKE=1` overrides it for a genuinely disposable
+box. The local executor remains fine for `teploy-ship run` and
+`teploy-ship fix` in your own terminal, where you are trusting your own
+machine.
+
+The sandbox daemon gives every run its own container with **default-deny
 egress** — an internal bridge with no route out, plus an allowlist proxy
 (package registries + GitHub built in) on the bridge gateway.
 
@@ -258,3 +270,31 @@ agent gets a ```search action.
   picks up engine updates.
 - CI runs on Forgejo Actions (`.forgejo/workflows/ci.yml`) with a
   sibling-Neutron checkout — register any docker-labeled runner.
+
+## Security-relevant settings
+
+These have defaults that are safe but restrictive; the first is the one a
+new deployment actually has to set.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `SHIP_REPO_ALLOWLIST` | unset | Origins Ship may clone, comma-separated (`https://github.com/your-org`, `http://100.x.y.z:49152/tyler`). A repository URL arriving from a webhook, a Slack message, or an issue body is **refused** unless it matches — otherwise a task could point Ship's deploy token at an attacker's host. An operator-typed URL is allowed when this is unset; external ones never are. |
+| `SHIP_GIT_TOKENS` | unset | JSON of origin → token, so two forges stop sharing one credential: `{"https://github.com":"ghp_…","http://100.x.y.z:49152":"…"}`. Falls back to `SHIP_GITHUB_TOKEN` / `SHIP_GIT_TOKEN`. |
+| `SHIP_ALLOW_UNSANDBOXED_INTAKE` | unset | Lets a worker start with no sandbox. Only for a disposable box. |
+| `SHIP_MAX_RUN_COST_USD` | `0` (off) | Hard per-run ceiling. Turn count is a poor proxy for cost; this bounds one pathological run rather than waiting for the daily cap to notice. |
+| `SHIP_ESTIMATED_RUN_COST_USD` | `0.50` | Held against a source's daily budget while a run is in flight, so a burst of launches cannot all pass the same budget read. |
+| `SHIP_DAILY_AUTO_LIMIT` | `10` | Auto-launches per source per day, **fleet-wide** (it used to be per worker). |
+| `SHIP_PUBLISH_MAX_FILES` | `200` | Publication refuses a diff touching more files than this. Also `SHIP_PUBLISH_MAX_ADDED_LINES` (20000) and `SHIP_PUBLISH_MAX_FILE_BYTES` (2 MiB). Binaries, symlinks, submodule pointers, key material and forbidden paths are refused outright. |
+| `SHIP_WEBHOOK_MAX_BYTES` | `1048576` | Cap on a webhook body, applied **before** the signature is computed. |
+| `SHIP_SESSION_SECRET` | derived from `SHIP_WEB_TOKEN` | Signs dashboard sessions. Setting it lets account sessions survive a token rotation; sessions established *with the master token* still die on rotation, so rotating remains revocation. |
+| `SHIP_TRUST_PROXY` | unset | Believe `X-Forwarded-Proto`/`-Host`/`-For`. Only set it when something in front actually overwrites those headers. |
+
+### Rotating the master credential
+
+```sh
+teploy secret set SHIP_WEB_TOKEN "$(openssl rand -hex 32)" && teploy deploy
+```
+
+Every session minted from the old token stops working immediately. Named
+accounts are unaffected — their roles are re-read from the store on every
+request.

@@ -11,7 +11,7 @@ task is done. This is the CodeAct strategy (per OpenHands' evidence),
 implemented against Teploy's own stack rather than ported.
 
 ```sh
-teploy-agent run "write fib.py that prints 8 Fibonacci numbers and run it"
+teploy-ship run "write fib.py that prints 8 Fibonacci numbers and run it"
 # local workspace by default; --sandbox <url> --sandbox-token <t> for teploy-sandbox
 ```
 
@@ -83,7 +83,7 @@ the run** on an approval event; deliver `{ approved }` to
 pending.
 
 ```ts
-import { durableAgent, defaultApprovalPolicy } from "teploy-agent";
+import { durableAgent, defaultApprovalPolicy } from "teploy-ship";
 const wf = durableAgent({ model, executor: sandboxProvider, approveAction: defaultApprovalPolicy });
 // run it with @neutron-build/workflow's executeRun / Scheduler; a dangerous
 // action → status "waiting"; deliverEvent(store, runId, approvalEvent(n), { approved: true }) resumes.
@@ -125,11 +125,11 @@ carries a prompt, optional workspace `setup`, and a **`verify`** that runs
 doing the work scores FAIL.
 
 ```sh
-teploy-agent eval --model anthropic/claude-sonnet-5 --repeats 3
+teploy-ship eval --model anthropic/claude-sonnet-5 --repeats 3
 ```
 
 ```ts
-import { runEval, checkCommand, builtinSuite } from "teploy-agent";
+import { runEval, checkCommand, builtinSuite } from "teploy-ship";
 const report = await runEval({ tasks: builtinSuite, model, repeats: 3 });
 // report.passRate, per-task PASS/FAIL, steps, duration
 ```

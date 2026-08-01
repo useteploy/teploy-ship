@@ -28,7 +28,8 @@
     "dev": "tsc --watch",
     "lint": "tsc --noEmit --pretty false",
     "test": "pnpm run build && node --test --experimental-test-isolation=none \"dist/**/*.test.js\"",
-    "start": "node dist/cli.js"
+    "start": "node dist/cli.js",
+    "scan:secrets": "node scripts/scan-secrets.mjs"
   },
   "dependencies": {
     "@neutron-build/agents": "^0.1.0",

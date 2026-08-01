@@ -12,13 +12,33 @@
 # for Tailscale-only access).
 #
 # Required secrets — set ONCE via `teploy secret set` from this directory
-# (they are app-scoped and injected into both processes on every deploy;
-# never put values in this file):
-#   SHIP_WEB_TOKEN       dashboard login + API bearer
-#   SHIP_WEBHOOK_SECRET  Forgejo/GitHub webhook HMAC
-#   SHIP_GIT_TOKEN       deploy token for repo runs (clone/push/PR)
-#   AI_GATEWAY_KEY       project key minted by `teploy-gateway key create`
+# (never put values in this file):
+#   SHIP_WEB_TOKEN       dashboard login + API bearer      (web only)
+#   SHIP_WEBHOOK_SECRET  Forgejo/GitHub webhook HMAC       (web only)
+#   SHIP_SESSION_SECRET  signs dashboard sessions          (web only)
+#   SHIP_GIT_TOKEN       deploy token for repo runs        (worker only)
+#   SHIP_SANDBOX_TOKEN   sandbox daemon credential         (worker only)
+#   AI_GATEWAY_KEY       project key from `teploy-gateway key create` (worker only)
 #     (or set ANTHROPIC_API_KEY instead and drop AI_GATEWAY_URL below)
+#
+# LEAST PRIVILEGE: teploy secrets are app-scoped — `processes:` takes a
+# command string, so there is no per-process secret scoping to declare here —
+# and they therefore land in BOTH containers. The web process has no use for
+# the git deploy token or the model key: it renders a dashboard and verifies
+# webhook signatures; it never clones, never pushes, and never calls a model.
+#
+# Ship handles that itself rather than waiting for the platform: `teploy-ship
+# web` DROPS worker-only credentials from the environment before serving (see
+# WORKER_ONLY_SECRETS in src/cli.ts), so a web-route bug cannot read a value
+# that is not there. Nothing to configure; noted here because the deployed
+# container will still show them in `teploy secret list`.
+#
+# Also required for repo runs (worker), and NOT optional once any intake
+# source is configured:
+#   SHIP_REPO_ALLOWLIST  origins Ship may clone, e.g.
+#                        https://github.com/your-org,http://100.x.y.z:49152/tyler
+#   Without it, a repository URL arriving from a webhook, a Slack message, or
+#   an issue body is refused rather than being handed the deploy token.
 
 app: ship
 server: smoke # your server name from servers.yml (smoke = the dev test box)

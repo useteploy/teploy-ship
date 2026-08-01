@@ -967,6 +967,28 @@ async function workerCommand(rest: string[]): Promise<void> {
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 }
 
+/**
+ * Credentials the WEB process never legitimately uses.
+ *
+ * teploy secrets are app-scoped, so a deploy injects every secret into both
+ * containers — which handed the dashboard the git deploy token and the model
+ * key, and made any web-route bug a repository and provider credential
+ * exposure. The web surface renders pages and verifies webhook signatures; it
+ * never clones, never pushes, and never calls a model (the worker does all
+ * three). Removing them from the child's environment is least privilege Ship
+ * can enforce on its own, without waiting for per-process secret scoping.
+ */
+const WORKER_ONLY_SECRETS = [
+  "SHIP_GIT_TOKEN",
+  "SHIP_GITHUB_TOKEN",
+  "SHIP_GIT_TOKENS",
+  "SHIP_SANDBOX_TOKEN",
+  "AI_GATEWAY_KEY",
+  "ANTHROPIC_API_KEY",
+  "OPENAI_API_KEY",
+  "SHIP_EMBED_KEY",
+];
+
 async function webCommand(rest: string[]): Promise<void> {
   const args = parseArgs(rest);
   const config = loadConfig();
@@ -975,6 +997,7 @@ async function webCommand(rest: string[]): Promise<void> {
     fail("web needs an access token: --token <t> or SHIP_WEB_TOKEN (the browser login uses it)");
   }
   const webDir = join(dirname(fileURLToPath(import.meta.url)), "..", "web");
+  const dropped = WORKER_ONLY_SECRETS.filter((name) => process.env[name] !== undefined && process.env[name] !== "");
   if (!existsSync(join(webDir, "package.json"))) fail(`web app not found at ${webDir}`);
 
   const storeKind = (args.flags.store as string) ?? config.store ?? "file";
@@ -989,6 +1012,11 @@ async function webCommand(rest: string[]): Promise<void> {
     const url = (args.flags["nucleus-url"] as string) ?? process.env.NUCLEUS_URL ?? config.nucleusUrl;
     if (url === undefined || url === "") fail("--store nucleus needs --nucleus-url, NUCLEUS_URL, or nucleusUrl in config");
     env.NUCLEUS_URL = url;
+  }
+  // Strip what the dashboard has no business holding.
+  for (const name of WORKER_ONLY_SECRETS) delete env[name];
+  if (dropped.length > 0) {
+    process.stderr.write(dim(`dropping worker-only secrets from the web process: ${dropped.join(", ")}\n`));
   }
 
   // The web app is a Neutron TS app living in web/; dev serves via Vite,

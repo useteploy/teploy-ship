@@ -1,4 +1,5 @@
 import { UNTRUSTED_RULE } from "./guard.js";
+import { scrub } from "./redact.js";
 
 /**
  * The CodeAct system prompt. Establishes the action protocol: think,
@@ -76,7 +77,14 @@ Do not finish until you have actually verified the result by running something.
 ${options.task}`;
 }
 
-/** Wrap an execution result as the observation the agent sees next turn. */
+/**
+ * Wrap an execution result as the observation the agent sees next turn.
+ *
+ * Scrubbed on the way in, which is the only place that catches everything: the
+ * observation is what reaches the model, the event log, the dashboard timeline
+ * and Observe, so redacting once here covers all of them rather than four
+ * partial passes at the far end.
+ */
 export function formatObservation(result: {
   exitCode: number;
   stdout: string;
@@ -85,8 +93,8 @@ export function formatObservation(result: {
   truncated: boolean;
 }): string {
   const parts: string[] = [`[exit ${result.exitCode}${result.timedOut ? ", TIMED OUT" : ""}]`];
-  if (result.stdout !== "") parts.push(`stdout:\n${result.stdout}`);
-  if (result.stderr !== "") parts.push(`stderr:\n${result.stderr}`);
+  if (result.stdout !== "") parts.push(`stdout:\n${scrub(result.stdout)}`);
+  if (result.stderr !== "") parts.push(`stderr:\n${scrub(result.stderr)}`);
   if (result.stdout === "" && result.stderr === "") parts.push("(no output)");
   if (result.truncated) parts.push("(output truncated)");
   return parts.join("\n");
