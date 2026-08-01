@@ -10,6 +10,24 @@ import { runAgent } from "./agent.js";
 import { secretEnvNames } from "./guard.js";
 import type { AgentResult, RunAgentOptions } from "./agent.js";
 
+/** Ceiling on any single verification. */
+export const DEFAULT_VERIFY_TIMEOUT_MS = 120_000;
+
+/** Reject rather than hang: a verifier that never returns must not stop the suite. */
+async function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`verification exceeded ${ms}ms`)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 /** Outcome of an independent verification check. */
 export interface Verification {
   passed: boolean;
@@ -31,6 +49,8 @@ export interface EvalTask {
   /** Independent check of the workspace after the agent stops. */
   verify: (executor: AgentExecutor) => Promise<Verification>;
   maxSteps?: number;
+  /** Wall-clock cap for this task's verification (default 120s). */
+  verifyTimeoutMs?: number;
 }
 
 export interface EvalRunResult {
@@ -57,6 +77,17 @@ export interface EvalExecutor {
   executor: AgentExecutor;
   /** Workdir shown to the agent and where verification runs. */
   workdir: string;
+  /**
+   * A FRESH executor over the same workspace, for verification.
+   *
+   * The verifier is independent in logic but was not independent in
+   * containment: it ran through the agent's own executor, so background
+   * processes, modified tooling, shell configuration and environment left
+   * behind by the agent were all in scope for the check that decides whether
+   * the agent succeeded. Providers that cannot isolate may omit this, and the
+   * agent's executor is used with a warning-free fallback.
+   */
+  verifier?: () => Promise<AgentExecutor>;
   cleanup: () => Promise<void>;
 }
 
@@ -80,7 +111,8 @@ export async function runEval(options: RunEvalOptions): Promise<EvalReport> {
 
   for (const task of options.tasks) {
     for (let attempt = 0; attempt < repeats; attempt++) {
-      const { executor, workdir, cleanup } = await createExecutor();
+      const created = await createExecutor();
+      const { executor, workdir, cleanup } = created;
       const started = Date.now();
       let result: EvalRunResult;
       try {
@@ -95,12 +127,19 @@ export async function runEval(options: RunEvalOptions): Promise<EvalReport> {
           ...options.agentOptions,
         });
 
-        // Independent verification — the agent's status does not decide this.
+        // Independent verification — the agent's status does not decide this,
+        // and neither does the agent's leftover process table. Bounded, because
+        // a verifier that deadlocks, waits on stdin, or inherits a stuck build
+        // used to hang the whole suite with no timeout at all.
+        const verifyExecutor = created.verifier !== undefined ? await created.verifier() : executor;
         let verification: Verification;
         try {
-          verification = await task.verify(executor);
+          verification = await withTimeout(
+            task.verify(verifyExecutor),
+            task.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS,
+          );
         } catch (error) {
-          verification = { passed: false, detail: `verify threw: ${error instanceof Error ? error.message : String(error)}` };
+          verification = { passed: false, detail: `verify failed: ${error instanceof Error ? error.message : String(error)}` };
         }
 
         result = {
@@ -156,6 +195,9 @@ export async function localEvalExecutor(): Promise<EvalExecutor> {
   return {
     executor: new LocalExecutor({ root, envDenylist: secretEnvNames() }),
     workdir: root,
+    // A fresh executor over the same workspace: same files (that is what is
+    // being checked), but not the agent's shell state or child processes.
+    verifier: async () => new LocalExecutor({ root, envDenylist: secretEnvNames() }),
     cleanup: () => rm(root, { recursive: true, force: true }),
   };
 }
@@ -165,9 +207,12 @@ export async function localEvalExecutor(): Promise<EvalExecutor> {
  * workspace. The standard way to check real work — run the tests, run the
  * program, grep the output.
  */
-export function checkCommand(command: string): (executor: AgentExecutor) => Promise<Verification> {
+export function checkCommand(command: string, timeoutMs = DEFAULT_VERIFY_TIMEOUT_MS): (executor: AgentExecutor) => Promise<Verification> {
   return async (executor) => {
-    const result = await executor.exec(command);
+    // An explicit timeout, because exec() with none is unbounded and a
+    // verification command is exactly the kind that starts a server or waits
+    // for input by accident.
+    const result = await executor.exec(command, { timeoutMs });
     return {
       passed: result.exitCode === 0,
       detail: result.exitCode === 0 ? undefined : `check \`${command}\` exited ${result.exitCode}: ${result.stderr.trim() || result.stdout.trim()}`,

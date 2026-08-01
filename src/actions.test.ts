@@ -77,3 +77,54 @@ Processed the log.
   const cutOff = parseAction('<invoke name="bash">\n<parameter name="command">ls');
   assert.equal(cutOff.kind, "invalid");
 });
+
+test("TS-055: model-supplied paths cannot escape the workspace or touch git internals", () => {
+  const bad = [
+    "/etc/passwd",
+    "../../secrets.txt",
+    "a/../../b",
+    "C:\\Windows\\system32\\drivers\\etc\\hosts",
+    ".git/config",
+    ".teploy-agent/kernel/kernel.py",
+  ];
+  for (const file of bad) {
+    const action = parseAction("```create " + file + "\nx\n```");
+    assert.equal(action.kind, "invalid", `${file} must be refused`);
+  }
+  for (const file of bad) {
+    const action = parseAction("```edit " + file + "\n<<<<<<< SEARCH\na\n=======\nb\n>>>>>>> REPLACE\n```");
+    assert.equal(action.kind, "invalid", `${file} must be refused for edit too`);
+  }
+
+  // Ordinary relative paths still work, including dotfiles that are not git's.
+  for (const file of ["src/index.ts", "./lib/util.js", "docs/.eslintrc.json", ".github/workflows/ci.yml"]) {
+    const action = parseAction("```create " + file + "\nx\n```");
+    assert.equal(action.kind, "create", `${file} should be allowed`);
+  }
+});
+
+test("TS-055: the XML rescue picks the command parameter by NAME, not by position", () => {
+  // Native tool-call payloads often put `description` first. Taking the first
+  // parameter ran the description as a shell command and dropped the real one.
+  const xml =
+    '<invoke name="bash">' +
+    '<parameter name="description">List the files in the repository</parameter>' +
+    '<parameter name="command">ls -la</parameter>' +
+    "</invoke>";
+  const action = parseAction(xml);
+  assert.equal(action.kind, "bash");
+  assert.equal(action.kind === "bash" ? action.code : "", "ls -la");
+
+  const py =
+    '<invoke name="python">' +
+    '<parameter name="explanation">compute the total</parameter>' +
+    '<parameter name="code">print(1+1)</parameter>' +
+    "</invoke>";
+  const pyAction = parseAction(py);
+  assert.equal(pyAction.kind, "python");
+  assert.equal(pyAction.kind === "python" ? pyAction.code : "", "print(1+1)");
+
+  // No recognisable command parameter at all is a correction, not a guess.
+  const vague = '<invoke name="bash"><parameter name="notes">something</parameter></invoke>';
+  assert.equal(parseAction(vague).kind, "invalid");
+});

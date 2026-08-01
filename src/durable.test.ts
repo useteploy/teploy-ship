@@ -717,7 +717,7 @@ test("durable runs condense long histories in a recorded step and replay without
     model,
     executor: provider,
     maxSteps: 12,
-    condense: { maxChars: 1500, keepRecent: 4 },
+    condense: { maxTokens: 420, keepRecent: 4, maxSummaryLayers: 3 },
   });
   const store = new MemoryEventStore();
   const outcome = await executeRun({ workflow: wf, runId: "run-condense", store, input: { task: "long task" } });

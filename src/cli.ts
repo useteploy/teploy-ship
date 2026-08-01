@@ -248,6 +248,32 @@ function resolveSandbox(args: ReturnType<typeof parseArgs>, config: Config): San
   return { url, token, image, network };
 }
 
+/**
+ * Refuse to execute untrusted work on the host.
+ *
+ * The approval policy is a set of command regexes. That is a useful warning —
+ * it catches `rm -rf`, `curl`, `sudo` — but it is not a boundary: the same
+ * effects are one `node -e`, `nc`, `find -delete`, or `getattr(os, "sys"+"tem")`
+ * away, and the agent writes the commands. Against a LocalExecutor the blast
+ * radius is the machine, including whatever the worker process can reach.
+ *
+ * So a run whose task text came from outside — a webhook, a chat message, an
+ * issue body — requires a sandbox. An operator typing a task into their own
+ * terminal is trusting their own machine, which is theirs to trust, and keeps
+ * working exactly as before. SHIP_ALLOW_UNSANDBOXED_INTAKE=1 exists for a
+ * deliberately disposable box; it says what it is.
+ */
+function assertSandboxedForUntrusted(sandboxConfigured: boolean, env: NodeJS.ProcessEnv = process.env): void {
+  if (sandboxConfigured) return;
+  const override = (env.SHIP_ALLOW_UNSANDBOXED_INTAKE ?? "").toLowerCase();
+  if (override === "1" || override === "true" || override === "yes") return;
+  fail(
+    "this worker accepts tasks from external sources but has no sandbox configured, so agent commands would run " +
+      "on the host. Set SHIP_SANDBOX_URL + SHIP_SANDBOX_TOKEN (see docs/DEPLOY.md), or set " +
+      "SHIP_ALLOW_UNSANDBOXED_INTAKE=1 if this machine is genuinely disposable.",
+  );
+}
+
 async function makeExecutor(
   args: ReturnType<typeof parseArgs>,
   config: Config,
@@ -713,6 +739,9 @@ async function workerCommand(rest: string[]): Promise<void> {
   // policies via SHIP_INTAKE_POLICIES (JSON, e.g. {"forgejo":"auto"}) merged
   // over the file's; auto is still earned per source, never a default.
   const intakePolicies = resolveIntakePolicies(config);
+  // A worker exists to run work that arrived from somewhere else, so the
+  // untrusted-execution rule applies to it unconditionally.
+  assertSandboxedForUntrusted(usingSandbox);
   const codeSearch = resolveCodeSearch(runtime);
   const worker = startWorker({
     runtime: runtime as import("./runtime.js").NucleusShipRuntime,

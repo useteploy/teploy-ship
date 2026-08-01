@@ -20,13 +20,13 @@ function conversation(middleTurns: number, turnSize: number): Message[] {
 
 test("small histories pass through untouched", async () => {
   const messages = conversation(2, 10);
-  const condensed = await condenseIfNeeded(messages, summarize, { maxChars: 100_000, keepRecent: 4 });
+  const condensed = await condenseIfNeeded(messages, summarize, { maxTokens: 28_000, keepRecent: 4, maxSummaryLayers: 3 });
   assert.deepEqual(condensed, messages);
 });
 
 test("oversized histories condense the middle and keep head + recent", async () => {
   const messages = conversation(20, 1000); // ~40k chars of middle
-  const condensed = await condenseIfNeeded(messages, summarize, { maxChars: 10_000, keepRecent: 6 });
+  const condensed = await condenseIfNeeded(messages, summarize, { maxTokens: 2_800, keepRecent: 6, maxSummaryLayers: 3 });
 
   // head (system + task) preserved verbatim
   assert.equal(condensed[0]?.content, "SYSTEM PROMPT");
@@ -44,6 +44,6 @@ test("oversized histories condense the middle and keep head + recent", async () 
 test("condensation is skipped when there is no safe middle to summarize", async () => {
   // over budget, but keepRecent covers everything after the head
   const messages = conversation(3, 5000);
-  const condensed = await condenseIfNeeded(messages, summarize, { maxChars: 1000, keepRecent: 6 });
+  const condensed = await condenseIfNeeded(messages, summarize, { maxTokens: 280, keepRecent: 6, maxSummaryLayers: 3 });
   assert.deepEqual(condensed, messages);
 });

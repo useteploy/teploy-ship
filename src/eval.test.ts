@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
+
+import { LocalExecutor } from "@neutron-build/agents";
 
 import type { AdapterGenerateResult, ModelAdapter } from "@neutron-build/ai";
 
 import { checkCommand, runEval } from "./eval.js";
-import type { EvalTask } from "./eval.js";
+import type { EvalTask, Verification } from "./eval.js";
 
 // A model that reacts to the last observation (so it can actually solve a
 // task against the real LocalExecutor).
@@ -123,5 +128,50 @@ test("a verify that throws is a clean FAIL, not a crash", async () => {
   };
   const report = await runEval({ tasks: [task], model: reactiveModel(["```finish\nx\n```"]) });
   assert.equal(report.results[0]?.passed, false);
-  assert.match(report.results[0]?.detail ?? "", /verify threw/);
+  assert.match(report.results[0]?.detail ?? "", /verify failed: verify blew up/);
+});
+
+test("TS-051: a verifier that hangs is bounded rather than stalling the suite", async () => {
+  const task: EvalTask = {
+    name: "hangs",
+    prompt: "x",
+    verifyTimeoutMs: 150,
+    // Never resolves — a deadlocked check, a started server, a wait on stdin.
+    verify: () => new Promise<Verification>(() => {}),
+  };
+  const started = Date.now();
+  const report = await runEval({ tasks: [task], model: reactiveModel(["```finish\nx\n```"]) });
+  assert.equal(report.results[0]?.passed, false);
+  assert.match(report.results[0]?.detail ?? "", /exceeded 150ms/);
+  assert.ok(Date.now() - started < 10_000, "the suite moved on instead of hanging");
+});
+
+test("TS-051: verification runs through its own executor, not the agent's", async () => {
+  const seen: string[] = [];
+  const task: EvalTask = {
+    name: "isolated",
+    prompt: "x",
+    verify: async (executor) => {
+      seen.push((executor as unknown as { __label?: string }).__label ?? "agent");
+      return { passed: true };
+    },
+  };
+  await runEval({
+    tasks: [task],
+    model: reactiveModel(["```finish\nx\n```"]),
+    createExecutor: async () => {
+      const agent = new LocalExecutor({ root: await mkdtemp(join(tmpdir(), "eval-iso-")) });
+      return {
+        executor: agent,
+        workdir: ".",
+        verifier: async () => {
+          const fresh = new LocalExecutor({ root: await mkdtemp(join(tmpdir(), "eval-iso-v-")) });
+          (fresh as unknown as { __label: string }).__label = "verifier";
+          return fresh;
+        },
+        cleanup: async () => {},
+      };
+    },
+  });
+  assert.deepEqual(seen, ["verifier"], "the agent's leftover process/shell state is not in scope for the check");
 });

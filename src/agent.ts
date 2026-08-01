@@ -1,3 +1,5 @@
+import { createHash, randomUUID } from "node:crypto";
+
 import { generateText } from "@neutron-build/ai";
 import type { Message, ModelAdapter, Usage } from "@neutron-build/ai";
 import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
@@ -55,6 +57,13 @@ export interface RunAgentOptions {
   /** Persistent python kernel (variables survive between actions); false = per-file execution. */
   kernel?: boolean;
   /**
+   * Namespaces this session's kernel cells and scratch files. Defaults to a
+   * random id; set it only to make a test deterministic. Reusing one across
+   * two sessions in the same workspace reintroduces the collision it exists
+   * to prevent.
+   */
+  sessionId?: string;
+  /**
    * Verified-finish guard (default on): the FIRST finish of a run is held
    * once — with zero successful executions the agent is told to do the
    * work; otherwise it is told to prove each deliverable with a real
@@ -97,17 +106,26 @@ export interface AgentResult {
  */
 export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
   const workdir = options.workdir ?? "/work";
+  // Cell ids must be unique across SESSIONS, not just within one. They used to
+  // be s0, s1, … restarting at zero for every runAgent call, so a caller
+  // reusing an executor/workspace for a follow-up session wrote a new cell-s0
+  // whose done-s0 marker already existed: the kernel skipped it and the caller
+  // read the FIRST session's output back as the result of the second.
+  const session = options.sessionId ?? randomUUID().slice(0, 8);
   const maxSteps = options.maxSteps ?? 20;
   const maxObs = options.maxObservationChars ?? 8000;
   const emit = options.onEvent ?? (() => {});
 
+  // A continued conversation gets THIS session's system prompt, not whatever
+  // the caller happened to bring. priorMessages used to be used verbatim, so a
+  // follow-up could run with no system message at all, or with a stale one
+  // naming a different workdir and a weaker completion/security policy — and
+  // this is an exported API, so that was not just an internal assumption.
+  const system: Message = { role: "system", content: systemPrompt({ workdir, task: options.task }) };
   let messages: Message[] =
     options.priorMessages !== undefined && options.priorMessages.length > 0
-      ? [...options.priorMessages, { role: "user", content: options.task }]
-      : [
-          { role: "system", content: systemPrompt({ workdir, task: options.task }) },
-          { role: "user", content: "Begin. Work step by step and verify before finishing." },
-        ];
+      ? [system, ...options.priorMessages.filter((m) => m.role !== "system"), { role: "user", content: options.task }]
+      : [system, { role: "user", content: "Begin. Work step by step and verify before finishing." }];
   const steps: AgentStep[] = [];
   let usage: Usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
   const addTo = (u: Usage): void => {
@@ -273,7 +291,7 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
     if (action.kind === "python") kernelUsed = true;
     let result: ExecResult;
     try {
-      result = await executeAction(options.executor, action, options.actionTimeoutMs, `s${index}`, options.kernel !== false);
+      result = await executeAction(options.executor, action, options.actionTimeoutMs, `${session}-s${index}`, options.kernel !== false);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       emit({ type: "error", step: index, text: message });
@@ -288,9 +306,13 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
     steps.push({ index, thought, action, result, observation });
     emit({ type: "observation", step: index, text: observation });
 
-    // Recovery: break loops and thrashing before they burn the budget.
+    // Recovery: break loops, thrashing, and busywork before they burn the
+    // budget. The diff fingerprint is what turns "the command worked" into
+    // "the work moved"; it is advisory, so a non-repo workspace just passes
+    // undefined and the progress check stays dormant.
     if (recovery !== null) {
-      const signal = recovery.observe(action, result.exitCode);
+      const fingerprint = await workspaceFingerprint(options.executor);
+      const signal = recovery.observe(action, result.exitCode, fingerprint);
       if (signal.kind === "abort") {
         emit({ type: "error", step: index, text: signal.message });
         return { status: "error", summary: signal.message, steps, messages, usage };
@@ -395,4 +417,15 @@ function truncate(text: string, max: number): string {
   const head = Math.floor(max * 0.6);
   const tail = max - head;
   return `${text.slice(0, head)}\n... [${text.length - max} chars truncated] ...\n${text.slice(-tail)}`;
+}
+
+/**
+ * A cheap stand-in for "has the work changed": the hash of the working-tree
+ * diff stat. Undefined outside a git repo, in which case progress detection is
+ * simply off rather than guessing.
+ */
+async function workspaceFingerprint(executor: AgentExecutor): Promise<string | undefined> {
+  const result = await executor.exec("git add -A >/dev/null 2>&1; git diff --cached --stat", { timeoutMs: 30_000 }).catch(() => null);
+  if (result === null || result.exitCode !== 0) return undefined;
+  return createHash("sha256").update(result.stdout).digest("hex").slice(0, 16);
 }

@@ -222,7 +222,7 @@ test("the live loop breaks a repeated-action loop with a recovery nudge", async 
     executor,
     task: "read a file that doesn't exist",
     maxSteps: 12,
-    recovery: { loopThreshold: 3, failureThreshold: 99, maxNudges: 2 },
+    recovery: { loopThreshold: 3, failureThreshold: 99, maxNudges: 2, noProgressThreshold: 99 },
     condense: false,
   });
   // recovery aborts rather than burning all 12 steps in the loop
@@ -260,7 +260,7 @@ test("the live loop condenses an overgrown conversation before the next model ca
     executor,
     task: "generate output",
     maxSteps: 8,
-    condense: { maxChars: 15_000, keepRecent: 4 },
+    condense: { maxTokens: 4_200, keepRecent: 4, maxSummaryLayers: 3 },
     recovery: false,
   });
   assert.equal(result.status, "finished");

@@ -17,10 +17,30 @@ import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
  */
 const DIR = ".teploy-agent/kernel";
 
-const KERNEL_PY = `import io, os, sys, time, traceback
+/**
+ * The kernel loop.
+ *
+ * `cancel-<cid>` is the abandonment protocol: when the caller gives up waiting
+ * on a cell it drops that marker, and the kernel raises inside the running cell
+ * at its next bytecode boundary. Without it a timed-out cell kept running —
+ * still writing files, still holding sockets — while the agent moved on and
+ * later actions raced it, and a late write could land in the final commit.
+ * A cell that ignores the interrupt (blocked in C, or catching BaseException)
+ * is escalated by the caller killing the kernel outright.
+ */
+const KERNEL_PY = `import io, os, sys, time, threading, traceback, _thread
 base = os.path.dirname(os.path.abspath(__file__))
 ns = {"__name__": "__main__"}
 done = {f[5:] for f in os.listdir(base) if f.startswith("done-")}
+
+def watch(cid, stop):
+    # Raise KeyboardInterrupt in the main thread the moment the caller gives up.
+    while not stop.is_set():
+        if os.path.exists(os.path.join(base, "cancel-" + cid)):
+            _thread.interrupt_main()
+            return
+        time.sleep(0.05)
+
 while not os.path.exists(os.path.join(base, "kernel.stop")):
     for f in sorted(os.listdir(base)):
         if not (f.startswith("cell-") and f.endswith(".py")):
@@ -33,6 +53,9 @@ while not os.path.exists(os.path.join(base, "kernel.stop")):
         ok = True
         out, err = sys.stdout, sys.stderr
         sys.stdout = sys.stderr = buf
+        stop = threading.Event()
+        watcher = threading.Thread(target=watch, args=(cid, stop), daemon=True)
+        watcher.start()
         try:
             with open(os.path.join(base, f)) as src:
                 code = src.read()
@@ -41,6 +64,7 @@ while not os.path.exists(os.path.join(base, "kernel.stop")):
             ok = False
             traceback.print_exc()
         finally:
+            stop.set()
             sys.stdout, sys.stderr = out, err
         with open(os.path.join(base, "out-" + cid + ".txt"), "w") as o:
             o.write(buf.getvalue())
@@ -84,8 +108,12 @@ export async function installKernel(executor: AgentExecutor): Promise<void> {
 
 /**
  * Execute one cell in the persistent namespace and wait for its result.
- * A cell that outlives timeoutMs reports timedOut (exit 124) — the
- * kernel keeps running it, but the agent moves on and is told so.
+ *
+ * On timeout the cell is CANCELLED, not abandoned: the caller drops a
+ * cancel marker, the kernel interrupts the cell, and we wait briefly for it to
+ * unwind. A cell that will not die takes the whole kernel with it. Leaving it
+ * running (the old behaviour, and documented as such) meant a timed-out cell
+ * kept mutating the workspace while later actions and the final commit read it.
  */
 export async function runCell(
   executor: AgentExecutor,
@@ -97,13 +125,36 @@ export async function runCell(
   const iterations = Math.max(1, Math.ceil(timeoutMs / 100));
   const waiter =
     `i=0; while [ ! -f ${DIR}/done-${cellId} ] && [ "$i" -lt ${iterations} ]; do sleep 0.1; i=$((i+1)); done; ` +
-    `if [ ! -f ${DIR}/done-${cellId} ]; then echo "[kernel] cell still running after timeout — its output will be lost; long work belongs in bash or files"; exit 124; fi; ` +
+    `if [ ! -f ${DIR}/done-${cellId} ]; then exit 124; fi; ` +
     `cat ${DIR}/out-${cellId}.txt; exit "$(cat ${DIR}/exit-${cellId})"`;
   const result = await executor.exec(waiter, { timeoutMs: timeoutMs + 10_000 });
-  if (result.exitCode === 124) {
-    return { ...result, timedOut: true };
+  if (result.exitCode !== 124) return result;
+
+  // Timed out: interrupt the cell and give it a moment to unwind.
+  await executor.exec(`touch ${DIR}/cancel-${cellId}`, { timeoutMs: 10_000 }).catch(() => {});
+  const settled = await executor
+    .exec(
+      `i=0; while [ ! -f ${DIR}/done-${cellId} ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done; ` +
+        `[ -f ${DIR}/done-${cellId} ] && echo stopped || echo stuck`,
+      { timeoutMs: 15_000 },
+    )
+    .catch(() => ({ stdout: "stuck" }) as ExecResult);
+
+  if (settled.stdout.trim() !== "stopped") {
+    // It ignored the interrupt (blocked in C, or swallowing BaseException).
+    // A workspace being mutated by a cell nobody is waiting for is worse than
+    // losing the namespace, so the kernel goes; the next python action starts
+    // a fresh one and the prompt already warns that variables can reset.
+    await stopKernel(executor);
   }
-  return result;
+  return {
+    ...result,
+    stdout:
+      "[kernel] cell exceeded its timeout and was cancelled" +
+      (settled.stdout.trim() === "stopped" ? "." : "; the kernel was restarted, so python variables are gone.") +
+      " Long-running work belongs in a bash action or a file.",
+    timedOut: true,
+  };
 }
 
 /** Ask the kernel to exit and kill it if it lingers (cleanup for local runs). */

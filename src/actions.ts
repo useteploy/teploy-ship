@@ -14,6 +14,32 @@ export type Action =
 
 const FENCE = /```([^\n`]*)\n([\s\S]*?)```/g;
 
+/**
+ * Validate a model-supplied file path before it reaches the executor.
+ *
+ * `edit` and `create` handed the path straight to getFile/putFile. A correct
+ * executor roots paths inside the workspace, but "correct" is then a property
+ * of every current AND future executor implementation, including a remote
+ * daemon on another host. The harness should not be relying on that: a path is
+ * the one thing here the model fully controls.
+ *
+ * Rejected: absolute paths, traversal, NUL bytes, Windows drive/UNC forms, git
+ * internals, and the harness's own scratch directory.
+ */
+export function validateActionPath(path: string): string | null {
+  const value = path.trim();
+  if (value === "") return "a file path is required";
+  if (value.length > 1024) return "that path is unreasonably long";
+  if (value.includes("\0")) return "paths may not contain NUL bytes";
+  if (value.startsWith("/") || value.startsWith("\\\\")) return "absolute paths are not allowed — use a path relative to the working directory";
+  if (/^[A-Za-z]:[\\/]/.test(value)) return "drive-letter paths are not allowed — use a path relative to the working directory";
+  const parts = value.split(/[\\/]+/);
+  if (parts.some((p) => p === "..")) return "'..' is not allowed in a path";
+  if (parts[0] === ".git") return ".git is off limits — change files, not git's internals";
+  if (parts[0] === ".teploy-agent") return ".teploy-agent is harness scratch, not part of the repository";
+  return null;
+}
+
 const BASH_LANGS = new Set(["bash", "sh", "shell", ""]);
 const PYTHON_LANGS = new Set(["python", "py", "python3"]);
 
@@ -55,6 +81,8 @@ function parseFencedAction(text: string): { index: number; action: Action } | nu
     }
     if (lang === "edit") {
       if (arg === "") return { index, action: { kind: "invalid", message: "```edit needs a file path: ```edit path/to/file" } };
+      const bad = validateActionPath(arg);
+      if (bad !== null) return { index, action: { kind: "invalid", message: `cannot edit ${arg}: ${bad}` } };
       const sr = SEARCH_REPLACE.exec(code);
       if (sr === null) {
         return {
@@ -70,6 +98,8 @@ function parseFencedAction(text: string): { index: number; action: Action } | nu
     }
     if (lang === "create") {
       if (arg === "") return { index, action: { kind: "invalid", message: "```create needs a file path: ```create path/to/file" } };
+      const bad = validateActionPath(arg);
+      if (bad !== null) return { index, action: { kind: "invalid", message: `cannot create ${arg}: ${bad}` } };
       return { index, action: { kind: "create", file: arg, content: code } };
     }
     if (lang === "search") {
@@ -91,7 +121,26 @@ function parseFencedAction(text: string): { index: number; action: Action } | nu
 
 const INVOKE = /<(?:\w+:)?invoke\s+name="([^"]+)"[^>]*>([\s\S]*?)<\/(?:\w+:)?invoke>/;
 const INVOKE_OPEN = /<(?:\w+:)?invoke\s+name="([^"]+)"/;
-const PARAM = /<(?:\w+:)?parameter\s+name="[^"]*"[^>]*>([\s\S]*?)<\/(?:\w+:)?parameter>/;
+const PARAM_ALL = /<(?:\w+:)?parameter\s+name="([^"]*)"[^>]*>([\s\S]*?)<\/(?:\w+:)?parameter>/g;
+
+/**
+ * Pull a named parameter out of a rescued tool-call payload.
+ *
+ * The old version took the FIRST <parameter> whatever it was called, so a
+ * native payload that puts `description` before `command` executed the
+ * description text as a shell command and silently dropped the real one.
+ */
+function paramByName(xml: string, names: string[]): string | null {
+  const found = new Map<string, string>();
+  for (const match of xml.matchAll(PARAM_ALL)) {
+    found.set(match[1]!.toLowerCase(), match[2]!);
+  }
+  for (const name of names) {
+    const value = found.get(name);
+    if (value !== undefined && value.trim() !== "") return value;
+  }
+  return null;
+}
 
 const XML_CORRECTION =
   'You emitted XML tool-call syntax, but this session has NO tool-calling — it will never execute. Act with a fenced code block instead: ```bash, ```python, ```edit, ```create, or ```finish.';
@@ -104,12 +153,14 @@ function parseToolXmlAction(text: string): { index: number; action: Action } | n
     return open === null ? null : { index: open.index, action: { kind: "invalid", message: XML_CORRECTION } };
   }
   const name = match[1]!.toLowerCase();
-  const content = PARAM.exec(match[2]!)?.[1] ?? "";
-  if (/bash|shell|terminal|cmd|exec/.test(name) && content.trim() !== "") {
-    return { index: match.index, action: { kind: "bash", code: content } };
+  const body = match[2]!;
+  if (/bash|shell|terminal|cmd|exec/.test(name)) {
+    const code = paramByName(body, ["command", "cmd", "script", "code", "input"]);
+    if (code !== null) return { index: match.index, action: { kind: "bash", code } };
   }
-  if (/python/.test(name) && content.trim() !== "") {
-    return { index: match.index, action: { kind: "python", code: content } };
+  if (/python/.test(name)) {
+    const code = paramByName(body, ["code", "script", "command", "input"]);
+    if (code !== null) return { index: match.index, action: { kind: "python", code } };
   }
   return { index: match.index, action: { kind: "invalid", message: XML_CORRECTION } };
 }

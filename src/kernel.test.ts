@@ -103,3 +103,52 @@ test("stopKernel actually kills the process", async () => {
   );
   assert.match(alive.stdout, /dead/);
 });
+
+test("TS-020: a second session in the same workspace does not read the first session's output", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ship-kernel-reuse-"));
+  const executor = new LocalExecutor({ root });
+  await installKernel(executor);
+  if (!(await ensureKernel(executor))) return; // no python3 here
+
+  try {
+    // Session A computes one thing.
+    const a = await runCell(executor, "sessA-s0", "print('from-session-a')");
+    assert.match(a.stdout, /from-session-a/);
+
+    // Session B reuses the SAME workspace and starts its own cell numbering.
+    // With shared ids ("s0") the kernel would see done-s0 and hand back A's
+    // output; distinct session ids keep them apart.
+    const b = await runCell(executor, "sessB-s0", "print('from-session-b')");
+    assert.match(b.stdout, /from-session-b/);
+    assert.doesNotMatch(b.stdout, /from-session-a/);
+  } finally {
+    await stopKernel(executor);
+  }
+});
+
+test("TS-019: a cell that outlives its timeout is cancelled, not left running", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ship-kernel-timeout-"));
+  const executor = new LocalExecutor({ root });
+  await installKernel(executor);
+  if (!(await ensureKernel(executor))) return;
+
+  try {
+    // Sleep well past the timeout, then write a file. The old kernel kept
+    // running the cell, so the file appeared AFTER the caller had moved on.
+    const result = await runCell(
+      executor,
+      "slow-1",
+      "import time\ntime.sleep(30)\nopen('mutated-after-timeout.txt','w').write('x')",
+      1000,
+    );
+    assert.equal(result.timedOut, true);
+    assert.match(result.stdout, /cancelled/);
+
+    // Give a still-running cell ample time to do the damage it was going to do.
+    await new Promise((r) => setTimeout(r, 2500));
+    const listing = await executor.exec("ls");
+    assert.doesNotMatch(listing.stdout, /mutated-after-timeout\.txt/, "the cancelled cell must not keep writing");
+  } finally {
+    await stopKernel(executor);
+  }
+});
