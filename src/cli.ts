@@ -46,9 +46,11 @@ Usage:
   teploy-ship run "<task>"            live run in the terminal (streamed, interactive approvals)
       [--model provider/model]        default anthropic/claude-sonnet-5
       [--sandbox <url> --sandbox-token <t> [--sandbox-image <img>] [--sandbox-network none|egress]]
-      [--max-steps N] [--yes] [--json]
+      [--max-steps N] [--yes] [--json] [--critic]
+                     --critic adds an independent review pass before finishing
   teploy-ship run --durable "<task>"  durable run: parks on approvals, survives exits
                      add --plan to review/approve the agent's plan before it acts
+                     add --critic for an independent review pass before it finishes
   teploy-ship runs                    list durable runs
   teploy-ship resume <run-id>         continue a durable run (after a crash or park)
   teploy-ship approve <run-id>        approve a parked action and continue
@@ -60,7 +62,7 @@ Usage:
   teploy-ship fix --repo <url> "<task>"  clone, fix on a branch, push, open a PR
       [--git-token <t>]               also SHIP_GIT_TOKEN or gitToken in config
       [--base <branch>]               PR target (default: repo default branch)
-      (accepts run flags: --model, --sandbox…, --max-steps, --yes, --json)
+      (accepts run flags: --model, --sandbox…, --max-steps, --yes, --json, --critic)
       NOTE: fix always needs network to clone/push — pass
       --sandbox-network egress (or sandboxNetwork:"egress" in config)
       whenever --sandbox is used; plain --sandbox defaults to "none".
@@ -74,7 +76,7 @@ Usage:
   teploy-ship web                     serve the runs dashboard (browser approve/deny)
       [--port N] [--token <t>]        token also via SHIP_WEB_TOKEN (required)
       [--dev]                         vite dev server instead of the built app
-  teploy-ship eval [--suite builtin|hard|extreme|all] [--repeats N] [--json]
+  teploy-ship eval [--suite builtin|hard|extreme|all] [--repeats N] [--json] [--critic]
 
 Config: flags > env > ~/.config/teploy-ship/config.json
   (model, sandboxUrl, sandboxToken, sandboxImage, store, nucleusUrl)
@@ -197,6 +199,7 @@ async function runCommand(rest: string[]): Promise<void> {
     onApprovalRequest: interactive ? (action) => promptApproval(action) : () => args.flags.yes === true,
     onEvent: args.flags.json === true ? undefined : renderEvent,
     abortSignal: abort.signal,
+    critic: args.flags.critic === true,
   });
 
   await executor.destroy();
@@ -292,6 +295,7 @@ async function fixCommand(rest: string[]): Promise<void> {
     approveAction: defaultApprovalPolicy,
     onApprovalRequest: interactive ? (action) => promptApproval(action) : () => args.flags.yes === true,
     onEvent: args.flags.json === true ? undefined : renderEvent,
+    critic: args.flags.critic === true,
   });
 
   // The deliverable is the tree, whatever the agent believes happened —
@@ -398,7 +402,7 @@ async function executePass(
   task: string,
   args: ReturnType<typeof parseArgs>,
   config: Config,
-  opts?: { plan?: boolean },
+  opts?: { plan?: boolean; critic?: boolean },
 ): Promise<RunOutcome | null> {
   const modelId = (args.flags.model as string) ?? config.model ?? "anthropic/claude-sonnet-5";
   const usingSandbox = resolveSandbox(args, config) !== undefined;
@@ -422,6 +426,7 @@ async function executePass(
     index: true,
     guard: true,
     ...(opts?.plan === true ? { plan: true } : {}),
+    ...(opts?.critic === true ? { critic: true } : {}),
   });
   if (outcome === null) return null; // another executor holds the lease
   const previous = await runtime.loadMeta(runId);
@@ -470,6 +475,7 @@ async function startDurable(task: string, args: ReturnType<typeof parseArgs>, co
   process.stderr.write(`${dim(`durable run ${runId}`)}\n`);
   const outcome = await executePass(runtime, runId, task, args, config, {
     ...(args.flags.plan === true ? { plan: true } : {}),
+    ...(args.flags.critic === true ? { critic: true } : {}),
   });
   reportOutcome(runId, outcome);
   await runtime.close();
@@ -749,6 +755,7 @@ async function evalCommand(rest: string[]): Promise<void> {
     tasks,
     model,
     repeats,
+    ...(args.flags.critic === true ? { agentOptions: { critic: true } } : {}),
     onResult: (r) => process.stderr.write(`  [${r.passed ? "PASS" : "FAIL"}] ${r.task} (attempt ${r.attempt + 1}, ${r.steps} steps)\n`),
   });
   process.stdout.write(`\n${formatReport(report)}\n`);

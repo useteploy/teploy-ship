@@ -296,6 +296,58 @@ test("verified-finish guard: first finish after work gets ONE verify nudge, seco
   assert.equal(result.steps.length, 3);
 });
 
+test("critic pass (options.critic): a rejected finish is sent back once, then the retry is honored", async () => {
+  const executor = await localExecutor();
+  await executor.exec("git init -q -b main . && git config user.email t@t && git config user.name t");
+  const nudges: string[] = [];
+  const { model, calls } = scriptedModel([
+    "```bash\necho changed > f.txt\n```", // a real change -> a non-empty diff for the critic to review
+    "```finish\nfirst claim\n```", // held by the verify nudge
+    "```finish\nsecond claim\n```", // verify nudge already spent -> the critic pass runs
+    "Needs more work: the change is incomplete.", // critic's verdict — no APPROVE, so it's a rejection
+    (obs) => {
+      nudges.push(obs);
+      return "```finish\nthird claim\n```"; // critic already ran once this run -> honored immediately
+    },
+  ]);
+  const result = await runAgent({ model, executor, task: "improve f.txt", critic: true, recovery: false, condense: false });
+  assert.equal(result.status, "finished");
+  assert.equal(result.summary, "third claim");
+  // exactly 5 model calls: 1 bash + 3 finish attempts + 1 critic review
+  // (bounded to a single critic-triggered retry, never a loop)
+  assert.equal(calls.length, 5);
+  assert.match(nudges[0] ?? "", /independent review of your changes found problems/);
+});
+
+test("critic pass approves and the run finishes without a retry", async () => {
+  const executor = await localExecutor();
+  await executor.exec("git init -q -b main . && git config user.email t@t && git config user.name t");
+  const { model, calls } = scriptedModel([
+    "```bash\necho changed > f.txt\n```",
+    "```finish\nfirst claim\n```",
+    "```finish\nsecond claim\n```", // the critic pass runs and approves
+    "Looks correct.\nAPPROVE",
+  ]);
+  const result = await runAgent({ model, executor, task: "improve f.txt", critic: true, recovery: false, condense: false });
+  assert.equal(result.status, "finished");
+  assert.equal(result.summary, "second claim");
+  assert.equal(calls.length, 4);
+});
+
+test("critic pass is off by default: no extra review call even with a real diff", async () => {
+  const executor = await localExecutor();
+  await executor.exec("git init -q -b main . && git config user.email t@t && git config user.name t");
+  const { model, calls } = scriptedModel([
+    "```bash\necho changed > f.txt\n```",
+    "```finish\nfirst claim\n```",
+    "```finish\nsecond claim\n```", // honored: critic was never requested
+  ]);
+  const result = await runAgent({ model, executor, task: "improve f.txt", recovery: false, condense: false });
+  assert.equal(result.status, "finished");
+  assert.equal(result.summary, "second claim");
+  assert.equal(calls.length, 3, "no critic call without options.critic");
+});
+
 test("verified-finish guard: a finish on the final step is honored immediately", async () => {
   const executor = await localExecutor();
   const { model } = scriptedModel([

@@ -2,7 +2,7 @@
 export function parseArgs(argv: string[]): { positional: string[]; flags: Record<string, string | true> } {
   const positional: string[] = [];
   const flags: Record<string, string | true> = {};
-  const boolFlags = new Set(["durable", "yes", "json", "headless", "handoff", "plan"]);
+  const boolFlags = new Set(["durable", "yes", "json", "headless", "handoff", "plan", "critic"]);
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i]!;
     if (token.startsWith("--")) {

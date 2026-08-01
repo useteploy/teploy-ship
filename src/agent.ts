@@ -5,6 +5,8 @@ import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 import type { Action } from "./actions.js";
 import { FINISH_NUDGE_FAILED, FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, describeAction, parseAction } from "./actions.js";
 import type { ApprovalPolicy } from "./approval.js";
+import { criticFeedback, isApproved, reviewWork } from "./critic.js";
+import { workingDiff } from "./git.js";
 import { ensureKernel, installKernel, runCell, stopKernel } from "./kernel.js";
 import { condenseIfNeeded, defaultCondenseConfig } from "./memory.js";
 import type { CondenseConfig } from "./memory.js";
@@ -61,6 +63,16 @@ export interface RunAgentOptions {
    * honored immediately (a nudge there could only burn the run).
    */
   requireVerifiedFinish?: boolean;
+  /**
+   * Independent critic pass (default off): once a finish survives the
+   * verify nudge above, an independent reviewer (Team/TeamPolicy over a
+   * single critic member — see critic.ts) checks the working-tree diff
+   * against the task and either approves or sends the run back once with
+   * concrete feedback. Bounded to a single critic-triggered retry per run
+   * — this never loops. Needs a git working tree; a non-repo run or an
+   * empty diff skips the pass and finishes as today.
+   */
+  critic?: boolean;
   onEvent?: (event: AgentEvent) => void;
   abortSignal?: AbortSignal;
 }
@@ -128,6 +140,7 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
   let finishNudged = false;
   let failNudges = 0;
   let lastExecFailed = false;
+  let criticDone = false;
   try {
   for (let index = 0; index < maxSteps; index++) {
     if (options.abortSignal?.aborted) {
@@ -180,6 +193,25 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
         } else if (lastExecFailed && failNudges < 2) {
           failNudges += 1;
           nudge = FINISH_NUDGE_FAILED;
+        } else if (options.critic === true && !criticDone) {
+          criticDone = true;
+          // The critic is a safety net over a run that already succeeded, so
+          // an infrastructure failure here (executor torn down, model call
+          // rejected) must not take the run down with it: skip the review and
+          // let the finish stand. Note this fails open only on a broken
+          // review — an actual verdict that is not an approval still blocks.
+          try {
+            const diff = await workingDiff(options.executor);
+            if (diff.trim() !== "") {
+              const review = await reviewWork(options.model, { task: options.task, summary: action.message, diff });
+              addTo(review.usage);
+              if (!isApproved(review.text)) {
+                nudge = criticFeedback(review.text);
+              }
+            }
+          } catch (err) {
+            emit({ type: "observation", step: index, text: `critic skipped: ${String(err)}` });
+          }
         }
         if (nudge !== null) {
           messages.push({ role: "user", content: nudge });

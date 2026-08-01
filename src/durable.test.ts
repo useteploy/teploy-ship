@@ -489,6 +489,167 @@ test("injection-y task text is framed as data and flagged on the timeline", asyn
   assert.ok(!(await store2.load("run-guard2")).some((e) => e.name === "injection-guard"));
 });
 
+test("critic pass (input.critic) sends a claimed-done repo run back once, then honors the retry", async () => {
+  const bareDir = await mkdtemp(join(tmpdir(), "durable-critic-bare-"));
+  const seedDir = await mkdtemp(join(tmpdir(), "durable-critic-seed-"));
+  const seeder = new LocalExecutor({ root: seedDir });
+  await seeder.exec(
+    `git init -q -b main . && git config user.email t@t && git config user.name t && printf 'hello\\n' > f.txt && git add -A && git commit -qm seed && git clone -q --bare . ${bareDir}/owner/repo.git`,
+  );
+
+  const { model, callCount } = reactiveModel([
+    "```bash\necho changed >> f.txt\n```", // real change -> a non-empty diff for the critic to review
+    "```finish\nfirst claim\n```", // held by the verify nudge (nothing proven yet, from the guard's pov)
+    "```finish\nsecond claim\n```", // verify nudge already spent -> the critic pass runs
+    "Needs more work: the change is incomplete.", // critic's verdict — no APPROVE token, so it's a rejection
+    "```finish\nthird claim\n```", // critic already ran once this run -> honored immediately
+  ]);
+
+  const work = await mkdtemp(join(tmpdir(), "durable-critic-work-"));
+  const provider: ExecutorProvider = {
+    async create() {
+      return { handle: work };
+    },
+    attach(handle: string) {
+      return new LocalExecutor({ root: handle });
+    },
+  };
+
+  // publish opens a real PR once there's a non-empty diff; stub the host
+  // API call rather than reaching a real forge (file:// remotes push fine
+  // locally but have no PR API).
+  const orig = globalThis.fetch;
+  (globalThis as unknown as { fetch: unknown }).fetch = () =>
+    Promise.resolve({ ok: true, json: () => Promise.resolve({ number: 1, html_url: "http://example/owner/repo/pulls/1" }) });
+
+  try {
+    const wf = durableAgent({ model, executor: provider, workdir: "." });
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: wf,
+      runId: "run-critic1",
+      store,
+      input: { task: "improve f.txt", repo: `file://${bareDir}/owner/repo.git`, critic: true },
+    });
+
+    assert.equal(outcome.status, "completed");
+    const out = outcome.output as { status: string; summary: string; turns: number; pr?: string };
+    assert.equal(out.summary, "third claim");
+    assert.equal(out.pr, "http://example/owner/repo/pulls/1");
+
+    // exactly 5 model calls: 1 bash + 3 finish attempts + 1 critic review
+    // (bounded to a single critic-triggered retry, not a loop)
+    assert.equal(callCount(), 5);
+
+    const stepNames = (await store.load("run-critic1"))
+      .filter((e) => e.type === "step-completed")
+      .map((s) => s.name ?? "");
+    assert.ok(stepNames.some((n) => n.endsWith("-critic-diff")), "the diff step must be recorded");
+    assert.ok(stepNames.some((n) => n.endsWith("-critic") && !n.endsWith("-critic-diff")), "the review step must be recorded");
+    assert.equal(stepNames.filter((n) => n.endsWith("-critic") && !n.endsWith("-critic-diff")).length, 1, "only one critic pass per run");
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+test("critic pass approves and the run finishes without a retry", async () => {
+  const bareDir = await mkdtemp(join(tmpdir(), "durable-critic-ok-bare-"));
+  const seedDir = await mkdtemp(join(tmpdir(), "durable-critic-ok-seed-"));
+  const seeder = new LocalExecutor({ root: seedDir });
+  await seeder.exec(
+    `git init -q -b main . && git config user.email t@t && git config user.name t && printf 'hello\\n' > f.txt && git add -A && git commit -qm seed && git clone -q --bare . ${bareDir}/owner/repo.git`,
+  );
+
+  const { model, callCount } = reactiveModel([
+    "```bash\necho changed >> f.txt\n```",
+    "```finish\nfirst claim\n```", // held by the verify nudge
+    "```finish\nsecond claim\n```", // the critic pass runs and approves
+    "Looks correct.\nAPPROVE",
+  ]);
+
+  const work = await mkdtemp(join(tmpdir(), "durable-critic-ok-work-"));
+  const provider: ExecutorProvider = {
+    async create() {
+      return { handle: work };
+    },
+    attach(handle: string) {
+      return new LocalExecutor({ root: handle });
+    },
+  };
+
+  const orig = globalThis.fetch;
+  (globalThis as unknown as { fetch: unknown }).fetch = () =>
+    Promise.resolve({ ok: true, json: () => Promise.resolve({ number: 1, html_url: "http://example/owner/repo/pulls/1" }) });
+
+  try {
+    const wf = durableAgent({ model, executor: provider, workdir: "." });
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: wf,
+      runId: "run-critic-ok",
+      store,
+      input: { task: "improve f.txt", repo: `file://${bareDir}/owner/repo.git`, critic: true },
+    });
+
+    assert.equal(outcome.status, "completed");
+    const out = outcome.output as { summary: string };
+    assert.equal(out.summary, "second claim");
+    assert.equal(callCount(), 4);
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+test("critic pass is off by default: no extra review call even with a real diff", async () => {
+  const bareDir = await mkdtemp(join(tmpdir(), "durable-critic-off-bare-"));
+  const seedDir = await mkdtemp(join(tmpdir(), "durable-critic-off-seed-"));
+  const seeder = new LocalExecutor({ root: seedDir });
+  await seeder.exec(
+    `git init -q -b main . && git config user.email t@t && git config user.name t && printf 'hello\\n' > f.txt && git add -A && git commit -qm seed && git clone -q --bare . ${bareDir}/owner/repo.git`,
+  );
+
+  const { model, callCount } = reactiveModel([
+    "```bash\necho changed >> f.txt\n```",
+    "```finish\nfirst claim\n```", // held by the verify nudge
+    "```finish\nsecond claim\n```", // honored: critic is not requested (input.critic unset)
+  ]);
+
+  const work = await mkdtemp(join(tmpdir(), "durable-critic-off-work-"));
+  const provider: ExecutorProvider = {
+    async create() {
+      return { handle: work };
+    },
+    attach(handle: string) {
+      return new LocalExecutor({ root: handle });
+    },
+  };
+
+  const orig = globalThis.fetch;
+  (globalThis as unknown as { fetch: unknown }).fetch = () =>
+    Promise.resolve({ ok: true, json: () => Promise.resolve({ number: 1, html_url: "http://example/owner/repo/pulls/1" }) });
+
+  try {
+    const wf = durableAgent({ model, executor: provider, workdir: "." });
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: wf,
+      runId: "run-critic-off",
+      store,
+      input: { task: "improve f.txt", repo: `file://${bareDir}/owner/repo.git` },
+    });
+
+    assert.equal(outcome.status, "completed");
+    const out = outcome.output as { summary: string };
+    assert.equal(out.summary, "second claim");
+    assert.equal(callCount(), 3, "no critic call without input.critic");
+
+    const steps = (await store.load("run-critic-off")).filter((e) => e.type === "step-completed");
+    assert.ok(!steps.some((s) => (s.name ?? "").includes("critic")), "no critic steps recorded when the feature is off");
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
 test("pre-telemetry logs (bare-string think steps) still replay", async () => {
   // this file's reactiveModel consumes turns per LIVE call (process-local
   // index) — replayed turns consume nothing, so the script starts at the

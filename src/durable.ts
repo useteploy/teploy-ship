@@ -7,7 +7,8 @@ import type { WorkflowContext, WorkflowDefinition } from "@neutron-build/workflo
 
 import { executeAction } from "./agent.js";
 import { FINISH_NUDGE_FAILED, FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, parseAction } from "./actions.js";
-import { commentOnPr, commitAndPush, fixPrompt, openPullRequest, parseRepoUrl, reviewPrompt, setupRepo, setupRepoForPr, tokenFor } from "./git.js";
+import { criticFeedback, isApproved, reviewWork } from "./critic.js";
+import { commentOnPr, commitAndPush, fixPrompt, openPullRequest, parseRepoUrl, reviewPrompt, setupRepo, setupRepoForPr, tokenFor, workingDiff } from "./git.js";
 import type { RepoCheckout } from "./git.js";
 import { condenseIfNeeded, defaultCondenseConfig } from "./memory.js";
 import type { CondenseConfig } from "./memory.js";
@@ -62,6 +63,17 @@ export interface DurableAgentInput {
    * so pre-feature runs replay unchanged.
    */
   guard?: boolean;
+  /**
+   * Post-finish critic pass: before a finish that survives the verify
+   * nudge is honored, an independent reviewer (Team/TeamPolicy over a
+   * single critic member — see critic.ts) checks the working-tree diff
+   * against the task and either approves or sends the run back once with
+   * concrete feedback. Bounded to one critic-triggered retry per run —
+   * this never loops. Input-gated like steer/index/guard so pre-feature
+   * runs replay unchanged. Repo runs only (it reviews a git diff); a
+   * non-repo run or an empty diff skips it and finishes as today.
+   */
+  critic?: boolean;
 }
 
 export interface DurableAgentOutput {
@@ -270,6 +282,7 @@ export function durableAgent(
       let finishNudged = false;
       let failNudges = 0;
       let lastExecFailed = false;
+      let criticDone = false;
 
       const usage: RunUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
       const addUsage = (u: Partial<RunUsage> | undefined): void => {
@@ -388,6 +401,34 @@ export function durableAgent(
             } else if (lastExecFailed && failNudges < 2) {
               failNudges += 1;
               nudge = FINISH_NUDGE_FAILED;
+            } else if (input.critic === true && checkout !== null && !criticDone) {
+              criticDone = true;
+              // Both failures are caught INSIDE the step, so the step always
+              // records a value rather than throwing: a step that throws would
+              // re-run on replay and could take a different branch, breaking
+              // determinism. Same fail-open-on-broken-review rule as the live
+              // loop in agent.ts — a real non-approval verdict still blocks.
+              const diff = await ctx.step(`turn-${turn}-critic-diff`, async () => {
+                try {
+                  return await workingDiff(executor);
+                } catch {
+                  return "";
+                }
+              });
+              if (diff.trim() !== "") {
+                const reviewStep = await ctx.step(`turn-${turn}-critic`, async () => {
+                  try {
+                    const review = await reviewWork(config.model, { task: input.task, summary: action.message, diff });
+                    return { text: review.text, usage: review.usage, reviewed: true };
+                  } catch {
+                    return { text: "", usage: undefined, reviewed: false };
+                  }
+                });
+                addUsage(reviewStep.usage);
+                if (reviewStep.reviewed && !isApproved(reviewStep.text)) {
+                  nudge = criticFeedback(reviewStep.text);
+                }
+              }
             }
             if (nudge !== null) {
               messages.push({ role: "user", content: nudge });

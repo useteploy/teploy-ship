@@ -158,6 +158,21 @@ export async function commitAndPush(
   return { sha };
 }
 
+/**
+ * Best-effort working-tree diff (staged + unstaged, `git add -A` first) —
+ * feeds the critic pass (critic.ts). Empty string when there's no repo, no
+ * git, or nothing changed; advisory, never throws (a diff failure degrades
+ * the critic pass, never the run — same posture as the code-index refresh).
+ */
+export async function workingDiff(executor: AgentExecutor, maxChars = 6000): Promise<string> {
+  const added = await executor.exec("git add -A", { timeoutMs: 60_000 });
+  if (added.exitCode !== 0) return "";
+  const diff = await executor.exec("git diff --cached", { timeoutMs: 60_000 });
+  if (diff.exitCode !== 0) return "";
+  const text = diff.stdout;
+  return text.length > maxChars ? `${text.slice(0, maxChars)}\n... [truncated]` : text;
+}
+
 export interface PullRequest {
   url: string;
   number: number;

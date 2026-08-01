@@ -78,7 +78,7 @@ export interface ShipRuntime {
   execute(
     workflow: WorkflowDefinition<{ task: string }, unknown>,
     runId: string,
-    input?: { task: string; repo?: string; pr?: number; plan?: boolean; steer?: boolean; index?: boolean; guard?: boolean },
+    input?: { task: string; repo?: string; pr?: number; plan?: boolean; steer?: boolean; index?: boolean; guard?: boolean; critic?: boolean },
   ): Promise<RunOutcome | null>;
   saveMeta(meta: RunMeta): Promise<void>;
   loadMeta(runId: string): Promise<RunMeta | null>;
@@ -139,7 +139,7 @@ export interface NucleusShipRuntime extends ShipRuntime {
 }
 
 export async function nucleusRuntime(url: string, owner: string): Promise<NucleusShipRuntime> {
-  const db = new NucleusPgwire(url);
+  const db = new NucleusPgwire(url, owner);
   const store = new NucleusEventStore(db.streams, { prefix: "ship" });
   const index = new RunIndex(db.document, { collection: "ship_runs" });
   const leases = new LeaseManager(db.kv, { prefix: "ship:lease", ttlSeconds: 60 });
@@ -230,6 +230,8 @@ export async function enqueueRun(
     repo?: string;
     pr?: number;
     plan?: boolean;
+    /** Post-finish critic pass (see DurableAgentInput.critic in durable.ts). Opt-in, default off. */
+    critic?: boolean;
     workflowName?: string;
     /** Intake source, recorded so completion can settle spend against it. */
     source?: string;
@@ -248,6 +250,7 @@ export async function enqueueRun(
         ...(options.repo !== undefined ? { repo: options.repo } : {}),
         ...(options.pr !== undefined ? { pr: options.pr } : {}),
         ...(options.plan === true ? { plan: true } : {}),
+        ...(options.critic === true ? { critic: true } : {}),
         // Every newly-enqueued run is steerable and index-eligible; runs
         // enqueued before these flags existed replay without the extra
         // steps (input-gated in durable). The executing worker's config
