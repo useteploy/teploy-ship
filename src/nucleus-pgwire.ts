@@ -19,10 +19,40 @@ function int(n: number): number {
  */
 export class NucleusPgwire {
   #pool: pg.Pool;
+  #owner: string;
   #docsReady: Promise<void> | null = null;
 
-  constructor(url: string) {
-    this.#pool = new pg.Pool({ connectionString: url, max: 4 });
+  /**
+   * @param owner Same identifier callers already pass to `nucleusRuntime`
+   *   (`web-{host}-{pid}`, `worker-{host}-{pid}`, `cli-{host}-{pid}`) — reused
+   *   here as the correlation tag on pool-level log lines, since a pool
+   *   'error' isn't tied to any single in-flight query/run.
+   */
+  constructor(url: string, owner = "unknown") {
+    this.#owner = owner;
+    this.#pool = new pg.Pool({
+      connectionString: url,
+      max: 4,
+      // Fail loud instead of hanging forever when ship-nucleus is down or
+      // unreachable (container restart, accessory upgrade, network blip):
+      // 5s to acquire a connection — either dialing fresh or waiting on the
+      // pool when all 4 are checked out — well above normal Tailscale-mesh
+      // latency but short enough that a caller sees a real error quickly.
+      connectionTimeoutMillis: 5_000,
+      // Asks for a 30s server-side cap on any one query, via the startup
+      // packet node-postgres sends on every connection it opens.
+      //
+      // Against Nucleus today this is INERT: the wire layer stores startup
+      // parameters as metadata and never applies them, and its own built-in
+      // statement cap already happens to be 30s — so this changes nothing
+      // now, and is here so the intent survives if Nucleus starts honouring
+      // the parameter (or this pool is ever pointed at real Postgres).
+      // Deliberately matched to the engine default rather than set tighter:
+      // the heaviest work on this pool is code-index vector search and bulk
+      // chunk writes, and code-index.ts caches its rejected promise, so a
+      // timeout there would disable search for the life of the process.
+      statement_timeout: 30_000,
+    });
     // An idle pooled connection dying (engine restart, accessory upgrade)
     // emits 'error' on the pool; unhandled, that event CRASHES the process.
     // Bit live 2026-07-10: a nucleus accessory upgrade took the worker down
@@ -30,7 +60,7 @@ export class NucleusPgwire {
     // reject through their own promises — this handler only absorbs the
     // idle-client death so the pool can mint fresh connections.
     this.#pool.on("error", (err) => {
-      console.error(`[nucleus-pgwire] pool connection error (will reconnect): ${err.message}`);
+      console.error(`[nucleus-pgwire] pool connection error (${this.#owner}, will reconnect): ${err.message}`);
     });
   }
 
