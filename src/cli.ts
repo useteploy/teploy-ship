@@ -1016,6 +1016,11 @@ async function webCommand(rest: string[]): Promise<void> {
   // Strip what the dashboard has no business holding.
   for (const name of WORKER_ONLY_SECRETS) delete env[name];
   if (dropped.length > 0) {
+    // Pass the NAMES (never the values) so the settings page can still report
+    // them accurately. Without this it reads a dropped variable as absent and
+    // tells the operator a configured credential is missing — sending them off
+    // to re-set something that was never wrong.
+    env.SHIP_WORKER_ONLY_SECRETS = dropped.join(",");
     process.stderr.write(dim(`dropping worker-only secrets from the web process: ${dropped.join(", ")}\n`));
   }
 

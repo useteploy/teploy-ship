@@ -25,8 +25,28 @@ interface SettingsData {
   me: Principal;
 }
 
-/** Present a secret as set/unset without ever revealing it. */
+/**
+ * Names of secrets `teploy-ship web` deliberately removed from this process's
+ * environment (they belong to the worker). Reported, not read.
+ */
+const WORKER_ONLY = new Set(
+  (process.env.SHIP_WORKER_ONLY_SECRETS ?? "")
+    .split(",")
+    .map((n) => n.trim())
+    .filter((n) => n !== ""),
+);
+
+/**
+ * Present a secret as set/unset without ever revealing it.
+ *
+ * A secret scoped to the worker is NOT absent — this process cannot see it by
+ * design. Reporting that as "not set" would send an operator to re-set a
+ * credential that was never wrong.
+ */
 function secret(name: string): Row {
+  if (WORKER_ONLY.has(name)) {
+    return { label: name, value: "set — scoped to the worker, not readable here", ok: true };
+  }
   const v = process.env[name];
   return { label: name, value: v !== undefined && v !== "" ? "set" : "not set", ok: v !== undefined && v !== "" };
 }
