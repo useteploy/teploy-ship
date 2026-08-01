@@ -9,6 +9,7 @@ import type { RunMeta } from "teploy-ship/runtime";
 import { shipRuntime } from "../../lib/store.server.js";
 import { itemClass, runOutcome, since, took, toTimeline } from "../../lib/timeline.js";
 import type { RunOutcome, TimelineItem } from "../../lib/timeline.js";
+import { startSpan } from "../../lib/observe.server.js";
 
 export const config = { mode: "app" };
 
@@ -37,33 +38,45 @@ function planFrom(events: { type: string; name?: string; data?: unknown }[]): st
   return typeof text === "string" ? text : undefined;
 }
 
+// This is the one route with an open reliability question (b7d5db3: a run
+// page occasionally 500'd with the trigger never pinned down), so it gets a
+// trace span in addition to the ErrorBoundary every route already has —
+// no-op unless OBSERVE_URL/OBSERVE_API_KEY are set.
 export async function loader({ params }: { params: { id: string } }): Promise<RunData> {
-  const runtime = await shipRuntime();
   const runId = params.id;
-  const [meta, events, ranOn, steerNotes] = await Promise.all([
-    runtime.loadMeta(runId),
-    runtime.store.load(runId),
-    runtime.placement.get(runId),
-    runtime.steer.pending(runId).catch(() => []),
-  ]);
-  if (meta !== null && ranOn !== null) meta.ranOn = ranOn;
-  const outcome = runOutcome(events);
-  const cost = costUSD(meta?.model ?? "", outcome.usage);
-  const started = events.find((e) => e.type === "run-started");
-  const steerable =
-    (started?.data as { input?: { steer?: boolean } } | undefined)?.input?.steer === true;
-  const plan = planFrom(events);
-  return {
-    meta,
-    items: toTimeline(events),
-    outcome,
-    costUSD: cost,
-    runId,
-    eventCount: events.length,
-    ...(plan !== undefined ? { plan } : {}),
-    steerable,
-    steerPending: steerNotes.map((n) => n.text),
-  };
+  const span = startSpan("GET /runs/:id", { "run.id": runId });
+  try {
+    const runtime = await shipRuntime();
+    const [meta, events, ranOn, steerNotes] = await Promise.all([
+      runtime.loadMeta(runId),
+      runtime.store.load(runId),
+      runtime.placement.get(runId),
+      runtime.steer.pending(runId).catch(() => []),
+    ]);
+    if (meta !== null && ranOn !== null) meta.ranOn = ranOn;
+    const outcome = runOutcome(events);
+    const cost = costUSD(meta?.model ?? "", outcome.usage);
+    const started = events.find((e) => e.type === "run-started");
+    const steerable =
+      (started?.data as { input?: { steer?: boolean } } | undefined)?.input?.steer === true;
+    const plan = planFrom(events);
+    const data: RunData = {
+      meta,
+      items: toTimeline(events),
+      outcome,
+      costUSD: cost,
+      runId,
+      eventCount: events.length,
+      ...(plan !== undefined ? { plan } : {}),
+      steerable,
+      steerPending: steerNotes.map((n) => n.text),
+    };
+    span.end("ok", { "run.status": meta?.status ?? "unknown", "run.event_count": events.length });
+    return data;
+  } catch (err) {
+    span.end("error");
+    throw err;
+  }
 }
 
 /** A PR reference may be a full URL or a bare number; make it a link when we can. */

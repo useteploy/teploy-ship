@@ -5,6 +5,7 @@ import type { MiddlewareFn } from "@neutron-build/core";
 import { currentUser, requiredRole, roleAllows, sameOrigin, isMutating } from "../lib/session.server.js";
 import { teployNav } from "../lib/nav.server.js";
 import type { NavData } from "../lib/nav.server.js";
+import { installProcessErrorHooks, reportError } from "../lib/observe.server.js";
 
 /** Cross-product dashboard switcher config (top-left). Server-side loader so it
  * renders with SSR and never causes a hydration mismatch. */
@@ -54,6 +55,11 @@ function activeHref(path: string): string | null {
  * settings/sources/users need admin.
  */
 export const middleware: MiddlewareFn = async (request, _context, next) => {
+  // Runs only on the server (middleware is a routing concept, never
+  // hydrated), so this is a safe, guaranteed-once-per-process place to
+  // install the catch-alls for anything that escapes a request entirely.
+  // No-op unless OBSERVE_URL and OBSERVE_API_KEY are set.
+  installProcessErrorHooks();
   const url = new URL(request.url);
   const path = url.pathname;
   // /hooks/* authenticates via webhook HMAC inside the route, not bearer;
@@ -422,8 +428,10 @@ export default function Layout({ children, data }: { children: ComponentChildren
  */
 export function ErrorBoundary({ error }: { error: Error }) {
   // Server-side render, so this reaches the container log — the one place an
-  // operator can actually go looking after the fact.
+  // operator can actually go looking after the fact. Also reported to Observe
+  // (no-op unless configured) so it shows up structured instead of only here.
   console.error(`[ship] render failed: ${error?.message ?? String(error)}`, error?.stack ?? "");
+  reportError(error);
   return (
     <>
       <style dangerouslySetInnerHTML={{ __html: CSS }} />
