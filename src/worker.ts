@@ -14,6 +14,9 @@ import type { IntakeStore, IntakePolicy, IntakeTask } from "./intake.js";
 import type { SourcePolicy } from "./policies.js";
 import { makeObserveEmitter } from "./observe.js";
 import { multiNotifier, slackNotifier, webhookNotifier } from "./notify.js";
+import type { RunNotification } from "./notify.js";
+import { NucleusOutbox, flushOutbox, notificationId } from "./outbox.js";
+import type { Outbox } from "./outbox.js";
 import type { SpendStore } from "./spend.js";
 import { utcDay } from "./spend.js";
 import { NucleusAdmission } from "./admission.js";
@@ -65,6 +68,8 @@ export interface WorkerOptions {
   admission?: AdmissionControl;
   /** Hard per-run spend ceiling in USD (0 = off, or SHIP_MAX_RUN_COST_USD). */
   maxRunCostUSD?: number;
+  /** Durable notification outbox. Defaults to the Nucleus-backed implementation. */
+  outbox?: Outbox;
   /**
    * Budget held per in-flight run until its real cost is known (default 0.50,
    * or SHIP_ESTIMATED_RUN_COST_USD). Only affects how conservatively the daily
@@ -278,6 +283,16 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
   // program (SHIP_NOTIFY_URL + SHIP_NOTIFY_SECRET) — that is the one a
   // workspace consumes to offer an approve button. Either, both, or neither.
   const notify = multiNotifier([slackNotifier({ log }), webhookNotifier({ log })]);
+  const outbox = options.outbox ?? new NucleusOutbox(options.runtime.db);
+  /** Record that a notification is owed. */
+  const owe = (event: RunNotification): Promise<void> =>
+    outbox.enqueue({ id: notificationId(event), event });
+  /** Attempt every owed notification; failures stay owed with a backoff. */
+  const flush = (): Promise<number> =>
+    flushOutbox(outbox, (event, id) => notify.runEvent(event, id)).catch((error) => {
+      log(`[worker] outbox flush failed: ${error instanceof Error ? error.message : String(error)}`);
+      return 0;
+    });
   // Runs actively executing on THIS worker — reported as fleet load. A Set keyed
   // by runId (not a counter) so it self-corrects: onRunStart fires only after we
   // win the lease, and onComplete OR onError removes it — a run that throws
@@ -439,6 +454,14 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
   // Runs this worker launched and is still holding fleet resources for.
   const inFlight = new Map<string, string>();
 
+  // Retry anything the outbox still owes. Rides the sweep timer rather than a
+  // timer of its own: the retry cadence only has to be "eventually", and the
+  // backoff inside the outbox is what actually paces it.
+  const retryNotifications = async (): Promise<void> => {
+    if (!notify.enabled) return;
+    await flush();
+  };
+
   const sweep = async (): Promise<void> => {
     // Re-read the live policies each tick so dashboard edits take effect
     // without a worker restart. Store wins over the env seed; a per-source
@@ -463,6 +486,16 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
       policies[p.source] = p.policy;
       if (p.dailyBudgetUSD !== undefined) storeBudgets[p.source] = p.dailyBudgetUSD;
     }
+    // Release tasks claimed for a run that never came into existence (the
+    // worker died between claiming and enqueueing). Without this they stay
+    // "launched" forever, pointing at a run id nothing will ever produce.
+    await options.runtime.intake
+      .reconcile(async (runId) => (await options.runtime.store.load(runId)).length > 0)
+      .then((released) => {
+        if (released.length > 0) log(`[worker] intake: released ${released.length} task(s) whose launch never landed`);
+      })
+      .catch((error) => log(`[worker] intake reconcile: ${error instanceof Error ? error.message : String(error)}`));
+
     return sweepIntake({
       intake: options.runtime.intake,
       spend: options.runtime.spend,
@@ -501,6 +534,7 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
     if (sweeping) return;
     sweeping = true;
     void sweep()
+      .then(() => retryNotifications())
       .catch((error) => log(`[worker] intake sweep: ${error instanceof Error ? error.message : String(error)}`))
       .finally(() => {
         sweeping = false;

@@ -51,3 +51,37 @@ test("intake: claim wins once on a proposed task and refuses everything else", a
   assert.equal(await store.claim(gone.taskId), false, "dismissed tasks are not claimable");
   assert.equal(await store.claim("task-missing"), false, "unknown ids are not claimable");
 });
+
+test("TS-012: a claim records the run id, so a launch that never landed can be released", async () => {
+  const store = new FileIntakeStore(await mkdtemp(join(tmpdir(), "intake-reconcile-")));
+  const { task } = await store.propose({
+    source: "forgejo",
+    kind: "issue",
+    title: "fix it",
+    dedupeKey: "forgejo:1",
+  });
+
+  // The worker claims for a run it is about to enqueue, then dies.
+  assert.equal(await store.claim(task.taskId, "run-ghost"), true);
+  const claimed = await store.get(task.taskId);
+  assert.equal(claimed?.state, "launched");
+  assert.equal(claimed?.runId, "run-ghost", "the run id is written WITH the claim, not after it");
+
+  // Reconcile sees a task pointing at a run with no events and puts it back.
+  const released = await store.reconcile(async () => false);
+  assert.deepEqual(released, [task.taskId]);
+  assert.equal((await store.get(task.taskId))?.state, "proposed");
+
+  // A task whose run really exists is left alone.
+  assert.equal(await store.claim(task.taskId, "run-real"), true);
+  assert.deepEqual(await store.reconcile(async () => true), []);
+  assert.equal((await store.get(task.taskId))?.state, "launched");
+});
+
+test("a claim still collapses two racing launchers to one", async () => {
+  const store = new FileIntakeStore(await mkdtemp(join(tmpdir(), "intake-race-")));
+  const { task } = await store.propose({ source: "slack", kind: "mention", title: "t", dedupeKey: "slack:1" });
+  assert.equal(await store.claim(task.taskId, "run-a"), true);
+  assert.equal(await store.claim(task.taskId, "run-b"), false, "the second launcher loses");
+  assert.equal((await store.get(task.taskId))?.runId, "run-a");
+});

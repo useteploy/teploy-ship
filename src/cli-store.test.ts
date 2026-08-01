@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -44,7 +44,8 @@ function reactiveModel(turns: Array<string | ((obs: string) => string)>): ModelA
 
 test("FileEventStore round-trips, dedupes by seq (first writer wins), and sorts", async () => {
   const dir = await mkdtemp(join(tmpdir(), "ship-store-"));
-  const store = new FileEventStore(dir);
+  const conflicts: string[] = [];
+  const store = new FileEventStore(dir, (m) => conflicts.push(m));
   const ev = (seq: number, name: string): WorkflowEvent => ({ v: 1, seq, type: "step-completed", at: "t", name, data: { result: name } });
 
   await store.append("r1", ev(1, "second"));
@@ -55,7 +56,37 @@ test("FileEventStore round-trips, dedupes by seq (first writer wins), and sorts"
   assert.equal(events.length, 2);
   assert.equal(events[0]?.name, "first");
   assert.equal(events[1]?.name, "second"); // first writer for seq 1 won
+  // Resolving the conflict quietly was the defect: two executors disagreeing
+  // about a run's history is exactly the thing an operator has to hear about.
+  assert.equal(conflicts.length, 1);
+  assert.match(conflicts[0]!, /two different events claim seq 1/);
   assert.deepEqual(await store.load("ghost"), []);
+});
+
+test("TS-017: a corrupt line in the MIDDLE of the log is refused, a torn tail is not", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ship-store-corrupt-"));
+  const store = new FileEventStore(dir);
+  const line = (seq: number, name: string): string =>
+    JSON.stringify({ v: 1, seq, type: "step-completed", at: "t", name, data: { result: name } });
+
+  // A crash mid-append leaves a partial LAST line. That is an uncommitted
+  // event: everything before it is intact, so the log loads.
+  await writeFile(join(dir, "torn.events.jsonl"), `${line(0, "a")}\n${line(1, "b")}\n{"v":1,"seq":2,"ty`);
+  const torn = await store.load("torn");
+  assert.equal(torn.length, 2, "a torn tail is dropped and the rest replays");
+
+  // A malformed line in the MIDDLE cannot be an uncommitted append — it is
+  // corruption, and skipping it while loading later events hands replay a
+  // history that never happened (re-running a model call, or a push).
+  await writeFile(join(dir, "holed.events.jsonl"), `${line(0, "a")}\nnot json at all\n${line(2, "c")}\n`);
+  await assert.rejects(() => store.load("holed"), /event log is corrupt at line 2/);
+});
+
+test("run ids that would escape the state directory are refused", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ship-store-path-"));
+  const store = new FileEventStore(dir);
+  await assert.rejects(() => store.load("../../etc/passwd"), /refusing unsafe run id/);
+  await assert.rejects(() => store.append("..", { v: 1, seq: 0, type: "run-started", at: "t" } as WorkflowEvent), /refusing unsafe run id/);
 });
 
 test("durable park -> approve -> resume works across store instances (separate CLI invocations)", async () => {

@@ -20,7 +20,12 @@ export interface RunNotification {
 
 export interface Notifier {
   enabled: boolean;
-  runEvent(event: RunNotification): void;
+  /**
+   * Deliver, resolving true only when the receiver accepted it. Callers use
+   * that to decide whether the outbox entry can be settled — a fire-and-forget
+   * void return could not distinguish "sent" from "lost".
+   */
+  runEvent(event: RunNotification, deliveryId?: string): Promise<boolean>;
 }
 
 /**
@@ -36,8 +41,11 @@ export function multiNotifier(notifiers: Notifier[]): Notifier {
   const active = notifiers.filter((n) => n.enabled);
   return {
     enabled: active.length > 0,
-    runEvent(event) {
-      for (const n of active) n.runEvent(event);
+    async runEvent(event, deliveryId) {
+      // All-or-nothing: if any member failed, the entry stays owed and the
+      // retry re-delivers to everyone. Receivers dedupe on the delivery id.
+      const results = await Promise.all(active.map((n) => n.runEvent(event, deliveryId)));
+      return results.every(Boolean);
     },
   };
 }
@@ -73,20 +81,23 @@ export function slackNotifier(options?: {
   const publicUrl = options?.publicUrl ?? process.env.SHIP_PUBLIC_URL ?? "";
   const log = options?.log ?? ((line: string) => process.stderr.write(line + "\n"));
   const fetchImpl = options?.fetchImpl ?? fetch;
-  if (webhookUrl === "") return { enabled: false, runEvent: () => {} };
+  if (webhookUrl === "") return { enabled: false, runEvent: async () => true };
   return {
     enabled: true,
-    runEvent(event) {
-      if (!notifiable(event.status)) return;
-      void fetchImpl(webhookUrl, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text: formatRunNotification(event, publicUrl) }),
-      })
-        .then((response) => {
-          if (!response.ok) log(`[notify] slack webhook ${response.status}`);
-        })
-        .catch((error) => log(`[notify] slack webhook failed: ${error instanceof Error ? error.message : String(error)}`));
+    async runEvent(event) {
+      if (!notifiable(event.status)) return true;
+      try {
+        const response = await fetchImpl(webhookUrl, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ text: formatRunNotification(event, publicUrl) }),
+        });
+        if (!response.ok) log(`[notify] slack webhook ${response.status}`);
+        return response.ok;
+      } catch (error) {
+        log(`[notify] slack webhook failed: ${error instanceof Error ? error.message : String(error)}`);
+        return false;
+      }
     },
   };
 }
@@ -175,24 +186,31 @@ export function webhookNotifier(options?: {
   const publicUrl = options?.publicUrl ?? process.env.SHIP_PUBLIC_URL ?? "";
   const log = options?.log ?? ((line: string) => process.stderr.write(line + "\n"));
   const fetchImpl = options?.fetchImpl ?? fetch;
-  if (webhookUrl === "") return { enabled: false, runEvent: () => {} };
+  if (webhookUrl === "") return { enabled: false, runEvent: async () => true };
   return {
     enabled: true,
-    runEvent(event) {
-      if (!notifiable(event.status)) return;
+    async runEvent(event, deliveryId) {
+      if (!notifiable(event.status)) return true;
       const body = JSON.stringify(runWebhookPayload(event, publicUrl));
-      void signWebhookBody(secret, body)
-        .then((headers) =>
-          fetchImpl(webhookUrl, {
-            method: "POST",
-            headers: { "content-type": "application/json", ...headers },
-            body,
-          }),
-        )
-        .then((response) => {
-          if (!response.ok) log(`[notify] webhook ${response.status}`);
-        })
-        .catch((error) => log(`[notify] webhook failed: ${error instanceof Error ? error.message : String(error)}`));
+      try {
+        const headers = await signWebhookBody(secret, body);
+        const response = await fetchImpl(webhookUrl, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            // Retries are at-least-once by design; this lets a receiver
+            // recognise a repeat instead of acting on it twice.
+            ...(deliveryId !== undefined ? { "X-Teploy-Delivery": deliveryId } : {}),
+            ...headers,
+          },
+          body,
+        });
+        if (!response.ok) log(`[notify] webhook ${response.status}`);
+        return response.ok;
+      } catch (error) {
+        log(`[notify] webhook failed: ${error instanceof Error ? error.message : String(error)}`);
+        return false;
+      }
     },
   };
 }

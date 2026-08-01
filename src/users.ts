@@ -1,9 +1,10 @@
-import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { scrypt as scryptCb, randomBytes, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
 
 import type { NucleusPgwire } from "./nucleus-pgwire.js";
+import { withFileLock, writeJsonFile } from "./file-store.js";
 import { stateDir } from "./run-store.js";
 
 /**
@@ -129,12 +130,22 @@ export class FileUserStore implements UserStore {
     }
   }
 
+  /**
+   * Atomic, with a UNIQUE temp name. A shared `${file}.tmp` meant two
+   * overlapping writers staged over each other and one rename landed a
+   * half-written account file.
+   */
   async #write(users: ShipUser[]): Promise<void> {
-    const { dirname } = await import("node:path");
-    await mkdir(dirname(this.#file), { recursive: true });
-    const tmp = `${this.#file}.tmp`;
-    await writeFile(tmp, JSON.stringify({ users } satisfies UsersFile, null, 2), { mode: 0o600 });
-    await rename(tmp, this.#file);
+    await writeJsonFile(this.#file, { users } satisfies UsersFile, 0o600);
+  }
+
+  /**
+   * Serialize a read-modify-write on the account file. Account changes are the
+   * one place where a lost update is an authorization bug: two admins editing
+   * at once could otherwise resurrect a removed user or undo a role change.
+   */
+  #mutate<T>(fn: () => Promise<T>): Promise<T> {
+    return withFileLock(this.#file, fn);
   }
 
   async list(): Promise<UserView[]> {
@@ -157,36 +168,44 @@ export class FileUserStore implements UserStore {
   }
 
   async create(username: string, password: string, role: Role): Promise<void> {
-    const u = validateUsername(username);
-    validatePassword(password);
-    const users = await this.#read();
-    if (users.some((x) => x.username === u)) throw new Error(`user "${u}" already exists`);
-    users.push({ username: u, passwordHash: await hashPassword(password), role: normalizeRole(role), createdAt: new Date().toISOString() });
-    await this.#write(users);
+    return this.#mutate(async () => {
+      const u = validateUsername(username);
+      validatePassword(password);
+      const users = await this.#read();
+      if (users.some((x) => x.username === u)) throw new Error(`user "${u}" already exists`);
+      users.push({ username: u, passwordHash: await hashPassword(password), role: normalizeRole(role), createdAt: new Date().toISOString() });
+      await this.#write(users);
+    });
   }
 
   async setPassword(username: string, password: string): Promise<void> {
-    validatePassword(password);
-    const users = await this.#read();
-    const u = users.find((x) => x.username === username);
-    if (!u) throw new Error("user not found");
-    u.passwordHash = await hashPassword(password);
-    await this.#write(users);
+    return this.#mutate(async () => {
+      validatePassword(password);
+      const users = await this.#read();
+      const u = users.find((x) => x.username === username);
+      if (!u) throw new Error("user not found");
+      u.passwordHash = await hashPassword(password);
+      await this.#write(users);
+    });
   }
 
   async setRole(username: string, role: Role): Promise<void> {
-    const users = await this.#read();
-    const u = users.find((x) => x.username === username);
-    if (!u) throw new Error("user not found");
-    u.role = normalizeRole(role);
-    await this.#write(users);
+    return this.#mutate(async () => {
+      const users = await this.#read();
+      const u = users.find((x) => x.username === username);
+      if (!u) throw new Error("user not found");
+      u.role = normalizeRole(role);
+      await this.#write(users);
+    });
   }
 
   async remove(username: string): Promise<void> {
-    const users = await this.#read();
-    const next = users.filter((x) => x.username !== username);
-    if (next.length === users.length) throw new Error("user not found");
-    await this.#write(next);
+    return this.#mutate(async () => {
+      const users = await this.#read();
+      const next = users.filter((x) => x.username !== username);
+      if (next.length === users.length) throw new Error("user not found");
+      await this.#write(next);
+    });
   }
 }
 

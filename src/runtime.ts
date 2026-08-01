@@ -24,6 +24,8 @@ import { FileUserStore, NucleusUserStore } from "./users.js";
 import type { UserStore } from "./users.js";
 import { FileDeliveryLog, NucleusDeliveryLog } from "./deliveries.js";
 import type { DeliveryLog } from "./deliveries.js";
+import { FileOutbox, NucleusOutbox } from "./outbox.js";
+import type { Outbox } from "./outbox.js";
 import { NucleusPgwire } from "./nucleus-pgwire.js";
 import { migrate } from "./migrations.js";
 import { assertRepoAllowed } from "./repo-policy.js";
@@ -46,6 +48,8 @@ export { FileRepoMemory, NucleusRepoMemory, loadRepoContext, runNote } from "./r
 export type { SteerStore, SteerNote } from "./steer.js";
 export { FileSteerStore, NucleusSteerStore } from "./steer.js";
 export type { DeliveryLog } from "./deliveries.js";
+export type { Outbox, OutboxEntry } from "./outbox.js";
+export { FileOutbox, NucleusOutbox, flushOutbox, notificationId } from "./outbox.js";
 export { FileDeliveryLog, NucleusDeliveryLog, DELIVERY_TTL_S } from "./deliveries.js";
 export type { UserStore, ShipUser, UserView, Role } from "./users.js";
 export {
@@ -121,6 +125,8 @@ export interface ShipRuntime {
   users: UserStore;
   /** Seen webhook deliveries — replay protection for the public hook routes. */
   deliveries: DeliveryLog;
+  /** Durable notification outbox (see outbox.ts). */
+  outbox: Outbox;
   /**
    * Atomically take ownership of the decision a parked run is waiting on.
    * True iff THIS caller won: the run's eventName is cleared as part of the
@@ -148,6 +154,7 @@ export function fileRuntime(): ShipRuntime {
     steer: new FileSteerStore(),
     users: new FileUserStore(),
     deliveries: new FileDeliveryLog(),
+    outbox: new FileOutbox(),
     // File mode is single-process by construction, so read-check-write is the
     // honest implementation; the Nucleus path below is the real atomic one.
     claimDecision: async (runId, eventName) => {
@@ -200,7 +207,22 @@ export async function nucleusRuntime(
   const saveMeta = async (m: RunMeta): Promise<void> => {
     const doc = { ...m } as Record<string, unknown>;
     const updated = await db.document.update(META_COLLECTION, { runId: m.runId }, doc);
-    if (updated === 0) await db.document.insert(META_COLLECTION, doc);
+    if (updated > 0) return;
+    // ship_docs has no unique index (Nucleus cannot add one to a populated
+    // table), so two concurrent first-saves could both update zero rows and
+    // both insert — after which loadMeta returns whichever row comes back first
+    // and every later update writes to both. The KV claim is the identity the
+    // schema cannot express.
+    const guard = `ship:meta:${m.runId}`;
+    if (await db.kv.setNX(guard, "1", { ttl: 30 })) {
+      if ((await db.document.update(META_COLLECTION, { runId: m.runId }, doc)) === 0) {
+        await db.document.insert(META_COLLECTION, doc);
+      }
+      return;
+    }
+    // Someone else is creating this run's row; their insert is the one that
+    // counts, so apply our fields on top of it.
+    await db.document.update(META_COLLECTION, { runId: m.runId }, doc);
   };
   // The index is status-authoritative: the worker records outcomes there
   // (not in ship_meta), so reads overlay index status onto the meta doc.
@@ -235,6 +257,7 @@ export async function nucleusRuntime(
     steer: new NucleusSteerStore(db),
     users: new NucleusUserStore(db),
     deliveries: new NucleusDeliveryLog(db),
+    outbox: new NucleusOutbox(db),
     /**
      * One conditional UPDATE decides the winner: the filter includes the
      * eventName the caller believes is parked, so a stale tab (or a second

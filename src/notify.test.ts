@@ -103,15 +103,32 @@ test("webhook notifier is disabled without a url, so nothing is sent", () => {
   assert.equal(webhookNotifier({ webhookUrl: "", fetchImpl: (() => { throw new Error("must not fetch"); }) as unknown as typeof fetch }).enabled, false);
 });
 
-test("multiNotifier fans out to enabled members and stays disabled when none are", () => {
+test("multiNotifier fans out to enabled members and stays disabled when none are", async () => {
   const calls: string[] = [];
-  const on = (name: string): Notifier => ({ enabled: true, runEvent: () => calls.push(name) });
-  const off: Notifier = { enabled: false, runEvent: () => calls.push("off") };
+  const on = (name: string, ok = true): Notifier => ({
+    enabled: true,
+    runEvent: async () => {
+      calls.push(name);
+      return ok;
+    },
+  });
+  const off: Notifier = {
+    enabled: false,
+    runEvent: async () => {
+      calls.push("off");
+      return true;
+    },
+  };
 
   const both = multiNotifier([on("a"), off, on("b")]);
   assert.ok(both.enabled);
-  both.runEvent({ runId: "r", status: "completed" });
+  assert.equal(await both.runEvent({ runId: "r", status: "completed" }), true);
   assert.deepEqual(calls, ["a", "b"], "a disabled member must not receive events");
+
+  // One failed member means the whole delivery is unsettled, so the outbox
+  // retries it — receivers dedupe on the delivery id.
+  const partial = multiNotifier([on("c"), on("d", false)]);
+  assert.equal(await partial.runEvent({ runId: "r", status: "completed" }), false);
 
   assert.equal(multiNotifier([off, off]).enabled, false);
 });

@@ -2,6 +2,9 @@ import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
+/** How long a dedupe guard is held. Long enough to cover an insert, short enough to self-heal. */
+const DEDUPE_TTL_S = 60;
+
 import type { NucleusPgwire } from "./nucleus-pgwire.js";
 import { stateDir } from "./run-store.js";
 
@@ -58,13 +61,27 @@ export interface IntakeStore {
   get(taskId: string): Promise<IntakeTask | null>;
   setState(taskId: string, state: IntakeTask["state"], runId?: string): Promise<void>;
   /**
-   * Atomically transition proposed → launched; true iff THIS caller won.
-   * Every launcher (worker sweep, web queue) must claim before enqueueing
-   * a run, so two workers racing on the same proposed task collapse to
-   * one run instead of duplicate PRs. A claimer whose launch then fails
-   * must setState back to "proposed" to release the claim.
+   * Atomically transition proposed → launched, recording the run id the caller
+   * is about to create; true iff THIS caller won.
+   *
+   * Every launcher (worker sweep, web queue) must claim before enqueueing a
+   * run, so two workers racing on the same proposed task collapse to one run
+   * instead of duplicate PRs. Writing the run id AS PART OF the claim is what
+   * makes the launch crash-consistent: a process that dies between claiming and
+   * enqueueing leaves a task that names a run which does not exist, which
+   * {@link IntakeStore.reconcile} can recognise and release. Previously the id
+   * was written afterwards, so the same crash left a "launched" task pointing
+   * at nothing and no way to tell it from a healthy one.
+   *
+   * A claimer whose launch then fails must setState back to "proposed".
    */
-  claim(taskId: string): Promise<boolean>;
+  claim(taskId: string, runId?: string): Promise<boolean>;
+  /**
+   * Release tasks that were claimed for a run that never came into existence.
+   * `exists` answers whether a run id has any recorded events. Returns the
+   * task ids released.
+   */
+  reconcile(exists: (runId: string) => Promise<boolean>): Promise<string[]>;
 }
 
 function newTask(input: ProposeInput): IntakeTask {
@@ -145,13 +162,25 @@ export class FileIntakeStore implements IntakeStore {
    * deployments run on the Nucleus store, where claim is a conditional
    * UPDATE.
    */
-  async claim(taskId: string): Promise<boolean> {
+  async claim(taskId: string, runId?: string): Promise<boolean> {
     const task = await this.get(taskId);
     if (task === null || task.state !== "proposed") return false;
     task.state = "launched";
+    if (runId !== undefined) task.runId = runId;
     task.updatedAt = new Date().toISOString();
     await this.#write(task);
     return true;
+  }
+
+  async reconcile(exists: (runId: string) => Promise<boolean>): Promise<string[]> {
+    const released: string[] = [];
+    for (const task of await this.list("launched")) {
+      if (task.runId === undefined) continue;
+      if (await exists(task.runId)) continue;
+      await this.setState(task.taskId, "proposed");
+      released.push(task.taskId);
+    }
+    return released;
   }
 }
 
@@ -211,6 +240,24 @@ export class NucleusIntakeStore implements IntakeStore {
       [input.dedupeKey],
     );
     if (rows.length > 0) return { created: false, task: this.#toTask(rows[0]!) };
+
+    // SELECT-then-INSERT is not dedupe: two concurrent deliveries of one
+    // webhook both see nothing, both insert, and the two rows get different
+    // task ids — so the later conditional claim cannot collapse them and the
+    // same issue becomes two runs and two PRs. The table has no unique index
+    // to lean on (Nucleus), so the KV's atomic setNX decides the winner.
+    const guard = `ship:dedupe:${input.dedupeKey}`;
+    const holder = `${process.pid}:${randomUUID()}`;
+    if (!(await this.#db.kv.setNX(guard, holder, { ttl: DEDUPE_TTL_S }))) {
+      // Someone else is inserting this key right now. Re-read: their row is
+      // either already visible or about to be, and returning "not created" with
+      // their task is exactly what a duplicate delivery should get.
+      const again = await this.#db.query(
+        "SELECT * FROM ship_tasks WHERE dedupe_key = $1 AND state <> 'dismissed'",
+        [input.dedupeKey],
+      );
+      if (again.length > 0) return { created: false, task: this.#toTask(again[0]!) };
+    }
     const task = newTask(input);
     await this.#db.query(
       `INSERT INTO ship_tasks (task_id, source, kind, repo, pr, title, detail, dedupe_key, state, run_id, created_at, updated_at)
@@ -267,12 +314,37 @@ export class NucleusIntakeStore implements IntakeStore {
   }
 
   /** Conditional UPDATE: the row count says whether this caller won the race. */
-  async claim(taskId: string): Promise<boolean> {
+  async claim(taskId: string, runId?: string): Promise<boolean> {
     await this.#ensure();
-    const claimed = await this.#db.exec(
-      "UPDATE ship_tasks SET state = 'launched', updated_at = $1 WHERE task_id = $2 AND state = 'proposed'",
-      [new Date().toISOString(), taskId],
-    );
+    // The run id lands in the SAME statement as the state change, so there is
+    // no window where a task is launched but nobody knows which run it became.
+    const claimed =
+      runId !== undefined
+        ? await this.#db.exec(
+            "UPDATE ship_tasks SET state = 'launched', run_id = $1, updated_at = $2 WHERE task_id = $3 AND state = 'proposed'",
+            [runId, new Date().toISOString(), taskId],
+          )
+        : await this.#db.exec(
+            "UPDATE ship_tasks SET state = 'launched', updated_at = $1 WHERE task_id = $2 AND state = 'proposed'",
+            [new Date().toISOString(), taskId],
+          );
     return claimed === 1;
+  }
+
+  async reconcile(exists: (runId: string) => Promise<boolean>): Promise<string[]> {
+    await this.#ensure();
+    const released: string[] = [];
+    for (const task of await this.list("launched")) {
+      if (task.runId === undefined) continue;
+      if (await exists(task.runId)) continue;
+      // Conditional on still being launched for THIS run, so a task that got
+      // relaunched between the read and now is left alone.
+      const freed = await this.#db.exec(
+        "UPDATE ship_tasks SET state = 'proposed', updated_at = $1 WHERE task_id = $2 AND state = 'launched' AND run_id = $3",
+        [new Date().toISOString(), task.taskId, task.runId],
+      );
+      if (freed === 1) released.push(task.taskId);
+    }
+    return released;
   }
 }

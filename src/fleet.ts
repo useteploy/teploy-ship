@@ -1,7 +1,8 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { NucleusPgwire } from "./nucleus-pgwire.js";
+import { readJsonFile, updateJsonFile } from "./file-store.js";
+import { upsertByKey } from "./upsert.js";
 import { stateDir } from "./run-store.js";
 
 /**
@@ -57,19 +58,17 @@ export class FilePlacementStore implements PlacementStore {
     this.#path = join(dir, "placement.json");
   }
 
+  // A corrupt file throws rather than reading back as "no placements": these
+  // answers drive what the dashboard shows and what the sweep believes.
   async #read(): Promise<Record<string, string>> {
-    try {
-      return JSON.parse(await readFile(this.#path, "utf8"));
-    } catch {
-      return {};
-    }
+    return readJsonFile<Record<string, string>>(this.#path, {});
   }
 
   async set(runId: string, host: string): Promise<void> {
-    await mkdir(stateDir(), { recursive: true });
-    const all = await this.#read();
-    all[runId] = host;
-    await writeFile(this.#path, JSON.stringify(all, null, 2));
+    // Locked read-modify-write into the file's OWN directory (it used to mkdir
+    // stateDir(), so a store built on a custom nested dir failed on first write)
+    // and atomically renamed, so two overlapping sets cannot lose one.
+    await updateJsonFile<Record<string, string>>(this.#path, {}, (all) => ({ ...all, [runId]: host }));
   }
 
   async get(runId: string): Promise<string | null> {
@@ -99,12 +98,13 @@ export class NucleusPlacementStore implements PlacementStore {
 
   async set(runId: string, host: string): Promise<void> {
     await this.#ensure();
-    const existing = await this.#db.query("SELECT run_id FROM ship_placement WHERE run_id = $1", [runId]);
-    if (existing.length > 0) {
-      await this.#db.query("UPDATE ship_placement SET host = $1 WHERE run_id = $2", [host, runId]);
-    } else {
-      await this.#db.query("INSERT INTO ship_placement (run_id, host) VALUES ($1, $2)", [runId, host]);
-    }
+    await upsertByKey(this.#db, {
+      table: "ship_placement",
+      keyColumn: "run_id",
+      key: runId,
+      update: () => this.#db.query("UPDATE ship_placement SET host = $1 WHERE run_id = $2", [host, runId]),
+      insert: () => this.#db.query("INSERT INTO ship_placement (run_id, host) VALUES ($1, $2)", [runId, host]),
+    });
   }
 
   async get(runId: string): Promise<string | null> {
@@ -131,18 +131,11 @@ export class FileFleetStore implements FleetStore {
   }
 
   async #read(): Promise<Record<string, WorkerInfo>> {
-    try {
-      return JSON.parse(await readFile(this.#path, "utf8"));
-    } catch {
-      return {};
-    }
+    return readJsonFile<Record<string, WorkerInfo>>(this.#path, {});
   }
 
   async heartbeat(info: WorkerInfo): Promise<void> {
-    await mkdir(stateDir(), { recursive: true });
-    const all = await this.#read();
-    all[info.owner] = info;
-    await writeFile(this.#path, JSON.stringify(all, null, 2));
+    await updateJsonFile<Record<string, WorkerInfo>>(this.#path, {}, (all) => ({ ...all, [info.owner]: info }));
   }
 
   async list(): Promise<WorkerInfo[]> {
@@ -150,19 +143,18 @@ export class FileFleetStore implements FleetStore {
   }
 
   async prune(before: Date): Promise<number> {
-    const all = await this.#read();
     const cutoff = before.getTime();
-    const kept: Record<string, WorkerInfo> = {};
     let dropped = 0;
-    for (const [owner, info] of Object.entries(all)) {
-      const seen = new Date(info.lastSeen).getTime();
-      if (Number.isFinite(seen) && seen < cutoff) dropped++;
-      else kept[owner] = info;
-    }
-    if (dropped > 0) {
-      await mkdir(stateDir(), { recursive: true });
-      await writeFile(this.#path, JSON.stringify(kept, null, 2));
-    }
+    await updateJsonFile<Record<string, WorkerInfo>>(this.#path, {}, (all) => {
+      const kept: Record<string, WorkerInfo> = {};
+      dropped = 0;
+      for (const [owner, info] of Object.entries(all)) {
+        const seen = new Date(info.lastSeen).getTime();
+        if (Number.isFinite(seen) && seen < cutoff) dropped++;
+        else kept[owner] = info;
+      }
+      return kept;
+    });
     return dropped;
   }
 }
@@ -203,18 +195,21 @@ export class NucleusFleetStore implements FleetStore {
       info.startedAt,
       info.lastSeen,
     ];
-    const existing = await this.#db.query("SELECT owner FROM ship_fleet WHERE owner = $1", [info.owner]);
-    if (existing.length > 0) {
-      await this.#db.query(
-        "UPDATE ship_fleet SET host = $1, sandbox = $2, max_concurrent = $3, active_runs = $4, started_at = $5, last_seen = $6 WHERE owner = $7",
-        [...vals, info.owner],
-      );
-    } else {
-      await this.#db.query(
-        "INSERT INTO ship_fleet (host, sandbox, max_concurrent, active_runs, started_at, last_seen, owner) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-        [...vals, info.owner],
-      );
-    }
+    await upsertByKey(this.#db, {
+      table: "ship_fleet",
+      keyColumn: "owner",
+      key: info.owner,
+      update: () =>
+        this.#db.query(
+          "UPDATE ship_fleet SET host = $1, sandbox = $2, max_concurrent = $3, active_runs = $4, started_at = $5, last_seen = $6 WHERE owner = $7",
+          [...vals, info.owner],
+        ),
+      insert: () =>
+        this.#db.query(
+          "INSERT INTO ship_fleet (host, sandbox, max_concurrent, active_runs, started_at, last_seen, owner) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+          [...vals, info.owner],
+        ),
+    });
   }
 
   async list(): Promise<WorkerInfo[]> {

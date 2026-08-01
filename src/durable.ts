@@ -147,6 +147,15 @@ export interface ExecutorProvider {
    */
   snapshot?: (handle: string) => Promise<string>;
   createFrom?: (image: string) => Promise<{ handle: string }>;
+  /**
+   * Release a workspace. Optional, and deliberately best-effort: the provider
+   * had no way to say "done with this" at all, so every run's container sat
+   * allocated until the daemon's TTL reaper noticed — and a snapshot-restore
+   * cycle left the SUPERSEDED container behind too, so one run that parked
+   * three times held four workspaces. On a busy box that is most of the
+   * capacity.
+   */
+  destroy?: (handle: string) => Promise<void>;
 }
 
 export interface DurableAgentConfig {
@@ -387,12 +396,18 @@ export function durableAgent(
         }
         const decision = await ctx.waitForEvent<PlanDecisionPayload>(PLAN_EVENT);
         if (parkImage !== undefined) {
+          const superseded = handle;
           handle = await ctx.step("plan-restore", async () => (await config.executor.createFrom!(parkImage)).handle);
           executor = config.executor.attach(handle);
+          // The snapshot captured everything the old container held; keeping it
+          // allocated through the park (and every later park) is pure waste.
+          if (superseded !== handle) await dispose(config, superseded);
         }
 
         if (!decision.approved) {
           const reason = decision.reason !== undefined ? `: ${decision.reason}` : "";
+          // Nothing will run in the freshly restored workspace — let it go.
+          await dispose(config, handle);
           return { status: "plan-rejected", summary: `Plan rejected by the operator${reason}.`, turns: 0, usage };
         }
         const edited =
@@ -419,14 +434,19 @@ export function durableAgent(
           const spent = costUSD(modelId, usage);
           const summary = `Stopped at the $${maxRunCostUSD.toFixed(2)} per-run cost ceiling (spent ~$${spent.toFixed(2)}) after ${turn} turns.`;
           const pr = await publishIfRepoRun(ctx, executor, config, input, checkout, summary, repoPolicy, true);
+          await dispose(config, handle);
           return { status: "budget-exhausted", summary, turns: turn, usage, ...(pr !== null ? { pr } : {}) };
         }
         // Mid-run steering: drain the operator's pending notes as a
         // recorded step (the store is read once, live; replay returns the
         // recorded notes). Advisory — a store hiccup never fails the run.
         if (input.steer === true) {
+          // Keyed by turn so the drain is idempotent: this mutates the store
+          // before the step result is committed, and a crash in that window
+          // would otherwise consume the operator's notes without delivering
+          // them (they are not in the log, and they are no longer pending).
           const steers = await ctx.step(`turn-${turn}-steer`, async () =>
-            config.steer !== undefined ? config.steer.drain(ctx.runId).catch(() => []) : [],
+            config.steer !== undefined ? config.steer.drain(ctx.runId, turn).catch(() => []) : [],
           );
           for (const text of steers) {
             messages.push({ role: "user", content: `Operator steering — adjust course accordingly: ${text}` });
@@ -524,6 +544,7 @@ export function durableAgent(
             }
           }
           const pr = await publishIfRepoRun(ctx, executor, config, input, checkout, action.message, repoPolicy);
+          await dispose(config, handle);
           return { status: "finished", summary: action.message, turns: turn + 1, usage, ...(pr !== null ? { pr } : {}) };
         }
         if (action.kind === "none" || action.kind === "invalid") {
@@ -576,8 +597,10 @@ export function durableAgent(
           // be long gone). The new handle is a recorded step result, so
           // replay re-attaches identically without re-creating anything.
           if (parkImage !== undefined) {
+            const superseded = handle;
             handle = await ctx.step(`turn-${turn}-restore`, async () => (await config.executor.createFrom!(parkImage)).handle);
             executor = config.executor.attach(handle);
+            if (superseded !== handle) await dispose(config, superseded);
           }
 
           if (!approval.approved) {
@@ -602,6 +625,7 @@ export function durableAgent(
       // died in runs that never got to say finish — but as a DRAFT, because
       // "ran out of turns" and "done" must not look alike to a reviewer.
       const pr = await publishIfRepoRun(ctx, executor, config, input, checkout, `Reached the ${maxSteps}-turn limit.`, repoPolicy, true);
+      await dispose(config, handle);
       return { status: "max-steps", summary: `Reached the ${maxSteps}-turn limit.`, turns: maxSteps, usage, ...(pr !== null ? { pr } : {}) };
     },
     config.runTimeout !== undefined ? { timeout: config.runTimeout } : {},
@@ -728,6 +752,18 @@ async function publishIfRepoRun(
   return pr.url;
 }
 
+/**
+ * Best-effort workspace release. Never throws and never blocks the run: a
+ * container that outlives its usefulness is a capacity problem, but a run that
+ * fails because cleanup failed is a correctness problem.
+ */
+async function dispose(config: DurableAgentConfig, handle: string, log?: (line: string) => void): Promise<void> {
+  if (config.executor.destroy === undefined) return;
+  await config.executor.destroy(handle).catch((error) => {
+    log?.(`sandbox ${handle} could not be released: ${error instanceof Error ? error.message : String(error)}`);
+  });
+}
+
 function prTitle(task: string, incomplete: boolean): string {
   const prefix = incomplete ? "[incomplete] " : "";
   const room = 72 - prefix.length;
@@ -768,6 +804,9 @@ export function sandboxProvider(options: {
     async createFrom(image: string) {
       const sandbox = await SandboxExecutor.start({ ...base, create: { ...create, image } });
       return { handle: sandbox.runId };
+    },
+    async destroy(handle: string) {
+      await SandboxExecutor.attach(handle, base).destroy();
     },
   };
 }

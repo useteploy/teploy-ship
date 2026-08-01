@@ -1,8 +1,10 @@
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
 import type { EventStore, WorkflowEvent } from "@neutron-build/workflow";
+
+import { appendLineSync, assertSafeId, readJsonFile, writeJsonFile } from "./file-store.js";
 
 /**
  * File-backed durable-run storage for the CLI: an event log per run
@@ -17,42 +19,68 @@ export function stateDir(): string {
 
 export class FileEventStore implements EventStore {
   #dir: string;
+  #onConflict: (message: string) => void;
 
-  constructor(dir = join(stateDir(), "runs")) {
+  constructor(dir = join(stateDir(), "runs"), onConflict?: (message: string) => void) {
     this.#dir = dir;
+    this.#onConflict = onConflict ?? ((message) => process.stderr.write(`[ship] ${message}\n`));
   }
 
   #path(runId: string): string {
-    return join(this.#dir, `${runId}.events.jsonl`);
+    return join(this.#dir, `${assertSafeId("run id", runId)}.events.jsonl`);
   }
 
+  /** Appends are fsynced: an event that is only in the page cache does not survive the crash this log exists for. */
   async append(runId: string, event: WorkflowEvent): Promise<void> {
-    await mkdir(this.#dir, { recursive: true });
-    const { appendFile } = await import("node:fs/promises");
-    await appendFile(this.#path(runId), JSON.stringify(event) + "\n");
+    await appendLineSync(this.#path(runId), JSON.stringify(event));
   }
 
   async load(runId: string): Promise<WorkflowEvent[]> {
     let raw: string;
     try {
       raw = await readFile(this.#path(runId), "utf8");
-    } catch {
-      return [];
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error; // a permission or I/O fault is not "this run has no events"
     }
-    const seen = new Set<number>();
+    const lines = raw.split("\n");
+    const seen = new Map<number, string>();
     const events: WorkflowEvent[] = [];
-    for (const line of raw.split("\n")) {
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]!;
       if (line.trim() === "") continue;
       let event: WorkflowEvent;
       try {
         event = JSON.parse(line) as WorkflowEvent;
-      } catch {
-        // A torn tail line (crash mid-append) is an uncommitted event — skip
-        // it rather than letting one bad line make the run unloadable.
+      } catch (error) {
+        // ONLY the final line can be a torn append. A malformed line in the
+        // MIDDLE is corruption, and skipping it while still loading everything
+        // after silently hands replay a history that never happened — which can
+        // re-run a model call or repeat an external side effect. Refuse instead.
+        const isLastContentLine = lines.slice(i + 1).every((l) => l.trim() === "");
+        if (isLastContentLine) break;
+        throw new Error(
+          `run ${runId}: event log is corrupt at line ${i + 1} — refusing to replay a partial history ` +
+            `(${error instanceof Error ? error.message : String(error)})`,
+        );
+      }
+      const previous = seen.get(event.seq);
+      const encoded = JSON.stringify(event);
+      if (previous !== undefined) {
+        // First writer wins, matching the Nucleus store — but a duplicate seq
+        // carrying DIFFERENT content means two executors disagreed about
+        // history, and the loser's step may already have had side effects. That
+        // used to pass in complete silence; resolving it quietly is defensible,
+        // never mentioning it is not.
+        if (previous !== encoded) {
+          this.#onConflict(
+            `run ${runId}: two different events claim seq ${event.seq}; keeping the first. ` +
+              `This means two executors wrote the same run — check lease ownership.`,
+          );
+        }
         continue;
       }
-      if (seen.has(event.seq)) continue; // first writer wins, like the Nucleus store
-      seen.add(event.seq);
+      seen.set(event.seq, encoded);
       events.push(event);
     }
     return events.sort((a, b) => a.seq - b.seq);
@@ -118,20 +146,16 @@ export class RunMetaStore {
   }
 
   #path(runId: string): string {
-    return join(this.#dir, `${runId}.meta.json`);
+    return join(this.#dir, `${assertSafeId("run id", runId)}.meta.json`);
   }
 
+  /** Atomic (temp + fsync + rename): a crash mid-write left a truncated file that read back as "unknown run". */
   async save(meta: RunMeta): Promise<void> {
-    await mkdir(this.#dir, { recursive: true });
-    await writeFile(this.#path(meta.runId), JSON.stringify(meta, null, 2));
+    await writeJsonFile(this.#path(meta.runId), meta);
   }
 
   async load(runId: string): Promise<RunMeta | null> {
-    try {
-      return JSON.parse(await readFile(this.#path(runId), "utf8")) as RunMeta;
-    } catch {
-      return null;
-    }
+    return readJsonFile<RunMeta | null>(this.#path(runId), null);
   }
 
   async list(): Promise<RunMeta[]> {

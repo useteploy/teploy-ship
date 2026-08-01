@@ -1,8 +1,9 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { IntakePolicy } from "./intake.js";
 import type { NucleusPgwire } from "./nucleus-pgwire.js";
+import { readJsonFile, updateJsonFile } from "./file-store.js";
+import { upsertByKey } from "./upsert.js";
 import { stateDir } from "./run-store.js";
 
 /**
@@ -32,17 +33,10 @@ export class FilePolicyStore implements PolicyStore {
     this.#path = join(dir, "policies.json");
   }
 
+  // Corruption throws: reading a damaged policy file as "{}" would drop every
+  // per-source budget and auto/ignore rule, i.e. silently widen authority.
   async #read(): Promise<Record<string, { policy: IntakePolicy; dailyBudgetUSD?: number }>> {
-    try {
-      return JSON.parse(await readFile(this.#path, "utf8"));
-    } catch {
-      return {};
-    }
-  }
-
-  async #write(all: Record<string, { policy: IntakePolicy; dailyBudgetUSD?: number }>): Promise<void> {
-    await mkdir(stateDir(), { recursive: true });
-    await writeFile(this.#path, JSON.stringify(all, null, 2));
+    return readJsonFile<Record<string, { policy: IntakePolicy; dailyBudgetUSD?: number }>>(this.#path, {});
   }
 
   async list(): Promise<SourcePolicy[]> {
@@ -51,21 +45,20 @@ export class FilePolicyStore implements PolicyStore {
   }
 
   async set(p: SourcePolicy): Promise<void> {
-    const all = await this.#read();
-    all[p.source] = { policy: p.policy, ...(p.dailyBudgetUSD !== undefined ? { dailyBudgetUSD: p.dailyBudgetUSD } : {}) };
-    await this.#write(all);
+    await updateJsonFile<Record<string, { policy: IntakePolicy; dailyBudgetUSD?: number }>>(this.#path, {}, (all) => ({
+      ...all,
+      [p.source]: { policy: p.policy, ...(p.dailyBudgetUSD !== undefined ? { dailyBudgetUSD: p.dailyBudgetUSD } : {}) },
+    }));
   }
 
   async seed(defaults: Record<string, IntakePolicy>): Promise<void> {
-    const all = await this.#read();
-    let changed = false;
-    for (const [source, policy] of Object.entries(defaults)) {
-      if (all[source] === undefined) {
-        all[source] = { policy };
-        changed = true;
+    await updateJsonFile<Record<string, { policy: IntakePolicy; dailyBudgetUSD?: number }>>(this.#path, {}, (all) => {
+      const next = { ...all };
+      for (const [source, policy] of Object.entries(defaults)) {
+        if (next[source] === undefined) next[source] = { policy };
       }
-    }
-    if (changed) await this.#write(all);
+      return next;
+    });
   }
 }
 
@@ -96,9 +89,15 @@ export class NucleusPolicyStore implements PolicyStore {
     const rows = await this.#db.query("SELECT source, policy, daily_budget_usd FROM ship_policies");
     return rows.map((r) => {
       const budget = r.daily_budget_usd !== null && r.daily_budget_usd !== undefined ? Number(r.daily_budget_usd) : undefined;
+      // Validate rather than cast: an unrecognised policy string used to become
+      // an IntakePolicy by assertion, and an unknown value silently behaves like
+      // whatever the comparisons happen to do with it. Unknown means "propose",
+      // the safe middle (never auto-launch on a typo).
+      const raw = String(r.policy);
+      const policy: IntakePolicy = raw === "ignore" || raw === "propose" || raw === "auto" ? raw : "propose";
       return {
         source: String(r.source),
-        policy: String(r.policy) as IntakePolicy,
+        policy,
         ...(budget !== undefined && Number.isFinite(budget) ? { dailyBudgetUSD: budget } : {}),
       };
     });
@@ -107,12 +106,15 @@ export class NucleusPolicyStore implements PolicyStore {
   async set(p: SourcePolicy): Promise<void> {
     await this.#ensure();
     const budget = p.dailyBudgetUSD !== undefined ? String(p.dailyBudgetUSD) : null;
-    const existing = await this.#db.query("SELECT source FROM ship_policies WHERE source = $1", [p.source]);
-    if (existing.length > 0) {
-      await this.#db.query("UPDATE ship_policies SET policy = $1, daily_budget_usd = $2 WHERE source = $3", [p.policy, budget, p.source]);
-    } else {
-      await this.#db.query("INSERT INTO ship_policies (source, policy, daily_budget_usd) VALUES ($1, $2, $3)", [p.source, p.policy, budget]);
-    }
+    await upsertByKey(this.#db, {
+      table: "ship_policies",
+      keyColumn: "source",
+      key: p.source,
+      update: () =>
+        this.#db.query("UPDATE ship_policies SET policy = $1, daily_budget_usd = $2 WHERE source = $3", [p.policy, budget, p.source]),
+      insert: () =>
+        this.#db.query("INSERT INTO ship_policies (source, policy, daily_budget_usd) VALUES ($1, $2, $3)", [p.source, p.policy, budget]),
+    });
   }
 
   async seed(defaults: Record<string, IntakePolicy>): Promise<void> {
