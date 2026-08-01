@@ -17,7 +17,8 @@ import type { AgentExecutor } from "@neutron-build/agents";
 import { cancelRun, deliverEvent } from "@neutron-build/workflow";
 import type { RunOutcome } from "@neutron-build/workflow";
 
-import { parseArgs } from "./args.js";
+import { ArgError, COMMAND_FLAGS, enumFlag, numberFlag, parseArgs } from "./args.js";
+import type { NumberRange } from "./args.js";
 import { commitAndPush, fixPrompt, openPullRequest, setupRepo } from "./git.js";
 import type { RepoRef } from "./git.js";
 import { assertRepoAllowed, credentialFor, policyFromEnv } from "./repo-policy.js";
@@ -39,6 +40,7 @@ import { NucleusCodeIndex } from "./code-index.js";
 import type { CodeSearch } from "./code-index.js";
 import { startWorker } from "./worker.js";
 import { costUSD, isPricedModel } from "./pricing.js";
+import { defaultRetryPolicy, withRetry } from "./provider.js";
 import { builtinSuite } from "./tasks.js";
 import { hardSuite } from "./hard-tasks.js";
 import { extremeSuite } from "./extreme-tasks.js";
@@ -125,13 +127,115 @@ function usageLine(modelId: string, usage: Parameters<typeof renderUsage>[0]): s
   return `${renderUsage(usage)} · ${tail}`;
 }
 
+/**
+ * Load ~/.config/teploy-ship/config.json.
+ *
+ * A MISSING file means "no config", which is a real and expected state. Every
+ * other failure is reported. It used to catch everything and return {}, so a
+ * permission error, a truncated write, or a stray comma silently selected the
+ * default model, dropped the sandbox settings (falling back to running agent
+ * commands on the host), discarded the Nucleus URL, and threw away per-source
+ * budgets — a configuration file that exists to constrain Ship, ignored
+ * precisely when it is malformed.
+ */
 function loadConfig(): Config {
+  const path = join(homedir(), ".config", "teploy-ship", "config.json");
+  let raw: string;
   try {
-    return JSON.parse(readFileSync(join(homedir(), ".config", "teploy-ship", "config.json"), "utf8")) as Config;
-  } catch {
-    return {};
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    fail(`cannot read ${path}: ${error instanceof Error ? error.message : String(error)}`);
   }
+  if (raw.trim() === "") return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    fail(`${path} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    fail(`${path} must contain a JSON object`);
+  }
+  return validateConfig(parsed as Record<string, unknown>, path);
 }
+
+/** Reject wrong-typed and out-of-range settings rather than letting them through as undefined behaviour. */
+function validateConfig(raw: Record<string, unknown>, path: string): Config {
+  const config: Config = {};
+  const str = (key: keyof Config): void => {
+    const v = raw[key];
+    if (v === undefined) return;
+    if (typeof v !== "string") fail(`${path}: "${key}" must be a string`);
+    (config as Record<string, unknown>)[key] = v;
+  };
+  for (const key of ["model", "sandboxUrl", "sandboxToken", "sandboxImage", "store", "nucleusUrl", "gitToken", "githubToken"] as const) {
+    str(key);
+  }
+  if (raw.sandboxNetwork !== undefined) {
+    if (raw.sandboxNetwork !== "none" && raw.sandboxNetwork !== "egress") {
+      fail(`${path}: "sandboxNetwork" must be "none" or "egress"`);
+    }
+    config.sandboxNetwork = raw.sandboxNetwork;
+  }
+  if (raw.store !== undefined && raw.store !== "file" && raw.store !== "nucleus") {
+    fail(`${path}: "store" must be "file" or "nucleus"`);
+  }
+  if (raw.intake !== undefined) {
+    if (typeof raw.intake !== "object" || raw.intake === null || Array.isArray(raw.intake)) {
+      fail(`${path}: "intake" must be an object of source -> ignore|propose|auto`);
+    }
+    const intake: Record<string, "ignore" | "propose" | "auto"> = {};
+    for (const [source, policy] of Object.entries(raw.intake as Record<string, unknown>)) {
+      if (policy !== "ignore" && policy !== "propose" && policy !== "auto") {
+        fail(`${path}: intake.${source} must be ignore|propose|auto`);
+      }
+      intake[source] = policy;
+    }
+    config.intake = intake;
+  }
+  const num = (key: "maxConcurrentRuns" | "dailyBudgetUSD", min: number): void => {
+    const v = raw[key];
+    if (v === undefined) return;
+    if (typeof v !== "number" || !Number.isFinite(v) || v < min) fail(`${path}: "${key}" must be a number >= ${min}`);
+    config[key] = v;
+  };
+  num("maxConcurrentRuns", 1);
+  num("dailyBudgetUSD", 0);
+  if (raw.intakeBudgets !== undefined) {
+    if (typeof raw.intakeBudgets !== "object" || raw.intakeBudgets === null || Array.isArray(raw.intakeBudgets)) {
+      fail(`${path}: "intakeBudgets" must be an object of source -> USD`);
+    }
+    const budgets: Record<string, number> = {};
+    for (const [source, amount] of Object.entries(raw.intakeBudgets as Record<string, unknown>)) {
+      if (typeof amount !== "number" || !Number.isFinite(amount) || amount < 0) {
+        fail(`${path}: intakeBudgets.${source} must be a number >= 0`);
+      }
+      budgets[source] = amount;
+    }
+    config.intakeBudgets = budgets;
+  }
+  for (const key of Object.keys(raw)) {
+    if (!KNOWN_CONFIG_KEYS.has(key)) fail(`${path}: unknown setting "${key}"`);
+  }
+  return config;
+}
+
+const KNOWN_CONFIG_KEYS = new Set([
+  "model",
+  "sandboxUrl",
+  "sandboxToken",
+  "sandboxImage",
+  "sandboxNetwork",
+  "store",
+  "nucleusUrl",
+  "gitToken",
+  "githubToken",
+  "intake",
+  "maxConcurrentRuns",
+  "dailyBudgetUSD",
+  "intakeBudgets",
+]);
 
 /**
  * Gateway-aware model resolution: with AI_GATEWAY_URL (+_KEY) set, all
@@ -139,6 +243,14 @@ function loadConfig(): Config {
  * keys never reach the app; caching stays on either way.
  */
 function resolveModel(modelId: string): ModelAdapter {
+  // Ship's own retry policy sits above whatever the SDK does: a durable run
+  // that has already paid for ten turns should not die to one 429.
+  return withRetry(baseModel(modelId), defaultRetryPolicy, {
+    log: (line) => process.stderr.write(`${dim(line)}\n`),
+  });
+}
+
+function baseModel(modelId: string): ModelAdapter {
   const gatewayURL = process.env.AI_GATEWAY_URL;
   const gatewayKey = process.env.AI_GATEWAY_KEY;
   if (gatewayURL !== undefined && gatewayURL !== "") {
@@ -155,17 +267,13 @@ function resolveModel(modelId: string): ModelAdapter {
     : openai(modelId.replace(/^openai\//, ""));
 }
 
-/**
- * Parse a numeric flag, failing clearly on garbage instead of yielding NaN —
- * which silently becomes setInterval(0) (a busy-spin hammering the store),
- * zero-step runs, or an unbounded budget. Returns the fallback when absent.
- */
-function numFlag(value: string | boolean | undefined, name: string, fallback: number): number {
-  if (value === undefined) return fallback;
-  if (typeof value !== "string") fail(`--${name} needs a numeric value`);
-  const n = Number(value);
-  if (!Number.isFinite(n)) fail(`--${name} must be a number, got ${JSON.stringify(value)}`);
-  return n;
+/** Parse a numeric flag within a range, turning an ArgError into a clean CLI exit. */
+function numFlag(value: string | boolean | undefined, name: string, fallback: number, range?: NumberRange): number {
+  try {
+    return numberFlag(value, name, fallback, range);
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
+  }
 }
 
 function fail(message: string): never {
@@ -200,20 +308,26 @@ async function runCommand(rest: string[]): Promise<void> {
   });
 
   const interactive = process.stdin.isTTY === true && args.flags.yes !== true && args.flags.headless !== true;
-  const result = await runAgent({
-    model,
-    executor,
-    task,
-    workdir,
-    maxSteps: numFlag(args.flags["max-steps"], "max-steps", 20),
-    approveAction: defaultApprovalPolicy,
-    onApprovalRequest: interactive ? (action) => promptApproval(action) : () => args.flags.yes === true,
-    onEvent: args.flags.json === true ? undefined : renderEvent,
-    abortSignal: abort.signal,
-    critic: args.flags.critic === true,
-  });
-
-  await executor.destroy();
+  // try/finally, not a trailing statement: an error anywhere in the run used
+  // to skip destroy() entirely, leaking a sandbox container (until its TTL) or
+  // a local workspace directory (forever).
+  let result;
+  try {
+    result = await runAgent({
+      model,
+      executor,
+      task,
+      workdir,
+      maxSteps: numFlag(args.flags["max-steps"], "max-steps", 20, { min: 1, max: 500, integer: true }),
+      approveAction: defaultApprovalPolicy,
+      onApprovalRequest: interactive ? (action) => promptApproval(action) : () => args.flags.yes === true,
+      onEvent: args.flags.json === true ? undefined : renderEvent,
+      abortSignal: abort.signal,
+      critic: args.flags.critic === true,
+    });
+  } finally {
+    await executor.destroy().catch(() => {});
+  }
   if (args.flags.json === true) {
     process.stdout.write(JSON.stringify({ status: result.status, summary: result.summary, steps: result.steps.length, usage: result.usage, costUSD: costUSD(modelId, result.usage) }, null, 2) + "\n");
   } else {
@@ -244,7 +358,19 @@ function resolveSandbox(args: ReturnType<typeof parseArgs>, config: Config): San
     fail("a sandbox URL is set but no token — use --sandbox-token, SHIP_SANDBOX_TOKEN, or sandboxToken in config");
   }
   const image = (args.flags["sandbox-image"] as string) ?? process.env.SHIP_SANDBOX_IMAGE ?? config.sandboxImage ?? "python:3.12-slim";
-  const network = ((args.flags["sandbox-network"] as string) ?? process.env.SHIP_SANDBOX_NETWORK ?? config.sandboxNetwork ?? "none") as "none" | "egress";
+  // Validated, not cast: an unrecognised value used to reach the sandbox
+  // daemon as-is and be interpreted by it however it saw fit.
+  let network: "none" | "egress";
+  try {
+    network = enumFlag(
+      (args.flags["sandbox-network"] as string) ?? process.env.SHIP_SANDBOX_NETWORK ?? config.sandboxNetwork,
+      "sandbox-network",
+      ["none", "egress"] as const,
+      "none",
+    );
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
+  }
   return { url, token, image, network };
 }
 
@@ -328,6 +454,16 @@ async function fixCommand(rest: string[]): Promise<void> {
   const model = resolveModel(modelId);
   const { executor } = await makeExecutor(args, config);
 
+  // Everything below runs under a cleanup guard; see the finally at the end.
+  let cleanupDone = false;
+  const cleanup = async (): Promise<void> => {
+    if (cleanupDone) return;
+    cleanupDone = true;
+    await runtimeRef?.close().catch(() => {});
+    await executor.destroy().catch(() => {});
+  };
+  let runtimeRef: ShipRuntime | undefined;
+  try {
   process.stderr.write(dim(`cloning ${ref.owner}/${ref.repo}…\n`));
   const checkout = await setupRepo(executor, { ref, token, runId });
   process.stderr.write(dim(`on ${checkout.branch} (from ${checkout.base})\n`));
@@ -345,7 +481,7 @@ async function fixCommand(rest: string[]): Promise<void> {
     executor,
     task: fixPrompt({ task, branch: checkout.branch, base: (args.flags.base as string) ?? checkout.base, context }),
     workdir: ".",
-    maxSteps: numFlag(args.flags["max-steps"], "max-steps", 30),
+    maxSteps: numFlag(args.flags["max-steps"], "max-steps", 30, { min: 1, max: 500, integer: true }),
     approveAction: defaultApprovalPolicy,
     onApprovalRequest: interactive ? (action) => promptApproval(action) : () => args.flags.yes === true,
     onEvent: args.flags.json === true ? undefined : renderEvent,
@@ -362,15 +498,13 @@ async function fixCommand(rest: string[]): Promise<void> {
     message: `${task.slice(0, 68)}\n\nTeploy Ship ${runId}\n${result.summary.slice(0, 400)}`,
   });
   if (pushed.kind === "refused") {
-    await runtime.close();
-    await executor.destroy();
+    await cleanup();
     process.stderr.write(`${red("not published")} — ${refusalMessage(pushed.screen)}\n`);
     process.exit(1);
   }
   if (pushed.kind === "empty") {
     await runtime.memory.record({ repo: repoKey, note: runNote({ task, summary: result.summary }), runId }).catch(() => {});
-    await runtime.close();
-    await executor.destroy();
+    await cleanup();
     process.stderr.write(`${red("no changes")} — the run produced an empty diff (status: ${result.status}).\n`);
     process.exit(1);
   }
@@ -392,14 +526,17 @@ async function fixCommand(rest: string[]): Promise<void> {
     body: `${result.summary}\n\n---\nTask: ${task}\nRun: ${runId} · ${result.steps.length} steps · agent status: ${result.status}\nGenerated by Teploy Ship.`,
   });
   await runtime.memory.record({ repo: repoKey, note: runNote({ task, summary: result.summary, pr: pr.url }), runId }).catch(() => {});
-  await runtime.close();
-  await executor.destroy();
+  await cleanup();
   if (args.flags.json === true) {
     process.stdout.write(JSON.stringify({ status: result.status, pr: pr.url, number: pr.number, sha: pushed.sha, runId, usage: result.usage, costUSD: costUSD(modelId, result.usage) }, null, 2) + "\n");
   } else {
     process.stderr.write(`\n${green("PR opened")} — ${bold(pr.url)}\n${dim(usageLine(modelId, result.usage))}\n`);
   }
   process.exit(0);
+  } finally {
+    // Reached on any error path; the success paths above already ran it.
+    await cleanup();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -731,19 +868,30 @@ async function workerCommand(rest: string[]): Promise<void> {
   if (((args.flags.store as string) ?? config.store) !== "nucleus") {
     fail("worker needs the shared store: --store nucleus (+ --nucleus-url or NUCLEUS_URL)");
   }
+  // Resolve and range-check everything BEFORE touching the network. A bad
+  // --interval should not cost a database connection and a migration pass to
+  // discover, and the sandbox rule should not be enforced after the fact.
+  const intervalMs = numFlag(args.flags.interval, "interval", 5, { min: 1, max: 3600 }) * 1000;
+  const maxConcurrentFlag =
+    args.flags["max-concurrent"] !== undefined
+      ? numFlag(args.flags["max-concurrent"], "max-concurrent", 3, { min: 1, max: 100, integer: true })
+      : undefined;
+  const dailyBudgetFlag =
+    args.flags["daily-budget"] !== undefined
+      ? numFlag(args.flags["daily-budget"], "daily-budget", 10, { min: 0 })
+      : undefined;
+  const usingSandbox = resolveSandbox(args, config) !== undefined;
+  assertSandboxedForUntrusted(usingSandbox);
+
   const runtime = await makeRuntime(args, config);
   if (runtime.kind !== "nucleus") fail("worker needs --store nucleus");
   const modelId = (args.flags.model as string) ?? config.model ?? "anthropic/claude-sonnet-5";
-  const usingSandbox = resolveSandbox(args, config) !== undefined;
   const gitToken = (args.flags["git-token"] as string) ?? process.env.SHIP_GIT_TOKEN ?? config.gitToken;
   const githubToken = process.env.SHIP_GITHUB_TOKEN ?? config.githubToken;
   // A teploy-deployed worker has no config file — everything is env. Intake
   // policies via SHIP_INTAKE_POLICIES (JSON, e.g. {"forgejo":"auto"}) merged
   // over the file's; auto is still earned per source, never a default.
   const intakePolicies = resolveIntakePolicies(config);
-  // A worker exists to run work that arrived from somewhere else, so the
-  // untrusted-execution rule applies to it unconditionally.
-  assertSandboxedForUntrusted(usingSandbox);
   const codeSearch = resolveCodeSearch(runtime);
   const worker = startWorker({
     runtime: runtime as import("./runtime.js").NucleusShipRuntime,
@@ -752,7 +900,7 @@ async function workerCommand(rest: string[]): Promise<void> {
     executor: durableProvider(args, config),
     workdir: usingSandbox ? "/work" : ".",
     ...(codeSearch !== undefined ? { codeSearch } : {}),
-    intervalMs: numFlag(args.flags.interval, "interval", 5) * 1000,
+    intervalMs,
     ...(gitToken !== undefined ? { gitToken } : {}),
     ...(githubToken !== undefined ? { githubToken } : {}),
     repoPolicy: {
@@ -761,13 +909,13 @@ async function workerCommand(rest: string[]): Promise<void> {
       ...(githubToken !== undefined ? { githubToken } : {}),
     },
     ...(intakePolicies !== undefined ? { intakePolicies } : {}),
-    ...(args.flags["max-concurrent"] !== undefined
-      ? { maxConcurrentRuns: numFlag(args.flags["max-concurrent"], "max-concurrent", 0) }
+    ...(maxConcurrentFlag !== undefined
+      ? { maxConcurrentRuns: maxConcurrentFlag }
       : config.maxConcurrentRuns !== undefined
         ? { maxConcurrentRuns: config.maxConcurrentRuns }
         : {}),
-    ...(args.flags["daily-budget"] !== undefined
-      ? { dailyBudgetUSD: numFlag(args.flags["daily-budget"], "daily-budget", 0) }
+    ...(dailyBudgetFlag !== undefined
+      ? { dailyBudgetUSD: dailyBudgetFlag }
       : config.dailyBudgetUSD !== undefined
         ? { dailyBudgetUSD: config.dailyBudgetUSD }
         : {}),
@@ -776,14 +924,47 @@ async function workerCommand(rest: string[]): Promise<void> {
   // The scheduler's own timer is unref'd; this ref'd no-op holds the
   // process resident until a signal stops it.
   const keepAlive = setInterval(() => {}, 60_000);
-  const shutdown = (): void => {
-    process.stderr.write(`\n${dim("worker stopping…")}\n`);
+
+  /**
+   * Ordered shutdown.
+   *
+   * The old handler called worker.stop() and then immediately started
+   * runtime.close(), so a scheduler callback, heartbeat, usage settlement or
+   * notification still in flight found the pool closed underneath it — the
+   * failure looks like a store error at exactly the moment nobody is watching.
+   * Both signals also registered the same handler with no guard, so a second
+   * Ctrl-C re-entered it. Now: stop accepting work, wait for what is running
+   * (bounded), then close.
+   */
+  let shuttingDown = false;
+  const shutdown = (signal: string): void => {
+    if (shuttingDown) {
+      process.stderr.write(`\n${dim("still stopping — send SIGKILL if you need it gone now")}\n`);
+      return;
+    }
+    shuttingDown = true;
+    process.stderr.write(`\n${dim(`worker stopping (${signal})…`)}\n`);
     clearInterval(keepAlive);
-    worker.stop();
-    void runtime.close().finally(() => process.exit(0));
+    void (async () => {
+      const deadline = Date.now() + 30_000;
+      try {
+        await worker.stop();
+        // Give in-flight completion work (spend settlement, the outbox flush,
+        // meta writes) a chance to land before the connection pool goes.
+        while (Date.now() < deadline && worker.busy()) {
+          await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+        if (worker.busy()) {
+          process.stderr.write(`${yellow("shutdown timed out")} — closing with work still in flight\n`);
+        }
+      } finally {
+        await runtime.close().catch(() => {});
+        process.exit(0);
+      }
+    })();
   };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
 }
 
 async function webCommand(rest: string[]): Promise<void> {
@@ -834,7 +1015,7 @@ async function evalCommand(rest: string[]): Promise<void> {
   const args = parseArgs(rest);
   const modelId = (args.flags.model as string) ?? config.model ?? "anthropic/claude-sonnet-5";
   const model = resolveModel(modelId);
-  const repeats = numFlag(args.flags.repeats, "repeats", 1);
+  const repeats = numFlag(args.flags.repeats, "repeats", 1, { min: 1, max: 100, integer: true });
   const suiteName = (args.flags.suite as string) ?? "builtin";
   const tasks: EvalTask[] =
     suiteName === "hard" ? hardSuite : suiteName === "extreme" ? extremeSuite : suiteName === "all" ? [...builtinSuite, ...hardSuite, ...extremeSuite] : builtinSuite;
@@ -856,6 +1037,16 @@ async function evalCommand(rest: string[]): Promise<void> {
 
 async function main(): Promise<void> {
   const [command, ...rest] = process.argv.slice(2);
+  // Validate against the command's schema up front, so a typo is an error
+  // rather than a run with a limit nobody chose.
+  if (command !== undefined && COMMAND_FLAGS[command] !== undefined) {
+    try {
+      parseArgs(rest, COMMAND_FLAGS[command]);
+    } catch (error) {
+      if (error instanceof ArgError) fail(`${error.message}\n\nSee: teploy-ship (no arguments) for usage.`);
+      throw error;
+    }
+  }
   switch (command) {
     case "run":
       return runCommand(rest);

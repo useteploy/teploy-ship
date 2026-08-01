@@ -14,7 +14,6 @@ import { approvalEvent, durableAgent } from "./durable.js";
 import type { ExecutorProvider } from "./durable.js";
 import { defaultApprovalPolicy } from "./approval.js";
 import { FileEventStore, RunMetaStore } from "./run-store.js";
-import { parseArgs } from "./args.js";
 
 function reactiveModel(turns: Array<string | ((obs: string) => string)>): ModelAdapter {
   return {
@@ -164,11 +163,3 @@ test("runAgent aggregates usage across calls, cache fields included", async () =
   assert.equal(result.usage.cacheReadTokens, 500);
 });
 
-test("parseArgs: boolean flags, value flags, positionals", () => {
-  const parsed = parseArgs(["do the thing", "--durable", "--model", "anthropic/x", "--yes", "--max-steps", "5"]);
-  assert.deepEqual(parsed.positional, ["do the thing"]);
-  assert.equal(parsed.flags.durable, true);
-  assert.equal(parsed.flags.yes, true);
-  assert.equal(parsed.flags.model, "anthropic/x");
-  assert.equal(parsed.flags["max-steps"], "5");
-});

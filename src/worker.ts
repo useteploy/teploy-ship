@@ -248,7 +248,13 @@ export async function sweepIntake(deps: IntakeSweepDeps): Promise<void> {
  * makes `approve` from a laptop a true handoff: the laptop delivers the
  * decision and flags the run due; the worker carries it to completion.
  */
-export function startWorker(options: WorkerOptions): { scheduler: Scheduler; stop: () => void } {
+export function startWorker(options: WorkerOptions): {
+  scheduler: Scheduler;
+  /** Stop accepting work; resolves once timers are down and the outbox is flushed. */
+  stop: () => Promise<void>;
+  /** True while runs are still executing or a sweep is mid-flight. */
+  busy: () => boolean;
+} {
   const log = options.log ?? ((line: string) => process.stderr.write(line + "\n"));
   const envMaxSteps = Number(process.env.SHIP_MAX_STEPS);
   const maxSteps = options.maxSteps ?? (Number.isFinite(envMaxSteps) && envMaxSteps > 0 ? envMaxSteps : undefined);
@@ -588,11 +594,22 @@ export function startWorker(options: WorkerOptions): { scheduler: Scheduler; sto
   log(`[worker] watching for due runs as ${options.runtime.owner}`);
   return {
     scheduler,
-    stop: () => {
+    /**
+     * Stop taking new work. Returns once the timers are down and the scheduler
+     * has been told to stop; use {@link busy} to wait for what is still
+     * executing before tearing the runtime down under it.
+     */
+    stop: async () => {
       clearInterval(intakeTimer);
       clearInterval(heartbeatTimer);
       clearInterval(reapTimer);
       scheduler.stop();
+      // One last flush so a notification owed by a run that just finished is
+      // attempted before the process goes, rather than waiting for the next
+      // worker to pick it up.
+      if (notify.enabled) await flush().catch(() => {});
     },
+    /** True while runs are still executing or a sweep is mid-flight. */
+    busy: () => inflight.size > 0 || sweeping,
   };
 }
