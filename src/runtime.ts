@@ -71,6 +71,7 @@ export {
   RepoNotAllowedError,
   assertRepoAllowed,
   credentialFor,
+  effectiveAllowlist,
   isAllowed,
   parseAllowlist,
   parseOriginTokens,

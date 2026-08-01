@@ -193,20 +193,24 @@ same secret). A failed CI run on one of Ship's own PRs (head branch
 reproduces the failure, fixes it on the PR branch, and pushes — deduped
 per failing SHA, so one red check is one fix attempt.
 
-## 3. Sandbox (required for a worker)
+## 3. Sandbox (required for tasks that arrive from outside)
 
-`teploy-ship worker` refuses to start without one, and that is deliberate.
-A worker exists to run work that arrived from somewhere else — a webhook, a
-chat message, an issue body — and the approval policy is a list of command
-regexes, not a boundary: the same effects are one `node -e`, `nc`,
-`find -delete` or `getattr(os, "sys"+"tem")` away, and the agent writes the
-commands. On the local executor the blast radius is the host and everything
-the worker process can reach.
+The worker starts without one and warns. What it will not do is execute a
+task that came from a webhook, a chat message, or an issue body — those
+runs fail with the reason on the run.
 
-`SHIP_ALLOW_UNSANDBOXED_INTAKE=1` overrides it for a genuinely disposable
-box. The local executor remains fine for `teploy-ship run` and
-`teploy-ship fix` in your own terminal, where you are trusting your own
-machine.
+The approval policy is a list of command regexes, which is a useful prompt
+and not a boundary: the same effects are one `node -e`, `nc`, `find -delete`
+or `getattr(os, "sys"+"tem")` away, and the agent writes the commands. On
+the local executor the blast radius is the host and everything the worker
+can reach. So untrusted work needs isolation — but the check belongs on the
+run rather than on the process, because a worker that refuses to boot is a
+worker whose operator sets the override and never revisits it.
+
+Runs you launch yourself (`teploy-ship run`, `teploy-ship fix`, the
+dashboard's new-run form) work unsandboxed. That is a person choosing to
+trust their own machine. `SHIP_ALLOW_UNSANDBOXED_INTAKE=1` extends that to
+external tasks on a genuinely disposable box.
 
 The sandbox daemon gives every run its own container with **default-deny
 egress** — an internal bridge with no route out, plus an allowlist proxy
@@ -278,16 +282,34 @@ new deployment actually has to set.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `SHIP_REPO_ALLOWLIST` | unset | Origins Ship may clone, comma-separated (`https://github.com/your-org`, `http://100.x.y.z:49152/tyler`). A repository URL arriving from a webhook, a Slack message, or an issue body is **refused** unless it matches — otherwise a task could point Ship's deploy token at an attacker's host. An operator-typed URL is allowed when this is unset; external ones never are. |
-| `SHIP_GIT_TOKENS` | unset | JSON of origin → token, so two forges stop sharing one credential: `{"https://github.com":"ghp_…","http://100.x.y.z:49152":"…"}`. Falls back to `SHIP_GITHUB_TOKEN` / `SHIP_GIT_TOKEN`. |
-| `SHIP_ALLOW_UNSANDBOXED_INTAKE` | unset | Lets a worker start with no sandbox. Only for a disposable box. |
+| `SHIP_GIT_TOKENS` | unset | JSON of origin → token: `{"https://github.com":"ghp_…","https://git.example.com":"…"}`. **This is the recommended way to configure credentials**, and it doubles as the allowlist — naming an origin here says Ship may talk to it, so there is no second variable to remember. |
+| `SHIP_REPO_ALLOWLIST` | derived from `SHIP_GIT_TOKENS` | Only needed when you use the origin-less `SHIP_GIT_TOKEN`, which has no host attached and would otherwise go wherever a URL says. Comma-separated, and can be narrower than an origin: `https://github.com/your-org`. |
+| `SHIP_ALLOW_UNSANDBOXED_INTAKE` | unset | Lets externally-sourced tasks run without a sandbox. Only for a disposable box. |
+| `SHIP_MODEL_PRICING` | unset | JSON of model → rates for a model Ship does not ship a price for: `{"my-model":{"inputPer1M":2,"outputPer1M":8}}`. Without it an unrecognised **hosted** model is charged the highest known rate so the spend cap cannot fail open. |
+| `SHIP_LOCAL_MODEL_PREFIXES` | `ollama/ local/ lmstudio/ vllm/ …` | Model prefixes that run on your own hardware and therefore cost nothing. Extend if your local runtime uses a different prefix. |
 | `SHIP_MAX_RUN_COST_USD` | `0` (off) | Hard per-run ceiling. Turn count is a poor proxy for cost; this bounds one pathological run rather than waiting for the daily cap to notice. |
 | `SHIP_ESTIMATED_RUN_COST_USD` | `0.50` | Held against a source's daily budget while a run is in flight, so a burst of launches cannot all pass the same budget read. |
 | `SHIP_DAILY_AUTO_LIMIT` | `10` | Auto-launches per source per day, **fleet-wide** (it used to be per worker). |
-| `SHIP_PUBLISH_MAX_FILES` | `200` | Publication refuses a diff touching more files than this. Also `SHIP_PUBLISH_MAX_ADDED_LINES` (20000) and `SHIP_PUBLISH_MAX_FILE_BYTES` (2 MiB). Binaries, symlinks, submodule pointers, key material and forbidden paths are refused outright. |
+| `SHIP_PUBLISH_MAX_FILES` | `200` | Above this, the PR is raised as a **draft** explaining why — not refused, because a big diff can be a real refactor and only a human knows. Also `SHIP_PUBLISH_MAX_ADDED_LINES` (20000), `SHIP_PUBLISH_MAX_FILE_BYTES` (2 MiB), and binaries. What *is* refused: key material, `.env`/`.ssh`/`.npmrc`-style paths, symlinks, and submodule pointers — none of which can be un-published. |
 | `SHIP_WEBHOOK_MAX_BYTES` | `1048576` | Cap on a webhook body, applied **before** the signature is computed. |
 | `SHIP_SESSION_SECRET` | derived from `SHIP_WEB_TOKEN` | Signs dashboard sessions. Setting it lets account sessions survive a token rotation; sessions established *with the master token* still die on rotation, so rotating remains revocation. |
 | `SHIP_TRUST_PROXY` | unset | Believe `X-Forwarded-Proto`/`-Host`/`-For`. Only set it when something in front actually overwrites those headers. |
+
+### Getting started
+
+The short version for a fresh install:
+
+```sh
+teploy secret set SHIP_WEB_TOKEN "$(openssl rand -hex 32)"
+teploy secret set SHIP_WEBHOOK_SECRET "$(openssl rand -hex 32)"
+teploy secret set SHIP_GIT_TOKENS '{"https://github.com":"ghp_your_token"}'
+teploy secret set AI_GATEWAY_KEY "…"        # or ANTHROPIC_API_KEY
+teploy secret set SHIP_SANDBOX_TOKEN "…"    # with SHIP_SANDBOX_URL in teploy.yml
+```
+
+That is enough. `SHIP_GIT_TOKENS` names the origins, so repository access is
+scoped without a second decision, and the sandbox means webhook-sourced
+tasks will actually run.
 
 ### Rotating the master credential
 

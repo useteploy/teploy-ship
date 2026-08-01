@@ -3,16 +3,27 @@
  *
  * `/login` is exempt from the auth middleware (it has to be), performs a scrypt
  * derivation on EVERY attempt including misses (deliberately — it hides which
- * usernames exist), and had no limit of any kind. Both halves of that are a
- * problem: unlimited guesses against whatever passwords exist, and an
- * unauthenticated way to make the process do unbounded scrypt work, which runs
- * on libuv's threadpool and therefore competes with the store I/O the rest of
- * the app needs.
+ * usernames exist), and had no limit of any kind: unlimited guesses, plus an
+ * unauthenticated way to make the process do unbounded scrypt work on libuv's
+ * threadpool, competing with the store I/O the rest of the app needs.
  *
- * Deliberately in-process and not in Nucleus: this must keep working when the
- * database is the thing under strain, and a per-replica limit is the useful
- * part of the protection. A determined attacker spreading across replicas still
- * hits the concurrency ceiling below, which is what protects the event loop.
+ * The shape matters as much as the existence. OWASP's guidance on lockouts is
+ * that an aggressive one is itself a denial-of-service vector — an attacker who
+ * can lock accounts (or, worse, lock everyone) has found a cheaper attack than
+ * the one being prevented. So this deliberately does NOT hard-lock on anything
+ * an attacker can choose:
+ *
+ *   per client IP  — lockout, but only when a declared proxy makes the address
+ *                    trustworthy. The attacker is the one locked out.
+ *   per username   — increasing delay, never a lock. Otherwise anyone who knows
+ *                    a username can lock its owner out at will.
+ *   no trusted IP  — NO lockout at all. A shared bucket would mean ten failures
+ *                    from anywhere logs the whole instance out, which is a
+ *                    self-inflicted outage. Delay plus the concurrency ceiling
+ *                    carry it instead.
+ *
+ * In-process rather than in Nucleus on purpose: this has to keep working when
+ * the database is the thing under strain.
  */
 
 interface Bucket {
@@ -45,10 +56,24 @@ export interface RateLimitResult {
   allowed: boolean;
   /** Seconds until the caller may try again (only when blocked). */
   retryAfterSeconds?: number;
+  /** Artificial delay to apply before answering, for keys that must not lock. */
+  delayMs?: number;
 }
 
-/** Record an attempt for `key`, and say whether it may proceed. */
-export function checkRateLimit(key: string, now = Date.now(), config: RateLimitConfig = loginLimits): RateLimitResult {
+/**
+ * Record an attempt for `key`.
+ *
+ * `lockable` decides the response to going over the limit: a hard lock (safe
+ * only when the key identifies the ATTACKER, i.e. a trustworthy client
+ * address) or an increasing delay (everything else). Delay still makes
+ * guessing impractical without handing anyone an outage button.
+ */
+export function checkRateLimit(
+  key: string,
+  now = Date.now(),
+  config: RateLimitConfig = loginLimits,
+  lockable = false,
+): RateLimitResult {
   const bucket = buckets.get(key) ?? { hits: [] };
   if (bucket.lockedUntil !== undefined && bucket.lockedUntil > now) {
     return { allowed: false, retryAfterSeconds: Math.ceil((bucket.lockedUntil - now) / 1000) };
@@ -56,10 +81,17 @@ export function checkRateLimit(key: string, now = Date.now(), config: RateLimitC
   bucket.hits = bucket.hits.filter((t) => now - t < config.windowMs);
   bucket.hits.push(now);
   if (bucket.hits.length > config.limit) {
-    bucket.lockedUntil = now + config.lockoutMs;
-    bucket.hits = [];
+    if (lockable) {
+      bucket.lockedUntil = now + config.lockoutMs;
+      bucket.hits = [];
+      buckets.set(key, bucket);
+      return { allowed: false, retryAfterSeconds: Math.ceil(config.lockoutMs / 1000) };
+    }
+    // Over the limit but not lockable: slow it down instead. Capped, so a
+    // flood cannot pin requests open and exhaust connections either.
     buckets.set(key, bucket);
-    return { allowed: false, retryAfterSeconds: Math.ceil(config.lockoutMs / 1000) };
+    const over = bucket.hits.length - config.limit;
+    return { allowed: true, delayMs: Math.min(250 * 2 ** Math.min(over, 5), 5000) };
   }
   delete bucket.lockedUntil;
   buckets.set(key, bucket);
@@ -109,16 +141,22 @@ export async function withVerifySlot<T>(
 }
 
 /**
- * Best-effort client identity for limiting.
+ * Client identity for limiting, and whether it is trustworthy enough to lock.
  *
- * The forwarded headers are only believed when the operator has declared a
- * proxy (same rule as everything else here); otherwise every request shares one
- * bucket, which is strictly safer — it cannot be split by spoofing a header.
+ * The forwarded address is only believed when the operator has declared a
+ * proxy. Without one there is no per-client identity at all — and crucially the
+ * answer to that is NOT "put everyone in one bucket", which would let any
+ * failed-login flood lock the whole instance out. It is "do not lock anyone".
  */
-export function clientKey(request: Request, trustProxy: boolean): string {
+export function clientKey(request: Request, trustProxy: boolean): { key: string; lockable: boolean } {
   if (trustProxy) {
     const forwarded = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
-    if (forwarded !== undefined && forwarded !== "") return `ip:${forwarded}`;
+    if (forwarded !== undefined && forwarded !== "") return { key: `ip:${forwarded}`, lockable: true };
   }
-  return "ip:shared";
+  return { key: "ip:unidentified", lockable: false };
+}
+
+/** Sleep, for applying a rate-limit delay. */
+export function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

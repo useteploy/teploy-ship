@@ -152,9 +152,10 @@ export async function setupRepo(
  * its deliverable is the edited tree, exactly like the SWE-bench path.
  */
 export type PushResult =
-  | { kind: "pushed"; sha: string }
+  /** Pushed. `screen` carries any warnings, which make the PR a draft. */
+  | { kind: "pushed"; sha: string; screen?: PublishScreen }
   | { kind: "empty" }
-  /** The diff broke a publication limit; nothing was committed or pushed. */
+  /** The diff contains something that must not be pushed. Nothing was committed. */
   | { kind: "refused"; screen: PublishScreen };
 
 export async function commitAndPush(
@@ -171,12 +172,13 @@ export async function commitAndPush(
   },
 ): Promise<PushResult> {
   const { ref, token, checkout, message } = options;
+  let screen: PublishScreen | undefined;
   const status = await git(executor, "git status --porcelain");
   if (status !== "") {
     // Stage first so the policy screens exactly what would be committed.
     await git(executor, "git add -A");
-    const screen = await screenPublication(executor, options.limits ?? publishLimitsFromEnv());
-    if (!screen.ok) {
+    screen = await screenPublication(executor, options.limits ?? publishLimitsFromEnv());
+    if (screen.blocking.length > 0) {
       // Leave the tree staged but unpushed: the operator can still inspect the
       // run, and nothing reached the destination repository.
       return { kind: "refused", screen };
@@ -194,7 +196,7 @@ export async function commitAndPush(
   // Pushing the same commit twice is a no-op, which is what makes the publish
   // step safe to replay after a crash between the push and the PR call.
   await git(executor, `git push ${authenticatedUrl(target, targetToken)} HEAD:refs/heads/${checkout.branch} 2>&1`, 300_000);
-  return { kind: "pushed", sha };
+  return { kind: "pushed", sha, ...(screen !== undefined && screen.warnings.length > 0 ? { screen } : {}) };
 }
 
 /**

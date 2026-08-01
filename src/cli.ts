@@ -375,28 +375,31 @@ function resolveSandbox(args: ReturnType<typeof parseArgs>, config: Config): San
 }
 
 /**
- * Refuse to execute untrusted work on the host.
+ * Warn — loudly — that this worker cannot run externally-sourced tasks.
  *
- * The approval policy is a set of command regexes. That is a useful warning —
- * it catches `rm -rf`, `curl`, `sudo` — but it is not a boundary: the same
- * effects are one `node -e`, `nc`, `find -delete`, or `getattr(os, "sys"+"tem")`
- * away, and the agent writes the commands. Against a LocalExecutor the blast
- * radius is the machine, including whatever the worker process can reach.
- *
- * So a run whose task text came from outside — a webhook, a chat message, an
- * issue body — requires a sandbox. An operator typing a task into their own
- * terminal is trusting their own machine, which is theirs to trust, and keeps
- * working exactly as before. SHIP_ALLOW_UNSANDBOXED_INTAKE=1 exists for a
- * deliberately disposable box; it says what it is.
+ * Deliberately a warning and not a refusal to start. The approval policy is a
+ * set of command regexes: useful as a prompt, not a boundary (the same effects
+ * are one `node -e`, `nc`, or `find -delete` away, and the agent writes the
+ * commands), so untrusted work genuinely does need isolation. But a worker that
+ * refuses to BOOT teaches its operator to reach for the override, after which
+ * everything runs unsandboxed forever — the enforcement has to sit on the
+ * dangerous run, not on the process. It does: see durable.ts. This exists so
+ * nobody discovers the situation from a failed run alone.
  */
-function assertSandboxedForUntrusted(sandboxConfigured: boolean, env: NodeJS.ProcessEnv = process.env): void {
+function warnIfUnsandboxed(sandboxConfigured: boolean, env: NodeJS.ProcessEnv = process.env): void {
   if (sandboxConfigured) return;
   const override = (env.SHIP_ALLOW_UNSANDBOXED_INTAKE ?? "").toLowerCase();
-  if (override === "1" || override === "true" || override === "yes") return;
-  fail(
-    "this worker accepts tasks from external sources but has no sandbox configured, so agent commands would run " +
-      "on the host. Set SHIP_SANDBOX_URL + SHIP_SANDBOX_TOKEN (see docs/DEPLOY.md), or set " +
-      "SHIP_ALLOW_UNSANDBOXED_INTAKE=1 if this machine is genuinely disposable.",
+  if (override === "1" || override === "true" || override === "yes") {
+    process.stderr.write(
+      `${yellow("warning:")} no sandbox configured and SHIP_ALLOW_UNSANDBOXED_INTAKE is set — agent commands from ` +
+        `webhooks and chat will run directly on this host.\n`,
+    );
+    return;
+  }
+  process.stderr.write(
+    `${yellow("warning:")} no sandbox configured. Runs you launch yourself work normally; tasks that arrive from a ` +
+      `webhook, Slack, or an issue will be REFUSED, because their commands would run on this host.\n` +
+      `  fix: set SHIP_SANDBOX_URL + SHIP_SANDBOX_TOKEN (see docs/DEPLOY.md)\n`,
   );
 }
 
@@ -568,7 +571,11 @@ function durableProvider(args: ReturnType<typeof parseArgs>, config: Config): Ex
   // Local durable runs: a persistent per-run workspace under the state
   // dir. It survives parks trivially (no TTL), so snapshot support is
   // unnecessary here — that's the sandbox path's concern.
+  //
+  // isolated is FALSE and that is not a formality: it is what stops an
+  // externally-sourced task from executing on this host.
   return {
+    isolated: false,
     async create() {
       const dir = join(stateDir(), "workspaces", `run-${randomUUID().slice(0, 8)}`);
       mkdirSync(dir, { recursive: true });
@@ -881,7 +888,7 @@ async function workerCommand(rest: string[]): Promise<void> {
       ? numFlag(args.flags["daily-budget"], "daily-budget", 10, { min: 0 })
       : undefined;
   const usingSandbox = resolveSandbox(args, config) !== undefined;
-  assertSandboxedForUntrusted(usingSandbox);
+  warnIfUnsandboxed(usingSandbox);
 
   const runtime = await makeRuntime(args, config);
   if (runtime.kind !== "nucleus") fail("worker needs --store nucleus");

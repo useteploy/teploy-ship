@@ -853,3 +853,45 @@ test("cancel settles a parked durable agent run as cancelled", async () => {
   assert.equal(settled.status, "cancelled");
   await assert.rejects(() => deliverEvent(store, "run-cxl", approvalEvent(0), { approved: true }), /already finished/);
 });
+
+test("an externally-sourced task will not execute on a non-isolating executor", async () => {
+  // The enforcement is on the RUN, not the process: a worker that refuses to
+  // boot teaches its operator to set the override, after which everything is
+  // unsandboxed forever. Refusing here keeps the dashboard and manual runs
+  // working and puts the reason where whoever triggered it will read it.
+  const { provider } = await localProvider(); // isolated is falsy
+  const wf = durableAgent({ model: reactiveModel(["```finish\nx\n```"]).model, executor: provider, workdir: "." });
+  const store = new MemoryEventStore();
+
+  const outcome = await executeRun({
+    workflow: wf,
+    runId: "run-untrusted",
+    store,
+    input: { task: "from a webhook", trust: "external" },
+  });
+  assert.equal(outcome.status, "failed");
+  assert.match(String(outcome.error?.detail ?? ""), /isolated executor/);
+
+  // An operator-launched task on the same executor is unaffected — that is a
+  // person choosing to trust their own machine.
+  const ok = await executeRun({
+    workflow: wf,
+    runId: "run-operator",
+    store: new MemoryEventStore(),
+    input: { task: "typed by a human", trust: "operator" },
+  });
+  assert.equal(ok.status, "completed");
+});
+
+test("the same task runs when the executor reports isolation", async () => {
+  const { provider } = await localProvider();
+  const isolated: ExecutorProvider = { ...provider, isolated: true };
+  const wf = durableAgent({ model: reactiveModel(["```finish\nx\n```"]).model, executor: isolated, workdir: "." });
+  const outcome = await executeRun({
+    workflow: wf,
+    runId: "run-sandboxed",
+    store: new MemoryEventStore(),
+    input: { task: "from a webhook", trust: "external" },
+  });
+  assert.equal(outcome.status, "completed");
+});

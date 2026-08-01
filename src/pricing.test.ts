@@ -69,3 +69,26 @@ test("absent usage is still genuinely zero", () => {
   assert.equal(costUSD("anthropic/claude-opus-5", undefined), 0);
   assert.equal(costUSD("totally-unknown", undefined), 0);
 });
+
+test("local models are free, not priced at the unknown-model ceiling", () => {
+  // The safety rule (unknown => most expensive) is right for a hosted model and
+  // badly wrong for one running on the operator's own hardware: a self-hosted
+  // Ship on Ollama would bill itself Opus rates for free inference and refuse
+  // to launch anything within the hour.
+  const usage = { inputTokens: 5_000_000, outputTokens: 5_000_000, totalTokens: 10_000_000 };
+  for (const id of ["ollama/llama3.1", "lmstudio/qwen", "vllm/mistral", "local/whatever"]) {
+    assert.equal(costUSD(id, usage), 0, `${id} runs on your own hardware`);
+    assert.equal(isPricedModel(id), true, "and is not reported as an unpriced guess");
+  }
+  // An unrecognised HOSTED model still fails closed.
+  assert.ok(costUSD("someprovider/mystery-model", usage) > 0);
+});
+
+test("an operator can declare rates for a model Ship does not know", () => {
+  const env = { SHIP_MODEL_PRICING: JSON.stringify({ "mystery-model": { inputPer1M: 1, outputPer1M: 2 } }) };
+  const usage = { inputTokens: 1_000_000, outputTokens: 1_000_000, totalTokens: 2_000_000 };
+  assert.equal(costUSD("someprovider/mystery-model", usage, env), 3);
+  assert.equal(isPricedModel("someprovider/mystery-model"), false, "without the override it is still a guess");
+  // Malformed JSON must not throw on a hot path.
+  assert.ok(costUSD("x/y", usage, { SHIP_MODEL_PRICING: "{oops" }) > 0);
+});

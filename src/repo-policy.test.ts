@@ -5,6 +5,7 @@ import {
   RepoNotAllowedError,
   assertRepoAllowed,
   credentialFor,
+  effectiveAllowlist,
   isAllowed,
   parseAllowlist,
   parseOriginTokens,
@@ -46,10 +47,10 @@ test("isAllowed matches at the configured precision, case-insensitively", () => 
   assert.equal(isAllowed(parseRepoUrl("https://github.com.evil.test/useteploy/x"), owner), false);
 });
 
-test("TS-001: an external repo is refused outright when no allowlist is configured", () => {
+test("TS-001: an external repo is refused outright when no origin has been declared", () => {
   assert.throws(
     () => assertRepoAllowed(ATTACKER, { trust: "external", config: {} }),
-    (e: unknown) => e instanceof RepoNotAllowedError && /SHIP_REPO_ALLOWLIST/.test((e as Error).message),
+    (e: unknown) => e instanceof RepoNotAllowedError && /SHIP_GIT_TOKENS|SHIP_REPO_ALLOWLIST/.test((e as Error).message),
   );
 });
 
@@ -94,11 +95,41 @@ test("credentialFor prefers an exact per-origin token, then github, then the gen
   };
   assert.equal(credentialFor(parseRepoUrl(FORGEJO), config), "forgejo-token");
   assert.equal(credentialFor(parseRepoUrl(OURS), config), "gh-origin-token");
-  assert.equal(credentialFor(parseRepoUrl("https://other.example/a/b"), config), "generic");
+  // An origin the config never mentions falls back to the generic token only
+  // when it is allowlisted — see the test below for why.
+  assert.equal(
+    credentialFor(parseRepoUrl("https://other.example/a/b"), { ...config, allowlist: "https://other.example" }),
+    "generic",
+  );
 
   const noOrigins = { gitToken: "generic", githubToken: "gh-fallback" };
   assert.equal(credentialFor(parseRepoUrl(OURS), noOrigins), "gh-fallback");
   assert.equal(credentialFor(parseRepoUrl(FORGEJO), noOrigins), "generic");
+});
+
+test("once any origin is named, the generic token is not sent to unnamed ones", () => {
+  // Naming per-origin credentials is a statement about where Ship belongs. An
+  // origin outside that set has no credential of its own, and quietly reaching
+  // for the origin-less token is the exact behaviour that made an arbitrary URL
+  // dangerous in the first place — so it is refused, with the fix in the message.
+  const config = {
+    originTokens: JSON.stringify({ "https://github.com": "gh" }),
+    gitToken: "generic",
+  };
+  assert.throws(() => credentialFor(parseRepoUrl("https://other.example/a/b"), config), RepoNotAllowedError);
+
+  // Two ways to say yes, both explicit: give it a credential, or allowlist it.
+  assert.equal(
+    credentialFor(parseRepoUrl("https://other.example/a/b"), {
+      ...config,
+      originTokens: JSON.stringify({ "https://github.com": "gh", "https://other.example": "other" }),
+    }),
+    "other",
+  );
+  assert.equal(
+    credentialFor(parseRepoUrl("https://other.example/a/b"), { ...config, allowlist: "https://other.example" }),
+    "generic",
+  );
 });
 
 test("parseOriginTokens tolerates junk without throwing at config time", () => {
@@ -111,4 +142,36 @@ test("parseOriginTokens tolerates junk without throwing at config time", () => {
 test("an unparseable repo URL is refused, not passed through", () => {
   assert.throws(() => assertRepoAllowed("https://github.com/onlyowner", { trust: "operator" }), RepoNotAllowedError);
   assert.throws(() => assertRepoAllowed("ssh://git@github.com/a/b", { trust: "operator" }), RepoNotAllowedError);
+});
+
+test("a per-origin credential allows its own origin — no second variable to set", () => {
+  // Secure-by-default: declaring "this token is for github.com" already says
+  // Ship may talk to github.com. Making the operator repeat that in a separate
+  // allowlist is the burden-on-the-customer pattern, and the step people skip.
+  const config = { originTokens: JSON.stringify({ "https://github.com": "ghp_x" }) };
+  assert.equal(assertRepoAllowed(OURS, { trust: "external", config }).repo, "teploy-cli");
+  // Other origins are still refused — the implication is per-origin, not blanket.
+  assert.throws(() => assertRepoAllowed(ATTACKER, { trust: "external", config }), RepoNotAllowedError);
+});
+
+test("an origin-less token still requires an explicit allowlist for external work", () => {
+  // SHIP_GIT_TOKEN has no host attached, so it goes wherever the URL says —
+  // exactly the exfiltration path. This is the one case that must be declared.
+  const config = { gitToken: "a-token-with-no-origin" };
+  assert.throws(
+    () => assertRepoAllowed(OURS, { trust: "external", config }),
+    (e: unknown) => e instanceof RepoNotAllowedError && /SHIP_GIT_TOKENS|SHIP_REPO_ALLOWLIST/.test((e as Error).message),
+  );
+  // Declaring it explicitly works, as does giving that token an origin.
+  assert.ok(assertRepoAllowed(OURS, { trust: "external", config: { ...config, allowlist: "https://github.com" } }));
+});
+
+test("effectiveAllowlist merges declared and implied entries without duplicating", () => {
+  const entries = effectiveAllowlist({
+    allowlist: "https://github.com/useteploy",
+    originTokens: JSON.stringify({ "https://github.com": "t", "https://git.example.com": "t2" }),
+  });
+  // The declared owner-scoped entry survives; the credential adds the origins.
+  assert.ok(entries.some((e) => e.origin === "https://github.com" && e.owner === "useteploy"));
+  assert.ok(entries.some((e) => e.origin === "https://git.example.com" && e.owner === undefined));
 });

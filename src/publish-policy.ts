@@ -10,18 +10,24 @@ import type { AgentExecutor } from "@neutron-build/agents";
  * key into a fixture, or deleted a directory it misread would have all of that
  * pushed to a real branch under Ship's credential.
  *
- * These are deliberately blunt structural limits, not a code reviewer: size,
- * shape, and a handful of things that must never be committed. Refusing is
- * always safe (the work stays in the run's log and the operator is told why);
- * silently publishing is not.
+ * Two different verdicts, because two different questions:
+ *
+ *   BLOCKING — credentials, forbidden paths, symlinks, submodule pointers.
+ *              Refused. None of these can be un-published once pushed, and none
+ *              of them has a legitimate version that Ship should guess at.
+ *   WARNING  — the diff is unusually large or contains binaries. Published as a
+ *              DRAFT that says why. A 400-file change is either a real refactor
+ *              or a runaway agent, and only a human knows which; a product that
+ *              refuses both just teaches its operator to raise the limit until
+ *              it never fires again, which is worse than not having it.
  */
 
 export interface PublishLimits {
-  /** Refuse a diff touching more files than this. */
+  /** Above this many files the PR is raised as a draft, not refused. */
   maxFiles: number;
-  /** Refuse when total added lines exceed this. */
+  /** Above this many added lines the PR is raised as a draft. */
   maxAddedLines: number;
-  /** Refuse when any single file is bigger than this, in bytes. */
+  /** Above this size for one file the PR is raised as a draft, in bytes. */
   maxFileBytes: number;
   /** Paths that must never be committed, matched against the repo-relative path. */
   forbidden: RegExp[];
@@ -54,8 +60,22 @@ const SECRET_PATTERNS: Array<{ pattern: RegExp; describe: string }> = [
 ];
 
 export interface PublishScreen {
+  /** No concerns at all. */
   ok: boolean;
-  /** Why publication was refused, in operator-readable terms. */
+  /**
+   * Content that must never be pushed: credentials, forbidden paths, symlinks,
+   * submodule pointers. Present means REFUSE.
+   */
+  blocking: string[];
+  /**
+   * The diff is unusual — very large, very many files, binaries. Present means
+   * publish, but as a draft that says why. A 400-file change can be a
+   * legitimate refactor or a runaway agent, and a product that refuses both
+   * teaches its users to raise the limit until it never fires. A draft asks a
+   * human the question instead of answering it for them.
+   */
+  warnings: string[];
+  /** Everything, blocking first — for logs and summaries. */
   reasons: string[];
   files: number;
   addedLines: number;
@@ -76,7 +96,8 @@ export async function screenPublication(
   executor: AgentExecutor,
   limits: PublishLimits = defaultPublishLimits,
 ): Promise<PublishScreen> {
-  const reasons: string[] = [];
+  const blocking: string[] = [];
+  const warnings: string[] = [];
 
   // --raw gives us modes, which is the only way to see symlinks (120000) and
   // submodule pointers (160000) — both of which can redirect what a reviewer
@@ -93,13 +114,15 @@ export async function screenPublication(
     const [, srcMode, dstMode, , path] = match;
     paths.push(path!);
     if (dstMode === "120000" && srcMode !== "120000") {
-      reasons.push(`adds a symlink (${path}) — a link can point outside anything a reviewer reads`);
+      // A link changes what a reviewer is actually approving — it can point
+      // anywhere, including outside the tree they are reading.
+      blocking.push(`adds a symlink (${path}) — a link can point outside anything a reviewer reads`);
     }
     if (dstMode === "160000" || srcMode === "160000") {
-      reasons.push(`changes a submodule pointer (${path})`);
+      blocking.push(`changes a submodule pointer (${path}) — that moves code a reviewer cannot see in the diff`);
     }
     if (dstMode === "100755" && srcMode === "100644") {
-      reasons.push(`makes ${path} executable`);
+      warnings.push(`makes ${path} executable`);
     }
   }
 
@@ -118,19 +141,20 @@ export async function screenPublication(
   }
 
   const files = paths.length;
+  // Size is a smell, not a verdict: a big diff can be a real refactor.
   if (files > limits.maxFiles) {
-    reasons.push(`touches ${files} files (limit ${limits.maxFiles})`);
+    warnings.push(`touches ${files} files (usual limit ${limits.maxFiles})`);
   }
   if (addedLines > limits.maxAddedLines) {
-    reasons.push(`adds ${addedLines} lines (limit ${limits.maxAddedLines})`);
+    warnings.push(`adds ${addedLines} lines (usual limit ${limits.maxAddedLines})`);
   }
   if (binaryFiles > 0) {
-    reasons.push(`adds or changes ${binaryFiles} binary file(s) — Ship does not publish binaries`);
+    warnings.push(`adds or changes ${binaryFiles} binary file(s)`);
   }
 
   for (const path of paths) {
     if (limits.forbidden.some((p) => p.test(path))) {
-      reasons.push(`touches a forbidden path (${path})`);
+      blocking.push(`touches a path that must never be committed (${path})`);
     }
   }
 
@@ -138,7 +162,7 @@ export async function screenPublication(
   for (const path of paths) {
     const size = Number(await git(executor, `git cat-file -s :"${path.replace(/"/g, '\\"')}" 2>/dev/null`));
     if (Number.isFinite(size) && size > limits.maxFileBytes) {
-      reasons.push(`${path} is ${Math.round(size / 1024)}KB (limit ${Math.round(limits.maxFileBytes / 1024)}KB)`);
+      warnings.push(`${path} is ${Math.round(size / 1024)}KB (usual limit ${Math.round(limits.maxFileBytes / 1024)}KB)`);
     }
   }
 
@@ -150,18 +174,39 @@ export async function screenPublication(
     .filter((l) => l.startsWith("+") && !l.startsWith("+++"))
     .join("\n");
   for (const { pattern, describe } of SECRET_PATTERNS) {
-    if (pattern.test(added)) reasons.push(`the diff appears to add ${describe}`);
+    // Never a warning: a published credential cannot be un-published.
+    if (pattern.test(added)) blocking.push(`the diff appears to add ${describe}`);
   }
 
-  return { ok: reasons.length === 0, reasons: [...new Set(reasons)], files, addedLines };
+  const uniqueBlocking = [...new Set(blocking)];
+  const uniqueWarnings = [...new Set(warnings)];
+  return {
+    ok: uniqueBlocking.length === 0 && uniqueWarnings.length === 0,
+    blocking: uniqueBlocking,
+    warnings: uniqueWarnings,
+    reasons: [...uniqueBlocking, ...uniqueWarnings],
+    files,
+    addedLines,
+  };
 }
 
 /** The PR/comment note explaining a refusal, so the run's outcome is not a mystery. */
 export function refusalMessage(screen: PublishScreen): string {
   return (
     `Ship refused to publish this run's diff (${screen.files} files, ${screen.addedLines} added lines):\n` +
-    screen.reasons.map((r) => `- ${r}`).join("\n") +
-    `\n\nThe work is still in the run's log. Adjust the task, or raise the limits via SHIP_PUBLISH_* if this is expected.`
+    screen.blocking.map((r) => `- ${r}`).join("\n") +
+    `\n\nThe work is still in the run's log. Nothing here is a size limit — these are things that cannot be ` +
+    `un-published once pushed, so they are refused rather than flagged.`
+  );
+}
+
+/** The note attached to a draft PR raised because the diff looked unusual. */
+export function warningMessage(screen: PublishScreen): string {
+  return (
+    `**This diff is unusual** (${screen.files} files, ${screen.addedLines} added lines), so it is a draft:\n` +
+    screen.warnings.map((r) => `- ${r}`).join("\n") +
+    `\n\nThat may be entirely correct for this task — review it and mark it ready. Adjust SHIP_PUBLISH_* if this ` +
+    `shape of change is normal for your repository.`
   );
 }
 

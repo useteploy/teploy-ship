@@ -48,8 +48,8 @@ test("TS-043: a diff that adds a private key is refused", async () => {
   });
   try {
     const screen = await screenPublication(repo.executor);
-    assert.equal(screen.ok, false);
-    assert.ok(screen.reasons.some((r) => /private key/.test(r)), screen.reasons.join("; "));
+    // A published credential cannot be un-published, so this is never a warning.
+    assert.ok(screen.blocking.some((r) => /private key/.test(r)), screen.blocking.join("; "));
   } finally {
     await repo.cleanup();
   }
@@ -65,8 +65,7 @@ test("TS-043: forbidden paths are refused even when small", async () => {
   });
   try {
     const screen = await screenPublication(repo.executor);
-    assert.equal(screen.ok, false);
-    assert.ok(screen.reasons.some((r) => /forbidden path/.test(r)), screen.reasons.join("; "));
+    assert.ok(screen.blocking.some((r) => /must never be committed/.test(r)), screen.blocking.join("; "));
   } finally {
     await repo.cleanup();
   }
@@ -99,15 +98,18 @@ test("the forbidden list covers the paths that must never be committed", () => {
   }
 });
 
-test("TS-043: an oversized file-count is refused with the numbers in the reason", async () => {
+test("TS-043: an oversized file-count becomes a draft, with the numbers in the reason", async () => {
   const repo = await stagedRepo(async (dir) => {
     await mkdir(join(dir, "vendor"), { recursive: true });
     for (let i = 0; i < 12; i++) await writeFile(join(dir, "vendor", `f${i}.js`), `export const a${i} = ${i};\n`);
   });
   try {
     const screen = await screenPublication(repo.executor, { ...defaultPublishLimits, maxFiles: 5 });
-    assert.equal(screen.ok, false);
-    assert.ok(screen.reasons.some((r) => /touches 12 files \(limit 5\)/.test(r)), screen.reasons.join("; "));
+    // A big diff is a question for a human, not a refusal: this publishes as a
+    // draft that says why. Refusing would just train the operator to raise the
+    // limit until it never fires.
+    assert.deepEqual(screen.blocking, [], "size alone never blocks");
+    assert.ok(screen.warnings.some((r) => /touches 12 files \(usual limit 5\)/.test(r)), screen.warnings.join("; "));
   } finally {
     await repo.cleanup();
   }
@@ -120,21 +122,20 @@ test("TS-043: a symlink is refused — it can point outside what a reviewer read
   });
   try {
     const screen = await screenPublication(repo.executor);
-    assert.equal(screen.ok, false);
-    assert.ok(screen.reasons.some((r) => /symlink/.test(r)), screen.reasons.join("; "));
+    assert.ok(screen.blocking.some((r) => /symlink/.test(r)), screen.blocking.join("; "));
   } finally {
     await repo.cleanup();
   }
 });
 
-test("TS-043: a binary blob is refused", async () => {
+test("TS-043: a binary blob is flagged for review, not refused", async () => {
   const repo = await stagedRepo(async (dir) => {
     await writeFile(join(dir, "blob.dat"), Buffer.from([0, 1, 2, 3, 0, 255, 7]));
   });
   try {
     const screen = await screenPublication(repo.executor);
-    assert.equal(screen.ok, false);
-    assert.ok(screen.reasons.some((r) => /binary/.test(r)), screen.reasons.join("; "));
+    assert.deepEqual(screen.blocking, []);
+    assert.ok(screen.warnings.some((r) => /binary/.test(r)), screen.warnings.join("; "));
   } finally {
     await repo.cleanup();
   }

@@ -82,13 +82,76 @@ function normalizeModelId(modelId: string): string {
 }
 
 /** Look up a model's pricing, tolerating a `provider/` prefix. Undefined for unknown models. */
-export function pricingFor(modelId: string): ModelPricing | undefined {
-  return PRICING[normalizeModelId(modelId)];
+export function pricingFor(modelId: string, env?: NodeJS.ProcessEnv): ModelPricing | undefined {
+  const key = normalizeModelId(modelId);
+  // Operator-declared rates win: they know what they are paying, we are guessing.
+  return pricingOverrides(env)[key] ?? PRICING[key];
 }
 
 /** Is this model in the table, or are we about to estimate its cost? */
 export function isPricedModel(modelId: string): boolean {
-  return pricingFor(modelId) !== undefined;
+  return pricingFor(modelId) !== undefined || isLocalModel(modelId);
+}
+
+/**
+ * Providers that run on hardware the operator already owns, where per-token
+ * cost is zero.
+ *
+ * This matters because the unknown-model rule below prices anything it does not
+ * recognise at the HIGHEST known rate — correct for an unrecognised hosted
+ * model, badly wrong for a local one. A self-hosted Ship pointed at Ollama
+ * would otherwise bill itself Opus rates for free inference and refuse to
+ * launch anything within an hour, which is a product that does not work for the
+ * people most likely to run it. Extend with SHIP_LOCAL_MODEL_PREFIXES.
+ */
+const BUILTIN_LOCAL_PREFIXES = ["ollama/", "local/", "lmstudio/", "llamacpp/", "llama-cpp/", "vllm/", "localai/", "jan/"];
+
+export function localModelPrefixes(env: NodeJS.ProcessEnv = process.env): string[] {
+  const extra = (env.SHIP_LOCAL_MODEL_PREFIXES ?? "")
+    .split(",")
+    .map((p) => p.trim().toLowerCase())
+    .filter((p) => p !== "")
+    .map((p) => (p.endsWith("/") ? p : `${p}/`));
+  return [...BUILTIN_LOCAL_PREFIXES, ...extra];
+}
+
+/** Does this model run on the operator's own hardware (so tokens are free)? */
+export function isLocalModel(modelId: string, env?: NodeJS.ProcessEnv): boolean {
+  const id = modelId.toLowerCase();
+  return localModelPrefixes(env).some((prefix) => id.startsWith(prefix));
+}
+
+/**
+ * Operator-declared pricing for models Ship does not ship a rate for, as JSON:
+ *
+ *   SHIP_MODEL_PRICING={"my-org/some-model":{"inputPer1M":2,"outputPer1M":8}}
+ *
+ * A product cannot know every model its users will point it at, and the answer
+ * to that should be "tell me the rate", not "guess high forever".
+ */
+export function pricingOverrides(env: NodeJS.ProcessEnv = process.env): Record<string, ModelPricing> {
+  const raw = env.SHIP_MODEL_PRICING;
+  if (raw === undefined || raw.trim() === "") return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return {};
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+  const out: Record<string, ModelPricing> = {};
+  for (const [id, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof value !== "object" || value === null) continue;
+    const v = value as Record<string, unknown>;
+    if (typeof v.inputPer1M !== "number" || typeof v.outputPer1M !== "number") continue;
+    out[id.toLowerCase()] = {
+      inputPer1M: v.inputPer1M,
+      outputPer1M: v.outputPer1M,
+      ...(typeof v.cacheReadPer1M === "number" ? { cacheReadPer1M: v.cacheReadPer1M } : {}),
+      ...(typeof v.cacheWritePer1M === "number" ? { cacheWritePer1M: v.cacheWritePer1M } : {}),
+    };
+  }
+  return out;
 }
 
 /**
@@ -120,9 +183,13 @@ export const UNKNOWN_MODEL_PRICING: ModelPricing = (() => {
  * Callers that want to SHOW the number should also check {@link isPricedModel}
  * and mark it as an estimate.
  */
-export function costUSD(modelId: string, usage: UsageLike | undefined): number {
+export function costUSD(modelId: string, usage: UsageLike | undefined, env?: NodeJS.ProcessEnv): number {
   if (usage === undefined) return 0;
-  const price = pricingFor(modelId) ?? UNKNOWN_MODEL_PRICING;
+  // Local inference genuinely costs nothing per token; charging it the
+  // unknown-model ceiling would exhaust a self-hosted user's budget on the
+  // first run for spend that never happened.
+  if (isLocalModel(modelId, env)) return 0;
+  const price = pricingFor(modelId, env) ?? UNKNOWN_MODEL_PRICING;
   const input = usage.inputTokens ?? 0;
   const output = usage.outputTokens ?? 0;
   const cacheRead = usage.cacheReadTokens ?? 0;

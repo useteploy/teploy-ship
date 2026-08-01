@@ -139,6 +139,35 @@ export function parseOriginTokens(raw: string | undefined): Record<string, strin
 }
 
 /**
+ * The effective allowlist: what the operator declared, plus what they implied.
+ *
+ * Declaring a per-origin credential in SHIP_GIT_TOKENS ("this token is for
+ * github.com") IS a statement that Ship may talk to that origin — Ship cannot
+ * clone somewhere it has no credential for anyway, and making the operator
+ * repeat themselves in a second variable is exactly the "burden of security
+ * falls on the customer" pattern that secure-by-default guidance exists to
+ * remove. So per-origin credentials seed the allowlist automatically.
+ *
+ * The ONE case that still needs an explicit answer is the origin-less
+ * SHIP_GIT_TOKEN, because that credential has no host attached — it goes
+ * wherever the URL says, which is precisely the token-exfiltration path. A
+ * deployment using only that token must say where it may be sent.
+ */
+export function effectiveAllowlist(config: RepoPolicyConfig): RepoAllowEntry[] {
+  const declared = parseAllowlist(config.allowlist);
+  const implied: RepoAllowEntry[] = Object.keys(parseOriginTokens(config.originTokens)).map((origin) => ({ origin }));
+  const seen = new Set(declared.map((e) => `${e.origin}|${e.owner ?? ""}|${e.repo ?? ""}`));
+  for (const entry of implied) {
+    const key = `${entry.origin}||`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      declared.push(entry);
+    }
+  }
+  return declared;
+}
+
+/**
  * Validate a repository URL against the policy and return its parsed ref.
  * Throws RepoNotAllowedError with an operator-actionable message otherwise.
  */
@@ -157,19 +186,25 @@ export function assertRepoAllowed(
   // there is nothing to leak and nothing to allowlist.
   if (ref.base === "file://") return ref;
 
-  const entries = parseAllowlist(config.allowlist);
+  const entries = effectiveAllowlist(config);
   if (entries.length === 0) {
     if (options.trust === "external") {
       throw new RepoNotAllowedError(
         url,
-        "it came from an external source (webhook, chat, or issue text) and SHIP_REPO_ALLOWLIST is not set. " +
-          "Set SHIP_REPO_ALLOWLIST to the origins Ship may clone, e.g. SHIP_REPO_ALLOWLIST=https://github.com/your-org",
+        "it came from an external source (webhook, chat, or issue text), and this deployment has not said which " +
+          "origins Ship may clone. Either give each forge its own credential — " +
+          'SHIP_GIT_TOKENS={"https://github.com":"…"} — which allows that origin automatically, or set ' +
+          "SHIP_REPO_ALLOWLIST=https://github.com/your-org explicitly.",
       );
     }
     return ref;
   }
   if (!isAllowed(ref, entries)) {
-    throw new RepoNotAllowedError(url, `${ref.base}/${ref.owner}/${ref.repo} is not in SHIP_REPO_ALLOWLIST`);
+    throw new RepoNotAllowedError(
+      url,
+      `${ref.base}/${ref.owner}/${ref.repo} is not an origin this deployment allows ` +
+        `(allowed: ${entries.map((e) => e.origin + (e.owner !== undefined ? `/${e.owner}` : "")).join(", ")})`,
+    );
   }
   return ref;
 }
@@ -184,11 +219,11 @@ export function assertRepoAllowed(
  */
 export function credentialFor(ref: RepoRef, config: RepoPolicyConfig): string {
   if (ref.base === "file://") return "";
-  const entries = parseAllowlist(config.allowlist);
+  const entries = effectiveAllowlist(config);
   if (entries.length > 0 && !isAllowed(ref, entries)) {
     throw new RepoNotAllowedError(
       `${ref.base}/${ref.owner}/${ref.repo}`,
-      "not in SHIP_REPO_ALLOWLIST — refusing to send a git credential to it",
+      "this deployment does not allow that origin — refusing to send a git credential to it",
     );
   }
   const byOrigin = parseOriginTokens(config.originTokens);

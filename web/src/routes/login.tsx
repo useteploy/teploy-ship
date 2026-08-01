@@ -1,6 +1,6 @@
 import { authenticate, requestIsSecure, sessionSetCookie, currentUser } from "../lib/session.server.js";
 import { oidcEnabled, oidcLabel, trustProxy } from "../lib/oidc.server.js";
-import { checkRateLimit, clearRateLimit, clientKey, withVerifySlot } from "../lib/ratelimit.server.js";
+import { checkRateLimit, clearRateLimit, clientKey, delay, loginLimits, withVerifySlot } from "../lib/ratelimit.server.js";
 
 export const config = { mode: "app" };
 
@@ -19,16 +19,22 @@ export async function action({ request }: { request: Request }): Promise<Respons
   const username = String(form.get("username") ?? "");
   const password = String(form.get("password") ?? "");
 
-  // Two limits, for two different problems. The per-key window bounds password
-  // GUESSING; the concurrency slot bounds the CPU an unauthenticated caller can
-  // make this process spend, because every attempt (including a miss, by
-  // design) runs scrypt on the shared threadpool and would otherwise starve the
-  // store I/O the rest of the dashboard depends on.
-  const key = `${clientKey(request, trustProxy())}|${username.toLowerCase()}`;
-  const limit = checkRateLimit(key);
-  if (!limit.allowed) {
-    return { error: `Too many attempts. Try again in ${limit.retryAfterSeconds ?? 300} seconds.` };
+  // Three layers, none of which hands an attacker an outage button:
+  //   - the client address may be locked out, but only when a declared proxy
+  //     makes it trustworthy (then the one locked out IS the attacker);
+  //   - the username is only ever slowed, because locking it would let anyone
+  //     who knows a name lock out its owner;
+  //   - the concurrency slot bounds the CPU an unauthenticated caller can make
+  //     this process spend on scrypt, which runs on the same threadpool as the
+  //     store I/O the rest of the dashboard needs.
+  const client = clientKey(request, trustProxy());
+  const byClient = checkRateLimit(client.key, Date.now(), loginLimits, client.lockable);
+  if (!byClient.allowed) {
+    return { error: `Too many attempts. Try again in ${byClient.retryAfterSeconds ?? 300} seconds.` };
   }
+  const byUser = checkRateLimit(`user:${username.toLowerCase()}`, Date.now(), loginLimits, false);
+  const wait = Math.max(byClient.delayMs ?? 0, byUser.delayMs ?? 0);
+  if (wait > 0) await delay(wait);
   const verified = await withVerifySlot(() => authenticate(username, password));
   if (verified.shed) {
     return { error: "The server is busy verifying sign-ins. Try again in a moment." };
@@ -38,7 +44,8 @@ export async function action({ request }: { request: Request }): Promise<Respons
     return { error: "Wrong username or password." };
   }
   // A legitimate user who mistyped twice is not an attacker.
-  clearRateLimit(key);
+  clearRateLimit(client.key);
+  clearRateLimit(`user:${username.toLowerCase()}`);
   // The same trusted-proxy ladder OIDC uses. Reading X-Forwarded-Proto
   // unconditionally let a caller choose the scheme and strip Secure from a
   // privileged cookie on an HTTPS deployment.

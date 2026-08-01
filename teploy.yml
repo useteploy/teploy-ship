@@ -33,12 +33,13 @@
 # that is not there. Nothing to configure; noted here because the deployed
 # container will still show them in `teploy secret list`.
 #
-# Also required for repo runs (worker), and NOT optional once any intake
-# source is configured:
-#   SHIP_REPO_ALLOWLIST  origins Ship may clone, e.g.
-#                        https://github.com/your-org,http://100.x.y.z:49152/tyler
-#   Without it, a repository URL arriving from a webhook, a Slack message, or
-#   an issue body is refused rather than being handed the deploy token.
+# Repository access (worker). Prefer the per-origin form — it names the
+# credential AND the origins Ship may clone, so there is nothing else to set:
+#   SHIP_GIT_TOKENS={"https://github.com":"ghp_…"}
+# The single-token SHIP_GIT_TOKEN still works, but because it has no host
+# attached it also needs SHIP_REPO_ALLOWLIST to say where it may be sent —
+# otherwise a repository URL arriving from a webhook, a Slack message, or an
+# issue body is refused rather than being handed the token.
 
 app: ship
 server: smoke # your server name from servers.yml (smoke = the dev test box)
