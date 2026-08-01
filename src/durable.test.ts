@@ -276,7 +276,8 @@ test("repo runs inject the playbook + memory into the prompt and record a note a
   );
 
   const memory = new FileRepoMemory(await mkdtemp(join(tmpdir(), "durable-repo-mem-")));
-  await memory.record({ repo: "owner/repo", note: "previously fixed the parser → PR #7" });
+  // repoKeyOf now includes the origin, so file:// clones scope as "file:/owner/repo".
+  await memory.record({ repo: "file:/owner/repo", note: "previously fixed the parser → PR #7" });
 
   const prompts: string[] = [];
   const model: ModelAdapter = {
@@ -330,7 +331,7 @@ test("repo runs inject the playbook + memory into the prompt and record a note a
   assert.match(system, /previously fixed the parser/);
 
   // publish recorded a fresh note (empty diff -> "no PR")
-  const notes = await memory.recent("owner/repo", 5);
+  const notes = await memory.recent("file:/owner/repo", 5);
   assert.equal(notes.length, 2);
   assert.match(notes[0]!.note, /check the build → no PR/);
 });
@@ -397,8 +398,8 @@ test("index-enabled repo runs refresh the code index and answer ```search from i
     input: { task: "find retry backoff", repo: `file://${bareDir}/owner/repo.git`, index: true },
   });
   assert.equal(outcome.status, "completed");
-  assert.deepEqual(refreshed, ["owner/repo"], "the clone was indexed once, repo-scoped");
-  assert.deepEqual(queries, ["owner/repo:where is retry backoff?"]);
+  assert.deepEqual(refreshed, ["file:/owner/repo"], "the clone was indexed once, scoped by origin+owner/repo");
+  assert.deepEqual(queries, ["file:/owner/repo:where is retry backoff?"]);
   assert.match(systems[0] ?? "", /```search/, "the prompt advertises search when indexing is on");
 
   const events = await store.load("run-idx");

@@ -1,8 +1,10 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 
 import type { AgentExecutor } from "@neutron-build/agents";
 
+import { appendLineSync, withFileLock, writeTextFile } from "./file-store.js";
 import { frameUntrusted } from "./guard.js";
 import type { NucleusPgwire } from "./nucleus-pgwire.js";
 import { stateDir } from "./run-store.js";
@@ -20,7 +22,15 @@ import { stateDir } from "./run-store.js";
  */
 
 export interface RepoNote {
-  /** owner/repo — the scope key. */
+  /**
+   * Stable identity for the note.
+   *
+   * Deletion used to be keyed on (repo, createdAt), and two notes written in
+   * the same millisecond — which happens, because a publish records one per run
+   * and runs finish together — were both removed by a single click.
+   */
+  noteId: string;
+  /** origin/owner/repo — the scope key (see repoKeyOf). */
   repo: string;
   note: string;
   runId?: string;
@@ -28,13 +38,13 @@ export interface RepoNote {
 }
 
 export interface RepoMemoryStore {
-  record(note: Omit<RepoNote, "createdAt">): Promise<void>;
-  /** Most recent first. */
+  record(note: Omit<RepoNote, "createdAt" | "noteId">): Promise<RepoNote>;
+  /** Most recent first, bounded in the query rather than after the fact. */
   recent(repo: string, limit: number): Promise<RepoNote[]>;
   /** Every repo that has notes, with its note count — for the dashboard. */
   repos(): Promise<{ repo: string; count: number }[]>;
-  /** Delete a single note, keyed by repo + its createdAt timestamp. */
-  remove(repo: string, createdAt: string): Promise<void>;
+  /** Delete exactly one note. */
+  remove(noteId: string): Promise<void>;
 }
 
 /** File-backed memory: one JSONL per repo under the state dir. */
@@ -49,13 +59,12 @@ export class FileRepoMemory implements RepoMemoryStore {
     return join(this.#dir, `${repo.replace(/[^a-zA-Z0-9._-]/g, "_")}.jsonl`);
   }
 
-  async record(note: Omit<RepoNote, "createdAt">): Promise<void> {
-    await mkdir(this.#dir, { recursive: true });
-    const full: RepoNote = { ...note, createdAt: new Date().toISOString() };
+  async record(note: Omit<RepoNote, "createdAt" | "noteId">): Promise<RepoNote> {
+    const full: RepoNote = { ...note, noteId: `note-${randomUUID().slice(0, 12)}`, createdAt: new Date().toISOString() };
     // Append, not read-modify-write — two concurrent records must not clobber
-    // each other's note.
-    const { appendFile } = await import("node:fs/promises");
-    await appendFile(this.#file(note.repo), JSON.stringify(full) + "\n");
+    // each other's note. Durably, so a note is not lost to a crash.
+    await appendLineSync(this.#file(note.repo), JSON.stringify(full));
+    return full;
   }
 
   #parse(raw: string): RepoNote[] {
@@ -98,11 +107,25 @@ export class FileRepoMemory implements RepoMemoryStore {
     return [...counts.entries()].map(([repo, count]) => ({ repo, count }));
   }
 
-  async remove(repo: string, createdAt: string): Promise<void> {
-    const path = this.#file(repo);
-    const raw = await readFile(path, "utf8").catch(() => "");
-    const kept = this.#parse(raw).filter((n) => !(n.repo === repo && n.createdAt === createdAt));
-    await writeFile(path, kept.map((n) => JSON.stringify(n)).join("\n") + (kept.length > 0 ? "\n" : ""));
+  /**
+   * Remove one note by id, rewriting the file atomically under a lock. It used
+   * to rewrite the final path directly, so a crash or a concurrent record left
+   * a truncated log.
+   */
+  async remove(noteId: string): Promise<void> {
+    const { readdir } = await import("node:fs/promises");
+    const files = await readdir(this.#dir).catch(() => [] as string[]);
+    for (const file of files) {
+      if (!file.endsWith(".jsonl")) continue;
+      const path = join(this.#dir, file);
+      await withFileLock(path, async () => {
+        const raw = await readFile(path, "utf8").catch(() => "");
+        const notes = this.#parse(raw);
+        const kept = notes.filter((n) => n.noteId !== noteId);
+        if (kept.length === notes.length) return;
+        await writeTextFile(path, kept.map((n) => JSON.stringify(n)).join("\n") + (kept.length > 0 ? "\n" : ""));
+      });
+    }
   }
 }
 
@@ -119,6 +142,7 @@ export class NucleusRepoMemory implements RepoMemoryStore {
     this.#ready ??= this.#db
       .query(
         `CREATE TABLE IF NOT EXISTS ship_memory (
+          note_id TEXT,
           repo TEXT,
           note TEXT,
           run_id TEXT,
@@ -129,31 +153,35 @@ export class NucleusRepoMemory implements RepoMemoryStore {
     return this.#ready;
   }
 
-  async record(note: Omit<RepoNote, "createdAt">): Promise<void> {
+  async record(note: Omit<RepoNote, "createdAt" | "noteId">): Promise<RepoNote> {
     await this.#ensure();
-    await this.#db.query("INSERT INTO ship_memory (repo, note, run_id, created_at) VALUES ($1, $2, $3, $4)", [
-      note.repo,
-      note.note,
-      note.runId ?? null,
-      new Date().toISOString(),
-    ]);
+    const full: RepoNote = { ...note, noteId: `note-${randomUUID().slice(0, 12)}`, createdAt: new Date().toISOString() };
+    await this.#db.query(
+      "INSERT INTO ship_memory (note_id, repo, note, run_id, created_at) VALUES ($1, $2, $3, $4, $5)",
+      [full.noteId, full.repo, full.note, full.runId ?? null, full.createdAt],
+    );
+    return full;
   }
 
+  /** Ordered and limited IN THE QUERY: this used to read every note a repo had ever accumulated and sort in JS. */
   async recent(repo: string, limit: number): Promise<RepoNote[]> {
     await this.#ensure();
-    const rows = await this.#db.query("SELECT * FROM ship_memory WHERE repo = $1", [repo]);
-    return rows
-      .map((row) => {
-        const note: RepoNote = {
-          repo: String(row.repo),
-          note: String(row.note),
-          createdAt: String(row.created_at),
-        };
-        if (row.run_id !== null && row.run_id !== undefined) note.runId = String(row.run_id);
-        return note;
-      })
-      .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
-      .slice(0, limit);
+    const k = Math.max(1, Math.trunc(limit));
+    const rows = await this.#db.query(
+      `SELECT note_id, repo, note, run_id, created_at FROM ship_memory WHERE repo = $1
+       ORDER BY created_at DESC, note_id DESC LIMIT ${k}`,
+      [repo],
+    );
+    return rows.map((row) => {
+      const note: RepoNote = {
+        noteId: row.note_id !== null && row.note_id !== undefined ? String(row.note_id) : "",
+        repo: String(row.repo),
+        note: String(row.note),
+        createdAt: String(row.created_at),
+      };
+      if (row.run_id !== null && row.run_id !== undefined) note.runId = String(row.run_id);
+      return note;
+    });
   }
 
   async repos(): Promise<{ repo: string; count: number }[]> {
@@ -168,9 +196,9 @@ export class NucleusRepoMemory implements RepoMemoryStore {
     return [...counts.entries()].map(([repo, count]) => ({ repo, count }));
   }
 
-  async remove(repo: string, createdAt: string): Promise<void> {
+  async remove(noteId: string): Promise<void> {
     await this.#ensure();
-    await this.#db.query("DELETE FROM ship_memory WHERE repo = $1 AND created_at = $2", [repo, createdAt]);
+    await this.#db.query("DELETE FROM ship_memory WHERE note_id = $1", [noteId]);
   }
 }
 

@@ -27,7 +27,7 @@ import { runAgent } from "./agent.js";
 import { refusalMessage } from "./publish-policy.js";
 import { defaultApprovalPolicy } from "./approval.js";
 import { secretEnvNames } from "./guard.js";
-import { durableAgent, sandboxProvider } from "./durable.js";
+import { durableAgent, repoKeyOf, sandboxProvider } from "./durable.js";
 import type { ExecutorProvider } from "./durable.js";
 import { formatReport, runEval } from "./eval.js";
 import type { EvalTask } from "./eval.js";
@@ -333,7 +333,9 @@ async function fixCommand(rest: string[]): Promise<void> {
   process.stderr.write(dim(`on ${checkout.branch} (from ${checkout.base})\n`));
 
   const runtime = await makeRuntime(args, config);
-  const repoKey = `${ref.owner}/${ref.repo}`;
+  // Same origin-scoped key the durable path uses, so a repo's history is
+  // one history whichever surface produced it.
+  const repoKey = repoKeyOf(repoUrl);
   const context = await loadRepoContext(executor, { repo: repoKey, memory: runtime.memory });
   if (context !== "") process.stderr.write(dim("injecting repo playbook/history\n"));
 

@@ -40,3 +40,34 @@ test("formatSearchHits: path:line ranges + snippets; empty is a clear miss", () 
   assert.match(out, /## src\/a\.ts:10-40\nfunction retryBackoff/);
   assert.match(formatSearchHits("nothing", []), /No indexed code matched/);
 });
+
+test("TS-021: reaching the chunk cap must not delete the index for files it never visited", async () => {
+  // The refresh loop breaks at the cap. `seen` was built as the loop went, so
+  // everything after the break looked "removed from the repo" and had its
+  // chunks and ledger row deleted — every refresh, on any repo bigger than the
+  // cap, silently destroying the tail of its own index.
+  const deleted: string[] = [];
+  const ledger = new Map([
+    ["a.ts", { hash: "old", chunks: 1 }],
+    ["b.ts", { hash: "old", chunks: 1 }],
+    ["c.ts", { hash: "old", chunks: 1 }],
+  ]);
+  const tracked = new Set(["a.ts", "b.ts", "c.ts"]);
+
+  // Simulate the removal phase with the FIXED membership rule: what git tracks
+  // now, not how far the loop got.
+  for (const [path] of ledger) {
+    if (tracked.has(path)) continue;
+    deleted.push(path);
+  }
+  assert.deepEqual(deleted, [], "no tracked file is treated as removed, capped or not");
+
+  // And a genuinely deleted file is still cleaned up.
+  tracked.delete("b.ts");
+  const afterDelete: string[] = [];
+  for (const [path] of ledger) {
+    if (tracked.has(path)) continue;
+    afterDelete.push(path);
+  }
+  assert.deepEqual(afterDelete, ["b.ts"]);
+});

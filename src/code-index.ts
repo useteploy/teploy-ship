@@ -175,10 +175,18 @@ export class NucleusCodeIndex implements CodeSearch {
     const ledger = new Map(rows.map((r) => [String(r.path), { hash: String(r.hash), chunks: Number(r.chunks) }]));
 
     const stats: RefreshStats = { files: paths.length, indexed: 0, removed: 0, chunks: 0, capped: false };
-    const seen = new Set<string>();
+    // Every path GIT still tracks, established up front.
+    //
+    // This used to be built incrementally as the loop visited files, and the
+    // loop breaks at the chunk cap — so every path after the break was missing
+    // from the set, and the removal phase below read "not in seen" as "left the
+    // repository" and deleted their chunks and ledger rows. A repo bigger than
+    // the cap therefore destroyed the tail of its own index on every refresh,
+    // then re-embedded it next time: expensive, and search silently missed
+    // files that were right there.
+    const tracked = new Set(paths);
 
     for (const path of paths) {
-      seen.add(path);
       if (stats.chunks >= MAX_CHUNKS_PER_REFRESH) {
         stats.capped = true;
         break;
@@ -199,8 +207,14 @@ export class NucleusCodeIndex implements CodeSearch {
       if (known !== undefined) await this.#deleteFileChunks(repo, path, known.chunks);
 
       // Embed in batches; insert with deterministic ids so re-runs replace.
-      for (let offset = 0; offset < chunks.length; offset += EMBED_BATCH) {
-        const batch = chunks.slice(offset, offset + EMBED_BATCH);
+      // The cap is enforced INSIDE the file too: checking only before a file
+      // meant one large file could carry stats.chunks far past the advertised
+      // ceiling in a single refresh.
+      const room = Math.max(0, MAX_CHUNKS_PER_REFRESH - stats.chunks);
+      const budgeted = chunks.slice(0, room);
+      if (budgeted.length < chunks.length) stats.capped = true;
+      for (let offset = 0; offset < budgeted.length; offset += EMBED_BATCH) {
+        const batch = budgeted.slice(offset, offset + EMBED_BATCH);
         const { embeddings } = await embedMany({
           model: this.#embedder,
           values: batch.map((c) => `${path}\n${c.text}`),
@@ -221,19 +235,25 @@ export class NucleusCodeIndex implements CodeSearch {
       }
 
       await this.#db.query("DELETE FROM ship_code_files WHERE repo = $1 AND path = $2", [repo, path]);
+      // Record what was actually indexed. Writing chunks.length while only
+      // storing `budgeted` would leave the ledger claiming chunks that do not
+      // exist, and #deleteFileChunks counts on this number being true.
       await this.#db.query("INSERT INTO ship_code_files (repo, path, hash, chunks) VALUES ($1, $2, $3, $4)", [
         repo,
         path,
         hash,
-        String(chunks.length),
+        String(budgeted.length),
       ]);
       stats.indexed += 1;
-      stats.chunks += chunks.length;
+      stats.chunks += budgeted.length;
+      if (stats.capped) break;
     }
 
-    // Files that left the tree take their chunks with them.
+    // Files that left the tree take their chunks with them. Membership is
+    // decided by what git tracks NOW, not by how far this refresh happened to
+    // get before the cap.
     for (const [path, known] of ledger) {
-      if (seen.has(path)) continue;
+      if (tracked.has(path)) continue;
       await this.#deleteFileChunks(repo, path, known.chunks);
       await this.#db.query("DELETE FROM ship_code_files WHERE repo = $1 AND path = $2", [repo, path]);
       stats.removed += 1;

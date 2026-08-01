@@ -128,3 +128,22 @@ export function assertSafeId(kind: string, id: string): string {
   }
   return id;
 }
+
+/** Atomic text write (temp + fsync + rename), for line-oriented state files. */
+export async function writeTextFile(path: string, text: string): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  const tmp = join(dirname(path), `.${randomUUID()}.tmp`);
+  try {
+    const handle = await open(tmp, "w", 0o600);
+    try {
+      await handle.writeFile(text);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(tmp, path);
+  } catch (error) {
+    await unlink(tmp).catch(() => {});
+    throw error;
+  }
+}

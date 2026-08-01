@@ -31,8 +31,11 @@ export async function action({ request }: { request: Request }): Promise<Respons
     const note = String(form.get("note") ?? "").trim();
     if (note !== "") await runtime.memory.record({ repo, note });
   } else if (repo !== "" && intent === "delete") {
-    const createdAt = String(form.get("createdAt") ?? "");
-    if (createdAt !== "") await runtime.memory.remove(repo, createdAt);
+    // Keyed on the note's own id. It used to be (repo, createdAt), and two
+    // notes written in the same millisecond — which happens when runs finish
+    // together — were both deleted by one click.
+    const noteId = String(form.get("noteId") ?? "");
+    if (noteId !== "") await runtime.memory.remove(noteId);
   }
   const to = repo !== "" ? `/knowledge?repo=${encodeURIComponent(repo)}` : "/knowledge";
   return new Response(null, { status: 302, headers: { location: to } });
@@ -85,7 +88,7 @@ export default function Knowledge({ data }: { data: KnowledgeData }) {
             <p class="empty">No notes for this repo yet.</p>
           ) : (
             data.notes.map((n) => (
-              <div key={`${n.createdAt}`} class="card">
+              <div key={n.noteId} class="card">
                 <div class="row-actions">
                   <span class="chip">{n.runId !== undefined ? "from run" : "manual"}</span>
                   {n.runId !== undefined && <a href={`/runs/${n.runId}`}>{n.runId}</a>}
@@ -94,7 +97,7 @@ export default function Knowledge({ data }: { data: KnowledgeData }) {
                   <form method="post" class="row-actions">
                     <input type="hidden" name="intent" value="delete" />
                     <input type="hidden" name="repo" value={data.repo} />
-                    <input type="hidden" name="createdAt" value={n.createdAt} />
+                    <input type="hidden" name="noteId" value={n.noteId} />
                     <button class="deny sm" type="submit">Delete</button>
                   </form>
                 </div>

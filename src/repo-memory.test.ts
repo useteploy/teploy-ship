@@ -6,6 +6,7 @@ import { test } from "node:test";
 
 import { LocalExecutor } from "@neutron-build/agents";
 
+import { repoKeyOf } from "./durable.js";
 import { FileRepoMemory, loadRepoContext, runNote } from "./repo-memory.js";
 
 async function fresh(): Promise<LocalExecutor> {
@@ -79,4 +80,36 @@ test("runNote compacts task/summary and names the outcome", () => {
   assert.match(withPr, /fix the bug → PR http:\/\/x\/pulls\/9\. did it well/);
   const noPr = runNote({ task: "t", summary: "s" });
   assert.match(noPr, /no PR \(empty diff\)/);
+});
+
+test("TS-047: notes are removed by id, so same-millisecond siblings survive", async () => {
+  const store = new FileRepoMemory(await mkdtemp(join(tmpdir(), "repo-mem-id-")));
+  const repo = "forge.test/tyler/ship";
+
+  // Two runs finishing together write two notes with the same timestamp.
+  const a = await store.record({ repo, note: "first run" });
+  const b = await store.record({ repo, note: "second run" });
+  assert.notEqual(a.noteId, b.noteId, "each note gets its own identity");
+
+  await store.remove(a.noteId);
+  const left = await store.recent(repo, 10);
+  assert.equal(left.length, 1, "deleting one note deletes exactly one note");
+  assert.equal(left[0]?.note, "second run");
+});
+
+test("TS-022: repository scope includes the origin, so two hosts do not share memory", async () => {
+  const store = new FileRepoMemory(await mkdtemp(join(tmpdir(), "repo-mem-origin-")));
+  await store.record({ repo: "github.com/tyler/ship", note: "public repo history" });
+  await store.record({ repo: "100.108.123.49:49152/tyler/ship", note: "private mirror history" });
+
+  const publicNotes = await store.recent("github.com/tyler/ship", 10);
+  assert.deepEqual(publicNotes.map((n) => n.note), ["public repo history"]);
+
+  const privateNotes = await store.recent("100.108.123.49:49152/tyler/ship", 10);
+  assert.deepEqual(privateNotes.map((n) => n.note), ["private mirror history"]);
+});
+
+test("repoKeyOf keeps same-path repositories on different hosts apart", () => {
+  assert.notEqual(repoKeyOf("https://github.com/tyler/ship"), repoKeyOf("http://100.108.123.49:49152/tyler/ship"));
+  assert.equal(repoKeyOf("https://github.com/tyler/ship.git"), repoKeyOf("https://github.com/tyler/ship"));
 });

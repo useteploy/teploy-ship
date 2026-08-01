@@ -632,9 +632,20 @@ export function durableAgent(
   );
 }
 
-function repoKeyOf(repoUrl: string): string {
+/**
+ * The scope key for a repository's code index and memory.
+ *
+ * Includes the ORIGIN, not just owner/repo. Two different hosts routinely carry
+ * the same path — a self-hosted `tyler/teploy-ship` and a GitHub
+ * `tyler/teploy-ship`, or an internal fork of a public project — and keying on
+ * owner/repo alone merged their vector chunks into one namespace and mixed
+ * their run history into each other's prompts. On a private mirror of a public
+ * repo that is a disclosure, not just a mix-up.
+ */
+export function repoKeyOf(repoUrl: string): string {
   const ref = parseRepoUrl(repoUrl);
-  return `${ref.owner}/${ref.repo}`;
+  const origin = ref.base.replace(/^https?:\/\//, "").replace(/\/+$/, "");
+  return `${origin}/${ref.owner}/${ref.repo}`;
 }
 
 /**
@@ -693,7 +704,10 @@ async function publishIfRepoRun(
     await ctx.step("repo-memory", async () => {
       await config
         .repoMemory!.record({
-          repo: `${ref.owner}/${ref.repo}`,
+          // The SAME key loadRepoContext reads with. These had drifted apart:
+          // context was read under the origin-scoped key and notes were written
+          // under a bare owner/repo, so a run never saw its own history back.
+          repo: repoKeyOf(repoUrl),
           note: runNote({ task: input.task, summary, ...(pr !== undefined ? { pr } : {}) }),
           runId: ctx.runId,
         })
