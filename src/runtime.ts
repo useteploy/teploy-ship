@@ -222,7 +222,11 @@ export async function nucleusRuntime(
   // back a runtime. A rolling deploy runs old and new processes against one
   // Nucleus, so this must be safe to call concurrently (it takes a KV lock)
   // and safe to call when nothing is pending (it is a no-op then).
-  await migrate(db, options?.log ?? (() => {}));
+  // Default to stderr rather than silence: a migration rewrites a populated
+  // table, and an operator reading deploy output must be able to see that it
+  // happened. Silence is only correct for the (usual) case where nothing is
+  // pending, and migrate() emits nothing then anyway.
+  await migrate(db, options?.log ?? ((line) => console.error(line)));
   const store = new NucleusEventStore(db.streams, { prefix: "ship" });
   const index = new RunIndex(db.document, { collection: "ship_runs" });
   const leases = new LeaseManager(db.kv, { prefix: "ship:lease", ttlSeconds: 60 });
