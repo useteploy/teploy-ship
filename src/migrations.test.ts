@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { DOC_FIELDS } from "./nucleus-pgwire.js";
-import { MIGRATIONS, migrate } from "./migrations.js";
+import { MIGRATIONS, hasColumns, migrate } from "./migrations.js";
 import { RUN_META_FIELDS } from "./run-store.js";
 import type { NucleusPgwire } from "./nucleus-pgwire.js";
 
@@ -26,7 +26,21 @@ test("migration ids are unique and stably ordered", () => {
   assert.deepEqual([...ids].sort(), ids, "migrations must be listed in id order");
 });
 
-/** A NucleusPgwire stand-in that records SQL and fakes the KV lock. */
+/**
+ * A NucleusPgwire stand-in that records SQL and fakes the KV lock.
+ *
+ * It deliberately reproduces Nucleus's REAL column semantics, which differ from
+ * Postgres's and from what an earlier version of this fake asserted:
+ *
+ *   - an unknown TABLE raises in either shape;
+ *   - an unknown COLUMN in a SELECT projection resolves to NULL, no error;
+ *   - an unknown COLUMN in an UPDATE assignment DOES raise.
+ *
+ * The lenient-SELECT rule is the whole point. A fake that threw on a SELECT of a
+ * missing column (as this one used to) makes a SELECT-based `hasColumns` look
+ * correct, which is how three migrations that silently never ran shipped with a
+ * green suite. Verified against a live Nucleus 2026-08-04.
+ */
 function fakeDb(options: { existingTables?: Set<string>; columns?: Record<string, string[]> } = {}) {
   const tables = options.existingTables ?? new Set<string>();
   const columns = options.columns ?? {};
@@ -57,15 +71,24 @@ function fakeDb(options: { existingTables?: Set<string>; columns?: Record<string
         return ledger.map((id) => ({ id }));
       }
       if (/^INSERT/i.test(text)) return [];
-      // A probe: succeed only when the table exists and has the columns asked for.
-      if (table !== undefined && !tables.has(table)) throw new Error(`relation "${table}" does not exist`);
-      const asked = /^SELECT (.+?) FROM/i.exec(text)?.[1] ?? "";
-      if (asked !== "1" && table !== undefined) {
-        const have = columns[table] ?? [];
-        for (const c of asked.split(",").map((s) => s.trim())) {
-          if (c !== "*" && !have.includes(c)) throw new Error(`column "${c}" does not exist`);
+
+      // The write-shaped column probe: `UPDATE t SET c = c, d = d WHERE 1 = 0`.
+      // Strict on column names — this is what makes hasColumns work.
+      const update = /^UPDATE\s+(\w+)\s+SET\s+(.+?)\s+WHERE/is.exec(text);
+      if (update !== null) {
+        const [, target, assignments] = update;
+        if (!tables.has(target!)) throw new Error(`relation "${target}" does not exist`);
+        const have = columns[target!] ?? [];
+        for (const pair of assignments!.split(",")) {
+          const name = pair.split("=")[0]!.trim();
+          if (!have.includes(name)) throw new Error(`column "${name}" does not exist`);
         }
+        return [];
       }
+
+      // Reads: unknown TABLE raises, unknown COLUMN does not (Nucleus resolves
+      // it to NULL). Deliberately lenient — see the note on fakeDb.
+      if (table !== undefined && !tables.has(table)) throw new Error(`relation "${table}" does not exist`);
       return [];
     },
     kv: {
@@ -83,6 +106,36 @@ function fakeDb(options: { existingTables?: Set<string>; columns?: Record<string
   };
   return db as unknown as NucleusPgwire & { sql: string[] };
 }
+
+/**
+ * The bug that made migrations 001-003 no-op on the only deployment that needed
+ * them: `hasColumns` probed with `SELECT <cols> FROM t LIMIT 1`, and Nucleus
+ * answers a SELECT of a missing column with NULL instead of an error. Every
+ * `needed()` returned false, migrate() wrote all three to the ledger, and the
+ * schema stayed wrong — with a log line saying the migrations were applied.
+ * Found by probing the live smoke instance, not by this suite.
+ */
+test("hasColumns probes with a write, because Nucleus reads unknown columns as NULL", async () => {
+  const db = fakeDb({ existingTables: new Set(["t"]), columns: { t: ["a", "b"] } });
+
+  assert.equal(await hasColumns(db, "t", ["a", "b"]), true, "present columns must report present");
+  assert.equal(await hasColumns(db, "t", ["a", "gone"]), false, "a missing column must report absent");
+
+  const joined = db.sql.join("\n");
+  assert.match(joined, /UPDATE t SET a = a, gone = gone WHERE 1 = 0/, "probe must be write-shaped");
+  assert.doesNotMatch(
+    joined,
+    /SELECT[^\n]*\bgone\b/,
+    "a SELECT probe cannot detect a missing column on Nucleus — that is the bug",
+  );
+});
+
+test("a missing column is still detected when SELECT is lenient end-to-end", async () => {
+  // Exactly the smoke box's state on 2026-08-04: the table exists, the column
+  // does not, and a SELECT of it would have succeeded.
+  const db = fakeDb({ existingTables: new Set(["ship_memory"]), columns: { ship_memory: ["repo", "note", "run_id", "created_at"] } });
+  assert.deepEqual(await migrate(db), ["003-ship-memory-note-id"]);
+});
 
 test("001 rebuilds ship_docs aside when the source column is missing", async () => {
   const db = fakeDb({

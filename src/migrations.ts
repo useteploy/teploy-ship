@@ -40,10 +40,26 @@ export interface Migration {
 const LOCK_KEY = "ship:migrate";
 const LOCK_TTL_S = 300;
 
-/** Does `SELECT <columns> FROM <table> LIMIT 1` work? The engine-agnostic column probe. */
+/**
+ * Does `table` really have every one of `columns`?
+ *
+ * This must be a WRITE-shaped probe. Nucleus resolves an unknown column in a
+ * projection to NULL instead of erroring, so `SELECT missing FROM t LIMIT 1`
+ * SUCCEEDS — the obvious probe reports every column present, `needed()` returns
+ * false for all three migrations below, and migrate() records them as applied
+ * without running them. That is strictly worse than having no migration at all:
+ * the schema stays wrong, the log says it is fine, and the ledger stops the
+ * fixed version from ever retrying.
+ *
+ * `UPDATE t SET c = c WHERE 1 = 0` resolves each name strictly (verified against
+ * a real Nucleus: it raises `column "c" does not exist`) and matches no rows, so
+ * the probe writes nothing. Note an INSERT-with-column-list probe does NOT work
+ * — Nucleus accepts an unknown column there when the SELECT yields zero rows.
+ */
 export async function hasColumns(db: NucleusPgwire, table: string, columns: string[]): Promise<boolean> {
+  const assignments = columns.map((c) => `${c} = ${c}`).join(", ");
   try {
-    await db.query(`SELECT ${columns.join(", ")} FROM ${table} LIMIT 1`);
+    await db.query(`UPDATE ${table} SET ${assignments} WHERE 1 = 0`);
     return true;
   } catch {
     return false;

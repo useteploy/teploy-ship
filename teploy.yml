@@ -65,7 +65,13 @@ processes:
 # app's private docker network. Same posture observe's teploy.yml ships.
 accessories:
   nucleus:
-    image: ghcr.io/neutron-build/nucleus:latest
+    # PINNED, not :latest. Nucleus publishes :latest on every push to main, so a
+    # redeploy would silently adopt whatever landed since — and a storage engine
+    # is the last thing that should change underneath you unannounced. v0.1.5 is
+    # the build carrying the 2026-08-03 KV/LSM memory rework (the fix for the
+    # write-reject-under-memory-pressure outage) and is the exact digest running
+    # on infra-home. Bump deliberately, after that instance has proven a release.
+    image: ghcr.io/neutron-build/nucleus:v0.1.5
     port: 5432
     env:
       NUCLEUS_ALLOW_NO_AUTH: "1"
