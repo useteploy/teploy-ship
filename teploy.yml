@@ -73,6 +73,12 @@ accessories:
     # on infra-home. Bump deliberately, after that instance has proven a release.
     image: ghcr.io/neutron-build/nucleus:v0.1.5
     port: 5432
+    # Hard cgroup cap. NUCLEUS_MAX_MEMORY_MB below is the engine's own
+    # accounting and is advisory — it was set to 16 GB on the day this engine
+    # reached 30 GB RSS and OOM-killed an unrelated service on the same host.
+    # Set above the engine budget so the engine's graceful eviction gets to run
+    # first, and the kernel cap is only the backstop.
+    memory: 1500m
     env:
       NUCLEUS_ALLOW_NO_AUTH: "1"
       NUCLEUS_ALLOW_INSECURE_CLUSTER: "1"
