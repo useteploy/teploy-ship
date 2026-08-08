@@ -44,6 +44,21 @@ const GIT_PRECLEAN =
   "cd /testbed && git config user.email a@b.c; git config user.name a; git checkout -- . 2>/dev/null; git clean -fd 2>/dev/null; true";
 const GIT_DIFF = "cd /testbed && git diff HEAD -- . 2>/dev/null";
 
+// Removing each instance image after use keeps a long sweep from filling the
+// disk. Off by default so short, repeated runs reuse the cached image.
+const PRUNE_IMAGES = process.env.SWEBENCH_PRUNE_IMAGES === "1";
+
+/** Free space on the docker host, in GB. Null when it cannot be read. */
+async function diskFreeGB(docker) {
+  try {
+    const info = await docker.info();
+    const total = info?.DriverStatus?.find?.((r) => /data space available/i.test(r?.[0] ?? ""))?.[1];
+    return total ?? null;
+  } catch {
+    return null;
+  }
+}
+
 const { docker, close } = await connectViaSSH(sshHost);
 const predictions = [];
 try {
@@ -116,6 +131,20 @@ ${inst.problem_statement}`;
       predictions.push({ instance_id: inst.instance_id, model_name_or_path: `teploy-agent+${MODEL}`, model_patch: finalPatch });
     } finally {
       await container.remove({ force: true }).catch(() => {});
+      // Reclaim the instance IMAGE too, not just the container. Official
+      // SWE-bench images are 1-2 GB each and every instance uses a different
+      // one, so a run of any real size fills the disk and dies partway
+      // through — the 3-instance gauge never hit this. Opt-in, because a
+      // small repeated run wants the image cached; required for a sweep.
+      if (PRUNE_IMAGES) {
+        const before = await diskFreeGB(docker);
+        await docker.getImage(inst.image).remove({ force: true }).catch(() => {});
+        const after = await diskFreeGB(docker);
+        console.error(
+          `  [prune] removed ${inst.image}` +
+            (before !== null && after !== null ? ` (disk free ${before} -> ${after} GB)` : ""),
+        );
+      }
     }
   }
 } finally {
