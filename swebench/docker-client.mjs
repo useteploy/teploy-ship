@@ -58,8 +58,34 @@ export async function connectViaSSH(sshHost) {
   };
 }
 
+/**
+ * Pull an image if it is not already on the host.
+ *
+ * createContainer does NOT pull — it 404s on a missing image — so a sweep over
+ * instances the host has never seen died on the first one. The 3-instance
+ * gauge hid this because those images had been pulled by hand.
+ *
+ * Progress is logged per layer-set rather than silently: these are 1-2 GB
+ * images and a run that looks hung for four minutes is otherwise
+ * indistinguishable from a broken one.
+ */
+export async function ensureImage(docker, image) {
+  const have = await docker.getImage(image).inspect().then(() => true).catch(() => false);
+  if (have) return;
+  console.error(`  pulling ${image} …`);
+  const started = Date.now();
+  await new Promise((resolve, reject) => {
+    docker.pull(image, (err, stream) => {
+      if (err) return reject(err);
+      docker.modem.followProgress(stream, (doneErr) => (doneErr ? reject(doneErr) : resolve()));
+    });
+  });
+  console.error(`  pulled in ${Math.round((Date.now() - started) / 1000)}s`);
+}
+
 /** Fresh long-lived container from an instance image (removing any stale one). */
 export async function startInstanceContainer(docker, { image, name }) {
+  await ensureImage(docker, image);
   await docker.getContainer(name).remove({ force: true }).catch(() => {});
   const container = await docker.createContainer({
     Image: image,

@@ -64,7 +64,20 @@ const MODEL = process.env.SWEBENCH_MODEL ?? "claude-sonnet-5";
 
 const GIT_PRECLEAN =
   "cd /testbed && git config user.email a@b.c; git config user.name a; git checkout -- . 2>/dev/null; git clean -fd 2>/dev/null; true";
-const GIT_DIFF = "cd /testbed && git diff HEAD -- . 2>/dev/null";
+// The agent's persistent kernel writes its scratch (cells, pids, logs) into
+// .teploy-agent/ INSIDE the workspace, so without an exclusion those files land
+// in the prediction patch — the canary run produced a patch touching
+// kernel.pid and kernel.log alongside the real source fix. Excluded two ways
+// because they fail differently: info/exclude keeps the files from ever being
+// staged, and the pathspec drops them from the diff even if something staged
+// them anyway. info/exclude rather than .gitignore, because editing a tracked
+// .gitignore would itself show up in the patch.
+const AGENT_SCRATCH = ".teploy-agent";
+const GIT_PRECLEAN_EXCLUDE =
+  `grep -qxF '${AGENT_SCRATCH}/' /testbed/.git/info/exclude 2>/dev/null || ` +
+  `echo '${AGENT_SCRATCH}/' >> /testbed/.git/info/exclude`;
+const GIT_DIFF =
+  `cd /testbed && git diff HEAD -- . ':(exclude)${AGENT_SCRATCH}' ':(exclude)${AGENT_SCRATCH}/**' 2>/dev/null`;
 
 // Removing each instance image after use keeps a long sweep from filling the
 // disk. Off by default so short, repeated runs reuse the cached image.
@@ -90,6 +103,7 @@ try {
     const container = await startInstanceContainer(docker, { image: inst.image, name });
     try {
       await execCollect(container, ["bash", "-lc", GIT_PRECLEAN]);
+      await execCollect(container, ["bash", "-lc", GIT_PRECLEAN_EXCLUDE]);
 
       const baseExecutor = containerExecutor({ container, workdir: "/testbed" });
 
