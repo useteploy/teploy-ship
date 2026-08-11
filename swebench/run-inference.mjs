@@ -24,14 +24,21 @@ const { anthropic, createAnthropic } = await import(join(here, "..", "node_modul
 // (so eval spend is tracked + capped centrally), otherwise call Anthropic
 // directly. Same shape as ship's own resolveModel — a gateway baseURL + the
 // project key, no gateway-specific adapter needed.
+// Prompt caching is an Anthropic feature. Pointing baseURL at an
+// Anthropic-COMPATIBLE endpoint (z.ai's /api/anthropic for GLM, or any other
+// compat layer) can mean cache_control blocks are rejected or silently
+// ignored, so it is togglable: SWEBENCH_NO_CACHE=1 turns it off. Leave it on
+// against real Anthropic — it is a large cost saving across a 50-instance run.
+const USE_CACHE = process.env.SWEBENCH_NO_CACHE !== "1";
+
 function buildModel(id) {
   const url = process.env.AI_GATEWAY_URL;
   const key = process.env.AI_GATEWAY_KEY;
   if (url && key) {
-    console.error(`  (routing through gateway ${url})`);
-    return createAnthropic({ baseURL: url, apiKey: key })(id, { cache: true });
+    console.error(`  (routing through ${url}${USE_CACHE ? "" : ", prompt cache off"})`);
+    return createAnthropic({ baseURL: url, apiKey: key })(id, { cache: USE_CACHE });
   }
-  return anthropic(id, { cache: true });
+  return anthropic(id, { cache: USE_CACHE });
 }
 const { containerExecutor } = await import(join(here, "container-executor.mjs"));
 const { connectViaSSH, execCollect, startInstanceContainer } = await import(join(here, "docker-client.mjs"));
