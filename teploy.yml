@@ -59,6 +59,13 @@ processes:
   web: web --store nucleus --port 7460
   worker: worker --store nucleus --interval 5
 
+# Ceiling per app container (web and worker each), not a reservation — they sit
+# at ~140 MB and ~30 MB respectively, because durable-run work happens inside
+# the sandbox container rather than in the worker process. This exists so a leak
+# or a runaway run cannot take the whole 4 GB box down with it, which on this
+# host would also mean the gateway and the Forgejo runner.
+memory: 1g
+
 # Nucleus sidecar. NUCLEUS_ALLOW_NO_AUTH: nucleus's pgwire SCRAM password
 # auth panics upstream ("Salt required for SCRAM auth source"), so
 # password auth is not usable yet; the accessory is only reachable on the
