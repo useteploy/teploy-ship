@@ -31,14 +31,29 @@ const { anthropic, createAnthropic } = await import(join(here, "..", "node_modul
 // against real Anthropic — it is a large cost saving across a 50-instance run.
 const USE_CACHE = process.env.SWEBENCH_NO_CACHE !== "1";
 
+// Extended thinking, off unless a budget is given. SWE-bench instances are
+// reasoning-heavy (locate the defect, then decide what the fix should be), so
+// a thinking budget is worth spending where the model supports it — GLM 5.2
+// does, via the same Anthropic-shaped `thinking` block. Must stay below the
+// model's max output tokens.
+const THINK_BUDGET = Number(process.env.SWEBENCH_THINKING_TOKENS ?? 0);
+
 function buildModel(id) {
+  const opts = { cache: USE_CACHE };
+  if (THINK_BUDGET > 0) opts.thinking = { budgetTokens: THINK_BUDGET };
+
   const url = process.env.AI_GATEWAY_URL;
   const key = process.env.AI_GATEWAY_KEY;
+  const notes = [
+    USE_CACHE ? "cache on" : "cache off",
+    THINK_BUDGET > 0 ? `thinking ${THINK_BUDGET}` : "no thinking",
+  ].join(", ");
   if (url && key) {
-    console.error(`  (routing through ${url}${USE_CACHE ? "" : ", prompt cache off"})`);
-    return createAnthropic({ baseURL: url, apiKey: key })(id, { cache: USE_CACHE });
+    console.error(`  (routing through ${url} — ${notes})`);
+    return createAnthropic({ baseURL: url, apiKey: key })(id, opts);
   }
-  return anthropic(id, { cache: USE_CACHE });
+  console.error(`  (direct anthropic — ${notes})`);
+  return anthropic(id, opts);
 }
 const { containerExecutor } = await import(join(here, "container-executor.mjs"));
 const { connectViaSSH, execCollect, startInstanceContainer } = await import(join(here, "docker-client.mjs"));
