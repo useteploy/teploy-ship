@@ -27,7 +27,7 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "lint": "tsc --noEmit --pretty false",
-    "test": "pnpm run build && node --test --experimental-test-isolation=none \"dist/**/*.test.js\"",
+    "test": "pnpm run build && node --test --experimental-test-isolation=none \"dist/**/*.test.js\" && node --test \"swebench/*.test.mjs\"",
     "start": "node dist/cli.js",
     "scan:secrets": "node scripts/scan-secrets.mjs"
   },

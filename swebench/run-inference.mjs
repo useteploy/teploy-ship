@@ -13,6 +13,7 @@
 //
 // instances.json: [{ instance_id, image, problem_statement }]
 import { readFile, writeFile } from "node:fs/promises";
+import { appendFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -56,9 +57,14 @@ function buildModel(id) {
   return anthropic(id, opts);
 }
 const { containerExecutor } = await import(join(here, "container-executor.mjs"));
+const { withDiffSnapshots } = await import(join(here, "executor-snapshot.mjs"));
 const { connectViaSSH, execCollect, startInstanceContainer } = await import(join(here, "docker-client.mjs"));
 
 const [, , sshHost, instancesPath, outPath] = process.argv;
+// Per-instance diagnostics sidecar, next to the predictions file. The
+// 2026-08-12 run kept no log, so its 12 empty patches could not be
+// attributed after the fact. This file makes that impossible to repeat.
+const RUNLOG_PATH = String(outPath ?? "predictions.json").replace(/\.json$/, "") + ".runlog.jsonl";
 const instances = JSON.parse(await readFile(instancesPath, "utf8"));
 const MODEL = process.env.SWEBENCH_MODEL ?? "claude-sonnet-5";
 
@@ -107,24 +113,19 @@ try {
 
       const baseExecutor = containerExecutor({ container, workdir: "/testbed" });
 
-      // Patch-preservation safety net: after every action, snapshot the
-      // working-tree diff; if the agent reverts its own fix while
-      // thrashing, the last non-empty diff is still recoverable.
+      // Patch-preservation safety net: snapshot the working-tree diff after
+      // every mutating action, so a fix the agent writes and then reverts is
+      // still recoverable. Wrapping lives in executor-snapshot.mjs and is
+      // covered by executor-snapshot.test.mjs — including the case that
+      // produced 12 empty patches on 2026-08-12, where an `edit` (which goes
+      // through putFile, not exec) was reverted before any command ran.
       let lastNonEmptyDiff = "";
-      const snapshotDiff = async () => {
+      let snapshotCount = 0;
+      const executor = withDiffSnapshots(baseExecutor, async () => {
+        snapshotCount++;
         const r = await execCollect(container, ["bash", "-lc", GIT_DIFF], { timeoutMs: 30000 });
         if (r.exitCode === 0 && r.stdout.trim() !== "") lastNonEmptyDiff = r.stdout;
-      };
-      const executor = {
-        async exec(cmd, opts) {
-          const result = await baseExecutor.exec(cmd, opts);
-          await snapshotDiff();
-          return result;
-        },
-        putFile: (p, d) => baseExecutor.putFile(p, d),
-        getFile: (p) => baseExecutor.getFile(p),
-        destroy: () => baseExecutor.destroy(),
-      };
+      });
 
       const task = `You are fixing a real bug in the ${inst.instance_id.split("__")[0]} repository, checked out at /testbed.
 
@@ -163,7 +164,27 @@ ${inst.problem_statement}`;
         console.error(`  [recovered] final tree was clean; using last non-empty snapshot (${lastNonEmptyDiff.length} chars)`);
       }
 
-      console.error(`  status=${result.status} steps=${result.steps.length} durationMs=${Date.now() - started} patchLen=${finalPatch.length}`);
+      // Diagnostics. An empty patch has two very different causes and the
+      // 2026-08-12 run could not tell them apart, because nothing was
+      // persisted: the agent never edited at all (a model/termination
+      // problem), or it edited and the tree lost it (a harness problem).
+      // everEdited distinguishes them. Written to a JSONL sidecar so the
+      // next post-mortem does not depend on someone having kept stderr.
+      const diag = {
+        instance_id: inst.instance_id,
+        status: result.status,
+        steps: result.steps.length,
+        durationMs: Date.now() - started,
+        patchLen: finalPatch.length,
+        everEdited: lastNonEmptyDiff !== "",
+        recovered: treeDiff.trim() === "" && lastNonEmptyDiff !== "",
+        snapshots: snapshotCount,
+      };
+      console.error(
+        `  status=${diag.status} steps=${diag.steps} durationMs=${diag.durationMs} patchLen=${diag.patchLen}` +
+          ` everEdited=${diag.everEdited} snapshots=${diag.snapshots}`,
+      );
+      appendFileSync(RUNLOG_PATH, JSON.stringify(diag) + "\n");
       predictions.push({ instance_id: inst.instance_id, model_name_or_path: `teploy-agent+${MODEL}`, model_patch: finalPatch });
     } finally {
       await container.remove({ force: true }).catch(() => {});
