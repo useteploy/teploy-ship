@@ -39,6 +39,16 @@ const USE_CACHE = process.env.SWEBENCH_NO_CACHE !== "1";
 // model's max output tokens.
 const THINK_BUDGET = Number(process.env.SWEBENCH_THINKING_TOKENS ?? 0);
 
+// Step cap. 56% of the 2026-08-12 run (28/50) hit this and were cut off
+// mid-work, so it is a config choice presenting as a capability gap —
+// OpenHands runs this benchmark at ~100.
+//
+// The default deliberately stays 40. The next sweep must measure the
+// empty-patch fix ALONE against the 22/50 baseline; raising the cap in the
+// same run would make the delta unattributable. Raise it in a SECOND run:
+//   SWEBENCH_MAX_STEPS=100 node swebench/run-inference.mjs ...
+const MAX_STEPS = Number(process.env.SWEBENCH_MAX_STEPS ?? 40);
+
 function buildModel(id) {
   const opts = { cache: USE_CACHE };
   if (THINK_BUDGET > 0) opts.thinking = { budgetTokens: THINK_BUDGET };
@@ -150,7 +160,7 @@ ${inst.problem_statement}`;
         executor,
         task,
         workdir: "/testbed",
-        maxSteps: 40,
+        maxSteps: MAX_STEPS,
         actionTimeoutMs: 120000,
         onEvent: (e) => {
           if (e.type === "action" || e.type === "finish" || e.type === "error") console.error(`  [${e.type}] ${e.text.slice(0, 100)}`);

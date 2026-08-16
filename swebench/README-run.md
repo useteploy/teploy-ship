@@ -33,6 +33,37 @@ z.ai API is a different base path and a different product.
 The predictions file records `model_name_or_path` as `teploy-agent+<model>`, so
 two runs stay distinguishable when scored.
 
+## Knobs
+
+| env | default | why |
+|---|---|---|
+| `SWEBENCH_MAX_STEPS` | `40` | 28/50 runs hit 40 on 2026-08-12. OpenHands runs ~100. Default is left at 40 on purpose — see attribution below. |
+| `SWEBENCH_PRUNE_IMAGES` | off | required for any sweep; images are 1-2 GB each |
+| `SWEBENCH_THINKING_TOKENS` | `0` | extended thinking budget, where the model supports it |
+| `SWEBENCH_NO_CACHE` | off | disable prompt caching on compat endpoints that reject it |
+| `SWEBENCH_MODEL` | `claude-sonnet-5` | model id |
+
+Each run also writes `<out-preds>.runlog.jsonl` — one line per instance with
+`status`, `steps`, `patchLen`, `everEdited` and `recovered`. **`everEdited` is
+the one that matters after an empty patch:** false means the agent never
+touched the tree (a termination problem), true means it edited and the tree
+lost it (a harness problem). The 2026-08-12 run kept no log at all, which is
+why its 12 empty patches could not be attributed afterwards.
+
+## Attribution: change one thing per sweep
+
+The scored baseline is **22/50 (44.0%) with GLM 5.2, 2026-08-15**. Two known
+losses are being fixed, and they must be measured separately or the delta is
+meaningless:
+
+1. **Empty patches** — fixed 2026-08-15 (`putFile` now snapshots). Measure this
+   alone: run with defaults, compare to 22/50.
+2. **Step cap** — not yet changed. Measure second, with
+   `SWEBENCH_MAX_STEPS=100`, against whatever (1) produced.
+
+Resist doing both in one sweep. The urge is strong and it costs the ability to
+say which fix bought what.
+
 ## Notes that cost time if ignored
 
 - **Disk.** Every instance pulls a different 1-2 GB image.
