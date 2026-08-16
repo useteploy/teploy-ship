@@ -36,7 +36,7 @@ const COMMON: FlagSpec = {
  */
 export const COMMAND_FLAGS: Record<string, FlagSpec> = {
   run: {
-    boolean: ["durable", "yes", "headless", "plan", "critic"],
+    boolean: ["durable", "yes", "headless", "plan", "critic", "settle"],
     value: ["model", "sandbox", "sandbox-token", "sandbox-image", "sandbox-network", "max-steps"],
   },
   runs: {},
@@ -46,7 +46,7 @@ export const COMMAND_FLAGS: Record<string, FlagSpec> = {
   cancel: {},
   inbox: {},
   fix: {
-    boolean: ["yes", "headless", "critic"],
+    boolean: ["yes", "headless", "critic", "settle"],
     value: [
       "repo",
       "git-token",
@@ -63,7 +63,7 @@ export const COMMAND_FLAGS: Record<string, FlagSpec> = {
     value: ["model", "interval", "max-concurrent", "daily-budget", "git-token", "sandbox", "sandbox-token", "sandbox-image", "sandbox-network"],
   },
   web: { boolean: ["dev"], value: ["port", "token", "model"] },
-  eval: { boolean: ["critic"], value: ["model", "suite", "repeats"] },
+  eval: { boolean: ["critic", "settle"], value: ["model", "suite", "repeats"] },
 };
 
 function merge(spec: FlagSpec): { boolean: Set<string>; value: Set<string> } {

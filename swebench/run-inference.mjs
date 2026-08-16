@@ -39,15 +39,50 @@ const USE_CACHE = process.env.SWEBENCH_NO_CACHE !== "1";
 // model's max output tokens.
 const THINK_BUDGET = Number(process.env.SWEBENCH_THINKING_TOKENS ?? 0);
 
-// Step cap. 56% of the 2026-08-12 run (28/50) hit this and were cut off
-// mid-work, so it is a config choice presenting as a capability gap —
-// OpenHands runs this benchmark at ~100.
+// Step cap. OpenHands runs this benchmark at ~100.
 //
-// The default deliberately stays 40. The next sweep must measure the
-// empty-patch fix ALONE against the 22/50 baseline; raising the cap in the
-// same run would make the delta unattributable. Raise it in a SECOND run:
+// Worth less than it first looked. On the 2026-08-12 run 56% (28/50) hit the
+// cap; on 2026-08-16 with GLM 5.3 only 24% (12/50) did, and the median run
+// stops at 33.5 steps of 40 — most runs no longer die of running out of room,
+// they die of not stopping (see FINISH_WHEN_SETTLED below).
+//
+// The default stays 40 so a raise is measured on its own against the current
+// 35/50 baseline:
 //   SWEBENCH_MAX_STEPS=100 node swebench/run-inference.mjs ...
 const MAX_STEPS = Number(process.env.SWEBENCH_MAX_STEPS ?? 40);
+
+// Deliberate termination. 30% of the 2026-08-16 run (15/50) ended in the
+// spinning abort at steps 28-38 of 40, holding a non-empty patch 13 times out
+// of 15: the agent had made its fix and kept poking at it.
+//
+// WHAT A SWEEP WITH THIS ON ACTUALLY MEASURES — do not overstate it:
+//   - The stop fires at the SAME step the abort would have. No steps are
+//     saved, and the harness reads the patch off the tree after the run
+//     whatever the status, so the relabel changes no prediction. The one
+//     finish-now nudge is the entire effect on the score.
+//   - That nudge reaches any run spinning over a dirty tree, not just the
+//     aborts: on the 2026-08-16 data that includes the 23 runs that finished
+//     deliberately (20/23 resolved) and the 12 cap-outs. It can talk a
+//     would-have-finished run into stopping early, so the score can go DOWN.
+//
+// Off by default so the next sweep can attribute it by flipping one variable:
+//   SHIP_FINISH_WHEN_SETTLED=1 node swebench/run-inference.mjs ...
+// `status` in the runlog then reads "settled" on the runs it changed — compare
+// that set against the same instances in the 35/50 baseline runlog.
+const FINISH_WHEN_SETTLED = process.env.SHIP_FINISH_WHEN_SETTLED === "1";
+
+// The independent critic pass (agent.ts `critic`). The deployed product can run
+// it; this harness never did, so every number published from here has been a
+// BARER loop than the thing users actually run — "Ship's score" has really been
+// "Ship-minus-the-critic's score". Turning it on is what makes a sweep the
+// product's number rather than the harness's.
+//
+// Off by default, like every other knob here, so it is measured on its own:
+//   SHIP_CRITIC=1 node swebench/run-inference.mjs ...
+// Cost warning: the critic is a second model call on any run that reaches a
+// finish with a non-empty diff, so expect a materially larger bill on a paid
+// model. It is bounded to one critic-triggered retry per run and never loops.
+const CRITIC = process.env.SHIP_CRITIC === "1";
 
 function buildModel(id) {
   const opts = { cache: USE_CACHE };
@@ -58,6 +93,8 @@ function buildModel(id) {
   const notes = [
     USE_CACHE ? "cache on" : "cache off",
     THINK_BUDGET > 0 ? `thinking ${THINK_BUDGET}` : "no thinking",
+    FINISH_WHEN_SETTLED ? "settle on" : "settle off",
+    CRITIC ? "critic on" : "critic off",
   ].join(", ");
   if (url && key) {
     console.error(`  (routing through ${url} — ${notes})`);
@@ -162,6 +199,8 @@ ${inst.problem_statement}`;
         workdir: "/testbed",
         maxSteps: MAX_STEPS,
         actionTimeoutMs: 120000,
+        finishWhenSettled: FINISH_WHEN_SETTLED,
+        critic: CRITIC,
         onEvent: (e) => {
           if (e.type === "action" || e.type === "finish" || e.type === "error") console.error(`  [${e.type}] ${e.text.slice(0, 100)}`);
         },

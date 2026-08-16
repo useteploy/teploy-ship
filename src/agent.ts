@@ -82,12 +82,47 @@ export interface RunAgentOptions {
    * empty diff skips the pass and finishes as today.
    */
   critic?: boolean;
+  /**
+   * Deliberate termination (default off): when the working tree already holds
+   * a change and successful commands stop changing it, the agent is verifying
+   * rather than building — so offer it a finish instead of only telling it to
+   * build, and end that run as `settled` rather than as an error.
+   *
+   * Measured motivation: on the 2026-08-16 SWE-bench sweep 15/50 runs ended in
+   * the spinning abort, at steps 28-38 of 40, and 13 of them were holding a
+   * non-empty patch at the time.
+   *
+   * READ THIS BEFORE INTERPRETING A SWEEP. The population this touches is
+   * WIDER than those 15 aborts, and the nudge is the entire measurable effect:
+   *
+   * - The nudge fires at the FIRST spinning rut over any dirty tree. On the
+   *   2026-08-16 data that reaches the 23 runs that finished deliberately
+   *   (median 28 steps, 20/23 resolved) and the 12 cap-outs as well as the 15
+   *   aborts. It can therefore talk a run that would have finished correctly
+   *   into stopping sooner — the score can move DOWN, not only up.
+   * - The relabel and the summary preservation contribute exactly nothing to a
+   *   benchmark: the stop fires at the same step the abort would have, and the
+   *   harness reads the patch from the tree after the run regardless of status.
+   *
+   * So a sweep with this on measures one thing only: whether offering a
+   * settled agent a finish produces better patches than letting it spin. Do
+   * not read a delta as being about the aborts.
+   *
+   * Bounded: at most one extra nudge per run, and the stop fires at the exact
+   * step the abort would have. It builds on stuck detection, so
+   * `recovery: false` disables this too.
+   */
+  finishWhenSettled?: boolean;
   onEvent?: (event: AgentEvent) => void;
   abortSignal?: AbortSignal;
 }
 
 export interface AgentResult {
-  status: "finished" | "max-steps" | "aborted" | "error";
+  /**
+   * `settled` = stopped deliberately by the settle path (finishWhenSettled),
+   * with work in the tree. It is NOT `finished`: the agent never said so.
+   */
+  status: "finished" | "max-steps" | "aborted" | "error" | "settled";
   /** The finish summary, or the reason the run ended. */
   summary: string;
   steps: AgentStep[];
@@ -140,7 +175,15 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
     };
   };
 
-  const recovery = options.recovery === false ? null : new RecoveryTracker(options.recovery ?? defaultRecoveryConfig);
+  const recovery =
+    options.recovery === false
+      ? null
+      : new RecoveryTracker({
+          ...(options.recovery ?? defaultRecoveryConfig),
+          // Layered on top of whatever recovery config the caller supplied, so
+          // the option works with a custom tracker config as well as the default.
+          ...(options.finishWhenSettled === true ? { settle: true } : {}),
+        });
   const condense = options.condense === false ? null : (options.condense ?? defaultCondenseConfig);
   const summarize = async (transcript: string): Promise<string> => {
     const generated = await generateText({
@@ -162,6 +205,12 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
   let failNudges = 0;
   let lastExecFailed = false;
   let criticDone = false;
+  /**
+   * The most recent finish the gate HELD. A run that ends any other way still
+   * has the agent's own account of the work; ending on a harness sentence when
+   * one of these exists throws it away.
+   */
+  let lastHeldFinish: string | undefined;
   try {
   for (let index = 0; index < maxSteps; index++) {
     if (options.abortSignal?.aborted) {
@@ -242,6 +291,17 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
           }
         }
         if (nudge !== null) {
+          // Only the benign "prove it" hold leaves the agent's claim usable as
+          // the run's official account. Every other hold is a REJECTION —
+          // FINISH_NUDGE_NO_WORK (nothing done), FINISH_NUDGE_FAILED (its last
+          // command failed), FINISH_NUDGE_NO_EVIDENCE (claimed verification it
+          // never ran), or a critic disapproval — and adopting the claim there
+          // would launder a judgement the run explicitly refused into
+          // `result.summary`, which becomes the git commit message
+          // (cli.ts:517), the PR body (cli.ts:545) and the repo memory note.
+          // Clearing rather than leaving the previous value matters: an
+          // earlier VERIFY claim must not survive a later rejection.
+          lastHeldFinish = nudge === FINISH_NUDGE_VERIFY ? action.message : undefined;
           messages.push({ role: "user", content: nudge });
           steps.push({ index, thought, action });
           emit({ type: "observation", step: index, text: nudge });
@@ -312,10 +372,18 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
     // undefined and the progress check stays dormant.
     if (recovery !== null) {
       const fingerprint = await workspaceFingerprint(options.executor);
-      const signal = recovery.observe(action, result.exitCode, fingerprint);
+      const signal = recovery.observe(action, result.exitCode, fingerprint?.hash, fingerprint?.dirty);
       if (signal.kind === "abort") {
         emit({ type: "error", step: index, text: signal.message });
         return { status: "error", summary: signal.message, steps, messages, usage };
+      }
+      if (signal.kind === "stop") {
+        // The work is in the tree and has stopped moving: end on the agent's
+        // own last account of it where there is one, rather than on a harness
+        // sentence that tells a reviewer nothing.
+        const summary = lastHeldFinish ?? signal.message;
+        emit({ type: "finish", step: index, text: summary });
+        return { status: "settled", summary, steps, messages, usage };
       }
       if (signal.kind === "nudge") {
         messages.push({ role: "user", content: signal.message });
@@ -419,13 +487,46 @@ function truncate(text: string, max: number): string {
   return `${text.slice(0, head)}\n... [${text.length - max} chars truncated] ...\n${text.slice(-tail)}`;
 }
 
+/** Harness scratch inside the workspace — never the agent's deliverable. */
+const AGENT_SCRATCH = ".teploy-agent";
+
 /**
  * A cheap stand-in for "has the work changed": the hash of the working-tree
  * diff stat. Undefined outside a git repo, in which case progress detection is
  * simply off rather than guessing.
+ *
+ * `dirty` is the second question the same output answers — is there any
+ * candidate work in the tree at all — which is what separates "verifying a
+ * finished change" from "never built anything". It is derived from the stat,
+ * not from the hash: the hash of an EMPTY diff is a perfectly stable value, so
+ * a run that never edits anything looks identical to one that settled.
  */
-async function workspaceFingerprint(executor: AgentExecutor): Promise<string | undefined> {
+async function workspaceFingerprint(
+  executor: AgentExecutor,
+): Promise<{ hash: string; dirty: boolean } | undefined> {
   const result = await executor.exec("git add -A >/dev/null 2>&1; git diff --cached --stat", { timeoutMs: 30_000 }).catch(() => null);
   if (result === null || result.exitCode !== 0) return undefined;
-  return createHash("sha256").update(result.stdout).digest("hex").slice(0, 16);
+  // Hash the raw stat exactly as before — changing what is hashed would change
+  // progress detection for every caller, settle option or not.
+  return { hash: createHash("sha256").update(result.stdout).digest("hex").slice(0, 16), dirty: statTouchesWork(result.stdout) };
+}
+
+/**
+ * Does a `--stat` name at least one changed path that is the agent's work?
+ *
+ * Path lines are `<path> | <n> <+->`; the trailing "N files changed" summary
+ * has no bar. Kernel scratch is excluded here as well as by the repo-local
+ * git exclude the repo/benchmark paths install, because a plain `run` in an
+ * arbitrary directory has no such exclude — and scratch alone must never make
+ * an empty run look like finished work.
+ */
+function statTouchesWork(stat: string): boolean {
+  for (const line of stat.split("\n")) {
+    const bar = line.lastIndexOf("|");
+    if (bar === -1) continue;
+    const path = line.slice(0, bar).trim();
+    if (path === "" || path === AGENT_SCRATCH || path.startsWith(`${AGENT_SCRATCH}/`)) continue;
+    return true;
+  }
+  return false;
 }

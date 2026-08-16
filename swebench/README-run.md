@@ -44,6 +44,8 @@ two runs stay distinguishable when scored.
 | env | default | why |
 |---|---|---|
 | `SWEBENCH_MAX_STEPS` | `40` | 28/50 runs hit 40 on 2026-08-12. OpenHands runs ~100. Default is left at 40 on purpose — see attribution below. |
+| `SHIP_FINISH_WHEN_SETTLED` | off | offer a settled agent a finish instead of spinning to an abort. Read the caveat in run-inference.mjs: it reaches most runs, not just aborts, so the score can move DOWN |
+| `SHIP_CRITIC` | off | run the independent critic pass. **This is what makes a sweep the PRODUCT's number** — every figure published so far came from a barer loop than users run. Costs a second model call per finishing run |
 | `SWEBENCH_PRUNE_IMAGES` | off | required for any sweep; images are 1-2 GB each |
 | `SWEBENCH_THINKING_TOKENS` | `0` | extended thinking budget, where the model supports it |
 | `SWEBENCH_NO_CACHE` | off | disable prompt caching on compat endpoints that reject it |
@@ -68,6 +70,16 @@ meaningless:
    at 5.3 and the median run stops at 33.5 steps. Measure with
    `SWEBENCH_MAX_STEPS=100` against 35/50 if you run it.
 3. **Termination** is now the biggest lever — 30% of runs end in a thrash-abort.
+   `SHIP_FINISH_WHEN_SETTLED=1` is the experiment.
+4. **The critic** (`SHIP_CRITIC=1`) is the one that changes what the number
+   MEANS rather than how big it is: without it, the published figure is not the
+   product's. Run it once the cheaper knobs are settled.
+
+The code index (task 12) is NOT yet measurable from here: the product's
+`search` path needs a `codeSearch` option on `runAgent` that does not exist
+yet, and an index arm needs a Nucleus reachable from the harness machine plus
+the gateway's `/v1/embeddings` with `nomic-embed-text` pulled. Both are
+operator setup on the eval box. Do not claim an index result until that exists.
 
 Resist doing two at once in one sweep. The urge is strong and it costs the ability to
 say which fix bought what.

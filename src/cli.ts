@@ -52,8 +52,11 @@ Usage:
   teploy-ship run "<task>"            live run in the terminal (streamed, interactive approvals)
       [--model provider/model]        default anthropic/claude-sonnet-5
       [--sandbox <url> --sandbox-token <t> [--sandbox-image <img>] [--sandbox-network none|egress]]
-      [--max-steps N] [--yes] [--json] [--critic]
+      [--max-steps N] [--yes] [--json] [--critic] [--settle]
                      --critic adds an independent review pass before finishing
+                     --settle lets a run that has stopped changing an already
+                     edited tree stop deliberately (status "settled") instead
+                     of spinning to an abort. Live runs only.
   teploy-ship run --durable "<task>"  durable run: parks on approvals, survives exits
                      add --plan to review/approve the agent's plan before it acts
                      add --critic for an independent review pass before it finishes
@@ -68,7 +71,7 @@ Usage:
   teploy-ship fix --repo <url> "<task>"  clone, fix on a branch, push, open a PR
       [--git-token <t>]               also SHIP_GIT_TOKEN or gitToken in config
       [--base <branch>]               PR target (default: repo default branch)
-      (accepts run flags: --model, --sandbox…, --max-steps, --yes, --json, --critic)
+      (accepts run flags: --model, --sandbox…, --max-steps, --yes, --json, --critic, --settle)
       NOTE: fix always needs network to clone/push — pass
       --sandbox-network egress (or sandboxNetwork:"egress" in config)
       whenever --sandbox is used; plain --sandbox defaults to "none".
@@ -82,7 +85,7 @@ Usage:
   teploy-ship web                     serve the runs dashboard (browser approve/deny)
       [--port N] [--token <t>]        token also via SHIP_WEB_TOKEN (required)
       [--dev]                         vite dev server instead of the built app
-  teploy-ship eval [--suite builtin|hard|extreme|all] [--repeats N] [--json] [--critic]
+  teploy-ship eval [--suite builtin|hard|extreme|all] [--repeats N] [--json] [--critic] [--settle]
 
 Config: flags > env > ~/.config/teploy-ship/config.json
   (model, sandboxUrl, sandboxToken, sandboxImage, store, nucleusUrl)
@@ -293,6 +296,12 @@ async function runCommand(rest: string[]): Promise<void> {
   if (task === undefined || task === "") fail('a task is required: teploy-ship run "fix the failing test"');
 
   if (args.flags.durable === true) {
+    // Say so rather than accepting it silently: the durable workflow has no
+    // stuck detector at all (durable.ts runs to its turn limit), so there is
+    // nothing there for --settle to change.
+    if (args.flags.settle === true) {
+      process.stderr.write(`${yellow("--settle is ignored on a durable run")} — the durable loop has no stuck detection.\n`);
+    }
     await startDurable(task, args, config);
     return;
   }
@@ -324,6 +333,7 @@ async function runCommand(rest: string[]): Promise<void> {
       onEvent: args.flags.json === true ? undefined : renderEvent,
       abortSignal: abort.signal,
       critic: args.flags.critic === true,
+      finishWhenSettled: args.flags.settle === true,
     });
   } finally {
     await executor.destroy().catch(() => {});
@@ -331,7 +341,12 @@ async function runCommand(rest: string[]): Promise<void> {
   if (args.flags.json === true) {
     process.stdout.write(JSON.stringify({ status: result.status, summary: result.summary, steps: result.steps.length, usage: result.usage, costUSD: costUSD(modelId, result.usage) }, null, 2) + "\n");
   } else {
-    const mark = result.status === "finished" ? green(result.status) : red(result.status);
+    // "settled" is neither a success nor a failure: work is in the tree and
+    // the agent stopped changing it, but it never said it was done. The exit
+    // code stays 1 (only "finished" is a clean finish) — the colour is what
+    // tells a human it is worth looking at rather than worth rerunning.
+    const mark =
+      result.status === "finished" ? green(result.status) : result.status === "settled" ? yellow(result.status) : red(result.status);
     process.stderr.write(`\n${mark} — ${result.summary}\n${dim(usageLine(modelId, result.usage))}\n`);
   }
   process.exit(result.status === "finished" ? 0 : 1);
@@ -489,6 +504,7 @@ async function fixCommand(rest: string[]): Promise<void> {
     onApprovalRequest: interactive ? (action) => promptApproval(action) : () => args.flags.yes === true,
     onEvent: args.flags.json === true ? undefined : renderEvent,
     critic: args.flags.critic === true,
+    finishWhenSettled: args.flags.settle === true,
   });
 
   // The deliverable is the tree, whatever the agent believes happened —
@@ -1060,12 +1076,27 @@ async function evalCommand(rest: string[]): Promise<void> {
   const tasks: EvalTask[] =
     suiteName === "hard" ? hardSuite : suiteName === "extreme" ? extremeSuite : suiteName === "all" ? [...builtinSuite, ...hardSuite, ...extremeSuite] : builtinSuite;
 
+  if (args.flags.settle === true) {
+    // Same footgun as --settle on a durable run, and worth the same warning:
+    // eval workspaces are bare mkdtemp directories (eval.ts) and no suite task
+    // runs `git init`, so the working-tree fingerprint always comes back
+    // undefined, `dirty` is never true, and the settle path cannot fire. Accept
+    // the flag but say plainly that it does nothing here.
+    process.stderr.write(`${yellow("--settle is ignored on eval runs")} — eval workspaces are not git repos, so there is no working tree to detect as settled.\n`);
+  }
   process.stderr.write(`Running ${tasks.length} tasks (${suiteName}) against ${modelId} (${repeats}x)...\n\n`);
   const report = await runEval({
     tasks,
     model,
     repeats,
-    ...(args.flags.critic === true ? { agentOptions: { critic: true } } : {}),
+    ...(args.flags.critic === true || args.flags.settle === true
+      ? {
+          agentOptions: {
+            ...(args.flags.critic === true ? { critic: true } : {}),
+            ...(args.flags.settle === true ? { finishWhenSettled: true } : {}),
+          },
+        }
+      : {}),
     onResult: (r) => process.stderr.write(`  [${r.passed ? "PASS" : "FAIL"}] ${r.task} (attempt ${r.attempt + 1}, ${r.steps} steps)\n`),
   });
   process.stdout.write(`\n${formatReport(report)}\n`);

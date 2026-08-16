@@ -9,6 +9,7 @@ import { LocalExecutor } from "@neutron-build/agents";
 
 import { runAgent } from "./agent.js";
 import type { AgentEvent } from "./agent.js";
+import { SETTLE_NUDGE } from "./recovery.js";
 
 // A model that replies with scripted turns AND can react to the last
 // observation — enough to prove the loop feeds output back correctly.
@@ -448,6 +449,148 @@ test("verified-finish guard: fail-nudges are capped so a stuck agent still termi
   assert.equal(result.summary, "give up");
 });
 
+// --- finishWhenSettled: stopping deliberately instead of thrashing to an abort ---
+
+/**
+ * A git repo the agent can dirty, plus a script that: does one thing, tries to
+ * finish (the gate holds it), and then verifies forever without ever finishing
+ * again. That is the exact 2026-08-16 pathology — 15/50 runs died this way at
+ * steps 28-38 of 40, most of them holding a real patch.
+ */
+async function settleRepo(): Promise<LocalExecutor> {
+  const executor = await localExecutor();
+  await executor.exec("git init -q -b main . && git config user.email t@t && git config user.name t");
+  return executor;
+}
+
+const PROBES = Array.from({ length: 20 }, (_, i) => `\`\`\`bash\necho probe-${i}\n\`\`\``);
+const SETTLE_RECOVERY = { loopThreshold: 99, failureThreshold: 99, maxNudges: 1, noProgressThreshold: 2 } as const;
+
+test("finishWhenSettled: a run that stops changing an edited tree ends as settled, in the agent's own words", async () => {
+  const executor = await settleRepo();
+  const { model } = scriptedModel([
+    '```create fix.py\ndef f(n):\n    return n + 1\n```', // the tree is now dirty
+    "```finish\nFixed the off-by-one in fix.py.\n```", // held by the verify gate
+    ...PROBES, // verifying forever, changing nothing
+  ]);
+  const result = await runAgent({
+    model,
+    executor,
+    task: "fix the off-by-one",
+    maxSteps: 20,
+    recovery: { ...SETTLE_RECOVERY },
+    condense: false,
+    finishWhenSettled: true,
+  });
+
+  assert.equal(result.status, "settled");
+  // The run ends on the agent's held finish, not on a harness sentence: the
+  // whole point is that this exit preserves the run instead of wasting it.
+  assert.equal(result.summary, "Fixed the off-by-one in fix.py.");
+  assert.ok(
+    result.messages.some((m) => m.role === "user" && m.content === SETTLE_NUDGE),
+    "the agent was offered the finish before the run was stopped",
+  );
+  assert.ok(result.steps.length < 20, "it stopped well short of the step budget");
+});
+
+test("finishWhenSettled SEAM: the same script over a CLEAN tree still aborts", async () => {
+  // The twin of the test above, differing in one thing: turn 1 changes no
+  // files. If `dirty` ever stops flowing from workspaceFingerprint into
+  // recovery.observe, the test above keeps passing on a hardcoded true and
+  // this one fails — which is why both exist.
+  const executor = await settleRepo();
+  const { model } = scriptedModel([
+    "```bash\necho looked-around\n```", // succeeds, writes nothing
+    "```finish\nI believe this is done.\n```",
+    ...PROBES,
+  ]);
+  const result = await runAgent({
+    model,
+    executor,
+    task: "fix the off-by-one",
+    maxSteps: 20,
+    recovery: { ...SETTLE_RECOVERY },
+    condense: false,
+    finishWhenSettled: true,
+  });
+
+  assert.equal(result.status, "error", "nothing was built, so there is nothing to settle on");
+  assert.match(result.summary, /without changing anything/);
+  assert.ok(
+    !result.messages.some((m) => m.role === "user" && m.content === SETTLE_NUDGE),
+    "a clean tree is never told it may already be done",
+  );
+});
+
+test("finishWhenSettled: harness scratch in the tree is not work — a scratch-only run still aborts", async () => {
+  // The kernel writes .teploy-agent/ into the workspace. The repo and
+  // benchmark paths git-exclude it, but a plain `run` in an arbitrary
+  // directory does not — and scratch alone must never make a run that built
+  // nothing look like a finished change.
+  const executor = await settleRepo();
+  const { model } = scriptedModel([
+    "```bash\nmkdir -p .teploy-agent && echo 1234 > .teploy-agent/kernel.pid\n```",
+    "```finish\nI believe this is done.\n```",
+    ...PROBES,
+  ]);
+  const result = await runAgent({
+    model,
+    executor,
+    task: "fix the off-by-one",
+    maxSteps: 20,
+    recovery: { ...SETTLE_RECOVERY },
+    condense: false,
+    finishWhenSettled: true,
+  });
+
+  assert.equal(result.status, "error");
+  assert.match(result.summary, /without changing anything/);
+});
+
+test("finishWhenSettled is off by default: the identical run still ends as an error", async () => {
+  const executor = await settleRepo();
+  const { model } = scriptedModel([
+    '```create fix.py\ndef f(n):\n    return n + 1\n```',
+    "```finish\nFixed the off-by-one in fix.py.\n```",
+    ...PROBES,
+  ]);
+  const result = await runAgent({
+    model,
+    executor,
+    task: "fix the off-by-one",
+    maxSteps: 20,
+    recovery: { ...SETTLE_RECOVERY },
+    condense: false,
+  });
+
+  assert.equal(result.status, "error");
+  assert.equal(result.summary, "Aborting: the agent kept running commands without changing anything after repeated nudges.");
+});
+
+test("finishWhenSettled rides on stuck detection: with recovery off it is inert", async () => {
+  // Documented footgun, pinned as a contract: the settle path is a branch of
+  // the stuck detector, so disabling recovery disables it too.
+  const executor = await settleRepo();
+  const { model } = scriptedModel([
+    '```create fix.py\ndef f(n):\n    return n + 1\n```',
+    "```finish\nFixed the off-by-one in fix.py.\n```",
+    ...PROBES,
+  ]);
+  const result = await runAgent({
+    model,
+    executor,
+    task: "fix the off-by-one",
+    maxSteps: 6,
+    recovery: false,
+    condense: false,
+    finishWhenSettled: true,
+  });
+
+  assert.equal(result.status, "max-steps");
+  assert.ok(!result.messages.some((m) => m.role === "user" && m.content === SETTLE_NUDGE));
+});
+
 test("an empty model response never becomes an empty stored turn", async () => {
   const executor = await localExecutor();
   // Turn 1 is empty (a rare API hiccup). Before the fix this stored an
@@ -475,4 +618,40 @@ test("an empty model response never becomes an empty stored turn", async () => {
       assert.notEqual(text.trim(), "", "an assistant turn was stored empty");
     }
   }
+});
+
+test("finishWhenSettled: a REJECTED finish never becomes the run's summary", async () => {
+  // Regression. `lastHeldFinish` was set on every hold, so a claim the run had
+  // explicitly refused — here the hallucinated-verification catch — was adopted
+  // as result.summary when the run later settled. That summary is not cosmetic:
+  // it becomes the git commit message (cli.ts) and the PR body, so this shipped
+  // a rejected claim as the description of the change.
+  const executor = await settleRepo();
+  const { model } = scriptedModel([
+    "```create fix.py\ndef f(n):\n    return n + 1\n```", // tree is dirty
+    "```finish\nFixed it and ran the full suite; everything passes.\n```", // held: verify
+    "```finish\nI already told you the suite passes.\n```", // held: NO_EVIDENCE — ran nothing
+    ...PROBES, // now spins without changing anything
+  ]);
+  const result = await runAgent({
+    model,
+    executor,
+    task: "fix the off-by-one",
+    maxSteps: 20,
+    recovery: { ...SETTLE_RECOVERY },
+    condense: false,
+    finishWhenSettled: true,
+  });
+
+  assert.equal(result.status, "settled");
+  assert.doesNotMatch(
+    result.summary,
+    /I already told you/,
+    "the rejected claim must not be laundered into the summary",
+  );
+  assert.doesNotMatch(
+    result.summary,
+    /everything passes/,
+    "an earlier accepted claim must not survive a later rejection either",
+  );
 });
