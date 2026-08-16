@@ -8,6 +8,7 @@ import {
 } from "@neutron-build/workflow";
 import type { EventStore, RunOutcome, WorkflowDefinition } from "@neutron-build/workflow";
 
+import { defaultRecoveryConfig } from "./recovery.js";
 import { FileIntakeStore, NucleusIntakeStore } from "./intake.js";
 import type { IntakeStore } from "./intake.js";
 import { FileSpendStore, NucleusSpendStore } from "./spend.js";
@@ -30,6 +31,7 @@ import { NucleusPgwire } from "./nucleus-pgwire.js";
 import { migrate } from "./migrations.js";
 import { assertRepoAllowed } from "./repo-policy.js";
 import type { RepoTrust } from "./repo-policy.js";
+import type { RecoveryTuning } from "./durable.js";
 import type { ProposeInput as IntakeProposeInput, IntakeTask as IntakeTaskType } from "./intake.js";
 import { FileEventStore, RunMetaStore } from "./run-store.js";
 import type { RunMeta } from "./run-store.js";
@@ -101,7 +103,19 @@ export interface ShipRuntime {
   execute(
     workflow: WorkflowDefinition<{ task: string }, unknown>,
     runId: string,
-    input?: { task: string; repo?: string; trust?: RepoTrust; pr?: number; plan?: boolean; steer?: boolean; index?: boolean; guard?: boolean; critic?: boolean },
+    input?: {
+      task: string;
+      repo?: string;
+      trust?: RepoTrust;
+      pr?: number;
+      plan?: boolean;
+      steer?: boolean;
+      index?: boolean;
+      guard?: boolean;
+      critic?: boolean;
+      recovery?: boolean | RecoveryTuning;
+      settle?: boolean;
+    },
   ): Promise<RunOutcome | null>;
   saveMeta(meta: RunMeta): Promise<void>;
   loadMeta(runId: string): Promise<RunMeta | null>;
@@ -361,6 +375,12 @@ export async function proposeExternal(
   return runtime.intake.propose(input);
 }
 
+/** A boolean environment switch, read at use so it stays testable. */
+function envFlag(name: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = (env[name] ?? "").toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes";
+}
+
 /**
  * Enqueue a run without executing it: append the run-started event
  * (exactly the shape executeRun writes on an empty log) and flag the run
@@ -380,6 +400,21 @@ export async function enqueueRun(
     plan?: boolean;
     /** Post-finish critic pass (see DurableAgentInput.critic in durable.ts). Opt-in, default off. */
     critic?: boolean;
+    /**
+     * Stuck detection and deliberate termination (see DurableAgentInput in
+     * durable.ts). Opt-in, default off. Both are baked into the run's
+     * `run-started` input HERE, at enqueue — never read from a worker's
+     * config at execution time, because the thresholds decide which turn the
+     * run terminates on and a worker that disagreed with the log would trip
+     * NondeterminismError.
+     *
+     * Absent from the call, they fall back to SHIP_RECOVERY / SHIP_SETTLE so
+     * an operator has one knob across every enqueue surface (the worker's
+     * intake sweep, the dashboard's launch button, the dashboard's quick run).
+     * Unset env = off, which is the whole product-path default.
+     */
+    recovery?: boolean | RecoveryTuning;
+    settle?: boolean;
     workflowName?: string;
     /** Intake source, recorded so completion can settle spend against it. */
     source?: string;
@@ -392,6 +427,24 @@ export async function enqueueRun(
   },
 ): Promise<void> {
   const now = new Date().toISOString();
+  // Materialise the thresholds at ENQUEUE, never leave a bare `true` in the
+  // log. durable.ts's contract is that the thresholds are fixed at enqueue,
+  // because they decide which turn the run terminates on: a worker replaying
+  // under tighter thresholds returns early, leaves recorded steps unconsumed,
+  // and `leftoverCursorEvent()` raises a NondeterminismError that executeRun
+  // THROWS rather than records — the run becomes permanently unrunnable, not
+  // merely failed.
+  //
+  // A bare `true` broke that contract silently, because durable.ts would then
+  // resolve thresholds from the `defaultRecoveryConfig` CODE CONSTANT at run
+  // time. Editing that constant — an ordinary-looking change — would brick
+  // every in-flight run enqueued before it. Reproduced end to end: enqueue
+  // with `recovery: true`, change noProgressThreshold 6 -> 2, replay, and the
+  // run is unrecoverable. Expanding here means the log carries the numbers.
+  const recoveryFlag = options.recovery ?? (envFlag("SHIP_RECOVERY") ? true : undefined);
+  const recovery =
+    recoveryFlag === true ? { ...defaultRecoveryConfig } : recoveryFlag;
+  const settle = options.settle ?? (envFlag("SHIP_SETTLE") ? true : undefined);
   await runtime.store.append(options.runId, {
     v: WIRE_FORMAT_VERSION,
     seq: 0,
@@ -406,6 +459,12 @@ export async function enqueueRun(
         ...(options.pr !== undefined ? { pr: options.pr } : {}),
         ...(options.plan === true ? { plan: true } : {}),
         ...(options.critic === true ? { critic: true } : {}),
+        // Deliberately NOT in the unconditional block below: stuck detection
+        // costs an extra sandbox round trip per executing turn and can end a
+        // run earlier than it would have ended, so it stays opt-in until it is
+        // measured on the product path.
+        ...(recovery !== undefined ? { recovery } : {}),
+        ...(settle === true ? { settle: true } : {}),
         // Every newly-enqueued run is steerable and index-eligible; runs
         // enqueued before these flags existed replay without the extra
         // steps (input-gated in durable). The executing worker's config

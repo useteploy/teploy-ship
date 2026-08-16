@@ -7,12 +7,15 @@ import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 import type { Action } from "./actions.js";
 import { FINISH_NUDGE_FAILED, FINISH_NUDGE_NO_EVIDENCE, FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, describeAction, parseAction } from "./actions.js";
 import type { ApprovalPolicy } from "./approval.js";
+import { formatSearchHits } from "./code-index.js";
+import type { CodeSearchHit } from "./code-index.js";
 import { criticFeedback, isApproved, reviewWork } from "./critic.js";
 import { workingDiff } from "./git.js";
 import { ensureKernel, installKernel, runCell, stopKernel } from "./kernel.js";
 import { condenseIfNeeded, defaultCondenseConfig } from "./memory.js";
 import type { CondenseConfig } from "./memory.js";
 import { formatObservation, systemPrompt } from "./prompt.js";
+import { scrub } from "./redact.js";
 import { RecoveryTracker, defaultRecoveryConfig } from "./recovery.js";
 import type { RecoveryConfig } from "./recovery.js";
 
@@ -31,6 +34,19 @@ export interface AgentEvent {
   step: number;
   text: string;
 }
+
+/**
+ * Semantic code retrieval for the live loop: a query in, ranked chunks out.
+ *
+ * A bare function rather than the `CodeSearch` interface (code-index.ts) on
+ * purpose. `CodeSearch` is repo-scoped — every call takes a repo key, and it
+ * also carries `refresh`, which needs an executor and a clone. The live loop
+ * has no repo concept and nothing to refresh, so it should not learn one: the
+ * caller closes over the repo key (and the result limit) and hands the loop the
+ * one capability it actually uses. durable.ts keeps the full interface, because
+ * it is the thing that clones and indexes.
+ */
+export type AgentCodeSearch = (query: string) => Promise<CodeSearchHit[]>;
 
 export interface RunAgentOptions {
   model: ModelAdapter;
@@ -113,6 +129,24 @@ export interface RunAgentOptions {
    * `recovery: false` disables this too.
    */
   finishWhenSettled?: boolean;
+  /**
+   * Semantic code retrieval (default absent). When supplied, the system prompt
+   * advertises the ```search action and each search turn feeds the ranked hits
+   * back as an observation.
+   *
+   * When ABSENT the run is byte-identical to one without this option: the
+   * prompt does not mention search (prompt.ts only emits the block on
+   * `search === true`), and a ```search the model invents anyway falls through
+   * to the same refusal as before. That is deliberate — it is what keeps a
+   * sweep with the index off comparable to the 35/50 baseline that predates
+   * this option.
+   *
+   * A search is retrieval, not work: it does not count as a successful action,
+   * does not clear the verified-finish evidence gate, and is not fed to the
+   * recovery tracker. See the handler in the loop for why each of those
+   * matters.
+   */
+  codeSearch?: AgentCodeSearch;
   onEvent?: (event: AgentEvent) => void;
   abortSignal?: AbortSignal;
 }
@@ -156,7 +190,15 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
   // follow-up could run with no system message at all, or with a stale one
   // naming a different workdir and a weaker completion/security policy — and
   // this is an exported API, so that was not just an internal assumption.
-  const system: Message = { role: "system", content: systemPrompt({ workdir, task: options.task }) };
+  // `search` is the seam: the loop can handle a ```search action and the parser
+  // has always produced one, but a model that is never TOLD the action exists
+  // will never emit it — a capability wired at both ends and connected at
+  // neither. Passing `false` is identical to passing nothing (prompt.ts tests
+  // `=== true`), so an option-less run's prompt is unchanged.
+  const system: Message = {
+    role: "system",
+    content: systemPrompt({ workdir, task: options.task, search: options.codeSearch !== undefined }),
+  };
   let messages: Message[] =
     options.priorMessages !== undefined && options.priorMessages.length > 0
       ? [system, ...options.priorMessages.filter((m) => m.role !== "system"), { role: "user", content: options.task }]
@@ -313,10 +355,51 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
       return { status: "finished", summary: action.message, steps, messages, usage };
     }
 
+    if (action.kind === "search" && options.codeSearch !== undefined) {
+      // Retrieval, not execution. Three things this deliberately does NOT do,
+      // each of which would be a quiet regression:
+      //
+      // - It does not set `anySuccessfulAction` or bump `execsSinceNudge`.
+      //   FINISH_NUDGE_NO_EVIDENCE fires on `execsSinceNudge === 0`, so
+      //   counting a search as evidence would let an agent answer "prove it"
+      //   with a database lookup and walk away — precisely the hallucinated
+      //   verification that gate exists to catch.
+      // - It does not touch `lastExecFailed`; no command ran, so the last
+      //   command's verdict still stands.
+      // - It does not call `recovery.observe`, matching every other
+      //   non-executing branch (none/invalid/denied) and durable.ts's own
+      //   search step. Consequence, accepted: repeated identical searches are
+      //   not loop-detected, only bounded by maxSteps — exactly as a refused
+      //   search is today.
+      //
+      // Fails open like the critic pass: a broken index degrades search to a
+      // hint to use grep, it never ends the run.
+      let observation: string;
+      try {
+        // scrub() for the same reason every command observation gets it
+        // (prompt.ts formatObservation): this text reaches the model, the
+        // event stream, the PR body and Observe. Search hits are REPO CONTENT
+        // — a committed .env fixture, a token in a test file, a credential in
+        // a config sample — so they are exactly as capable of carrying a
+        // secret as a command's stdout, and they were the only observation in
+        // the loop bypassing redaction.
+        observation = scrub(formatSearchHits(action.query, await options.codeSearch(action.query)));
+      } catch (error) {
+        observation = `Code search failed (${error instanceof Error ? error.message : String(error)}). Use grep/rg via \`\`\`bash instead.`;
+      }
+      observation = truncate(observation, maxObs);
+      messages.push({ role: "user", content: observation });
+      steps.push({ index, thought, action, observation });
+      emit({ type: "observation", step: index, text: observation });
+      continue;
+    }
+
     if (action.kind === "none" || action.kind === "invalid" || action.kind === "search") {
       // No runnable action (or a malformed one): feed the reason back.
-      // ```search is a durable-run capability (it needs the Nucleus code
-      // index); the live loop points the model at grep instead.
+      // ```search reaches here only when no `codeSearch` was supplied (it
+      // needs a Nucleus code index behind it) — the prompt never advertised
+      // it, so this catches a model inventing the action, and points it at
+      // grep. Wording unchanged from before `codeSearch` existed.
       const nudge =
         action.kind === "invalid"
           ? action.message
@@ -490,6 +573,12 @@ function truncate(text: string, max: number): string {
 /** Harness scratch inside the workspace — never the agent's deliverable. */
 const AGENT_SCRATCH = ".teploy-agent";
 
+/** What `workspaceFingerprint` answers: has the work changed, and is there any. */
+export interface WorkspaceFingerprint {
+  hash: string;
+  dirty: boolean;
+}
+
 /**
  * A cheap stand-in for "has the work changed": the hash of the working-tree
  * diff stat. Undefined outside a git repo, in which case progress detection is
@@ -500,10 +589,17 @@ const AGENT_SCRATCH = ".teploy-agent";
  * finished change" from "never built anything". It is derived from the stat,
  * not from the hash: the hash of an EMPTY diff is a perfectly stable value, so
  * a run that never edits anything looks identical to one that settled.
+ *
+ * Exported so the durable loop (durable.ts) fingerprints with THIS function
+ * rather than a hand-synced copy. Two implementations of the same measurement,
+ * kept in step by hand, is precisely the failure this codebase keeps finding.
+ * The durable loop wraps the call in a recorded step, which is what keeps the
+ * read replay-safe; the function itself performs real I/O and must never be
+ * called outside one there.
  */
-async function workspaceFingerprint(
+export async function workspaceFingerprint(
   executor: AgentExecutor,
-): Promise<{ hash: string; dirty: boolean } | undefined> {
+): Promise<WorkspaceFingerprint | undefined> {
   const result = await executor.exec("git add -A >/dev/null 2>&1; git diff --cached --stat", { timeoutMs: 30_000 }).catch(() => null);
   if (result === null || result.exitCode !== 0) return undefined;
   // Hash the raw stat exactly as before — changing what is hashed would change

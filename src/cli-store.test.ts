@@ -10,10 +10,13 @@ import { deliverEvent, executeRun } from "@neutron-build/workflow";
 import type { WorkflowEvent } from "@neutron-build/workflow";
 
 import { runAgent } from "./agent.js";
+import { durableRecoveryInput } from "./durable.js";
+import { defaultRecoveryConfig } from "./recovery.js";
 import { approvalEvent, durableAgent } from "./durable.js";
 import type { ExecutorProvider } from "./durable.js";
 import { defaultApprovalPolicy } from "./approval.js";
 import { FileEventStore, RunMetaStore } from "./run-store.js";
+import { enqueueRun } from "./runtime.js";
 
 function reactiveModel(turns: Array<string | ((obs: string) => string)>): ModelAdapter {
   return {
@@ -163,3 +166,80 @@ test("runAgent aggregates usage across calls, cache fields included", async () =
   assert.equal(result.usage.cacheReadTokens, 500);
 });
 
+
+test("enqueueRun bakes stuck detection into the run INPUT — absent by default, env-settable", async () => {
+  // The knob has to be decided at enqueue, not at execution: the thresholds
+  // choose which turn a run terminates on, so a worker that disagreed with the
+  // log would trip NondeterminismError. This pins where the decision lands.
+  const inputOf = async (
+    options: Parameters<typeof enqueueRun>[1],
+    env: Record<string, string> = {},
+  ): Promise<Record<string, unknown>> => {
+    const dir = await mkdtemp(join(tmpdir(), "ship-enqueue-"));
+    const store = new FileEventStore(dir);
+    const runtime = { kind: "file" as const, store, saveMeta: async () => {} };
+    const saved = { ...process.env };
+    Object.assign(process.env, env);
+    try {
+      await enqueueRun(runtime as unknown as Parameters<typeof enqueueRun>[0], options);
+    } finally {
+      for (const key of Object.keys(env)) delete process.env[key];
+      Object.assign(process.env, saved);
+    }
+    const started = (await store.load(options.runId)).find((e) => e.type === "run-started");
+    return (started?.data as { input: Record<string, unknown> }).input;
+  };
+
+  const base = { runId: "r-enq", task: "t", model: "m" };
+  const plain = await inputOf(base);
+  assert.equal("recovery" in plain, false, "off unless asked for — nothing changes for existing deployments");
+  assert.equal("settle" in plain, false);
+
+  const asked = await inputOf({ ...base, recovery: { maxNudges: 1 }, settle: true });
+  assert.deepEqual(asked.recovery, { maxNudges: 1 }, "the THRESHOLDS ride in the input too, not just the switch");
+  assert.equal(asked.settle, true);
+
+  const viaEnv = await inputOf(base, { SHIP_RECOVERY: "1", SHIP_SETTLE: "true" });
+  // The env knob MATERIALISES the thresholds rather than storing a bare `true`.
+  // A bare `true` would leave durable.ts resolving them from the
+  // defaultRecoveryConfig code constant at run time, so editing that constant
+  // would return a replaying run on a different turn, leave recorded steps
+  // unconsumed, and raise a NondeterminismError that executeRun THROWS rather
+  // than records — bricking every in-flight run enqueued before the edit.
+  assert.deepEqual(
+    viaEnv.recovery,
+    defaultRecoveryConfig,
+    "the env knob must bake the thresholds into the log, not defer them to the code constant",
+  );
+  assert.equal(viaEnv.settle, true);
+});
+
+// SEAM: --settle must actually reach the durable run input.
+//
+// Deleting the one spread that joins the flag to the input left 319/319 green
+// while `teploy-ship run --durable --settle` silently did nothing. The flag is
+// registered in args.ts and honoured in durable.ts; only that line connected
+// them, and nothing pinned it. Worse, the warning that used to tell the
+// operator the flag was ignored had been removed, so the failure went from
+// loud to silent.
+//
+// Two assertions, because the mapping and the CALL SITE fail independently.
+test("durableRecoveryInput maps --settle onto the durable input", () => {
+  assert.deepEqual(durableRecoveryInput({ settle: true }), { recovery: true, settle: true });
+  assert.deepEqual(durableRecoveryInput({ settle: false }), {});
+  assert.deepEqual(durableRecoveryInput(undefined), {});
+  assert.deepEqual(durableRecoveryInput({}), {});
+});
+
+test("SEAM: executePass actually calls durableRecoveryInput", async () => {
+  // Structural, deliberately: the mapping above stays correct even if the call
+  // site is deleted, which is exactly how this broke. `pnpm test` builds before
+  // running, so dist/cli.js is current.
+  const { readFile } = await import("node:fs/promises");
+  const compiled = await readFile(new URL("./cli.js", import.meta.url), "utf8");
+  assert.match(
+    compiled,
+    /durableRecoveryInput\(/,
+    "executePass no longer spreads durableRecoveryInput — --settle is a silent no-op on durable runs",
+  );
+});

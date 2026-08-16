@@ -11,8 +11,9 @@ import { MemoryEventStore, cancelRun, deliverEvent, executeRun } from "@neutron-
 
 import { PLAN_EVENT, approvalEvent, durableAgent } from "./durable.js";
 import { FileRepoMemory } from "./repo-memory.js";
-import type { ExecutorProvider } from "./durable.js";
+import type { ExecutorProvider, RecoveryTuning } from "./durable.js";
 import { defaultApprovalPolicy } from "./approval.js";
+import { SETTLE_NUDGE, SETTLE_STOP } from "./recovery.js";
 
 // A model that reacts to the last observation, counting how many times it
 // was actually called (to prove replay never re-invokes it).
@@ -894,4 +895,398 @@ test("the same task runs when the executor reports isolation", async () => {
     input: { task: "from a webhook", trust: "external" },
   });
   assert.equal(outcome.status, "completed");
+});
+
+// ---------------------------------------------------------------------------
+// stuck detection + deliberate termination on the DURABLE loop
+//
+// The product path (webhook -> worker -> PR) runs durableAgent, not runAgent,
+// so the recovery behaviour measured on the live loop did not exist here at
+// all. These pin the port: the tracker is fed from a RECORDED step, so replay
+// re-derives its state without touching the workspace again.
+// ---------------------------------------------------------------------------
+
+/**
+ * A durable provider over a real git workspace, counting both total execs and
+ * the fingerprint's signature command specifically. The second counter is what
+ * makes "recorded, not re-read on replay" testable.
+ */
+async function settleProvider(): Promise<{
+  provider: ExecutorProvider;
+  execCount: () => number;
+  fingerprintCount: () => number;
+  root: string;
+}> {
+  const root = await mkdtemp(join(tmpdir(), "durable-settle-"));
+  const inner = new LocalExecutor({ root });
+  await inner.exec("git init -q -b main . && git config user.email t@t && git config user.name t");
+  let execs = 0;
+  let fingerprints = 0;
+  const executor: AgentExecutor = {
+    async exec(cmd, opts) {
+      execs++;
+      if (cmd.includes("git diff --cached --stat")) fingerprints++;
+      return inner.exec(cmd, opts);
+    },
+    putFile: (p, d) => inner.putFile(p, d),
+    getFile: (p) => inner.getFile(p),
+    destroy: () => inner.destroy(),
+  };
+  return {
+    root,
+    execCount: () => execs,
+    fingerprintCount: () => fingerprints,
+    provider: {
+      async create() {
+        return { handle: `local:${root}` };
+      },
+      attach() {
+        return executor;
+      },
+    },
+  };
+}
+
+/** reactiveModel plus a record of every last-user-message the model was shown. */
+function watchingModel(turns: string[]): { model: ModelAdapter; seen: string[]; callCount: () => number } {
+  const seen: string[] = [];
+  const { model, callCount } = reactiveModel(
+    turns.map((text) => (obs: string) => {
+      seen.push(obs);
+      return text;
+    }),
+  );
+  return { model, seen, callCount };
+}
+
+const PROBES = Array.from({ length: 20 }, (_, i) => `\`\`\`bash\necho probe-${i}\n\`\`\``);
+/** Tight enough that a settle/abort lands in a handful of turns. */
+const TIGHT: RecoveryTuning = { loopThreshold: 99, failureThreshold: 99, maxNudges: 1, noProgressThreshold: 2 };
+
+const fingerprintSteps = (events: Array<{ type: string; name?: string }>): string[] =>
+  events.filter((e) => e.type === "step-completed" && /-fingerprint$/.test(e.name ?? "")).map((e) => e.name ?? "");
+
+test("durable settle: a run that stops changing an edited tree ends as settled, in the agent's own words", async () => {
+  const { model, seen } = watchingModel([
+    "```create fix.py\ndef f(n):\n    return n + 1\n```", // the tree is now dirty
+    "```finish\nFixed the off-by-one in fix.py.\n```", // held by the verify gate
+    ...PROBES, // verifying forever, changing nothing
+  ]);
+  const { provider } = await settleProvider();
+  const wf = durableAgent({ model, executor: provider, workdir: "." });
+  const store = new MemoryEventStore();
+
+  const outcome = await executeRun({
+    workflow: wf,
+    runId: "run-settle",
+    store,
+    input: { task: "fix the off-by-one", recovery: TIGHT, settle: true },
+  });
+
+  assert.equal(outcome.status, "completed");
+  const out = outcome.output as { status: string; summary: string; turns: number };
+  assert.equal(out.status, "settled");
+  // The run ends on the agent's HELD finish, not on a harness sentence: that
+  // summary becomes the PR body and the repo-memory note.
+  assert.equal(out.summary, "Fixed the off-by-one in fix.py.");
+  assert.ok(seen.includes(SETTLE_NUDGE), "the agent was offered the finish before the run was stopped");
+  assert.ok(out.turns < 40, `stopped well short of the turn budget (${out.turns})`);
+
+  // one fingerprint step per EXECUTING turn, none for the finish turn
+  const names = fingerprintSteps(await store.load("run-settle"));
+  assert.ok(names.includes("turn-0-fingerprint"));
+  assert.ok(!names.includes("turn-1-fingerprint"), "the held finish executed nothing, so it fingerprints nothing");
+});
+
+test("durable settle SEAM: the same script over a CLEAN tree ends stuck, not settled", async () => {
+  // Twin of the test above, differing in one thing: turn 0 writes no file. If
+  // `dirty` ever stops flowing out of the RECORDED fingerprint and into
+  // recovery.observe, the test above still passes on a hardcoded true and this
+  // one fails — which is why both exist.
+  const { model, seen } = watchingModel([
+    "```bash\necho looked-around\n```", // succeeds, writes nothing
+    "```finish\nI believe this is done.\n```",
+    ...PROBES,
+  ]);
+  const { provider } = await settleProvider();
+  const wf = durableAgent({ model, executor: provider, workdir: "." });
+  const store = new MemoryEventStore();
+
+  const outcome = await executeRun({
+    workflow: wf,
+    runId: "run-settle-clean",
+    store,
+    input: { task: "fix the off-by-one", recovery: TIGHT, settle: true },
+  });
+
+  assert.equal(outcome.status, "completed");
+  const out = outcome.output as { status: string; summary: string };
+  assert.equal(out.status, "stuck", "nothing was built, so there is nothing to settle on");
+  assert.match(out.summary, /without changing anything/);
+  assert.ok(!seen.includes(SETTLE_NUDGE), "a clean tree is never told it may already be done");
+});
+
+test("durable recovery SEAM: the fingerprint is RECORDED — a resumed run never re-reads the workspace", async () => {
+  // The durable-specific half of the port. Turn 1 parks on approval, so the
+  // second pass REPLAYS turn 0 in full. If the fingerprint were read outside
+  // ctx.step it would run again on that replay and the count would rise.
+  const { model } = reactiveModel([
+    "```bash\necho hi > a.txt\n```", // auto-safe
+    "```bash\nrm -rf build/\n```", // dangerous -> parks
+    (obs) => (obs.includes("exit 0") ? "```finish\ntidied up\n```" : "```bash\necho hmm\n```"),
+    (obs) => (obs.includes("Before finishing") ? "```bash\ncat a.txt\n```" : "```bash\necho hmm\n```"),
+    (obs) => (obs.includes("hi") ? "```finish\ntidied up\n```" : "```bash\necho hmm\n```"),
+  ]);
+  const { provider, fingerprintCount } = await settleProvider();
+  const wf = durableAgent({ model, executor: provider, workdir: ".", approveAction: defaultApprovalPolicy });
+  const store = new MemoryEventStore();
+
+  const parked = await executeRun({
+    workflow: wf,
+    runId: "run-fp-replay",
+    store,
+    input: { task: "tidy", recovery: true },
+  });
+  assert.equal(parked.status, "waiting");
+  assert.equal(fingerprintCount(), 1, "turn 0 fingerprinted once, live");
+  assert.deepEqual(fingerprintSteps(await store.load("run-fp-replay")), ["turn-0-fingerprint"]);
+
+  await deliverEvent(store, "run-fp-replay", approvalEvent(1), { approved: true });
+  const done = await executeRun({ workflow: wf, runId: "run-fp-replay", store });
+  assert.equal(done.status, "completed");
+
+  // Turns 1 and 3 execute; turn 0 is replayed from the log. Three executing
+  // turns, three fingerprint reads in total — not four.
+  const names = fingerprintSteps(await store.load("run-fp-replay"));
+  assert.deepEqual(names, ["turn-0-fingerprint", "turn-1-fingerprint", "turn-3-fingerprint"]);
+  assert.equal(fingerprintCount(), 3, "the replayed turn's fingerprint came from the log, not the workspace");
+});
+
+test("durable recovery SEAM: the step is gated on the RUN INPUT, so pre-feature logs replay unchanged", async () => {
+  // Backward compatibility, and the reason the flag cannot live on
+  // DurableAgentConfig. Both halves use the SAME hand-seeded log; only the
+  // recorded input differs.
+  const base = { v: 1, at: new Date().toISOString() };
+  const seed = async (store: MemoryEventStore, runId: string, input: unknown): Promise<void> => {
+    await store.append(runId, { ...base, seq: 0, type: "run-started", data: { workflow: "coding-agent", input } });
+    await store.append(runId, { ...base, seq: 1, type: "step-completed", name: "sandbox", data: { result: "local:x" } });
+    await store.append(runId, { ...base, seq: 2, type: "step-completed", name: "turn-0-think", data: { result: "```bash\ntrue\n```" } });
+    await store.append(runId, {
+      ...base,
+      seq: 3,
+      type: "step-completed",
+      name: "turn-0-exec",
+      data: { result: { exitCode: 0, stdout: "", stderr: "", timedOut: false, truncated: false } },
+    });
+    // The event that makes this a real test: something is recorded AFTER
+    // turn-0-exec, so an unexpected turn-0-fingerprint collides with it.
+    await store.append(runId, { ...base, seq: 4, type: "step-completed", name: "turn-1-think", data: { result: "```finish\nreplayed finish\n```" } });
+  };
+
+  // (a) a log written before the feature existed: no fingerprint step is
+  //     appended, replay walks straight past turn-0-exec into turn-1-think.
+  const old = await settleProvider();
+  const wfOld = durableAgent({ model: reactiveModel(["```bash\ntrue\n```", "```finish\nreplayed finish\n```"]).model, executor: old.provider, workdir: "." });
+  const storeOld = new MemoryEventStore();
+  await seed(storeOld, "run-pre-feature", { task: "t" });
+  const done = await executeRun({ workflow: wfOld, runId: "run-pre-feature", store: storeOld });
+  assert.equal(done.status, "completed");
+  assert.equal((done.output as { summary: string }).summary, "replayed finish");
+  assert.deepEqual(fingerprintSteps(await storeOld.load("run-pre-feature")), [], "no fingerprint step on a pre-feature run");
+  assert.equal(old.fingerprintCount(), 0);
+
+  // (b) the same log claiming the feature: the code now runs a step the log
+  //     does not have there, and the workflow SDK refuses. This is what would
+  //     happen to EVERY queued run if the gate ever moved to config.
+  const enabled = await settleProvider();
+  const wfNew = durableAgent({ model: reactiveModel(["```finish\nx\n```"]).model, executor: enabled.provider, workdir: "." });
+  const storeNew = new MemoryEventStore();
+  await seed(storeNew, "run-mismatch", { task: "t", recovery: true });
+  await assert.rejects(
+    () => executeRun({ workflow: wfNew, runId: "run-mismatch", store: storeNew }),
+    /Replay mismatch/,
+  );
+});
+
+test("durable recovery is off by default: no fingerprint steps, no settle nudge, same ending as before", async () => {
+  const { model, seen } = watchingModel([
+    "```create fix.py\ndef f(n):\n    return n + 1\n```",
+    "```finish\nFixed the off-by-one in fix.py.\n```",
+    ...PROBES,
+  ]);
+  const { provider, fingerprintCount } = await settleProvider();
+  const wf = durableAgent({ model, executor: provider, workdir: ".", maxSteps: 8 });
+  const store = new MemoryEventStore();
+
+  const outcome = await executeRun({ workflow: wf, runId: "run-recovery-off", store, input: { task: "fix the off-by-one" } });
+  assert.equal(outcome.status, "completed");
+  const out = outcome.output as { status: string; turns: number };
+  assert.equal(out.status, "max-steps", "with recovery off the run spins to its turn limit, exactly as before");
+  assert.equal(out.turns, 8);
+  assert.deepEqual(fingerprintSteps(await store.load("run-recovery-off")), []);
+  assert.equal(fingerprintCount(), 0, "the workspace is never fingerprinted when the feature is off");
+  assert.ok(!seen.includes(SETTLE_NUDGE));
+});
+
+test("durable recovery gating: settle implies the tracker; an explicit recovery:false still disables both", async () => {
+  const script = ["```create fix.py\nx = 1\n```", "```bash\necho probe\n```", "```bash\necho probe\n```", "```bash\necho probe\n```"];
+
+  // settle alone is NOT a silent no-op — there is no "recovery defaults on"
+  // here for it to ride, so it turns the tracker on itself.
+  const on = await settleProvider();
+  const storeOn = new MemoryEventStore();
+  await executeRun({
+    workflow: durableAgent({ model: reactiveModel([...script]).model, executor: on.provider, workdir: ".", maxSteps: 4 }),
+    runId: "run-settle-implies",
+    store: storeOn,
+    input: { task: "t", settle: true },
+  });
+  assert.ok(fingerprintSteps(await storeOn.load("run-settle-implies")).length > 0, "settle:true alone runs the tracker");
+
+  // …but an explicit opt-out wins, matching runAgent's `recovery: false`.
+  const off = await settleProvider();
+  const storeOff = new MemoryEventStore();
+  await executeRun({
+    workflow: durableAgent({ model: reactiveModel([...script]).model, executor: off.provider, workdir: ".", maxSteps: 4 }),
+    runId: "run-settle-optout",
+    store: storeOff,
+    input: { task: "t", recovery: false, settle: true },
+  });
+  assert.deepEqual(fingerprintSteps(await storeOff.load("run-settle-optout")), [], "recovery:false disables settle too");
+  assert.equal(off.fingerprintCount(), 0);
+});
+
+/** A bare file:// remote plus a fetch stub that captures the PR POST body. */
+async function repoFixture(name: string): Promise<{
+  repo: string;
+  posts: Array<Record<string, unknown>>;
+  provider: ExecutorProvider;
+  restore: () => void;
+}> {
+  const bareDir = await mkdtemp(join(tmpdir(), `durable-${name}-bare-`));
+  const seedDir = await mkdtemp(join(tmpdir(), `durable-${name}-seed-`));
+  const seeder = new LocalExecutor({ root: seedDir });
+  await seeder.exec(
+    `git init -q -b main . && git config user.email t@t && git config user.name t && printf 'hello\\n' > f.txt && git add -A && git commit -qm seed && git clone -q --bare . ${bareDir}/owner/repo.git`,
+  );
+  const work = await mkdtemp(join(tmpdir(), `durable-${name}-work-`));
+  const posts: Array<Record<string, unknown>> = [];
+  const orig = globalThis.fetch;
+  (globalThis as unknown as { fetch: unknown }).fetch = (_url: unknown, init?: { method?: string; body?: string }) => {
+    if (init?.method === "POST" && typeof init.body === "string") posts.push(JSON.parse(init.body) as Record<string, unknown>);
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ number: 1, html_url: "http://example/owner/repo/pulls/1" }) });
+  };
+  return {
+    repo: `file://${bareDir}/owner/repo.git`,
+    posts,
+    provider: {
+      async create() {
+        return { handle: work };
+      },
+      attach(handle: string) {
+        return new LocalExecutor({ root: handle });
+      },
+    },
+    restore: () => {
+      globalThis.fetch = orig;
+    },
+  };
+}
+
+test("durable settle on a repo run publishes the HELD finish as a draft, never as a clean finish", async () => {
+  const fixture = await repoFixture("settle-pr");
+  try {
+    const { model } = reactiveModel([
+      "```bash\necho changed >> f.txt\n```", // a real change -> dirty tree
+      "```finish\nAppended the missing line to f.txt.\n```", // held by the verify gate
+      ...PROBES,
+    ]);
+    const wf = durableAgent({ model, executor: fixture.provider, workdir: "." });
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: wf,
+      runId: "run-settle-pr",
+      store,
+      input: { task: "append to f.txt", repo: fixture.repo, recovery: TIGHT, settle: true },
+    });
+
+    assert.equal(outcome.status, "completed");
+    const out = outcome.output as { status: string; summary: string; pr?: string };
+    assert.equal(out.status, "settled");
+    assert.equal(out.summary, "Appended the missing line to f.txt.");
+    assert.equal(out.pr, "http://example/owner/repo/pulls/1");
+
+    assert.equal(fixture.posts.length, 1, "exactly one PR was opened");
+    const pr = fixture.posts[0] as { title: string; body: string };
+    // file:// parses as a Forgejo-shaped ref, so "draft" is the WIP prefix.
+    assert.match(pr.title, /^WIP: \[incomplete\] /, "a settled run did not say done — it ships as a draft");
+    assert.match(pr.body, /Appended the missing line to f\.txt\./);
+    assert.match(pr.body, /did not finish/);
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("durable stuck on a repo run publishes a draft and does NOT launder the finish the gate rejected", async () => {
+  const fixture = await repoFixture("stuck-pr");
+  try {
+    const { model } = reactiveModel([
+      "```finish\nI already fixed it.\n```", // rejected: nothing has run (FINISH_NUDGE_NO_WORK)
+      "```bash\necho changed >> f.txt\n```", // real work lands anyway
+      ...PROBES, // then spins; settle is OFF, so this aborts
+    ]);
+    const wf = durableAgent({ model, executor: fixture.provider, workdir: "." });
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: wf,
+      runId: "run-stuck-pr",
+      store,
+      input: { task: "append to f.txt", repo: fixture.repo, recovery: TIGHT },
+    });
+
+    assert.equal(outcome.status, "completed");
+    const out = outcome.output as { status: string; summary: string; pr?: string };
+    assert.equal(out.status, "stuck");
+    assert.match(out.summary, /^Aborting: /);
+    assert.ok(!/already fixed/.test(out.summary), "a finish the gate REJECTED must never become the run's account");
+    assert.equal(out.pr, "http://example/owner/repo/pulls/1", "the work still ships — it just ships as unfinished");
+
+    const pr = fixture.posts[0] as { title: string; body: string };
+    assert.match(pr.title, /^WIP: \[incomplete\] /);
+    assert.ok(!/already fixed/.test(pr.body));
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("durable settle SEAM: a finish the gate REJECTED is never adopted as the settled run's account", async () => {
+  // The clear-on-rejection half of lastHeldFinish. Turn 1's finish is held by
+  // the benign "prove it" nudge (usable). Turn 2's is REJECTED —
+  // FINISH_NUDGE_NO_EVIDENCE, i.e. it claimed verification it never ran — and
+  // that must wipe the earlier claim rather than leave it standing. Without
+  // the wipe, "first claim" becomes the summary, and from there the PR body
+  // and the repo-memory note: a judgement the run explicitly refused,
+  // laundered into the published artefact.
+  const { model } = reactiveModel([
+    "```create fix.py\ndef f(n):\n    return n + 1\n```", // dirty tree
+    "```finish\nfirst claim\n```", // HELD by the verify nudge -> usable
+    "```finish\nsecond claim\n```", // REJECTED: no evidence since the nudge
+    ...PROBES,
+  ]);
+  const { provider } = await settleProvider();
+  const wf = durableAgent({ model, executor: provider, workdir: "." });
+  const store = new MemoryEventStore();
+
+  const outcome = await executeRun({
+    workflow: wf,
+    runId: "run-settle-rejected",
+    store,
+    input: { task: "fix the off-by-one", recovery: TIGHT, settle: true },
+  });
+
+  assert.equal(outcome.status, "completed");
+  const out = outcome.output as { status: string; summary: string };
+  assert.equal(out.status, "settled");
+  assert.equal(out.summary, SETTLE_STOP, "a rejected claim must not survive as the run's summary");
+  assert.ok(!/claim/.test(out.summary));
 });

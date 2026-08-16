@@ -28,7 +28,7 @@ import { runAgent } from "./agent.js";
 import { refusalMessage } from "./publish-policy.js";
 import { defaultApprovalPolicy } from "./approval.js";
 import { secretEnvNames } from "./guard.js";
-import { durableAgent, repoKeyOf, sandboxProvider } from "./durable.js";
+import { durableAgent, durableRecoveryInput, repoKeyOf, sandboxProvider } from "./durable.js";
 import type { ExecutorProvider } from "./durable.js";
 import { formatReport, runEval } from "./eval.js";
 import type { EvalTask } from "./eval.js";
@@ -56,10 +56,13 @@ Usage:
                      --critic adds an independent review pass before finishing
                      --settle lets a run that has stopped changing an already
                      edited tree stop deliberately (status "settled") instead
-                     of spinning to an abort. Live runs only.
+                     of spinning to an abort.
   teploy-ship run --durable "<task>"  durable run: parks on approvals, survives exits
                      add --plan to review/approve the agent's plan before it acts
                      add --critic for an independent review pass before it finishes
+                     add --settle for stuck detection + the deliberate stop
+                     (off by default on durable runs; SHIP_RECOVERY/SHIP_SETTLE
+                     turn it on for worker- and dashboard-enqueued runs)
   teploy-ship runs                    list durable runs
   teploy-ship resume <run-id>         continue a durable run (after a crash or park)
   teploy-ship approve <run-id>        approve a parked action and continue
@@ -296,12 +299,6 @@ async function runCommand(rest: string[]): Promise<void> {
   if (task === undefined || task === "") fail('a task is required: teploy-ship run "fix the failing test"');
 
   if (args.flags.durable === true) {
-    // Say so rather than accepting it silently: the durable workflow has no
-    // stuck detector at all (durable.ts runs to its turn limit), so there is
-    // nothing there for --settle to change.
-    if (args.flags.settle === true) {
-      process.stderr.write(`${yellow("--settle is ignored on a durable run")} — the durable loop has no stuck detection.\n`);
-    }
     await startDurable(task, args, config);
     return;
   }
@@ -630,7 +627,7 @@ async function executePass(
   task: string,
   args: ReturnType<typeof parseArgs>,
   config: Config,
-  opts?: { plan?: boolean; critic?: boolean },
+  opts?: { plan?: boolean; critic?: boolean; settle?: boolean },
 ): Promise<RunOutcome | null> {
   const modelId = (args.flags.model as string) ?? config.model ?? "anthropic/claude-sonnet-5";
   const usingSandbox = resolveSandbox(args, config) !== undefined;
@@ -655,6 +652,7 @@ async function executePass(
     guard: true,
     ...(opts?.plan === true ? { plan: true } : {}),
     ...(opts?.critic === true ? { critic: true } : {}),
+    ...durableRecoveryInput(opts),
   });
   if (outcome === null) return null; // another executor holds the lease
   const previous = await runtime.loadMeta(runId);
@@ -704,6 +702,7 @@ async function startDurable(task: string, args: ReturnType<typeof parseArgs>, co
   const outcome = await executePass(runtime, runId, task, args, config, {
     ...(args.flags.plan === true ? { plan: true } : {}),
     ...(args.flags.critic === true ? { critic: true } : {}),
+    ...(args.flags.settle === true ? { settle: true } : {}),
   });
   reportOutcome(runId, outcome);
   await runtime.close();

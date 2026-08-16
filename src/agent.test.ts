@@ -655,3 +655,214 @@ test("finishWhenSettled: a REJECTED finish never becomes the run's summary", asy
     "an earlier accepted claim must not survive a later rejection either",
   );
 });
+
+// --- codeSearch (```search in the live loop) ---------------------------------
+//
+// Before this option the live loop refused every ```search outright, so the
+// Nucleus code index could not be measured against the SWE-bench harness at
+// all. These cover the retrieval path, the prompt seam that makes it reachable,
+// and — the point of the whole set — that ABSENCE of the option leaves the loop
+// byte-for-byte what it was, which is what keeps the 35/50 baseline comparable.
+
+const HIT = { path: "lib.ts", start: 1, end: 1, text: "export function retryBackoff() {}", distance: 0.05 };
+
+test("codeSearch: a ```search action is answered with ranked hits as an observation", async () => {
+  const executor = await localExecutor();
+  const queries: string[] = [];
+  const { model } = scriptedModel([
+    "Let me locate it.\n```search\nwhere is retry backoff?\n```",
+    // finishes ONLY if the real hit came back — proving the loop fed it in
+    (obs) => (obs.includes("lib.ts:1-1") ? "```finish\nfound it in lib.ts\n```" : "```bash\necho lost\n```"),
+  ]);
+
+  const result = await runAgent({
+    model,
+    executor,
+    task: "find the retry backoff",
+    requireVerifiedFinish: false,
+    recovery: false,
+    condense: false,
+    codeSearch: async (query) => {
+      queries.push(query);
+      return [HIT];
+    },
+  });
+
+  assert.equal(result.status, "finished");
+  assert.equal(result.summary, "found it in lib.ts");
+  assert.deepEqual(queries, ["where is retry backoff?"], "the parsed query reached the search function verbatim");
+  const searchStep = result.steps.find((s) => s.action.kind === "search");
+  assert.match(searchStep?.observation ?? "", /Top 1 matches for "where is retry backoff\?"/);
+  assert.match(searchStep?.observation ?? "", /## lib\.ts:1-1/);
+  assert.match(searchStep?.observation ?? "", /retryBackoff/);
+  assert.equal(searchStep?.result, undefined, "a search executes nothing, so it carries no ExecResult");
+});
+
+test("codeSearch SEAM: the prompt advertises ```search only when the option is supplied", async () => {
+  // The seam. parseAction has always produced a `search` action and the loop
+  // now handles one, but a model that is never TOLD the action exists will
+  // never emit it — capability correct at both ends, connected at neither.
+  // Delete `search: options.codeSearch !== undefined` from the systemPrompt
+  // call in agent.ts and THIS is the test that fails; the retrieval test above
+  // still passes, because the handler is fine. That asymmetry is the point.
+  const script = ["```search\nwhere is retry backoff?\n```", "```finish\ndone\n```"];
+
+  const withIndex = scriptedModel([...script]);
+  await runAgent({
+    model: withIndex.model,
+    executor: await localExecutor(),
+    task: "find it",
+    requireVerifiedFinish: false,
+    recovery: false,
+    condense: false,
+    codeSearch: async () => [HIT],
+  });
+  assert.match(
+    String(withIndex.calls[0]?.messages[0]?.content),
+    /```search/,
+    "with a code index the model must be told the action exists",
+  );
+
+  const without = scriptedModel([...script]);
+  await runAgent({
+    model: without.model,
+    executor: await localExecutor(),
+    task: "find it",
+    requireVerifiedFinish: false,
+    recovery: false,
+    condense: false,
+  });
+  assert.doesNotMatch(
+    String(without.calls[0]?.messages[0]?.content),
+    /```search/,
+    "without one it must not be advertised — an unusable action in the prompt is a trap",
+  );
+});
+
+test("codeSearch absent: ```search is refused exactly as before, and the run is otherwise unchanged", async () => {
+  // The refusal string had NO test coverage until now, which is precisely how
+  // it could have drifted while looking maintained.
+  const executor = await localExecutor();
+  const seen: string[] = [];
+  const { model } = scriptedModel([
+    "```search\nwhere is retry backoff?\n```",
+    (obs) => {
+      seen.push(obs);
+      return "```bash\ngrep -r retryBackoff . || true\n```";
+    },
+    "```finish\ngrepped instead\n```",
+  ]);
+  const result = await runAgent({
+    model,
+    executor,
+    task: "find it",
+    requireVerifiedFinish: false,
+    recovery: false,
+    condense: false,
+  });
+
+  assert.equal(
+    seen[0],
+    "Code search is not available in this session. Use grep/rg via ```bash instead.",
+    "byte-identical to the pre-codeSearch refusal",
+  );
+  assert.equal(result.status, "finished");
+  const searchStep = result.steps.find((s) => s.action.kind === "search");
+  assert.equal(searchStep?.observation, undefined, "the refusal path records no observation on the step, as before");
+});
+
+test("codeSearch: a failing index degrades to a grep hint and never ends the run", async () => {
+  // Fail-open, same posture as the critic pass: retrieval is an accelerator,
+  // never a dependency. A Nucleus blip must not cost a paid benchmark run.
+  const executor = await localExecutor();
+  const seen: string[] = [];
+  const { model } = scriptedModel([
+    "```search\nwhere is retry backoff?\n```",
+    (obs) => {
+      seen.push(obs);
+      return "```finish\nfell back to grep\n```";
+    },
+  ]);
+  const result = await runAgent({
+    model,
+    executor,
+    task: "find it",
+    requireVerifiedFinish: false,
+    recovery: false,
+    condense: false,
+    codeSearch: async () => {
+      throw new Error("nucleus unreachable");
+    },
+  });
+
+  assert.equal(result.status, "finished");
+  assert.match(seen[0] ?? "", /Code search failed \(nucleus unreachable\)/);
+  assert.match(seen[0] ?? "", /Use grep\/rg via ```bash instead/);
+});
+
+test("codeSearch: an empty result is reported as such, not as a failure", async () => {
+  // An empty index and a broken one must be distinguishable in a transcript,
+  // or a null benchmark result cannot be attributed.
+  const executor = await localExecutor();
+  const seen: string[] = [];
+  const { model } = scriptedModel([
+    "```search\nwhere is retry backoff?\n```",
+    (obs) => {
+      seen.push(obs);
+      return "```finish\nnothing indexed\n```";
+    },
+  ]);
+  await runAgent({
+    model,
+    executor,
+    task: "find it",
+    requireVerifiedFinish: false,
+    recovery: false,
+    condense: false,
+    codeSearch: async () => [],
+  });
+  assert.equal(seen[0], 'No indexed code matched "where is retry backoff?".');
+});
+
+test("codeSearch: a search is NOT evidence — it cannot satisfy the verified-finish gate", async () => {
+  // The safety regression guard. If a search ever counted as an execution,
+  // an agent asked to PROVE its work could answer with a database lookup and
+  // be believed — the hallucinated-verification finish FINISH_NUDGE_NO_EVIDENCE
+  // exists to catch. This is the test that would fail if someone "helpfully"
+  // made search bump execsSinceNudge.
+  const executor = await localExecutor();
+  const nudges: string[] = [];
+  const { model } = scriptedModel([
+    "```bash\necho work\n```",
+    "```finish\nDone.\n```",
+    (obs) => {
+      nudges.push(obs);
+      return "```search\ndid I do the work?\n```"; // retrieval, not verification
+    },
+    (obs) => {
+      nudges.push(obs); // the search observation — proof the search really ran
+      return "```finish\nDone, I promise.\n```";
+    },
+    (obs) => {
+      nudges.push(obs);
+      return "```finish\nDone.\n```";
+    },
+  ]);
+  const result = await runAgent({
+    model,
+    executor,
+    task: "work",
+    recovery: false,
+    condense: false,
+    codeSearch: async () => [HIT],
+  });
+
+  assert.match(nudges[0] ?? "", /Before finishing, verify your work/);
+  assert.match(nudges[1] ?? "", /Top 1 matches/, "the search did happen — this is not a vacuous pass");
+  assert.match(
+    nudges[2] ?? "",
+    /did not run anything between being asked to verify/,
+    "searching between the two finishes must not count as having run something",
+  );
+  assert.equal(result.status, "finished", "still bounded — the gate holds once more, then honours the finish");
+});

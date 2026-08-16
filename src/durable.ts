@@ -5,7 +5,7 @@ import type { AgentExecutor } from "@neutron-build/agents";
 import { workflow } from "@neutron-build/workflow";
 import type { WorkflowContext, WorkflowDefinition } from "@neutron-build/workflow";
 
-import { executeAction } from "./agent.js";
+import { executeAction, workspaceFingerprint } from "./agent.js";
 import { FINISH_NUDGE_FAILED, FINISH_NUDGE_NO_EVIDENCE, FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, parseAction } from "./actions.js";
 import { criticFeedback, isApproved, reviewWork } from "./critic.js";
 import {
@@ -28,6 +28,8 @@ import { assertRepoAllowed, credentialFor, policyFromEnv } from "./repo-policy.j
 import type { RepoPolicyConfig, RepoTrust } from "./repo-policy.js";
 import { condenseIfNeeded, defaultCondenseConfig } from "./memory.js";
 import type { CondenseConfig } from "./memory.js";
+import { RecoveryTracker, defaultRecoveryConfig } from "./recovery.js";
+import type { RecoveryConfig } from "./recovery.js";
 import { loadRepoContext, runNote } from "./repo-memory.js";
 import type { RepoMemoryStore } from "./repo-memory.js";
 import type { SteerStore } from "./steer.js";
@@ -99,7 +101,46 @@ export interface DurableAgentInput {
    * non-repo run or an empty diff skips it and finishes as today.
    */
   critic?: boolean;
+  /**
+   * Stuck detection (default OFF here, unlike the live loop where it is on).
+   * `true` uses `defaultRecoveryConfig`; an object overrides individual
+   * thresholds; `false` is an explicit opt-out that also disables `settle`,
+   * matching runAgent's `recovery: false`.
+   *
+   * TWO things ride in the RUN INPUT rather than in DurableAgentConfig, and
+   * both are load-bearing rather than stylistic:
+   *
+   * - PRESENCE, like steer/index/guard/critic: a run enqueued before this
+   *   feature existed has no `recovery` in its `run-started` input, so it
+   *   replays without the per-turn fingerprint step and cannot trip a
+   *   step-sequence mismatch on a worker running the new code.
+   * - THE THRESHOLDS. These decide which turn the run TERMINATES on. A worker
+   *   configured with a tighter threshold than the one the log was written
+   *   under would return early, leaving recorded steps unconsumed —
+   *   `leftoverCursorEvent()` then raises NondeterminismError, which
+   *   `executeRun` THROWS rather than records, leaving the run permanently
+   *   unrunnable rather than merely failed. Config-level tuning would be a
+   *   live nondeterminism bug; input-level tuning is fixed at enqueue.
+   */
+  recovery?: boolean | RecoveryTuning;
+  /**
+   * Deliberate termination (default off): when the tree already holds a change
+   * and successful commands stop changing it, the agent is verifying rather
+   * than building — offer it a finish, and end the run as `settled` rather
+   * than as `stuck`. See RunAgentOptions.finishWhenSettled in agent.ts for the
+   * measured motivation and for how to read a sweep that has it on.
+   *
+   * It is a branch of the stuck detector, so it turns the tracker on by
+   * itself; `recovery: false` still disables both.
+   */
+  settle?: boolean;
 }
+
+/**
+ * Per-run recovery thresholds. `settle` is omitted because it is its own input
+ * flag above — one switch, one place.
+ */
+export type RecoveryTuning = Partial<Omit<RecoveryConfig, "settle">>;
 
 export interface DurableAgentOutput {
   /**
@@ -108,8 +149,14 @@ export interface DurableAgentOutput {
    * indistinguishable from a completed task in dashboards, metrics and
    * notifications. "budget-exhausted" likewise records that the run was stopped
    * by its cost ceiling rather than by finishing or running out of turns.
+   *
+   * "stuck" and "settled" are the two endings stuck detection adds (input
+   * `recovery` / `settle`). Neither is the agent saying "done": "stuck" is the
+   * harness cutting a looping, thrashing or spinning run short, "settled" is a
+   * tree that holds a complete-looking change and stopped moving. Both publish
+   * their work as an INCOMPLETE (draft/WIP) pull request for that reason.
    */
-  status: "finished" | "max-steps" | "plan-rejected" | "budget-exhausted";
+  status: "finished" | "max-steps" | "plan-rejected" | "budget-exhausted" | "stuck" | "settled";
   summary: string;
   turns: number;
   /** PR opened by a repo run (absent for workspace runs or empty diffs). */
@@ -135,6 +182,26 @@ export interface RunUsage {
  * handle on every execution pass — including replays and post-suspension
  * resumes — with no I/O.
  */
+/**
+ * Maps the CLI's --settle onto the durable run input.
+ *
+ * Extracted so it can be pinned by a test. Deleting the single spread that
+ * used to live inline in executePass left the whole suite green while
+ * `teploy-ship run --durable --settle` became a silent no-op — the flag is
+ * registered in args.ts and honoured in durable.ts, and only this line joined
+ * them. That is the house's signature shape: correct on both ends, unwired in
+ * between.
+ *
+ * --settle turns the stuck detector on as well: settle is a branch of it, and
+ * a durable input has no "recovery defaults on" to opt out of, so gating it
+ * the way runAgent does would make the flag a no-op here.
+ */
+export function durableRecoveryInput(
+  opts?: { settle?: boolean },
+): { recovery?: true; settle?: true } {
+  return opts?.settle === true ? { recovery: true, settle: true } : {};
+}
+
 export interface ExecutorProvider {
   create: () => Promise<{ handle: string }>;
   attach: (handle: string) => AgentExecutor;
@@ -386,6 +453,29 @@ export function durableAgent(
       let failNudges = 0;
       let lastExecFailed = false;
       let criticDone = false;
+      /**
+       * The most recent finish the gate HELD, and only when the hold was the
+       * benign "prove it" one. A run that ends on a harness sentence while one
+       * of these exists throws away the agent's own account of the work —
+       * which becomes the PR body and the repo-memory note.
+       */
+      let lastHeldFinish: string | undefined;
+
+      // Stuck detection. The tracker itself is never persisted: it is a pure
+      // state machine over (action, exitCode, fingerprint), so replaying the
+      // same recorded observations in the same order re-derives the same state
+      // — exactly how anySuccessfulAction/finishNudged/criticDone above are
+      // already re-derived on every pass.
+      const recoveryTuning: RecoveryTuning =
+        typeof input.recovery === "object" && input.recovery !== null ? input.recovery : {};
+      const recoveryOn = input.recovery !== false && (input.recovery !== undefined || input.settle === true);
+      const recovery = recoveryOn
+        ? new RecoveryTracker({
+            ...defaultRecoveryConfig,
+            ...recoveryTuning,
+            ...(input.settle === true ? { settle: true } : {}),
+          })
+        : null;
 
       const maxRunCostUSD = config.maxRunCostUSD ?? 0;
       const modelId = config.modelId ?? "";
@@ -561,6 +651,15 @@ export function durableAgent(
               }
             }
             if (nudge !== null) {
+              // Only the benign "prove it" hold leaves the agent's claim usable
+              // as the run's official account. Every other hold is a REJECTION
+              // — NO_WORK (nothing done), FAILED (its last command failed),
+              // NO_EVIDENCE (claimed verification it never ran), or a critic
+              // disapproval — and adopting the claim there would launder a
+              // judgement the run explicitly refused into the PR body and the
+              // repo-memory note. Assignment, not a conditional set: an earlier
+              // VERIFY claim must not survive a later rejection.
+              lastHeldFinish = nudge === FINISH_NUDGE_VERIFY ? action.message : undefined;
               messages.push({ role: "user", content: nudge });
               continue;
             }
@@ -639,6 +738,58 @@ export function durableAgent(
         execsSinceNudge += 1;
         lastExecFailed = result.exitCode !== 0;
         messages.push({ role: "user", content: truncate(formatObservation(result), maxObs) });
+
+        // Recovery: break loops, thrashing and busywork before they burn the
+        // turn budget. The progress fingerprint is what turns "the command
+        // worked" into "the work moved".
+        //
+        // The read is real I/O, so it lives INSIDE a step — that is the whole
+        // reason it is replay-safe, and four properties make it so:
+        //  - PRESENCE is a function of the recorded run input (`recovery` /
+        //    `settle`) and of reaching this point, which earlier replayed
+        //    steps decide. A pre-feature log never runs it at all.
+        //  - THE NAME is turn-scoped and sits in a fixed position, always
+        //    immediately after `turn-N-exec`.
+        //  - THE RESULT is `{hash, dirty} | null` — JSON-clean, and ctx.step
+        //    returns the post-JSON value, so live and replay observe the same
+        //    object.
+        //  - ERRORS are caught INSIDE the step so it always records a value. A
+        //    step that throws would re-run on replay and could branch
+        //    differently (the same rule the critic-diff step states above).
+        //
+        // The fingerprint runs `git add -A`, an idempotent index mutation.
+        // Publishing is unaffected: commitAndPush gates on `git status
+        // --porcelain`, which still reports staged entries, then stages again
+        // itself.
+        if (recovery !== null) {
+          const fingerprint = await ctx.step(`turn-${turn}-fingerprint`, async () => {
+            try {
+              return (await workspaceFingerprint(executor)) ?? null;
+            } catch {
+              return null;
+            }
+          });
+          const signal = recovery.observe(action, result.exitCode, fingerprint?.hash, fingerprint?.dirty);
+          if (signal.kind === "abort" || signal.kind === "stop") {
+            // Both endings publish, and both publish as INCOMPLETE. The work
+            // still ships (the SWE-bench lesson: real fixes die in runs that
+            // never got to say finish), but as a draft/WIP PR — in neither case
+            // did the agent declare itself done.
+            const summary = signal.kind === "stop" ? (lastHeldFinish ?? signal.message) : signal.message;
+            const pr = await publishIfRepoRun(ctx, executor, config, input, checkout, summary, repoPolicy, true);
+            await dispose(config, handle);
+            return {
+              status: signal.kind === "stop" ? "settled" : "stuck",
+              summary,
+              turns: turn + 1,
+              usage,
+              ...(pr !== null ? { pr } : {}),
+            };
+          }
+          if (signal.kind === "nudge") {
+            messages.push({ role: "user", content: signal.message });
+          }
+        }
       }
 
       // Non-empty diffs are published even off a max-steps exit — real
