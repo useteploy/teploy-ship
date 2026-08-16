@@ -57,6 +57,7 @@ two runs stay distinguishable when scored.
 | `SHIP_CRITIC` | off | run the independent critic pass. **This is what makes a sweep the PRODUCT's number** — every figure published so far came from a barer loop than users run. Costs a second model call per finishing run |
 | `SHIP_CODE_INDEX` | off | index each instance's checkout into Nucleus vectors and give the agent the ```search action. Requires `NUCLEUS_URL` + `SHIP_EMBED_URL` + `SHIP_EMBED_KEY` (it refuses to start without them) — read **Index arm** below first; this is the one knob that is not just an env var |
 | `SHIP_EMBED_MODEL` | `ollama/nomic-embed-text` | embedding model id, provider-prefixed as the gateway routes it. Only read when `SHIP_CODE_INDEX=1` |
+| `SWEBENCH_BUDGET_USD` | unset (no cap) | **hard spend ceiling for the whole sweep.** Checked after every instance; stops the run and exits 3. Set it for ANY paid model |
 | `SWEBENCH_PRUNE_IMAGES` | off | required for any sweep; images are 1-2 GB each |
 | `SWEBENCH_THINKING_TOKENS` | `0` | extended thinking budget, where the model supports it |
 | `SWEBENCH_NO_CACHE` | off | disable prompt caching on compat endpoints that reject it |
@@ -176,6 +177,32 @@ instances of one repo sit at different base commits, and a cap-truncated refresh
 could leave another instance's post-fix source searchable, which is gold-patch
 leakage into a published number. Rows are deleted after each instance, and the
 run aborts if the *first* instance fails to index.
+
+## Cost — read before pointing this at a paid model
+
+**Thinking tokens bill as OUTPUT.** On `claude-sonnet-5` ($15/1M output) a
+32768 thinking budget across ~33 steps can reach **$2-3 for a single
+instance**, so a 50-instance sweep is a three-figure bill that only becomes
+visible after it is spent. The GLM coding-plan endpoint is free, which makes
+this easy to forget between runs.
+
+Controls, in order of leverage:
+
+1. `SWEBENCH_BUDGET_USD=10` — hard stop. Always set it on a paid model.
+2. `SWEBENCH_THINKING_TOKENS=0` — the single biggest lever; thinking is most of
+   the output bill.
+3. Fewer instances. A **smoke test does not need 50**: if the question is "does
+   the harness work with this model at all" — action-block parsing, the nudges,
+   the finish gate — 8 to 12 instances answers it.
+4. `SWEBENCH_MAX_STEPS` — fewer turns, less context replayed per turn.
+
+Per-instance `costUSD` is recorded in the runlog sidecar, and the running total
+prints after each instance, so a sweep going hot is visible within minutes
+rather than at the end.
+
+**A budget-stopped sweep is PARTIAL.** It exits 3 and says so. Score it out of
+the instances that actually ran — scoring it out of 50 counts every unrun
+instance as unresolved and silently understates the model.
 
 ## Notes that cost time if ignored
 

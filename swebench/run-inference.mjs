@@ -280,8 +280,11 @@ async function diskFreeGB(docker) {
 
 const { docker, close } = await connectViaSSH(sshHost);
 const predictions = [];
+let spentUSD = 0;
+let overBudget = null;
 try {
   for (const inst of instances) {
+    if (overBudget !== null) break;
     const name = `tgw-inf-${inst.instance_id}`.replaceAll(/[^a-zA-Z0-9_.-]/g, "-");
     console.error(`\n=== ${inst.instance_id} ===`);
     const container = await startInstanceContainer(docker, { image: inst.image, name });
@@ -418,7 +421,9 @@ ${inst.problem_statement}`;
               indexError,
             }
           : {}),
+        costUSD: Number(costUSD(MODEL, result.usage).toFixed(4)),
       };
+      spentUSD += diag.costUSD;
       console.error(
         `  status=${diag.status} steps=${diag.steps} durationMs=${diag.durationMs} patchLen=${diag.patchLen}` +
           ` everEdited=${diag.everEdited} snapshots=${diag.snapshots}` +
@@ -426,6 +431,12 @@ ${inst.problem_statement}`;
       );
       appendFileSync(RUNLOG_PATH, JSON.stringify(diag) + "\n");
       predictions.push({ instance_id: inst.instance_id, model_name_or_path: `teploy-agent+${MODEL}`, model_patch: finalPatch });
+      // Stop the sweep the moment the running total crosses the ceiling. The
+      // check is AFTER the push so the instance just paid for is kept — and
+      // outside the try/finally's cleanup so the image prune still runs below.
+      if (BUDGET_USD > 0 && spentUSD >= BUDGET_USD) {
+        overBudget = `stopped after ${predictions.length} instance(s): spent $${spentUSD.toFixed(2)} of the $${BUDGET_USD.toFixed(2)} SWEBENCH_BUDGET_USD ceiling`;
+      }
     } finally {
       // Before the container goes: this instance's vectors are dead weight the
       // moment its run ends, and they are keyed per instance so nothing reuses
@@ -457,3 +468,11 @@ ${inst.problem_statement}`;
 
 await writeFile(outPath, JSON.stringify(predictions, null, 2));
 console.error(`\nwrote ${predictions.length} predictions to ${outPath}`);
+if (spentUSD > 0) console.error(`total spend: $${spentUSD.toFixed(2)}`);
+if (overBudget !== null) {
+  // Loud and non-zero: a partial sweep scored as if it were complete would
+  // silently understate the model, since unrun instances count as unresolved.
+  console.error(`\nBUDGET STOP — ${overBudget}`);
+  console.error(`Score this as ${predictions.length}/${predictions.length}, NOT out of ${instances.length}.`);
+  process.exitCode = 3;
+}
