@@ -9,3 +9,6 @@ deploy/vendor/
 # Private notes (never committed)
 _internal/
 INTERNAL.md
+
+# Private dev guide (internal context — never committed, cf. teploy-cli)
+CLAUDE.md
