@@ -24,6 +24,15 @@ z.ai exposes an Anthropic-compatible API, and the harness builds its model with
     node swebench/run-inference.mjs <ssh-host> \
       swebench/instances-lite-50.json swebench/preds-glm53-50.json
 
+**Models available on the coding plan** (probed 2026-08-16, all free):
+`glm-5.3` (what `glm-5`/`glm-5.2` now resolve to), `glm-4.6`, `glm-4.5`,
+`glm-4.5-air` -> served as **glm-4.7**, `glm-4.6v` (vision). `glm-5.3-flash`
+does not exist. A second GLM is a free way to vary the MODEL while holding the
+harness constant — but it cannot tell you whether the harness is overfit to
+GLM, which is a live risk since every prompt and nudge here has only ever been
+observed against Zhipu models. Ship is BYO-model; that deserves one small
+cross-family run, not another GLM.
+
 Re-verified 2026-08-16 against the live coding-plan endpoint:
 
 - **`glm-5.2` is gone.** Every 5.x id (`glm-5`, `glm-5.2`, `glm-5.3`) now serves
