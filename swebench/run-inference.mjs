@@ -281,13 +281,48 @@ async function diskFreeGB(docker) {
 const { docker, close } = await connectViaSSH(sshHost);
 const predictions = [];
 let spentUSD = 0;
+const skipped = [];
+
+/**
+ * Persist predictions after EVERY instance.
+ *
+ * This used to be a single writeFile after the loop, and that cost 45
+ * completed instances — about six hours of compute — when a transient DNS
+ * failure threw out of the loop at instance 46. The runlog sidecar survived
+ * (it appends per instance) but it records patchLen, not the patch, so nothing
+ * was recoverable. A sweep is expensive and long; its output must be durable
+ * at every step, not at the end.
+ */
+async function persist() {
+  await writeFile(outPath, JSON.stringify(predictions, null, 2));
+}
 let overBudget = null;
 try {
   for (const inst of instances) {
     if (overBudget !== null) break;
     const name = `tgw-inf-${inst.instance_id}`.replaceAll(/[^a-zA-Z0-9_.-]/g, "-");
     console.error(`\n=== ${inst.instance_id} ===`);
-    const container = await startInstanceContainer(docker, { image: inst.image, name });
+
+    // Starting the container is OUTSIDE the try below, so a pull failure used
+    // to escape the loop and kill the process — taking every completed
+    // prediction with it, since they were only written at the end. One
+    // instance failing to start is not a reason to discard the sweep: record
+    // the skip and carry on. ensureImage already retries with backoff, so
+    // reaching here means it failed persistently.
+    let container;
+    try {
+      container = await startInstanceContainer(docker, { image: inst.image, name });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`  SKIPPED — could not start ${inst.image}: ${message.slice(0, 200)}`);
+      skipped.push({ instance_id: inst.instance_id, reason: message.slice(0, 300) });
+      appendFileSync(
+        RUNLOG_PATH,
+        JSON.stringify({ instance_id: inst.instance_id, status: "skipped", reason: message.slice(0, 300) }) + "\n",
+      );
+      continue;
+    }
+
     try {
       await execCollect(container, ["bash", "-lc", GIT_PRECLEAN]);
       await execCollect(container, ["bash", "-lc", GIT_PRECLEAN_EXCLUDE]);
@@ -431,6 +466,7 @@ ${inst.problem_statement}`;
       );
       appendFileSync(RUNLOG_PATH, JSON.stringify(diag) + "\n");
       predictions.push({ instance_id: inst.instance_id, model_name_or_path: `teploy-agent+${MODEL}`, model_patch: finalPatch });
+      await persist();
       // Stop the sweep the moment the running total crosses the ceiling. The
       // check is AFTER the push so the instance just paid for is kept — and
       // outside the try/finally's cleanup so the image prune still runs below.
@@ -467,7 +503,17 @@ ${inst.problem_statement}`;
 }
 
 await writeFile(outPath, JSON.stringify(predictions, null, 2));
+await persist();
 console.error(`\nwrote ${predictions.length} predictions to ${outPath}`);
+if (skipped.length > 0) {
+  // Loud, and non-zero exit: scoring a short predictions file against the full
+  // instance list counts every skipped instance as unresolved and silently
+  // understates the model. Re-run these before comparing to a full sweep.
+  console.error(`\n${skipped.length} instance(s) SKIPPED — the sweep is PARTIAL:`);
+  for (const s of skipped) console.error(`  ${s.instance_id}: ${s.reason.slice(0, 120)}`);
+  console.error(`Score ${predictions.length}/${predictions.length}, or re-run the skipped ids.`);
+  process.exitCode = 4;
+}
 if (spentUSD > 0) console.error(`total spend: $${spentUSD.toFixed(2)}`);
 if (overBudget !== null) {
   // Loud and non-zero: a partial sweep scored as if it were complete would

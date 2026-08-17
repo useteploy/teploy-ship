@@ -69,18 +69,42 @@ export async function connectViaSSH(sshHost) {
  * images and a run that looks hung for four minutes is otherwise
  * indistinguishable from a broken one.
  */
-export async function ensureImage(docker, image) {
+export async function ensureImage(docker, image, { attempts = 4, baseDelayMs = 15000 } = {}) {
   const have = await docker.getImage(image).inspect().then(() => true).catch(() => false);
   if (have) return;
-  console.error(`  pulling ${image} …`);
-  const started = Date.now();
-  await new Promise((resolve, reject) => {
-    docker.pull(image, (err, stream) => {
-      if (err) return reject(err);
-      docker.modem.followProgress(stream, (doneErr) => (doneErr ? reject(doneErr) : resolve()));
-    });
-  });
-  console.error(`  pulled in ${Math.round((Date.now() - started) / 1000)}s`);
+
+  // Retried, because the failure this guards is TRANSIENT and has now cost
+  // real work twice. The docker daemon resolves registry hostnames through the
+  // HOST's resolv.conf — daemon.json's `dns` key configures CONTAINER
+  // resolution, not the daemon's own pulls — and on a Tailscale host that
+  // resolv.conf is MagicDNS only, with no public fallback. When MagicDNS
+  // wobbles the pull fails with a 500 "server misbehaving", and it resolves
+  // again minutes later on its own. It killed a 50-instance scoring pass
+  // (25 instances scored as errors) and later a 50-instance inference sweep at
+  // instance 46, losing 45 completed instances of work.
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    console.error(`  pulling ${image} …${attempt > 1 ? ` (attempt ${attempt}/${attempts})` : ""}`);
+    const started = Date.now();
+    try {
+      await new Promise((resolve, reject) => {
+        docker.pull(image, (err, stream) => {
+          if (err) return reject(err);
+          docker.modem.followProgress(stream, (doneErr) => (doneErr ? reject(doneErr) : resolve()));
+        });
+      });
+      console.error(`  pulled in ${Math.round((Date.now() - started) / 1000)}s`);
+      return;
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : String(error);
+      if (attempt === attempts) break;
+      const delay = baseDelayMs * attempt; // linear backoff: 15s, 30s, 45s
+      console.error(`  pull failed (${message.slice(0, 140)}) — retrying in ${delay / 1000}s`);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  throw lastError;
 }
 
 /** Fresh long-lived container from an instance image (removing any stale one). */
