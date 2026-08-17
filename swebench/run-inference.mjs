@@ -84,6 +84,12 @@ const FINISH_WHEN_SETTLED = process.env.SHIP_FINISH_WHEN_SETTLED === "1";
 // model. It is bounded to one critic-triggered retry per run and never loops.
 const CRITIC = process.env.SHIP_CRITIC === "1";
 
+// Hard spend ceiling in USD for the whole sweep. Unset (0) means no cap, which
+// is right for the free coding-plan models. Checked after every instance; the
+// budget is charged the unpriced CEILING rather than the honest cost, so it
+// cannot fail open on a model whose price is unknown.
+const BUDGET_USD = Number(process.env.SWEBENCH_BUDGET_USD ?? 0);
+
 // The Nucleus code index (```search). Ship builds and ships this — repo runs
 // embed the clone into Nucleus vectors and the agent gets semantic retrieval —
 // and nobody has ever measured whether it earns its RAM, because until now the
@@ -281,6 +287,20 @@ async function diskFreeGB(docker) {
     return null;
   }
 }
+
+// Touch every configuration constant at STARTUP.
+//
+// Three sweeps died ~12 minutes in, after a full agent run, on a symbol whose
+// declaration was never written (costUSD, then BUDGET_USD). `node --check`
+// passes — these are runtime references, not syntax — and the test suite does
+// not exercise this file. Referencing them here means an undefined one throws
+// before a single container starts, which is the difference between a
+// two-second failure and a lost sweep.
+console.error(
+  `  config: model=${MODEL} maxSteps=${MAX_STEPS} thinking=${THINK_BUDGET} ` +
+    `settle=${FINISH_WHEN_SETTLED} critic=${CRITIC} index=${CODE_INDEX} ` +
+    `prune=${PRUNE_IMAGES} budgetUSD=${BUDGET_USD} priced=${priced} cache=${USE_CACHE}`,
+);
 
 const { docker, close } = await connectViaSSH(sshHost);
 const predictions = [];
