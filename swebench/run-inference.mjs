@@ -123,7 +123,7 @@ function buildModel(id) {
 }
 const { containerExecutor } = await import(join(here, "container-executor.mjs"));
 const { withDiffSnapshots } = await import(join(here, "executor-snapshot.mjs"));
-const { costUSD } = await import(join(here, "..", "dist", "pricing.js"));
+const { costUSD, isPricedModel } = await import(join(here, "..", "dist", "pricing.js"));
 const { connectViaSSH, execCollect, startInstanceContainer } = await import(join(here, "docker-client.mjs"));
 
 const [, , sshHost, instancesPath, outPath] = process.argv;
@@ -133,6 +133,9 @@ const [, , sshHost, instancesPath, outPath] = process.argv;
 const RUNLOG_PATH = String(outPath ?? "predictions.json").replace(/\.json$/, "") + ".runlog.jsonl";
 const instances = JSON.parse(await readFile(instancesPath, "utf8"));
 const MODEL = process.env.SWEBENCH_MODEL ?? "claude-sonnet-5";
+// Whether real per-token pricing exists for this model. Drives whether the
+// runlog records a COST or a CEILING — see the diag block below.
+const priced = isPricedModel(MODEL);
 
 // The code index, constructed only when the arm is on. Deliberately does NOT
 // inherit AI_GATEWAY_URL/_KEY the way ship's own resolveCodeSearch does
@@ -434,6 +437,9 @@ ${inst.problem_statement}`;
       // problem), or it edited and the tree lost it (a harness problem).
       // everEdited distinguishes them. Written to a JSONL sidecar so the
       // next post-mortem does not depend on someone having kept stderr.
+      // The conservative number, always. costUSD prices an unpriced model at the
+      // highest known rate on purpose, so a spend cap cannot fail open.
+      const ceiling = Number(costUSD(MODEL, result.usage).toFixed(4));
       const diag = {
         instance_id: inst.instance_id,
         status: result.status,
@@ -457,9 +463,20 @@ ${inst.problem_statement}`;
               indexError,
             }
           : {}),
-        costUSD: Number(costUSD(MODEL, result.usage).toFixed(4)),
+        // costUSD prices an UNPRICED model at the highest known rate, on
+        // purpose, so a spend cap cannot fail open. That is right for a cap
+        // and wrong to record as fact: the free z.ai coding-plan models are
+        // unpriced, so a 50-instance sweep costing nothing would otherwise
+        // write ~$178 of phantom spend into a runlog that gets committed.
+        // Record the ceiling, but say plainly that it is one.
+        costUSD: priced ? ceiling : 0,
+        ...(priced ? {} : { costCeilingUSD: ceiling }),
+        priced,
       };
-      spentUSD += diag.costUSD;
+      // Charge the budget the CEILING even when the model is unpriced. Using
+      // diag.costUSD here would make SWEBENCH_BUDGET_USD fail open for exactly
+      // the models whose price is unknown — the opposite of what a cap is for.
+      spentUSD += ceiling;
       console.error(
         `  status=${diag.status} steps=${diag.steps} durationMs=${diag.durationMs} patchLen=${diag.patchLen}` +
           ` everEdited=${diag.everEdited} snapshots=${diag.snapshots}` +
