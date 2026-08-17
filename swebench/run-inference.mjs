@@ -123,6 +123,7 @@ function buildModel(id) {
 }
 const { containerExecutor } = await import(join(here, "container-executor.mjs"));
 const { withDiffSnapshots } = await import(join(here, "executor-snapshot.mjs"));
+const { costUSD } = await import(join(here, "..", "dist", "pricing.js"));
 const { connectViaSSH, execCollect, startInstanceContainer } = await import(join(here, "docker-client.mjs"));
 
 const [, , sshHost, instancesPath, outPath] = process.argv;
