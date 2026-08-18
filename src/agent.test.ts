@@ -866,3 +866,54 @@ test("codeSearch: a search is NOT evidence — it cannot satisfy the verified-fi
   );
   assert.equal(result.status, "finished", "still bounded — the gate holds once more, then honours the finish");
 });
+
+test("a finish over an UNCHANGED tree is held, however many commands succeeded", async () => {
+  // The cross-family regression. The verified-finish gate asked only whether
+  // COMMANDS had succeeded, which an agent satisfies with read-only ones while
+  // writing nothing: 4 of 9 claude-haiku-4.5 runs finished with an empty patch
+  // on 2026-08-18, versus 0 of 100 GLM runs. Empty-patch rate tracked model
+  // family, not model strength — a harness defect, not a capability gap.
+  const executor = await settleRepo();
+  const { model } = scriptedModel([
+    "```bash\necho reading the code\n```", // a real, SUCCESSFUL command — but read-only
+    "```bash\nls -a\n```",
+    "```finish\nI reviewed the code and it is already correct.\n```", // verify hold
+    "```bash\necho verified\n```", // "proves" something, still writes nothing
+    "```finish\nAs I said, no change is needed.\n```", // would have been HONOURED
+    "```create fix.py\ndef f(n):\n    return n + 1\n```", // finally does the work
+    "```finish\nFixed it.\n```",
+  ]);
+  const result = await runAgent({
+    model,
+    executor,
+    task: "CLEANTREE probe",
+    maxSteps: 12,
+    condense: false,
+  });
+
+  const nudged = result.messages.filter(
+    (m) => m.role === "user" && typeof m.content === "string" && m.content.includes("working tree is UNCHANGED"),
+  );
+  assert.ok(nudged.length > 0, "a finish over a clean tree must be held, not honoured");
+  assert.equal(result.status, "finished");
+  // The run only ended after the tree actually changed. `git diff HEAD` is not
+  // usable here — the fixture repo has no commits — so check the file itself.
+  const ls = await executor.exec("ls fix.py");
+  assert.equal(ls.exitCode, 0, "the agent was pushed into making a real edit before it could finish");
+});
+
+test("the clean-tree hold is bounded — it cannot loop forever", async () => {
+  const executor = await settleRepo();
+  const { model } = scriptedModel([
+    "```bash\necho hello\n```",
+    ...Array.from({ length: 8 }, () => "```finish\nNothing to do.\n```"),
+  ]);
+  const result = await runAgent({
+    model,
+    executor,
+    task: "do nothing",
+    maxSteps: 12,
+    condense: false,
+  });
+  assert.equal(result.status, "finished", "a stubborn agent is eventually honoured rather than looping");
+});

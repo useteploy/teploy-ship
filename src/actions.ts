@@ -223,3 +223,21 @@ export const FINISH_NUDGE_NO_EVIDENCE =
 
 export const FINISH_NUDGE_VERIFY =
   "Before finishing, verify your work. Re-read the task, then run one command that PROVES each artifact or change it requires actually exists and is correct (list or cat the files you claim to have created, run the tests, execute the program). If any check fails or anything is missing, fix it before finishing. If everything is already proven, finish again.";
+
+/**
+ * A finish over an UNCHANGED working tree.
+ *
+ * The verified-finish gate used to ask only "did any command succeed?", which
+ * an agent satisfies with `cat`, `grep` and `pytest` while having written
+ * nothing. On the 2026-08-18 cross-family run, four of nine claude-haiku-4.5
+ * runs finished this way — status `finished`, zero edits, empty patch — versus
+ * zero of one hundred GLM runs. Empty-patch rate tracked model FAMILY (56% vs
+ * 6-8%), not model strength, which is what makes it a harness defect rather
+ * than a capability gap: the gate was tuned against a model that happens not to
+ * do this.
+ *
+ * Only fires where a workspace fingerprint exists (a git repo) and the tree is
+ * clean, so it cannot misfire on tasks whose deliverable is not a diff.
+ */
+export const FINISH_NUDGE_CLEAN_TREE =
+  "Your working tree is UNCHANGED — `git diff` is empty, so you have not edited any file. The deliverable is the edited tree, not your description of it: a summary with no diff is worth nothing here. Make the actual edit now, verify it, then finish. If you genuinely believe no code change is required, say that explicitly and explain why.";

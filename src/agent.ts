@@ -5,7 +5,7 @@ import type { Message, ModelAdapter, Usage } from "@neutron-build/ai";
 import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 
 import type { Action } from "./actions.js";
-import { FINISH_NUDGE_FAILED, FINISH_NUDGE_NO_EVIDENCE, FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, describeAction, parseAction } from "./actions.js";
+import { FINISH_NUDGE_CLEAN_TREE, FINISH_NUDGE_FAILED, FINISH_NUDGE_NO_EVIDENCE, FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, describeAction, parseAction } from "./actions.js";
 import type { ApprovalPolicy } from "./approval.js";
 import { formatSearchHits } from "./code-index.js";
 import type { CodeSearchHit } from "./code-index.js";
@@ -241,6 +241,8 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
   let kernelUsed = false;
   let anySuccessfulAction = false;
   let finishNudged = false;
+  /** Bounded holds for a finish over an unchanged tree. See FINISH_NUDGE_CLEAN_TREE. */
+  let cleanTreeNudges = 0;
   let evidenceNudged = false;
   /** Executions (successful or not) since the verify nudge was issued. */
   let execsSinceNudge = 0;
@@ -330,6 +332,18 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
             }
           } catch (err) {
             emit({ type: "observation", step: index, text: `critic skipped: ${String(err)}` });
+          }
+        }
+        // Last resort before honouring a finish: is the tree actually changed?
+        // Every branch above asks about COMMANDS, which an agent satisfies with
+        // read-only ones while writing nothing. Bounded at two holds, and only
+        // where a fingerprint exists (a git repo), so a task whose deliverable
+        // is not a diff is unaffected.
+        if (nudge === null && cleanTreeNudges < 2) {
+          const fp = await workspaceFingerprint(options.executor);
+          if (fp !== undefined && !fp.dirty) {
+            cleanTreeNudges += 1;
+            nudge = FINISH_NUDGE_CLEAN_TREE;
           }
         }
         if (nudge !== null) {

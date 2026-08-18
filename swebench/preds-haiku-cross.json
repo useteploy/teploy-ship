@@ -1,0 +1,47 @@
+[
+  {
+    "instance_id": "astropy__astropy-14182",
+    "model_name_or_path": "teploy-agent+claude-haiku-4-5",
+    "model_patch": "diff --git a/astropy/io/ascii/rst.py b/astropy/io/ascii/rst.py\nindex abdeba8ef..e5a4a24fd 100755\n--- a/astropy/io/ascii/rst.py\n+++ b/astropy/io/ascii/rst.py\n@@ -57,8 +57,8 @@ class RST(FixedWidth):\n     data_class = SimpleRSTData\n     header_class = SimpleRSTHeader\n \n-    def __init__(self):\n-        super().__init__(delimiter_pad=None, bookend=False)\n+    def __init__(self, **kwargs):\n+        super().__init__(delimiter_pad=None, bookend=False, **kwargs)\n \n     def write(self, lines):\n         lines = super().write(lines)\n"
+  },
+  {
+    "instance_id": "django__django-11283",
+    "model_name_or_path": "teploy-agent+claude-haiku-4-5",
+    "model_patch": ""
+  },
+  {
+    "instance_id": "matplotlib__matplotlib-23913",
+    "model_name_or_path": "teploy-agent+claude-haiku-4-5",
+    "model_patch": "diff --git a/lib/matplotlib/legend.py b/lib/matplotlib/legend.py\nindex 9e5b903d59..865abaae60 100755\n--- a/lib/matplotlib/legend.py\n+++ b/lib/matplotlib/legend.py\n@@ -342,7 +342,8 @@ class Legend(Artist):\n         title_fontproperties=None,  # properties for the legend title\n         alignment=\"center\",       # control the alignment within the legend box\n         *,\n-        ncol=1  # synonym for ncols (backward compatibility)\n+        ncol=1,  # synonym for ncols (backward compatibility)\n+        draggable=None\n     ):\n         \"\"\"\n         Parameters\n@@ -362,6 +363,10 @@ class Legend(Artist):\n         ----------------\n         %(_legend_kw_doc)s\n \n+\n+        draggable : bool or None, default: None\n+            If *True*, the legend can be dragged with the mouse using\n+            `.DraggableLegend`. If *False* or *None*, the legend cannot be dragged.\n         Notes\n         -----\n         Users can specify any arbitrary location for the legend using the\n@@ -574,6 +579,9 @@ class Legend(Artist):\n         else:\n             raise ValueError(f\"Invalid labelcolor: {labelcolor!r}\")\n \n+\n+        if draggable is not None:\n+            self.set_draggable(draggable)\n     def _set_artist_props(self, a):\n         \"\"\"\n         Set the boilerplate props for artists added to axes.\n"
+  },
+  {
+    "instance_id": "pydata__xarray-5131",
+    "model_name_or_path": "teploy-agent+claude-haiku-4-5",
+    "model_patch": ""
+  },
+  {
+    "instance_id": "pylint-dev__pylint-7228",
+    "model_name_or_path": "teploy-agent+claude-haiku-4-5",
+    "model_patch": "diff --git a/pylint/extensions/naming_style.py b/pylint/extensions/naming_style.py\nnew file mode 100644\nindex 00000000..2d3000e0\n--- /dev/null\n+++ b/pylint/extensions/naming_style.py\n@@ -0,0 +1,91 @@\n+\"\"\"Provides configuration options for configuring naming styles.\"\"\"\n+\n+import re\n+from typing import Any, Dict, List, Pattern, Set, Tuple\n+\n+from pylint.typing import OptionDict\n+\n+\n+def _compile_regex(pattern: str) -> Pattern:\n+    \"\"\"Compile a regex pattern, handling Unicode property escapes.\n+    \n+    This function attempts to compile a regex pattern. If the pattern contains\n+    Unicode property escapes like \\p{Han} (which are not supported by Python's\n+    re module), it tries to convert them to equivalent Unicode character ranges.\n+    \"\"\"\n+    try:\n+        return re.compile(pattern)\n+    except re.error as e:\n+        if r\"\\p{\" in pattern or r\"\\P{\" in pattern:\n+            converted_pattern = _convert_unicode_properties(pattern)\n+            try:\n+                return re.compile(converted_pattern)\n+            except re.error:\n+                raise e\n+        raise\n+\n+\n+def _convert_unicode_properties(pattern: str) -> str:\n+    \"\"\"Convert Unicode property escapes to character ranges.\"\"\"\n+    unicode_ranges = {\n+        \"Han\": \"一-鿿\",\n+    }\n+    result = pattern\n+    for prop_name, char_range in unicode_ranges.items():\n+        result = result.replace(f\"\\\\p{{{prop_name}}}\", char_range)\n+        result = result.replace(f\"\\\\P{{{prop_name}}}\", f\"^{char_range}\")\n+    return result\n+\n+\n+class NamingStyleChecker:\n+    \"\"\"A checker for naming conventions based on regex patterns.\"\"\"\n+    \n+    name = \"naming_style\"\n+    msgs = {}\n+    options = (\n+        (\n+            \"function-rgx\",\n+            \"function_rgx\",\n+            {\"type\": _compile_regex, \"default\": r\"[a-z_][a-z0-9_]*$\", \"metavar\": \"<pattern>\"},\n+        ),\n+        (\n+            \"variable-rgx\",\n+            \"variable_rgx\",\n+            {\"type\": _compile_regex, \"default\": r\"[a-z_][a-z0-9_]*$\", \"metavar\": \"<pattern>\"},\n+        ),\n+        (\n+            \"class-rgx\",\n+            \"class_rgx\",\n+            {\"type\": _compile_regex, \"default\": r\"[A-Z_][a-zA-Z0-9_]*$\", \"metavar\": \"<pattern>\"},\n+        ),\n+        (\n+            \"const-rgx\",\n+            \"const_rgx\",\n+            {\"type\": _compile_regex, \"default\": r\"[A-Z_][A-Z0-9_]*$\", \"metavar\": \"<pattern>\"},\n+        ),\n+        (\n+            \"attr-rgx\",\n+            \"attr_rgx\",\n+            {\"type\": _compile_regex, \"default\": r\"[a-z_][a-z0-9_]*$\", \"metavar\": \"<pattern>\"},\n+        ),\n+        (\n+            \"arg-rgx\",\n+            \"arg_rgx\",\n+            {\"type\": _compile_regex, \"default\": r\"[a-z_][a-z0-9_]*$\", \"metavar\": \"<pattern>\"},\n+        ),\n+        (\n+            \"method-rgx\",\n+            \"method_rgx\",\n+            {\"type\": _compile_regex, \"default\": r\"[a-z_][a-z0-9_]*$\", \"metavar\": \"<pattern>\"},\n+        ),\n+        (\n+            \"module-rgx\",\n+            \"module_rgx\",\n+            {\"type\": _compile_regex, \"default\": r\"[a-z_][a-z0-9_]*$\", \"metavar\": \"<pattern>\"},\n+        ),\n+        (\n+            \"typevar-rgx\",\n+            \"typevar_rgx\",\n+            {\"type\": _compile_regex, \"default\": r\"[A-Z_][a-zA-Z0-9_]*$\", \"metavar\": \"<pattern>\"},\n+        ),\n+    )\n"
+  },
+  {
+    "instance_id": "pytest-dev__pytest-5221",
+    "model_name_or_path": "teploy-agent+claude-haiku-4-5",
+    "model_patch": ""
+  },
+  {
+    "instance_id": "scikit-learn__scikit-learn-11281",
+    "model_name_or_path": "teploy-agent+claude-haiku-4-5",
+    "model_patch": "diff --git a/sklearn/mixture/base.py b/sklearn/mixture/base.py\nindex a9f66740f..3ec8b0414 100755\n--- a/sklearn/mixture/base.py\n+++ b/sklearn/mixture/base.py\n@@ -15,6 +15,7 @@ import numpy as np\n from .. import cluster\n from ..base import BaseEstimator\n from ..base import DensityMixin\n+from ..base import ClusterMixin\n from ..externals import six\n from ..exceptions import ConvergenceWarning\n from ..utils import check_array, check_random_state\n@@ -64,7 +65,7 @@ def _check_X(X, n_components=None, n_features=None, ensure_min_samples=1):\n     return X\n \n \n-class BaseMixture(six.with_metaclass(ABCMeta, DensityMixin, BaseEstimator)):\n+class BaseMixture(six.with_metaclass(ABCMeta, DensityMixin, BaseEstimator, ClusterMixin)):\n     \"\"\"Base class for mixture models.\n \n     This abstract class specifies an interface for all mixture classes and\n"
+  },
+  {
+    "instance_id": "sphinx-doc__sphinx-8273",
+    "model_name_or_path": "teploy-agent+claude-haiku-4-5",
+    "model_patch": ""
+  },
+  {
+    "instance_id": "sympy__sympy-12419",
+    "model_name_or_path": "teploy-agent+claude-haiku-4-5",
+    "model_patch": ""
+  }
+]
