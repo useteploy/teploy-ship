@@ -115,6 +115,7 @@ export interface ShipRuntime {
       critic?: boolean;
       recovery?: boolean | RecoveryTuning;
       settle?: boolean;
+      requireEdit?: boolean;
     },
   ): Promise<RunOutcome | null>;
   saveMeta(meta: RunMeta): Promise<void>;
@@ -415,6 +416,8 @@ export async function enqueueRun(
      */
     recovery?: boolean | RecoveryTuning;
     settle?: boolean;
+    /** Hold a finish whose working tree is unchanged. See durable.ts. */
+    requireEdit?: boolean;
     workflowName?: string;
     /** Intake source, recorded so completion can settle spend against it. */
     source?: string;
@@ -445,6 +448,10 @@ export async function enqueueRun(
   const recovery =
     recoveryFlag === true ? { ...defaultRecoveryConfig } : recoveryFlag;
   const settle = options.settle ?? (envFlag("SHIP_SETTLE") ? true : undefined);
+  // Hold a finish over an unchanged tree. One operator knob across every
+  // enqueue surface, same shape as the two above. Absent unless asked for, so
+  // no existing run's replay gains a step it was not written with.
+  const requireEdit = options.requireEdit ?? (envFlag("SHIP_REQUIRE_EDIT") ? true : undefined);
   await runtime.store.append(options.runId, {
     v: WIRE_FORMAT_VERSION,
     seq: 0,
@@ -465,6 +472,7 @@ export async function enqueueRun(
         // measured on the product path.
         ...(recovery !== undefined ? { recovery } : {}),
         ...(settle === true ? { settle: true } : {}),
+        ...(requireEdit === true ? { requireEdit: true } : {}),
         // Every newly-enqueued run is steerable and index-eligible; runs
         // enqueued before these flags existed replay without the extra
         // steps (input-gated in durable). The executing worker's config

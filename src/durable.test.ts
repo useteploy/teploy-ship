@@ -1290,3 +1290,61 @@ test("durable settle SEAM: a finish the gate REJECTED is never adopted as the se
   assert.equal(out.summary, SETTLE_STOP, "a rejected claim must not survive as the run's summary");
   assert.ok(!/claim/.test(out.summary));
 });
+
+test("requireEdit: the durable path also holds a finish over an unchanged tree", async () => {
+  // The product path carried the SAME defect as the live loop: the finish gate
+  // asked whether a COMMAND had succeeded, never whether the TREE changed. It
+  // matters more here, because durableAgent is what worker.ts drives — the
+  // webhook-to-PR flow — so an agent that narrates instead of editing opens an
+  // empty PR. 4 of 9 claude-haiku-4-5 runs finished that way on 2026-08-18,
+  // against 0 of 100 GLM runs.
+  const { provider } = await settleProvider();
+  const { model } = reactiveModel([
+    "```bash\necho reading the code\n```", // succeeds, writes nothing
+    "```finish\nThe code is already correct.\n```", // held: verify
+    "```bash\necho verified\n```", // "proves" something, still writes nothing
+    "```finish\nAs I said, no change needed.\n```", // must be HELD by requireEdit
+    "```bash\necho fixed >> fix.py\n```", // finally real work
+    "```finish\nFixed it.\n```",
+  ]);
+  const wf = durableAgent({ model, executor: provider, workdir: "." });
+  const store = new MemoryEventStore();
+  await executeRun({
+    workflow: wf,
+    runId: "run-require-edit",
+    store,
+    input: { task: "fix the off-by-one", requireEdit: true },
+  });
+
+  // Assert on OBSERVABLE behaviour rather than the nudge text: nudges live in
+  // the in-memory message list, while the event log records steps. Without the
+  // hold the run ends at the turn-3 finish; with it the agent is pushed on and
+  // the tree-check step at that turn is recorded.
+  const events = await store.load("run-require-edit");
+  const names = JSON.stringify(events);
+  assert.ok(names.includes("turn-3-finish-tree"), "the tree was checked at the finish");
+  assert.ok(names.includes("turn-5"), "the run continued past the held finish and did real work");
+});
+
+test("requireEdit absent records NO finish-tree step — old logs replay unchanged", async () => {
+  // The determinism contract. A worker replaying a log written before this
+  // option existed must not meet a step the log does not contain: returning
+  // early leaves recorded steps unconsumed, and the resulting
+  // NondeterminismError is THROWN rather than recorded, leaving the run
+  // permanently unrunnable rather than merely failed.
+  const { provider } = await settleProvider();
+  const { model } = reactiveModel([
+    "```bash\necho reading\n```",
+    "```finish\nNo change needed.\n```",
+    "```finish\nStill none.\n```",
+  ]);
+  const wf = durableAgent({ model, executor: provider, workdir: "." });
+  const store = new MemoryEventStore();
+  await executeRun({ workflow: wf, runId: "run-no-require-edit", store, input: { task: "do nothing" } });
+
+  const events = await store.load("run-no-require-edit");
+  assert.ok(
+    !JSON.stringify(events).includes("finish-tree"),
+    "no finish-tree step may be recorded when requireEdit is absent",
+  );
+});

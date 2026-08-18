@@ -6,7 +6,7 @@ import { workflow } from "@neutron-build/workflow";
 import type { WorkflowContext, WorkflowDefinition } from "@neutron-build/workflow";
 
 import { executeAction, workspaceFingerprint } from "./agent.js";
-import { FINISH_NUDGE_FAILED, FINISH_NUDGE_NO_EVIDENCE, FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, parseAction } from "./actions.js";
+import { FINISH_NUDGE_CLEAN_TREE, FINISH_NUDGE_FAILED, FINISH_NUDGE_NO_EVIDENCE, FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, parseAction } from "./actions.js";
 import { criticFeedback, isApproved, reviewWork } from "./critic.js";
 import {
   commentOnPr,
@@ -134,6 +134,21 @@ export interface DurableAgentInput {
    * itself; `recovery: false` still disables both.
    */
   settle?: boolean;
+  /**
+   * Hold a finish whose working tree is UNCHANGED (default off).
+   *
+   * The finish gate otherwise asks only whether a COMMAND succeeded, which an
+   * agent satisfies with read-only ones while writing nothing. On the
+   * 2026-08-18 cross-family run, 4 of 9 claude-haiku-4-5 runs reported
+   * `finished` having never edited a file, against 0 of 100 GLM runs — the
+   * empty-patch rate tracked model FAMILY, not model strength, which is what
+   * makes it a harness defect rather than a capability gap.
+   *
+   * On the run input rather than config, and absent by default, because it
+   * adds a recorded step (`turn-N-finish-tree`): a worker replaying a log
+   * written before this existed must not find a step the log does not contain.
+   */
+  requireEdit?: boolean;
 }
 
 /**
@@ -446,6 +461,8 @@ export function durableAgent(
       const searchable = input.index === true && checkout !== null && config.codeSearch !== undefined;
       let messages: Message[] = [{ role: "system", content: systemPrompt({ workdir, task, search: searchable }) }];
       let anySuccessfulAction = false;
+      /** Bounded holds for a finish over an unchanged tree. See FINISH_NUDGE_CLEAN_TREE. */
+      let cleanTreeNudges = 0;
       let finishNudged = false;
       let evidenceNudged = false;
       /** Executions (successful or not) since the verify nudge was issued. */
@@ -621,6 +638,35 @@ export function durableAgent(
               // hallucinated-verification finish the gate exists to catch.
               evidenceNudged = true;
               nudge = FINISH_NUDGE_NO_EVIDENCE;
+            } else if (
+              // The tree check, ported from agent.ts. The branches above ask
+              // whether a COMMAND succeeded, which an agent satisfies with cat,
+              // grep and pytest while writing nothing — 4 of 9 haiku runs
+              // finished that way on 2026-08-18 against 0 of 100 GLM runs.
+              //
+              // Gated on `requireEdit` and bounded at two holds. The gate has
+              // to live on the run INPUT, not on config: it adds a recorded
+              // step, and a worker replaying an OLD log under new code would
+              // otherwise find a step the log does not contain. Absent from the
+              // input means no step, so every existing run replays untouched.
+              input.requireEdit === true &&
+              // Deliberately NOT gated on `checkout !== null`, unlike the
+              // critic below. The critic needs a repo checkout to diff against;
+              // workspaceFingerprint only needs a git workspace, and requiring
+              // a checkout would make this inert for plain durable runs — which
+              // are exactly the ones with no PR review to catch an empty result.
+              cleanTreeNudges < 2 &&
+              (await ctx.step(`turn-${turn}-finish-tree`, async () => {
+                try {
+                  const fp = await workspaceFingerprint(executor);
+                  return fp !== undefined && !fp.dirty;
+                } catch {
+                  return false;
+                }
+              }))
+            ) {
+              cleanTreeNudges += 1;
+              nudge = FINISH_NUDGE_CLEAN_TREE;
             } else if (input.critic === true && checkout !== null && !criticDone) {
               criticDone = true;
               // Both failures are caught INSIDE the step, so the step always
