@@ -1348,3 +1348,152 @@ test("requireEdit absent records NO finish-tree step — old logs replay unchang
     "no finish-tree step may be recorded when requireEdit is absent",
   );
 });
+
+/**
+ * A git workspace with one committed file and NO remote — a plain `run`
+ * workspace, the shape every non-repo durable run has.
+ */
+async function gitWorkspaceProvider(): Promise<ExecutorProvider> {
+  const root = await mkdtemp(join(tmpdir(), "durable-workspace-key-"));
+  const inner = new LocalExecutor({ root });
+  await inner.exec(
+    "git init -q -b main . && git config user.email t@t && git config user.name t && printf 'hello\\n' > f.txt && git add -A && git commit -qm seed",
+  );
+  return {
+    async create() {
+      return { handle: root };
+    },
+    attach(handle: string) {
+      return new LocalExecutor({ root: handle });
+    },
+  };
+}
+
+/** The script both halves of the seam test below run. */
+function criticScript(): ReturnType<typeof reactiveModel> {
+  return reactiveModel([
+    "```bash\necho changed >> f.txt\n```", // a real edit, so workingDiff is non-empty
+    "```finish\nfirst claim\n```", // held by the verify nudge
+    "```bash\ncat f.txt\n```", // the proof it was asked for
+    "```finish\nsecond claim\n```", // the critic gate is reached here
+    "Needs more work: the change is incomplete.", // the critic's verdict, if it runs
+    "```finish\nthird claim\n```", // honored — one critic retry per run, never a loop
+  ]);
+}
+
+test("SEAM: workspaceKey lets the critic review a run that has no repo", async () => {
+  // The gate used to be `input.critic === true && checkout !== null`, so a
+  // workspace run asked for the critic and silently got nothing — no step, no
+  // review, no log line. Deleting the `input.workspaceKey !== undefined` clause
+  // from that condition must fail HERE, naming the missing critic step.
+  const { model, callCount } = criticScript();
+  const wf = durableAgent({ model, executor: await gitWorkspaceProvider(), workdir: "." });
+  const store = new MemoryEventStore();
+  const outcome = await executeRun({
+    workflow: wf,
+    runId: "run-wskey-on",
+    store,
+    input: { task: "improve f.txt", critic: true, workspaceKey: "bench/instance-1" },
+  });
+
+  assert.equal(outcome.status, "completed");
+  const names = (await store.load("run-wskey-on")).filter((e) => e.type === "step-completed").map((s) => s.name ?? "");
+  assert.ok(names.some((n) => n.endsWith("-critic-diff")), "the critic must diff the workspace (no -critic-diff step recorded)");
+  assert.ok(
+    names.some((n) => n.endsWith("-critic") && !n.endsWith("-critic-diff")),
+    "the critic review must actually run (no -critic step recorded)",
+  );
+  assert.equal(callCount(), 6, "one critic call on top of the five agent turns");
+  assert.equal((outcome.output as { summary: string }).summary, "third claim", "the run resumed after the critic sent it back");
+});
+
+test("SEAM: without workspaceKey a repo-less run records NO critic step — old logs replay unchanged", async () => {
+  // The other half. Without it the test above passes with the gate deleted
+  // entirely, which is precisely how five dash kv tests stayed green while
+  // their feature was unwired.
+  const { model, callCount } = criticScript();
+  const wf = durableAgent({ model, executor: await gitWorkspaceProvider(), workdir: "." });
+  const store = new MemoryEventStore();
+  const outcome = await executeRun({
+    workflow: wf,
+    runId: "run-wskey-off",
+    store,
+    input: { task: "improve f.txt", critic: true },
+  });
+
+  assert.equal(outcome.status, "completed");
+  // Step NAMES, not the whole log: `critic: true` is in the run-started input,
+  // so a substring search over the log is satisfied by the input alone and
+  // would pass with the feature deleted in either direction.
+  const offNames = (await store.load("run-wskey-off")).filter((e) => e.type === "step-completed").map((s) => s.name ?? "");
+  assert.deepEqual(
+    offNames.filter((n) => n.includes("critic")),
+    [],
+    "no critic step may be recorded when workspaceKey is absent",
+  );
+  assert.equal(callCount(), 4, "no critic call: the finish is honored at the fourth turn");
+});
+
+test("SEAM: workspaceKey scopes the code index and the ```search action on a repo-less run", async () => {
+  // repo-index, the prompt's search advertisement and the ```search handler
+  // were all gated on a repo checkout too, so an index-enabled workspace run
+  // got an action that could only refuse. Both halves are asserted: the key
+  // the index is refreshed and searched under, and the absence of all of it
+  // when workspaceKey is not supplied.
+  const refreshed: string[] = [];
+  const searched: string[] = [];
+  const codeSearch = {
+    async refresh(_executor: AgentExecutor, repo: string) {
+      refreshed.push(repo);
+      return { files: 1, indexed: 1, chunks: 2, removed: 0, capped: false };
+    },
+    async search(repo: string, query: string) {
+      searched.push(`${repo}::${query}`);
+      return [{ path: "f.txt", start: 1, end: 1, text: "hello", distance: 0.1 }];
+    },
+  };
+
+  const { model } = reactiveModel([
+    "```search\nwhere is the greeting\n```",
+    "```bash\necho changed >> f.txt\n```",
+    "```finish\nfound it\n```",
+    "```bash\ncat f.txt\n```",
+    "```finish\nfound it\n```",
+  ]);
+  const wf = durableAgent({ model, executor: await gitWorkspaceProvider(), workdir: ".", codeSearch });
+  const store = new MemoryEventStore();
+  await executeRun({
+    workflow: wf,
+    runId: "run-wskey-index",
+    store,
+    input: { task: "find the greeting", index: true, workspaceKey: "bench/instance-2" },
+  });
+
+  assert.deepEqual(refreshed, ["bench/instance-2"], "the index must be refreshed under the workspace key");
+  assert.deepEqual(searched, ["bench/instance-2::where is the greeting"], "the search must be scoped to the workspace key");
+
+  // And the negative: no key, no index work at all.
+  refreshed.length = 0;
+  searched.length = 0;
+  const { model: model2 } = reactiveModel([
+    "```search\nwhere is the greeting\n```",
+    "```bash\necho changed >> f.txt\n```",
+    "```finish\nfound it\n```",
+    "```bash\ncat f.txt\n```",
+    "```finish\nfound it\n```",
+  ]);
+  const wf2 = durableAgent({ model: model2, executor: await gitWorkspaceProvider(), workdir: ".", codeSearch });
+  const store2 = new MemoryEventStore();
+  await executeRun({
+    workflow: wf2,
+    runId: "run-wskey-index-off",
+    store: store2,
+    input: { task: "find the greeting", index: true },
+  });
+  assert.deepEqual(refreshed, [], "no workspaceKey means no index refresh");
+  assert.deepEqual(searched, [], "no workspaceKey means ```search cannot reach the index");
+  assert.ok(
+    !JSON.stringify(await store2.load("run-wskey-index-off")).includes("repo-index"),
+    "no repo-index step may be recorded when workspaceKey is absent",
+  );
+});

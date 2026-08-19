@@ -149,6 +149,32 @@ export interface DurableAgentInput {
    * written before this existed must not find a step the log does not contain.
    */
   requireEdit?: boolean;
+  /**
+   * "This run has no `repo`, but its workspace is already a git tree — scope
+   * its code index here and let the diff-based passes run."
+   *
+   * Four capabilities used to be gated on `checkout !== null`, i.e. on the run
+   * having cloned a repository: the `repo-index` refresh, the prompt's
+   * advertisement of ```search, the ```search handler itself, and the critic.
+   * A workspace run therefore got NONE of them, silently — `--durable --critic`
+   * with no `--repo` was a no-op that logged nothing, and a benchmark of the
+   * product path could not include the critic or the index at all. (A
+   * SWE-bench container cannot be a repo run: /testbed is pip-installed
+   * editable, so an agent editing a clone elsewhere is graded against the
+   * untouched original.)
+   *
+   * The critic only ever needed a git diff and the index only ever needed a
+   * scope key, so the honest gate is "is there a keyed git workspace", which is
+   * what this supplies. It rides on the run INPUT, absent by default, for the
+   * same reason as steer/index/guard/critic/requireEdit above: every branch it
+   * widens adds a recorded step (`repo-index`, `turn-N-search`,
+   * `turn-N-critic-diff`, `turn-N-critic`), and step PRESENCE must be a
+   * function of the recorded input. No log written before this field existed
+   * contains it, so nothing enqueued earlier replays differently.
+   *
+   * It is NOT a substitute for `repo`: no clone, no branch, no commit, no PR.
+   */
+  workspaceKey?: string;
 }
 
 /**
@@ -413,6 +439,14 @@ export function durableAgent(
         });
       }
       const repoKey = input.repo !== undefined ? repoKeyOf(input.repo) : null;
+      /**
+       * The code-index scope for this run: the repo key on a repo run, the
+       * caller's `workspaceKey` on a keyed workspace run, null when there is
+       * neither. `repoKey !== null` and `checkout !== null` are the same
+       * condition (both derive from `input.repo`), so this is exactly the old
+       * gate widened by one absent-by-default input field.
+       */
+      const scopeKey = repoKey ?? input.workspaceKey ?? null;
       // Playbook + recent-run notes, recorded so replay never re-reads
       // a tree or memory that has since changed.
       let repoContext = "";
@@ -428,11 +462,11 @@ export function durableAgent(
       // diff). Input-gated; a worker without codeSearch records "disabled"
       // so the step sequence never depends on executor wiring. Advisory —
       // an index failure degrades ```search, never the run.
-      if (input.index === true && checkout !== null && repoKey !== null) {
+      if (input.index === true && scopeKey !== null) {
         await ctx.step("repo-index", async () => {
           if (config.codeSearch === undefined) return "disabled (no code index configured on this worker)";
           try {
-            const stats = await config.codeSearch.refresh(executor, repoKey);
+            const stats = await config.codeSearch.refresh(executor, scopeKey);
             return `${stats.indexed} files indexed (${stats.chunks} chunks), ${stats.removed} removed of ${stats.files} tracked${stats.capped ? " (capped)" : ""}`;
           } catch (error) {
             return `index refresh failed: ${error instanceof Error ? error.message : String(error)}`;
@@ -458,7 +492,7 @@ export function durableAgent(
             : fixPrompt({ task: input.task, branch: checkout.branch, base: checkout.base, context: repoContext })
           : input.task;
 
-      const searchable = input.index === true && checkout !== null && config.codeSearch !== undefined;
+      const searchable = input.index === true && scopeKey !== null && config.codeSearch !== undefined;
       let messages: Message[] = [{ role: "system", content: systemPrompt({ workdir, task, search: searchable }) }];
       let anySuccessfulAction = false;
       /** Bounded holds for a finish over an unchanged tree. See FINISH_NUDGE_CLEAN_TREE. */
@@ -667,7 +701,16 @@ export function durableAgent(
             ) {
               cleanTreeNudges += 1;
               nudge = FINISH_NUDGE_CLEAN_TREE;
-            } else if (input.critic === true && checkout !== null && !criticDone) {
+            } else if (
+              input.critic === true &&
+              // A git diff is all the critic needs, so a keyed workspace run
+              // qualifies as well as a repo checkout. Gating on the checkout
+              // alone made `--durable --critic` with no `--repo` a silent
+              // no-op, and made the critic unreachable on the product's own
+              // benchmark path.
+              (checkout !== null || input.workspaceKey !== undefined) &&
+              !criticDone
+            ) {
               criticDone = true;
               // Both failures are caught INSIDE the step, so the step always
               // records a value rather than throwing: a step that throws would
@@ -730,11 +773,11 @@ export function durableAgent(
         if (action.kind === "search") {
           const query = action.query;
           const observation = await ctx.step(`turn-${turn}-search`, async () => {
-            if (config.codeSearch === undefined || repoKey === null) {
+            if (config.codeSearch === undefined || scopeKey === null) {
               return "Code search is not available in this run. Use grep/rg via ```bash instead.";
             }
             try {
-              return formatSearchHits(query, await config.codeSearch.search(repoKey, query));
+              return formatSearchHits(query, await config.codeSearch.search(scopeKey, query));
             } catch (error) {
               return `Code search failed (${error instanceof Error ? error.message : String(error)}). Use grep/rg via \`\`\`bash instead.`;
             }
