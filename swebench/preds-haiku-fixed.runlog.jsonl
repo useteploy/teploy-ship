@@ -1,0 +1,8 @@
+{"instance_id":"astropy__astropy-14182","status":"finished","steps":24,"durationMs":362649,"patchLen":468,"everEdited":true,"recovered":false,"snapshots":43,"costUSD":0.3495,"priced":true}
+{"instance_id":"django__django-11283","status":"error","steps":27,"durationMs":363985,"patchLen":0,"everEdited":false,"recovered":false,"snapshots":54,"costUSD":0.3821,"priced":true}
+{"instance_id":"matplotlib__matplotlib-23913","status":"finished","steps":19,"durationMs":419781,"patchLen":0,"everEdited":false,"recovered":false,"snapshots":28,"costUSD":0.3764,"priced":true}
+{"instance_id":"pydata__xarray-5131","status":"error","steps":39,"durationMs":294725,"patchLen":596,"everEdited":true,"recovered":false,"snapshots":73,"costUSD":0.3366,"priced":true}
+{"instance_id":"pylint-dev__pylint-7228","status":"error","steps":40,"durationMs":572820,"patchLen":0,"everEdited":false,"recovered":false,"snapshots":71,"costUSD":0.8851,"priced":true}
+{"instance_id":"pytest-dev__pytest-5221","status":"error","steps":38,"durationMs":340995,"patchLen":0,"everEdited":false,"recovered":false,"snapshots":68,"costUSD":0.4886,"priced":true}
+{"instance_id":"scikit-learn__scikit-learn-11281","status":"error","steps":40,"durationMs":733591,"patchLen":0,"everEdited":false,"recovered":false,"snapshots":77,"costUSD":0.771,"priced":true}
+{"instance_id":"sphinx-doc__sphinx-8273","status":"max-steps","steps":40,"durationMs":348752,"patchLen":2974,"everEdited":true,"recovered":false,"snapshots":58,"costUSD":0.4883,"priced":true}
