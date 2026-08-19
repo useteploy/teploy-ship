@@ -18,8 +18,15 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const { runAgent } = await import(join(here, "..", "dist", "index.js"));
 const { anthropic, createAnthropic } = await import(join(here, "..", "node_modules", "@neutron-build", "ai", "dist", "anthropic", "index.js"));
+// The loop dispatch and the durable arm's driver. Imported unconditionally so
+// a typo in it fails at startup rather than twelve minutes into a run — the
+// same reason every configuration constant is echoed at startup further down.
+// runAgent is NOT imported here any more: driveLoop owns both arms, so the
+// choice of loop is made in a module a test can import.
+const { DIST_REQUIREMENTS, assertNoExistingLog, driveLoop, durableArmFromEnv, provenance, teeStore } = await import(
+  join(here, "durable-run.mjs")
+);
 
 // Route model calls through teploy-gateway when AI_GATEWAY_URL + _KEY are set
 // (so eval spend is tracked + capped centrally), otherwise call Anthropic
@@ -107,6 +114,28 @@ const CODE_INDEX = process.env.SHIP_CODE_INDEX === "1";
 // (teploy-ship/teploy.yml: SHIP_EMBED_MODEL=ollama/nomic-embed-text).
 const EMBED_MODEL = process.env.SHIP_EMBED_MODEL ?? "ollama/nomic-embed-text";
 
+// WHICH LOOP RUNS. Off by default, like every other knob here.
+//
+// Every number published from this harness was measured on `runAgent`
+// (src/agent.ts) — the live loop. The PRODUCT is `durableAgent`
+// (src/durable.ts): the webhook -> intake -> worker -> PR path that worker.ts
+// drives. They are different loops, so the published figure does not describe
+// the shipped thing. That is the gap this knob closes, and it is why the
+// predictions file carries a DIFFERENT model_name_or_path on this arm — a
+// durable result must never be scoreable as the live baseline.
+//
+// Two values, because the two loops' DEFAULTS differ on three axes and a
+// single arm would confound them (see durable-run.mjs for the source lines):
+//   SHIP_DURABLE=1        parity arm — recovery and requireEdit forced ON,
+//                         which is what the live loop does by default, so the
+//                         LOOP is the only variable against the 35/50 baseline.
+//   SHIP_DURABLE=product  product arm — exactly what enqueueRun bakes into a
+//                         webhook-launched run. Answers "what does a real run
+//                         score", and is NOT comparable to 35/50 term by term.
+// Whichever is published must be named with its arm. Never average them.
+const DURABLE_ARM = durableArmFromEnv(process.env);
+const DURABLE = DURABLE_ARM !== null;
+
 function buildModel(id) {
   const opts = { cache: USE_CACHE };
   if (THINK_BUDGET > 0) opts.thinking = { budgetTokens: THINK_BUDGET };
@@ -119,6 +148,7 @@ function buildModel(id) {
     FINISH_WHEN_SETTLED ? "settle on" : "settle off",
     CRITIC ? "critic on" : "critic off",
     CODE_INDEX ? "index on" : "index off",
+    DURABLE ? `durable loop (${DURABLE_ARM} arm)` : "live loop",
   ].join(", ");
   if (url && key) {
     console.error(`  (routing through ${url} — ${notes})`);
@@ -130,6 +160,7 @@ function buildModel(id) {
 const { containerExecutor } = await import(join(here, "container-executor.mjs"));
 const { withDiffSnapshots } = await import(join(here, "executor-snapshot.mjs"));
 const { costUSD, isPricedModel } = await import(join(here, "..", "dist", "pricing.js"));
+const { FileEventStore } = await import(join(here, "..", "dist", "run-store.js"));
 const { connectViaSSH, execCollect, startInstanceContainer } = await import(join(here, "docker-client.mjs"));
 
 const [, , sshHost, instancesPath, outPath] = process.argv;
@@ -139,6 +170,9 @@ const [, , sshHost, instancesPath, outPath] = process.argv;
 const RUNLOG_PATH = String(outPath ?? "predictions.json").replace(/\.json$/, "") + ".runlog.jsonl";
 const instances = JSON.parse(await readFile(instancesPath, "utf8"));
 const MODEL = process.env.SWEBENCH_MODEL ?? "claude-sonnet-5";
+// The ONE call that decides both the runlog's `loop` field and the predictions'
+// model_name_or_path, so those two can never disagree about which loop ran.
+const PROVENANCE = provenance(DURABLE, MODEL);
 // Whether real per-token pricing exists for this model. Drives whether the
 // runlog records a COST or a CEILING — see the diag block below.
 const priced = isPricedModel(MODEL);
@@ -150,7 +184,7 @@ const priced = isPricedModel(MODEL);
 // would point embeddings at a messages path and fail on every instance, midway
 // through a paid run. Require the embedding endpoint explicitly or refuse to
 // start.
-// Guard against a STALE dist/. The harness imports runAgent from ../dist, and
+// Guard against a STALE dist/. The harness runs code from ../dist, and
 // an unknown option is silently dropped by JS — so a sweep launched against a
 // build that predates a feature runs for hours with that feature inert and
 // reports a number that looks like a real result. Nothing else catches this:
@@ -158,16 +192,31 @@ const priced = isPricedModel(MODEL);
 // code honouring them was compiled.
 {
   const { readFileSync } = await import("node:fs");
-  const built = readFileSync(join(here, "..", "dist", "agent.js"), "utf8");
+  const read = (file) => readFileSync(join(here, "..", "dist", file), "utf8");
+  const built = read("agent.js");
   const required = [
-    [FINISH_WHEN_SETTLED, "finishWhenSettled", "SHIP_FINISH_WHEN_SETTLED"],
-    [CRITIC, "critic", "SHIP_CRITIC"],
-    [CODE_INDEX, "codeSearch", "SHIP_CODE_INDEX"],
+    [FINISH_WHEN_SETTLED, "finishWhenSettled", "SHIP_FINISH_WHEN_SETTLED", "agent.js"],
+    [CRITIC && !DURABLE, "critic", "SHIP_CRITIC", "agent.js"],
+    [CODE_INDEX && !DURABLE, "codeSearch", "SHIP_CODE_INDEX", "agent.js"],
+    // The durable arm reads a DIFFERENT compilation unit, so the rows above
+    // cannot see it. Those rows are DIST_REQUIREMENTS, consumed rather than
+    // restated, so a symbol added there is enforced here automatically —
+    // `workspaceKey` being the one that would fail quietly and expensively:
+    // without it the critic and the code index are unreachable on any run with
+    // no repo checkout, and a SWE-bench container cannot be a repo run, so a
+    // P0-2 sweep would run for hours with NEITHER of the two features it
+    // exists to measure and report a number that looks real.
+    ...DIST_REQUIREMENTS.map((r) => [r.when({ durable: DURABLE, critic: CRITIC, index: CODE_INDEX }), r.symbol, r.env, r.file]),
   ];
-  const stale = required.filter(([on, symbol]) => on && !built.includes(symbol));
+  const sources = new Map([["agent.js", built]]);
+  const stale = required.filter(([on, symbol, , file]) => {
+    if (!on) return false;
+    if (!sources.has(file)) sources.set(file, read(file));
+    return !sources.get(file).includes(symbol);
+  });
   if (stale.length > 0) {
-    for (const [, symbol, env] of stale) {
-      console.error(`${env}=1 but dist/agent.js has no "${symbol}" — the build predates it and the flag would be SILENTLY IGNORED.`);
+    for (const [, symbol, env, file] of stale) {
+      console.error(`${env} is set but dist/${file} has no "${symbol}" — the build predates it and the flag would be SILENTLY IGNORED.`);
     }
     console.error("Run `pnpm run build` and relaunch.");
     process.exit(2);
@@ -299,8 +348,18 @@ async function diskFreeGB(docker) {
 console.error(
   `  config: model=${MODEL} maxSteps=${MAX_STEPS} thinking=${THINK_BUDGET} ` +
     `settle=${FINISH_WHEN_SETTLED} critic=${CRITIC} index=${CODE_INDEX} ` +
+    `loop=${PROVENANCE.loop} arm=${DURABLE_ARM ?? "-"} predictionsAs=${PROVENANCE.modelName} ` +
     `prune=${PRUNE_IMAGES} budgetUSD=${BUDGET_USD} priced=${priced} cache=${USE_CACHE}`,
 );
+// The durable arm's event logs, one per instance, beside the predictions file.
+// The product's own FileEventStore is used rather than an in-memory one for two
+// reasons: it is the class fileRuntime() ships (so the benchmark exercises the
+// real durability path, fsync and all), and it leaves the post-mortem record
+// the 2026-08-12 sweep did not have — with no onEvent hook on this path, the
+// log is the ONLY account of what a durable run did. An explicit directory,
+// never the operator's ~/.local/state/teploy-ship.
+const DURABLE_EVENTS_DIR = String(outPath ?? "predictions.json").replace(/\.json$/, "") + ".durable-events";
+if (DURABLE) console.error(`  durable event logs: ${DURABLE_EVENTS_DIR}/`);
 
 const { docker, close } = await connectViaSSH(sshHost);
 const predictions = [];
@@ -400,7 +459,13 @@ ${inst.problem_statement}`;
       let indexStats = null;
       let indexMs = 0;
       let indexError = null;
-      if (index !== null) {
+      // The DURABLE arm does not refresh here. durable.ts refreshes the index
+      // itself, as a recorded `repo-index` step, and that step is part of what
+      // a product-configuration sweep is supposed to be measuring — running it
+      // twice would double the (already minutes-long) index cost and measure
+      // the harness's refresh rather than the product's. The scope key is the
+      // same `instance_id` either way, so dropIndexRows below cleans up both.
+      if (index !== null && !DURABLE) {
         const t0 = Date.now();
         try {
           indexStats = await index.refresh(baseExecutor, repoKey);
@@ -426,23 +491,56 @@ ${inst.problem_statement}`;
       }
 
       const started = Date.now();
-      const result = await runAgent({
+      // ONE of the two loops runs, and driveLoop decides which. Everything
+      // AFTER this call — the final `git diff HEAD`, the lastNonEmptyDiff
+      // fallback, the prediction — is shared, deliberately: a durable run that
+      // failed or parked can still be holding a real fix in the tree, which is
+      // the same lesson durable.ts records when it publishes off a max-steps
+      // exit.
+      //
+      // The dispatch itself lives in durable-run.mjs because this file opens an
+      // SSH connection at module scope and so cannot be imported by a test.
+      // Anything load-bearing left inline here is verified by nothing but its
+      // own text, which is why so little is left inline.
+      if (DURABLE) assertNoExistingLog(DURABLE_EVENTS_DIR, inst.instance_id);
+      const drive = await driveLoop({
+        arm: DURABLE_ARM,
         model: buildModel(MODEL),
         executor,
         task,
         workdir: "/testbed",
         maxSteps: MAX_STEPS,
         actionTimeoutMs: 120000,
-        finishWhenSettled: FINISH_WHEN_SETTLED,
+        settle: FINISH_WHEN_SETTLED,
         critic: CRITIC,
-        // Absent unless the arm is on AND this instance actually indexed, so a
-        // per-instance index failure degrades to the baseline loop rather than
-        // giving the agent an action that can only refuse.
-        ...(index !== null && indexError === null ? { codeSearch: (q) => index.search(repoKey, q) } : {}),
+        index: CODE_INDEX,
+        // Live arm: absent unless the index arm is on AND this instance
+        // actually indexed, so a per-instance index failure degrades to the
+        // baseline loop rather than giving the agent an action that can only
+        // refuse. Durable arm: the index object itself, refreshed inside
+        // durable's own recorded `repo-index` step.
+        ...(DURABLE
+          ? index !== null
+            ? { codeSearch: index }
+            : {}
+          : index !== null && indexError === null
+            ? { codeSearch: (q) => index.search(repoKey, q) }
+            : {}),
+        // Same key the harness uses everywhere else, so durable's own
+        // `repo-index` step and dropIndexRows() below agree on scope. It is
+        // also what makes the critic reachable at all on a run with no repo
+        // checkout — see DurableAgentInput.workspaceKey.
+        workspaceKey: repoKey,
+        runId: inst.instance_id,
+        // One log per instance, fsynced, under an explicit directory.
+        ...(DURABLE ? { store: teeStore(new FileEventStore(DURABLE_EVENTS_DIR), (line) => console.error(line)) } : {}),
+        first: predictions.length === 0,
         onEvent: (e) => {
           if (e.type === "action" || e.type === "finish" || e.type === "error") console.error(`  [${e.type}] ${e.text.slice(0, 100)}`);
         },
       });
+      const result = drive.live ?? null;
+      const durableRun = drive.durable ?? null;
 
       const final = await execCollect(container, ["bash", "-lc", GIT_DIFF], { timeoutMs: 30000 });
       const treeDiff = final.exitCode === 0 ? final.stdout : "";
@@ -459,11 +557,24 @@ ${inst.problem_statement}`;
       // next post-mortem does not depend on someone having kept stderr.
       // The conservative number, always. costUSD prices an unpriced model at the
       // highest known rate on purpose, so a spend cap cannot fail open.
-      const ceiling = Number(costUSD(MODEL, result.usage).toFixed(4));
+      const usage = drive.usage;
+      const ceiling = Number(costUSD(MODEL, usage).toFixed(4));
       const diag = {
         instance_id: inst.instance_id,
-        status: result.status,
-        steps: result.steps.length,
+        // WHICH LOOP RAN. Recorded first and unconditionally, on every row.
+        // A result whose loop cannot be established after the fact is exactly
+        // the misattribution this arm exists to end, so this is not optional
+        // and is not "durable-only" — a live row says so explicitly too.
+        loop: PROVENANCE.loop,
+        ...(drive.arm !== null ? { arm: drive.arm } : {}),
+        status: drive.status,
+        // Model turns, both arms — the same quantity measured two ways
+        // (runAgent appends one step per action; durable records one
+        // `turn-N-think` per model call). `snapshots` below is NOT comparable
+        // across arms: durable's fingerprint, critic-diff and index reads all
+        // go through the wrapped executor, while the live arm deliberately
+        // indexes off baseExecutor.
+        steps: drive.steps,
         durationMs: Date.now() - started,
         patchLen: finalPatch.length,
         everEdited: lastNonEmptyDiff !== "",
@@ -473,7 +584,7 @@ ${inst.problem_statement}`;
         // the arm means anything at all: an index arm in which the agent never
         // issued a ```search measures NOTHING, and without this recorded that
         // is invisible after the fact. Same lesson as everEdited.
-        ...(CODE_INDEX
+        ...(CODE_INDEX && !DURABLE
           ? {
               searches: result.steps.filter((s) => s.action.kind === "search").length,
               indexFiles: indexStats?.files ?? 0,
@@ -481,6 +592,23 @@ ${inst.problem_statement}`;
               indexCapped: indexStats?.capped ?? false,
               indexMs,
               indexError,
+            }
+          : {}),
+        // The durable arm's own measurements, off its event log — the only
+        // account of the run, since durable has no onEvent hook. `execs` and
+        // `thinks` are the "did this arm measure anything at all" pair: a
+        // durable row with zero execs means the provider never attached, the
+        // same trap `searches: 0` is for the index arm. Every field here is a
+        // PROCESS metric and a hypothesis about the score — never a proxy for
+        // it. The verbatim input is recorded so a row can be reproduced
+        // exactly, arm defaults included.
+        ...(DURABLE
+          ? {
+              durableInput: drive.input,
+              outcome: durableRun.outcomeStatus,
+              turns: durableRun.turns,
+              ...(durableRun.error !== undefined ? { error: durableRun.error } : {}),
+              ...durableRun.counts,
             }
           : {}),
         // costUSD prices an UNPRICED model at the highest known rate, on
@@ -498,12 +626,17 @@ ${inst.problem_statement}`;
       // the models whose price is unknown — the opposite of what a cap is for.
       spentUSD += ceiling;
       console.error(
-        `  status=${diag.status} steps=${diag.steps} durationMs=${diag.durationMs} patchLen=${diag.patchLen}` +
+        `  loop=${diag.loop} status=${diag.status} steps=${diag.steps} durationMs=${diag.durationMs} patchLen=${diag.patchLen}` +
           ` everEdited=${diag.everEdited} snapshots=${diag.snapshots}` +
-          (CODE_INDEX ? ` searches=${diag.searches}` : ""),
+          (DURABLE ? ` execs=${diag.execs} searches=${diag.searches} criticRuns=${diag.criticRuns} parked=${diag.parked}` : "") +
+          (CODE_INDEX && !DURABLE ? ` searches=${diag.searches}` : ""),
       );
       appendFileSync(RUNLOG_PATH, JSON.stringify(diag) + "\n");
-      predictions.push({ instance_id: inst.instance_id, model_name_or_path: `teploy-agent+${MODEL}`, model_patch: finalPatch });
+      // The predictions file names the loop too, so a durable result can never
+      // be scored as the live-loop baseline even if the runlog is lost. Same
+      // provenance() call as the runlog's `loop` field — one source, so the two
+      // cannot disagree.
+      predictions.push({ instance_id: inst.instance_id, model_name_or_path: PROVENANCE.modelName, model_patch: finalPatch });
       await persist();
       // Stop the sweep the moment the running total crosses the ceiling. The
       // check is AFTER the push so the instance just paid for is kept — and
