@@ -46,6 +46,19 @@ The full bring-up — dashboard + worker + Nucleus via one `teploy
 deploy`, webhook wiring, the default-deny sandbox, embeddings, and the
 security model — is in **[docs/DEPLOY.md](docs/DEPLOY.md)**.
 
+## Models
+
+Ship is model-agnostic by architecture — two adapter shapes,
+Anthropic-compatible and OpenAI-compatible, direct or through a gateway
+you run, with your credentials and no markup. It is validated and
+prompt-tuned on GLM. Other families run; how well varies, and we publish
+what we measured rather than what we assume.
+
+**[docs/MODELS.md](docs/MODELS.md)** is the canonical statement: what the
+routing seam actually guarantees, every model we have measured with its
+sample size and confidence interval, and the one known cross-family
+limitation. Read it before quoting a number from anywhere else.
+
 ## The stack it stands on
 
 | Layer | Provides |

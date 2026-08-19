@@ -3,6 +3,15 @@
 Point-in-time runs of `teploy-agent eval` against a real model, kept so
 quality changes can be compared over time.
 
+**These are in-house starter suites, not SWE-bench.** Three to six tasks, as
+few as four attempts (the extremeSuite rows are 4 tasks at repeats 1), no
+confidence intervals, and several rows are saturated —
+a 100% here means the stack works end to end, not that the agent is good. Do
+not quote a figure from this table as a Ship benchmark result. SWE-bench
+numbers live in the dated writeups in this directory
+(`2026-08-16-swebench-lite-50-glm53.md` and its siblings), and the product's
+model position — what is validated, on what sample — is `docs/MODELS.md`.
+
 | Date | Model | Suite | pass@k | Note |
 |------|-------|-------|--------|------|
 | 2026-07-03 | claude-sonnet-5 | builtinSuite (3) | 3/3 (100%), 9/9 attempts | First live run. Stack works; suite saturated. |

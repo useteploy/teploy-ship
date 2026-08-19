@@ -112,7 +112,7 @@ A self-hosted coding agent: point it at a task and it plans, edits, runs, and re
 
 ### Model and infrastructure
 
-- Configurable model routing: Anthropic or OpenAI directly, or any OpenAI-compatible gateway (self-hosted or otherwise) — you choose the endpoint and hold the credentials.
+- Configurable model routing: Anthropic or OpenAI directly, or any OpenAI-compatible gateway (self-hosted or otherwise) — you choose the endpoint and hold the credentials. Routing is model-agnostic; performance is not. Ship is validated and prompt-tuned on specific model families — [docs/MODELS.md](docs/MODELS.md) records exactly which, on what sample size, and with what confidence interval.
 - Sandboxed execution via `teploy-sandbox`, with a default-deny egress policy — a run can reach its git host, its model gateway, and package registries, and nothing else.
 - Prompt-injection mitigations: untrusted issue/PR/repo content is framed explicitly as data, not instructions; a guardrail pass flags injection-shaped content in the run timeline; the approval gate stays in front of network/push actions regardless of what repo content says.
 - Secrets are scoped per run source rather than dumped wholesale into the sandbox environment.
@@ -126,3 +126,4 @@ A self-hosted coding agent: point it at a task and it plans, edits, runs, and re
 ### Known gaps
 
 - Multi-user auth/RBAC, SSO, and an IDE integration are deliberately deferred — see the project roadmap for the reasoning. Single-token auth is the current model; fine for solo/small self-hosting, not yet a team product.
+- **Model portability is architectural, not yet broadly validated.** The routing seam reaches any Anthropic- or OpenAI-compatible endpoint, but the agent prompt was written and tuned while only ever observed against one model family. On a 9-instance cross-family smoke, a different family produced no patch in 5 of 9 runs — not a format failure, a prompt-tuning one. [docs/MODELS.md](docs/MODELS.md) has the numbers and the honest limits.

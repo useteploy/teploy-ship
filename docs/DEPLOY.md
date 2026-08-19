@@ -287,6 +287,7 @@ new deployment actually has to set.
 | `SHIP_ALLOW_UNSANDBOXED_INTAKE` | unset | Lets externally-sourced tasks run without a sandbox. Only for a disposable box. |
 | `SHIP_MODEL_PRICING` | unset | JSON of model → rates for a model Ship does not ship a price for: `{"my-model":{"inputPer1M":2,"outputPer1M":8}}`. Without it an unrecognised **hosted** model is charged the highest known rate so the spend cap cannot fail open. |
 | `SHIP_LOCAL_MODEL_PREFIXES` | `ollama/ local/ lmstudio/ vllm/ …` | Model prefixes that run on your own hardware and therefore cost nothing. Extend if your local runtime uses a different prefix. |
+| `SHIP_REQUIRE_EDIT` | unset | Hold a finish declared over an unchanged tree, bounded at two holds, on the **durable** path — the one a webhook launches. The live loop does this unconditionally; the durable loop does not, so without this a production run can finish "fixed" having written nothing. See `docs/MODELS.md` §3 for what it does and does not buy. |
 | `SHIP_MAX_RUN_COST_USD` | `0` (off) | Hard per-run ceiling. Turn count is a poor proxy for cost; this bounds one pathological run rather than waiting for the daily cap to notice. |
 | `SHIP_ESTIMATED_RUN_COST_USD` | `0.50` | Held against a source's daily budget while a run is in flight, so a burst of launches cannot all pass the same budget read. |
 | `SHIP_DAILY_AUTO_LIMIT` | `10` | Auto-launches per source per day, **fleet-wide** (it used to be per worker). |
@@ -294,6 +295,12 @@ new deployment actually has to set.
 | `SHIP_WEBHOOK_MAX_BYTES` | `1048576` | Cap on a webhook body, applied **before** the signature is computed. |
 | `SHIP_SESSION_SECRET` | derived from `SHIP_WEB_TOKEN` | Signs dashboard sessions. Setting it lets account sessions survive a token rotation; sessions established *with the master token* still die on rotation, so rotating remains revocation. |
 | `SHIP_TRUST_PROXY` | unset | Believe `X-Forwarded-Proto`/`-Host`/`-For`. Only set it when something in front actually overwrites those headers. |
+
+**Which model to point it at.** Any Anthropic- or OpenAI-compatible endpoint
+routes, but they do not all perform alike and only some have been measured.
+[`MODELS.md`](MODELS.md) records what was measured, on what sample, with what
+confidence interval, and the one known cross-family limitation. Read it before
+choosing a model for a production deployment.
 
 ### Getting started
 
