@@ -121,3 +121,51 @@ costs nothing when unused. It is not a fix for cross-family compatibility and
 must not be described as one.
 
 Spend to date on this line of work: **$7.27**.
+
+---
+
+# Correction: it is not the action format, 2026-08-18
+
+**The hypothesis published above — that haiku struggles with the `edit`
+SEARCH/REPLACE shape — is WRONG.** Tested for free by reading the action stream
+rather than running another sweep.
+
+| | haiku | glm-5.3 |
+|---|---|---|
+| `edit`/`create` as a share of all actions | 6 of 225 = **2.7%** | 111 of 1281 = **8.7%** |
+| `invalid-action` (a genuine parse failure) | 12 | 39 |
+| read-only bash (`sed -n`, `cat`, `grep`, `head`, `find`, `ls`) | **55% of all bash** | — |
+| `sed` used **in place** (`sed -i`) | **0 of 36** | — |
+
+Haiku emits perfectly valid `edit` blocks six times, so the format parses. Its
+`invalid-action` count is *lower* than GLM's, in absolute terms, over a fifth
+the actions. And every one of its 36 `sed` calls is `sed -n '<range>p'` — using
+sed to READ, never `sed -i` to write.
+
+So haiku is not failing to express edits. **It is choosing to keep reading.**
+It investigates at length — 55% of its shell commands are pure inspection — and
+then concludes the code is already correct.
+
+This holds despite the task prompt already stating, in capitals, that
+`The DELIVERABLE IS YOUR EDITED WORKING TREE`. An explicit instruction does not
+move it.
+
+## What this means
+
+The defect is real but its name was wrong. Not "the action format is overfit to
+GLM" — the format is fine. Rather: **our prompt produces commitment in GLM and
+deliberation in haiku**, and a benchmark harness that only ever saw GLM had no
+way to notice the difference.
+
+The clean-tree gate treats the symptom, a dishonest finish, and it should be
+kept for that. It cannot address the cause, which is an agent that reads for
+forty turns and never decides to act.
+
+Anything further here is model-specific prompt tuning, and should be recognised
+as that rather than dressed up as a portability fix. Worth doing before Ship
+claims BYO-model works well with any model; not worth doing blind.
+
+**Method note:** this correction cost nothing. The two sweeps that produced the
+original hypothesis cost $7.27 and eight hours; reading the action stream took
+two greps. Look at what the agent actually did before paying to watch it do it
+again.
