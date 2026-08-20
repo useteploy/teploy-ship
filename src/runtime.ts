@@ -118,6 +118,7 @@ export interface ShipRuntime {
       requireEdit?: boolean;
       preview?: boolean;
       telemetry?: boolean;
+      tests?: boolean;
     },
   ): Promise<RunOutcome | null>;
   saveMeta(meta: RunMeta): Promise<void>;
@@ -424,6 +425,8 @@ export async function enqueueRun(
     preview?: boolean;
     /** Put the service's measured before/after on the PR. See observe.ts. */
     telemetry?: boolean;
+    /** Run the project's suite after the agent stops. See tests.ts. */
+    tests?: boolean;
     workflowName?: string;
     /** Intake source, recorded so completion can settle spend against it. */
     source?: string;
@@ -466,6 +469,8 @@ export async function enqueueRun(
   const preview = options.preview ?? (envFlag("SHIP_PREVIEW") ? true : undefined);
   // Read the affected service's telemetry around the change. Same opt-in shape.
   const telemetry = options.telemetry ?? (envFlag("SHIP_TELEMETRY") ? true : undefined);
+  // Run the project's suite after the agent stops. Same opt-in shape.
+  const tests = options.tests ?? (envFlag("SHIP_TESTS") ? true : undefined);
   await runtime.store.append(options.runId, {
     v: WIRE_FORMAT_VERSION,
     seq: 0,
@@ -489,6 +494,7 @@ export async function enqueueRun(
         ...(requireEdit === true ? { requireEdit: true } : {}),
         ...(preview === true ? { preview: true } : {}),
         ...(telemetry === true ? { telemetry: true } : {}),
+        ...(tests === true ? { tests: true } : {}),
         // Every newly-enqueued run is steerable and index-eligible; runs
         // enqueued before these flags existed replay without the extra
         // steps (input-gated in durable). The executing worker's config

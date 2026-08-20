@@ -97,10 +97,16 @@ one, and anything written around it — including a reviewer's own notes — is
 left alone. If the body cannot be read or updated, the section is posted as a
 comment instead.
 
-It does **not** claim the tests passed. Ship has no structured test result: the
-verified-finish gate asks whether the agent ran something and whether the tree
-changed, which is not the same thing, and a "tests: green" line off that would
-be a claim the run cannot support.
+The tests line is produced by **Ship**, not the agent: with `SHIP_TESTS=1` and
+`SHIP_TEST_COMMAND`, the suite runs in the workspace after the agent stops and
+before the push, so "tests passed" describes the code that became the PR. An
+agent's own account of its testing is exactly the claim the verified-finish gate
+exists because models get it wrong.
+
+A failing suite still publishes the pull request, marked, with its output — a
+real fix alongside an unrelated red test is still worth a human's attention. A
+suite that could not be *run* (missing command, dead container, timeout) is
+reported as "not run", never as failed.
 
 ## Telemetry on the pull request
 

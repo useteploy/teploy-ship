@@ -1823,3 +1823,98 @@ test("an unwired worker records the check as disabled and posts nothing", async 
     fixture.restore();
   }
 });
+
+// ---------------------------------------------------------------- tests step
+
+test("SEAM: Ship runs the suite itself and puts the result in the PR body", async () => {
+  const fixture = await repoFixture("tests-on");
+  const ran: string[] = [];
+  try {
+    const { model } = reactiveModel(["```bash\necho changed >> f.txt\n```", "```finish\nFixed.\n```", ...PROBES]);
+    const wf = durableAgent({
+      model,
+      executor: fixture.provider,
+      workdir: ".",
+      // A command that passes, and records that it was actually executed.
+      tests: { command: "echo suite-ran" },
+    });
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: wf,
+      runId: "run-tests-on",
+      store,
+      input: { task: "append to f.txt", repo: fixture.repo, tests: true },
+    });
+
+    assert.equal(outcome.status, "completed");
+    const events = await store.load("run-tests-on");
+    const names = events.filter((e) => e.type === "step-completed").map((s) => s.name ?? "");
+    assert.ok(names.includes("tests"), "no tests step was recorded");
+    // Before the push: "tests passed" must describe the code in the PR.
+    assert.ok(names.indexOf("tests") < names.indexOf("repo-push"), "the suite must run before the push");
+
+    const patch = fixture.patches.find((p) => typeof p.body === "string" && /Tests:/.test(p.body as string));
+    assert.ok(patch !== undefined, `the result never reached the PR: ${JSON.stringify(fixture.patches)}`);
+    assert.match(patch!.body as string, /passed/);
+    assert.match(patch!.body as string, /not reported by the agent/);
+    void ran;
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("a failing suite still publishes the pull request, marked", async () => {
+  const fixture = await repoFixture("tests-fail");
+  try {
+    const { model } = reactiveModel(["```bash\necho changed >> f.txt\n```", "```finish\nFixed.\n```", ...PROBES]);
+    const wf = durableAgent({
+      model,
+      executor: fixture.provider,
+      workdir: ".",
+      tests: { command: "echo boom >&2; exit 1" },
+    });
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: wf,
+      runId: "run-tests-fail",
+      store,
+      input: { task: "append to f.txt", repo: fixture.repo, tests: true },
+    });
+
+    // The change is the deliverable; a red suite is information, not a veto.
+    assert.equal(outcome.status, "completed");
+    assert.equal((outcome.output as { pr?: string }).pr, "http://example/owner/repo/pulls/1");
+    const patch = fixture.patches.find((p) => typeof p.body === "string" && /Tests: \*\*FAILED\*\*/.test(p.body as string));
+    assert.ok(patch !== undefined, "a failing suite must be said out loud on the PR");
+    assert.match(patch!.body as string, /boom/, "the reviewer needs the output");
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("SEAM: without input.tests no suite is run and no step is recorded", async () => {
+  const fixture = await repoFixture("tests-off");
+  try {
+    const { model } = reactiveModel(["```bash\necho changed >> f.txt\n```", "```finish\nFixed.\n```", ...PROBES]);
+    const wf = durableAgent({
+      model,
+      executor: fixture.provider,
+      workdir: ".",
+      // Configured, and still must not fire unasked.
+      tests: { command: "exit 1" },
+    });
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: wf,
+      runId: "run-tests-off",
+      store,
+      input: { task: "append to f.txt", repo: fixture.repo },
+    });
+
+    assert.equal(outcome.status, "completed", "a configured-but-unasked suite must not run, let alone fail the run");
+    const names = (await store.load("run-tests-off")).filter((e) => e.type === "step-completed").map((s) => s.name ?? "");
+    assert.deepEqual(names.filter((n) => n === "tests"), []);
+  } finally {
+    fixture.restore();
+  }
+});

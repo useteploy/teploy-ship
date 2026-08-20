@@ -12,20 +12,23 @@
  * pushed to three times ends with one Verification section and whatever the
  * reviewer wrote around it.
  *
- * What is deliberately NOT claimed here: that the tests passed. Ship has no
- * structured test result — the verified-finish gate asks whether the agent ran
- * something and whether the tree changed, which is not the same thing. Adding
- * a "tests: green" line off that would be a claim the run cannot support.
+ * The tests line is produced by Ship running an operator-configured command
+ * after the agent has stopped — never by the agent's own account of its
+ * testing, which is exactly the claim the verified-finish gate exists because
+ * models get wrong. See tests.ts.
  */
 import type { PreviewOutcome } from "./deploy.js";
 import { previewComment } from "./deploy.js";
 import type { TelemetryVerdict } from "./observe.js";
 import { telemetryComment } from "./observe.js";
+import type { TestOutcome } from "./tests.js";
+import { testComment } from "./tests.js";
 
 export const VERIFICATION_START = "<!-- teploy-ship:verification -->";
 export const VERIFICATION_END = "<!-- /teploy-ship:verification -->";
 
 export interface Evidence {
+  tests?: TestOutcome;
   preview?: PreviewOutcome;
   telemetry?: TelemetryVerdict;
 }
@@ -40,6 +43,11 @@ export interface Evidence {
  */
 export function verificationSection(evidence: Evidence, runId: string): string | null {
   const parts: string[] = [];
+  // Tests first: it is the question a reviewer asks before "where can I see it".
+  const tests = evidence.tests;
+  if (tests !== undefined && tests.kind !== "disabled") {
+    parts.push(testComment(tests));
+  }
   const preview = evidence.preview;
   if (preview !== undefined && preview.kind !== "skipped") {
     parts.push(previewComment(preview, runId));

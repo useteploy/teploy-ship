@@ -27,6 +27,7 @@ import {
 import { deployPreview, type PreviewOutcome, type PreviewTarget } from "./deploy.js";
 import { compareAroundNow, type TelemetryTarget, type TelemetryVerdict } from "./observe.js";
 import { spliceVerification, verificationSection, type Evidence } from "./verification.js";
+import { runTests, type TestOutcome, type TestTarget } from "./tests.js";
 import { refusalMessage, warningMessage } from "./publish-policy.js";
 import type { RepoCheckout, RepoRef } from "./git.js";
 import { assertRepoAllowed, credentialFor, policyFromEnv } from "./repo-policy.js";
@@ -179,6 +180,15 @@ export interface DurableAgentInput {
    * anything, is reported as exactly that and never fails the run.
    */
   telemetry?: boolean;
+  /**
+   * Run the project's test suite after the agent stops, and put the result on
+   * the pull request.
+   *
+   * Ship runs it, not the agent: an agent's account of its own testing is the
+   * claim the verified-finish gate exists because models get it wrong. Absent
+   * by default — it adds a recorded `tests` step.
+   */
+  tests?: boolean;
   /**
    * "This run has no `repo`, but its workspace is already a git tree — scope
    * its code index here and let the diff-based passes run."
@@ -359,6 +369,11 @@ export interface DurableAgentConfig {
    * and names a service on a host the run does not choose.
    */
   telemetry?: TelemetryTarget;
+  /**
+   * The project's test command, run by Ship after the agent stops. Worker
+   * wiring: the command depends on the checkout this host has, not on the run.
+   */
+  tests?: TestTarget;
   /**
    * Context condensation (default on, same budgets as the live loop):
    * when the history outgrows the budget, the middle turns are replaced
@@ -996,6 +1011,10 @@ async function publishIfRepoRun(
   const token = credentialFor(ref, policy);
   const headToken = co.headRepo !== undefined ? credentialFor(parseRepoUrl(co.headRepo), policy) : "";
 
+  // 0. Run the suite BEFORE the push, so "tests passed" describes the code that
+  // is about to become the pull request rather than an earlier state of it.
+  const tests = await testsIfAsked(ctx, executor, config, input);
+
   // 1. Commit + push. Screened first; a refusal is recorded and stops here.
   const push = await ctx.step("repo-push", async () => {
     const result = await commitAndPush(executor, {
@@ -1055,6 +1074,7 @@ async function publishIfRepoRun(
     // A review follow-up pushed new commits, so any preview is stale and the
     // numbers moved. Refresh both, then amend the same Verification section.
     const followUp: Evidence = {
+      ...(tests !== undefined ? { tests } : {}),
       ...(push.kind === "pushed" ? { preview: await previewIfAsked(ctx, config, input, co.branch) } : {}),
       telemetry: await telemetryIfAsked(ctx, config, input),
     };
@@ -1098,6 +1118,7 @@ async function publishIfRepoRun(
     return { url: created.url, number: created.number };
   });
   await publishVerification(ctx, ref, token, pr.number, {
+    ...(tests !== undefined ? { tests } : {}),
     preview: await previewIfAsked(ctx, config, input, co.branch),
     telemetry: await telemetryIfAsked(ctx, config, input),
   });
@@ -1205,6 +1226,29 @@ async function publishVerification(
     }
     await commentOnPr(ref, token, pr, section).catch(() => {});
     return "comment";
+  });
+}
+
+
+/**
+ * Run the suite, once, after the agent has stopped touching the tree.
+ *
+ * Before the push, deliberately: the result belongs in the evidence that goes
+ * out with the pull request, and a reviewer reading "tests passed" wants it to
+ * mean the code in the PR, not the code as it was two steps earlier.
+ */
+async function testsIfAsked(
+  ctx: WorkflowContext,
+  executor: AgentExecutor,
+  config: DurableAgentConfig,
+  input: DurableAgentInput,
+): Promise<TestOutcome | undefined> {
+  if (input.tests !== true) return undefined;
+  return await ctx.step("tests", async (): Promise<TestOutcome> => {
+    if (config.tests === undefined) {
+      return { kind: "disabled", reason: "no test command configured on this worker" };
+    }
+    return await runTests(executor, config.tests);
   });
 }
 

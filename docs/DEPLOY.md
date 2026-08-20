@@ -294,6 +294,9 @@ new deployment actually has to set.
 | `SHIP_PREVIEW_TTL` | `24h` | Passed to `teploy preview deploy --ttl`. The CLI prunes expired previews on the next preview deploy for that app. |
 | `SHIP_PREVIEW_DESTINATION` | unset | Destination overlay (`-d staging`), applied to every command so a preview cannot land on the wrong server. |
 | `SHIP_PREVIEW_TIMEOUT_MS` | `900000` | Per-command ceiling. The server-side image build is the slow step. |
+| `SHIP_TESTS` | unset | Ask every newly-enqueued run to execute `SHIP_TEST_COMMAND` after the agent stops, and put the result on the pull request. Ship runs it — the agent's own account of its testing is not used. |
+| `SHIP_TEST_COMMAND` | unset | The project's suite, e.g. `pnpm test`. Run in the run's workspace **before** the push, so "tests passed" describes the code that becomes the PR. Without it a run that asked for tests records the step as disabled. |
+| `SHIP_TEST_TIMEOUT_MS` | `900000` | Ceiling. A suite that hits it is reported as **not run**, never as failed — a killed suite did not fail, it never finished. |
 | `SHIP_TELEMETRY` | unset | Ask every newly-enqueued run to read the affected service's error rate and latency around its change and put the numbers on the pull request. Needs the three `OBSERVE_*` reads below. |
 | `OBSERVE_READ_TOKEN` | unset | An Observe **share token** (`X-Share-Token`), not the ingest key. Share tokens are GET-only, pinned server-side to their own site, long-lived and revocable — the only credential in Observe a worker can hold. Mint one from the site's share menu; revoke it to take the worker's read access away. Requires an Observe with share-token auth on `/api/v1/traces/services` (unreleased at the time of writing). |
 | `OBSERVE_SERVICE` | unset | The service name as it appears in traces. Without it there is nothing to look up and the read stays off. |

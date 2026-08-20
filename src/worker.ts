@@ -8,6 +8,7 @@ import { hostname } from "node:os";
 import { durableAgent } from "./durable.js";
 import { previewTargetFromEnv } from "./deploy.js";
 import { telemetryTargetFromEnv } from "./observe.js";
+import { testTargetFromEnv } from "./tests.js";
 import type { ExecutorProvider, RunUsage } from "./durable.js";
 import { defaultApprovalPolicy } from "./approval.js";
 import { enqueueRun } from "./runtime.js";
@@ -290,6 +291,9 @@ export function startWorker(options: WorkerOptions): {
     // Where this worker reads service health (OBSERVE_URL + OBSERVE_READ_TOKEN
     // + OBSERVE_SERVICE). Absent unless all three are set.
     ...(telemetryTargetFromEnv() !== undefined ? { telemetry: telemetryTargetFromEnv()! } : {}),
+    // The project's test command (SHIP_TEST_COMMAND), run by Ship after the
+    // agent stops rather than trusted from the agent's own account.
+    ...(testTargetFromEnv() !== undefined ? { tests: testTargetFromEnv()! } : {}),
   });
   const host = hostname();
   // Opt-in: emit each completed run to Observe (no-op unless configured).
