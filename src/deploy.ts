@@ -92,7 +92,19 @@ interface PreviewRow {
 /**
  * Deploy a preview of `branch`, and return the URL a reviewer can open.
  *
- * Three CLI calls, in order, because each is the input to the next:
+ * FIRST, the branch is checked out. `teploy build` builds whatever is in its
+ * working directory, and `teploy preview deploy` only uses the branch name to
+ * pick a subdomain — so building in the operator's directory would deploy
+ * WHATEVER COMMIT THAT DIRECTORY HAPPENS TO BE ON and label it as the fix. The
+ * pull request would carry a URL serving code the reviewer never wrote. Caught
+ * 2026-08-19 by reading this function against the CLI's own help text, after
+ * tests that asserted the argv and never the commit had passed.
+ *
+ * A detached `git worktree` off the operator's clone, not a checkout in it:
+ * this must not move the branch a human has open, and it must clean up even
+ * when the build fails.
+ *
+ * Then three CLI calls, in order, because each is the input to the next:
  *   1. `teploy build --json`     — an image of THIS branch, without touching
  *                                  production. `teploy deploy` would build one
  *                                  too, and also replace the running app.
@@ -117,6 +129,49 @@ export async function deployPreview(target: PreviewTarget, branch: string): Prom
   } catch (error) {
     return { kind: "skipped", reason: error instanceof Error ? error.message : String(error) };
   }
+
+  // The branch, in a throwaway worktree, so the image is of the code the pull
+  // request contains.
+  const fetched = await run(["git", "-C", cwd, "fetch", "origin", branch], { cwd, timeoutMs: 120_000 });
+  if (fetched.code !== 0) {
+    return {
+      kind: "failed",
+      reason:
+        `could not fetch ${branch} into the preview checkout: ${tail(fetched.stderr || fetched.stdout)}. ` +
+        `SHIP_PREVIEW_DIR must be a clone of the repository being fixed.`,
+    };
+  }
+  const tree = `${cwd.replace(/\/+$/, "")}/.teploy-ship-preview`;
+  await run(["git", "-C", cwd, "worktree", "remove", "--force", tree], { cwd, timeoutMs: 60_000 });
+  const added = await run(["git", "-C", cwd, "worktree", "add", "--detach", tree, "FETCH_HEAD"], { cwd, timeoutMs: 120_000 });
+  if (added.code !== 0) {
+    return { kind: "failed", reason: `could not create a preview worktree: ${tail(added.stderr || added.stdout)}` };
+  }
+
+  try {
+    return await buildAndDeploy({ run, bin, dest, timeoutMs, tree, branch, target });
+  } finally {
+    // Always: a worktree left behind makes the next run's `worktree add` fail,
+    // and it sits inside the operator's clone.
+    await run(["git", "-C", cwd, "worktree", "remove", "--force", tree], { cwd, timeoutMs: 60_000 });
+  }
+}
+
+/** The three CLI calls, once the branch is checked out at `tree`. */
+async function buildAndDeploy(opts: {
+  run: CommandRunner;
+  bin: string;
+  dest: string[];
+  timeoutMs: number;
+  tree: string;
+  branch: string;
+  target: PreviewTarget;
+}): Promise<PreviewOutcome> {
+  const { run, bin, dest, timeoutMs, branch, target } = opts;
+  // Every teploy call runs in the WORKTREE, not the operator's directory:
+  // build takes its source and its version from here, and preview deploy reads
+  // the same teploy.yml.
+  const cwd = opts.tree;
 
   const built = await run([bin, "build", "--json", ...dest], { cwd, timeoutMs });
   if (built.code !== 0) {

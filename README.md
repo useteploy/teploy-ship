@@ -69,6 +69,11 @@ the link on the PR:
     teploy build --json                        # an image of THIS branch
     teploy preview deploy <branch> --ttl 24h --image <tag>
 
+`SHIP_PREVIEW_DIR` must be a clone of the repository being fixed: Ship fetches
+the run's branch into a detached worktree beside it and builds there, so the
+preview serves the code in the pull request rather than whatever commit your
+checkout is sitting on. Your checkout is never moved.
+
 Both commands run **on the worker host**, never in the agent's sandbox: the CLI
 holds the credentials that reach your servers, and the sandbox executes
 model-authored commands. `teploy deploy` is never invoked — a preview must not

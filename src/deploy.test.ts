@@ -3,10 +3,17 @@ import assert from "node:assert/strict";
 import { deployPreview, destroyPreview, previewComment, previewTargetFromEnv, type CommandResult, type CommandRunner } from "./deploy.js";
 
 /** A runner that plays scripted results and records every argv it saw. */
-function scriptedRunner(results: Record<string, CommandResult>): { run: CommandRunner; calls: string[][] } {
+function scriptedRunner(results: Record<string, CommandResult>): {
+  run: CommandRunner;
+  calls: string[][];
+  cwds: string[];
+} {
   const calls: string[][] = [];
-  const run: CommandRunner = async (argv) => {
+  const cwds: string[] = [];
+  const run: CommandRunner = async (argv, opts) => {
     calls.push(argv);
+    cwds.push(opts.cwd);
+    if (argv[0] === "git") return { code: 0, stdout: "", stderr: "" };
     // Key on the command words only: the verb, plus its subcommand when the
     // next token is not a flag. ["teploy","build","--json","-d","staging"]
     // -> "build"; ["teploy","preview","deploy",...] -> "preview deploy".
@@ -15,7 +22,7 @@ function scriptedRunner(results: Record<string, CommandResult>): { run: CommandR
       .join(" ");
     return results[key] ?? { code: 0, stdout: "", stderr: "" };
   };
-  return { run, calls };
+  return { run, calls, cwds };
 }
 
 const OK_BUILD: CommandResult = { code: 0, stdout: `{"image":"api-build-abc1234","version":"abc1234","built":true}\n`, stderr: "" };
@@ -34,7 +41,7 @@ const OK_LIST: CommandResult = {
 };
 
 test("a preview is built, deployed and reported — and the tag is passed, never re-derived", async () => {
-  const { run, calls } = scriptedRunner({ build: OK_BUILD, "preview deploy": OK_DEPLOY, "preview list": OK_LIST });
+  const { run, calls, cwds } = scriptedRunner({ build: OK_BUILD, "preview deploy": OK_DEPLOY, "preview list": OK_LIST });
   const outcome = await deployPreview({ dir: "/srv/app", run }, "fix/login");
 
   assert.deepEqual(outcome, {
@@ -44,11 +51,30 @@ test("a preview is built, deployed and reported — and the tag is passed, never
     expiresAt: "2026-08-20T12:00:00Z",
   });
 
-  // Build first: `preview deploy` runs an image that must already exist.
-  assert.deepEqual(calls[0], ["teploy", "build", "--json"]);
+  // The branch is fetched and checked out BEFORE anything is built. Without
+  // this the image is of whatever commit the operator's directory sits on, and
+  // the PR carries a URL serving code the reviewer never wrote.
+  assert.deepEqual(calls[0], ["git", "-C", "/srv/app", "fetch", "origin", "fix/login"]);
+  assert.ok(
+    calls.some((c) => c[3] === "worktree" && c[4] === "add" && c.includes("FETCH_HEAD")),
+    `the fetched branch must be checked out: ${JSON.stringify(calls)}`,
+  );
+
+  const buildIdx = calls.findIndex((c) => c[0] === "teploy" && c[1] === "build");
+  assert.ok(buildIdx !== -1, "nothing was built");
+  assert.deepEqual(calls[buildIdx], ["teploy", "build", "--json"]);
+  // ...and it ran in the WORKTREE, not the operator's checkout.
+  assert.notEqual(cwds[buildIdx], "/srv/app", "building in the operator's directory builds the wrong commit");
+  assert.match(cwds[buildIdx]!, /\.teploy-ship-preview$/);
+
+  // The worktree is removed afterwards, or the next run cannot create one.
+  assert.ok(
+    calls.filter((c) => c[3] === "worktree" && c[4] === "remove").length >= 1,
+    "the worktree must be cleaned up inside the operator's clone",
+  );
   // The tag from step 1 reaches step 2. Without --image the two agree only by
   // both re-deriving <app>-build-<git hash>, which breaks across checkouts.
-  assert.deepEqual(calls[1], [
+  assert.deepEqual(calls.find((c) => c[1] === "preview" && c[2] === "deploy"), [
     "teploy",
     "preview",
     "deploy",
@@ -60,7 +86,7 @@ test("a preview is built, deployed and reported — and the tag is passed, never
   ]);
   // The URL comes from the CLI, not from a TypeScript copy of Go's
   // SanitizeBranch — that copy would drift and report URLs that do not exist.
-  assert.deepEqual(calls[2], ["teploy", "preview", "list", "--json"]);
+  assert.deepEqual(calls.find((c) => c[1] === "preview" && c[2] === "list"), ["teploy", "preview", "list", "--json"]);
 });
 
 test("`teploy deploy` is never invoked — a preview must not reach production", async () => {
@@ -80,7 +106,7 @@ test("a failed build stops there — nothing is deployed off a broken image", as
   assert.equal(outcome.kind, "failed");
   assert.match((outcome as { reason: string }).reason, /teploy build failed \(exit 1\)/);
   assert.match((outcome as { reason: string }).reason, /npm ERR/, "the reviewer needs the actual build error");
-  assert.equal(calls.length, 1, "a preview deploy after a failed build would run stale code");
+  assert.ok(!calls.some((c) => c[1] === "preview" && c[2] === "deploy"), "a preview deploy after a failed build would run stale code");
 });
 
 test("a build that prints no tag is a failure, not a guess", async () => {
@@ -88,7 +114,7 @@ test("a build that prints no tag is a failure, not a guess", async () => {
   const outcome = await deployPreview({ dir: "/srv/app", run }, "fix/login");
   assert.equal(outcome.kind, "failed");
   assert.match((outcome as { reason: string }).reason, /no image tag/);
-  assert.equal(calls.length, 1, "guessing a tag deploys the wrong code");
+  assert.ok(!calls.some((c) => c[1] === "preview"), "guessing a tag deploys the wrong code");
 });
 
 test("a preview that deployed but cannot be listed still reports its URL", async () => {
@@ -114,11 +140,13 @@ test("a branch that could carry a flag or a second command is refused before any
 test("the destination overlay reaches every command, or the preview lands on the wrong server", async () => {
   const { run, calls } = scriptedRunner({ build: OK_BUILD, "preview deploy": OK_DEPLOY, "preview list": OK_LIST });
   await deployPreview({ dir: "/srv/app", destination: "staging", ttl: "6h", bin: "/usr/local/bin/teploy", run }, "fix/login");
-  for (const argv of calls) {
+  const teployCalls = calls.filter((c) => c[0] !== "git");
+  assert.ok(teployCalls.length >= 3, "build, preview deploy and preview list all run");
+  for (const argv of teployCalls) {
     assert.equal(argv[0], "/usr/local/bin/teploy");
     assert.ok(argv.includes("-d") && argv.includes("staging"), `missing overlay: ${argv.join(" ")}`);
   }
-  assert.ok(calls[1]!.includes("6h"));
+  assert.ok(teployCalls.find((c) => c[1] === "preview" && c[2] === "deploy")!.includes("6h"));
 });
 
 test("destroy is scoped to the one branch and never falls back to a wider teardown", async () => {
@@ -164,4 +192,20 @@ test("a worker is preview-capable only when it has a directory to run the CLI in
   // A junk timeout falls back to the default rather than becoming NaN, which
   // execFile would treat as no timeout at all — a hung build would pin a worker.
   assert.deepEqual(previewTargetFromEnv({ SHIP_PREVIEW_DIR: "/srv/app", SHIP_PREVIEW_TIMEOUT_MS: "soon" }), { dir: "/srv/app" });
+});
+
+test("a preview directory that is not a clone of the repo fails with a usable reason", async () => {
+  const calls: string[][] = [];
+  const run: CommandRunner = async (argv) => {
+    calls.push(argv);
+    if (argv[0] === "git" && argv[3] === "fetch") {
+      return { code: 128, stdout: "", stderr: "fatal: not a git repository\n" };
+    }
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  const outcome = await deployPreview({ dir: "/srv/app", run }, "fix/login");
+
+  assert.equal(outcome.kind, "failed");
+  assert.match((outcome as { reason: string }).reason, /must be a clone of the repository being fixed/);
+  assert.ok(!calls.some((c) => c[0] === "teploy"), "nothing may be built from an unknown commit");
 });

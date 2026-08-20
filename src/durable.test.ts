@@ -1533,6 +1533,9 @@ function scriptedTeploy(overrides: Record<string, { code: number; stdout: string
   };
   const run = async (argv: string[]) => {
     calls.push(argv);
+    // The preview fetches the branch into a worktree before it builds; those
+    // are git calls, and they succeed silently here.
+    if (argv[0] === "git") return { code: 0, stdout: "", stderr: "" };
     const key = [argv[1], argv[2]?.startsWith("-") === false ? argv[2] : undefined].filter((a) => a !== undefined).join(" ");
     return table[key] ?? { code: 0, stdout: "", stderr: "" };
   };
@@ -1577,7 +1580,11 @@ test("SEAM: a preview run builds, deploys and links the URL on the pull request"
     for (const argv of teploy.calls) {
       assert.notEqual(argv[1], "deploy", `preview used the production deploy path: ${argv.join(" ")}`);
     }
-    assert.equal(teploy.calls[0]?.[1], "build", "an image of THIS branch has to be built first");
+    // The branch is checked out first, then built — building in the operator's
+    // directory would deploy whatever commit it sits on.
+    assert.equal(teploy.calls[0]?.[0], "git", "the branch must be fetched before anything is built");
+    const buildCall = teploy.calls.findIndex((c) => c[0] === "teploy" && c[1] === "build");
+    assert.ok(buildCall !== -1, "an image of THIS branch has to be built");
   } finally {
     fixture.restore();
   }
@@ -1641,7 +1648,10 @@ test("a preview that fails is reported on the PR and does NOT fail the run", asy
     const patch = fixture.patches.find((p) => typeof p.body === "string" && /Preview deploy FAILED/.test(p.body as string));
     assert.ok(patch !== undefined, "a silent preview failure teaches reviewers that a missing URL means 'slow'");
     assert.match(patch!.body as string, /npm ERR!/, "the reviewer needs the actual reason");
-    assert.equal(teploy.calls.length, 1, "nothing was deployed off a build that failed");
+    assert.ok(
+      !teploy.calls.some((c) => c[1] === "preview" && c[2] === "deploy"),
+      "nothing was deployed off a build that failed",
+    );
   } finally {
     fixture.restore();
   }
