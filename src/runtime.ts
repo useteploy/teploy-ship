@@ -116,6 +116,7 @@ export interface ShipRuntime {
       recovery?: boolean | RecoveryTuning;
       settle?: boolean;
       requireEdit?: boolean;
+      preview?: boolean;
     },
   ): Promise<RunOutcome | null>;
   saveMeta(meta: RunMeta): Promise<void>;
@@ -418,6 +419,8 @@ export async function enqueueRun(
     settle?: boolean;
     /** Hold a finish whose working tree is unchanged. See durable.ts. */
     requireEdit?: boolean;
+    /** Deploy the pushed branch to a preview environment. See deploy.ts. */
+    preview?: boolean;
     workflowName?: string;
     /** Intake source, recorded so completion can settle spend against it. */
     source?: string;
@@ -452,6 +455,12 @@ export async function enqueueRun(
   // enqueue surface, same shape as the two above. Absent unless asked for, so
   // no existing run's replay gains a step it was not written with.
   const requireEdit = options.requireEdit ?? (envFlag("SHIP_REQUIRE_EDIT") ? true : undefined);
+  // Deploy the pushed branch to a preview environment and link it on the PR.
+  // Opt-in for the same reason as the three above: it adds recorded steps, so
+  // turning it on must never change how an already-enqueued run replays. The
+  // executing worker's config decides whether a preview can actually happen —
+  // this only records that the run asked.
+  const preview = options.preview ?? (envFlag("SHIP_PREVIEW") ? true : undefined);
   await runtime.store.append(options.runId, {
     v: WIRE_FORMAT_VERSION,
     seq: 0,
@@ -473,6 +482,7 @@ export async function enqueueRun(
         ...(recovery !== undefined ? { recovery } : {}),
         ...(settle === true ? { settle: true } : {}),
         ...(requireEdit === true ? { requireEdit: true } : {}),
+        ...(preview === true ? { preview: true } : {}),
         // Every newly-enqueued run is steerable and index-eligible; runs
         // enqueued before these flags existed replay without the extra
         // steps (input-gated in durable). The executing worker's config

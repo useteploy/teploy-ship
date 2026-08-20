@@ -59,6 +59,22 @@ routing seam actually guarantees, every model we have measured with its
 sample size and confidence interval, and the one known cross-family
 limitation. Read it before quoting a number from anywhere else.
 
+## Preview deploys
+
+Ship owns a deployer, so a run does not have to stop at the pull request. With
+`SHIP_PREVIEW_DIR` set on the worker and `SHIP_PREVIEW=1`, a run that opens a PR
+also builds that branch's image and puts it on a temporary URL, then comments
+the link on the PR:
+
+    teploy build --json                        # an image of THIS branch
+    teploy preview deploy <branch> --ttl 24h --image <tag>
+
+Both commands run **on the worker host**, never in the agent's sandbox: the CLI
+holds the credentials that reach your servers, and the sandbox executes
+model-authored commands. `teploy deploy` is never invoked — a preview must not
+be able to reach production. A preview that fails is reported on the pull
+request and never fails the run.
+
 ## The stack it stands on
 
 | Layer | Provides |

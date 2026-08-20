@@ -16,6 +16,8 @@ export { condenseIfNeeded, defaultCondenseConfig, historySize } from "./memory.j
 export type { CondenseConfig, Summarizer } from "./memory.js";
 
 export { approvalEvent, durableAgent, sandboxProvider } from "./durable.js";
+export { deployPreview, destroyPreview, hostRunner, previewComment, previewTargetFromEnv } from "./deploy.js";
+export type { CommandResult, CommandRunner, PreviewOutcome, PreviewTarget } from "./deploy.js";
 export type {
   ApprovalDecisionPayload,
   DurableAgentConfig,

@@ -22,8 +22,9 @@ import {
   resolvePr,
   workingDiff,
 } from "./git.js";
+import { deployPreview, previewComment, type PreviewOutcome, type PreviewTarget } from "./deploy.js";
 import { refusalMessage, warningMessage } from "./publish-policy.js";
-import type { RepoCheckout } from "./git.js";
+import type { RepoCheckout, RepoRef } from "./git.js";
 import { assertRepoAllowed, credentialFor, policyFromEnv } from "./repo-policy.js";
 import type { RepoPolicyConfig, RepoTrust } from "./repo-policy.js";
 import { condenseIfNeeded, defaultCondenseConfig } from "./memory.js";
@@ -149,6 +150,19 @@ export interface DurableAgentInput {
    * written before this existed must not find a step the log does not contain.
    */
   requireEdit?: boolean;
+  /**
+   * Deploy the pushed branch to a preview environment and link it on the PR.
+   *
+   * Absent by default, like every other capability on this input, because it
+   * adds recorded steps (`preview-deploy`, `preview-comment`) and step
+   * presence must be a function of the recorded input — no run enqueued before
+   * this field existed replays differently.
+   *
+   * Advisory end to end: a preview that fails is reported on the pull request
+   * and never fails the run. The change is the deliverable; the URL is
+   * evidence about it.
+   */
+  preview?: boolean;
   /**
    * "This run has no `repo`, but its workspace is already a git tree — scope
    * its code index here and let the diff-based passes run."
@@ -312,6 +326,17 @@ export interface DurableAgentConfig {
   repoPolicy?: RepoPolicyConfig;
   /** Per-repo memory: recent-run notes injected into and recorded by repo runs. */
   repoMemory?: RepoMemoryStore;
+  /**
+   * Where this worker may deploy previews, if it may at all.
+   *
+   * Worker wiring, deliberately NOT part of the run input: it names a
+   * directory and a binary on this host, and it carries the credentials that
+   * reach the deploy target. A run says whether it WANTS a preview; only the
+   * operator says where one can go. A worker without this records the step as
+   * disabled rather than skipping it, so the step sequence stays a function of
+   * the input — same rule as the code index.
+   */
+  preview?: PreviewTarget;
   /**
    * Context condensation (default on, same budgets as the live loop):
    * when the history outgrows the budget, the middle turns are replaced
@@ -1003,6 +1028,9 @@ async function publishIfRepoRun(
       await commentOnPr(ref, token, input.pr!, body);
       return true;
     });
+    // A review follow-up pushed new commits to the same branch, so the preview
+    // that branch is on is now stale. Refresh it, unless nothing was pushed.
+    if (push.kind === "pushed") await previewIfAsked(ctx, config, input, co.branch, ref, token, input.pr);
     await remember(prUrl);
     return prUrl;
   }
@@ -1024,7 +1052,7 @@ async function publishIfRepoRun(
   const asDraft = incomplete || flagged;
   const pr = await ctx.step("repo-pr", async () => {
     const existing = await findOpenPullRequest({ ref, token, head: co.branch, owner: ref.owner }).catch(() => null);
-    if (existing !== null) return { url: existing.url };
+    if (existing !== null) return { url: existing.url, number: existing.number };
     const created = await openPullRequest({
       ref,
       token,
@@ -1039,10 +1067,56 @@ async function publishIfRepoRun(
           : "") +
         (push.kind === "pushed" && push.warning !== undefined ? `\n\n${push.warning}` : ""),
     });
-    return { url: created.url };
+    return { url: created.url, number: created.number };
   });
+  await previewIfAsked(ctx, config, input, co.branch, ref, token, pr.number);
   await remember(pr.url);
   return pr.url;
+}
+
+/**
+ * Deploy a preview of the pushed branch and say so on the pull request.
+ *
+ * Both steps are recorded whenever `input.preview` is set, including when this
+ * worker has no preview target — a disabled note keeps the step sequence a
+ * function of the recorded input rather than of which host picked the run up.
+ *
+ * Nothing here can fail the run. The deploy shells out to the `teploy` CLI on
+ * the WORKER host (never in the agent's sandbox, which must not hold deploy
+ * credentials), and every failure path returns an outcome instead of throwing.
+ */
+async function previewIfAsked(
+  ctx: WorkflowContext,
+  config: DurableAgentConfig,
+  input: DurableAgentInput,
+  branch: string,
+  ref: RepoRef,
+  token: string,
+  pr: number | undefined,
+): Promise<void> {
+  if (input.preview !== true) return;
+
+  const outcome = await ctx.step("preview-deploy", async (): Promise<PreviewOutcome> => {
+    if (config.preview === undefined) {
+      return { kind: "skipped", reason: "no preview target configured on this worker" };
+    }
+    try {
+      return await deployPreview(config.preview, branch);
+    } catch (error) {
+      // deployPreview is written not to throw; if it ever does, the run must
+      // still end with its pull request.
+      return { kind: "failed", reason: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  // A skipped preview on an unconfigured worker is not news for a reviewer;
+  // a failed one is, and so is a URL.
+  if (outcome.kind === "skipped") return;
+  if (pr === undefined) return;
+  await ctx.step("preview-comment", async () => {
+    await commentOnPr(ref, token, pr, previewComment(outcome, ctx.runId)).catch(() => {});
+    return true;
+  });
 }
 
 /**

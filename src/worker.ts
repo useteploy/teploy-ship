@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 
 import { durableAgent } from "./durable.js";
+import { previewTargetFromEnv } from "./deploy.js";
 import type { ExecutorProvider, RunUsage } from "./durable.js";
 import { defaultApprovalPolicy } from "./approval.js";
 import { enqueueRun } from "./runtime.js";
@@ -280,6 +281,11 @@ export function startWorker(options: WorkerOptions): {
     repoMemory: options.runtime.memory,
     steer: options.runtime.steer,
     ...(options.codeSearch !== undefined ? { codeSearch: options.codeSearch } : {}),
+    // Where this worker may deploy previews (SHIP_PREVIEW_DIR and friends).
+    // Absent on a worker that has no app checkout to run the CLI in; a run
+    // that asked for a preview then records the step as disabled rather than
+    // silently skipping it.
+    ...(previewTargetFromEnv() !== undefined ? { preview: previewTargetFromEnv()! } : {}),
   });
   const host = hostname();
   // Opt-in: emit each completed run to Observe (no-op unless configured).

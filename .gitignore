@@ -12,3 +12,9 @@ INTERNAL.md
 
 # Private dev guide (internal context — never committed, cf. teploy-cli)
 CLAUDE.md
+
+# Durable-arm event logs from a SWE-bench sweep: one fsynced log per instance,
+# written while the sweep runs. The predictions file and its .runlog.jsonl are
+# the artifacts worth committing; these are the raw post-mortem record, and
+# committing them mid-sweep captures a half-written log.
+swebench/*.durable-events/

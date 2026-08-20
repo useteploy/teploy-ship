@@ -1497,3 +1497,156 @@ test("SEAM: workspaceKey scopes the code index and the ```search action on a rep
     "no repo-index step may be recorded when workspaceKey is absent",
   );
 });
+
+// ---------------------------------------------------------------- preview
+
+/**
+ * A scripted `teploy` on the worker host. Records every argv so the tests can
+ * assert what a preview did — and, more importantly, what it never did.
+ */
+function scriptedTeploy(overrides: Record<string, { code: number; stdout: string; stderr: string }> = {}) {
+  const calls: string[][] = [];
+  const table: Record<string, { code: number; stdout: string; stderr: string }> = {
+    build: { code: 0, stdout: `{"image":"repo-build-abc1234","version":"abc1234","built":true}\n`, stderr: "" },
+    "preview deploy": { code: 0, stdout: "  Preview deployed: https://preview-x.example.com\n", stderr: "" },
+    "preview list": { code: 0, stdout: "[]", stderr: "" },
+    ...overrides,
+  };
+  const run = async (argv: string[]) => {
+    calls.push(argv);
+    const key = [argv[1], argv[2]?.startsWith("-") === false ? argv[2] : undefined].filter((a) => a !== undefined).join(" ");
+    return table[key] ?? { code: 0, stdout: "", stderr: "" };
+  };
+  return { run, calls };
+}
+
+test("SEAM: a preview run builds, deploys and links the URL on the pull request", async () => {
+  const fixture = await repoFixture("preview-on");
+  const teploy = scriptedTeploy();
+  try {
+    const { model } = reactiveModel(["```bash\necho changed >> f.txt\n```", "```finish\nFixed.\n```", ...PROBES]);
+    const wf = durableAgent({
+      model,
+      executor: fixture.provider,
+      workdir: ".",
+      preview: { dir: "/srv/app", run: teploy.run },
+    });
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: wf,
+      runId: "run-preview-on",
+      store,
+      input: { task: "append to f.txt", repo: fixture.repo, preview: true },
+    });
+
+    assert.equal(outcome.status, "completed");
+    const names = (await store.load("run-preview-on")).filter((e) => e.type === "step-completed").map((s) => s.name ?? "");
+    assert.ok(names.includes("preview-deploy"), "no preview-deploy step was recorded");
+    assert.ok(names.includes("preview-comment"), "the URL never reached the pull request");
+
+    // The whole point: a reviewer opens the PR and finds somewhere to click.
+    const comment = fixture.posts.find((p) => typeof p.body === "string" && /Preview:/.test(p.body as string));
+    assert.ok(comment !== undefined, `no preview comment posted: ${JSON.stringify(fixture.posts)}`);
+    assert.match(comment!.body as string, /https:\/\/preview-x\.example\.com/);
+    assert.match(comment!.body as string, /repo-build-abc1234/, "say which image is running");
+
+    // A preview must never reach production. `teploy deploy` would.
+    for (const argv of teploy.calls) {
+      assert.notEqual(argv[1], "deploy", `preview used the production deploy path: ${argv.join(" ")}`);
+    }
+    assert.equal(teploy.calls[0]?.[1], "build", "an image of THIS branch has to be built first");
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("SEAM: without input.preview no preview step is recorded — old logs replay unchanged", async () => {
+  const fixture = await repoFixture("preview-off");
+  const teploy = scriptedTeploy();
+  try {
+    const { model } = reactiveModel(["```bash\necho changed >> f.txt\n```", "```finish\nFixed.\n```", ...PROBES]);
+    const wf = durableAgent({
+      model,
+      executor: fixture.provider,
+      workdir: ".",
+      // Configured on the worker, and still must not fire unasked: step
+      // presence is a function of the INPUT, never of which host ran it.
+      preview: { dir: "/srv/app", run: teploy.run },
+    });
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: wf,
+      runId: "run-preview-off",
+      store,
+      input: { task: "append to f.txt", repo: fixture.repo },
+    });
+
+    assert.equal(outcome.status, "completed");
+    const names = (await store.load("run-preview-off")).filter((e) => e.type === "step-completed").map((s) => s.name ?? "");
+    assert.deepEqual(names.filter((n) => n.startsWith("preview")), [], "a run that never asked for a preview recorded one");
+    assert.deepEqual(teploy.calls, [], "the CLI must not be invoked at all");
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("a preview that fails is reported on the PR and does NOT fail the run", async () => {
+  const fixture = await repoFixture("preview-fail");
+  const teploy = scriptedTeploy({ build: { code: 1, stdout: "", stderr: "npm ERR! missing script: build\n" } });
+  try {
+    const { model } = reactiveModel(["```bash\necho changed >> f.txt\n```", "```finish\nFixed.\n```", ...PROBES]);
+    const wf = durableAgent({
+      model,
+      executor: fixture.provider,
+      workdir: ".",
+      preview: { dir: "/srv/app", run: teploy.run },
+    });
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: wf,
+      runId: "run-preview-fail",
+      store,
+      input: { task: "append to f.txt", repo: fixture.repo, preview: true },
+    });
+
+    // The fix is the deliverable; the preview is evidence about it.
+    assert.equal(outcome.status, "completed", "a broken preview must not take the run down with it");
+    const out = outcome.output as { pr?: string };
+    assert.equal(out.pr, "http://example/owner/repo/pulls/1", "the pull request still exists");
+
+    const comment = fixture.posts.find((p) => typeof p.body === "string" && /Preview deploy FAILED/.test(p.body as string));
+    assert.ok(comment !== undefined, "a silent preview failure teaches reviewers that a missing URL means 'slow'");
+    assert.match(comment!.body as string, /npm ERR!/, "the reviewer needs the actual reason");
+    assert.equal(teploy.calls.length, 1, "nothing was deployed off a build that failed");
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("a worker with no preview target records the step as disabled and posts nothing", async () => {
+  const fixture = await repoFixture("preview-unwired");
+  try {
+    const { model } = reactiveModel(["```bash\necho changed >> f.txt\n```", "```finish\nFixed.\n```", ...PROBES]);
+    const wf = durableAgent({ model, executor: fixture.provider, workdir: "." });
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: wf,
+      runId: "run-preview-unwired",
+      store,
+      input: { task: "append to f.txt", repo: fixture.repo, preview: true },
+    });
+
+    assert.equal(outcome.status, "completed");
+    const events = await store.load("run-preview-unwired");
+    const names = events.filter((e) => e.type === "step-completed").map((s) => s.name ?? "");
+    // Recorded, not skipped: the same input must produce the same step
+    // sequence on every worker, or a replay on a differently-wired host
+    // diverges.
+    assert.ok(names.includes("preview-deploy"), "the step must exist even where the feature cannot run");
+    assert.ok(!names.includes("preview-comment"), "an unconfigured worker has nothing to tell the reviewer");
+    const step = events.find((e) => e.type === "step-completed" && e.name === "preview-deploy") as { data?: { result?: { kind?: string } } };
+    assert.equal(step.data?.result?.kind, "skipped");
+  } finally {
+    fixture.restore();
+  }
+});
