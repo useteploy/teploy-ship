@@ -75,6 +75,24 @@ model-authored commands. `teploy deploy` is never invoked — a preview must not
 be able to reach production. A preview that fails is reported on the pull
 request and never fails the run.
 
+## Telemetry on the pull request
+
+`SHIP_TELEMETRY=1`, plus `OBSERVE_URL`, `OBSERVE_READ_TOKEN` and
+`OBSERVE_SERVICE` on the worker, and a run that opens a PR also reads the
+affected service's RED metrics from Observe over two adjacent windows and posts
+the comparison — requests, errors, error rate, p95, p99, Apdex.
+
+The credential is an Observe **share token**: GET-only, pinned server-side to
+its own site, revocable. Ship reads one aggregate endpoint and no trace
+payloads.
+
+**It refuses to report a verdict off thin traffic.** Below `OBSERVE_MIN_REQUESTS`
+in either window the comment says "not enough data to compare" and shows the
+raw counts instead. A preview environment serves almost nothing, so that is the
+common case, and a confident percentage computed from nine requests would look
+like proof while being noise. Where a comparison *is* reported, it is labelled
+correlation — other deploys and traffic mix are not controlled for.
+
 ## The stack it stands on
 
 | Layer | Provides |

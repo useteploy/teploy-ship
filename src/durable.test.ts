@@ -1650,3 +1650,151 @@ test("a worker with no preview target records the step as disabled and posts not
     fixture.restore();
   }
 });
+
+// ---------------------------------------------------------------- telemetry
+
+/** An Observe stand-in: RED metrics for two adjacent windows. */
+function scriptedObserve(rows: unknown[][]) {
+  let call = 0;
+  const calls: string[] = [];
+  const fetchStub = (async (url: string) => {
+    calls.push(String(url));
+    const body = rows[call++] ?? [];
+    return { ok: true, status: 200, json: async () => body };
+  }) as unknown as typeof globalThis.fetch;
+  return { fetchStub, calls };
+}
+
+const RED_ROW = (over: Record<string, unknown> = {}) => ({
+  service_name: "api",
+  request_count: 1000,
+  error_count: 50,
+  p50_ms: 40,
+  p95_ms: 200,
+  p99_ms: 400,
+  apdex_score: 0.9,
+  ...over,
+});
+
+test("SEAM: a telemetry run puts the measured before/after on the pull request", async () => {
+  const fixture = await repoFixture("telemetry-on");
+  // Window 1 is the "before" read, window 2 the "after".
+  const observe = scriptedObserve([[RED_ROW()], [RED_ROW({ error_count: 10, p95_ms: 150 })]]);
+  try {
+    const { model } = reactiveModel(["```bash\necho changed >> f.txt\n```", "```finish\nFixed.\n```", ...PROBES]);
+    const wf = durableAgent({
+      model,
+      executor: fixture.provider,
+      workdir: ".",
+      telemetry: { url: "https://o.example.com", token: "tok", service: "api", fetch: observe.fetchStub },
+    });
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: wf,
+      runId: "run-telemetry-on",
+      store,
+      input: { task: "append to f.txt", repo: fixture.repo, telemetry: true },
+    });
+
+    assert.equal(outcome.status, "completed");
+    const names = (await store.load("run-telemetry-on")).filter((e) => e.type === "step-completed").map((s) => s.name ?? "");
+    assert.ok(names.includes("telemetry-check"), "no telemetry-check step was recorded");
+    assert.ok(names.includes("telemetry-comment"), "the numbers never reached the pull request");
+
+    const comment = fixture.posts.find((p) => typeof p.body === "string" && /Telemetry/.test(p.body as string));
+    assert.ok(comment !== undefined, `no telemetry comment posted: ${JSON.stringify(fixture.posts)}`);
+    const body = comment!.body as string;
+    assert.match(body, /5\.00%/, "the before error rate");
+    assert.match(body, /1\.00%/, "the after error rate");
+    assert.match(body, /Correlation only/, "a PR must not claim the change caused the delta");
+
+    // Two adjacent windows, both scoped by the share token.
+    assert.equal(observe.calls.length, 2);
+    for (const url of observe.calls) assert.match(url, /\/api\/v1\/traces\/services\?/);
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("thin traffic produces a refusal on the PR, not a flattering number", async () => {
+  const fixture = await repoFixture("telemetry-thin");
+  // What a preview environment actually looks like: almost no requests.
+  const observe = scriptedObserve([[RED_ROW({ request_count: 6, error_count: 3 })], [RED_ROW({ request_count: 4, error_count: 0 })]]);
+  try {
+    const { model } = reactiveModel(["```bash\necho changed >> f.txt\n```", "```finish\nFixed.\n```", ...PROBES]);
+    const wf = durableAgent({
+      model,
+      executor: fixture.provider,
+      workdir: ".",
+      telemetry: { url: "https://o.example.com", token: "tok", service: "api", fetch: observe.fetchStub },
+    });
+    const store = new MemoryEventStore();
+    await executeRun({
+      workflow: wf,
+      runId: "run-telemetry-thin",
+      store,
+      input: { task: "append to f.txt", repo: fixture.repo, telemetry: true },
+    });
+
+    const comment = fixture.posts.find((p) => typeof p.body === "string" && /Telemetry/.test(p.body as string));
+    assert.ok(comment !== undefined);
+    const body = comment!.body as string;
+    // 3/6 -> 0/4 is a 50-point "improvement" off ten requests. It must not be
+    // reported as one.
+    assert.match(body, /Not enough data to compare/);
+    assert.doesNotMatch(body, /50\.00%/);
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("SEAM: without input.telemetry no telemetry step is recorded", async () => {
+  const fixture = await repoFixture("telemetry-off");
+  const observe = scriptedObserve([[RED_ROW()], [RED_ROW()]]);
+  try {
+    const { model } = reactiveModel(["```bash\necho changed >> f.txt\n```", "```finish\nFixed.\n```", ...PROBES]);
+    const wf = durableAgent({
+      model,
+      executor: fixture.provider,
+      workdir: ".",
+      telemetry: { url: "https://o.example.com", token: "tok", service: "api", fetch: observe.fetchStub },
+    });
+    const store = new MemoryEventStore();
+    await executeRun({
+      workflow: wf,
+      runId: "run-telemetry-off",
+      store,
+      input: { task: "append to f.txt", repo: fixture.repo },
+    });
+
+    const names = (await store.load("run-telemetry-off")).filter((e) => e.type === "step-completed").map((s) => s.name ?? "");
+    assert.deepEqual(names.filter((n) => n.startsWith("telemetry")), []);
+    assert.deepEqual(observe.calls, [], "Observe must not be read by a run that never asked");
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("an unwired worker records the check as disabled and posts nothing", async () => {
+  const fixture = await repoFixture("telemetry-unwired");
+  try {
+    const { model } = reactiveModel(["```bash\necho changed >> f.txt\n```", "```finish\nFixed.\n```", ...PROBES]);
+    const wf = durableAgent({ model, executor: fixture.provider, workdir: "." });
+    const store = new MemoryEventStore();
+    await executeRun({
+      workflow: wf,
+      runId: "run-telemetry-unwired",
+      store,
+      input: { task: "append to f.txt", repo: fixture.repo, telemetry: true },
+    });
+
+    const events = await store.load("run-telemetry-unwired");
+    const names = events.filter((e) => e.type === "step-completed").map((s) => s.name ?? "");
+    assert.ok(names.includes("telemetry-check"), "the step must exist even where the feature cannot run");
+    assert.ok(!names.includes("telemetry-comment"));
+    const step = events.find((e) => e.type === "step-completed" && e.name === "telemetry-check") as { data?: { result?: { kind?: string } } };
+    assert.equal(step.data?.result?.kind, "disabled");
+  } finally {
+    fixture.restore();
+  }
+});

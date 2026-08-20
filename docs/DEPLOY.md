@@ -294,6 +294,11 @@ new deployment actually has to set.
 | `SHIP_PREVIEW_TTL` | `24h` | Passed to `teploy preview deploy --ttl`. The CLI prunes expired previews on the next preview deploy for that app. |
 | `SHIP_PREVIEW_DESTINATION` | unset | Destination overlay (`-d staging`), applied to every command so a preview cannot land on the wrong server. |
 | `SHIP_PREVIEW_TIMEOUT_MS` | `900000` | Per-command ceiling. The server-side image build is the slow step. |
+| `SHIP_TELEMETRY` | unset | Ask every newly-enqueued run to read the affected service's error rate and latency around its change and put the numbers on the pull request. Needs the three `OBSERVE_*` reads below. |
+| `OBSERVE_READ_TOKEN` | unset | An Observe **share token** (`X-Share-Token`), not the ingest key. Share tokens are GET-only, pinned server-side to their own site, long-lived and revocable — the only credential in Observe a worker can hold. Mint one from the site's share menu; revoke it to take the worker's read access away. Requires an Observe with share-token auth on `/api/v1/traces/services` (unreleased at the time of writing). |
+| `OBSERVE_SERVICE` | unset | The service name as it appears in traces. Without it there is nothing to look up and the read stays off. |
+| `OBSERVE_WINDOW_MINUTES` | `30` | Length of each comparison window. Two adjacent windows ending now. |
+| `OBSERVE_MIN_REQUESTS` | `20` | Requests needed **in each window** before a comparison is reported at all. Below it the PR says "not enough data to compare" and shows the raw counts. Lower it only if you want verdicts computed off a handful of requests. |
 | `SHIP_MAX_RUN_COST_USD` | `0` (off) | Hard per-run ceiling. Turn count is a poor proxy for cost; this bounds one pathological run rather than waiting for the daily cap to notice. |
 | `SHIP_ESTIMATED_RUN_COST_USD` | `0.50` | Held against a source's daily budget while a run is in flight, so a burst of launches cannot all pass the same budget read. |
 | `SHIP_DAILY_AUTO_LIMIT` | `10` | Auto-launches per source per day, **fleet-wide** (it used to be per worker). |

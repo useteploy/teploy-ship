@@ -23,6 +23,7 @@ import {
   workingDiff,
 } from "./git.js";
 import { deployPreview, previewComment, type PreviewOutcome, type PreviewTarget } from "./deploy.js";
+import { compareAroundNow, telemetryComment, type TelemetryTarget, type TelemetryVerdict } from "./observe.js";
 import { refusalMessage, warningMessage } from "./publish-policy.js";
 import type { RepoCheckout, RepoRef } from "./git.js";
 import { assertRepoAllowed, credentialFor, policyFromEnv } from "./repo-policy.js";
@@ -163,6 +164,18 @@ export interface DurableAgentInput {
    * evidence about it.
    */
   preview?: boolean;
+  /**
+   * Read the affected service's error rate and latency around this change and
+   * put the numbers on the pull request.
+   *
+   * Absent by default like every other capability here — it adds recorded
+   * steps (`telemetry-check`, `telemetry-comment`), and step presence must
+   * stay a function of the recorded input.
+   *
+   * Advisory: a read that fails, or that finds too little traffic to say
+   * anything, is reported as exactly that and never fails the run.
+   */
+  telemetry?: boolean;
   /**
    * "This run has no `repo`, but its workspace is already a git tree — scope
    * its code index here and let the diff-based passes run."
@@ -337,6 +350,12 @@ export interface DurableAgentConfig {
    * the input — same rule as the code index.
    */
   preview?: PreviewTarget;
+  /**
+   * Where this worker reads telemetry, if it may at all. Worker wiring for the
+   * same reason as `preview`: it carries a credential (an Observe share token)
+   * and names a service on a host the run does not choose.
+   */
+  telemetry?: TelemetryTarget;
   /**
    * Context condensation (default on, same budgets as the live loop):
    * when the history outgrows the budget, the middle turns are replaced
@@ -1031,6 +1050,7 @@ async function publishIfRepoRun(
     // A review follow-up pushed new commits to the same branch, so the preview
     // that branch is on is now stale. Refresh it, unless nothing was pushed.
     if (push.kind === "pushed") await previewIfAsked(ctx, config, input, co.branch, ref, token, input.pr);
+    await telemetryIfAsked(ctx, config, input, ref, token, input.pr);
     await remember(prUrl);
     return prUrl;
   }
@@ -1070,6 +1090,7 @@ async function publishIfRepoRun(
     return { url: created.url, number: created.number };
   });
   await previewIfAsked(ctx, config, input, co.branch, ref, token, pr.number);
+  await telemetryIfAsked(ctx, config, input, ref, token, pr.number);
   await remember(pr.url);
   return pr.url;
 }
@@ -1115,6 +1136,46 @@ async function previewIfAsked(
   if (pr === undefined) return;
   await ctx.step("preview-comment", async () => {
     await commentOnPr(ref, token, pr, previewComment(outcome, ctx.runId)).catch(() => {});
+    return true;
+  });
+}
+
+/**
+ * Put the service's measured before/after on the pull request.
+ *
+ * The interesting case is the one that says nothing: a preview environment
+ * serves almost no traffic, so the honest default outcome is "not enough data
+ * to compare", printed as such. A confident number computed off nine requests
+ * would look like proof and would be noise — the same mistake as reading a
+ * process metric as a score, which cost two sweeps this week.
+ */
+async function telemetryIfAsked(
+  ctx: WorkflowContext,
+  config: DurableAgentConfig,
+  input: DurableAgentInput,
+  ref: RepoRef,
+  token: string,
+  pr: number | undefined,
+): Promise<void> {
+  if (input.telemetry !== true) return;
+
+  const verdict = await ctx.step("telemetry-check", async (): Promise<TelemetryVerdict> => {
+    if (config.telemetry === undefined) {
+      return { kind: "disabled", reason: "no telemetry target configured on this worker" };
+    }
+    try {
+      return await compareAroundNow(config.telemetry, new Date());
+    } catch (error) {
+      return { kind: "unavailable", reason: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  // Gated on the RECORDED verdict, never on whether this host happens to be
+  // wired for telemetry — otherwise a replay elsewhere gains or loses a step.
+  if (verdict.kind === "disabled") return;
+  if (pr === undefined) return;
+  await ctx.step("telemetry-comment", async () => {
+    await commentOnPr(ref, token, pr, telemetryComment(verdict, ctx.runId)).catch(() => {});
     return true;
   });
 }

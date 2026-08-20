@@ -7,6 +7,7 @@ import { hostname } from "node:os";
 
 import { durableAgent } from "./durable.js";
 import { previewTargetFromEnv } from "./deploy.js";
+import { telemetryTargetFromEnv } from "./observe.js";
 import type { ExecutorProvider, RunUsage } from "./durable.js";
 import { defaultApprovalPolicy } from "./approval.js";
 import { enqueueRun } from "./runtime.js";
@@ -286,6 +287,9 @@ export function startWorker(options: WorkerOptions): {
     // that asked for a preview then records the step as disabled rather than
     // silently skipping it.
     ...(previewTargetFromEnv() !== undefined ? { preview: previewTargetFromEnv()! } : {}),
+    // Where this worker reads service health (OBSERVE_URL + OBSERVE_READ_TOKEN
+    // + OBSERVE_SERVICE). Absent unless all three are set.
+    ...(telemetryTargetFromEnv() !== undefined ? { telemetry: telemetryTargetFromEnv()! } : {}),
   });
   const host = hostname();
   // Opt-in: emit each completed run to Observe (no-op unless configured).
