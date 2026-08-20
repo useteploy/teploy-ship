@@ -325,6 +325,84 @@ export async function openPullRequest(options: {
   return { number: created.number, url: created.html_url ?? created.url ?? "" };
 }
 
+/**
+ * Rewrite a pull request's body.
+ *
+ * The body is what a reviewer reads first and what merge automation parses;
+ * a comment is a footnote below it. Evidence a run gathered AFTER opening the
+ * PR — a preview URL, measured telemetry — belongs in the body, and the body
+ * is written before any of that exists, so it has to be updated.
+ *
+ * PATCH on the PR is the same call for both forges. Returns false rather than
+ * throwing: evidence is advisory, and a failed update must leave the pull
+ * request exactly as it was, not fail the run that produced it.
+ */
+export async function updatePullRequestBody(options: {
+  ref: RepoRef;
+  token: string;
+  pr: number;
+  body: string;
+  fetchImpl?: typeof fetch;
+}): Promise<boolean> {
+  const { ref, token } = options;
+  const doFetch = options.fetchImpl ?? fetch;
+  const endpoint =
+    ref.kind === "github"
+      ? `https://api.github.com/repos/${ref.owner}/${ref.repo}/pulls/${options.pr}`
+      : `${ref.base}/api/v1/repos/${ref.owner}/${ref.repo}/pulls/${options.pr}`;
+  try {
+    const response = await doFetch(endpoint, {
+      method: "PATCH",
+      headers: {
+        "content-type": "application/json",
+        authorization: ref.kind === "github" ? `Bearer ${token}` : `token ${token}`,
+        ...(ref.kind === "github" ? { accept: "application/vnd.github+json" } : {}),
+      },
+      body: JSON.stringify({ body: options.body }),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Read a pull request's current body, so an update can append rather than
+ * overwrite.
+ *
+ * Ship wrote the body it is amending, but a human may have edited it in the
+ * meantime — clobbering a reviewer's own notes to add a URL would be a poor
+ * trade. Returns null when it cannot be read, which the caller treats as
+ * "do not rewrite".
+ */
+export async function readPullRequestBody(options: {
+  ref: RepoRef;
+  token: string;
+  pr: number;
+  fetchImpl?: typeof fetch;
+}): Promise<string | null> {
+  const { ref, token } = options;
+  const doFetch = options.fetchImpl ?? fetch;
+  const endpoint =
+    ref.kind === "github"
+      ? `https://api.github.com/repos/${ref.owner}/${ref.repo}/pulls/${options.pr}`
+      : `${ref.base}/api/v1/repos/${ref.owner}/${ref.repo}/pulls/${options.pr}`;
+  try {
+    const response = await doFetch(endpoint, {
+      method: "GET",
+      headers: {
+        authorization: ref.kind === "github" ? `Bearer ${token}` : `token ${token}`,
+        ...(ref.kind === "github" ? { accept: "application/vnd.github+json" } : {}),
+      },
+    });
+    if (!response.ok) return null;
+    const pr = (await response.json()) as { body?: unknown };
+    return typeof pr.body === "string" ? pr.body : "";
+  } catch {
+    return null;
+  }
+}
+
 // Credential selection deliberately does NOT live here: picking a token for a
 // host is a policy decision that has to consult the repository allowlist, and
 // keeping it in repo-policy.ts means there is exactly one function that can put

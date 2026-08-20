@@ -75,6 +75,33 @@ model-authored commands. `teploy deploy` is never invoked — a preview must not
 be able to reach production. A preview that fails is reported on the pull
 request and never fails the run.
 
+## A pull request that carries its evidence
+
+When a run deploys a preview or reads telemetry, the results go into the pull
+request **body** — the thing a reviewer reads first and merge automation
+parses — as one Verification section between HTML markers:
+
+    ## Verification
+
+    Preview: https://preview-fix-login.example.com
+    Running `api-build-abc1234`, expires 2026-08-21T09:00:00Z.
+
+    | api | before | after |
+    |---|---|---|
+    | requests | 1000 | 900 |
+    | errors | 50 (5.00%) | 9 (1.00%) |
+    | p95 | 200ms | 150ms |
+
+Pushing to the branch again replaces that section rather than adding a second
+one, and anything written around it — including a reviewer's own notes — is
+left alone. If the body cannot be read or updated, the section is posted as a
+comment instead.
+
+It does **not** claim the tests passed. Ship has no structured test result: the
+verified-finish gate asks whether the agent ran something and whether the tree
+changed, which is not the same thing, and a "tests: green" line off that would
+be a claim the run cannot support.
+
 ## Telemetry on the pull request
 
 `SHIP_TELEMETRY=1`, plus `OBSERVE_URL`, `OBSERVE_READ_TOKEN` and

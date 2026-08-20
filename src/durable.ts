@@ -16,14 +16,17 @@ import {
   openPullRequest,
   parseRepoUrl,
   pullRequestUrl,
+  readPullRequestBody,
   reviewPrompt,
   setupRepo,
   setupRepoForPr,
   resolvePr,
+  updatePullRequestBody,
   workingDiff,
 } from "./git.js";
-import { deployPreview, previewComment, type PreviewOutcome, type PreviewTarget } from "./deploy.js";
-import { compareAroundNow, telemetryComment, type TelemetryTarget, type TelemetryVerdict } from "./observe.js";
+import { deployPreview, type PreviewOutcome, type PreviewTarget } from "./deploy.js";
+import { compareAroundNow, type TelemetryTarget, type TelemetryVerdict } from "./observe.js";
+import { spliceVerification, verificationSection, type Evidence } from "./verification.js";
 import { refusalMessage, warningMessage } from "./publish-policy.js";
 import type { RepoCheckout, RepoRef } from "./git.js";
 import { assertRepoAllowed, credentialFor, policyFromEnv } from "./repo-policy.js";
@@ -1049,8 +1052,13 @@ async function publishIfRepoRun(
     });
     // A review follow-up pushed new commits to the same branch, so the preview
     // that branch is on is now stale. Refresh it, unless nothing was pushed.
-    if (push.kind === "pushed") await previewIfAsked(ctx, config, input, co.branch, ref, token, input.pr);
-    await telemetryIfAsked(ctx, config, input, ref, token, input.pr);
+    // A review follow-up pushed new commits, so any preview is stale and the
+    // numbers moved. Refresh both, then amend the same Verification section.
+    const followUp: Evidence = {
+      ...(push.kind === "pushed" ? { preview: await previewIfAsked(ctx, config, input, co.branch) } : {}),
+      telemetry: await telemetryIfAsked(ctx, config, input),
+    };
+    await publishVerification(ctx, ref, token, input.pr, followUp);
     await remember(prUrl);
     return prUrl;
   }
@@ -1089,8 +1097,10 @@ async function publishIfRepoRun(
     });
     return { url: created.url, number: created.number };
   });
-  await previewIfAsked(ctx, config, input, co.branch, ref, token, pr.number);
-  await telemetryIfAsked(ctx, config, input, ref, token, pr.number);
+  await publishVerification(ctx, ref, token, pr.number, {
+    preview: await previewIfAsked(ctx, config, input, co.branch),
+    telemetry: await telemetryIfAsked(ctx, config, input),
+  });
   await remember(pr.url);
   return pr.url;
 }
@@ -1111,11 +1121,8 @@ async function previewIfAsked(
   config: DurableAgentConfig,
   input: DurableAgentInput,
   branch: string,
-  ref: RepoRef,
-  token: string,
-  pr: number | undefined,
-): Promise<void> {
-  if (input.preview !== true) return;
+): Promise<PreviewOutcome | undefined> {
+  if (input.preview !== true) return undefined;
 
   const outcome = await ctx.step("preview-deploy", async (): Promise<PreviewOutcome> => {
     if (config.preview === undefined) {
@@ -1130,14 +1137,10 @@ async function previewIfAsked(
     }
   });
 
-  // A skipped preview on an unconfigured worker is not news for a reviewer;
-  // a failed one is, and so is a URL.
-  if (outcome.kind === "skipped") return;
-  if (pr === undefined) return;
-  await ctx.step("preview-comment", async () => {
-    await commentOnPr(ref, token, pr, previewComment(outcome, ctx.runId)).catch(() => {});
-    return true;
-  });
+  // The outcome goes into the pull request BODY, with the telemetry, as one
+  // Verification section — see publishVerification. Reporting it here as its
+  // own comment made a reviewer hunt for two footnotes under the body.
+  return outcome;
 }
 
 /**
@@ -1153,11 +1156,8 @@ async function telemetryIfAsked(
   ctx: WorkflowContext,
   config: DurableAgentConfig,
   input: DurableAgentInput,
-  ref: RepoRef,
-  token: string,
-  pr: number | undefined,
-): Promise<void> {
-  if (input.telemetry !== true) return;
+): Promise<TelemetryVerdict | undefined> {
+  if (input.telemetry !== true) return undefined;
 
   const verdict = await ctx.step("telemetry-check", async (): Promise<TelemetryVerdict> => {
     if (config.telemetry === undefined) {
@@ -1170,13 +1170,41 @@ async function telemetryIfAsked(
     }
   });
 
-  // Gated on the RECORDED verdict, never on whether this host happens to be
-  // wired for telemetry — otherwise a replay elsewhere gains or loses a step.
-  if (verdict.kind === "disabled") return;
-  if (pr === undefined) return;
-  await ctx.step("telemetry-comment", async () => {
-    await commentOnPr(ref, token, pr, telemetryComment(verdict, ctx.runId)).catch(() => {});
-    return true;
+  return verdict;
+}
+
+
+/**
+ * Amend the pull request body with what the run measured.
+ *
+ * One step, gated on the run INPUT (not on how this worker is wired), so the
+ * recorded step sequence is the same everywhere. The body is read before it is
+ * written: Ship wrote it, but a reviewer may have edited it since, and
+ * clobbering their notes to add a URL is a bad trade. If the read or the write
+ * fails, the evidence falls back to a comment — worse placement, still
+ * delivered — and if that fails too the run ends normally with its PR.
+ *
+ * Renaming the two comment steps this replaces is safe: both features landed
+ * today and are unreleased, so no enqueued run has a log containing them.
+ * After a release this would be a replay-breaking change.
+ */
+async function publishVerification(
+  ctx: WorkflowContext,
+  ref: RepoRef,
+  token: string,
+  pr: number | undefined,
+  evidence: Evidence,
+): Promise<void> {
+  const section = verificationSection(evidence, ctx.runId);
+  if (section === null || pr === undefined) return;
+  await ctx.step("verification", async () => {
+    const current = await readPullRequestBody({ ref, token, pr });
+    if (current !== null) {
+      const updated = await updatePullRequestBody({ ref, token, pr, body: spliceVerification(current, section) });
+      if (updated) return "body";
+    }
+    await commentOnPr(ref, token, pr, section).catch(() => {});
+    return "comment";
   });
 }
 
