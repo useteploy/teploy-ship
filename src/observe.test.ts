@@ -56,6 +56,7 @@ test("observe emitter posts an LLM event with model/tokens/cost when configured"
 
 import {
   MIN_REQUESTS_FOR_A_VERDICT,
+  compareAroundNow,
   compareHealth,
   readServiceHealth,
   telemetryComment,
@@ -97,6 +98,8 @@ test("a read is authenticated by share token, scoped to one service, and asks a 
   const health = await readServiceHealth(target, new Date("2026-08-19T00:00:00Z"), new Date("2026-08-19T01:00:00Z"));
 
   assert.deepEqual(health, {
+    kind: "ok",
+    health: {
     service: "api",
     requests: 200,
     errors: 4,
@@ -105,6 +108,7 @@ test("a read is authenticated by share token, scoped to one service, and asks a 
     p95: 110,
     p99: 250,
     apdex: 0.97,
+    },
   });
   assert.equal(seen.headers?.["X-Share-Token"], "tok-123", "the share token is the only credential a worker can hold");
   // RFC3339 exactly: Observe silently falls back to "the last 24 hours" on an
@@ -116,13 +120,39 @@ test("a read is authenticated by share token, scoped to one service, and asks a 
 test("a telemetry read never throws and never invents a number", async () => {
   const base = { url: "https://o.example.com", token: "t", service: "api" };
   // Service absent from the window is a real answer, not a zero-error service.
-  assert.equal(await readServiceHealth({ ...base, fetch: fetchStub(200, [{ service_name: "other" }]) }, new Date(), new Date()), null);
-  assert.equal(await readServiceHealth({ ...base, fetch: fetchStub(401, {}) }, new Date(), new Date()), null);
-  assert.equal(await readServiceHealth({ ...base, fetch: fetchStub(200, { not: "an array" }) }, new Date(), new Date()), null);
+  assert.deepEqual(
+    await readServiceHealth({ ...base, fetch: fetchStub(200, [{ service_name: "other" }]) }, new Date(), new Date()),
+    { kind: "absent" },
+  );
   const boom = (async () => {
     throw new Error("connection refused");
   }) as unknown as typeof globalThis.fetch;
-  assert.equal(await readServiceHealth({ ...base, fetch: boom }, new Date(), new Date()), null);
+  for (const fetch of [fetchStub(401, {}), fetchStub(403, {}), fetchStub(500, {}), fetchStub(200, { not: "an array" }), boom]) {
+    const read = await readServiceHealth({ ...base, fetch }, new Date(), new Date());
+    assert.equal(read.kind, "rejected", "an unusable read is never reported as an empty window");
+  }
+});
+
+// Found by running this against a live Observe: a revoked share token and a
+// service with no traffic produced the SAME pull-request line, "no telemetry
+// for this service in either window". An operator reads that as a fact about
+// the deploy when it is a fact about their credential.
+test("a refused read is reported as a wiring fault, not as an empty window", async () => {
+  const base = { url: "https://o.example.com", token: "revoked", service: "api", windowMinutes: 30 };
+  const verdict = await compareAroundNow({ ...base, fetch: fetchStub(401, {}) }, new Date("2026-08-21T00:00:00Z"));
+  assert.equal(verdict.kind, "unavailable");
+  assert.match(verdict.reason ?? "", /401/);
+  assert.match(verdict.reason ?? "", /token/, "the message has to name the credential, or it is not actionable");
+  assert.doesNotMatch(
+    verdict.reason ?? "",
+    /no telemetry for this service/,
+    "this is exactly the sentence that made a broken token look like an idle service",
+  );
+
+  // And the honest empty case still says what it always said.
+  const empty = await compareAroundNow({ ...base, fetch: fetchStub(200, []) }, new Date("2026-08-21T00:00:00Z"));
+  assert.equal(empty.kind, "unavailable");
+  assert.match(empty.reason ?? "", /no telemetry for this service/);
 });
 
 test("a verdict is refused when the traffic cannot carry one", () => {

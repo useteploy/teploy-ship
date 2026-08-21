@@ -143,17 +143,37 @@ interface ServiceSummaryWire {
 }
 
 /**
+ * What one read of the endpoint actually established.
+ *
+ * `absent` and `rejected` are deliberately different outcomes. Both produce no
+ * metrics, but only one of them is a statement about the SERVICE: a window with
+ * no rows means nothing was served, while a 401 means this worker's credential
+ * cannot read and the service's traffic is simply unknown. Collapsing them —
+ * which this did until it was run against a live instance — prints "no
+ * telemetry for this service" at an operator whose share token was revoked, and
+ * that reads as a fact about the deploy rather than a fact about the wiring.
+ *
+ * Same distinction the tests leg draws between a suite that FAILED and one that
+ * could not be RUN, for the same reason.
+ */
+export type ServiceRead =
+  | { kind: "ok"; health: ServiceHealth }
+  /** The endpoint answered and this service had no rows in the window. */
+  | { kind: "absent" }
+  /** The endpoint refused, or answered something unreadable. Says nothing about traffic. */
+  | { kind: "rejected"; reason: string };
+
+/**
  * Read one service's RED metrics over a window.
  *
- * Returns null when the service has no rows in the window — which is a real
- * answer ("nothing was served") and must not be confused with a zero-error
- * service. Throws nothing: a telemetry read cannot be allowed to fail a run.
+ * Throws nothing: a telemetry read cannot be allowed to fail a run. Every
+ * failure comes back as a `rejected` read carrying why.
  */
 export async function readServiceHealth(
   target: TelemetryTarget,
   from: Date,
   to: Date,
-): Promise<ServiceHealth | null> {
+): Promise<ServiceRead> {
   const doFetch = target.fetch ?? globalThis.fetch;
   // RFC3339, always. Observe parses these with time.Parse and SILENTLY falls
   // back to "the last 24 hours" on a malformed value, so a formatting slip
@@ -167,25 +187,32 @@ export async function readServiceHealth(
       headers: { "X-Share-Token": target.token },
       signal: controller.signal,
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      // 401/403 is the one an operator will actually hit: a share token that was
+      // revoked, or never set. Name it rather than letting it look like silence.
+      return { kind: "rejected", reason: `Observe answered ${res.status} (${res.status === 401 || res.status === 403 ? "the read token is not accepted" : "read failed"})` };
+    }
     const rows = (await res.json()) as ServiceSummaryWire[];
-    if (!Array.isArray(rows)) return null;
+    if (!Array.isArray(rows)) return { kind: "rejected", reason: "Observe returned an unexpected body" };
     const row = rows.find((r) => r.service_name === target.service);
-    if (row === undefined) return null;
+    if (row === undefined) return { kind: "absent" };
     const requests = row.request_count ?? 0;
     const errors = row.error_count ?? 0;
     return {
-      service: target.service,
-      requests,
-      errors,
-      errorRate: requests > 0 ? errors / requests : 0,
-      p50: row.p50_ms ?? 0,
-      p95: row.p95_ms ?? 0,
-      p99: row.p99_ms ?? 0,
-      apdex: row.apdex_score ?? 0,
+      kind: "ok",
+      health: {
+        service: target.service,
+        requests,
+        errors,
+        errorRate: requests > 0 ? errors / requests : 0,
+        p50: row.p50_ms ?? 0,
+        p95: row.p95_ms ?? 0,
+        p99: row.p99_ms ?? 0,
+        apdex: row.apdex_score ?? 0,
+      },
     };
-  } catch {
-    return null;
+  } catch (error) {
+    return { kind: "rejected", reason: `Observe could not be reached: ${error instanceof Error ? error.message : String(error)}` };
   } finally {
     clearTimeout(timer);
   }
@@ -316,5 +343,14 @@ export async function compareAroundNow(target: TelemetryTarget, now: Date): Prom
   const start = new Date(now.getTime() - 2 * ms);
   const before = await readServiceHealth(target, start, mid);
   const after = await readServiceHealth(target, mid, now);
-  return compareHealth(before, after, target.minRequests);
+  // A rejected read is a wiring fault, not a measurement, and it must not be
+  // laundered into "this service served nothing". Either side rejecting is
+  // enough: half a comparison is not a comparison.
+  const rejected = before.kind === "rejected" ? before : after.kind === "rejected" ? after : null;
+  if (rejected !== null) return { kind: "unavailable", reason: rejected.reason };
+  return compareHealth(
+    before.kind === "ok" ? before.health : null,
+    after.kind === "ok" ? after.health : null,
+    target.minRequests,
+  );
 }
