@@ -386,6 +386,16 @@ function envFlag(name: string, env: NodeJS.ProcessEnv = process.env): boolean {
 }
 
 /**
+ * Explicitly turned OFF — distinct from unset, which leaves a default alone.
+ * Only needed for the flags that default ON, where "absent" and "disabled" are
+ * different answers.
+ */
+function envFlagOff(name: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = (env[name] ?? "").toLowerCase();
+  return raw === "0" || raw === "false" || raw === "no";
+}
+
+/**
  * Enqueue a run without executing it: append the run-started event
  * (exactly the shape executeRun writes on an empty log) and flag the run
  * due. A resident worker picks it up on its next tick; with the file
@@ -457,10 +467,25 @@ export async function enqueueRun(
   const recovery =
     recoveryFlag === true ? { ...defaultRecoveryConfig } : recoveryFlag;
   const settle = options.settle ?? (envFlag("SHIP_SETTLE") ? true : undefined);
-  // Hold a finish over an unchanged tree. One operator knob across every
-  // enqueue surface, same shape as the two above. Absent unless asked for, so
-  // no existing run's replay gains a step it was not written with.
-  const requireEdit = options.requireEdit ?? (envFlag("SHIP_REQUIRE_EDIT") ? true : undefined);
+  // Hold a finish over an unchanged tree. ON by default, unlike the knobs
+  // above, because it is not a tuning knob: without it a webhook-launched run
+  // can finish "fixed" having written nothing and open a pull request that
+  // makes a false claim to a human reviewer. Set SHIP_REQUIRE_EDIT=0 to turn it
+  // off for a deployment, or pass requireEdit: false for one run.
+  //
+  // Measured cost, so nobody has to re-derive it: forcing this on for the
+  // 2026-08-20 parity sweep turned 8 deliberate finishes into cap-outs and cost
+  // ~30% more wall-clock. It did NOT measurably change the score, and at n=49
+  // it could not have — the point is what a run CLAIMS, not what it scores.
+  // The hold-grace exit in durable.ts is what pays back most of that cost.
+  //
+  // Flipped HERE and never in durable.ts's branch condition, deliberately: the
+  // flag is materialised into the recorded input, so a run enqueued before this
+  // change carries no `requireEdit` and replays through exactly the steps its
+  // log contains. Changing the branch instead would make every in-flight run
+  // look for a step its log does not have, which is a NondeterminismError and
+  // leaves the run permanently unrunnable rather than merely failed.
+  const requireEdit = options.requireEdit ?? (envFlagOff("SHIP_REQUIRE_EDIT") ? false : true);
   // Deploy the pushed branch to a preview environment and link it on the PR.
   // Opt-in for the same reason as the three above: it adds recorded steps, so
   // turning it on must never change how an already-enqueued run replays. The

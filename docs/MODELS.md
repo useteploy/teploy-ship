@@ -102,12 +102,25 @@ of this file said "default off on both paths" and that is wrong:
 | path | state |
 |---|---|
 | live loop (`runAgent`, `agent.ts:342`) | **on**, unconditionally, whenever `requireVerifiedFinish !== false` |
-| durable loop (`durable.ts:686`) — the product | **off** unless the run input carries `requireEdit` |
+| durable loop (`durable.ts`) — the product | **on** by default since 2026-08-20; `SHIP_REQUIRE_EDIT=0` turns it off |
 
-So the numbers above were measured with the gate ON (the harness drives the
-live loop), and a webhook-launched production run does **not** have it unless
-`SHIP_REQUIRE_EDIT=1` is set (`runtime.ts:454` — the only way to turn it on;
-there is no CLI flag). That asymmetry is a known gap, not a decision.
+The asymmetry this section used to describe — the live loop holding a
+clean-tree finish while the product path did not — is **closed**. It was never
+a decision, and it meant a webhook-launched run could finish "fixed" having
+written nothing and open a pull request saying so.
+
+The flip is at `enqueueRun`, which materialises `requireEdit: true` into the
+recorded run input, and deliberately NOT in the loop's branch condition: runs
+enqueued before the change carry no such flag and replay through exactly the
+steps their logs contain.
+
+Its measured cost was 8 deliberate finishes turned into cap-outs and ~30% more
+wall-clock on the 2026-08-20 parity sweep, with no measurable score effect —
+and at n=49 there could not have been one. It is justified by what a run
+CLAIMS, not by what it scores. Most of that cost is repaid by the hold-grace
+exit: a run that takes the nudge and has still written nothing eight turns
+later ends there rather than grinding to the step cap, which is where those
+runs were going anyway, since a clean tree publishes nothing either way.
 
 Closing this properly is per-family prompt tuning, and should be called that.
 

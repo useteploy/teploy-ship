@@ -442,6 +442,13 @@ export function durableAgent(
   // SWE-bench gauge recorded a run spending its last ten steps just locating
   // pytest). Cost is bounded by the daily spend caps, not by this.
   const maxSteps = config.maxSteps ?? 40;
+  // How many executing turns a held finish gets to produce an edit before the
+  // run stops waiting. See heldCleanAtTurn: the hold tells an agent its tree is
+  // unchanged, and an agent that has still written nothing this many turns
+  // later is not going to. Ending then costs a hypothetical late edit and saves
+  // the rest of the run; grinding on to the cap costs the run and saves nothing,
+  // because a clean tree publishes nothing either way.
+  const HOLD_GRACE_TURNS = 8;
   const maxObs = config.maxObservationChars ?? 8000;
   // Single-token config folds into the policy so credential selection and the
   // allowlist are one lookup rather than two places that can disagree.
@@ -559,6 +566,16 @@ export function durableAgent(
       let anySuccessfulAction = false;
       /** Bounded holds for a finish over an unchanged tree. See FINISH_NUDGE_CLEAN_TREE. */
       let cleanTreeNudges = 0;
+      /**
+       * The turn a clean-tree hold last fired on, or null if none is standing.
+       *
+       * The hold sends the agent back to work; what it cannot do is make it
+       * come back. On the 2026-08-20 parity sweep 8 runs took the nudge, never
+       * attempted another finish, and ground on to the 40-turn cap with a tree
+       * that was still clean — the whole of that arm's ~30% wall-clock cost,
+       * spent to produce nothing. See HOLD_GRACE_TURNS.
+       */
+      let heldCleanAtTurn: number | null = null;
       let finishNudged = false;
       let evidenceNudged = false;
       /** Executions (successful or not) since the verify nudge was issued. */
@@ -762,6 +779,7 @@ export function durableAgent(
               }))
             ) {
               cleanTreeNudges += 1;
+              heldCleanAtTurn = turn;
               nudge = FINISH_NUDGE_CLEAN_TREE;
             } else if (
               input.critic === true &&
@@ -940,6 +958,46 @@ export function durableAgent(
           if (signal.kind === "nudge") {
             messages.push({ role: "user", content: signal.message });
           }
+        }
+
+        // A held finish that never came back. One recorded step, only on runs
+        // that opted into the hold and actually took one, and only once the
+        // grace has elapsed — so its presence is a function of the recorded
+        // input and of earlier replayed results, exactly like the holds above.
+        //
+        // The requireEdit test is belt-and-braces and no mutation can kill it:
+        // the only writer of heldCleanAtTurn sits inside the requireEdit-gated
+        // hold, so it is already unreachable without it. Kept because it is the
+        // determinism contract being stated where a reader will look for it,
+        // and because a second writer added later would otherwise silently
+        // start recording a step that old logs do not contain.
+        if (input.requireEdit === true && heldCleanAtTurn !== null && turn - heldCleanAtTurn >= HOLD_GRACE_TURNS) {
+          const stillClean = await ctx.step(`turn-${turn}-hold-recheck`, async () => {
+            try {
+              const fp = await workspaceFingerprint(executor);
+              return fp !== undefined && !fp.dirty;
+            } catch {
+              // Unreadable is not clean. Failing this open would end runs on a
+              // transient git error, which is far worse than waiting.
+              return false;
+            }
+          });
+          if (stillClean) {
+            // Publishes exactly as the cap would: incomplete, and on a HARNESS
+            // sentence rather than the agent's. Not an oversight — the
+            // clean-tree hold is a rejection, so it clears lastHeldFinish for
+            // the reason spelled out at the nudge dispatch: adopting a claim
+            // the run explicitly refused would launder it into the PR body and
+            // the repo-memory note. The outcome is identical to running to the
+            // cap; this only stops paying for the turns in between.
+            const summary = `Held a finish over an unchanged tree and made no edit in the ${HOLD_GRACE_TURNS} turns since.`;
+            const pr = await publishIfRepoRun(ctx, executor, config, input, checkout, summary, repoPolicy, true);
+            await dispose(config, handle);
+            return { status: "settled", summary, turns: turn + 1, usage, ...(pr !== null ? { pr } : {}) };
+          }
+          // It wrote something. Normal flow resumes; a later finish is judged
+          // on its own tree, not on this one.
+          heldCleanAtTurn = null;
         }
       }
 

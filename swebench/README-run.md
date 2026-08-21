@@ -93,7 +93,7 @@ destroyed after every instance.
 | | live (`runAgent`) | durable (`durableAgent`) |
 |---|---|---|
 | stuck detection | ON by default (`agent.ts:220`) | OFF unless the run input carries `recovery` — or `settle`, which implies it (`durable.ts:522`) |
-| clean-tree finish hold | unconditional (`agent.ts:342`) | gated on `input.requireEdit` (`durable.ts:686`) |
+| clean-tree finish hold | unconditional (`agent.ts:342`) | gated on `input.requireEdit`, which `enqueueRun` now sets by default |
 | `maxSteps` default | 20 | 40 — moot, the harness passes it |
 
 So a durable sweep at durable's own defaults differs from the 35/50 baseline in
@@ -104,8 +104,15 @@ three ways at once and its delta would mean nothing. Hence two arms:
   the only variable against 35/50. Answers: *is the durable loop worse?*
 - **`SHIP_DURABLE=product` — product.** Exactly what `enqueueRun`
   (`src/runtime.ts`) bakes into a webhook-launched run: `steer`/`index`/`guard`
-  on, no `recovery`, no `requireEdit`. Answers: *what does a real run score?*
-  It is NOT term-by-term comparable to 35/50.
+  and — since 2026-08-20 — `requireEdit` on, still no `recovery`. Answers:
+  *what does a real run score?* It is NOT term-by-term comparable to 35/50.
+
+  The two arms are therefore now closer than they were: `requireEdit` is no
+  longer a parity-only forcing. `recovery` is the remaining difference, plus
+  the product arm's `steer`/`index`/`guard`. Seam 3 in
+  `durable-run.test.mjs` compares this arm's input against what `enqueueRun`
+  actually writes and fails when they drift — it is what caught the default
+  flip, so trust it over this paragraph.
 
 **Whichever number is published must be named with its arm. Never average them
 and never compare them to each other without saying which is which.**

@@ -1345,6 +1345,74 @@ test("requireEdit: the durable path also holds a finish over an unchanged tree",
   assert.ok(names.includes("turn-5"), "the run continued past the held finish and did real work");
 });
 
+test("a held finish that never produces an edit ends the run instead of grinding to the cap", async () => {
+  // The hold's cost, and the reason it is now affordable. On the 2026-08-20
+  // parity sweep 8 runs took the clean-tree nudge, never attempted another
+  // finish, and ran to the 40-turn cap with a tree that was still clean — the
+  // whole of that arm's ~30% extra wall-clock, spent to publish nothing. A
+  // clean tree publishes nothing whether the run stops at the grace or at the
+  // cap, so the turns in between buy only a hypothetical late edit.
+  const { provider } = await settleProvider();
+  // Reads forever: succeeds every turn, writes nothing, never finishes again.
+  const { model } = reactiveModel([
+    "```bash\necho reading\n```",
+    "```finish\nAlready correct.\n```", // held: verify
+    "```bash\necho verified\n```",
+    "```finish\nStill correct.\n```", // held: clean tree — the grace starts here
+    ...Array.from({ length: 20 }, () => "```bash\necho still reading\n```"),
+  ]);
+  const wf = durableAgent({ model, executor: provider, workdir: "." });
+  const store = new MemoryEventStore();
+  const outcome = await executeRun({
+    workflow: wf,
+    runId: "run-hold-grace",
+    store,
+    input: { task: "fix the off-by-one", requireEdit: true },
+  });
+  const result = outcome.output as { status: string; summary: string; turns: number };
+
+  assert.equal(result.status, "settled", "the run ends on the grace, not on the step cap");
+  // NOT the agent's own words: the clean-tree hold is a rejection, and the loop
+  // clears the held claim on any rejecting hold so a refused judgement cannot
+  // be laundered into the PR body. The harness says what actually happened.
+  assert.match(result.summary, /unchanged tree/, "a refused claim must not become the run's account of itself");
+  assert.doesNotMatch(result.summary, /Already correct/);
+  assert.ok(result.turns < 40, `the run must stop well short of the cap, ended at turn ${result.turns}`);
+  assert.ok(
+    JSON.stringify(await store.load("run-hold-grace")).includes("hold-recheck"),
+    "the grace check is a recorded step, so a replay takes the same branch",
+  );
+});
+
+test("a held finish followed by a real edit is not ended early", async () => {
+  // The other half: the grace must not punish an agent that took the nudge.
+  // Without this, the previous test passes just as well with an exit that fires
+  // on any held finish regardless of what the tree did afterwards.
+  const { provider } = await settleProvider();
+  const { model } = reactiveModel([
+    "```bash\necho reading\n```",
+    "```finish\nAlready correct.\n```", // held: verify
+    "```bash\necho verified\n```",
+    "```finish\nStill correct.\n```", // held: clean tree
+    // Takes the nudge, but only after most of the grace has elapsed.
+    ...Array.from({ length: 7 }, () => "```bash\necho thinking\n```"),
+    "```bash\necho fixed >> fix.py\n```",
+    "```finish\nFixed it.\n```",
+  ]);
+  const wf = durableAgent({ model, executor: provider, workdir: "." });
+  const store = new MemoryEventStore();
+  const outcome = await executeRun({
+    workflow: wf,
+    runId: "run-hold-grace-recovered",
+    store,
+    input: { task: "fix the off-by-one", requireEdit: true },
+  });
+  const result = outcome.output as { status: string; summary: string };
+
+  assert.equal(result.status, "finished", "an agent that did the work still finishes");
+  assert.equal(result.summary, "Fixed it.");
+});
+
 test("requireEdit absent records NO finish-tree step — old logs replay unchanged", async () => {
   // The determinism contract. A worker replaying a log written before this
   // option existed must not meet a step the log does not contain: returning
@@ -1362,10 +1430,12 @@ test("requireEdit absent records NO finish-tree step — old logs replay unchang
   await executeRun({ workflow: wf, runId: "run-no-require-edit", store, input: { task: "do nothing" } });
 
   const events = await store.load("run-no-require-edit");
-  assert.ok(
-    !JSON.stringify(events).includes("finish-tree"),
-    "no finish-tree step may be recorded when requireEdit is absent",
-  );
+  const recorded = JSON.stringify(events);
+  assert.ok(!recorded.includes("finish-tree"), "no finish-tree step may be recorded when requireEdit is absent");
+  // Same contract, the step the hold-grace exit adds. Unreachable here because
+  // the hold that sets heldCleanAtTurn is itself gated, but asserted so the
+  // contract is stated for both steps rather than only the older one.
+  assert.ok(!recorded.includes("hold-recheck"), "no hold-recheck step may be recorded when requireEdit is absent");
 });
 
 /**

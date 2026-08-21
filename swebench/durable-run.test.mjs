@@ -201,7 +201,11 @@ test("the parity arm materializes recovery thresholds and holds a clean-tree fin
 test("the product arm carries the product's enqueue defaults and neither parity forcing", () => {
   const input = durableInput({ task: "t", arm: "product" });
   assert.equal(input.recovery, undefined, "the product does not enable stuck detection by default");
-  assert.equal(input.requireEdit, undefined, "the product does not hold a clean-tree finish by default");
+  // Flipped when enqueueRun made the hold the default: a run that finishes
+  // "fixed" over an unchanged tree opens a PR making a false claim, so the
+  // product carries it and this arm has to as well or it stops being the
+  // product. Seam 3 is what caught the drift when only enqueueRun changed.
+  assert.equal(input.requireEdit, true, "the product holds a clean-tree finish by default");
   assert.deepEqual(
     { steer: input.steer, index: input.index, guard: input.guard },
     { steer: true, index: true, guard: true },

@@ -134,10 +134,12 @@ export function durableInput({ task, arm, settle = false, critic = false, index 
     task,
     ...(recoveryOn ? { recovery: { ...defaultRecoveryConfig } } : {}),
     ...(settleBits.settle === true ? { settle: true } : {}),
-    // Parity only: the live loop holds a finish over an unchanged tree
-    // unconditionally, so leaving this off would make the durable arm strictly
-    // more permissive than the baseline it is being compared to.
-    ...(arm === "parity" ? { requireEdit: true } : {}),
+    // Both arms now. Parity needs it because the live loop holds a finish over
+    // an unchanged tree unconditionally, so leaving it off would make the
+    // durable arm strictly more permissive than the baseline it is compared to.
+    // Product needs it because enqueueRun turned it ON by default — the seam
+    // test below is what caught that this had drifted, which is what it is for.
+    requireEdit: true,
     // The product arm gets exactly what enqueueRun bakes in for a
     // webhook-launched run. steer with no store configured drains empty; guard
     // is inert without a repo. Both still record their steps, which is the
