@@ -317,10 +317,26 @@ new deployment actually has to set.
 | `SHIP_REQUIRE_EDIT` | **on** | Hold a finish declared over an unchanged tree, bounded at two holds, on the **durable** path — the one a webhook launches. On by default since 2026-08-20, because without it a production run can finish "fixed" having written nothing and open a pull request that says so. Set to `0` to turn it off. A run that takes the hold and still has not edited eight turns later ends there rather than running to the step cap. Only newly-enqueued runs are affected: the flag is written into the run input, so anything already enqueued replays exactly as it was recorded. See `docs/MODELS.md` §3. |
 | `SHIP_PREVIEW` | unset | Ask every newly-enqueued run to deploy its branch to a preview environment and link the URL on the pull request. Per-run, and only the request — whether a preview can happen is `SHIP_PREVIEW_DIR` below. |
 | `SHIP_PREVIEW_DIR` | unset | **The switch.** A clone **of the repository being fixed**, on the WORKER host, containing the app's `teploy.yml`. Ship fetches the run's branch into a detached `git worktree` beside it and builds THERE — building in the directory itself would deploy whatever commit it happens to sit on and label it as the fix. Your checkout is never moved and the worktree is always removed. Deploy credentials stay on the worker — they are never placed in the agent's sandbox, which executes model-authored commands. Without this a run that asked for a preview records the step as disabled. |
-| `SHIP_PREVIEW_BIN` | `teploy` | Path to the CLI. Needs a CLI with `teploy build`, released in **v0.1.27**; older binaries can only produce an image by deploying to production, which is exactly what a preview must not do. |
+| `SHIP_PREVIEW_BIN` | `teploy` | Path to the CLI. Needs a CLI with `teploy build`, released in **v0.1.27**; older binaries can only produce an image by deploying to production, which is exactly what a preview must not do. **The container image ships it** (`ARG TEPLOY_VERSION`, checksum-verified at build, both arches) — set this only to point at a different binary. |
 | `SHIP_PREVIEW_TTL` | `24h` | Passed to `teploy preview deploy --ttl`. The CLI prunes expired previews on the next preview deploy for that app. |
 | `SHIP_PREVIEW_DESTINATION` | unset | Destination overlay (`-d staging`), applied to every command so a preview cannot land on the wrong server. |
 | `SHIP_PREVIEW_TIMEOUT_MS` | `900000` | Per-command ceiling. The server-side image build is the slow step. |
+
+**Running a preview from the container image.** The image carries the `teploy`
+binary, so the remaining two things a preview needs are the ones that cannot be
+baked in — mount both into the worker:
+
+```
+-v /srv/app-clone:/srv/app-clone          # SHIP_PREVIEW_DIR: a clone OF THE REPO BEING FIXED,
+                                          #   containing its teploy.yml
+-v /root/.ssh:/home/node/.ssh:ro          # the deploy key and known_hosts
+```
+
+The CLI speaks SSH through Go's `crypto/ssh` rather than shelling out, so
+`openssh-client` is not needed — but it **fails closed** on an unreadable
+`known_hosts`, so that file has to be there and readable by uid 1000 (`node`).
+Deploy credentials stay on the worker and never enter the agent's sandbox,
+which executes model-authored commands.
 | `SHIP_TESTS` | unset | Ask every newly-enqueued run to execute `SHIP_TEST_COMMAND` after the agent stops, and put the result on the pull request. Ship runs it — the agent's own account of its testing is not used. |
 | `SHIP_TEST_COMMAND` | unset | The project's suite, e.g. `pnpm test`. Run in the run's workspace **before** the push, so "tests passed" describes the code that becomes the PR. Without it a run that asked for tests records the step as disabled. |
 | `SHIP_TEST_TIMEOUT_MS` | `900000` | Ceiling. A suite that hits it is reported as **not run**, never as failed — a killed suite did not fail, it never finished. |
