@@ -212,6 +212,33 @@ dashboard's new-run form) work unsandboxed. That is a person choosing to
 trust their own machine. `SHIP_ALLOW_UNSANDBOXED_INTAKE=1` extends that to
 external tasks on a genuinely disposable box.
 
+### Evidence on a `fix` pull request
+
+`teploy-ship fix` runs the live loop with its own inline publish, so for a
+while none of the verification chain was reachable from it: its pull request
+body was the agent's summary and nothing else — the agent's own account of its
+own work, which is the claim the finish gate exists because models get wrong.
+
+It now attaches the same Verification section the worker does, from the same
+code, using the same variables:
+
+| piece | when it runs on `fix` |
+|---|---|
+| tests | `--tests`, or `SHIP_TESTS=1` — plus `SHIP_TEST_COMMAND`. Run before the push, like the worker. |
+| telemetry | whenever the three `OBSERVE_*` variables are set. A read is safe, so configuration is the ask. |
+| preview | **`--preview` or `SHIP_PREVIEW=1` AND `SHIP_PREVIEW_DIR`.** Both, deliberately. |
+
+The preview needs the explicit ask because it is the only one that changes the
+world: it shells the `teploy` CLI with credentials that reach real servers, and
+`fix` typically runs on a laptop where a stale `SHIP_PREVIEW_DIR` should not
+quietly deploy anything.
+
+None of it can fail the run — the fix is pushed and the PR is open before any
+of this starts. And a surface wired for none of it adds *nothing* to the body,
+rather than printing "not deployed, not measured, not tested" on every pull
+request, which would train a reviewer to skip the section that sometimes
+carries the real thing.
+
 The sandbox daemon gives every run its own container with **default-deny
 egress** — an internal bridge with no route out, plus an allowlist proxy
 (package registries + GitHub built in) on the bridge gateway.
@@ -290,7 +317,7 @@ new deployment actually has to set.
 | `SHIP_REQUIRE_EDIT` | **on** | Hold a finish declared over an unchanged tree, bounded at two holds, on the **durable** path — the one a webhook launches. On by default since 2026-08-20, because without it a production run can finish "fixed" having written nothing and open a pull request that says so. Set to `0` to turn it off. A run that takes the hold and still has not edited eight turns later ends there rather than running to the step cap. Only newly-enqueued runs are affected: the flag is written into the run input, so anything already enqueued replays exactly as it was recorded. See `docs/MODELS.md` §3. |
 | `SHIP_PREVIEW` | unset | Ask every newly-enqueued run to deploy its branch to a preview environment and link the URL on the pull request. Per-run, and only the request — whether a preview can happen is `SHIP_PREVIEW_DIR` below. |
 | `SHIP_PREVIEW_DIR` | unset | **The switch.** A clone **of the repository being fixed**, on the WORKER host, containing the app's `teploy.yml`. Ship fetches the run's branch into a detached `git worktree` beside it and builds THERE — building in the directory itself would deploy whatever commit it happens to sit on and label it as the fix. Your checkout is never moved and the worktree is always removed. Deploy credentials stay on the worker — they are never placed in the agent's sandbox, which executes model-authored commands. Without this a run that asked for a preview records the step as disabled. |
-| `SHIP_PREVIEW_BIN` | `teploy` | Path to the CLI. Needs a CLI with `teploy build`, which landed **after v0.1.26** and is unreleased at the time of writing; older binaries can only produce an image by deploying to production, which is exactly what a preview must not do. |
+| `SHIP_PREVIEW_BIN` | `teploy` | Path to the CLI. Needs a CLI with `teploy build`, released in **v0.1.27**; older binaries can only produce an image by deploying to production, which is exactly what a preview must not do. |
 | `SHIP_PREVIEW_TTL` | `24h` | Passed to `teploy preview deploy --ttl`. The CLI prunes expired previews on the next preview deploy for that app. |
 | `SHIP_PREVIEW_DESTINATION` | unset | Destination overlay (`-d staging`), applied to every command so a preview cannot land on the wrong server. |
 | `SHIP_PREVIEW_TIMEOUT_MS` | `900000` | Per-command ceiling. The server-side image build is the slow step. |

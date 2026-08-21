@@ -46,7 +46,7 @@ export const COMMAND_FLAGS: Record<string, FlagSpec> = {
   cancel: {},
   inbox: {},
   fix: {
-    boolean: ["yes", "headless", "critic", "settle"],
+    boolean: ["yes", "headless", "critic", "settle", "tests", "preview", "telemetry"],
     value: [
       "repo",
       "git-token",
