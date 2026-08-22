@@ -46,6 +46,11 @@ The full bring-up — dashboard + worker + Nucleus via one `teploy
 deploy`, webhook wiring, the default-deny sandbox, embeddings, and the
 security model — is in **[docs/DEPLOY.md](docs/DEPLOY.md)**.
 
+Upgrading a running install — including the one hazard specific to Ship, a
+durable run enqueued under old code and replayed under new — is in
+**[docs/UPGRADING.md](docs/UPGRADING.md)**. Read it before deploying a new
+version with runs in flight.
+
 ## Models
 
 Ship is model-agnostic by architecture — two adapter shapes,

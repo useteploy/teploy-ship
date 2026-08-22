@@ -4,6 +4,10 @@ Issues in, pull requests out, on your own box. One `teploy deploy` from
 this repo brings up the dashboard, the worker, and a Nucleus store; the
 optional gateway and sandbox daemon complete the production shape.
 
+> **Upgrading an install that already exists?** See
+> [UPGRADING.md](UPGRADING.md). Migrations are forward-only and a durable run
+> enqueued under old code is replayed under the new one — both have rules.
+
 ## What runs where
 
 | Piece | What | How it deploys |
