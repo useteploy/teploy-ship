@@ -1,7 +1,7 @@
 import { deployPreview, previewTargetFromEnv } from "./deploy.js";
 import { commentOnPr, readPullRequestBody, updatePullRequestBody } from "./git.js";
 import type { RepoRef } from "./git.js";
-import { compareAroundNow, telemetryTargetFromEnv } from "./observe.js";
+import { compareAroundNow, telemetryAppliesTo, telemetryTargetFromEnv } from "./observe.js";
 import { spliceVerification, verificationSection } from "./verification.js";
 import type { Evidence } from "./verification.js";
 import type { parseArgs } from "./args.js";
@@ -41,6 +41,8 @@ export async function attachEvidence(opts: {
   branch: string;
   runId: string;
   evidence: Evidence;
+  /** The repo this fix ran against, for the telemetry repo gate. */
+  repoUrl?: string;
   args: ReturnType<typeof parseArgs>;
   /** Injected in tests; the real calls go through git.ts's default fetch. */
   fetchImpl?: typeof fetch;
@@ -63,7 +65,10 @@ export async function attachEvidence(opts: {
     // the ask. `--telemetry` and SHIP_TELEMETRY remain accepted so the same
     // invocation works against a worker, but neither is required.
     const telemetry = telemetryTargetFromEnv();
-    if (telemetry !== undefined) {
+    // Same repo gate as the durable path: a measurement of a service this run
+    // did not touch is not evidence, it is a misattribution a reviewer will
+    // read as a finding.
+    if (telemetry !== undefined && telemetryAppliesTo(telemetry, opts.repoUrl)) {
       evidence.telemetry = await compareAroundNow(telemetry, new Date()).catch((error) => ({
         kind: "unavailable" as const,
         reason: error instanceof Error ? error.message : String(error),

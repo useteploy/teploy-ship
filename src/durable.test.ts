@@ -1780,6 +1780,46 @@ const RED_ROW = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
+// The live bug, 2026-08-21. A worker configured to watch `fylun-web` reported
+// that service's RED metrics on a pull request that changed one line of Go in
+// an unrelated repo, and the reviewer saw "p95 up 2653ms" under a change that
+// could not have caused it. Real numbers, nonsense attribution — worse than
+// noise, because it reads as a finding.
+test("SEAM: a run on a different repo gets NO telemetry, however well configured", async () => {
+  const fixture = await repoFixture("telemetry-wrong-repo");
+  const observe = scriptedObserve([[RED_ROW()], [RED_ROW({ error_count: 10, p95_ms: 150 })]]);
+  try {
+    const { model } = reactiveModel(["```bash\necho changed >> f.txt\n```", "```finish\nFixed.\n```", ...PROBES]);
+    const wf = durableAgent({
+      model,
+      executor: fixture.provider,
+      workdir: ".",
+      // Fully wired, and pointed at a service built from a DIFFERENT repo.
+      telemetry: { url: "https://o.example.com", token: "tok", service: "api", repo: "someone/other-service", fetch: observe.fetchStub },
+    });
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: wf,
+      runId: "run-telemetry-wrong-repo",
+      store,
+      input: { task: "append to f.txt", repo: fixture.repo, telemetry: true },
+    });
+
+    assert.equal(outcome.status, "completed");
+    // The step is still RECORDED — step presence must stay a function of the
+    // run input, not of how this worker happens to be wired — but it records a
+    // refusal, and it must not have called Observe at all.
+    const names = (await store.load("run-telemetry-wrong-repo")).filter((e) => e.type === "step-completed").map((s) => s.name ?? "");
+    assert.ok(names.includes("telemetry-check"), "the step is input-gated and must still be recorded");
+    assert.equal(observe.calls.length, 0, "a run on another repo must not even read the service");
+
+    const patch = fixture.patches.find((p) => typeof p.body === "string" && /Telemetry/.test(p.body as string));
+    assert.equal(patch, undefined, "no measurement of another service may reach this pull request");
+  } finally {
+    fixture.restore();
+  }
+});
+
 test("SEAM: a telemetry run puts the measured before/after on the pull request", async () => {
   const fixture = await repoFixture("telemetry-on");
   // Window 1 is the "before" read, window 2 the "after".
@@ -1790,7 +1830,7 @@ test("SEAM: a telemetry run puts the measured before/after on the pull request",
       model,
       executor: fixture.provider,
       workdir: ".",
-      telemetry: { url: "https://o.example.com", token: "tok", service: "api", fetch: observe.fetchStub },
+      telemetry: { url: "https://o.example.com", token: "tok", service: "api", repo: "owner/repo", fetch: observe.fetchStub },
     });
     const store = new MemoryEventStore();
     const outcome = await executeRun({
@@ -1830,7 +1870,7 @@ test("thin traffic produces a refusal on the PR, not a flattering number", async
       model,
       executor: fixture.provider,
       workdir: ".",
-      telemetry: { url: "https://o.example.com", token: "tok", service: "api", fetch: observe.fetchStub },
+      telemetry: { url: "https://o.example.com", token: "tok", service: "api", repo: "owner/repo", fetch: observe.fetchStub },
     });
     const store = new MemoryEventStore();
     await executeRun({
@@ -1861,7 +1901,7 @@ test("SEAM: without input.telemetry no telemetry step is recorded", async () => 
       model,
       executor: fixture.provider,
       workdir: ".",
-      telemetry: { url: "https://o.example.com", token: "tok", service: "api", fetch: observe.fetchStub },
+      telemetry: { url: "https://o.example.com", token: "tok", service: "api", repo: "owner/repo", fetch: observe.fetchStub },
     });
     const store = new MemoryEventStore();
     await executeRun({

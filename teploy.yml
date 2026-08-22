@@ -140,6 +140,45 @@ env:
   SHIP_SANDBOX_IMAGE: golang:1.24
   SHIP_SANDBOX_NETWORK: egress
 
+  # --- Evidence on the pull request (P1) ---------------------------------
+  # Each of these only ASKS. Whether the evidence can actually be produced is
+  # the worker's own configuration, and a leg that is not configured records
+  # itself as disabled rather than failing the run. A worker wired for none of
+  # them adds nothing to the PR at all, deliberately: printing "not deployed,
+  # not measured, not tested" on every pull request trains a reviewer to skip
+  # the section that sometimes carries the real thing.
+  #
+  # Ship runs the suite itself, after the agent stops and BEFORE the push, so
+  # "tests passed" describes the code that becomes the PR. The agent's own
+  # account of its testing is exactly the claim the finish gate exists because
+  # models get wrong.
+  #
+  # CAVEAT, and it is a real limitation: SHIP_TEST_COMMAND is ONE command for
+  # every repo this worker serves. That is fine while it serves one, and wrong
+  # the moment it serves two. A per-repo test command belongs in intake config,
+  # not here — not built.
+  SHIP_TESTS: "1"
+  # Matched to SHIP_SANDBOX_IMAGE (golang:1.24) — a command the sandbox cannot
+  # run reports "not run", never "failed", which is correct but useless.
+  SHIP_TEST_COMMAND: "go test ./..."
+
+  # Read the affected service's error rate and latency either side of the
+  # change and put the numbers on the PR. Below OBSERVE_MIN_REQUESTS in either
+  # window it says "not enough data to compare" and shows raw counts instead —
+  # a preview environment serves almost nothing, so that is the common case and
+  # the refusal IS the feature. Where a comparison is reported it is labelled
+  # correlation; nothing claims causation.
+  #
+  # OBSERVE_READ_TOKEN is a share token and is set via `teploy secret set`.
+  SHIP_TELEMETRY: "1"
+  OBSERVE_URL: http://100.108.123.49:3000
+  OBSERVE_SERVICE: fylun-web
+  # The repo that service is built from. Without it the leg is OFF, by design:
+  # on 2026-08-21 a worker watching fylun-web put its RED metrics on a pull
+  # request that changed one line of Go in an unrelated repo, and the reviewer
+  # saw "p95 up 2653ms" under a change that could not have caused it.
+  OBSERVE_REPO: tyler/fylun
+
 # Durable state for the worker's file paths (nucleus mode needs little,
 # but the image declares VOLUME /data).
 volumes:

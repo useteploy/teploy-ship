@@ -25,7 +25,7 @@ import {
   workingDiff,
 } from "./git.js";
 import { deployPreview, type PreviewOutcome, type PreviewTarget } from "./deploy.js";
-import { compareAroundNow, type TelemetryTarget, type TelemetryVerdict } from "./observe.js";
+import { compareAroundNow, telemetryAppliesTo, type TelemetryTarget, type TelemetryVerdict } from "./observe.js";
 import { spliceVerification, verificationSection, type Evidence } from "./verification.js";
 import { runTests, type TestOutcome, type TestTarget } from "./tests.js";
 import { refusalMessage, warningMessage } from "./publish-policy.js";
@@ -1241,6 +1241,19 @@ async function telemetryIfAsked(
   const verdict = await ctx.step("telemetry-check", async (): Promise<TelemetryVerdict> => {
     if (config.telemetry === undefined) {
       return { kind: "disabled", reason: "no telemetry target configured on this worker" };
+    }
+    // The service this worker watches has to be the one this run touched.
+    // Proven necessary by a live run on 2026-08-21: a worker set to watch
+    // `fylun-web` reported its RED metrics on a pull request that changed one
+    // line of Go in an unrelated repo, and the reviewer saw "p95 up 2653ms"
+    // under a change that could not have caused it. Real numbers, nonsense
+    // attribution — which reads as a finding rather than as noise, and is
+    // therefore worse than saying nothing.
+    if (!telemetryAppliesTo(config.telemetry, input.repo)) {
+      return {
+        kind: "disabled",
+        reason: `this run is not on ${config.telemetry.repo}, which is the repo OBSERVE_SERVICE=${config.telemetry.service} is built from`,
+      };
     }
     try {
       return await compareAroundNow(config.telemetry, new Date());

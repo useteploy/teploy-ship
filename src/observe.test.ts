@@ -58,6 +58,7 @@ import {
   MIN_REQUESTS_FOR_A_VERDICT,
   compareAroundNow,
   compareHealth,
+  telemetryAppliesTo,
   readServiceHealth,
   telemetryComment,
   telemetryTargetFromEnv,
@@ -90,6 +91,7 @@ test("a read is authenticated by share token, scoped to one service, and asks a 
     url: "https://observe.example.com",
     token: "tok-123",
     service: "api",
+    repo: "o/api",
     fetch: fetchStub(200, [
       { service_name: "web", request_count: 5, error_count: 5 },
       { service_name: "api", request_count: 200, error_count: 4, p50_ms: 30, p95_ms: 110, p99_ms: 250, apdex_score: 0.97 },
@@ -118,7 +120,7 @@ test("a read is authenticated by share token, scoped to one service, and asks a 
 });
 
 test("a telemetry read never throws and never invents a number", async () => {
-  const base = { url: "https://o.example.com", token: "t", service: "api" };
+  const base = { url: "https://o.example.com", token: "t", service: "api", repo: "o/api" };
   // Service absent from the window is a real answer, not a zero-error service.
   assert.deepEqual(
     await readServiceHealth({ ...base, fetch: fetchStub(200, [{ service_name: "other" }]) }, new Date(), new Date()),
@@ -137,8 +139,41 @@ test("a telemetry read never throws and never invents a number", async () => {
 // service with no traffic produced the SAME pull-request line, "no telemetry
 // for this service in either window". An operator reads that as a fact about
 // the deploy when it is a fact about their credential.
+// Found by running the real thing: a worker configured to watch `fylun-web`
+// put that service's RED metrics on a pull request that changed one line of Go
+// in an unrelated repo. The numbers were real and the attribution was nonsense
+// — the reviewer saw "p95 up 2653ms" under a change that could not have caused
+// it. minRequests guards against too LITTLE data; nothing guarded against data
+// about the wrong thing, which is worse, because it reads as a finding.
+test("telemetry only applies to the repo its service is built from", () => {
+  const target = { url: "https://o.example.com", token: "t", service: "fylun-web", repo: "tyler/fylun-web" };
+
+  assert.equal(telemetryAppliesTo(target, "tyler/fylun-web"), true);
+  // Same repo, different URL shapes — all of these are the configured repo.
+  assert.equal(telemetryAppliesTo(target, "https://git.example.com/tyler/fylun-web.git"), true);
+  assert.equal(telemetryAppliesTo(target, "git@git.example.com:tyler/fylun-web"), true);
+  assert.equal(telemetryAppliesTo(target, "HTTPS://GIT.EXAMPLE.COM/Tyler/Fylun-Web/"), true);
+
+  // The live mistake.
+  assert.equal(telemetryAppliesTo(target, "http://forge/Tyler/ship-e2e-20260821"), false);
+  // A same-named repo under a different owner is a different repo.
+  assert.equal(telemetryAppliesTo(target, "https://git.example.com/someoneelse/fylun-web"), false);
+  // A run with no repo at all cannot be about this service.
+  assert.equal(telemetryAppliesTo(target, undefined), false);
+  assert.equal(telemetryAppliesTo(target, ""), false);
+  // Unparseable answers false: a comparison that cannot be made is not a match.
+  assert.equal(telemetryAppliesTo(target, "fylun-web"), false);
+});
+
+test("no OBSERVE_REPO means no telemetry target at all", () => {
+  const base = { OBSERVE_URL: "https://o.example.com", OBSERVE_READ_TOKEN: "t", OBSERVE_SERVICE: "api" };
+  assert.equal(telemetryTargetFromEnv(base as NodeJS.ProcessEnv), undefined, "without a repo the leg cannot know what it is measuring");
+  const withRepo = telemetryTargetFromEnv({ ...base, OBSERVE_REPO: "o/api" } as NodeJS.ProcessEnv);
+  assert.equal(withRepo?.repo, "o/api");
+});
+
 test("a refused read is reported as a wiring fault, not as an empty window", async () => {
-  const base = { url: "https://o.example.com", token: "revoked", service: "api", windowMinutes: 30 };
+  const base = { url: "https://o.example.com", token: "revoked", service: "api", repo: "o/api", windowMinutes: 30 };
   const verdict = await compareAroundNow({ ...base, fetch: fetchStub(401, {}) }, new Date("2026-08-21T00:00:00Z"));
   assert.equal(verdict.kind, "unavailable");
   assert.match(verdict.reason ?? "", /401/);
@@ -197,17 +232,20 @@ test("an insufficient verdict says so plainly instead of implying a result", () 
   assert.match(telemetryComment({ kind: "unavailable", reason: "no telemetry for this service in either window" }, "r"), /No measurement/);
 });
 
-test("a worker reads telemetry only with all three of url, token and service", () => {
+test("a worker reads telemetry only with all four of url, token, service and repo", () => {
+  const full = { OBSERVE_URL: "https://o/", OBSERVE_READ_TOKEN: "t", OBSERVE_SERVICE: "api", OBSERVE_REPO: "o/api" };
   assert.equal(telemetryTargetFromEnv({}), undefined);
   assert.equal(telemetryTargetFromEnv({ OBSERVE_URL: "https://o", OBSERVE_READ_TOKEN: "t" }), undefined, "without a service name there is nothing to look up");
   assert.equal(telemetryTargetFromEnv({ OBSERVE_URL: "https://o", OBSERVE_SERVICE: "api" }), undefined, "the ingest key must not be reused as a read credential");
-  assert.deepEqual(telemetryTargetFromEnv({ OBSERVE_URL: "https://o/", OBSERVE_READ_TOKEN: "t", OBSERVE_SERVICE: "api" }), {
-    url: "https://o",
-    token: "t",
-    service: "api",
-  });
+  // The fourth is new, and is the one a live run proved necessary.
+  assert.equal(
+    telemetryTargetFromEnv({ OBSERVE_URL: "https://o", OBSERVE_READ_TOKEN: "t", OBSERVE_SERVICE: "api" }),
+    undefined,
+    "without a repo the leg cannot tell whether the service has anything to do with the run",
+  );
+  assert.deepEqual(telemetryTargetFromEnv(full), { url: "https://o", token: "t", service: "api", repo: "o/api" });
   assert.deepEqual(
-    telemetryTargetFromEnv({ OBSERVE_URL: "https://o", OBSERVE_READ_TOKEN: "t", OBSERVE_SERVICE: "api", OBSERVE_MIN_REQUESTS: "500" }),
-    { url: "https://o", token: "t", service: "api", minRequests: 500 },
+    telemetryTargetFromEnv({ ...full, OBSERVE_MIN_REQUESTS: "500" }),
+    { url: "https://o", token: "t", service: "api", repo: "o/api", minRequests: 500 },
   );
 });

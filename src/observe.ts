@@ -104,6 +104,20 @@ export interface TelemetryTarget {
   /** The service name as it appears in traces. */
   service: string;
   /**
+   * The repository that service is built from.
+   *
+   * Required, and the reason is a live mistake: a worker configured with one
+   * `OBSERVE_SERVICE` reported that service's RED metrics on a pull request
+   * that changed one line of Go in a completely unrelated repo. The numbers
+   * were real and the attribution was nonsense — the reviewer saw "p95 up
+   * 2653ms" under a one-line change that could not have caused it.
+   *
+   * The floor below (`minRequests`) guards against too LITTLE data. Nothing
+   * guarded against data about the wrong thing, which is worse: it is not
+   * noise, it reads as a finding.
+   */
+  repo: string;
+  /**
    * Below this many requests a window says nothing, and a "verdict" off it
    * would be noise dressed as evidence. Both windows must clear it.
    */
@@ -120,13 +134,19 @@ export function telemetryTargetFromEnv(env: NodeJS.ProcessEnv = process.env): Te
   const url = (env.OBSERVE_URL ?? "").replace(/\/+$/, "");
   const token = (env.OBSERVE_READ_TOKEN ?? "").trim();
   const service = (env.OBSERVE_SERVICE ?? "").trim();
-  if (url === "" || token === "" || service === "") return undefined;
+  // No OBSERVE_REPO means no telemetry, deliberately. See TelemetryTarget.repo:
+  // without it the leg cannot tell whether the service it reads has anything to
+  // do with the run it is reporting on, and a confident measurement of the
+  // wrong service is worse than silence.
+  const repo = (env.OBSERVE_REPO ?? "").trim();
+  if (url === "" || token === "" || service === "" || repo === "") return undefined;
   const min = Number(env.OBSERVE_MIN_REQUESTS);
   const win = Number(env.OBSERVE_WINDOW_MINUTES);
   return {
     url,
     token,
     service,
+    repo,
     ...(Number.isFinite(min) && min > 0 ? { minRequests: min } : {}),
     ...(Number.isFinite(win) && win > 0 ? { windowMinutes: win } : {}),
   };
@@ -228,6 +248,26 @@ export type TelemetryVerdict =
   | { kind: "compared"; before: ServiceHealth; after: ServiceHealth; errorRateDelta: number; p95Delta: number }
   | { kind: "insufficient"; reason: string; before: ServiceHealth | null; after: ServiceHealth | null }
   | { kind: "unavailable"; reason: string };
+
+/**
+ * Is this run's repo the one the configured service is built from?
+ *
+ * Compared on owner/name rather than on the URL, so an https clone URL, an
+ * ssh one and a bare slug all agree. Anything unparseable answers false: a
+ * comparison that cannot be made is not a match.
+ */
+export function telemetryAppliesTo(target: TelemetryTarget, runRepo: string | undefined): boolean {
+  if (runRepo === undefined || runRepo.trim() === "") return false;
+  const slug = (s: string): string | null => {
+    const cleaned = s.trim().toLowerCase().replace(/\.git$/, "").replace(/\/+$/, "");
+    const parts = cleaned.split(/[/:]/).filter((x) => x !== "");
+    if (parts.length < 2) return null;
+    return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
+  };
+  const a = slug(target.repo);
+  const b = slug(runRepo);
+  return a !== null && b !== null && a === b;
+}
 
 /** Default floor: below this a window is noise, not a measurement. */
 export const MIN_REQUESTS_FOR_A_VERDICT = 20;
