@@ -41,6 +41,7 @@ export const COMMAND_FLAGS: Record<string, FlagSpec> = {
   },
   runs: {},
   explain: { boolean: ["json"], value: ["store", "nucleus-url"] },
+  audit: { value: ["format", "since", "until", "store", "nucleus-url"] },
   enqueue: { boolean: ["json", "plan", "critic", "settle"], value: ["repo", "model", "store", "nucleus-url"] },
   resume: { value: ["model", "sandbox", "sandbox-token", "sandbox-image", "sandbox-network", "max-steps"] },
   approve: { boolean: ["handoff"], value: ["model", "sandbox", "sandbox-token", "sandbox-image", "sandbox-network"] },

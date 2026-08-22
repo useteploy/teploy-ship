@@ -19,6 +19,7 @@ import type { RunOutcome } from "@neutron-build/workflow";
 
 import { ArgError, COMMAND_FLAGS, enumFlag, numberFlag, parseArgs } from "./args.js";
 import { explainRun } from "./explain.js";
+import { auditRow, toCsv, withinWindow } from "./audit.js";
 import type { NumberRange } from "./args.js";
 import { commitAndPush, fixPrompt, openPullRequest, setupRepo } from "./git.js";
 import { runTests, testTargetFromEnv } from "./tests.js";
@@ -70,6 +71,9 @@ Usage:
   teploy-ship enqueue "<task>"        hand a task to a worker (the issue -> PR flow)
       [--repo <url>]                  the repository to work in
       [--model …] [--plan] [--critic] [--settle] [--json]
+  teploy-ship audit                   export the run history (what ran, cost, PRs)
+      [--format csv|json] [--since <iso>] [--until <iso>]
+      NOTE: Ship records no actor, so this cannot say WHO authorised a run.
   teploy-ship runs                    list durable runs
   teploy-ship explain <run-id>        why a run ended the way it did, and what to do
       [--json]                        the same, as an object
@@ -910,6 +914,45 @@ async function enqueueCommand(rest: string[]): Promise<void> {
   process.stderr.write(`  teploy-ship runs\n  teploy-ship explain ${runId}\n`);
 }
 
+/**
+ * Export the run history as something outside this machine can read.
+ *
+ * The durable event log has always recorded everything, which is why Ship gets
+ * described as having an audit trail. It did not have one: a record you cannot
+ * show anyone is not an audit trail, and the only way to answer "what has this
+ * agent done to our repositories" was to read hundreds of events per run out of
+ * the store.
+ *
+ * Read `src/audit.ts` before relying on the output. Ship records **no actor**
+ * — not for enqueue, not for approval — so this answers what ran, when, at what
+ * cost and what it published, and cannot answer who authorised it. Every row
+ * carries `attributable: false` so that is impossible to miss.
+ */
+async function auditCommand(rest: string[]): Promise<void> {
+  const args = parseArgs(rest);
+  const format = enumFlag(args.flags.format, "format", ["csv", "json"] as const, "csv");
+  const since = args.flags.since as string | undefined;
+  const until = args.flags.until as string | undefined;
+  for (const [name, value] of [["since", since], ["until", until]] as const) {
+    if (value !== undefined && Number.isNaN(Date.parse(value))) fail(`--${name} must be an ISO-8601 timestamp, got: ${value}`);
+  }
+
+  const runtime = await makeRuntime(args, loadConfig());
+  try {
+    const metas = await runtime.listMeta();
+    const rows = [];
+    for (const meta of metas) {
+      rows.push(auditRow(meta, await runtime.store.load(meta.runId)));
+    }
+    const windowed = withinWindow(rows, since, until);
+    process.stdout.write(format === "json" ? `${JSON.stringify(windowed, null, 2)}\n` : toCsv(windowed));
+    if (windowed.length === 0) process.stderr.write(dim("no runs in that window\n"));
+    else process.stderr.write(dim(`${windowed.length} run${windowed.length === 1 ? "" : "s"} — no actor attribution; see docs/DEPLOY.md\n`));
+  } finally {
+    await runtime.close();
+  }
+}
+
 async function runsCommand(rest: string[]): Promise<void> {
   const runtime = await makeRuntime(parseArgs(rest), loadConfig());
   const metas = await runtime.listMeta();
@@ -1243,6 +1286,8 @@ async function main(): Promise<void> {
       return explainCommand(rest);
     case "enqueue":
       return enqueueCommand(rest);
+    case "audit":
+      return auditCommand(rest);
     case "resume":
       return resumeCommand(rest);
     case "approve":

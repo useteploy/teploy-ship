@@ -157,7 +157,7 @@ test("enqueue and explain are real commands, not just usage text", async () => {
   // present only in the usage banner is the exact shape of this repo's house
   // failure mode — correct on both ends, unwired in between.
   const { COMMAND_FLAGS } = await import("./args.js");
-  for (const command of ["enqueue", "explain"]) {
+  for (const command of ["enqueue", "explain", "audit"]) {
     assert.ok(command in COMMAND_FLAGS, `${command} has no flag definition, so parseArgs would reject its flags`);
   }
   assert.ok(COMMAND_FLAGS.enqueue?.value?.includes("repo"), "enqueue must accept --repo or the flow it exists for is unreachable");
@@ -166,4 +166,5 @@ test("enqueue and explain are real commands, not just usage text", async () => {
   const cli = await import("node:fs/promises").then((fs) => fs.readFile(new URL("../src/cli.ts", import.meta.url), "utf8"));
   assert.match(cli, /case "enqueue":\s*\n\s*return enqueueCommand\(rest\);/, "enqueue is not dispatched");
   assert.match(cli, /case "explain":\s*\n\s*return explainCommand\(rest\);/, "explain is not dispatched");
+  assert.match(cli, /case "audit":\s*\n\s*return auditCommand\(rest\);/, "audit is not dispatched");
 });

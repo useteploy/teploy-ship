@@ -219,6 +219,30 @@ dashboard's new-run form) work unsandboxed. That is a person choosing to
 trust their own machine. `SHIP_ALLOW_UNSANDBOXED_INTAKE=1` extends that to
 external tasks on a genuinely disposable box.
 
+### The audit trail, and what it cannot tell you
+
+`teploy-ship audit` exports the run history as CSV or JSON — what ran, when,
+from which intake source, on which worker, against which repository, what it
+cost, and what pull request it opened.
+
+```sh
+teploy-ship audit --since 2026-08-01T00:00:00Z --format csv > runs.csv
+```
+
+**It cannot say who authorised anything.** Ship records no actor: a run does
+not carry who enqueued it and an approval does not carry who granted it —
+`RunMeta` has `source` (which intake *channel*) and `ranOn` (which host), and
+no user field at all. Every exported row therefore carries
+`attributable: false`, stated in the data rather than left in a footnote.
+
+For an internal operator record that is enough. **For a compliance artefact it
+is not**, and actor attribution is the prerequisite for that, not a refinement
+of this export. Do not hand this file to an auditor as an answer to "who
+approved this change".
+
+Retention is your storage's, not Ship's: the export reads the same durable
+event logs the runs are made of, and nothing prunes them.
+
 ### Evidence on a `fix` pull request
 
 `teploy-ship fix` runs the live loop with its own inline publish, so for a

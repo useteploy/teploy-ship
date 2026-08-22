@@ -63,7 +63,7 @@ test("enum flags validate instead of casting", () => {
 });
 
 test("every command in the usage table has a schema", () => {
-  for (const command of ["run", "runs", "explain", "enqueue", "resume", "approve", "deny", "cancel", "inbox", "fix", "worker", "web", "eval"]) {
+  for (const command of ["run", "runs", "explain", "enqueue", "audit", "resume", "approve", "deny", "cancel", "inbox", "fix", "worker", "web", "eval"]) {
     assert.ok(COMMAND_FLAGS[command] !== undefined, `${command} needs a flag schema`);
   }
 });
