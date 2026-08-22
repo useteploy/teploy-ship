@@ -74,11 +74,21 @@ accessories:
   nucleus:
     # PINNED, not :latest. Nucleus publishes :latest on every push to main, so a
     # redeploy would silently adopt whatever landed since — and a storage engine
-    # is the last thing that should change underneath you unannounced. v0.1.5 is
-    # the build carrying the 2026-08-03 KV/LSM memory rework (the fix for the
-    # write-reject-under-memory-pressure outage) and is the exact digest running
-    # on infra-home. Bump deliberately, after that instance has proven a release.
-    image: ghcr.io/neutron-build/nucleus:v0.1.5
+    # is the last thing that should change underneath you unannounced.
+    #
+    # v0.1.8 (2026-08-21) supersedes v0.1.5. It keeps the 2026-08-03 KV/LSM
+    # memory rework that fixed the write-reject-under-memory-pressure outage,
+    # and adds the run of durability fixes released in 0.1.7/0.1.8 — several
+    # acked-but-unfsynced writes, three confirmed CRITICALs, and streaming
+    # routes that bypassed column masking and the SELECT grant.
+    #
+    # The concrete reason to move off v0.1.5: it cannot bootstrap a fresh
+    # Observe schema. Migration 28 fails with `events_pre028 not found in
+    # storage`, so a new install or a restore that replays the schema cannot
+    # come up. Verified on 2026-08-21 that Observe's suite passes against
+    # v0.1.8 (34 packages) and fails three of them against v0.1.5.
+    # Bump deliberately, after an instance has proven a release.
+    image: ghcr.io/neutron-build/nucleus:v0.1.8
     port: 5432
     # Hard cgroup cap. NUCLEUS_MAX_MEMORY_MB below is the engine's own
     # accounting and is advisory — it was set to 16 GB on the day this engine
