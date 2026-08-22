@@ -145,3 +145,25 @@ test("the plain-text rendering keeps every field a reader needs", () => {
   assert.match(text, /Next:/);
   assert.match(text, /fix the parser/);
 });
+
+// --- the CLI seam -----------------------------------------------------------
+
+test("enqueue and explain are real commands, not just usage text", async () => {
+  // The product's headline flow is issue -> worker -> pull request, and until
+  // `enqueue` existed the only ways to start one were the dashboard form and a
+  // webhook: `run --durable` executes in-process and took no repo, and `fix`
+  // uses the live loop. The documented flow could not be started from the CLI
+  // at all. This pins that both new verbs are dispatched, because a command
+  // present only in the usage banner is the exact shape of this repo's house
+  // failure mode — correct on both ends, unwired in between.
+  const { COMMAND_FLAGS } = await import("./args.js");
+  for (const command of ["enqueue", "explain"]) {
+    assert.ok(command in COMMAND_FLAGS, `${command} has no flag definition, so parseArgs would reject its flags`);
+  }
+  assert.ok(COMMAND_FLAGS.enqueue?.value?.includes("repo"), "enqueue must accept --repo or the flow it exists for is unreachable");
+  assert.ok(COMMAND_FLAGS.explain?.boolean?.includes("json"));
+
+  const cli = await import("node:fs/promises").then((fs) => fs.readFile(new URL("../src/cli.ts", import.meta.url), "utf8"));
+  assert.match(cli, /case "enqueue":\s*\n\s*return enqueueCommand\(rest\);/, "enqueue is not dispatched");
+  assert.match(cli, /case "explain":\s*\n\s*return explainCommand\(rest\);/, "explain is not dispatched");
+});

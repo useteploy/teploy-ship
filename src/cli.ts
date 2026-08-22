@@ -38,7 +38,7 @@ import { formatReport, runEval } from "./eval.js";
 import type { EvalTask } from "./eval.js";
 import { stateDir } from "./run-store.js";
 import { buildFeed } from "./inbox.js";
-import { fileRuntime, nucleusRuntime } from "./runtime.js";
+import { enqueueRun, fileRuntime, nucleusRuntime } from "./runtime.js";
 import type { NucleusShipRuntime, ShipRuntime } from "./runtime.js";
 import { NucleusCodeIndex } from "./code-index.js";
 import type { CodeSearch } from "./code-index.js";
@@ -67,6 +67,9 @@ Usage:
                      add --settle for stuck detection + the deliberate stop
                      (off by default on durable runs; SHIP_RECOVERY/SHIP_SETTLE
                      turn it on for worker- and dashboard-enqueued runs)
+  teploy-ship enqueue "<task>"        hand a task to a worker (the issue -> PR flow)
+      [--repo <url>]                  the repository to work in
+      [--model …] [--plan] [--critic] [--settle] [--json]
   teploy-ship runs                    list durable runs
   teploy-ship explain <run-id>        why a run ended the way it did, and what to do
       [--json]                        the same, as an object
@@ -846,6 +849,67 @@ async function explainCommand(rest: string[]): Promise<void> {
   }
 }
 
+/**
+ * Hand a task to a worker instead of running it here.
+ *
+ * The product's headline flow is issue -> worker -> pull request, and until now
+ * the only ways to start one were the dashboard's form and an intake webhook:
+ * `run --durable` executes in-process and takes no repo, and `fix` uses the
+ * live loop with its own inline publish. So the flow the documentation leads
+ * with could not be started from the CLI at all, which is a poor first ten
+ * minutes for anyone self-hosting.
+ *
+ * The repo is checked against the same allowlist `fix` uses. An operator typed
+ * this URL, so it is trusted as `operator` — but `assertRepoAllowed` still
+ * binds when an allowlist is configured, and `credentialFor` will not hand a
+ * token to an origin outside it either way.
+ */
+async function enqueueCommand(rest: string[]): Promise<void> {
+  const config = loadConfig();
+  const args = parseArgs(rest);
+  const task = args.positional[0];
+  if (task === undefined || task === "") fail('a task is required: teploy-ship enqueue "fix the failing test" --repo <url>');
+
+  const repoUrl = args.flags.repo as string | undefined;
+  if (repoUrl !== undefined) {
+    const policy: RepoPolicyConfig = {
+      ...policyFromEnv(),
+      ...(config.gitToken !== undefined ? { gitToken: config.gitToken } : {}),
+      ...(config.githubToken !== undefined ? { githubToken: config.githubToken } : {}),
+    };
+    try {
+      assertRepoAllowed(repoUrl, { trust: "operator", config: policy });
+    } catch (error) {
+      fail(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  const runtime = await makeRuntime(args, config);
+  const runId = `run-${randomUUID().slice(0, 8)}`;
+  try {
+    await enqueueRun(runtime, {
+      runId,
+      task,
+      model: (args.flags.model as string) ?? config.model ?? "anthropic/claude-sonnet-5",
+      source: "manual",
+      ...(repoUrl !== undefined ? { repo: repoUrl, trust: "operator" as const } : {}),
+      ...(args.flags.plan === true ? { plan: true } : {}),
+      ...(args.flags.critic === true ? { critic: true } : {}),
+      ...(args.flags.settle === true ? { settle: true } : {}),
+    });
+  } finally {
+    await runtime.close();
+  }
+
+  if (args.flags.json === true) {
+    process.stdout.write(`${JSON.stringify({ runId, task, repo: repoUrl ?? null })}\n`);
+    return;
+  }
+  process.stderr.write(`${green("queued")} ${bold(runId)}\n`);
+  process.stderr.write(`${dim("A worker picks it up on its next tick. Watch it with:")}\n`);
+  process.stderr.write(`  teploy-ship runs\n  teploy-ship explain ${runId}\n`);
+}
+
 async function runsCommand(rest: string[]): Promise<void> {
   const runtime = await makeRuntime(parseArgs(rest), loadConfig());
   const metas = await runtime.listMeta();
@@ -1177,6 +1241,8 @@ async function main(): Promise<void> {
       return runsCommand(rest);
     case "explain":
       return explainCommand(rest);
+    case "enqueue":
+      return enqueueCommand(rest);
     case "resume":
       return resumeCommand(rest);
     case "approve":
