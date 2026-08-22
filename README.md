@@ -42,6 +42,10 @@ TTLs too. Config defaults live in `~/.config/teploy-ship/config.json`
 
 ## Self-hosting
 
+**First time? [docs/QUICKSTART.md](docs/QUICKSTART.md)** — nothing to a pull
+request that carries its test result, in about ten minutes, skipping everything
+you do not need to see the loop work.
+
 The full bring-up — dashboard + worker + Nucleus via one `teploy
 deploy`, webhook wiring, the default-deny sandbox, embeddings, and the
 security model — is in **[docs/DEPLOY.md](docs/DEPLOY.md)**.
