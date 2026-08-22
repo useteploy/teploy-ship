@@ -18,6 +18,7 @@ import { cancelRun, deliverEvent } from "@neutron-build/workflow";
 import type { RunOutcome } from "@neutron-build/workflow";
 
 import { ArgError, COMMAND_FLAGS, enumFlag, numberFlag, parseArgs } from "./args.js";
+import { explainRun } from "./explain.js";
 import type { NumberRange } from "./args.js";
 import { commitAndPush, fixPrompt, openPullRequest, setupRepo } from "./git.js";
 import { runTests, testTargetFromEnv } from "./tests.js";
@@ -67,6 +68,8 @@ Usage:
                      (off by default on durable runs; SHIP_RECOVERY/SHIP_SETTLE
                      turn it on for worker- and dashboard-enqueued runs)
   teploy-ship runs                    list durable runs
+  teploy-ship explain <run-id>        why a run ended the way it did, and what to do
+      [--json]                        the same, as an object
   teploy-ship resume <run-id>         continue a durable run (after a crash or park)
   teploy-ship approve <run-id>        approve a parked action and continue
       [--handoff]                     deliver the decision, let a worker finish the run
@@ -812,6 +815,37 @@ async function cancelCommand(rest: string[]): Promise<void> {
   process.exit(0);
 }
 
+/**
+ * Explain one run in operator terms.
+ *
+ * `runs` answers "what is there"; the run detail page answers "what happened,
+ * in 300 events". Neither answers "what do I do about it", which is the only
+ * question anyone actually has about a run that did not finish. Derived from
+ * the log alone, so it works when nothing else does.
+ */
+async function explainCommand(rest: string[]): Promise<void> {
+  const args = parseArgs(rest);
+  const runId = args.positional[0];
+  if (runId === undefined || runId === "") fail("a run id is required: teploy-ship explain <run-id>");
+  const runtime = await makeRuntime(args, loadConfig());
+  try {
+    const events = await runtime.store.load(runId);
+    const explanation = explainRun(events);
+    if (args.flags.json === true) {
+      process.stdout.write(`${JSON.stringify(explanation, null, 2)}\n`);
+      return;
+    }
+    const colour = explanation.needsAttention ? yellow : green;
+    process.stdout.write(`${colour(explanation.headline)}\n\n`);
+    process.stdout.write(`${dim("Asked to:  ")} ${explanation.tried}\n`);
+    process.stdout.write(`${dim("Stopped at:")} ${explanation.stoppedAt}\n`);
+    process.stdout.write(`${dim("Next:      ")} ${explanation.nextStep}\n`);
+    if (explanation.evidence.length > 0) process.stdout.write(`\n${dim(explanation.evidence.join("  ·  "))}\n`);
+  } finally {
+    await runtime.close();
+  }
+}
+
 async function runsCommand(rest: string[]): Promise<void> {
   const runtime = await makeRuntime(parseArgs(rest), loadConfig());
   const metas = await runtime.listMeta();
@@ -1141,6 +1175,8 @@ async function main(): Promise<void> {
       return runCommand(rest);
     case "runs":
       return runsCommand(rest);
+    case "explain":
+      return explainCommand(rest);
     case "resume":
       return resumeCommand(rest);
     case "approve":

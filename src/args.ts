@@ -40,6 +40,7 @@ export const COMMAND_FLAGS: Record<string, FlagSpec> = {
     value: ["model", "sandbox", "sandbox-token", "sandbox-image", "sandbox-network", "max-steps"],
   },
   runs: {},
+  explain: { boolean: ["json"], value: ["store", "nucleus-url"] },
   resume: { value: ["model", "sandbox", "sandbox-token", "sandbox-image", "sandbox-network", "max-steps"] },
   approve: { boolean: ["handoff"], value: ["model", "sandbox", "sandbox-token", "sandbox-image", "sandbox-network"] },
   deny: { boolean: ["handoff"], value: ["model", "sandbox", "sandbox-token", "sandbox-image", "sandbox-network"] },
