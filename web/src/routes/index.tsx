@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 
 import { deliverEvent } from "@neutron-build/workflow";
-import { enqueueRun } from "teploy-ship/runtime";
+import { enqueueRun, actorFromPrincipal, intakeActor } from "teploy-ship/runtime";
 import type { RunMeta } from "teploy-ship/runtime";
 import type { IntakeTask } from "teploy-ship/runtime";
 
 import { defaultModel, shipRuntime } from "../lib/store.server.js";
+import { currentUser } from "../lib/session.server.js";
 
 export const config = { mode: "app" };
 
@@ -32,6 +33,10 @@ export async function action({ request }: { request: Request }): Promise<Respons
   const form = await request.formData();
   const intent = String(form.get("intent") ?? "new-run");
   const runtime = await shipRuntime();
+  // _layout.tsx has already gated the request by role; this only names the
+  // person it let through. Never null in practice for a mutation, but an
+  // unattributable run is legal (see actor.ts) rather than a 500.
+  const me = await currentUser(request);
 
   // Approve / deny a parked run — deliver the decision event, flag the run
   // due, and let the resident worker carry it. (Mirrors runs/[id].tsx; the
@@ -45,7 +50,10 @@ export async function action({ request }: { request: Request }): Promise<Respons
     if (reviewed === "") return redirect("/");
     if (!(await runtime.claimDecision(runId, reviewed))) return redirect("/?decision=taken");
     try {
-      await deliverEvent(runtime.store, runId, reviewed, { approved: intent === "approve" });
+      await deliverEvent(runtime.store, runId, reviewed, {
+        approved: intent === "approve",
+        ...(me !== null ? { by: actorFromPrincipal(me).id } : {}),
+      });
     } catch (error) {
       await runtime.releaseDecision(runId, reviewed).catch(() => {});
       throw error;
@@ -73,6 +81,13 @@ export async function action({ request }: { request: Request }): Promise<Respons
         task: task.pr !== undefined ? (task.detail ?? task.title) : task.detail !== undefined ? `${task.title}\n\n${task.detail}` : task.title,
         model: defaultModel(),
         source: task.source,
+        // Whoever the payload named, not whoever clicked launch. The clicker
+        // authorised it; the requester asked for it, and an audit reader wants
+        // the second. A manual task nobody signed falls back to the operator.
+        actor:
+          task.requestedBy !== undefined
+            ? intakeActor(task.requestedBy, task.source)
+            : actorFromPrincipal(me),
         // A launch click approves running the task, not the origin it names:
         // the repo came from a webhook or chat payload either way.
         trust: task.source === "manual" ? "operator" : "external",
@@ -97,6 +112,7 @@ export async function action({ request }: { request: Request }): Promise<Respons
     task,
     model: defaultModel(),
     source: "manual",
+    actor: actorFromPrincipal(me),
     // An authenticated editor typed this URL into the form.
     trust: "operator",
     ...(repo !== "" ? { repo } : {}),

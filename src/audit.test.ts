@@ -43,11 +43,66 @@ test("a row carries what an auditor asks about", () => {
 // (which intake channel) and `ranOn` (which host) and no user field at all, so
 // no row can say who authorised anything. If that is ever silently dropped,
 // someone will hand this file to an auditor as if it answered the question.
-test("every row states that it cannot attribute an action to a person", () => {
+test("a run with no actor is reported unattributable rather than blank", () => {
+  // Runs enqueued before attribution existed carry no actor at all. The row
+  // must say so in the column a reader filters on, not merely leave a gap.
   const row = auditRow(meta(), [ev("run-started", undefined, { input: { task: "t" } })]);
   assert.equal(row.attributable, false);
-  assert.ok(!("user" in row) && !("approvedBy" in row), "adding an actor field means revisiting attributable, not just the schema");
+  assert.equal(row.actor, "");
+  assert.equal(row.actorKind, "unknown");
   assert.match(toCsv([row]), /attributable/, "the CSV header must carry the caveat, not just the type");
+});
+
+test("a run with an actor is attributable, and the KIND rides along with the name", () => {
+  const row = auditRow(
+    meta({ actor: "https://idp#sub-42", actorKind: "user" }),
+    [ev("run-started", undefined, { input: { task: "t" } })],
+  );
+  assert.equal(row.attributable, true);
+  assert.equal(row.actor, "https://idp#sub-42");
+  // Exported next to the name on purpose: an authenticated session and a
+  // handle a webhook asserted are worth different amounts to an auditor, and
+  // without this column they would be indistinguishable.
+  assert.equal(row.actorKind, "user");
+});
+
+test("an actor Ship could not verify is still attributable, but says it was asserted", () => {
+  const row = auditRow(meta({ actor: "github:octocat", actorKind: "intake" }), []);
+  assert.equal(row.attributable, true);
+  assert.equal(row.actorKind, "intake");
+});
+
+test("a kind the store does not recognise degrades to unattributable", () => {
+  // actor_kind is TEXT in a store an operator can edit by hand. A value the
+  // code does not know must not be presented as a verified identity.
+  const row = auditRow(meta({ actor: "someone", actorKind: "root" }), []);
+  assert.equal(row.attributable, false);
+});
+
+test("approval granters are recorded in order, and an unsigned decision adds nothing", () => {
+  const row = auditRow(meta({ actor: "alice", actorKind: "user" }), [
+    ev("run-started", undefined, { input: { task: "t" } }),
+    ev("event-waiting", "turn-1-approval"),
+    ev("event-received", "turn-1-approval", { payload: { approved: true, by: "alice" } }),
+    ev("event-waiting", "turn-4-approval"),
+    // A decision delivered by a CLI too old to send `by`, or by a session that
+    // could not be resolved. It must not contribute an empty entry that reads
+    // like a second granter.
+    ev("event-received", "turn-4-approval", { payload: { approved: true } }),
+    ev("event-waiting", "turn-9-approval"),
+    ev("event-received", "turn-9-approval", { payload: { approved: false, by: "bob" } }),
+  ]);
+  assert.equal(row.approvals, 3);
+  assert.equal(row.approvedBy, "alice; bob");
+});
+
+test("a run that needed no approval has no granters, which is not the same as an unsigned one", () => {
+  const row = auditRow(meta({ actor: "alice", actorKind: "user" }), [
+    ev("run-started", undefined, { input: { task: "t" } }),
+    ev("run-completed", undefined, { output: { status: "finished" } }),
+  ]);
+  assert.equal(row.approvals, 0);
+  assert.equal(row.approvedBy, "");
 });
 
 test("approvals are counted, because 'a person unblocked this' is the closest thing to an actor we have", () => {
@@ -71,7 +126,7 @@ test("CSV quoting survives a task written by a human", () => {
   const row = auditRow(meta({ task: 'fix "quoting", then\nnewlines, too' }), [ev("run-started", undefined, { input: { task: "x" } })]);
   const csv = toCsv([row]);
   const header = csv.split("\n")[0]!;
-  assert.equal(header.split(",").length, 14, "the header must not itself be ambiguous");
+  assert.equal(header.split(",").length, 17, "the header must not itself be ambiguous");
   assert.match(csv, /"fix ""quoting"", then\nnewlines, too"/, "quotes doubled, whole field wrapped");
 
   // And the row must still be one record: a bare newline inside an unquoted
@@ -95,5 +150,8 @@ test("column order is fixed, because a moving header breaks every downstream con
   const a = toCsv([auditRow(meta({ runId: "a" }), [])]).split("\n")[0];
   const b = toCsv([auditRow(meta({ runId: "b", source: "slack" }), [])]).split("\n")[0];
   assert.equal(a, b);
-  assert.equal(a, "runId,createdAt,updatedAt,status,source,model,ranOn,repo,task,pr,turns,costUSD,approvals,attributable");
+  assert.equal(
+    a,
+    "runId,createdAt,updatedAt,status,source,actor,actorKind,approvedBy,model,ranOn,repo,task,pr,turns,costUSD,approvals,attributable",
+  );
 });

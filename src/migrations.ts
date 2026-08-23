@@ -181,7 +181,101 @@ const memoryNoteId: Migration = {
   },
 };
 
-export const MIGRATIONS: Migration[] = [docsSourceColumn, steerConsumedTurn, memoryNoteId];
+/**
+ * 004 — ship_docs gained `actor` and `actor_kind`: who asked for the run, and
+ * how that identity was established (see actor.ts).
+ *
+ * Exactly the shape of 001, and for exactly the same reason: column() THROWS on
+ * an unmapped key, so on an existing deployment the first enqueue carrying an
+ * actor would have failed the whole write — no run could be created from the
+ * dashboard, the CLI or the intake sweep. A missing actor is a cosmetic gap in
+ * an audit export; a missing column is a total outage of run creation.
+ */
+const docsActorColumns: Migration = {
+  id: "004-ship-docs-actor",
+  description: "add actor + actor_kind to ship_docs (rename-aside + copy)",
+  async needed(db) {
+    if (!(await tableExists(db, "ship_docs"))) return false; // fresh install: DDL already has them
+    return !(await hasColumns(db, "ship_docs", ["actor", "actor_kind"]));
+  },
+  async run(db) {
+    const aside = "ship_docs_004";
+    const cols =
+      "collection, run_id, workflow, status, wake_at, event_name, task, model, workspace, source, ran_on, created_at, updated_at";
+    await db.query(`ALTER TABLE ship_docs RENAME TO ${aside}`);
+    await db.query(
+      `CREATE TABLE ship_docs (
+        collection TEXT,
+        run_id TEXT,
+        workflow TEXT,
+        status TEXT,
+        wake_at TEXT,
+        event_name TEXT,
+        task TEXT,
+        model TEXT,
+        workspace TEXT,
+        source TEXT,
+        ran_on TEXT,
+        actor TEXT,
+        actor_kind TEXT,
+        created_at TEXT,
+        updated_at TEXT
+      )`,
+    );
+    await db.query(`INSERT INTO ship_docs (${cols}) SELECT ${cols} FROM ${aside}`);
+  },
+};
+
+/**
+ * 005 — ship_tasks gained `requested_by`: the handle a webhook payload asserted
+ * for whoever opened the issue or sent the message. It is carried from intake
+ * into the run's actor at launch, so without it every intake-launched run is
+ * unattributable no matter what the enqueue surfaces do.
+ *
+ * Not a total outage like 004 if missed — propose() lists its columns
+ * explicitly rather than going through a column map, so an absent column throws
+ * on INSERT only. That is still every webhook silently failing to file a task.
+ */
+const tasksRequestedBy: Migration = {
+  id: "005-ship-tasks-requested-by",
+  description: "add requested_by to ship_tasks (rename-aside + copy)",
+  async needed(db) {
+    if (!(await tableExists(db, "ship_tasks"))) return false;
+    return !(await hasColumns(db, "ship_tasks", ["requested_by"]));
+  },
+  async run(db) {
+    const aside = "ship_tasks_005";
+    const cols =
+      "task_id, source, kind, repo, pr, title, detail, dedupe_key, state, run_id, created_at, updated_at";
+    await db.query(`ALTER TABLE ship_tasks RENAME TO ${aside}`);
+    await db.query(
+      `CREATE TABLE ship_tasks (
+        task_id TEXT,
+        source TEXT,
+        kind TEXT,
+        repo TEXT,
+        pr TEXT,
+        title TEXT,
+        detail TEXT,
+        dedupe_key TEXT,
+        state TEXT,
+        run_id TEXT,
+        requested_by TEXT,
+        created_at TEXT,
+        updated_at TEXT
+      )`,
+    );
+    await db.query(`INSERT INTO ship_tasks (${cols}) SELECT ${cols} FROM ${aside}`);
+  },
+};
+
+export const MIGRATIONS: Migration[] = [
+  docsSourceColumn,
+  steerConsumedTurn,
+  memoryNoteId,
+  docsActorColumns,
+  tasksRequestedBy,
+];
 
 /**
  * Apply every pending migration. Returns the ids applied by THIS call (empty

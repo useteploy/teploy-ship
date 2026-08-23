@@ -190,6 +190,8 @@ export class NucleusPgwire {
           workspace TEXT,
           source TEXT,
           ran_on TEXT,
+          actor TEXT,
+          actor_kind TEXT,
           created_at TEXT,
           updated_at TEXT
         )`,
@@ -224,6 +226,8 @@ const COLUMNS: Record<string, string> = {
   workspace: "workspace",
   source: "source",
   ranOn: "ran_on",
+  actor: "actor",
+  actorKind: "actor_kind",
   createdAt: "created_at",
   updatedAt: "updated_at",
 };

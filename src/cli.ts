@@ -40,6 +40,7 @@ import type { EvalTask } from "./eval.js";
 import { stateDir } from "./run-store.js";
 import { buildFeed } from "./inbox.js";
 import { enqueueRun, fileRuntime, nucleusRuntime } from "./runtime.js";
+import { cliActor, formatActor, actorFromMeta } from "./actor.js";
 import type { NucleusShipRuntime, ShipRuntime } from "./runtime.js";
 import { NucleusCodeIndex } from "./code-index.js";
 import type { CodeSearch } from "./code-index.js";
@@ -775,6 +776,8 @@ async function decideCommand(rest: string[], approved: boolean): Promise<void> {
     await deliverEvent(runtime.store, runId, eventName, {
       approved,
       ...(reason !== undefined ? { reason } : {}),
+      // Who unblocked it. Approving is remote code execution and spend.
+      by: cliActor().id,
     });
   } catch (error) {
     await runtime.releaseDecision(runId, eventName).catch(() => {});
@@ -896,6 +899,8 @@ async function enqueueCommand(rest: string[]): Promise<void> {
       task,
       model: (args.flags.model as string) ?? config.model ?? "anthropic/claude-sonnet-5",
       source: "manual",
+      // Whoever holds this shell. Attested by the OS, not by Ship — see actor.ts.
+      actor: cliActor(),
       ...(repoUrl !== undefined ? { repo: repoUrl, trust: "operator" as const } : {}),
       ...(args.flags.plan === true ? { plan: true } : {}),
       ...(args.flags.critic === true ? { critic: true } : {}),
@@ -947,7 +952,21 @@ async function auditCommand(rest: string[]): Promise<void> {
     const windowed = withinWindow(rows, since, until);
     process.stdout.write(format === "json" ? `${JSON.stringify(windowed, null, 2)}\n` : toCsv(windowed));
     if (windowed.length === 0) process.stderr.write(dim("no runs in that window\n"));
-    else process.stderr.write(dim(`${windowed.length} run${windowed.length === 1 ? "" : "s"} — no actor attribution; see docs/DEPLOY.md\n`));
+    else {
+      // Report the gap by counting it, not with a blanket caveat. The old line
+      // said "no actor attribution" unconditionally; once runs started carrying
+      // an actor that footer contradicted the rows directly above it, which is
+      // the kind of stale claim that makes a reader distrust the whole export.
+      const n = windowed.length;
+      const unattributed = windowed.filter((r) => !r.attributable).length;
+      const caveat =
+        unattributed === 0
+          ? "every run names who asked"
+          : unattributed === n
+            ? "no run names who asked (all predate attribution, or came from a machine)"
+            : `${unattributed} of ${n} name nobody`;
+      process.stderr.write(dim(`${n} run${n === 1 ? "" : "s"} — ${caveat}\n`));
+    }
   } finally {
     await runtime.close();
   }
@@ -962,7 +981,12 @@ async function runsCommand(rest: string[]): Promise<void> {
   for (const meta of metas) {
     const status =
       meta.status === "completed" ? green(meta.status) : meta.status === "waiting" ? yellow(meta.status) : meta.status === "failed" ? red(meta.status) : meta.status;
-    process.stdout.write(`${meta.runId}  ${status}  ${dim(meta.updatedAt)}  ${meta.task.slice(0, 60)}\n`);
+    // Who asked, when anyone did. Runs from before attribution existed print
+    // nothing here rather than a placeholder — a blank is honest, "unknown" in
+    // every row is noise that trains you to stop reading the column.
+    const actor = actorFromMeta(meta);
+    const who = actor.kind === "unknown" ? "" : `  ${dim(formatActor(actor))}`;
+    process.stdout.write(`${meta.runId}  ${status}  ${dim(meta.updatedAt)}${who}  ${meta.task.slice(0, 60)}\n`);
   }
   await runtime.close();
 }

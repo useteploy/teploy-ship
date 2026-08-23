@@ -37,6 +37,12 @@ export interface IntakeTask {
   detail?: string;
   /** Same key = same task; re-proposals return the existing one. */
   dedupeKey: string;
+  /**
+   * The handle the payload asserted for whoever opened the issue or sent the
+   * message. Carried into the launched run's actor, so an intake run can be
+   * attributed at all. Unverified by Ship — see intakeActor() in actor.ts.
+   */
+  requestedBy?: string;
   state: "proposed" | "launched" | "dismissed";
   /** The durable run a launch created. */
   runId?: string;
@@ -52,6 +58,8 @@ export interface ProposeInput {
   title: string;
   detail?: string;
   dedupeKey: string;
+  /** Handle the payload asserted for the requester, when it carries one. */
+  requestedBy?: string;
 }
 
 export interface IntakeStore {
@@ -95,6 +103,7 @@ function newTask(input: ProposeInput): IntakeTask {
     title: input.title,
     ...(input.detail !== undefined ? { detail: input.detail } : {}),
     dedupeKey: input.dedupeKey,
+    ...(input.requestedBy !== undefined ? { requestedBy: input.requestedBy } : {}),
     state: "proposed",
     createdAt: now,
     updatedAt: now,
@@ -207,6 +216,7 @@ export class NucleusIntakeStore implements IntakeStore {
           dedupe_key TEXT,
           state TEXT,
           run_id TEXT,
+          requested_by TEXT,
           created_at TEXT,
           updated_at TEXT
         )`,
@@ -230,6 +240,7 @@ export class NucleusIntakeStore implements IntakeStore {
     if (row.pr !== null && row.pr !== undefined) task.pr = Number(row.pr);
     if (row.detail !== null && row.detail !== undefined) task.detail = String(row.detail);
     if (row.run_id !== null && row.run_id !== undefined) task.runId = String(row.run_id);
+    if (row.requested_by !== null && row.requested_by !== undefined) task.requestedBy = String(row.requested_by);
     return task;
   }
 
@@ -260,8 +271,8 @@ export class NucleusIntakeStore implements IntakeStore {
     }
     const task = newTask(input);
     await this.#db.query(
-      `INSERT INTO ship_tasks (task_id, source, kind, repo, pr, title, detail, dedupe_key, state, run_id, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+      `INSERT INTO ship_tasks (task_id, source, kind, repo, pr, title, detail, dedupe_key, state, run_id, requested_by, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
       [
         task.taskId,
         task.source,
@@ -273,6 +284,7 @@ export class NucleusIntakeStore implements IntakeStore {
         task.dedupeKey,
         task.state,
         null,
+        task.requestedBy ?? null,
         task.createdAt,
         task.updatedAt,
       ],

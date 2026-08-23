@@ -413,6 +413,16 @@ export function approvalEvent(turn: number): string {
 export interface ApprovalDecisionPayload {
   approved: boolean;
   reason?: string;
+  /**
+   * Stable id of whoever decided (see actor.ts). Recorded in the delivered
+   * event, which is where an audit reader looks — approving is remote code
+   * execution and spend, so "a person unblocked this" was never enough.
+   *
+   * Optional and unread by the loop on purpose: nothing about how the run
+   * proceeds may depend on it, or a replay of a decision delivered before this
+   * field existed would diverge.
+   */
+  by?: string;
 }
 
 /**

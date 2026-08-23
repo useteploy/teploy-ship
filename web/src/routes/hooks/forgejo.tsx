@@ -1,4 +1,4 @@
-import { ciFixTaskFromWorkflowRun } from "teploy-ship/runtime";
+import { ciFixTaskFromWorkflowRun, requesterOf } from "teploy-ship/runtime";
 
 import { BodyTooLarge, claimDelivery, firstHeader, json, parseJson, proposeFromWebhook, readCappedBody } from "../../lib/webhook.server.js";
 
@@ -64,7 +64,13 @@ export async function action({ request }: { request: Request }): Promise<Respons
 
   const payload = parseJson<{
     action?: string;
-    issue?: { number?: number; title?: string; body?: string; labels?: Array<{ name?: string }> };
+    issue?: {
+      number?: number;
+      title?: string;
+      body?: string;
+      labels?: Array<{ name?: string }>;
+      user?: { login?: string };
+    };
     repository?: { full_name?: string; clone_url?: string };
   }>(body);
   if (payload === null) return json(400, { title: "malformed JSON body" });
@@ -83,6 +89,7 @@ export async function action({ request }: { request: Request }): Promise<Respons
     ...(payload.repository.clone_url !== undefined ? { repo: payload.repository.clone_url } : {}),
     title: payload.issue.title ?? `issue #${payload.issue.number}`,
     ...(payload.issue.body !== undefined && payload.issue.body !== "" ? { detail: payload.issue.body } : {}),
+    ...requesterOf(payload.issue.user?.login),
     dedupeKey: `forgejo:${payload.repository.full_name}#${payload.issue.number}`,
   });
 }
@@ -96,7 +103,7 @@ export async function action({ request }: { request: Request }): Promise<Respons
 async function handleComment(body: string): Promise<Response> {
   const payload = parseJson<{
     action?: string;
-    comment?: { id?: number; body?: string };
+    comment?: { id?: number; body?: string; user?: { login?: string } };
     issue?: { number?: number; title?: string; pull_request?: unknown; labels?: Array<{ name?: string }> };
     repository?: { full_name?: string; clone_url?: string };
   }>(body);
@@ -124,6 +131,8 @@ async function handleComment(body: string): Promise<Response> {
     pr: payload.issue.number,
     title: `PR #${payload.issue.number} review: ${(payload.issue.title ?? "").slice(0, 60)}`,
     detail: text,
+    // The commenter asked for this, not the issue's original author.
+    ...requesterOf(payload.comment.user?.login),
     dedupeKey: `forgejo:${payload.repository.full_name}#comment-${payload.comment.id}`,
   });
 }

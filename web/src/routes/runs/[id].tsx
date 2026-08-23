@@ -3,10 +3,11 @@ import { cancelRun, deliverEvent } from "@neutron-build/workflow";
 // PLAN_EVENT comes from the dependency-free plan module: it's used in the
 // component (client bundle), where teploy-ship/runtime (node-only) can't go.
 import { PLAN_EVENT } from "teploy-ship/plan";
-import { costUSD, isPricedModel } from "teploy-ship/runtime";
+import { costUSD, isPricedModel, actorFromPrincipal } from "teploy-ship/runtime";
 import type { RunMeta } from "teploy-ship/runtime";
 
 import { shipRuntime } from "../../lib/store.server.js";
+import { currentUser } from "../../lib/session.server.js";
 import { itemClass, runOutcome, since, took, toTimeline } from "../../lib/timeline.js";
 import type { RunOutcome, TimelineItem } from "../../lib/timeline.js";
 import { startSpan } from "../../lib/observe.server.js";
@@ -114,6 +115,8 @@ export async function action({
   const form = await request.formData();
   const intent = String(form.get("intent") ?? "");
   const runtime = await shipRuntime();
+  // _layout.tsx already gated this by role; this only names who it let through.
+  const me = await currentUser(request);
   const runId = params.id;
   const meta = await runtime.loadMeta(runId);
   // "cancelling" is not terminal — the executor has not settled it yet — but a
@@ -166,6 +169,8 @@ export async function action({
         approved: intent === "approve",
         ...(reason !== "" ? { reason } : {}),
         ...(plan !== "" ? { plan } : {}),
+        // Who unblocked it. _layout.tsx already proved they may.
+        ...(me !== null ? { by: actorFromPrincipal(me).id } : {}),
       });
     } catch (error) {
       // The claim already moved the run out of "waiting"; put it back so the

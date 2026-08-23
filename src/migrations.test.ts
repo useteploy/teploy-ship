@@ -143,7 +143,7 @@ test("001 rebuilds ship_docs aside when the source column is missing", async () 
     columns: { ship_docs: ["collection", "run_id", "workflow", "status", "wake_at", "event_name", "task", "model", "workspace", "created_at", "updated_at"] },
   });
   const applied = await migrate(db);
-  assert.deepEqual(applied, ["001-ship-docs-source-ranon"]);
+  assert.deepEqual(applied, ["001-ship-docs-source-ranon", "004-ship-docs-actor"]);
   const joined = db.sql.join("\n");
   assert.match(joined, /ALTER TABLE ship_docs RENAME TO ship_docs_001/);
   assert.match(joined, /CREATE TABLE ship_docs \(.*source TEXT.*ran_on TEXT/s);
@@ -159,7 +159,10 @@ test("001 is a no-op on a fresh install and on an already-migrated store", async
 
   const current = fakeDb({
     existingTables: new Set(["ship_docs"]),
-    columns: { ship_docs: ["source", "ran_on"] },
+    // "Already migrated" means through the LATEST migration touching this
+    // table, not through 001 — a store carrying source/ran_on but not
+    // actor/actor_kind is mid-chain and 004 is correctly still pending.
+    columns: { ship_docs: ["source", "ran_on", "actor", "actor_kind"] },
   });
   assert.deepEqual(await migrate(current), []);
   assert.doesNotMatch(current.sql.join("\n"), /RENAME TO/);
@@ -170,7 +173,7 @@ test("migrate runs each migration at most once", async () => {
     existingTables: new Set(["ship_docs"]),
     columns: { ship_docs: ["collection"] },
   });
-  assert.deepEqual(await migrate(db), ["001-ship-docs-source-ranon"]);
+  assert.deepEqual(await migrate(db), ["001-ship-docs-source-ranon", "004-ship-docs-actor"]);
   assert.deepEqual(await migrate(db), [], "second call must be a no-op");
 });
 
@@ -182,10 +185,20 @@ test("a process that loses the migration lock proceeds instead of racing", async
   assert.doesNotMatch(db.sql.join("\n"), /RENAME TO/);
 });
 
-/** Column names from a `CREATE TABLE [IF NOT EXISTS] <table> ( … )` in some source text. */
+/**
+ * Columns of the LAST `CREATE TABLE <table>` in a source file.
+ *
+ * Last, not first, and that distinction is the whole point once a table has
+ * more than one migration. Migration 001 creates ship_docs in its 2026-era
+ * shape and 004 rebuilds it with `actor`; only 004's shape may be compared to
+ * today's DDL. An earlier migration is a historical snapshot — editing it to
+ * match the current DDL would make the chain skip columns for a deployment
+ * sitting between the two, which is the failure this whole test exists to stop.
+ */
 function columnsOf(source: string, table: string): string[] | null {
-  const re = new RegExp(`CREATE TABLE (?:IF NOT EXISTS )?${table} \\(([^)]*)\\)`, "s");
-  const body = re.exec(source)?.[1];
+  const re = new RegExp(`CREATE TABLE (?:IF NOT EXISTS )?${table} \\(([^)]*)\\)`, "gs");
+  const bodies = [...source.matchAll(re)].map((m) => m[1]);
+  const body = bodies.at(-1);
   if (body === undefined) return null;
   return body
     .split(",")

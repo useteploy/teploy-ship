@@ -104,6 +104,18 @@ export interface RunMeta {
   source?: string;
   /** Host of the worker that most recently executed this run (fleet placement). */
   ranOn?: string;
+  /**
+   * Stable id of whoever asked for this run (see actor.ts). Absent on runs
+   * enqueued before attribution existed, and on any surface that genuinely
+   * cannot name a person — `actorKind` says which.
+   *
+   * Flat, not a nested Actor, because the Nucleus store is a hand-written map
+   * of scalar columns: an object here is stringified into the column and reads
+   * back as the literal text `[object Object]`.
+   */
+  actor?: string;
+  /** How that identity was established: user | cli | intake | unknown. */
+  actorKind?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -129,6 +141,8 @@ export const RUN_META_FIELDS = [
   "model",
   "source",
   "ranOn",
+  "actor",
+  "actorKind",
   "createdAt",
   "updatedAt",
 ] as const satisfies readonly (keyof RunMeta)[];

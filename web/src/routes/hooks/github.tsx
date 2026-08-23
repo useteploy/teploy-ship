@@ -1,4 +1,4 @@
-import { ciFixTaskFromWorkflowRun } from "teploy-ship/runtime";
+import { ciFixTaskFromWorkflowRun, requesterOf } from "teploy-ship/runtime";
 
 import { BodyTooLarge, claimDelivery, firstHeader, json, parseJson, proposeFromWebhook, readCappedBody } from "../../lib/webhook.server.js";
 
@@ -52,8 +52,9 @@ export async function action({ request }: { request: Request }): Promise<Respons
       body?: string | null;
       labels?: Array<{ name?: string }>;
       pull_request?: unknown;
+      user?: { login?: string };
     };
-    comment?: { id?: number; body?: string };
+    comment?: { id?: number; body?: string; user?: { login?: string } };
     repository?: { full_name?: string; clone_url?: string };
   }>(body);
   if (payload === null) return json(400, { title: "malformed JSON body" });
@@ -84,6 +85,8 @@ export async function action({ request }: { request: Request }): Promise<Respons
       pr: payload.issue.number,
       title: `PR #${payload.issue.number} review: ${(payload.issue.title ?? "").slice(0, 60)}`,
       detail: text,
+      // The commenter asked for this, not the issue's original author.
+      ...requesterOf(payload.comment.user?.login),
       dedupeKey: `github:${fullName}#comment-${payload.comment.id}`,
     });
   }
@@ -104,6 +107,7 @@ export async function action({ request }: { request: Request }): Promise<Respons
     ...(payload.issue.body !== undefined && payload.issue.body !== null && payload.issue.body !== ""
       ? { detail: payload.issue.body }
       : {}),
+    ...requesterOf(payload.issue.user?.login),
     dedupeKey: `github:${fullName}#${payload.issue.number}`,
   });
 }

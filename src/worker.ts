@@ -12,6 +12,7 @@ import { testTargetFromEnv } from "./tests.js";
 import type { ExecutorProvider, RunUsage } from "./durable.js";
 import { defaultApprovalPolicy } from "./approval.js";
 import { enqueueRun } from "./runtime.js";
+import { intakeActor } from "./actor.js";
 import type { NucleusShipRuntime } from "./runtime.js";
 import type { IntakeStore, IntakePolicy, IntakeTask } from "./intake.js";
 import type { SourcePolicy } from "./policies.js";
@@ -534,6 +535,10 @@ export function startWorker(options: WorkerOptions): {
           task: task.detail !== undefined ? `${task.title}\n\n${task.detail}` : task.title,
           model: modelId,
           source: task.source,
+          // The handle the webhook payload asserted for whoever opened the
+          // issue. Unverified — the delivery signature proves the payload came
+          // from the forge, not that the forge is honest about the author.
+          actor: intakeActor(task.requestedBy, task.source),
           // A swept task was proposed by a webhook, a chat message, or an
           // issue body — never by a human typing into this process.
           trust: "external",

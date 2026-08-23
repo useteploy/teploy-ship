@@ -219,29 +219,55 @@ dashboard's new-run form) work unsandboxed. That is a person choosing to
 trust their own machine. `SHIP_ALLOW_UNSANDBOXED_INTAKE=1` extends that to
 external tasks on a genuinely disposable box.
 
-### The audit trail, and what it cannot tell you
+### The audit trail
 
 `teploy-ship audit` exports the run history as CSV or JSON — what ran, when,
-from which intake source, on which worker, against which repository, what it
-cost, and what pull request it opened.
+from which intake source, **who asked for it**, **who approved it**, on which
+worker, against which repository, what it cost, and what pull request it
+opened.
 
 ```sh
 teploy-ship audit --since 2026-08-01T00:00:00Z --format csv > runs.csv
 ```
 
-**It cannot say who authorised anything.** Ship records no actor: a run does
-not carry who enqueued it and an approval does not carry who granted it —
-`RunMeta` has `source` (which intake *channel*) and `ranOn` (which host), and
-no user field at all. Every exported row therefore carries
-`attributable: false`, stated in the data rather than left in a footnote.
+Three columns carry the attribution, and the second is the one people skip:
 
-For an internal operator record that is enough. **For a compliance artefact it
-is not**, and actor attribution is the prerequisite for that, not a refinement
-of this export. Do not hand this file to an auditor as an answer to "who
-approved this change".
+| column | what it is |
+|---|---|
+| `actor` | stable id of whoever asked for the run |
+| `actorKind` | how that identity was established — `user`, `cli`, `intake`, `unknown` |
+| `approvedBy` | stable ids of everyone who granted an approval, in order |
+
+**`actorKind` is not decoration, it is how much the name is worth.**
+
+- `user` — an authenticated dashboard session. For SSO the id is `issuer#sub`,
+  never the username, so the row keeps pointing at the *person* after a rename.
+- `cli` — `user@host`, attested by the operating system of the machine the
+  command ran on. A real operator, vouched for by their box rather than by Ship.
+- `intake` — a handle a webhook payload asserted. The delivery signature proves
+  the payload came from your forge; it does **not** prove the forge is honest
+  about who wrote the issue. Trustworthy to the same degree your forge is.
+- `unknown` — nobody could be named. Runs enqueued before attribution existed,
+  and CI-triggered runs, where a machine asked and naming the pusher would put a
+  real person on a run they never authorised.
+
+`attributable` is `false` for exactly the `unknown` case, so a reader wanting
+only accountable actions filters on one column. The footer of a human-readable
+export counts them (`3 of 40 name nobody`) rather than printing a blanket
+caveat.
+
+**What it still is not:** proof. Ship records who a surface said was acting; it
+does not re-verify a webhook's claim about authorship. An auditor should be told
+what `actorKind` means, and `intake` rows are as good as the forge that sent
+them — no better.
 
 Retention is your storage's, not Ship's: the export reads the same durable
 event logs the runs are made of, and nothing prunes them.
+
+Attribution lives on the run's **metadata**, never in the recorded workflow
+input. That is deliberate: every field in the input gates which steps a replay
+expects, so putting the actor there would change how in-flight runs replay. You
+can turn attribution on with runs already in the queue.
 
 ### Evidence on a `fix` pull request
 

@@ -124,6 +124,16 @@ So the honest rule: **rollback is safe when the version you are leaving added
 only additive migrations and no step-sequence changes.** When it did either,
 rolling back is a restore-from-backup operation, not a `teploy rollback`.
 
+**Worked example — actor attribution (migrations 004 and 005).** Both are
+additive column adds via rename-aside, and the actor is recorded on a run's
+*metadata* rather than in its recorded workflow input, so no step sequence
+changes and no in-flight run replays differently. That makes it safe to deploy
+with runs already queued, and safe to roll back: older code ignores the extra
+columns, and the aside tables (`ship_docs_004`, `ship_tasks_005`) still hold the
+pre-migration rows. This is the shape to copy — attribution *could* have been
+put in the run input, and that one decision is the difference between an
+ordinary upgrade and a restore-from-backup.
+
 ## 5. A trap in the migration runner, worth knowing
 
 `migrate()` decides whether a migration is needed by calling `m.needed(db)`, and

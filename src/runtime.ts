@@ -25,6 +25,7 @@ import { FileUserStore, NucleusUserStore } from "./users.js";
 import type { UserStore } from "./users.js";
 import { FileDeliveryLog, NucleusDeliveryLog } from "./deliveries.js";
 import type { DeliveryLog } from "./deliveries.js";
+import type { Actor } from "./actor.js";
 import { FileOutbox, NucleusOutbox } from "./outbox.js";
 import type { Outbox } from "./outbox.js";
 import { NucleusPgwire } from "./nucleus-pgwire.js";
@@ -54,6 +55,16 @@ export type { Outbox, OutboxEntry } from "./outbox.js";
 export { FileOutbox, NucleusOutbox, flushOutbox, notificationId } from "./outbox.js";
 export { FileDeliveryLog, NucleusDeliveryLog, DELIVERY_TTL_S } from "./deliveries.js";
 export type { UserStore, ShipUser, UserView, Role } from "./users.js";
+export type { Actor, ActorKind } from "./actor.js";
+export {
+  UNKNOWN_ACTOR,
+  actorFromMeta,
+  actorFromPrincipal,
+  cliActor,
+  formatActor,
+  intakeActor,
+  isAttributable,
+} from "./actor.js";
 export {
   FileUserStore,
   NucleusUserStore,
@@ -67,7 +78,7 @@ export {
 } from "./users.js";
 export type { CodeSearch, CodeSearchHit, RefreshStats } from "./code-index.js";
 export { NucleusCodeIndex } from "./code-index.js";
-export { parseRepoToken, slackTaskFromMention, linearTaskFromIssue, ciFixTaskFromWorkflowRun } from "./intake-sources.js";
+export { parseRepoToken, requesterOf, slackTaskFromMention, linearTaskFromIssue, ciFixTaskFromWorkflowRun } from "./intake-sources.js";
 export type { RepoTrust, RepoPolicyConfig, RepoAllowEntry } from "./repo-policy.js";
 export {
   RepoNotAllowedError,
@@ -441,6 +452,20 @@ export async function enqueueRun(
     /** Intake source, recorded so completion can settle spend against it. */
     source?: string;
     /**
+     * Who asked for this run. Recorded on the run's META, deliberately NOT in
+     * the workflow input below.
+     *
+     * That placement is the whole safety argument. Every field in the recorded
+     * `input` gates which steps a replay expects, so adding one there changes
+     * how an in-flight run replays and risks a NondeterminismError that leaves
+     * it permanently unrunnable (see the requireEdit note further down). The
+     * actor decides nothing the agent does — it is a fact ABOUT the run, not an
+     * instruction TO it — so metadata is both the safer and the more honest
+     * home for it, and attribution can be added to a deployment with runs in
+     * flight.
+     */
+    actor?: Actor;
+    /**
      * Where `repo` came from. Defaults to "external" — the safe assumption for
      * a queued run, since the surfaces that KNOW a human typed the URL (the CLI
      * and the dashboard's new-run form) can say so explicitly.
@@ -536,6 +561,13 @@ export async function enqueueRun(
     model: options.model,
     status: "queued",
     ...(options.source !== undefined ? { source: options.source } : {}),
+    // Flat columns, never a nested object: the Nucleus doc store maps scalars.
+    // An unattributable run records the unknown actor rather than nothing, so
+    // "we could not name anyone" and "this predates attribution" stay
+    // distinguishable in the export.
+    ...(options.actor !== undefined
+      ? { actor: options.actor.id, actorKind: options.actor.kind }
+      : {}),
     createdAt: now,
     updatedAt: now,
   });

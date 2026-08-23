@@ -1,5 +1,6 @@
 import type { WorkflowEvent } from "@neutron-build/workflow";
 
+import { actorFromMeta, isAttributable } from "./actor.js";
 import { costUSD } from "./pricing.js";
 import type { RunMeta } from "./run-store.js";
 
@@ -12,19 +13,22 @@ import type { RunMeta } from "./run-store.js";
  * only way to answer "what has this agent done to our repositories" was to read
  * several hundred events per run out of a database.
  *
- * ## What this cannot tell you, and why it is stated rather than hidden
+ * ## Attribution, and what it is still not
  *
- * **There is no actor attribution anywhere in Ship.** A run does not record who
- * enqueued it and an approval does not record who granted it — `RunMeta` has
- * `source` (which intake channel) and `ranOn` (which host), and no user field
- * at all. So this export answers *what ran, when, at what cost, and what it
- * published*. It cannot answer *who authorised it*.
+ * Runs now carry an actor and approvals carry a granter (see actor.ts), so a
+ * row can answer *who asked* and *who unblocked it* as well as what ran, when,
+ * at what cost and what it published.
  *
- * For an internal operator record that is enough and useful. For a compliance
- * artefact it is not, and adding actor attribution is the prerequisite — not a
- * refinement of this. It is deliberately surfaced by `attributable: false` on
- * every row rather than left for someone to discover after they have relied on
- * it.
+ * Two honest limits remain, both visible in the row rather than buried:
+ *
+ * - **`attributable` is per-row, not decorative.** Runs enqueued before
+ *   attribution existed, CI-triggered runs (a machine asked, not a person), and
+ *   any surface that could not name someone report `false`. A reader filtering
+ *   for accountable actions filters on this column.
+ * - **An `intake` actor is asserted, not verified.** The webhook signature
+ *   proves the payload came from the forge; it does not prove the forge is
+ *   honest about who wrote the issue. `actorKind` is exported next to `actor`
+ *   precisely so nobody has to guess how much the name is worth.
  */
 export interface AuditRow {
   runId: string;
@@ -33,6 +37,17 @@ export interface AuditRow {
   status: string;
   /** Which intake channel the run arrived through — NOT which person. */
   source: string;
+  /** Stable id of whoever asked for the run; "" when nobody could be named. */
+  actor: string;
+  /** How that identity was established: user | cli | intake | unknown. */
+  actorKind: string;
+  /**
+   * Stable ids of everyone who granted an approval on this run, in order,
+   * separated by "; ". Empty when the run needed no approval — which is not the
+   * same as an approval nobody signed, and `approvals` is the column that
+   * distinguishes them.
+   */
+  approvedBy: string;
   model: string;
   /** Worker host that last executed it. */
   ranOn: string;
@@ -45,8 +60,9 @@ export interface AuditRow {
   /** Did a person have to unblock this run at some point? */
   approvals: number;
   /**
-   * Always false today. Ship records no actor for enqueue or approval, so no
-   * row here can name a person. See the note on this module.
+   * True when this run names who asked for it. False for runs enqueued before
+   * attribution existed and for machine-triggered runs. See the note above:
+   * true means a name is present, NOT that Ship verified it.
    */
   attributable: boolean;
 }
@@ -62,6 +78,7 @@ export function auditRow(meta: RunMeta, events: WorkflowEvent[]): AuditRow {
   let turns = 0;
   let approvals = 0;
   let cost = 0;
+  const approvedBy: string[] = [];
 
   for (const e of events) {
     const data = asRecord(e.data);
@@ -70,6 +87,13 @@ export function auditRow(meta: RunMeta, events: WorkflowEvent[]): AuditRow {
       if (typeof input?.repo === "string") repo = input.repo;
     } else if (e.type === "event-waiting") {
       approvals += 1;
+    } else if (e.type === "event-received") {
+      // The granter rides on the delivered payload — deliverEvent records it as
+      // `data.payload` — which is the only place a decision's author appears.
+      // An unsigned decision (a CLI too old to send `by`, or a session that
+      // could not be resolved) contributes nothing rather than a blank entry.
+      const by = asRecord(data?.payload)?.by;
+      if (typeof by === "string" && by !== "") approvedBy.push(by);
     } else if (e.type === "step-completed") {
       const m = /^turn-(\d+)-exec$/.exec(e.name ?? "");
       if (m !== null) turns = Math.max(turns, Number(m[1]) + 1);
@@ -90,6 +114,9 @@ export function auditRow(meta: RunMeta, events: WorkflowEvent[]): AuditRow {
     updatedAt: meta.updatedAt,
     status: meta.status,
     source: meta.source ?? "unknown",
+    actor: meta.actor ?? "",
+    actorKind: meta.actorKind ?? "unknown",
+    approvedBy: approvedBy.join("; "),
     model: meta.model,
     ranOn: meta.ranOn ?? "",
     repo,
@@ -98,7 +125,7 @@ export function auditRow(meta: RunMeta, events: WorkflowEvent[]): AuditRow {
     turns,
     costUSD: Number(cost.toFixed(4)),
     approvals,
-    attributable: false,
+    attributable: isAttributable(actorFromMeta(meta)),
   };
 }
 
@@ -108,6 +135,9 @@ const COLUMNS: (keyof AuditRow)[] = [
   "updatedAt",
   "status",
   "source",
+  "actor",
+  "actorKind",
+  "approvedBy",
   "model",
   "ranOn",
   "repo",

@@ -11,6 +11,16 @@ import type { ProposeInput } from "./intake.js";
 
 const REPO_TOKEN = /(?:^|\s)repo:(https?:\/\/\S+)/i;
 
+/**
+ * Spreadable `requestedBy` — present only when the payload actually named
+ * someone. An empty string is not an attribution, and writing one would make an
+ * unattributable task indistinguishable from an attributed one in the export.
+ */
+export function requesterOf(handle: string | undefined | null): { requestedBy?: string } {
+  const trimmed = (handle ?? "").trim();
+  return trimmed === "" ? {} : { requestedBy: trimmed };
+}
+
 /** Extract a `repo:<url>` binding from free text. */
 export function parseRepoToken(text: string): string | undefined {
   const match = REPO_TOKEN.exec(text);
@@ -27,6 +37,8 @@ export function slackTaskFromMention(event: {
   text?: string;
   channel?: string;
   ts?: string;
+  /** Slack member id of the sender — the requester, for attribution. */
+  user?: string;
 }): ProposeInput | null {
   const raw = (event.text ?? "").replace(/<@[A-Z0-9]+>/g, "").trim();
   if (raw === "" || event.channel === undefined || event.ts === undefined) return null;
@@ -39,6 +51,7 @@ export function slackTaskFromMention(event: {
     title: cleaned.length > 140 ? `${cleaned.slice(0, 140)}…` : cleaned,
     ...(cleaned.length > 140 ? { detail: cleaned } : {}),
     ...(repo !== undefined ? { repo } : {}),
+    ...(event.user !== undefined && event.user !== "" ? { requestedBy: event.user } : {}),
     dedupeKey: `slack:${event.channel}:${event.ts}`,
   };
 }
@@ -59,6 +72,8 @@ export function linearTaskFromIssue(payload: {
     labels?: Array<{ name?: string }>;
   };
   url?: string;
+  /** Linear names the person who triggered the webhook here. */
+  actor?: { name?: string; email?: string };
 }): ProposeInput | null {
   if (payload.type !== "Issue") return null;
   if (payload.action !== "create" && payload.action !== "update") return null;
@@ -80,6 +95,7 @@ export function linearTaskFromIssue(payload: {
         ? { detail: payload.url }
         : {}),
     ...(repo !== undefined ? { repo } : {}),
+    ...(requesterOf(payload.actor?.email ?? payload.actor?.name)),
     dedupeKey: `linear:${data.id}`,
   };
 }
@@ -123,6 +139,10 @@ export function ciFixTaskFromWorkflowRun(payload: {
       `The CI workflow "${run.name ?? "workflow"}" FAILED on this pull request's branch (${branch} @ ${run.head_sha.slice(0, 10)}).` +
       ` Reproduce the failure locally (run the repository's tests), fix it, and verify the tests pass.` +
       (run.html_url !== undefined ? `\n\nFailed run: ${run.html_url}` : ""),
+    // Deliberately no requestedBy: a CI failure is a machine event. The person
+    // who pushed the branch did not ask Ship to fix it, and naming them as the
+    // requester would put a real person's handle on a run they never
+    // authorised — a worse lie than an honest blank.
     dedupeKey: `ci:${fullName}#${pr}:${run.head_sha}`,
   };
 }
