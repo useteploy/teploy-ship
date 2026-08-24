@@ -4,6 +4,34 @@ All notable changes to Teploy Ship are recorded here.
 
 ## [Unreleased]
 
+### Fixed — dashboard pre-release pass (2026-08-24)
+- Every Nucleus-backed store cached a FAILED table-ensure for the life of the
+  process: one transient engine error at startup left that page 500ing on every
+  request until a restart (found live: `/knowledge` returned "catalog
+  persistence failed" for two days while the query itself worked from a fresh
+  connection). A failed ensure is now retried on the next call. Seam test in
+  `repo-memory.test.ts`; same fix in attributed-spend, code-index, evidence,
+  fleet, intake, outbox, policies, steer, users.
+- Settings named credentials Ship never reads (`FORGEJO_TOKEN`, `GITHUB_TOKEN`)
+  and omitted the ones it does (`SHIP_GIT_TOKENS`, `SHIP_GIT_TOKEN`,
+  `SHIP_GITHUB_TOKEN`, `SHIP_REPO_ALLOWLIST`, `AI_GATEWAY_KEY`). It now shows
+  the real names, plus the evidence legs (tests / telemetry / preview and their
+  config), intake settings, and `SHIP_MAX_STEPS`.
+- Run page and login read `?decision=` / `?cancel=` / `?error=` from
+  `window.location` inside the component, so the server rendered no banner and
+  the client hydrated one in — a hydration mismatch. They are read in the
+  loader now. The Inbox never showed its own `?decision=taken` outcome at all.
+- Spend's "projected for today" extrapolated from minutes into the UTC day
+  (ten cents at 00:02 read as $72); it waits for the first hour.
+- Runs filter chips showed an empty table with headers and no message when a
+  category had no rows; the `running` and `cancelling` statuses had no chip
+  colour.
+- Native `<select>` / `<input>` controls on Sources rendered in the platform's
+  light theme on the dark page; form controls are styled globally now.
+- Narrow screens: the header nav overflowed the viewport and the page scrolled
+  horizontally; the nav now wraps to its own scrollable row and wide tables
+  scroll inside themselves.
+
 ### Added
 - Teams and roles (Teploy RBAC contract: admin/editor/viewer). Ship's single
   shared `SHIP_WEB_TOKEN` becomes multi-user: username/password accounts with

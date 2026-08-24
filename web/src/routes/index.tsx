@@ -16,16 +16,19 @@ interface InboxData {
   proposed: IntakeTask[];
   store: string;
   model: string;
+  /** ?decision=taken — the operator's approve/deny lost the race to another one. */
+  decisionTaken: boolean;
 }
 
 // "cancelling" is a request in flight, not an outcome.
 const TERMINAL = ["completed", "failed", "cancelled"];
 
-export async function loader(): Promise<InboxData> {
+export async function loader({ request }: { request: Request }): Promise<InboxData> {
   const runtime = await shipRuntime();
+  const decisionTaken = new URL(request.url).searchParams.get("decision") === "taken";
   const [runs, proposed] = await Promise.all([runtime.listMeta(), runtime.intake.list("proposed")]);
   const parked = runs.filter((r) => r.status === "waiting" && r.eventName !== undefined);
-  return { parked, proposed, store: runtime.kind, model: defaultModel() };
+  return { parked, proposed, store: runtime.kind, model: defaultModel(), decisionTaken };
 }
 
 export async function action({ request }: { request: Request }): Promise<Response> {
@@ -136,6 +139,11 @@ export default function Inbox({ data }: { data: InboxData }) {
   const nothing = data.parked.length === 0 && data.proposed.length === 0;
   return (
     <>
+      {data.decisionTaken && (
+        <p class="card attn notice" style="color:var(--yellow)">
+          Not applied — someone else decided that run first.
+        </p>
+      )}
       <h1 class="page">Inbox</h1>
       <p class="meta">
         Issues in, verified pull requests out. This page is everything waiting on you — a decision on a
@@ -184,7 +192,7 @@ export default function Inbox({ data }: { data: InboxData }) {
         Proposed tasks <span class="count">({data.proposed.length})</span>
       </h2>
       {data.proposed.length === 0 ? (
-        <p class="empty">No proposed tasks. Label a Forgejo/GitHub issue `ship` to see it here.</p>
+        <p class="empty">No proposed tasks. Label a Forgejo/GitHub issue <code>ship</code> to see it here.</p>
       ) : (
         data.proposed.map((t) => (
           <div key={t.taskId} class="card">

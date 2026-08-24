@@ -139,7 +139,13 @@ export class NucleusCodeIndex implements CodeSearch {
           chunks TEXT
         )`,
       )
-      .then(() => undefined);
+      .then(() => undefined)
+      // A failed ensure must not be cached: one transient store error would
+      // otherwise poison every later call for the life of the process.
+      .catch((error: unknown) => {
+        this.#ready = null;
+        throw error;
+      });
     return this.#ready;
   }
 

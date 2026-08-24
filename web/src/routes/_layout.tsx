@@ -244,8 +244,9 @@ table.runs td { padding: 8px 10px; border-bottom: 1px solid var(--border); verti
 .status.waiting { color: var(--yellow); border-color: var(--yellow); }
 .status.failed { color: var(--red); border-color: var(--red); }
 .status.cancelled { color: var(--dim); border-color: var(--dim); }
-.status.queued, .status.wake, .status.sleeping, .status.retrying { color: var(--blue); border-color: var(--blue); }
-form.newrun { display: flex; gap: 8px; margin: 18px 0; }
+.status.queued, .status.wake, .status.sleeping, .status.retrying, .status.running { color: var(--blue); border-color: var(--blue); }
+.status.cancelling { color: var(--yellow); border-color: var(--yellow); }
+form.newrun { display: flex; gap: 8px; margin: 18px 0; flex-wrap: wrap; }
 form.newrun input[type=text] { flex: 1; background: var(--panel); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font: inherit; }
 button { background: var(--panel); color: var(--text); border: 1px solid var(--border);
@@ -284,6 +285,27 @@ button.deny { color: var(--red); border-color: var(--red); }
 .login input { width: 100%; margin: 10px 0; background: var(--panel); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px; padding: 10px; font: inherit; }
 .empty { color: var(--dim); padding: 30px 0; }
+/* Native form controls default to the platform's light theme; give every one
+   the panel look so a <select> on Sources is not a white box on a dark page. */
+select, textarea, input[type=text], input[type=password], input[type=number], input[type=url] {
+  background: var(--panel); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 8px; font: inherit; }
+select option { background: var(--panel); color: var(--text); }
+.notice { margin: 12px 0; }
+/* Tables scroll inside themselves on a narrow screen; the page never does. */
+.table-wrap { overflow-x: auto; }
+@media (max-width: 720px) {
+  header.top { gap: 12px; padding: 8px 12px; flex-wrap: wrap; }
+  header.top nav.nav { order: 3; flex-basis: 100%; overflow-x: auto; gap: 2px;
+    scrollbar-width: none; }
+  header.top nav.nav::-webkit-scrollbar { display: none; }
+  header.top nav.nav a { white-space: nowrap; padding: 4px 8px; }
+  main { padding: 14px 12px 40px; }
+  form.newrun input[type=text] { flex-basis: 100%; }
+  .timeline summary { flex-wrap: wrap; }
+  .turn-action { flex-basis: 100%; white-space: normal; }
+  table.runs td, table.runs th { padding: 6px; }
+}
 `;
 
 // The layout renders a FRAGMENT, not a document: the framework owns the

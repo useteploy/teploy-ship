@@ -103,7 +103,10 @@ export default function Spend({ data }: { data: SpendData }) {
   // it is a rate, not a forecast: it cannot see that a run just started, or
   // that nobody works at 3am UTC.
   const msIntoDay = data.nowMs - Date.parse(`${data.today}T00:00:00Z`);
-  const projectedToday = msIntoDay > 0 ? (todayTotal * 86_400_000) / msIntoDay : todayTotal;
+  // Not shown until an hour of the day has passed: ten cents at 00:02 UTC
+  // extrapolates to $72, which is a number that only misleads.
+  const projectable = msIntoDay >= 3_600_000;
+  const projectedToday = projectable ? (todayTotal * 86_400_000) / msIntoDay : todayTotal;
 
   const repoRows = attributionRows(data.attributed, "repo", data.today);
   const actorRows = attributionRows(data.attributed, "actor", data.today);
@@ -117,7 +120,7 @@ export default function Spend({ data }: { data: SpendData }) {
       </p>
 
       <h2 class="section">Today <span class="count">({data.today} · {usd(todayTotal)})</span></h2>
-      {todayTotal > 0 && (
+      {todayTotal > 0 && projectable && (
         <p class="meta" style="margin:0 0 8px">
           projected for today at current rate: {usd(projectedToday)} — projection, not a cap
         </p>
@@ -151,7 +154,7 @@ export default function Spend({ data }: { data: SpendData }) {
       {days.length === 0 ? (
         <p class="empty">No spend recorded yet.</p>
       ) : (
-        <table class="runs">
+        <div class="table-wrap"><table class="runs">
           <thead>
             <tr><th>day</th><th style="width:60%">spend</th><th style="text-align:right">total</th></tr>
           </thead>
@@ -168,7 +171,7 @@ export default function Spend({ data }: { data: SpendData }) {
               </tr>
             ))}
           </tbody>
-        </table>
+        </table></div>
       )}
 
       <h2 class="section">By repository</h2>

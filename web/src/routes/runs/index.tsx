@@ -39,9 +39,13 @@ function category(status: string): string {
 const FILTER = `
 (function(){
   var q=new URLSearchParams(location.search).get("status")||"all";
+  var shown=0;
   document.querySelectorAll("tr[data-cat]").forEach(function(tr){
-    tr.style.display=(q==="all"||tr.getAttribute("data-cat")===q)?"":"none";
+    var on=(q==="all"||tr.getAttribute("data-cat")===q);
+    tr.style.display=on?"":"none"; if(on)shown++;
   });
+  var none=document.getElementById("filter-empty");
+  if(none){ none.style.display=shown===0?"":"none"; none.textContent="No "+q+" runs."; }
   document.querySelectorAll(".chips a").forEach(function(a){
     if((a.getAttribute("data-f")||"all")===q)a.classList.add("on");
   });
@@ -74,6 +78,8 @@ export default function RunsList({ data }: { data: RunsData }) {
       {data.runs.length === 0 ? (
         <p class="empty">No runs yet. Queue one from the <a href="/">Inbox</a>.</p>
       ) : (
+        <div class="table-wrap">
+        <p class="empty" id="filter-empty" style="display:none" />
         <table class="runs">
           <thead>
             <tr>
@@ -96,6 +102,7 @@ export default function RunsList({ data }: { data: RunsData }) {
             ))}
           </tbody>
         </table>
+        </div>
       )}
       <script dangerouslySetInnerHTML={{ __html: FILTER }} />
       <script dangerouslySetInnerHTML={{ __html: `__shipLive("route:runs/index.tsx");` }} />

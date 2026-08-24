@@ -4,14 +4,16 @@ import { checkRateLimit, clearRateLimit, clientKey, delay, loginLimits, withVeri
 
 export const config = { mode: "app" };
 
-export async function loader({ request }: { request: Request }): Promise<Response | { sso: { label: string } | null }> {
+export async function loader({ request }: { request: Request }): Promise<Response | { sso: { label: string } | null; error: string | null }> {
   // Already signed in: the layout lets /login through unauthenticated, so
   // without this an authenticated visitor is shown a sign-in form while every
   // nav link works — indistinguishable from being signed out.
   if ((await currentUser(request)) !== null) {
     return new Response(null, { status: 302, headers: { location: "/" } });
   }
-  return { sso: oidcEnabled() ? { label: oidcLabel() } : null };
+  // The OIDC callback redirects here with ?error=…; read it on the server so
+  // the rendered page and the hydrated one agree.
+  return { sso: oidcEnabled() ? { label: oidcLabel() } : null, error: new URL(request.url).searchParams.get("error") };
 }
 
 export async function action({ request }: { request: Request }): Promise<Response | { error: string }> {
@@ -53,10 +55,9 @@ export async function action({ request }: { request: Request }): Promise<Respons
   return new Response(null, { status: 302, headers: { location: "/", "set-cookie": cookie } });
 }
 
-export default function Login({ data, actionData }: { data?: { sso: { label: string } | null }; actionData?: { error?: string } }) {
+export default function Login({ data, actionData }: { data?: { sso: { label: string } | null; error?: string | null }; actionData?: { error?: string } }) {
   const sso = data?.sso ?? null;
-  const urlError = typeof location !== "undefined" ? new URLSearchParams(location.search).get("error") : null;
-  const error = actionData?.error ?? urlError ?? undefined;
+  const error = actionData?.error ?? data?.error ?? undefined;
   return (
     <div class="login">
       <h1>Teploy Ship</h1>

@@ -7,7 +7,8 @@ import { test } from "node:test";
 import { LocalExecutor } from "@neutron-build/agents";
 
 import { repoKeyOf } from "./durable.js";
-import { FileRepoMemory, loadRepoContext, runNote } from "./repo-memory.js";
+import type { NucleusPgwire } from "./nucleus-pgwire.js";
+import { FileRepoMemory, NucleusRepoMemory, loadRepoContext, runNote } from "./repo-memory.js";
 
 async function fresh(): Promise<LocalExecutor> {
   return new LocalExecutor({ root: await mkdtemp(join(tmpdir(), "repo-mem-")) });
@@ -112,4 +113,25 @@ test("TS-022: repository scope includes the origin, so two hosts do not share me
 test("repoKeyOf keeps same-path repositories on different hosts apart", () => {
   assert.notEqual(repoKeyOf("https://github.com/tyler/ship"), repoKeyOf("http://100.108.123.49:49152/tyler/ship"));
   assert.equal(repoKeyOf("https://github.com/tyler/ship.git"), repoKeyOf("https://github.com/tyler/ship"));
+});
+
+test("nucleus memory: a failed table ensure is retried, not cached for the process", async () => {
+  // Seam: the first CREATE fails (a transient engine error), every later call
+  // must try again instead of replaying the rejection forever. Found live —
+  // /knowledge 500'd on every request after one I/O error at startup.
+  let calls = 0;
+  const db = {
+    async query(sql: string): Promise<Record<string, unknown>[]> {
+      if (sql.startsWith("CREATE TABLE")) {
+        calls++;
+        if (calls === 1) throw new Error("catalog persistence failed: I/O error");
+        return [];
+      }
+      return [{ repo: "o/a" }];
+    },
+  } as unknown as NucleusPgwire;
+  const memory = new NucleusRepoMemory(db);
+  await assert.rejects(memory.repos(), /catalog persistence failed/);
+  assert.deepEqual(await memory.repos(), [{ repo: "o/a", count: 1 }]);
+  assert.equal(calls, 2);
 });

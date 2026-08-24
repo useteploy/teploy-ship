@@ -31,6 +31,10 @@ interface RunData {
   steerPending: string[];
   /** Every step-completed event, ordered — the log's index (see timeline.ts). */
   steps: RecordedStep[];
+  /** ?decision=stale|taken — read server-side so the banner survives hydration. */
+  decision: string | null;
+  /** ?cancel=failed */
+  cancelFailed: boolean;
 }
 
 /** The plan-think step's recorded text ({text, usage} or a bare string). */
@@ -47,8 +51,9 @@ function planFrom(events: { type: string; name?: string; data?: unknown }[]): st
 // page occasionally 500'd with the trigger never pinned down), so it gets a
 // trace span in addition to the ErrorBoundary every route already has —
 // no-op unless OBSERVE_URL/OBSERVE_API_KEY are set.
-export async function loader({ params }: { params: { id: string } }): Promise<RunData> {
+export async function loader({ params, request }: { params: { id: string }; request: Request }): Promise<RunData> {
   const runId = params.id;
+  const query = new URL(request.url).searchParams;
   const span = startSpan("GET /runs/:id", { "run.id": runId });
   try {
     const runtime = await shipRuntime();
@@ -77,6 +82,8 @@ export async function loader({ params }: { params: { id: string } }): Promise<Ru
       steerable,
       steerPending: steerNotes.map((n) => n.text),
       steps: recordedSteps(events),
+      decision: query.get("decision"),
+      cancelFailed: query.get("cancel") === "failed",
     };
     span.end("ok", { "run.status": meta?.status ?? "unknown", "run.event_count": events.length });
     return data;
@@ -198,7 +205,7 @@ const POLL = `__shipLive("route:runs/[id].tsx");`;
 
 export default function RunDetail({ data }: { data: RunData }) {
   const active = data.meta !== null && !["completed", "failed", "cancelled", "cancelling"].includes(data.meta.status);
-  const decision = typeof location !== "undefined" ? new URLSearchParams(location.search).get("decision") : null;
+  const decision = data.decision;
   return (
     <div id="run-root" data-event-count={String(data.eventCount)} data-run-status={data.meta?.status ?? "unknown"}>
       {decision === "stale" && (
@@ -211,7 +218,7 @@ export default function RunDetail({ data }: { data: RunData }) {
           Cancellation requested — the executor settles it at its next checkpoint.
         </p>
       )}
-      {typeof location !== "undefined" && new URLSearchParams(location.search).get("cancel") === "failed" && (
+      {data.cancelFailed && (
         <p class="card attn" style="margin:12px 0;color:var(--red)">
           Cancellation was not recorded — the store rejected it. The run is still going; try again.
         </p>
@@ -225,7 +232,7 @@ export default function RunDetail({ data }: { data: RunData }) {
         <a href="/runs">runs</a> / {data.runId}
       </h1>
       {data.meta === null ? (
-        <p class="empty">Unknown run.</p>
+        <p class="empty">Unknown run — it may have been removed, or the id is mistyped. <a href="/runs">All runs</a></p>
       ) : (
         <>
           <p class="meta">
@@ -384,7 +391,7 @@ export default function RunDetail({ data }: { data: RunData }) {
                 <summary style="cursor:pointer">
                   Recorded steps <span class="count">({data.steps.length})</span>
                 </summary>
-                <table class="runs" style="margin-top:8px">
+                <div class="table-wrap"><table class="runs" style="margin-top:8px">
                   <thead>
                     <tr><th>step</th><th>result</th><th style="text-align:right">at</th></tr>
                   </thead>
@@ -407,7 +414,7 @@ export default function RunDetail({ data }: { data: RunData }) {
                       ];
                     })}
                   </tbody>
-                </table>
+                </table></div>
               </details>
             );
           })()}

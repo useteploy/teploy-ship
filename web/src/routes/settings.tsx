@@ -51,6 +51,11 @@ function secret(name: string): Row {
   return { label: name, value: v !== undefined && v !== "" ? "set" : "not set", ok: v !== undefined && v !== "" };
 }
 
+/** "1", "true", "yes" — the worker's own reading of an on/off env flag. */
+function flagOn(name: string): boolean {
+  return ["1", "true", "yes"].includes((process.env[name] ?? "").trim().toLowerCase());
+}
+
 function value(name: string, fallback = "not set"): Row {
   const v = process.env[name];
   return { label: name, value: v !== undefined && v !== "" ? v : fallback, ok: v !== undefined && v !== "" };
@@ -110,7 +115,7 @@ export async function loader({ request }: { request: Request }): Promise<Setting
       },
       {
         title: "AI gateway",
-        rows: [safeUrl("AI_GATEWAY_URL"), secret("ANTHROPIC_API_KEY"), secret("OPENAI_API_KEY")],
+        rows: [safeUrl("AI_GATEWAY_URL"), secret("AI_GATEWAY_KEY"), secret("ANTHROPIC_API_KEY"), secret("OPENAI_API_KEY"), num("SHIP_MAX_STEPS", "40")],
       },
       {
         title: "Sandbox",
@@ -137,10 +142,34 @@ export async function loader({ request }: { request: Request }): Promise<Setting
         ],
       },
       {
+        title: "Evidence on the pull request",
+        rows: [
+          { label: "tests", value: flagOn("SHIP_TESTS") ? "enabled" : "disabled", ok: flagOn("SHIP_TESTS"), hint: "SHIP_TESTS — the suite runs after the agent stops, before the push" },
+          value("SHIP_TEST_COMMAND", "not set (worker default)"),
+          { label: "telemetry", value: flagOn("SHIP_TELEMETRY") ? "enabled" : "disabled", ok: flagOn("SHIP_TELEMETRY"), hint: "SHIP_TELEMETRY — error rate and latency either side of the change" },
+          value("OBSERVE_SERVICE", "not set"),
+          { ...value("OBSERVE_REPO", "not set — telemetry leg is off"), hint: "the repo the service belongs to; required, so metrics never land on an unrelated PR" },
+          secret("OBSERVE_READ_TOKEN"),
+          { label: "preview", value: flagOn("SHIP_PREVIEW") ? "enabled" : "disabled", ok: flagOn("SHIP_PREVIEW"), hint: "SHIP_PREVIEW — deploy the branch with the teploy CLI" },
+          value("SHIP_PREVIEW_DIR", "not set — preview leg is off"),
+          { label: "per-repo overrides", value: "teploy-ship evidence set <repo> --test-command … --observe-service …", hint: "win over these worker-wide defaults" },
+        ],
+      },
+      {
+        title: "Intake",
+        rows: [
+          secret("SHIP_WEBHOOK_SECRET"),
+          value("SHIP_PUBLIC_URL", "not set — webhook URLs on Sources show a placeholder"),
+          value("SHIP_INTAKE_POLICIES", "not set — every source proposes; edit on Sources"),
+        ],
+      },
+      {
         title: "Git & access",
         rows: [
-          secret("FORGEJO_TOKEN"),
-          secret("GITHUB_TOKEN"),
+          { ...secret("SHIP_GIT_TOKENS"), hint: "per-origin deploy tokens, JSON — the preferred form" },
+          { ...secret("SHIP_GIT_TOKEN"), hint: "single deploy token; needs SHIP_REPO_ALLOWLIST to say where it may be sent" },
+          { ...secret("SHIP_GITHUB_TOKEN"), hint: "GitHub API token for pull requests and review replies" },
+          value("SHIP_REPO_ALLOWLIST", "not set"),
           { ...secret("SHIP_WEB_TOKEN"), hint: "admin master credential + API bearer; rotate: teploy secret set SHIP_WEB_TOKEN <new> && redeploy" },
         ],
       },

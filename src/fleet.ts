@@ -92,7 +92,13 @@ export class NucleusPlacementStore implements PlacementStore {
   #ensure(): Promise<void> {
     this.#ready ??= this.#db
       .query(`CREATE TABLE IF NOT EXISTS ship_placement (run_id TEXT, host TEXT)`)
-      .then(() => undefined);
+      .then(() => undefined)
+      // A failed ensure must not be cached: one transient store error would
+      // otherwise poison every later call for the life of the process.
+      .catch((error: unknown) => {
+        this.#ready = null;
+        throw error;
+      });
     return this.#ready;
   }
 
@@ -181,7 +187,13 @@ export class NucleusFleetStore implements FleetStore {
           last_seen TEXT
         )`,
       )
-      .then(() => undefined);
+      .then(() => undefined)
+      // A failed ensure must not be cached: one transient store error would
+      // otherwise poison every later call for the life of the process.
+      .catch((error: unknown) => {
+        this.#ready = null;
+        throw error;
+      });
     return this.#ready;
   }
 
