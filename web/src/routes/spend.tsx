@@ -1,4 +1,4 @@
-import { utcDay } from "teploy-ship/runtime";
+import { utcDay } from "../lib/ship.server.js";
 import type { SpendEntry } from "teploy-ship/runtime";
 
 import { shipRuntime } from "../lib/store.server.js";

@@ -1,4 +1,4 @@
-import { ciFixTaskFromWorkflowRun, requesterOf } from "teploy-ship/runtime";
+import { ciFixTaskFromWorkflowRun, requesterOf } from "../../lib/ship.server.js";
 
 import { BodyTooLarge, claimDelivery, firstHeader, json, parseJson, proposeFromWebhook, readCappedBody } from "../../lib/webhook.server.js";
 

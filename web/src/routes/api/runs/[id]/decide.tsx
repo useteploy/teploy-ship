@@ -1,6 +1,6 @@
 import type { ActionArgs } from "@neutron-build/core";
 
-import { deliverEvent } from "@neutron-build/workflow";
+import { deliverEvent } from "../../../../lib/ship.server.js";
 
 import { PLAN_EVENT } from "teploy-ship/plan";
 

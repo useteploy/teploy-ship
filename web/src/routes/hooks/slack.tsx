@@ -1,4 +1,4 @@
-import { slackTaskFromMention } from "teploy-ship/runtime";
+import { slackTaskFromMention } from "../../lib/ship.server.js";
 
 import { BodyTooLarge, claimDelivery, json, parseJson, proposeFromWebhook, readCappedBody } from "../../lib/webhook.server.js";
 

@@ -1,4 +1,4 @@
-import { normalizeRole } from "teploy-ship/runtime";
+import { normalizeRole } from "../lib/ship.server.js";
 import type { Role, UserView, ShipRuntime } from "teploy-ship/runtime";
 
 import { shipRuntime, defaultModel } from "../lib/store.server.js";

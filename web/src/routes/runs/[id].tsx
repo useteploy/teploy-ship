@@ -1,9 +1,9 @@
-import { cancelRun, deliverEvent } from "@neutron-build/workflow";
+import { cancelRun, deliverEvent, costUSD, isPricedModel, actorFromPrincipal } from "../../lib/ship.server.js";
 
 // PLAN_EVENT comes from the dependency-free plan module: it's used in the
 // component (client bundle), where teploy-ship/runtime (node-only) can't go.
 import { PLAN_EVENT } from "teploy-ship/plan";
-import { costUSD, isPricedModel, actorFromPrincipal } from "teploy-ship/runtime";
+
 import type { RunMeta } from "teploy-ship/runtime";
 
 import { shipRuntime } from "../../lib/store.server.js";

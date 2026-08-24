@@ -1,4 +1,4 @@
-import { linearTaskFromIssue } from "teploy-ship/runtime";
+import { linearTaskFromIssue } from "../../lib/ship.server.js";
 
 import { BodyTooLarge, claimDelivery, firstHeader, json, parseJson, proposeFromWebhook, readCappedBody } from "../../lib/webhook.server.js";
 

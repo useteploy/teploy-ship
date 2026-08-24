@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { deliverEvent } from "@neutron-build/workflow";
-import { enqueueRun, actorFromPrincipal, intakeActor } from "teploy-ship/runtime";
+import { deliverEvent, enqueueRun, actorFromPrincipal, intakeActor } from "../lib/ship.server.js";
 import type { RunMeta } from "teploy-ship/runtime";
 import type { IntakeTask } from "teploy-ship/runtime";
 
