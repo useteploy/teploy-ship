@@ -138,7 +138,8 @@ export default function Inbox({ data }: { data: InboxData }) {
     <>
       <h1 class="page">Inbox</h1>
       <p class="meta">
-        Everything waiting on you. · store: {data.store} · model: {data.model}
+        Issues in, verified pull requests out. This page is everything waiting on you — a decision on a
+        parked run, or a launch call on a proposed task. · store: {data.store} · model: {data.model}
         {data.store === "file" && " · file store has no worker — resume queued runs from the CLI"}
       </p>
 

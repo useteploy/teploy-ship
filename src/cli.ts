@@ -46,7 +46,7 @@ import { NucleusCodeIndex } from "./code-index.js";
 import type { CodeSearch } from "./code-index.js";
 import { startWorker } from "./worker.js";
 import { costUSD, isPricedModel } from "./pricing.js";
-import { defaultRetryPolicy, withRetry } from "./provider.js";
+import { defaultRetryPolicy, withRetry, withCallTimeout, modelTimeoutFromEnv } from "./provider.js";
 import { builtinSuite } from "./tasks.js";
 import { hardSuite } from "./hard-tasks.js";
 import { extremeSuite } from "./extreme-tasks.js";
@@ -273,11 +273,16 @@ const KNOWN_CONFIG_KEYS = new Set([
  * keys never reach the app; caching stays on either way.
  */
 function resolveModel(modelId: string): ModelAdapter {
-  // Ship's own retry policy sits above whatever the SDK does: a durable run
-  // that has already paid for ten turns should not die to one 429.
-  return withRetry(baseModel(modelId), defaultRetryPolicy, {
-    log: (line) => process.stderr.write(`${dim(line)}\n`),
-  });
+  // Ship's own policies sit above whatever the SDK does: a durable run that
+  // has already paid for ten turns should not die to one 429 (retry), and a
+  // hung model call must fail the run visibly rather than wedge it past even
+  // cancel (per-call timeout — P3-7, found live 2026-08-24).
+  return withCallTimeout(
+    withRetry(baseModel(modelId), defaultRetryPolicy, {
+      log: (line) => process.stderr.write(`${dim(line)}\n`),
+    }),
+    modelTimeoutFromEnv(),
+  );
 }
 
 function baseModel(modelId: string): ModelAdapter {

@@ -112,8 +112,8 @@ export default function Spend({ data }: { data: SpendData }) {
     <>
       <h1 class="page">Spend</h1>
       <p class="meta">
-        Your API cost — no markup. Metered against the per-source daily cap the worker enforces
-        (SHIP_DAILY_BUDGET_USD, default {usd(data.dailyBudget)}).
+        Your API cost — no markup, cut by source, repository, and who asked. Metered against the
+        per-source daily cap the worker enforces (SHIP_DAILY_BUDGET_USD, default {usd(data.dailyBudget)}).
       </p>
 
       <h2 class="section">Today <span class="count">({data.today} · {usd(todayTotal)})</span></h2>

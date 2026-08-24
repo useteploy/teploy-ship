@@ -100,3 +100,48 @@ export function withRetry(
     doStream: model.doStream.bind(model),
   } as ModelAdapter;
 }
+
+/**
+ * Wrap an adapter so a single model call cannot hang forever (P3-7).
+ *
+ * Found live on 2026-08-24: a run whose model call hung (bogus model id via
+ * the gateway) wedged INDEFINITELY — no client timeout, the retry policy never
+ * fired (nothing threw), and `cancel` could not take effect because a cancel
+ * lands "at the next step", which never comes. The only remedy was a worker
+ * restart. Selfwatch correctly flagged the run as stuck at 30 minutes; this
+ * makes the flag a formality rather than the remedy.
+ *
+ * Per-CALL ceiling, not per-run: one generateText with tools loops several
+ * doGenerate calls and each gets its own budget, so a long multi-step turn is
+ * never cut off by the turns before it. Default 10 minutes — measured
+ * thinking-mode turns run several minutes, so the default must sit well above
+ * real work and well below "wedged". An aborted call surfaces as a (retryable)
+ * timeout error: the run fails VISIBLY and can be resumed, instead of hanging
+ * invisibly. Replay is unaffected — timeouts bound in-flight calls only; a
+ * replayed step reads the log and never calls the model.
+ *
+ * Adapter-level rather than sprinkled across the six generateText call sites:
+ * the critic path goes through the agents package with no signal passthrough,
+ * and any future call site inherits the bound for free.
+ */
+export function withCallTimeout(model: ModelAdapter, timeoutMs: number): ModelAdapter {
+  return {
+    ...model,
+    provider: model.provider,
+    modelId: model.modelId,
+    doGenerate: async (opts) => {
+      const timeout = AbortSignal.timeout(timeoutMs);
+      const signal = opts.abortSignal !== undefined ? AbortSignal.any([opts.abortSignal, timeout]) : timeout;
+      return await model.doGenerate({ ...opts, abortSignal: signal });
+    },
+    doStream: model.doStream.bind(model),
+  } as ModelAdapter;
+}
+
+/** Per-call model timeout from the environment, or the default when unset/invalid. */
+export const DEFAULT_MODEL_TIMEOUT_MS = 10 * 60_000;
+
+export function modelTimeoutFromEnv(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.SHIP_MODEL_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_MODEL_TIMEOUT_MS;
+}

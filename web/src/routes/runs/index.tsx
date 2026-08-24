@@ -61,7 +61,7 @@ export default function RunsList({ data }: { data: RunsData }) {
   return (
     <>
       <h1 class="page">Runs</h1>
-      <p class="meta">{data.runs.length} run{data.runs.length === 1 ? "" : "s"} total.</p>
+      <p class="meta">{data.runs.length} run{data.runs.length === 1 ? "" : "s"} total. Open one for its timeline and the recorded steps behind the pull request.</p>
 
       <div class="chips">
         {CHIPS.map((c) => (
