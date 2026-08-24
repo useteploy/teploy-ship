@@ -617,7 +617,10 @@ export function startWorker(options: WorkerOptions): {
   const driveTimer = setInterval(
     () =>
       void drive().catch((error) =>
-        log(`[worker] tick failed (store unreachable?): ${error instanceof Error ? error.message : String(error)}`),
+        log(
+          `[worker] tick failed (store unreachable?): ${error instanceof Error ? error.message : String(error)}\n` +
+            (error instanceof Error && error.stack !== undefined ? error.stack : ""),
+        ),
       ),
     options.intervalMs ?? 5000,
   );
