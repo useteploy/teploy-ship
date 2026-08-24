@@ -8,8 +8,8 @@ import type { RunMeta } from "teploy-ship/runtime";
 
 import { shipRuntime } from "../../lib/store.server.js";
 import { currentUser } from "../../lib/session.server.js";
-import { itemClass, runOutcome, since, took, toTimeline } from "../../lib/timeline.js";
-import type { RunOutcome, TimelineItem } from "../../lib/timeline.js";
+import { itemClass, runOutcome, since, took, toTimeline, recordedSteps } from "../../lib/timeline.js";
+import type { RunOutcome, TimelineItem, RecordedStep } from "../../lib/timeline.js";
 import { startSpan } from "../../lib/observe.server.js";
 
 export const config = { mode: "app" };
@@ -29,6 +29,8 @@ interface RunData {
   steerable: boolean;
   /** Steer notes sent but not yet consumed by a turn. */
   steerPending: string[];
+  /** Every step-completed event, ordered — the log's index (see timeline.ts). */
+  steps: RecordedStep[];
 }
 
 /** The plan-think step's recorded text ({text, usage} or a bare string). */
@@ -74,6 +76,7 @@ export async function loader({ params }: { params: { id: string } }): Promise<Ru
       ...(plan !== undefined ? { plan } : {}),
       steerable,
       steerPending: steerNotes.map((n) => n.text),
+      steps: recordedSteps(events),
     };
     span.end("ok", { "run.status": meta?.status ?? "unknown", "run.event_count": events.length });
     return data;
@@ -371,6 +374,43 @@ export default function RunDetail({ data }: { data: RunData }) {
               );
             })}
           </ul>
+          {data.steps.length > 0 && (() => {
+            // The log's index: one row per recorded step, grouped by turn
+            // where the steps are turn-scoped. Collapsed by default so it
+            // complements the timeline above rather than burying it.
+            const firstAt = data.items[0]?.at ?? data.steps[0]!.at;
+            return (
+              <details class="card" style="margin:12px 0">
+                <summary style="cursor:pointer">
+                  Recorded steps <span class="count">({data.steps.length})</span>
+                </summary>
+                <table class="runs" style="margin-top:8px">
+                  <thead>
+                    <tr><th>step</th><th>result</th><th style="text-align:right">at</th></tr>
+                  </thead>
+                  <tbody>
+                    {data.steps.flatMap((s, i) => {
+                      const group = s.turn !== undefined && s.turn !== data.steps[i - 1]?.turn;
+                      return [
+                        ...(group
+                          ? [
+                              <tr key={`turn-${s.turn}`}>
+                                <td colSpan={3} class="meta" style="color:var(--dim)">turn {s.turn}</td>
+                              </tr>,
+                            ]
+                          : []),
+                        <tr key={`${s.at}-${i}`}>
+                          <td class="meta"><code>{s.name}</code></td>
+                          <td style={s.failed ? "color:var(--red)" : ""}>{s.summary !== "" ? s.summary : "—"}</td>
+                          <td class="meta" style="text-align:right">{since(firstAt, s.at)}</td>
+                        </tr>,
+                      ];
+                    })}
+                  </tbody>
+                </table>
+              </details>
+            );
+          })()}
           {active && <script dangerouslySetInnerHTML={{ __html: POLL }} />}
         </>
       )}

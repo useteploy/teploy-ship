@@ -17,6 +17,8 @@ import { FilePolicyStore, NucleusPolicyStore } from "./policies.js";
 import type { PolicyStore } from "./policies.js";
 import { FileEvidenceStore, NucleusEvidenceStore } from "./evidence.js";
 import type { EvidenceStore } from "./evidence.js";
+import { FileAttributedSpendStore, NucleusAttributedSpendStore } from "./attributed-spend.js";
+import type { AttributedSpendStore, AttributedSpendEntry, SpendDimension } from "./attributed-spend.js";
 import { FileFleetStore, NucleusFleetStore, FilePlacementStore, NucleusPlacementStore } from "./fleet.js";
 import type { FleetStore, PlacementStore } from "./fleet.js";
 import { FileRepoMemory, NucleusRepoMemory } from "./repo-memory.js";
@@ -48,6 +50,8 @@ export type { PolicyStore, SourcePolicy } from "./policies.js";
 export { FilePolicyStore, NucleusPolicyStore } from "./policies.js";
 export type { EvidenceStore, RepoEvidence } from "./evidence.js";
 export { FileEvidenceStore, NucleusEvidenceStore } from "./evidence.js";
+export type { AttributedSpendStore, AttributedSpendEntry, SpendDimension } from "./attributed-spend.js";
+export { FileAttributedSpendStore, NucleusAttributedSpendStore } from "./attributed-spend.js";
 export type { FleetStore, WorkerInfo, PlacementStore } from "./fleet.js";
 export { FileFleetStore, NucleusFleetStore, FilePlacementStore, NucleusPlacementStore } from "./fleet.js";
 export type { RepoMemoryStore, RepoNote } from "./repo-memory.js";
@@ -164,6 +168,11 @@ export interface ShipRuntime {
   intake: IntakeStore;
   /** Per-source, per-UTC-day spend ledger backing the worker's budget cap. */
   spend: SpendStore;
+  /**
+   * The same settled cost as `spend`, cut by repository and by actor —
+   * reporting only, the budget cap never reads it. See attributed-spend.ts.
+   */
+  attributedSpend: AttributedSpendStore;
   /** Editable per-source intake policies (dashboard-managed, env-seeded). */
   policies: PolicyStore;
   /** Per-repo evidence config (test command, Observe service). See evidence.ts. */
@@ -202,6 +211,7 @@ export function fileRuntime(): ShipRuntime {
     store,
     intake: new FileIntakeStore(),
     spend: new FileSpendStore(),
+    attributedSpend: new FileAttributedSpendStore(),
     policies: new FilePolicyStore(),
     evidence: new FileEvidenceStore(),
     fleet: new FileFleetStore(),
@@ -317,6 +327,7 @@ export async function nucleusRuntime(
     db,
     intake: new NucleusIntakeStore(db),
     spend: new NucleusSpendStore(db),
+    attributedSpend: new NucleusAttributedSpendStore(db),
     policies: new NucleusPolicyStore(db),
     evidence: new NucleusEvidenceStore(db),
     fleet: new NucleusFleetStore(db),

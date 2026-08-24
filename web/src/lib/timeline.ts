@@ -226,6 +226,106 @@ export function toTimeline(events: WorkflowEvent[]): TimelineItem[] {
   return items;
 }
 
+/** One row in the run page's "Recorded steps" section. */
+export interface RecordedStep {
+  /** Step name exactly as recorded ("turn-3-exec", "repo-push", "tests"). */
+  name: string;
+  at: string;
+  /** Minimum honest one-line summary derived from the recorded result. */
+  summary: string;
+  /** True when the result itself says the step did not succeed. */
+  failed: boolean;
+  /** Present on per-turn steps: which turn the step belongs to. */
+  turn?: number;
+}
+
+/**
+ * Any turn-scoped step, broader than toTimeline's turnMatch on purpose: the
+ * timeline collapses think/exec/steer/search into one narrative row, but the
+ * recorded-steps list is an INDEX of the log — turn-2-critic and
+ * turn-2-fingerprint belong to turn 2 even though the timeline never groups
+ * them.
+ */
+const TURN_STEP = /^turn-(\d+)-[a-z-]+$/;
+
+/** One line, bounded: a summary that wraps or scrolls stops summarising. */
+function oneLine(text: string, max = 120): string {
+  const line = text.split("\n")[0] ?? "";
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+}
+
+/**
+ * The minimum honest one-line summary of a recorded step result.
+ *
+ * NEVER the raw payload: a step's result can be kilobytes of stdout, and this
+ * feeds a compact index whose job is "what happened here" at a glance. The
+ * shapes recognised are the ones durable.ts actually records — exitCode for
+ * exec-shaped results, the outcome kind for evidence steps (tests,
+ * preview-deploy, telemetry-check, repo-push), a PR number for repo-pr — and
+ * anything unrecognised degrades to a bounded first line or a capped
+ * compact-JSON rendering, never a dump.
+ */
+function stepSummary(result: unknown): { summary: string; failed: boolean } {
+  if (result === null || result === undefined) return { summary: "", failed: false };
+  if (typeof result === "string") return { summary: oneLine(result), failed: false };
+  if (typeof result === "number" || typeof result === "boolean") return { summary: String(result), failed: false };
+  if (Array.isArray(result)) return { summary: `${result.length}`, failed: false };
+  if (typeof result !== "object") return { summary: oneLine(String(result)), failed: false };
+  const r = result as {
+    exitCode?: unknown;
+    kind?: unknown;
+    number?: unknown;
+    text?: unknown;
+  };
+  // Evidence steps: the outcome kind. "failed" carries the suite's exit code
+  // when there is one; disabled/skipped/unavailable/insufficient are honest
+  // outcomes, not failures. Checked BEFORE exitCode because the failed suite
+  // result carries both, and "failed (exit 2)" says more than "exit 2".
+  if (typeof r.kind === "string") {
+    const failed = r.kind === "failed" || r.kind === "errored" || r.kind === "refused";
+    const exit = failed && typeof r.exitCode === "number" ? ` (exit ${r.exitCode})` : "";
+    return { summary: `${r.kind}${exit}`, failed };
+  }
+  // Exec-shaped results (turn-N-exec): the exit code IS the summary.
+  if (typeof r.exitCode === "number") return { summary: `exit ${r.exitCode}`, failed: r.exitCode !== 0 };
+  // repo-pr: {url, number} — the PR number is the summary, not the URL.
+  if (typeof r.number === "number") return { summary: `PR #${r.number}`, failed: false };
+  // Think-shaped results ({text, usage}): the first line of the reasoning.
+  if (typeof r.text === "string") return { summary: oneLine(r.text), failed: false };
+  // Unknown object: compact JSON, capped — a bounded rendering, not a dump.
+  try {
+    return { summary: oneLine(JSON.stringify(result)), failed: false };
+  } catch {
+    return { summary: "", failed: false };
+  }
+}
+
+/**
+ * Every step-completed event as an ordered row — the inspection view the
+ * narrative timeline deliberately is not. toTimeline tells you WHAT THE AGENT
+ * DID; this tells you WHAT THE LOG RECORDS, one row per step, which is the
+ * honest basis for any future replay: you cannot replay what you cannot see.
+ */
+export function recordedSteps(events: WorkflowEvent[]): RecordedStep[] {
+  const steps: RecordedStep[] = [];
+  for (const event of events) {
+    if (event.type !== "step-completed") continue;
+    const name = event.name ?? "";
+    if (name === "") continue;
+    const result = (event.data as { result?: unknown } | undefined)?.result;
+    const { summary, failed } = stepSummary(result);
+    const turn = TURN_STEP.exec(name);
+    steps.push({
+      name,
+      at: event.at,
+      summary,
+      failed,
+      ...(turn !== null ? { turn: Number(turn[1]) } : {}),
+    });
+  }
+  return steps;
+}
+
 export interface Usage {
   inputTokens: number;
   outputTokens: number;

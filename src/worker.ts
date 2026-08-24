@@ -12,6 +12,7 @@ import { testTargetFromEnv } from "./tests.js";
 import type { ExecutorProvider, RunUsage } from "./durable.js";
 import { defaultApprovalPolicy } from "./approval.js";
 import { enqueueRun } from "./runtime.js";
+import { attributionsFrom } from "./attributed-spend.js";
 import { intakeActor } from "./actor.js";
 import type { NucleusShipRuntime } from "./runtime.js";
 import type { NucleusPgwire } from "./nucleus-pgwire.js";
@@ -441,6 +442,31 @@ export function startWorker(options: WorkerOptions): {
         const day = utcDay(new Date());
         await options.runtime.spend.add(source, day, cost);
         log(`[worker] ${runId} (${source}) cost $${cost.toFixed(4)} recorded to ${day}`);
+        // The same cost, cut by repository and by actor. Fire-and-forget with
+        // its own guard, in the style of the surrounding side effects:
+        // attribution is reporting, and a failure here must never break or
+        // delay the settle above it — the budget ledger is the record that
+        // matters. Same cost > 0 gate as the source settle, inherited by
+        // placement (the block returned above when cost <= 0).
+        const attribution = attributionsFrom(meta, events);
+        if (attribution.repo !== undefined) {
+          void options.runtime.attributedSpend.add("repo", attribution.repo, day, cost).catch((error) =>
+            log(
+              `[worker] ${runId}: attributed spend (repo) failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            ),
+          );
+        }
+        if (attribution.actor !== undefined) {
+          void options.runtime.attributedSpend.add("actor", attribution.actor, day, cost).catch((error) =>
+            log(
+              `[worker] ${runId}: attributed spend (actor) failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            ),
+          );
+        }
       })().catch((error) =>
         log(
           `[worker] ${runId}: spend settle failed: ${error instanceof Error ? error.message : String(error)}\n` +
