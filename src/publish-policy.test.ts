@@ -165,3 +165,42 @@ test("limits come from the environment with sane fallbacks", () => {
   assert.equal(publishLimitsFromEnv({ SHIP_PUBLISH_MAX_FILES: "junk" }).maxFiles, defaultPublishLimits.maxFiles);
   assert.equal(publishLimitsFromEnv({ SHIP_PUBLISH_MAX_FILES: "-3" }).maxFiles, defaultPublishLimits.maxFiles);
 });
+
+test("P2-3: a diff over the HARD file cap is refused, not drafted", async () => {
+  const repo = await stagedRepo(async (dir) => {
+    await mkdir(join(dir, "vendor"), { recursive: true });
+    for (let i = 0; i < 12; i++) await writeFile(join(dir, "vendor", `f${i}.js`), `export const a${i} = ${i};\n`);
+  });
+  try {
+    // Soft limit 5 (draft territory), hard limit 9 (refuse): 12 files trips both.
+    const screen = await screenPublication(repo.executor, { ...defaultPublishLimits, maxFiles: 5, hardMaxFiles: 9 });
+    assert.ok(screen.blocking.some((r) => /touches 12 files \(hard cap 9\)/.test(r)), screen.blocking.join("; "));
+    // The soft-limit warning is still there: the reviewer who raises the hard
+    // cap back to nothing should still see the draft-level question.
+    assert.ok(screen.warnings.some((r) => /usual limit 5/.test(r)), screen.warnings.join("; "));
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test("P2-3: under the hard cap, size stays a question for a human", async () => {
+  const repo = await stagedRepo(async (dir) => {
+    await mkdir(join(dir, "vendor"), { recursive: true });
+    for (let i = 0; i < 8; i++) await writeFile(join(dir, "vendor", `f${i}.js`), `export const a${i} = ${i};\n`);
+  });
+  try {
+    // Over the soft limit (5), under the hard cap (9): draft, never refuse.
+    const screen = await screenPublication(repo.executor, { ...defaultPublishLimits, maxFiles: 5, hardMaxFiles: 9 });
+    assert.deepEqual(screen.blocking, [], "under the hard cap, size never blocks");
+    assert.ok(screen.warnings.length > 0);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test("P2-3: the hard cap is opt-in — unset or junk env means no cap", () => {
+  assert.equal(publishLimitsFromEnv({ SHIP_PUBLISH_HARD_MAX_FILES: "20" }).hardMaxFiles, 20);
+  assert.equal(publishLimitsFromEnv({}).hardMaxFiles, undefined, "today's behaviour is unchanged until the operator opts in");
+  assert.equal(publishLimitsFromEnv({ SHIP_PUBLISH_HARD_MAX_FILES: "junk" }).hardMaxFiles, undefined);
+  assert.equal(publishLimitsFromEnv({ SHIP_PUBLISH_HARD_MAX_FILES: "0" }).hardMaxFiles, undefined);
+});

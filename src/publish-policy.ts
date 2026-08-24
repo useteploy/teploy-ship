@@ -12,19 +12,32 @@ import type { AgentExecutor } from "@neutron-build/agents";
  *
  * Two different verdicts, because two different questions:
  *
- *   BLOCKING — credentials, forbidden paths, symlinks, submodule pointers.
- *              Refused. None of these can be un-published once pushed, and none
- *              of them has a legitimate version that Ship should guess at.
+ *   BLOCKING — credentials, forbidden paths, symlinks, submodule pointers,
+ *              and a diff over the HARD file cap. Refused. None of these can
+ *              be un-published once pushed, and none of them has a legitimate
+ *              version that Ship should guess at.
  *   WARNING  — the diff is unusually large or contains binaries. Published as a
  *              DRAFT that says why. A 400-file change is either a real refactor
  *              or a runaway agent, and only a human knows which; a product that
  *              refuses both just teaches its operator to raise the limit until
  *              it never fires again, which is worse than not having it.
+ *
+ * The hard cap (SHIP_PUBLISH_HARD_MAX_FILES) is the blast-radius bound from the
+ * policy work: the soft limit above it stays a question for a human, but an
+ * operator running unattended against real repositories gets to say "past this
+ * many files, do not push at all" — the refusal is recorded as a step and the
+ * work stays in the run's log. Unset by default so existing deployments behave
+ * exactly as before until the operator opts in.
  */
 
 export interface PublishLimits {
   /** Above this many files the PR is raised as a draft, not refused. */
   maxFiles: number;
+  /**
+   * Above this many files the push is REFUSED outright. Undefined = no hard
+   * cap; the draft-level maxFiles above still applies.
+   */
+  hardMaxFiles?: number;
   /** Above this many added lines the PR is raised as a draft. */
   maxAddedLines: number;
   /** Above this size for one file the PR is raised as a draft, in bytes. */
@@ -145,6 +158,13 @@ export async function screenPublication(
   if (files > limits.maxFiles) {
     warnings.push(`touches ${files} files (usual limit ${limits.maxFiles})`);
   }
+  // ...unless the operator drew a hard line. Past the hard cap this is a
+  // runaway agent or a misunderstanding of the task, and pushing it creates a
+  // branch the repository then owns; the refusal keeps the work in the run's
+  // log, where a human can still look at it.
+  if (limits.hardMaxFiles !== undefined && files > limits.hardMaxFiles) {
+    blocking.push(`touches ${files} files (hard cap ${limits.hardMaxFiles}) — refused rather than pushed`);
+  }
   if (addedLines > limits.maxAddedLines) {
     warnings.push(`adds ${addedLines} lines (usual limit ${limits.maxAddedLines})`);
   }
@@ -216,8 +236,11 @@ export function publishLimitsFromEnv(env: NodeJS.ProcessEnv = process.env): Publ
     const raw = Number(env[name]);
     return Number.isFinite(raw) && raw > 0 ? raw : fallback;
   };
+  const hard = Number(env.SHIP_PUBLISH_HARD_MAX_FILES);
   return {
     maxFiles: num("SHIP_PUBLISH_MAX_FILES", defaultPublishLimits.maxFiles),
+    // Opt-in: absent or junk means "no hard cap", preserving today's behaviour.
+    ...(Number.isFinite(hard) && hard > 0 ? { hardMaxFiles: hard } : {}),
     maxAddedLines: num("SHIP_PUBLISH_MAX_ADDED_LINES", defaultPublishLimits.maxAddedLines),
     maxFileBytes: num("SHIP_PUBLISH_MAX_FILE_BYTES", defaultPublishLimits.maxFileBytes),
     forbidden: defaultPublishLimits.forbidden,

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { sweepIntake } from "./worker.js";
+import { sweepIntake, makeTerminalClaim, launchDueBounded } from "./worker.js";
 import type { IntakeSweepDeps } from "./worker.js";
 import type { IntakeTask } from "./intake.js";
 import type { RunUsage } from "./durable.js";
@@ -122,6 +122,113 @@ function harness(overrides: Partial<IntakeSweepDeps>, tasks: IntakeTask[]): Harn
   };
   return { deps, launched, terminal, spend, intake, admission };
 }
+
+test("the terminal claim settles a run exactly once, per worker and across ticks", async () => {
+  // File mode: a Set is the whole guarantee, and the claim is per-process.
+  const fileClaim = makeTerminalClaim({ kind: "file", owner: "w1" }, "h1");
+  assert.equal(await fileClaim("run-a"), true, "first observer wins");
+  assert.equal(await fileClaim("run-a"), false, "a racing second tick loses");
+  assert.equal(await fileClaim("run-b"), true, "a different run claims independently");
+
+  // Nucleus mode: the KV decides, so two PROCESSES share the same answer.
+  let kvCalls = 0;
+  const nucleusClaimA = makeTerminalClaim(
+    {
+      kind: "nucleus",
+      owner: "w1",
+      db: { kv: { setNX: async () => { kvCalls += 1; return kvCalls === 1; } } } as never,
+    },
+    "h1",
+  );
+  const nucleusClaimB = makeTerminalClaim(
+    {
+      kind: "nucleus",
+      owner: "w2",
+      db: { kv: { setNX: async () => false } } as never,
+    },
+    "h2",
+  );
+  assert.equal(await nucleusClaimA("run-c"), true);
+  assert.equal(await nucleusClaimB("run-c"), false, "the other worker in the fleet loses");
+
+  // A KV failure must NOT answer true: an unreachable store skipping a settle
+  // under-counts spend; processing twice over-counts and trips the budget cap
+  // on money nobody spent.
+  const brokenClaim = makeTerminalClaim(
+    {
+      kind: "nucleus",
+      owner: "w1",
+      db: {
+        kv: {
+          setNX: async () => {
+            throw new Error("kv down");
+          },
+        },
+      } as never,
+    },
+    "h1",
+  );
+  assert.equal(await brokenClaim("run-d"), false, "a KV failure claims nothing");
+});
+
+test("P3-4: at the concurrency ceiling, due runs QUEUE — nothing is dropped or errored", async () => {
+  const due = [
+    { runId: "r1", sleeping: false },
+    { runId: "r2", sleeping: false },
+    { runId: "r3", sleeping: false },
+  ];
+  const inflight = new Set<string>();
+  const launching = new Set<string>();
+  const launched: string[] = [];
+
+  // Ceiling 2, five slots of nothing running: exactly the first two launch.
+  const first = await launchDueBounded({
+    due: async () => due,
+    inflight,
+    launching,
+    maxConcurrent: 2,
+    launch: (runId) => {
+      launched.push(runId);
+      launching.add(runId);
+    },
+  });
+  assert.equal(first, 2);
+  assert.deepEqual(launched, ["r1", "r2"]);
+
+  // r1 and r2 are mid-execution. The third pass must launch NOTHING — r3
+  // waits, still due, not dropped and not errored.
+  const second = await launchDueBounded({
+    due: async () => due,
+    inflight,
+    launching,
+    maxConcurrent: 2,
+    launch: (runId) => {
+      launched.push(runId);
+      launching.add(runId);
+    },
+  });
+  assert.equal(second, 0, "the ceiling is the ceiling");
+  assert.deepEqual(launched, ["r1", "r2"], "r3 was not launched past the cap");
+
+  // r1 finishes: its slot frees and it leaves the due list (the index records
+  // the terminal status) — and r3, unmodified, still due, launches.
+  // Queue-not-drop, end to end.
+  launching.delete("r1");
+  inflight.delete("r1");
+  due.shift();
+  const third = await launchDueBounded({
+    due: async () => due,
+    inflight,
+    launching,
+    maxConcurrent: 2,
+    launch: (runId) => {
+      launched.push(runId);
+      launching.add(runId);
+    },
+  });
+  assert.equal(third, 1);
+  assert.deepEqual(launched, ["r1", "r2", "r3"]);
+});
 
 test("worker sweep bounds simultaneously-running auto-launches to maxConcurrentRuns", async () => {
   const h = harness({ maxConcurrentRuns: 2 }, [mkTask("t1"), mkTask("t2"), mkTask("t3")]);

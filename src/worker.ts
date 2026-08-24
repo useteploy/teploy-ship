@@ -1,5 +1,5 @@
-import { Scheduler } from "@neutron-build/workflow";
-import type { WorkflowDefinition, WorkflowEvent } from "@neutron-build/workflow";
+import { completeSleep, executeRunExclusive } from "@neutron-build/workflow";
+import type { WorkflowEvent } from "@neutron-build/workflow";
 import type { ModelAdapter } from "@neutron-build/ai";
 
 import { randomUUID } from "node:crypto";
@@ -14,6 +14,7 @@ import { defaultApprovalPolicy } from "./approval.js";
 import { enqueueRun } from "./runtime.js";
 import { intakeActor } from "./actor.js";
 import type { NucleusShipRuntime } from "./runtime.js";
+import type { NucleusPgwire } from "./nucleus-pgwire.js";
 import type { IntakeStore, IntakePolicy, IntakeTask } from "./intake.js";
 import type { SourcePolicy } from "./policies.js";
 import { makeObserveEmitter } from "./observe.js";
@@ -28,6 +29,7 @@ import type { AdmissionControl } from "./admission.js";
 import type { RepoPolicyConfig } from "./repo-policy.js";
 import type { CodeSearch } from "./code-index.js";
 import { costUSD, isPricedModel } from "./pricing.js";
+import { makeObserveLogEmitter, selfwatchOnce } from "./selfwatch.js";
 
 export type { IntakePolicy } from "./intake.js";
 
@@ -245,15 +247,79 @@ export async function sweepIntake(deps: IntakeSweepDeps): Promise<void> {
 }
 
 /**
- * The resident worker: registers the coding-agent workflow and lets the
- * Workflow SDK's scheduler execute due runs under leases. Safe to run
- * alongside CLI invocations and other workers — a run someone else holds
- * is simply skipped; crash recovery is the event log's job. This is what
- * makes `approve` from a laptop a true handoff: the laptop delivers the
- * decision and flags the run due; the worker carries it to completion.
+ * Exactly-once claim on a run's TERMINAL outcome, fleet-wide.
+ *
+ * Overlapping ticks can both observe the same completed run: a tick's due()
+ * snapshot can predate the index write, and replaying a completed log returns
+ * its recorded outcome again — so onComplete fires twice and would settle the
+ * run's spend twice (observed live on 2026-08-24: one run, two
+ * "cost $0.0128 recorded" lines). The KV claim decides a single winner across
+ * workers and ticks; false means another tick already processed this outcome.
+ *
+ * A KV failure answers FALSE rather than true, deliberately: skipping a settle
+ * under-counts spend, processing it twice over-counts, and a budget cap
+ * over-reacting to phantom spend is the failure an operator cannot debug from
+ * outside. Parks never claim — a run may park and resume repeatedly, and their
+ * side effects are already idempotent.
+ */
+export function makeTerminalClaim(
+  runtime: { kind: "file" | "nucleus"; owner: string; db?: NucleusPgwire },
+  host: string,
+): (runId: string) => Promise<boolean> {
+  const doneLocally = new Set<string>();
+  return (runId: string): Promise<boolean> => {
+    if (runtime.kind === "nucleus" && runtime.db !== undefined) {
+      return runtime.db.kv
+        .setNX(`ship:done:${runId}`, `${runtime.owner}:${host}`, { ttl: 7 * 24 * 60 * 60 })
+        .catch(() => false);
+    }
+    if (doneLocally.has(runId)) return Promise.resolve(false);
+    doneLocally.add(runId);
+    return Promise.resolve(true);
+  };
+}
+
+/**
+ * Launch due runs up to the concurrency ceiling, and no further.
+ *
+ * This is the P3-4 seam: behaviour AT the cap is QUEUE, never drop — the runs
+ * not launched are simply still in the due list, and the next pass picks them
+ * up when a slot frees. Returned is how many were launched this pass.
+ */
+export async function launchDueBounded(deps: {
+  due: () => Promise<Array<{ runId: string; sleeping: boolean }>>;
+  inflight: ReadonlySet<string>;
+  launching: ReadonlySet<string>;
+  maxConcurrent: number;
+  launch: (runId: string, sleeping: boolean) => void;
+}): Promise<number> {
+  let launched = 0;
+  while (deps.inflight.size + deps.launching.size < deps.maxConcurrent) {
+    const due = await deps.due();
+    const next = due.find((d) => !deps.inflight.has(d.runId) && !deps.launching.has(d.runId));
+    if (next === undefined) break;
+    deps.launch(next.runId, next.sleeping);
+    launched += 1;
+  }
+  return launched;
+}
+
+/**
+ * The resident worker: executes due durable runs under leases, bounded by the
+ * concurrency ceiling. Safe to run alongside CLI invocations and other workers
+ * — a run someone else holds is simply skipped; crash recovery is the event
+ * log's job. This is what makes `approve` from a laptop a true handoff: the
+ * laptop delivers the decision and flags the run due; the worker carries it to
+ * completion.
+ *
+ * The worker drives execution itself rather than starting the SDK Scheduler
+ * (P3-4): the Scheduler has no concurrency bound, so overlapping ticks grow
+ * executing runs without limit — SHIP_MAX_CONCURRENT_RUNS only ever gated
+ * auto-launches. Here, at the ceiling a due run WAITS: it stays due in the
+ * index and executes when a slot frees. Nothing is dropped or errored; the cap
+ * bounds concurrency, never admission.
  */
 export function startWorker(options: WorkerOptions): {
-  scheduler: Scheduler;
   /** Stop accepting work; resolves once timers are down and the outbox is flushed. */
   stop: () => Promise<void>;
   /** True while runs are still executing or a sweep is mid-flight. */
@@ -320,28 +386,34 @@ export function startWorker(options: WorkerOptions): {
   // (nondeterminism/store error) still gets cleaned up, and an error before the
   // lease is won (which never added) is a harmless no-op delete.
   const inflight = new Set<string>();
-  const scheduler = new Scheduler({
-    workflows: [wf as unknown as WorkflowDefinition<never, unknown>],
-    store: options.runtime.store,
-    leases: options.runtime.leases,
-    index: options.runtime.index,
-    owner: options.runtime.owner,
-    intervalMs: options.intervalMs ?? 5000,
-    onError: (runId, error) => {
-      inflight.delete(runId);
-      log(`[worker] run ${runId}: ${error instanceof Error ? error.message : String(error)}`);
-    },
-    onTickError: (error) =>
-      log(`[worker] tick failed (store unreachable?): ${error instanceof Error ? error.message : String(error)}`),
-    onRunStart: (runId) => {
-      inflight.add(runId);
-      log(`[worker] picked up ${runId}`);
-      // Record where this run is executing so the dashboard can show placement.
-      void options.runtime.placement.set(runId, host).catch(() => {});
-    },
-    onComplete: (runId, outcome) => {
+  const claimTerminalOutcome = makeTerminalClaim(options.runtime, host);
+  const handleError = (runId: string, error: unknown): void => {
+    inflight.delete(runId);
+    log(`[worker] run ${runId}: ${error instanceof Error ? error.message : String(error)}`);
+  };
+  const handleStart = (runId: string): void => {
+    inflight.add(runId);
+    log(`[worker] picked up ${runId}`);
+    // Record where this run is executing so the dashboard can show placement.
+    void options.runtime.placement.set(runId, host).catch(() => {});
+  };
+  const handleComplete = (runId: string, outcome: { status: string; eventName?: string }): void => {
       inflight.delete(runId);
       log(`[worker] ${runId} → ${outcome.status}`);
+      // TERMINAL outcomes are processed exactly once, fleet-wide.
+      //
+      // A racing tick can replay-finalise a completed run (its due() snapshot
+      // predates the index write; executeRunExclusive then replays the log,
+      // returns the recorded outcome, and onComplete fires a SECOND time —
+      // observed live on 2026-08-24 settling one run's spend twice). The KV
+      // claim decides a single winner across workers and ticks; the loser does
+      // nothing. Non-terminal outcomes (parks) skip the claim: a run may park
+      // and resume repeatedly, and their side effects are already idempotent
+      // (outbox ids dedupe the notifications).
+      const terminal = outcome.status === "completed" || outcome.status === "failed" || outcome.status === "cancelled";
+      // One claim shared by every terminal side effect below (settle, notify,
+      // observe). Parks resolve true without claiming.
+      const terminalPass = !terminal ? Promise.resolve(true) : claimTerminalOutcome(runId);
       // Settle spend for every run this worker finishes. This used to live in
       // the intake sweep, which only reconciled runs it had auto-launched and
       // was tracking in memory — so a run started from the Inbox never had its
@@ -349,6 +421,7 @@ export function startWorker(options: WorkerOptions): {
       // pitch is cost transparency. Completion is the one point every durable
       // run passes through regardless of how it was launched.
       void (async () => {
+        if (!(await terminalPass)) return; // a racing tick already processed this outcome
         const [meta, events] = await Promise.all([options.runtime.loadMeta(runId), options.runtime.store.load(runId)]);
         const settled = readOutcome(events);
         if (!settled.terminal) return; // a park is not a finish
@@ -369,7 +442,10 @@ export function startWorker(options: WorkerOptions): {
         await options.runtime.spend.add(source, day, cost);
         log(`[worker] ${runId} (${source}) cost $${cost.toFixed(4)} recorded to ${day}`);
       })().catch((error) =>
-        log(`[worker] ${runId}: spend settle failed: ${error instanceof Error ? error.message : String(error)}`),
+        log(
+          `[worker] ${runId}: spend settle failed: ${error instanceof Error ? error.message : String(error)}\n` +
+            (error instanceof Error && error.stack !== undefined ? error.stack : ""),
+        ),
       );
       if (notify.enabled) {
         // Both branches read the event log for context. The park branch used to
@@ -377,43 +453,48 @@ export function startWorker(options: WorkerOptions): {
         // to route and describe — "run-7f3a is waiting" with no repo and no task
         // is an approval request nobody can act on. One store read per park is
         // cheap; parks are rare by construction.
-        void options.runtime.store
-          .load(runId)
-          .then((events) => {
-            const started = events.find((e) => e.type === "run-started");
-            const input = (started as { data?: { input?: { repo?: string; task?: string } } } | undefined)?.data?.input;
-            const context = {
-              ...(input?.repo !== undefined ? { repo: input.repo } : {}),
-              ...(input?.task !== undefined ? { task: input.task } : {}),
-            };
-            if (outcome.status === "waiting") {
-              notify.runEvent({
-                runId,
-                status: outcome.status,
-                ...(outcome.eventName !== undefined ? { eventName: outcome.eventName } : {}),
-                ...context,
-              });
-              return;
-            }
-            // Terminal: include the PR link when the run opened one.
-            const done = events.find((e) => e.type === "run-completed");
-            const pr = (done?.data as { output?: { pr?: string } } | undefined)?.output?.pr;
-            notify.runEvent({ runId, status: outcome.status, ...(pr !== undefined ? { pr } : {}), ...context });
-          })
-          // A store read failure must not lose the notification entirely — a
-          // bare status still tells a consumer the run needs attention.
-          .catch(() =>
+        void (async () => {
+          if (!(await terminalPass)) return;
+          let events: Awaited<ReturnType<typeof options.runtime.store.load>>;
+          try {
+            events = await options.runtime.store.load(runId);
+          } catch {
+            // A store read failure must not lose the notification entirely — a
+            // bare status still tells a consumer the run needs attention.
             notify.runEvent({
               runId,
               status: outcome.status,
               ...(outcome.status === "waiting" && outcome.eventName !== undefined ? { eventName: outcome.eventName } : {}),
-            }),
-          );
+            });
+            return;
+          }
+          const started = events.find((e) => e.type === "run-started");
+          const input = (started as { data?: { input?: { repo?: string; task?: string } } } | undefined)?.data?.input;
+          const context = {
+            ...(input?.repo !== undefined ? { repo: input.repo } : {}),
+            ...(input?.task !== undefined ? { task: input.task } : {}),
+          };
+          if (outcome.status === "waiting") {
+            notify.runEvent({
+              runId,
+              status: outcome.status,
+              ...(outcome.eventName !== undefined ? { eventName: outcome.eventName } : {}),
+              ...context,
+            });
+            return;
+          }
+          // Terminal: include the PR link when the run opened one.
+          const done = events.find((e) => e.type === "run-completed");
+          const pr = (done?.data as { output?: { pr?: string } } | undefined)?.output?.pr;
+          notify.runEvent({ runId, status: outcome.status, ...(pr !== undefined ? { pr } : {}), ...context });
+        })();
       }
       // Dogfood the run into Observe (no-op unless configured).
       if (observe.enabled) {
-        void Promise.all([options.runtime.loadMeta(runId), options.runtime.store.load(runId)])
-          .then(([meta, events]) => {
+        void (async () => {
+          if (!(await terminalPass)) return;
+          try {
+            const [meta, events] = await Promise.all([options.runtime.loadMeta(runId), options.runtime.store.load(runId)]);
             const usage = readOutcome(events).usage;
             const started = events.find((e) => e.type === "run-started");
             const input = (started as { data?: { input?: { repo?: string; pr?: number } } } | undefined)?.data?.input;
@@ -425,8 +506,10 @@ export function startWorker(options: WorkerOptions): {
               ...(input?.repo !== undefined ? { repo: input.repo } : {}),
               ...(input?.pr !== undefined ? { pr: input.pr } : {}),
             });
-          })
-          .catch(() => {});
+          } catch {
+            // telemetry must never fail a run
+          }
+        })();
       }
       // The index is status-authoritative, but persist the terminal status
       // onto the raw meta doc too so it's self-consistent (accurate for
@@ -444,9 +527,7 @@ export function startWorker(options: WorkerOptions): {
           }
         })
         .catch((error) => log(`[worker] ${runId}: meta update failed: ${error instanceof Error ? error.message : String(error)}`));
-    },
-  });
-  scheduler.start();
+    };
 
   const envInt = (name: string): number | undefined => {
     const raw = process.env[name];
@@ -464,6 +545,84 @@ export function startWorker(options: WorkerOptions): {
   const defaultBudget = options.dailyBudgetUSD ?? envInt("SHIP_DAILY_BUDGET_USD") ?? 10;
   const budgets = options.intakeBudgets ?? {};
   const envPolicies = options.intakePolicies ?? {};
+
+  // ---- Bounded execution (P3-4). Mirrors the SDK Scheduler's tick, with two
+  // differences that are the point: launches stop at the concurrency ceiling
+  // (due runs WAIT in the index rather than all executing at once), and a run
+  // whose log is already terminal is finalised in the index instead of being
+  // replayed again (the racing-tick double-processing that double-settled
+  // spend, observed live on 2026-08-24).
+  const launching = new Set<string>();
+  const TERMINAL_EVENTS: ReadonlySet<string> = new Set(["run-completed", "run-failed", "run-cancelled"]);
+  /** Execute one due run. Returns true when this pass made progress (a slot likely freed). */
+  const driveOne = async (runId: string, sleeping: boolean): Promise<boolean> => {
+    try {
+      const events = await options.runtime.store.load(runId);
+      const terminal = events.find((e) => TERMINAL_EVENTS.has(e.type));
+      if (terminal !== undefined) {
+        // Finished elsewhere (or its writer died between the terminal event and
+        // the index write). Make the index agree so it stops coming due, run
+        // the terminal bookkeeping once — the KV claim inside handleComplete
+        // decides the winner — and never execute it again.
+        const status = terminal.type === "run-completed" ? "completed" : terminal.type === "run-failed" ? "failed" : "cancelled";
+        await options.runtime.index.record(runId, wf.name, { status } as never);
+        handleComplete(runId, { status });
+        return true;
+      }
+      if (sleeping) await completeSleep(options.runtime.store, runId);
+      const outcome = await executeRunExclusive({
+        workflow: wf,
+        runId,
+        store: options.runtime.store,
+        leases: options.runtime.leases,
+        owner: options.runtime.owner,
+        onStart: () => handleStart(runId),
+      });
+      if (outcome === null) return false; // another worker holds the lease; not ours to run
+      await options.runtime.index.record(runId, wf.name, outcome);
+      handleComplete(runId, outcome);
+      return true;
+    } catch (error) {
+      handleError(runId, error);
+      return false;
+    }
+  };
+  let driving = false;
+  const drive = async (): Promise<void> => {
+    if (driving) return;
+    driving = true;
+    try {
+      await launchDueBounded({
+        due: () => options.runtime.index.due(new Date()),
+        inflight,
+        launching,
+        maxConcurrent: maxConcurrentRuns,
+        launch: (runId, sleeping) => {
+          launching.add(runId);
+          void driveOne(runId, sleeping)
+            .catch(() => false)
+            .then((progressed) => {
+              launching.delete(runId);
+              // Fill a freed slot immediately; when nothing progressed (lease
+              // contention, an error), the interval is soon enough — an
+              // immediate retry loop would hammer the store for nothing.
+              if (progressed) void drive().catch(() => {});
+            });
+        },
+      });
+    } finally {
+      driving = false;
+    }
+  };
+  const driveTimer = setInterval(
+    () =>
+      void drive().catch((error) =>
+        log(`[worker] tick failed (store unreachable?): ${error instanceof Error ? error.message : String(error)}`),
+      ),
+    options.intervalMs ?? 5000,
+  );
+  driveTimer.unref?.();
+  void drive().catch(() => {});
 
   // The policy store is dashboard-authoritative; seed it from the env defaults
   // once (first run) so an operator who never opens the UI keeps the same
@@ -593,6 +752,29 @@ export function startWorker(options: WorkerOptions): {
   const heartbeatTimer = setInterval(() => void beat(), 15000);
   heartbeatTimer.unref?.();
 
+  // Self-observability (P3-6): one health pass a minute — queue depth, worker
+  // liveness, stuck-run detection — reported locally only when something is
+  // wrong, and always emitted to Observe's log ingest when wired. Reports, never
+  // kills: a "stuck" run may be a long thinking call, and terminating a live run
+  // is the operator's call with the evidence in front of them.
+  const selfwatch = makeObserveLogEmitter(log);
+  const selfwatchIntervalS = envInt("SHIP_SELFWATCH_INTERVAL_S") ?? 60;
+  let selfwatchTimer: ReturnType<typeof setInterval> | undefined;
+  if (selfwatchIntervalS > 0) {
+    const watch = (): Promise<void> =>
+      selfwatchOnce({
+        runtime: options.runtime,
+        fleet: options.runtime.fleet,
+        owner: options.runtime.owner,
+        activeRuns: inflight.size,
+        log,
+        ...(selfwatch.enabled ? { emitter: selfwatch } : {}),
+      }).then(() => undefined);
+    void watch().catch(() => {});
+    selfwatchTimer = setInterval(() => void watch().catch(() => {}), selfwatchIntervalS * 1000);
+    selfwatchTimer.unref?.();
+  }
+
   // Retire workers that stopped heartbeating a long time ago. The registry
   // keeps every worker it has ever seen, so without this the Fleet page slowly
   // fills with dead hosts (ours had entries last seen 400+ hours back) and the
@@ -612,23 +794,23 @@ export function startWorker(options: WorkerOptions): {
 
   log(`[worker] watching for due runs as ${options.runtime.owner}`);
   return {
-    scheduler,
     /**
-     * Stop taking new work. Returns once the timers are down and the scheduler
-     * has been told to stop; use {@link busy} to wait for what is still
-     * executing before tearing the runtime down under it.
+     * Stop taking new work. Returns once the timers are down; use {@link busy}
+     * to wait for what is still executing before tearing the runtime down
+     * under it.
      */
     stop: async () => {
       clearInterval(intakeTimer);
       clearInterval(heartbeatTimer);
       clearInterval(reapTimer);
-      scheduler.stop();
+      if (selfwatchTimer !== undefined) clearInterval(selfwatchTimer);
+      clearInterval(driveTimer);
       // One last flush so a notification owed by a run that just finished is
       // attempted before the process goes, rather than waiting for the next
       // worker to pick it up.
       if (notify.enabled) await flush().catch(() => {});
     },
     /** True while runs are still executing or a sweep is mid-flight. */
-    busy: () => inflight.size > 0 || sweeping,
+    busy: () => inflight.size > 0 || launching.size > 0 || sweeping,
   };
 }
