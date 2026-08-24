@@ -2038,3 +2038,82 @@ test("SEAM: without input.tests no suite is run and no step is recorded", async 
     fixture.restore();
   }
 });
+
+// ------------------------------------------------- per-repo evidence (D1)
+//
+// SHIP_TEST_COMMAND and OBSERVE_SERVICE are one value per WORKER; the run
+// input carries the per-repo values enqueueRun resolved from the evidence
+// store. The seams below pin that the INPUT wins over worker wiring at
+// execution time — which is also what makes replay stable when the store is
+// edited after enqueue.
+
+test("SEAM: the run's per-repo test command wins over the worker's env default", async () => {
+  const fixture = await repoFixture("tests-per-repo");
+  try {
+    const { model } = reactiveModel(["```bash\necho changed >> f.txt\n```", "```finish\nFixed.\n```", ...PROBES]);
+    const wf = durableAgent({
+      model,
+      executor: fixture.provider,
+      workdir: ".",
+      // The worker is wired for Go. This run's repo is not a Go repo.
+      tests: { command: "echo worker-default-go-test" },
+    });
+    const store = new MemoryEventStore();
+    await executeRun({
+      workflow: wf,
+      runId: "run-tests-per-repo",
+      store,
+      input: { task: "append to f.txt", repo: fixture.repo, tests: true, testCommand: "echo per-repo-suite" },
+    });
+
+    const patch = fixture.patches.find((p) => typeof p.body === "string" && /Tests:/.test(p.body as string));
+    assert.ok(patch !== undefined, `the result never reached the PR: ${JSON.stringify(fixture.patches)}`);
+    assert.match(patch!.body as string, /per-repo-suite/, "the PR names the command that ran");
+    assert.doesNotMatch(patch!.body as string, /worker-default-go-test/, "the worker's default must not run for this repo");
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("SEAM: the run's per-repo observe service is the one read, not the worker's default", async () => {
+  const fixture = await repoFixture("telemetry-per-repo");
+  // The rows answer for the PER-REPO service; if the worker's default service
+  // had been read, the lookup would find no row and the PR would say "absent".
+  const observe = scriptedObserve([
+    [RED_ROW({ service_name: "go-svc" })],
+    [RED_ROW({ service_name: "go-svc", error_count: 10, p95_ms: 150 })],
+  ]);
+  try {
+    const { model } = reactiveModel(["```bash\necho changed >> f.txt\n```", "```finish\nFixed.\n```", ...PROBES]);
+    const wf = durableAgent({
+      model,
+      executor: fixture.provider,
+      workdir: ".",
+      // The worker is wired for a DIFFERENT service, built from a different repo.
+      telemetry: { url: "https://o.example.com", token: "tok", service: "fylun-web", repo: "tyler/fylun", fetch: observe.fetchStub },
+    });
+    const store = new MemoryEventStore();
+    await executeRun({
+      workflow: wf,
+      runId: "run-telemetry-per-repo",
+      store,
+      input: {
+        task: "append to f.txt",
+        repo: fixture.repo,
+        telemetry: true,
+        observeService: "go-svc",
+        // What enqueueRun materialises: the evidence key, which matches the
+        // run's own repo — so the applies-gate passes for the RIGHT reason.
+        observeRepo: "owner/repo",
+      },
+    });
+
+    const patch = fixture.patches.find((p) => typeof p.body === "string" && /Telemetry/.test(p.body as string));
+    assert.ok(patch !== undefined, `no telemetry reached the PR: ${JSON.stringify(fixture.patches)}`);
+    assert.match(patch!.body as string, /go-svc/, "the table names the service that was actually read");
+    assert.match(patch!.body as string, /Correlation only/);
+    assert.equal(observe.calls.length, 2, "both windows were read");
+  } finally {
+    fixture.restore();
+  }
+});

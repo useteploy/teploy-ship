@@ -15,6 +15,8 @@ import { FileSpendStore, NucleusSpendStore } from "./spend.js";
 import type { SpendStore } from "./spend.js";
 import { FilePolicyStore, NucleusPolicyStore } from "./policies.js";
 import type { PolicyStore } from "./policies.js";
+import { FileEvidenceStore, NucleusEvidenceStore } from "./evidence.js";
+import type { EvidenceStore } from "./evidence.js";
 import { FileFleetStore, NucleusFleetStore, FilePlacementStore, NucleusPlacementStore } from "./fleet.js";
 import type { FleetStore, PlacementStore } from "./fleet.js";
 import { FileRepoMemory, NucleusRepoMemory } from "./repo-memory.js";
@@ -44,6 +46,8 @@ export type { SpendStore, SpendEntry } from "./spend.js";
 export { FileSpendStore, NucleusSpendStore, utcDay } from "./spend.js";
 export type { PolicyStore, SourcePolicy } from "./policies.js";
 export { FilePolicyStore, NucleusPolicyStore } from "./policies.js";
+export type { EvidenceStore, RepoEvidence } from "./evidence.js";
+export { FileEvidenceStore, NucleusEvidenceStore } from "./evidence.js";
 export type { FleetStore, WorkerInfo, PlacementStore } from "./fleet.js";
 export { FileFleetStore, NucleusFleetStore, FilePlacementStore, NucleusPlacementStore } from "./fleet.js";
 export type { RepoMemoryStore, RepoNote } from "./repo-memory.js";
@@ -130,6 +134,10 @@ export interface ShipRuntime {
       preview?: boolean;
       telemetry?: boolean;
       tests?: boolean;
+      testCommand?: string;
+      testTimeoutMs?: number;
+      observeService?: string;
+      observeRepo?: string;
     },
   ): Promise<RunOutcome | null>;
   saveMeta(meta: RunMeta): Promise<void>;
@@ -158,6 +166,8 @@ export interface ShipRuntime {
   spend: SpendStore;
   /** Editable per-source intake policies (dashboard-managed, env-seeded). */
   policies: PolicyStore;
+  /** Per-repo evidence config (test command, Observe service). See evidence.ts. */
+  evidence: EvidenceStore;
   /** Live registry of workers in the fleet (heartbeat + capacity/load). */
   fleet: FleetStore;
   /** Which worker host executed each run (fleet placement). */
@@ -193,6 +203,7 @@ export function fileRuntime(): ShipRuntime {
     intake: new FileIntakeStore(),
     spend: new FileSpendStore(),
     policies: new FilePolicyStore(),
+    evidence: new FileEvidenceStore(),
     fleet: new FileFleetStore(),
     placement: new FilePlacementStore(),
     memory: new FileRepoMemory(),
@@ -307,6 +318,7 @@ export async function nucleusRuntime(
     intake: new NucleusIntakeStore(db),
     spend: new NucleusSpendStore(db),
     policies: new NucleusPolicyStore(db),
+    evidence: new NucleusEvidenceStore(db),
     fleet: new NucleusFleetStore(db),
     placement: new NucleusPlacementStore(db),
     memory: new NucleusRepoMemory(db),
@@ -517,10 +529,21 @@ export async function enqueueRun(
   // executing worker's config decides whether a preview can actually happen —
   // this only records that the run asked.
   const preview = options.preview ?? (envFlag("SHIP_PREVIEW") ? true : undefined);
+  // Per-repo evidence, resolved HERE so every enqueue surface (CLI, dashboard,
+  // webhook, intake sweep) gets the same treatment without each knowing about
+  // the store. Materialised into the recorded input below, never re-read at
+  // execution: the store is editable, and a replay must run the command the
+  // log was written under, not whatever the store says today.
+  //
+  // An entry's presence is also the ASK: a repo with a testCommand configured
+  // gets its suite run (and one with an observeService gets telemetry) even on
+  // a worker whose env never set SHIP_TESTS/SHIP_TELEMETRY. The config is the
+  // operator saying what evidence this repo owes a reviewer.
+  const evidence = options.repo !== undefined ? await runtime.evidence.forRepo(options.repo) : null;
   // Read the affected service's telemetry around the change. Same opt-in shape.
-  const telemetry = options.telemetry ?? (envFlag("SHIP_TELEMETRY") ? true : undefined);
+  const telemetry = options.telemetry ?? (evidence?.observeService !== undefined || envFlag("SHIP_TELEMETRY") ? true : undefined);
   // Run the project's suite after the agent stops. Same opt-in shape.
-  const tests = options.tests ?? (envFlag("SHIP_TESTS") ? true : undefined);
+  const tests = options.tests ?? (evidence?.testCommand !== undefined || envFlag("SHIP_TESTS") ? true : undefined);
   await runtime.store.append(options.runId, {
     v: WIRE_FORMAT_VERSION,
     seq: 0,
@@ -545,6 +568,13 @@ export async function enqueueRun(
         ...(preview === true ? { preview: true } : {}),
         ...(telemetry === true ? { telemetry: true } : {}),
         ...(tests === true ? { tests: true } : {}),
+        // Per-repo evidence values (see the resolution above). Absent on runs
+        // enqueued before this existed, which replay and fall back to the
+        // worker's env wiring exactly as before.
+        ...(evidence?.testCommand !== undefined ? { testCommand: evidence.testCommand } : {}),
+        ...(evidence?.testTimeoutMs !== undefined ? { testTimeoutMs: evidence.testTimeoutMs } : {}),
+        ...(evidence?.observeService !== undefined ? { observeService: evidence.observeService } : {}),
+        ...(evidence?.observeService !== undefined ? { observeRepo: evidence.repo } : {}),
         // Every newly-enqueued run is steerable and index-eligible; runs
         // enqueued before these flags existed replay without the extra
         // steps (input-gated in durable). The executing worker's config

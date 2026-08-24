@@ -250,22 +250,31 @@ export type TelemetryVerdict =
   | { kind: "unavailable"; reason: string };
 
 /**
+ * Owner/name for a repo URL or slug, lowercased, `.git` and trailing slashes
+ * stripped — so an https clone URL, an ssh one and a bare slug all agree.
+ * Null when the input has no owner/name shape.
+ *
+ * One function, used for two jobs: deciding whether a telemetry target is
+ * ABOUT the repo a run touched (telemetryAppliesTo), and keying the per-repo
+ * evidence store. They must never disagree about what "same repo" means.
+ */
+export function repoSlug(s: string): string | null {
+  const cleaned = s.trim().toLowerCase().replace(/\/+$/, "").replace(/\.git$/, "");
+  const parts = cleaned.split(/[/:]/).filter((x) => x !== "");
+  if (parts.length < 2) return null;
+  return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
+}
+
+/**
  * Is this run's repo the one the configured service is built from?
  *
- * Compared on owner/name rather than on the URL, so an https clone URL, an
- * ssh one and a bare slug all agree. Anything unparseable answers false: a
- * comparison that cannot be made is not a match.
+ * Compared on owner/name rather than on the URL. Anything unparseable answers
+ * false: a comparison that cannot be made is not a match.
  */
 export function telemetryAppliesTo(target: TelemetryTarget, runRepo: string | undefined): boolean {
   if (runRepo === undefined || runRepo.trim() === "") return false;
-  const slug = (s: string): string | null => {
-    const cleaned = s.trim().toLowerCase().replace(/\.git$/, "").replace(/\/+$/, "");
-    const parts = cleaned.split(/[/:]/).filter((x) => x !== "");
-    if (parts.length < 2) return null;
-    return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
-  };
-  const a = slug(target.repo);
-  const b = slug(runRepo);
+  const a = repoSlug(target.repo);
+  const b = repoSlug(runRepo);
   return a !== null && b !== null && a === b;
 }
 
@@ -366,6 +375,29 @@ export function telemetryComment(verdict: TelemetryVerdict, runId: string): stri
 
 /** Default comparison window, each side. */
 export const DEFAULT_WINDOW_MINUTES = 30;
+
+/**
+ * The telemetry target a run actually uses: the worker's wiring (URL, share
+ * token, default service) with the per-repo service/repo from the run input
+ * layered on top when the enqueue path recorded one.
+ *
+ * The credential stays worker wiring — a run input never carries a token. The
+ * SERVICE is a fact about the repo, so it travels with the run: a worker
+ * wired for `fylun-web` serving a dozen repos must read each repo's own
+ * service, not the one its env names.
+ */
+export function effectiveTelemetryTarget(
+  config: TelemetryTarget | undefined,
+  input: { observeService?: string; observeRepo?: string },
+): TelemetryTarget | undefined {
+  if (config === undefined) return undefined;
+  if (input.observeService === undefined || input.observeService.trim() === "") return config;
+  return {
+    ...config,
+    service: input.observeService.trim(),
+    repo: (input.observeRepo ?? config.repo).trim(),
+  };
+}
 
 /**
  * Compare the window before this moment with the one before that.

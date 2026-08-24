@@ -46,6 +46,23 @@ export function testTargetFromEnv(env: NodeJS.ProcessEnv = process.env): TestTar
   };
 }
 
+/**
+ * The per-repo test command recorded in the run input at enqueue (see
+ * evidence.ts). Takes precedence over the worker's env default — one worker
+ * serving many repos runs each repo's own suite — and absent on runs enqueued
+ * before per-repo evidence existed, which then fall back exactly as before.
+ */
+export function testTargetFromInput(input: { testCommand?: string; testTimeoutMs?: number }): TestTarget | undefined {
+  const command = input.testCommand?.trim();
+  if (command === undefined || command === "") return undefined;
+  return {
+    command,
+    ...(input.testTimeoutMs !== undefined && Number.isFinite(input.testTimeoutMs) && input.testTimeoutMs > 0
+      ? { timeoutMs: input.testTimeoutMs }
+      : {}),
+  };
+}
+
 /** Keep the tail: a failing suite puts its summary at the end. */
 function tail(text: string, lines = 40): string {
   const kept = text.trimEnd().split("\n").slice(-lines).join("\n");

@@ -72,9 +72,14 @@ Usage:
   teploy-ship enqueue "<task>"        hand a task to a worker (the issue -> PR flow)
       [--repo <url>]                  the repository to work in
       [--model …] [--plan] [--critic] [--settle] [--json]
+  teploy-ship evidence set <repo>     per-repo evidence: the suite command and the
+      [--test-command "<cmd>"]        Observe service that belong to ONE repo, so
+      [--test-timeout-ms N]           one worker can serve many repos (resolved at
+      [--observe-service <svc>]       enqueue; a flag omitted clears its field)
+  teploy-ship evidence list [--json]
+  teploy-ship evidence remove <repo>
   teploy-ship audit                   export the run history (what ran, cost, PRs)
       [--format csv|json] [--since <iso>] [--until <iso>]
-      NOTE: Ship records no actor, so this cannot say WHO authorised a run.
   teploy-ship runs                    list durable runs
   teploy-ship explain <run-id>        why a run ended the way it did, and what to do
       [--json]                        the same, as an object
@@ -920,6 +925,84 @@ async function enqueueCommand(rest: string[]): Promise<void> {
 }
 
 /**
+ * Per-repo evidence configuration (D1): the test command and Observe service
+ * that belong to ONE repository.
+ *
+ * SHIP_TEST_COMMAND and OBSERVE_SERVICE are one value per WORKER, which was
+ * fine while a worker served one repository and failed the moment it served
+ * two — a worker watching fylun-web attached its RED metrics to a one-line Go
+ * change in an unrelated repo. This command writes the repo-keyed config that
+ * `enqueueRun` resolves and materialises into each run's input, so one worker
+ * serves many repos with the right evidence for each.
+ *
+ * `set` is a full upsert: the entry becomes exactly the flags you pass, and a
+ * flag you omit clears its field. Omit everything and nothing is stored.
+ */
+async function evidenceCommand(rest: string[]): Promise<void> {
+  const config = loadConfig();
+  const [sub, target] = rest;
+  const args = parseArgs(rest);
+  if (sub === "list") {
+    const runtime = await makeRuntime(args, config);
+    try {
+      const entries = await runtime.evidence.list();
+      if (args.flags.json === true) {
+        process.stdout.write(`${JSON.stringify(entries, null, 2)}\n`);
+        return;
+      }
+      if (entries.length === 0) {
+        process.stderr.write(dim("no per-repo evidence configured; workers fall back to SHIP_TEST_COMMAND / OBSERVE_*\n"));
+        return;
+      }
+      for (const e of entries) {
+        process.stdout.write(`${bold(e.repo)}\n`);
+        if (e.testCommand !== undefined) process.stdout.write(`  tests:    ${e.testCommand}\n`);
+        if (e.testTimeoutMs !== undefined) process.stdout.write(`  timeout:  ${e.testTimeoutMs}ms\n`);
+        if (e.observeService !== undefined) process.stdout.write(`  observe:  ${e.observeService}\n`);
+      }
+    } finally {
+      await runtime.close();
+    }
+    return;
+  }
+  if (sub === "remove") {
+    if (target === undefined) fail("a repo is required: teploy-ship evidence remove owner/name");
+    const runtime = await makeRuntime(args, config);
+    try {
+      await runtime.evidence.remove(target);
+    } finally {
+      await runtime.close();
+    }
+    process.stderr.write(`${green("removed")} ${target}\n`);
+    return;
+  }
+  if (sub === "set") {
+    if (target === undefined || target === "") fail("a repo is required: teploy-ship evidence set owner/name --test-command \"pnpm test\"");
+    const command = args.flags["test-command"] as string | undefined;
+    const timeout = args.flags["test-timeout-ms"] !== undefined ? Number(args.flags["test-timeout-ms"]) : undefined;
+    if (timeout !== undefined && (!Number.isFinite(timeout) || timeout <= 0)) fail(`--test-timeout-ms must be a positive number, got: ${args.flags["test-timeout-ms"]}`);
+    const service = args.flags["observe-service"] as string | undefined;
+    if (command === undefined && service === undefined && timeout === undefined) {
+      fail('nothing to set: pass --test-command and/or --observe-service (a flag you omit clears its field)');
+    }
+    const runtime = await makeRuntime(args, config);
+    try {
+      await runtime.evidence.set({
+        repo: target,
+        ...(command !== undefined ? { testCommand: command } : {}),
+        ...(timeout !== undefined ? { testTimeoutMs: timeout } : {}),
+        ...(service !== undefined ? { observeService: service } : {}),
+      });
+    } finally {
+      await runtime.close();
+    }
+    process.stderr.write(`${green("set")} ${target}\n`);
+    return;
+  }
+  fail('usage: teploy-ship evidence set <repo> [--test-command <cmd>] [--test-timeout-ms N] [--observe-service <svc>]\n       teploy-ship evidence list [--json]\n       teploy-ship evidence remove <repo>');
+}
+
+/**
  * Export the run history as something outside this machine can read.
  *
  * The durable event log has always recorded everything, which is why Ship gets
@@ -1310,6 +1393,8 @@ async function main(): Promise<void> {
       return explainCommand(rest);
     case "enqueue":
       return enqueueCommand(rest);
+    case "evidence":
+      return evidenceCommand(rest);
     case "audit":
       return auditCommand(rest);
     case "resume":

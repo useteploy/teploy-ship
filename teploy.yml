@@ -153,13 +153,12 @@ env:
   # account of its testing is exactly the claim the finish gate exists because
   # models get wrong.
   #
-  # CAVEAT, and it is a real limitation: SHIP_TEST_COMMAND is ONE command for
-  # every repo this worker serves. That is fine while it serves one, and wrong
-  # the moment it serves two. A per-repo test command belongs in intake config,
-  # not here — not built.
+  # CAVEAT: SHIP_TEST_COMMAND is the worker-wide DEFAULT, used for repos with
+  # no per-repo evidence entry. Per-repo config exists — `teploy-ship evidence
+  # set <repo> --test-command "..." --observe-service <svc>` — and wins over
+  # this value, so one worker can serve repos with different suites. A command
+  # the sandbox image cannot run reports "not run", never "failed".
   SHIP_TESTS: "1"
-  # Matched to SHIP_SANDBOX_IMAGE (golang:1.24) — a command the sandbox cannot
-  # run reports "not run", never "failed", which is correct but useless.
   SHIP_TEST_COMMAND: "go test ./..."
 
   # Read the affected service's error rate and latency either side of the
@@ -169,11 +168,16 @@ env:
   # the refusal IS the feature. Where a comparison is reported it is labelled
   # correlation; nothing claims causation.
   #
+  # These three are the worker-wide DEFAULT (used for repos with no per-repo
+  # evidence entry). A repo's own service is configured per repo:
+  #   teploy-ship evidence set tyler/fylun --observe-service fylun-web
+  # which also makes the run read THAT service regardless of OBSERVE_SERVICE.
+  #
   # OBSERVE_READ_TOKEN is a share token and is set via `teploy secret set`.
   SHIP_TELEMETRY: "1"
   OBSERVE_URL: http://100.108.123.49:3000
   OBSERVE_SERVICE: fylun-web
-  # The repo that service is built from. Without it the leg is OFF, by design:
+  # Without a repo (here OR in per-repo evidence) the leg is OFF, by design:
   # on 2026-08-21 a worker watching fylun-web put its RED metrics on a pull
   # request that changed one line of Go in an unrelated repo, and the reviewer
   # saw "p95 up 2653ms" under a change that could not have caused it.

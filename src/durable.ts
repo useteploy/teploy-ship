@@ -25,9 +25,9 @@ import {
   workingDiff,
 } from "./git.js";
 import { deployPreview, type PreviewOutcome, type PreviewTarget } from "./deploy.js";
-import { compareAroundNow, telemetryAppliesTo, type TelemetryTarget, type TelemetryVerdict } from "./observe.js";
+import { compareAroundNow, effectiveTelemetryTarget, telemetryAppliesTo, type TelemetryTarget, type TelemetryVerdict } from "./observe.js";
 import { spliceVerification, verificationSection, type Evidence } from "./verification.js";
-import { runTests, type TestOutcome, type TestTarget } from "./tests.js";
+import { runTests, testTargetFromInput, type TestOutcome, type TestTarget } from "./tests.js";
 import { refusalMessage, warningMessage } from "./publish-policy.js";
 import type { RepoCheckout, RepoRef } from "./git.js";
 import { assertRepoAllowed, credentialFor, policyFromEnv } from "./repo-policy.js";
@@ -189,6 +189,25 @@ export interface DurableAgentInput {
    * by default — it adds a recorded `tests` step.
    */
   tests?: boolean;
+  /**
+   * Per-repo evidence, materialised at ENQUEUE from the evidence store
+   * (`teploy-ship evidence set`): the test command this repo runs and the
+   * Observe service it is built from.
+   *
+   * On the run INPUT for the same replay rule as every capability above, and
+   * for one specific to it: the evidence store is EDITABLE, and a worker that
+   * re-read it at execution time could run a different command on replay than
+   * the log recorded. Absent by default, so runs enqueued before per-repo
+   * evidence existed replay unchanged and fall back to the worker's env
+   * wiring exactly as before.
+   *
+   * `observeRepo` is normally the evidence key itself — the service named by
+   * `observeService` is built from the repo the entry describes.
+   */
+  testCommand?: string;
+  testTimeoutMs?: number;
+  observeService?: string;
+  observeRepo?: string;
   /**
    * "This run has no `repo`, but its workspace is already a git tree — scope
    * its code index here and let the diff-based passes run."
@@ -1249,24 +1268,30 @@ async function telemetryIfAsked(
   if (input.telemetry !== true) return undefined;
 
   const verdict = await ctx.step("telemetry-check", async (): Promise<TelemetryVerdict> => {
-    if (config.telemetry === undefined) {
+    // Per-repo service/repo from the run input layered over the worker's
+    // wiring: the URL and share token are the worker's (a run input never
+    // carries a credential), the service is a fact about the repo and
+    // travels with the run. A worker wired for one service must read each
+    // repo's own service, not the one its env names.
+    const target = effectiveTelemetryTarget(config.telemetry, input);
+    if (target === undefined) {
       return { kind: "disabled", reason: "no telemetry target configured on this worker" };
     }
-    // The service this worker watches has to be the one this run touched.
+    // The service this comparison reads has to be the one this run touched.
     // Proven necessary by a live run on 2026-08-21: a worker set to watch
     // `fylun-web` reported its RED metrics on a pull request that changed one
     // line of Go in an unrelated repo, and the reviewer saw "p95 up 2653ms"
     // under a change that could not have caused it. Real numbers, nonsense
     // attribution — which reads as a finding rather than as noise, and is
     // therefore worse than saying nothing.
-    if (!telemetryAppliesTo(config.telemetry, input.repo)) {
+    if (!telemetryAppliesTo(target, input.repo)) {
       return {
         kind: "disabled",
-        reason: `this run is not on ${config.telemetry.repo}, which is the repo OBSERVE_SERVICE=${config.telemetry.service} is built from`,
+        reason: `this run is not on ${target.repo}, which is the repo OBSERVE_SERVICE=${target.service} is built from`,
       };
     }
     try {
-      return await compareAroundNow(config.telemetry, new Date());
+      return await compareAroundNow(target, new Date());
     } catch (error) {
       return { kind: "unavailable", reason: error instanceof Error ? error.message : String(error) };
     }
@@ -1326,10 +1351,14 @@ async function testsIfAsked(
 ): Promise<TestOutcome | undefined> {
   if (input.tests !== true) return undefined;
   return await ctx.step("tests", async (): Promise<TestOutcome> => {
-    if (config.tests === undefined) {
-      return { kind: "disabled", reason: "no test command configured on this worker" };
+    // Per-repo first: one worker serving many repos runs each repo's own
+    // suite. The env default remains for repos with no entry and for runs
+    // enqueued before per-repo evidence existed.
+    const target = testTargetFromInput(input) ?? config.tests;
+    if (target === undefined) {
+      return { kind: "disabled", reason: "no test command configured for this repo or worker" };
     }
-    return await runTests(executor, config.tests);
+    return await runTests(executor, target);
   });
 }
 
