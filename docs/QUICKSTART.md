@@ -116,13 +116,22 @@ teploy secret set SHIP_TESTS=1 SHIP_TEST_COMMAND="go test ./..."
 teploy deploy
 ```
 
-Two things to get right, both of which are one value per worker:
+Two things to get right:
 
-- `SHIP_TEST_COMMAND` must be runnable **in the sandbox image**
-  (`SHIP_SANDBOX_IMAGE`, default `golang:1.24`). `pnpm test` against a Go image
-  reports "not run" — correct, and useless.
-- The same command is used for **every** repository this worker serves. Fine
-  for one repo; wrong the moment there are two.
+- `SHIP_TEST_COMMAND` is the worker-wide default, and must be runnable **in
+  the sandbox image** (`SHIP_SANDBOX_IMAGE`, default `golang:1.24`). `pnpm
+  test` against a Go image reports "not run" — correct, and useless.
+- Repos with different suites get their own command, keyed by repo — the same
+  worker can run `go test ./...` for one and `pnpm test` for another:
+
+  ```sh
+  teploy-ship evidence set tyler/my-go-repo --test-command "go test ./..."
+  teploy-ship evidence set tyler/my-ts-repo --test-command "pnpm test"
+  teploy-ship evidence set tyler/my-ts-repo --observe-service my-ts-svc  # if Observe watches it
+  ```
+
+  A repo with a `testCommand` gets its suite run even where `SHIP_TESTS` was
+  never set: the config is the ask.
 
 Enqueue another task and the pull request now carries a Verification section:
 
