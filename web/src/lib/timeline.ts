@@ -332,6 +332,10 @@ export interface Usage {
   totalTokens: number;
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
+  /** False = consumed a quota Ship cannot price (P5-3); counted, never a dollar figure. */
+  priced?: boolean;
+  /** The harness's own dollar figure, when it priced its usage itself. */
+  costUSD?: number;
 }
 
 export interface RunOutcome {

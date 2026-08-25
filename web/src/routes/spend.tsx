@@ -1,5 +1,5 @@
 import { utcDay } from "../lib/ship.server.js";
-import type { SpendEntry, AttributedSpendEntry } from "teploy-ship/runtime";
+import type { SpendEntry, AttributedSpendEntry, UnpricedRunEntry } from "teploy-ship/runtime";
 
 import { shipRuntime } from "../lib/store.server.js";
 
@@ -9,6 +9,8 @@ interface SpendData {
   entries: SpendEntry[];
   /** The same settled cost, cut by repo and by actor (see src/attributed-spend.ts). */
   attributed: AttributedSpendEntry[];
+  /** Runs that consumed a quota Ship cannot price — counted, never dollars (P5-3). */
+  unpriced: UnpricedRunEntry[];
   today: string;
   dailyBudget: number;
   /** Server read time, epoch ms — the projection is computed against it, not the client clock. */
@@ -17,12 +19,13 @@ interface SpendData {
 
 export async function loader(): Promise<SpendData> {
   const runtime = await shipRuntime();
-  const [entries, attributed] = await Promise.all([runtime.spend.list(), runtime.attributedSpend.list()]);
+  const [entries, attributed, unpriced] = await Promise.all([runtime.spend.list(), runtime.attributedSpend.list(), runtime.unpricedRuns.list()]);
   const budget = Number(process.env.SHIP_DAILY_BUDGET_USD ?? "10");
   const now = new Date();
   return {
     entries,
     attributed,
+    unpriced,
     today: utcDay(now),
     dailyBudget: Number.isFinite(budget) ? budget : 10,
     nowMs: now.getTime(),
@@ -111,6 +114,24 @@ export default function Spend({ data }: { data: SpendData }) {
   const repoRows = attributionRows(data.attributed, "repo", data.today);
   const actorRows = attributionRows(data.attributed, "actor", data.today);
 
+  // Unpriced runs: a separate count, never folded into the dollars above. A
+  // subscription-fed harness consumed a quota; reporting it as $0 would say
+  // the work was free, and pricing its tokens would invent a bill.
+  const unpricedSince = dayOffset(data.today, -6);
+  const unpricedBySource = new Map<string, [number, number]>();
+  let unpricedToday = 0;
+  for (const e of data.unpriced) {
+    if (e.day < unpricedSince) continue;
+    const row = unpricedBySource.get(e.source) ?? [0, 0];
+    if (e.day === data.today) {
+      row[0] += e.runs;
+      unpricedToday += e.runs;
+    }
+    row[1] += e.runs;
+    unpricedBySource.set(e.source, row);
+  }
+  const unpricedRows = [...unpricedBySource.entries()].sort((a, b) => b[1][1] - a[1][1]);
+
   return (
     <>
       <h1 class="page">Spend</h1>
@@ -148,6 +169,31 @@ export default function Spend({ data }: { data: SpendData }) {
               </div>
             );
           })
+      )}
+
+      <h2 class="section">Unpriced runs <span class="count">(today: {unpricedToday})</span></h2>
+      <p class="meta" style="margin:0 0 8px">
+        Runs on a harness whose usage has no dollar price — a subscription login, or a model the harness
+        reports no cost for. They are counted here and never shown as $0 above; the dollar cap cannot see
+        them, so the daily auto-launch count (SHIP_DAILY_AUTO_LIMIT) is what bounds a source that runs this way.
+      </p>
+      {unpricedRows.length === 0 ? (
+        <p class="empty">No unpriced runs in the last 7 days.</p>
+      ) : (
+        <div class="table-wrap"><table class="runs">
+          <thead>
+            <tr><th>source</th><th style="text-align:right">today</th><th style="text-align:right">last 7 days</th></tr>
+          </thead>
+          <tbody>
+            {unpricedRows.map(([source, [today, week]]) => (
+              <tr key={source}>
+                <td class="meta">{source}</td>
+                <td style="text-align:right">{today > 0 ? `${today} unpriced` : "—"}</td>
+                <td style="text-align:right">{week} unpriced</td>
+              </tr>
+            ))}
+          </tbody>
+        </table></div>
       )}
 
       <h2 class="section">Recent days <span class="count">(total {usd(allTotal)})</span></h2>

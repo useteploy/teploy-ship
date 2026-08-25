@@ -6,6 +6,7 @@ import type { IntakeSweepDeps } from "./worker.js";
 import type { IntakeTask } from "./intake.js";
 import type { RunUsage } from "./durable.js";
 import type { SpendStore } from "./spend.js";
+import { usageFromEvents } from "./worker.js";
 import { LocalAdmission } from "./admission.js";
 import type { AdmissionControl } from "./admission.js";
 
@@ -363,4 +364,21 @@ test("TS-004: concurrent admitters see each other's reservation instead of the s
   await sweepIntake(b.deps);
   assert.equal(a.launched.length, 1);
   assert.equal(b.launched.length, 0, "the in-flight reservation blocks the second launch");
+});
+
+test("usageFromEvents: one unpriced leg makes the reconstructed usage unpriced, and harness cost sums when priced", () => {
+  const step = (name: string, usage: Record<string, unknown>) => ({ v: 1, seq: 0, type: "step-completed" as const, at: "", name, data: { result: { usage } } });
+  const priced = usageFromEvents([
+    step("harness-run", { inputTokens: 1, outputTokens: 1, totalTokens: 2, priced: true, costUSD: 0.5 }),
+    step("turn-0-think", { inputTokens: 1, outputTokens: 1, totalTokens: 2 }),
+  ] as never);
+  assert.equal(priced?.priced, undefined);
+  assert.equal(priced?.costUSD, 0.5);
+  const mixed = usageFromEvents([
+    step("turn-0-think", { inputTokens: 1, outputTokens: 1, totalTokens: 2, costUSD: 0.5 }),
+    step("attempt-1-harness-run", { inputTokens: 5, outputTokens: 5, totalTokens: 10, priced: false }),
+  ] as never);
+  assert.equal(mixed?.priced, false);
+  assert.equal(mixed?.costUSD, undefined, "no dollar figure survives on an unpriced run");
+  assert.equal(mixed?.totalTokens, 12);
 });

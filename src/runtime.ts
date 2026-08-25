@@ -11,8 +11,8 @@ import type { EventStore, RunOutcome, WorkflowDefinition } from "@neutron-build/
 import { defaultRecoveryConfig } from "./recovery.js";
 import { FileIntakeStore, NucleusIntakeStore } from "./intake.js";
 import type { IntakeStore } from "./intake.js";
-import { FileSpendStore, NucleusSpendStore } from "./spend.js";
-import type { SpendStore } from "./spend.js";
+import { FileSpendStore, NucleusSpendStore, FileUnpricedRunStore, NucleusUnpricedRunStore } from "./spend.js";
+import type { SpendStore, UnpricedRunStore } from "./spend.js";
 import { FilePolicyStore, NucleusPolicyStore } from "./policies.js";
 import type { PolicyStore } from "./policies.js";
 import { FileEvidenceStore, NucleusEvidenceStore } from "./evidence.js";
@@ -48,8 +48,8 @@ import type { RunMeta } from "./run-store.js";
 export type { RunMeta } from "./run-store.js";
 export type { IntakeStore, IntakeTask, ProposeInput } from "./intake.js";
 export { FileIntakeStore, NucleusIntakeStore } from "./intake.js";
-export type { SpendStore, SpendEntry } from "./spend.js";
-export { FileSpendStore, NucleusSpendStore, utcDay } from "./spend.js";
+export type { SpendStore, SpendEntry, UnpricedRunStore, UnpricedRunEntry } from "./spend.js";
+export { FileSpendStore, NucleusSpendStore, FileUnpricedRunStore, NucleusUnpricedRunStore, utcDay } from "./spend.js";
 export type { PolicyStore, SourcePolicy } from "./policies.js";
 export { FilePolicyStore, NucleusPolicyStore } from "./policies.js";
 export type { EvidenceStore, RepoEvidence } from "./evidence.js";
@@ -195,6 +195,11 @@ export interface ShipRuntime {
    * reporting only, the budget cap never reads it. See attributed-spend.ts.
    */
   attributedSpend: AttributedSpendStore;
+  /**
+   * Runs that consumed a quota Ship cannot price (P5-3): counted per source
+   * and day, never added to `spend`, never reported as $0. See spend.ts.
+   */
+  unpricedRuns: UnpricedRunStore;
   /** Editable per-source intake policies (dashboard-managed, env-seeded). */
   policies: PolicyStore;
   /** Per-repo evidence config (test command, Observe service). See evidence.ts. */
@@ -236,6 +241,7 @@ export function fileRuntime(): ShipRuntime {
     intake: new FileIntakeStore(),
     spend: new FileSpendStore(),
     attributedSpend: new FileAttributedSpendStore(),
+    unpricedRuns: new FileUnpricedRunStore(),
     policies: new FilePolicyStore(),
     evidence: new FileEvidenceStore(),
     governance: new FileGovernanceStore(),
@@ -353,6 +359,7 @@ export async function nucleusRuntime(
     intake: new NucleusIntakeStore(db),
     spend: new NucleusSpendStore(db),
     attributedSpend: new NucleusAttributedSpendStore(db),
+    unpricedRuns: new NucleusUnpricedRunStore(db),
     policies: new NucleusPolicyStore(db),
     evidence: new NucleusEvidenceStore(db),
     governance: new NucleusGovernanceStore(db),

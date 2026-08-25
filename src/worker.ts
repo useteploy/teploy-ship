@@ -119,7 +119,12 @@ export function usageFromEvents(events: WorkflowEvent[]): RunUsage | undefined {
     total.totalTokens += usage.totalTokens ?? 0;
     if (usage.cacheReadTokens !== undefined) total.cacheReadTokens = (total.cacheReadTokens ?? 0) + usage.cacheReadTokens;
     if (usage.cacheWriteTokens !== undefined) total.cacheWriteTokens = (total.cacheWriteTokens ?? 0) + usage.cacheWriteTokens;
+    // One unpriced leg makes the run unpriced: a dollar total that silently
+    // omitted part of the work would understate it (P5-3).
+    if (usage.priced === false) total.priced = false;
+    if (typeof usage.costUSD === "number" && total.priced !== false) total.costUSD = (total.costUSD ?? 0) + usage.costUSD;
   }
+  if (found && total.priced === false) delete total.costUSD;
   return found ? total : undefined;
 }
 
@@ -454,6 +459,15 @@ export function startWorker(options: WorkerOptions): {
         const source = meta?.source;
         if (source === undefined || source === "") return; // pre-source run; nothing to attribute
         const model = meta?.model ?? modelId;
+        const day = utcDay(new Date());
+        if (settled.usage?.priced === false) {
+          // The run consumed a quota Ship cannot price (a subscription-fed
+          // harness). Counted, never priced, and never written as $0 — the
+          // Spend page shows the count as its own line (P5-3).
+          await options.runtime.unpricedRuns.add(source, day, runId);
+          log(`[worker] ${runId} (${source}) ran unpriced (${settled.usage.totalTokens} tokens on a quota Ship cannot price) — counted to ${day}, not priced`);
+          return;
+        }
         const cost = costUSD(model, settled.usage);
         if (cost <= 0) return;
         if (!isPricedModel(model)) {
@@ -461,7 +475,6 @@ export function startWorker(options: WorkerOptions): {
           // budget cap is now enforcing against it. Add the model to pricing.ts.
           log(`[worker] ${runId}: model ${model} is not in the pricing table — charging the highest known rate`);
         }
-        const day = utcDay(new Date());
         await options.runtime.spend.add(source, day, cost);
         log(`[worker] ${runId} (${source}) cost $${cost.toFixed(4)} recorded to ${day}`);
         // The same cost, cut by repository and by actor. Fire-and-forget with

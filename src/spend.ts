@@ -240,3 +240,143 @@ export class NucleusSpendStore implements SpendStore {
     return [...map.values()];
   }
 }
+
+/**
+ * Unpriced runs (P5-3): work that consumed a quota Ship cannot price — a
+ * subscription-fed harness, or one that reports tokens with no cost. Such a
+ * run is never added to the dollar ledger above and is never reported as $0;
+ * it is COUNTED here, per source and UTC day, and the Spend page shows the
+ * count as its own line. The daily auto-launch count cap is what bounds a
+ * source whose runs are unpriced; the dollar cap cannot see them.
+ */
+export interface UnpricedRunEntry {
+  day: string;
+  source: string;
+  runs: number;
+}
+
+export interface UnpricedRunStore {
+  /** Count one run. `runId` is recorded so a double settle is visible, not silently doubled. */
+  add(source: string, day: string, runId: string): Promise<void>;
+  /** Runs counted for `source` on `day`. */
+  count(source: string, day: string): Promise<number>;
+  /** Every (day, source) bucket — for the spend dashboard. */
+  list(): Promise<UnpricedRunEntry[]>;
+}
+
+/** File-backed: one append-only JSONL per day of {source, runId} lines. */
+export class FileUnpricedRunStore implements UnpricedRunStore {
+  #dir: string;
+
+  constructor(dir = join(stateDir(), "unpriced-runs")) {
+    this.#dir = dir;
+  }
+
+  #path(day: string): string {
+    return join(this.#dir, `${day}.jsonl`);
+  }
+
+  async #day(day: string): Promise<Map<string, Set<string>>> {
+    const raw = await readFile(this.#path(day), "utf8").catch(() => "");
+    const bySource = new Map<string, Set<string>>();
+    for (const line of raw.split("\n")) {
+      if (line.trim() === "") continue;
+      try {
+        const { source, runId } = JSON.parse(line) as { source: string; runId: string };
+        if (typeof source !== "string" || typeof runId !== "string") continue;
+        const set = bySource.get(source) ?? new Set<string>();
+        set.add(runId);
+        bySource.set(source, set);
+      } catch {
+        // torn tail line — skip
+      }
+    }
+    return bySource;
+  }
+
+  async add(source: string, day: string, runId: string): Promise<void> {
+    await mkdir(this.#dir, { recursive: true });
+    await appendFile(this.#path(day), JSON.stringify({ source, runId }) + "\n");
+  }
+
+  async count(source: string, day: string): Promise<number> {
+    return (await this.#day(day)).get(source)?.size ?? 0;
+  }
+
+  async list(): Promise<UnpricedRunEntry[]> {
+    let files: string[];
+    try {
+      files = await readdir(this.#dir);
+    } catch {
+      return [];
+    }
+    const entries: UnpricedRunEntry[] = [];
+    for (const file of files) {
+      if (!file.endsWith(".jsonl")) continue;
+      const day = file.slice(0, -6);
+      for (const [source, ids] of await this.#day(day)) entries.push({ day, source, runs: ids.size });
+    }
+    return entries;
+  }
+}
+
+/** Nucleus-backed: one row per counted run in ship_unpriced_runs. */
+export class NucleusUnpricedRunStore implements UnpricedRunStore {
+  #db: NucleusPgwire;
+  #ready: Promise<void> | null = null;
+
+  constructor(db: NucleusPgwire) {
+    this.#db = db;
+  }
+
+  #ensure(): Promise<void> {
+    this.#ready ??= (async () => {
+      await this.#db.query(
+        `CREATE TABLE IF NOT EXISTS ship_unpriced_runs (
+          day TEXT,
+          source TEXT,
+          run_id TEXT,
+          at TEXT
+        )`,
+      );
+    })().catch((error) => {
+      // A failed ensure is retried on the next call, never cached for the
+      // life of the process (the 2026-08-24 dashboard lesson).
+      this.#ready = null;
+      throw error;
+    });
+    return this.#ready;
+  }
+
+  async add(source: string, day: string, runId: string): Promise<void> {
+    await this.#ensure();
+    await this.#db.query("INSERT INTO ship_unpriced_runs (day, source, run_id, at) VALUES ($1, $2, $3, $4)", [
+      day,
+      source,
+      runId,
+      new Date().toISOString(),
+    ]);
+  }
+
+  async count(source: string, day: string): Promise<number> {
+    await this.#ensure();
+    const rows = await this.#db.query("SELECT run_id FROM ship_unpriced_runs WHERE day = $1 AND source = $2", [day, source]);
+    return new Set(rows.map((r) => String(r.run_id))).size;
+  }
+
+  async list(): Promise<UnpricedRunEntry[]> {
+    await this.#ensure();
+    const rows = await this.#db.query("SELECT day, source, run_id FROM ship_unpriced_runs");
+    const map = new Map<string, Set<string>>();
+    for (const r of rows) {
+      const key = `${String(r.day)} ${String(r.source)}`;
+      const set = map.get(key) ?? new Set<string>();
+      set.add(String(r.run_id));
+      map.set(key, set);
+    }
+    return [...map.entries()].map(([key, ids]) => {
+      const space = key.indexOf(" ");
+      return { day: key.slice(0, space), source: key.slice(space + 1), runs: ids.size };
+    });
+  }
+}

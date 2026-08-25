@@ -22,6 +22,8 @@ interface RunData {
   costUSD: number;
   /** False when the model is absent from the pricing table and the cost is a ceiling, not a price. */
   costPriced: boolean;
+  /** True when the run consumed a quota Ship cannot price (P5-3): counted on Spend, never a dollar figure. */
+  costUnpriced: boolean;
   runId: string;
   eventCount: number;
   /** The agent's proposed plan, when this run is parked on plan approval. */
@@ -78,7 +80,9 @@ export async function loader({ params, request }: { params: { id: string }; requ
       items: toTimeline(events),
       outcome,
       costUSD: cost,
-      costPriced: isPricedModel(meta?.model ?? ""),
+      // A harness that priced its own usage is priced whatever the table says.
+      costPriced: isPricedModel(meta?.model ?? "") || typeof outcome.usage?.costUSD === "number",
+      costUnpriced: outcome.usage?.priced === false,
       runId,
       eventCount: events.length,
       ...(plan !== undefined ? { plan } : {}),
@@ -264,7 +268,12 @@ export default function RunDetail({ data }: { data: RunData }) {
                 {data.outcome.repo !== undefined && (
                   <span class="meta">{data.outcome.repo.replace(/^https?:\/\//, "").replace(/\.git$/, "")}</span>
                 )}
-                {data.costUSD > 0 && (
+                {data.costUnpriced && (
+                  <span class="chip" title="this run consumed a quota Ship cannot price (a subscription login or a cost-less harness); it is counted on the Spend page, not billed as $0">
+                    unpriced run
+                  </span>
+                )}
+                {!data.costUnpriced && data.costUSD > 0 && (
                   <span class="chip" title={data.costPriced ? "estimated from list prices" : "this model is not in the pricing table — upper bound at the highest known rate"}>
                     {data.costPriced ? "~" : "≤"}${data.costUSD.toFixed(4)}
                     {!data.costPriced && <span class="meta"> unpriced</span>}

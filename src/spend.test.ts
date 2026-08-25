@@ -4,7 +4,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { FileSpendStore, utcDay } from "./spend.js";
+import { FileSpendStore, FileUnpricedRunStore, utcDay } from "./spend.js";
 
 async function store(): Promise<FileSpendStore> {
   return new FileSpendStore(await mkdtemp(join(tmpdir(), "spend-")));
@@ -51,4 +51,22 @@ test("list on an empty store is [] not a throw", async () => {
 test("utcDay is a YYYY-MM-DD UTC bucket", () => {
   assert.equal(utcDay(new Date("2026-07-09T23:59:59.000Z")), "2026-07-09");
   assert.equal(utcDay(new Date("2026-07-10T00:00:01.000Z")), "2026-07-10");
+});
+
+test("unpriced runs are counted per source and day, once per run id", async () => {
+  const store = new FileUnpricedRunStore(await mkdtemp(join(tmpdir(), "unpriced-")));
+  assert.equal(await store.count("forgejo", "2026-08-24"), 0);
+  await store.add("forgejo", "2026-08-24", "run-1");
+  await store.add("forgejo", "2026-08-24", "run-2");
+  await store.add("forgejo", "2026-08-24", "run-2"); // a double settle is not a third run
+  await store.add("github", "2026-08-24", "run-3");
+  await store.add("forgejo", "2026-08-23", "run-0");
+  assert.equal(await store.count("forgejo", "2026-08-24"), 2);
+  assert.equal(await store.count("github", "2026-08-24"), 1);
+  const list = (await store.list()).sort((a, b) => `${a.day}${a.source}`.localeCompare(`${b.day}${b.source}`));
+  assert.deepEqual(list, [
+    { day: "2026-08-23", source: "forgejo", runs: 1 },
+    { day: "2026-08-24", source: "forgejo", runs: 2 },
+    { day: "2026-08-24", source: "github", runs: 1 },
+  ]);
 });

@@ -234,6 +234,17 @@ export function explainRun(events: WorkflowEvent[]): RunExplanation {
         needsAttention: false,
       };
 
+    case "error":
+      return {
+        headline: "The harness failed.",
+        tried,
+        stoppedAt: brief(d.summary ?? "The external harness ended with an error."),
+        nextStep:
+          "Read the harness-preflight and harness-run steps: a binary missing from the sandbox image, a credential that was not forwarded, or a vendor-side error. Any diff it left was published as a draft.",
+        evidence,
+        needsAttention: true,
+      };
+
     case "budget-exhausted":
       return {
         headline: "Hit the spend cap.",

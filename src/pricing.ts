@@ -34,6 +34,10 @@ export interface UsageLike {
   totalTokens?: number;
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
+  /** False = the work consumed a quota that has no dollar price (P5-3). */
+  priced?: boolean;
+  /** A dollar figure the harness itself reported for this usage. */
+  costUSD?: number;
 }
 
 // Anthropic cache rates follow the published multipliers: cache-read is
@@ -185,6 +189,14 @@ export const UNKNOWN_MODEL_PRICING: ModelPricing = (() => {
  */
 export function costUSD(modelId: string, usage: UsageLike | undefined, env?: NodeJS.ProcessEnv): number {
   if (usage === undefined) return 0;
+  // An unpriced run consumed a quota, not dollars. It is COUNTED by the settle
+  // path (the unpriced-runs ledger), never priced — pricing its tokens from the
+  // table would invent a bill; returning 0 here is what lets the caller branch
+  // on `priced` before it ever mistakes this for "free".
+  if (usage.priced === false) return 0;
+  // A harness that priced its own usage (claude under an API key, opencode
+  // reporting cost) knows its rates better than this table does.
+  if (typeof usage.costUSD === "number" && Number.isFinite(usage.costUSD) && usage.costUSD >= 0) return usage.costUSD;
   // Local inference genuinely costs nothing per token; charging it the
   // unknown-model ceiling would exhaust a self-hosted user's budget on the
   // first run for spend that never happened.

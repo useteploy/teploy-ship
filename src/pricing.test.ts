@@ -92,3 +92,11 @@ test("an operator can declare rates for a model Ship does not know", () => {
   // Malformed JSON must not throw on a hot path.
   assert.ok(costUSD("x/y", usage, { SHIP_MODEL_PRICING: "{oops" }) > 0);
 });
+
+test("pricing: an unpriced run costs nothing HERE — it is counted, not priced — and a harness's own cost wins over the table", () => {
+  const usage = { inputTokens: 1_000_000, outputTokens: 1_000_000, totalTokens: 2_000_000 };
+  assert.equal(costUSD("claude-sonnet-5", { ...usage, priced: false }), 0);
+  assert.equal(costUSD("claude-sonnet-5", { ...usage, priced: true, costUSD: 0.42 }), 0.42);
+  assert.equal(costUSD("claude-sonnet-5", { ...usage, costUSD: 0.42 }), 0.42);
+  assert.ok(costUSD("claude-sonnet-5", usage) > 1, "the table still prices ordinary usage");
+});
