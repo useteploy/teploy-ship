@@ -6,6 +6,7 @@ import type { IntakeTask } from "teploy-ship/runtime";
 
 import { defaultModel, shipRuntime } from "../lib/store.server.js";
 import { currentUser } from "../lib/session.server.js";
+import { may } from "../lib/authority.server.js";
 
 export const config = { mode: "app" };
 
@@ -18,6 +19,8 @@ interface InboxData {
   model: string;
   /** ?decision=taken — the operator's approve/deny lost the race to another one. */
   decisionTaken: boolean;
+  /** ?denied=approve — this account lacks the approve authority. */
+  denied: boolean;
 }
 
 // "cancelling" is a request in flight, not an outcome.
@@ -25,10 +28,12 @@ const TERMINAL = ["completed", "failed", "cancelled"];
 
 export async function loader({ request }: { request: Request }): Promise<InboxData> {
   const runtime = await shipRuntime();
-  const decisionTaken = new URL(request.url).searchParams.get("decision") === "taken";
+  const query = new URL(request.url).searchParams;
+  const decisionTaken = query.get("decision") === "taken";
+  const denied = query.get("denied") === "approve";
   const [runs, proposed] = await Promise.all([runtime.listMeta(), runtime.intake.list("proposed")]);
   const parked = runs.filter((r) => r.status === "waiting" && r.eventName !== undefined);
-  return { parked, proposed, store: runtime.kind, model: defaultModel(), decisionTaken };
+  return { parked, proposed, store: runtime.kind, model: defaultModel(), decisionTaken, denied };
 }
 
 export async function action({ request }: { request: Request }): Promise<Response> {
@@ -39,6 +44,12 @@ export async function action({ request }: { request: Request }): Promise<Respons
   // person it let through. Never null in practice for a mutation, but an
   // unattributable run is legal (see actor.ts) rather than a 500.
   const me = await currentUser(request);
+
+  // Deciding a park and launching a proposed task both authorise code
+  // execution and spend: the `approve` grant (governance.ts), deny by default.
+  if ((intent === "approve" || intent === "deny" || intent === "launch-task" || intent === "new-run") && !(await may("approve", me))) {
+    return redirect("/?denied=approve");
+  }
 
   // Approve / deny a parked run — deliver the decision event, flag the run
   // due, and let the resident worker carry it. (Mirrors runs/[id].tsx; the
@@ -142,6 +153,11 @@ export default function Inbox({ data }: { data: InboxData }) {
       {data.decisionTaken && (
         <p class="card attn notice" style="color:var(--yellow)">
           Not applied — someone else decided that run first.
+        </p>
+      )}
+      {data.denied && (
+        <p class="card attn notice" style="color:var(--red)">
+          Not applied — your account may not approve, deny or launch runs. An admin can grant it on <a href="/policies">Policies</a>.
         </p>
       )}
       <h1 class="page">Inbox</h1>

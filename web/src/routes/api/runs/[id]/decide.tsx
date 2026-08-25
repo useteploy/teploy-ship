@@ -4,7 +4,8 @@ import { deliverEvent } from "../../../../lib/ship.server.js";
 
 import { PLAN_EVENT } from "teploy-ship/plan";
 
-import { currentUser, roleAllows } from "../../../../lib/session.server.js";
+import { currentUser } from "../../../../lib/session.server.js";
+import { may } from "../../../../lib/authority.server.js";
 import { shipRuntime } from "../../../../lib/store.server.js";
 
 export const config = { mode: "app" };
@@ -25,7 +26,8 @@ export const config = { mode: "app" };
  *
  * Auth is the existing bearer credential (`Authorization: Bearer
  * <SHIP_WEB_TOKEN>`), already documented in session.server.ts as the API path.
- * Deciding is a write, so it needs the editor role.
+ * Deciding needs the `approve` authority (governance.ts; editor and admin by
+ * default).
  *
  * The race this route has to refuse: a consumer (an approvals queue in a
  * workspace, say) learned about a park from a webhook, the run then parked again
@@ -63,8 +65,10 @@ export async function action({ request, params }: ActionArgs): Promise<Response>
   if (principal === null) {
     return json(401, { error: "unauthorized — send Authorization: Bearer <SHIP_WEB_TOKEN>" });
   }
-  if (!roleAllows(principal.role, "editor")) {
-    return json(403, { error: `role ${principal.role} may not decide runs` });
+  // The `approve` authority grant (governance.ts), not a fixed role: deny by
+  // default, editable on the Policies page.
+  if (!(await may("approve", principal))) {
+    return json(403, { error: `${principal.user} (${principal.role}) may not decide runs — the approve authority is not granted` });
   }
 
   let body: DecideBody;

@@ -8,6 +8,7 @@ import type { RunMeta } from "teploy-ship/runtime";
 
 import { shipRuntime } from "../../lib/store.server.js";
 import { currentUser } from "../../lib/session.server.js";
+import { may } from "../../lib/authority.server.js";
 import { itemClass, runOutcome, since, took, toTimeline, recordedSteps } from "../../lib/timeline.js";
 import type { RunOutcome, TimelineItem, RecordedStep } from "../../lib/timeline.js";
 import { startSpan } from "../../lib/observe.server.js";
@@ -35,6 +36,8 @@ interface RunData {
   decision: string | null;
   /** ?cancel=failed */
   cancelFailed: boolean;
+  /** ?denied=approve|steer — the authority grant this account lacks. */
+  denied: string | null;
 }
 
 /** The plan-think step's recorded text ({text, usage} or a bare string). */
@@ -84,6 +87,7 @@ export async function loader({ params, request }: { params: { id: string }; requ
       steps: recordedSteps(events),
       decision: query.get("decision"),
       cancelFailed: query.get("cancel") === "failed",
+      denied: query.get("denied"),
     };
     span.end("ok", { "run.status": meta?.status ?? "unknown", "run.event_count": events.length });
     return data;
@@ -133,6 +137,11 @@ export async function action({
   // second cancel click while one is pending is noise, so it is not active
   // either for the purposes of offering the button.
   const active = meta !== null && !["completed", "failed", "cancelled", "cancelling"].includes(meta.status);
+  // Authority (governance.ts) on top of the layout's role gate: steer/cancel
+  // and approve/deny are separate grants an admin can narrow or widen per
+  // role or per named user.
+  if ((intent === "cancel" || intent === "steer") && !(await may("steer", me))) return redirectTo(`/runs/${runId}?denied=steer`);
+  if ((intent === "approve" || intent === "deny") && !(await may("approve", me))) return redirectTo(`/runs/${runId}?denied=approve`);
   if (active && intent === "cancel") {
     // Only claim what actually happened. The old code swallowed a failed
     // cancelRun and then wrote terminal "cancelled" metadata anyway, so the UI
@@ -211,6 +220,11 @@ export default function RunDetail({ data }: { data: RunData }) {
       {decision === "stale" && (
         <p class="card attn" style="margin:12px 0;color:var(--yellow)">
           Not applied — this run moved on to a different decision after the page was loaded. Review the current one below.
+        </p>
+      )}
+      {data.denied !== null && (
+        <p class="card attn" style="margin:12px 0;color:var(--red)">
+          Not applied — your account may not {data.denied === "steer" ? "steer or cancel runs" : "approve or deny runs"}. An admin can grant it on <a href="/policies">Policies</a>.
         </p>
       )}
       {data.meta?.status === "cancelling" && (

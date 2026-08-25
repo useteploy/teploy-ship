@@ -41,6 +41,9 @@ import { stateDir } from "./run-store.js";
 import { buildFeed } from "./inbox.js";
 import { enqueueRun, fileRuntime, nucleusRuntime } from "./runtime.js";
 import { cliActor, formatActor, actorFromMeta } from "./actor.js";
+import { AUTHORITY_ACTIONS, GLOBAL_WINDOW, autoAllowedNow, formatWindow, parseDays, windowFor } from "./governance.js";
+import type { AuthorityAction } from "./governance.js";
+import { repoSlug } from "./observe.js";
 import type { NucleusShipRuntime, ShipRuntime } from "./runtime.js";
 import { NucleusCodeIndex } from "./code-index.js";
 import type { CodeSearch } from "./code-index.js";
@@ -78,6 +81,12 @@ Usage:
       [--observe-service <svc>]       enqueue; a flag omitted clears its field)
   teploy-ship evidence list [--json]
   teploy-ship evidence remove <repo>
+  teploy-ship policy show [--json]    who may do what, auto windows, required reviewers
+  teploy-ship policy authority <approve|auto|steer|policies> --roles admin,editor [--users a,b]
+  teploy-ship policy window set [--source <s>] --days mon-fri --start 09:00 --end 18:00 --tz <zone>
+  teploy-ship policy window remove [--source <s>]      (no --source = the global window)
+  teploy-ship policy window check [--source <s>]       is auto allowed right now?
+  teploy-ship policy reviewers set <repo> [--users a,b] [--teams t]   (both empty = remove)
   teploy-ship audit                   export the run history (what ran, cost, PRs)
       [--format csv|json] [--since <iso>] [--until <iso>]
   teploy-ship runs                    list durable runs
@@ -1008,6 +1017,148 @@ async function evidenceCommand(rest: string[]): Promise<void> {
 }
 
 /**
+ * The buyer half of P2-3 (governance.ts): per-user authority, auto windows,
+ * required reviewers. The dashboard's Policies page edits the same store.
+ */
+async function policyCommand(rest: string[]): Promise<void> {
+  const config = loadConfig();
+  const [sub, second, third] = rest;
+  const args = parseArgs(rest);
+  const list = (flag: string): string[] | undefined => {
+    const v = args.flags[flag];
+    if (v === undefined) return undefined;
+    return String(v).split(",").map((x) => x.trim()).filter((x) => x !== "");
+  };
+  const usage =
+    "usage: teploy-ship policy show [--json]\n" +
+    "       teploy-ship policy authority <approve|auto|steer|policies> --roles admin,editor [--users a,b]\n" +
+    "       teploy-ship policy window set [--source <s>] --days mon-fri --start 09:00 --end 18:00 --tz <zone>\n" +
+    "       teploy-ship policy window remove|check [--source <s>]\n" +
+    "       teploy-ship policy reviewers set <repo> [--users a,b] [--teams t]";
+
+  if (sub === "show") {
+    const runtime = await makeRuntime(args, config);
+    try {
+      const g = await runtime.governance.get();
+      if (args.flags.json === true) {
+        process.stdout.write(`${JSON.stringify(g, null, 2)}\n`);
+        return;
+      }
+      process.stdout.write(`${bold("authority")}\n`);
+      for (const action of AUTHORITY_ACTIONS) {
+        const grant = g.authority[action];
+        process.stdout.write(`  ${action.padEnd(9)} roles: ${grant.roles.join(",") || "-"}   users: ${grant.users.join(",") || "-"}\n`);
+      }
+      process.stdout.write(`${bold("auto windows")}\n`);
+      const windows = Object.entries(g.windows);
+      if (windows.length === 0) process.stdout.write(dim("  none — auto sources may launch at any time\n"));
+      for (const [source, w] of windows) {
+        const inside = autoAllowedNow(g.windows, source === GLOBAL_WINDOW ? "" : source, new Date());
+        process.stdout.write(`  ${(source === GLOBAL_WINDOW ? "(global)" : source).padEnd(12)} ${formatWindow(w)}   ${inside ? green("open now") : yellow("closed now")}\n`);
+      }
+      process.stdout.write(`${bold("required reviewers")}\n`);
+      if (g.reviewers.length === 0) process.stdout.write(dim("  none\n"));
+      for (const r of g.reviewers) {
+        process.stdout.write(`  ${r.repo.padEnd(28)} users: ${r.users.join(",") || "-"}   teams: ${r.teams.join(",") || "-"}\n`);
+      }
+    } finally {
+      await runtime.close();
+    }
+    return;
+  }
+
+  if (sub === "authority") {
+    if (second === undefined || !(AUTHORITY_ACTIONS as readonly string[]).includes(second)) {
+      fail(`an action is required: one of ${AUTHORITY_ACTIONS.join(", ")}`);
+    }
+    const roles = list("roles");
+    const users = list("users");
+    if (roles === undefined && users === undefined) fail("pass --roles and/or --users (omitting one clears it)");
+    for (const r of roles ?? []) if (!["admin", "editor", "viewer"].includes(r)) fail(`unknown role: ${r}`);
+    const runtime = await makeRuntime(args, config);
+    try {
+      await runtime.governance.setAuthority(second as AuthorityAction, {
+        roles: (roles ?? []) as Array<"admin" | "editor" | "viewer">,
+        users: users ?? [],
+      });
+    } finally {
+      await runtime.close();
+    }
+    process.stderr.write(`${green("set")} ${second}: roles ${(roles ?? []).join(",") || "-"}, users ${(users ?? []).join(",") || "-"}\n`);
+    return;
+  }
+
+  if (sub === "window") {
+    const source = ((args.flags.source as string | undefined) ?? "").trim();
+    const label = source === "" ? "(global)" : source;
+    if (second === "set") {
+      const days = args.flags.days as string | undefined;
+      const start = args.flags.start as string | undefined;
+      const end = args.flags.end as string | undefined;
+      const tz = args.flags.tz as string | undefined;
+      if (days === undefined || start === undefined || end === undefined || tz === undefined) {
+        fail("window set needs --days, --start, --end and --tz");
+      }
+      const runtime = await makeRuntime(args, config);
+      try {
+        await runtime.governance.setWindow(source, { days: parseDays(days), start, end, tz });
+        const w = windowFor((await runtime.governance.get()).windows, source === "" ? GLOBAL_WINDOW : source)!;
+        process.stderr.write(`${green("set")} ${label}: ${formatWindow(w)}\n`);
+      } finally {
+        await runtime.close();
+      }
+      return;
+    }
+    if (second === "remove") {
+      const runtime = await makeRuntime(args, config);
+      try {
+        await runtime.governance.setWindow(source, null);
+      } finally {
+        await runtime.close();
+      }
+      process.stderr.write(`${green("removed")} window for ${label}\n`);
+      return;
+    }
+    if (second === "check") {
+      const runtime = await makeRuntime(args, config);
+      try {
+        const g = await runtime.governance.get();
+        const key = source === "" ? GLOBAL_WINDOW : source;
+        const w = windowFor(g.windows, key);
+        const open = autoAllowedNow(g.windows, key, new Date());
+        if (args.flags.json === true) {
+          process.stdout.write(`${JSON.stringify({ source: key, window: w ?? null, autoAllowedNow: open })}\n`);
+        } else if (w === undefined) {
+          process.stdout.write(`${label}: no window — auto may launch at any time\n`);
+        } else {
+          process.stdout.write(`${label}: ${formatWindow(w)} — ${open ? green("open: auto launches now") : yellow("closed: auto sources park as propose")}\n`);
+        }
+      } finally {
+        await runtime.close();
+      }
+      return;
+    }
+    fail(usage);
+  }
+
+  if (sub === "reviewers") {
+    if (second !== "set" || third === undefined || third === "") fail("usage: teploy-ship policy reviewers set <repo> [--users a,b] [--teams t]");
+    const runtime = await makeRuntime(args, config);
+    try {
+      await runtime.governance.setReviewers({ repo: third, users: list("users") ?? [], teams: list("teams") ?? [] });
+      const key = repoSlug(third) ?? third.trim().toLowerCase();
+      const rule = (await runtime.governance.get()).reviewers.find((r) => r.repo === key);
+      process.stderr.write(rule === undefined ? `${green("removed")} reviewer rule for ${third}\n` : `${green("set")} ${rule.repo}: users ${rule.users.join(",") || "-"}, teams ${rule.teams.join(",") || "-"}\n`);
+    } finally {
+      await runtime.close();
+    }
+    return;
+  }
+
+  fail(usage);
+}
+
+/**
  * Export the run history as something outside this machine can read.
  *
  * The durable event log has always recorded everything, which is why Ship gets
@@ -1400,6 +1551,8 @@ async function main(): Promise<void> {
       return enqueueCommand(rest);
     case "evidence":
       return evidenceCommand(rest);
+    case "policy":
+      return policyCommand(rest);
     case "audit":
       return auditCommand(rest);
     case "resume":

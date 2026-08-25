@@ -19,6 +19,8 @@ import { FileEvidenceStore, NucleusEvidenceStore } from "./evidence.js";
 import { harnessRef } from "./harness.js";
 import type { HarnessRef } from "./harness.js";
 import type { EvidenceStore } from "./evidence.js";
+import { FileGovernanceStore, NucleusGovernanceStore, reviewersFor } from "./governance.js";
+import type { GovernanceStore } from "./governance.js";
 import { FileAttributedSpendStore, NucleusAttributedSpendStore } from "./attributed-spend.js";
 import type { AttributedSpendStore, AttributedSpendEntry, SpendDimension } from "./attributed-spend.js";
 import { FileFleetStore, NucleusFleetStore, FilePlacementStore, NucleusPlacementStore } from "./fleet.js";
@@ -52,6 +54,23 @@ export type { PolicyStore, SourcePolicy } from "./policies.js";
 export { FilePolicyStore, NucleusPolicyStore } from "./policies.js";
 export type { EvidenceStore, RepoEvidence } from "./evidence.js";
 export { FileEvidenceStore, NucleusEvidenceStore } from "./evidence.js";
+export type { GovernanceStore, Governance, Grant, Authority, AuthorityAction, AutoWindow, Windows, ReviewerRule } from "./governance.js";
+export {
+  FileGovernanceStore,
+  NucleusGovernanceStore,
+  AUTHORITY_ACTIONS,
+  DEFAULT_AUTHORITY,
+  GLOBAL_WINDOW,
+  autoAllowedNow,
+  formatWindow,
+  insideWindow,
+  mayDo,
+  normalizeGrant,
+  parseDays,
+  reviewersFor,
+  validateWindow,
+  windowFor,
+} from "./governance.js";
 export type { AttributedSpendStore, AttributedSpendEntry, SpendDimension } from "./attributed-spend.js";
 export { FileAttributedSpendStore, NucleusAttributedSpendStore } from "./attributed-spend.js";
 export type { FleetStore, WorkerInfo, PlacementStore } from "./fleet.js";
@@ -180,6 +199,8 @@ export interface ShipRuntime {
   policies: PolicyStore;
   /** Per-repo evidence config (test command, Observe service). See evidence.ts. */
   evidence: EvidenceStore;
+  /** Who may do what, auto windows, required reviewers. See governance.ts. */
+  governance: GovernanceStore;
   /** Live registry of workers in the fleet (heartbeat + capacity/load). */
   fleet: FleetStore;
   /** Which worker host executed each run (fleet placement). */
@@ -217,6 +238,7 @@ export function fileRuntime(): ShipRuntime {
     attributedSpend: new FileAttributedSpendStore(),
     policies: new FilePolicyStore(),
     evidence: new FileEvidenceStore(),
+    governance: new FileGovernanceStore(),
     fleet: new FileFleetStore(),
     placement: new FilePlacementStore(),
     memory: new FileRepoMemory(),
@@ -333,6 +355,7 @@ export async function nucleusRuntime(
     attributedSpend: new NucleusAttributedSpendStore(db),
     policies: new NucleusPolicyStore(db),
     evidence: new NucleusEvidenceStore(db),
+    governance: new NucleusGovernanceStore(db),
     fleet: new NucleusFleetStore(db),
     placement: new NucleusPlacementStore(db),
     memory: new NucleusRepoMemory(db),
@@ -569,6 +592,12 @@ export async function enqueueRun(
   // included, so the log says which program wrote it; a run enqueued before
   // this field existed has none and is native by definition.
   const harness = harnessRef(options.harness ?? process.env.SHIP_HARNESS);
+  // Required reviewers for this repo (governance.ts), resolved HERE for the
+  // same reason as evidence: it adds a recorded step (`repo-reviewers`), so
+  // its presence must be a function of the recorded input, and the rule is
+  // editable, so a replay must request the reviewers the log was written
+  // under. Absent on runs enqueued before the rule existed.
+  const reviewers = options.repo !== undefined ? reviewersFor((await runtime.governance.get()).reviewers, options.repo) : null;
   await runtime.store.append(options.runId, {
     v: WIRE_FORMAT_VERSION,
     seq: 0,
@@ -600,6 +629,7 @@ export async function enqueueRun(
         ...(evidence?.testTimeoutMs !== undefined ? { testTimeoutMs: evidence.testTimeoutMs } : {}),
         ...(evidence?.observeService !== undefined ? { observeService: evidence.observeService } : {}),
         ...(evidence?.observeService !== undefined ? { observeRepo: evidence.repo } : {}),
+        ...(reviewers !== null ? { reviewers: { users: reviewers.users, teams: reviewers.teams } } : {}),
         // Every newly-enqueued run is steerable and index-eligible; runs
         // enqueued before these flags existed replay without the extra
         // steps (input-gated in durable). The executing worker's config

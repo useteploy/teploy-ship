@@ -203,14 +203,21 @@ export async function currentUser(request: Request): Promise<Principal | null> {
 
 // ── Route authorization ──────────────────────────────────────────────────
 
-// Admin-only areas: they read/write secrets, sources, and accounts.
-const ADMIN_PREFIXES = ["/settings", "/sources", "/users"];
+// Admin-only areas: they read/write secrets and accounts.
+const ADMIN_PREFIXES = ["/settings", "/users"];
+// Governed by the authority grants (governance.ts) INSIDE the route, not by
+// role here: a named user may hold `approve` or `policies` without being an
+// editor or admin, and a viewer may read what the rules are. Every mutation on
+// these paths calls `may()` itself — see authority.server.ts. The Inbox ("/")
+// is exact-match: its approve / launch / new-run posts are all `approve`-gated.
+const AUTHORITY_PATHS = ["/runs", "/api/runs", "/sources", "/policies", "/api/policies"];
 
 /** Minimum role for a request. Reads → viewer, mutations → editor, admin areas
  * → admin. Fails closed: an unclassified mutation requires editor, never
  * viewer. Self-service password change (/account) is allowed for any user. */
 export function requiredRole(method: string, path: string): Role {
   if (ADMIN_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`))) return "admin";
+  if (path === "/" || AUTHORITY_PATHS.some((p) => path === p || path.startsWith(`${p}/`))) return "viewer";
   if (path === "/account" || path.startsWith("/account/")) return "viewer";
   return method === "GET" || method === "HEAD" ? "viewer" : "editor";
 }

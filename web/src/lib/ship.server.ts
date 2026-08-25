@@ -13,7 +13,14 @@
  * downgrade.
  */
 export {
+  AUTHORITY_ACTIONS,
+  GLOBAL_WINDOW,
   actorFromPrincipal,
+  autoAllowedNow,
+  formatWindow,
+  parseDays,
+  validateWindow,
+  windowFor,
   ciFixTaskFromWorkflowRun,
   costUSD,
   enqueueRun,

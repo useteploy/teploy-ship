@@ -33,6 +33,21 @@ All notable changes to Teploy Ship are recorded here.
   scroll inside themselves.
 
 ### Added
+- Team policies (P2-3, the buyer half): `src/governance.ts`, the dashboard's
+  **Policies** page, `/api/policies` and `teploy-ship policy …`.
+  **Authority** — per action (`approve`, `auto`, `steer`, `policies`) the
+  roles and named users allowed; deny by default; enforced server-side on
+  the run page, the Inbox, the Sources form, `/api/runs/:id/decide` and
+  `/api/policies` (a refused caller gets a 403 or a `?denied=` banner, never
+  a silent no-op). Paths those grants govern are no longer role-locked in the
+  layout, so a named viewer can hold `approve` — and a quick new run from
+  the Inbox now needs `approve` like a launch does. **Auto windows** — per
+  source or global (`*`), wall clock in an IANA zone; outside it an `auto`
+  source parks its tasks as `propose` (the worker checks at every sweep and
+  claims nothing). **Required reviewers** — per repo slug, requested on the
+  PR via one call shape on both forges; materialised into the run input at
+  enqueue (new recorded step `repo-reviewers`), and a refused request is the
+  step's recorded outcome, never a failed run.
 - Teams and roles (Teploy RBAC contract: admin/editor/viewer). Ship's single
   shared `SHIP_WEB_TOKEN` becomes multi-user: username/password accounts with
   three roles — **admin** (manage users, sources, secrets), **editor** (approve

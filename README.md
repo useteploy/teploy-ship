@@ -192,6 +192,53 @@ durability of the sandbox *filesystem* needs snapshots (teploy-sandbox
 M3); until then this gives crash-recovery within a run and approvals that
 resolve within the container's lifetime.
 
+## Team policies: authority, auto windows, required reviewers
+
+Three rules make Ship usable by a team rather than one operator. All three
+live in one store (`src/governance.ts`), edited on the dashboard's
+**Policies** page, over `/api/policies` (bearer token, JSON), or with
+`teploy-ship policy …`. Per-source ignore/propose/auto and budgets stay on
+**Sources**.
+
+**Authority** — which roles and which named users may `approve` (decide a
+parked run, launch a proposed task, start a run), set a source to `auto`,
+`steer` or cancel a run, or change `policies`. Deny by default: a role not
+named in a grant is refused, and an unknown role string is a viewer. The
+defaults reproduce the plain RBAC contract (editor approves and steers,
+admin sets auto and edits policy); narrow or widen per action, or name a
+single user regardless of role. Enforced server-side on every dashboard
+mutation and API route, not in the UI. The CLI is not gated — a shell on
+the worker holds the state directory and every credential already.
+
+```
+teploy-ship policy authority approve --roles admin --users release-bot
+```
+
+**Auto windows** — outside its window an `auto` source behaves as
+`propose`: the task waits in the Inbox instead of launching unattended at
+03:00. One window for all sources (`*`) or one per source; wall clock in
+the zone given, so DST is the zone's problem; `end` before `start` runs
+overnight. The worker checks the window at every sweep and claims nothing
+outside it. Nothing about a window is read at execution time, so it is
+recorded on the run's metadata rather than its input.
+
+```
+teploy-ship policy window set --days mon-fri --start 09:00 --end 18:00 --tz Europe/Berlin
+teploy-ship policy window check --source forgejo
+```
+
+**Required reviewers** — per repository (owner/name, the same key the
+evidence store uses), the reviewers and teams every pull request Ship opens
+there must request. Resolved at **enqueue** and copied into the run input,
+because it adds a recorded step (`repo-reviewers`) and a replay must request
+the reviewers the log was written under. Forgejo and GitHub take the same
+call; a request the forge refuses (not a collaborator, no such team) is the
+step's recorded outcome and the pull request still opens.
+
+```
+teploy-ship policy reviewers set owner/name --users alice,bob --teams core
+```
+
 ## Recovery and memory (agent quality infrastructure)
 
 Two of the levers that make an agent actually finish tasks — built as

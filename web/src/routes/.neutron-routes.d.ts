@@ -4,6 +4,7 @@ declare module "@neutron-build/core" {
     paths:
     | "/"
     | "/account"
+    | "/api/policies"
     | `/api/runs/${string}/decide`
     | "/events"
     | "/fleet"
@@ -16,6 +17,7 @@ declare module "@neutron-build/core" {
     | "/login"
     | "/oidc/callback"
     | "/oidc/login"
+    | "/policies"
     | "/reviews"
     | "/runs"
     | `/runs/${string}`

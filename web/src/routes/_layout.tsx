@@ -27,6 +27,7 @@ const NAV_LINKS = [
   { href: "/fleet", label: "Fleet" },
   { href: "/knowledge", label: "Knowledge" },
   { href: "/sources", label: "Sources" },
+  { href: "/policies", label: "Policies" },
   { href: "/spend", label: "Spend" },
   { href: "/settings", label: "Settings" },
   { href: "/account", label: "Account" },

@@ -14,6 +14,7 @@ import {
   findOpenPullRequest,
   fixPrompt,
   openPullRequest,
+  requestReviewers,
   parseRepoUrl,
   pullRequestUrl,
   readPullRequestBody,
@@ -210,6 +211,14 @@ export interface DurableAgentInput {
   testTimeoutMs?: number;
   observeService?: string;
   observeRepo?: string;
+  /**
+   * Reviewers the pull request must request (governance.ts, per repo),
+   * materialised at ENQUEUE. Adds a recorded `repo-reviewers` step after the
+   * PR opens; the request failing is that step's recorded outcome and never
+   * fails the run or the PR — the reviewer rule is a control on who looks,
+   * not on whether the work lands.
+   */
+  reviewers?: { users: string[]; teams: string[] };
   /**
    * "This run has no `repo`, but its workspace is already a git tree — scope
    * its code index here and let the diff-based passes run."
@@ -1241,6 +1250,7 @@ async function publishIfRepoRun(
     });
     return { url: created.url, number: created.number };
   });
+  await requestReviewersIfAsked(ctx, ref, token, pr.number, input);
   await publishVerification(ctx, ref, token, pr.number, {
     ...(tests !== undefined ? { tests } : {}),
     preview: await previewIfAsked(ctx, config, input, co.branch),
@@ -1248,6 +1258,30 @@ async function publishIfRepoRun(
   });
   await remember(pr.url);
   return pr.url;
+}
+
+/**
+ * Ask the forge for the reviewers the repo's rule names. Recorded whenever
+ * `input.reviewers` is set; a refused or failed request is the step's outcome,
+ * visible on the run's timeline, and the pull request stays open regardless.
+ */
+async function requestReviewersIfAsked(
+  ctx: WorkflowContext,
+  ref: RepoRef,
+  token: string,
+  pr: number,
+  input: DurableAgentInput,
+): Promise<void> {
+  if (input.reviewers === undefined) return;
+  const asked = input.reviewers;
+  await ctx.step("repo-reviewers", async (): Promise<{ kind: "requested" | "failed"; users: string[]; teams: string[]; reason?: string }> => {
+    try {
+      await requestReviewers({ ref, token, pr, users: asked.users, teams: asked.teams });
+      return { kind: "requested", users: asked.users, teams: asked.teams };
+    } catch (error) {
+      return { kind: "failed", users: asked.users, teams: asked.teams, reason: error instanceof Error ? error.message : String(error) };
+    }
+  });
 }
 
 /**

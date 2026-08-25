@@ -326,6 +326,45 @@ export async function openPullRequest(options: {
 }
 
 /**
+ * Request reviewers on an open pull request. The same endpoint shape on both
+ * forges: POST .../pulls/<n>/requested_reviewers with `reviewers` (user
+ * logins) and `team_reviewers` (team slugs). Throws on a non-2xx so the
+ * caller can record the failure; it never opens or closes anything.
+ */
+export async function requestReviewers(options: {
+  ref: RepoRef;
+  token: string;
+  pr: number;
+  users: string[];
+  teams: string[];
+  fetchImpl?: typeof fetch;
+}): Promise<void> {
+  const { ref, token } = options;
+  if (options.users.length === 0 && options.teams.length === 0) return;
+  const doFetch = options.fetchImpl ?? fetch;
+  const endpoint =
+    ref.kind === "github"
+      ? `https://api.github.com/repos/${ref.owner}/${ref.repo}/pulls/${options.pr}/requested_reviewers`
+      : `${ref.base}/api/v1/repos/${ref.owner}/${ref.repo}/pulls/${options.pr}/requested_reviewers`;
+  const response = await doFetch(endpoint, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: ref.kind === "github" ? `Bearer ${token}` : `token ${token}`,
+      ...(ref.kind === "github" ? { accept: "application/vnd.github+json" } : {}),
+    },
+    body: JSON.stringify({
+      ...(options.users.length > 0 ? { reviewers: options.users } : {}),
+      ...(options.teams.length > 0 ? { team_reviewers: options.teams } : {}),
+    }),
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`reviewer request failed (${response.status}): ${detail.slice(0, 300)}`);
+  }
+}
+
+/**
  * Rewrite a pull request's body.
  *
  * The body is what a reviewer reads first and what merge automation parses;

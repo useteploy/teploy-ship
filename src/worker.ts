@@ -18,6 +18,8 @@ import type { NucleusShipRuntime } from "./runtime.js";
 import type { NucleusPgwire } from "./nucleus-pgwire.js";
 import type { IntakeStore, IntakePolicy, IntakeTask } from "./intake.js";
 import type { SourcePolicy } from "./policies.js";
+import { autoAllowedNow, formatWindow, windowFor } from "./governance.js";
+import type { Windows } from "./governance.js";
 import { makeObserveEmitter } from "./observe.js";
 import { multiNotifier, slackNotifier, webhookNotifier } from "./notify.js";
 import type { RunNotification } from "./notify.js";
@@ -142,6 +144,11 @@ export interface IntakeSweepDeps {
   /** Fleet-wide slots and counters (see admission.ts). */
   admission: AdmissionControl;
   policies: Record<string, IntakePolicy>;
+  /**
+   * Auto windows (governance.ts). Outside a source's window an "auto" task is
+   * treated as "propose": it stays in the Inbox for a human. Absent = always.
+   */
+  windows?: Windows;
   dailyAutoLimit: number;
   maxConcurrentRuns: number;
   /** Per-source daily budget in USD; <= 0 disables the cap for that source. */
@@ -188,8 +195,19 @@ export async function sweepIntake(deps: IntakeSweepDeps): Promise<void> {
   // 2) Launch, if any source is configured "auto".
   if (!Object.values(deps.policies).some((p) => p === "auto")) return;
 
+  const parkedOutsideWindow = new Set<string>();
   for (const task of await deps.intake.list("proposed")) {
     if (deps.policies[task.source] !== "auto") continue;
+    // Outside its window an auto source is a propose source: the task waits
+    // for a human, nothing is claimed, and the next in-window sweep takes it.
+    if (!autoAllowedNow(deps.windows ?? {}, task.source, deps.now())) {
+      if (!parkedOutsideWindow.has(task.source)) {
+        parkedOutsideWindow.add(task.source);
+        const w = windowFor(deps.windows ?? {}, task.source)!;
+        deps.log(`[worker] intake: ${task.source} is outside its auto window (${formatWindow(w)}); tasks stay proposed`);
+      }
+      continue;
+    }
 
     // Claim first: two workers sweeping the same proposed list must collapse to
     // one run. Losing just means someone else got there — take no resources.
@@ -689,6 +707,17 @@ export function startWorker(options: WorkerOptions): {
       );
       return;
     }
+    // Same fail-closed rule for the windows: an unreadable governance store
+    // must not turn a 09:00-18:00 rule into "always".
+    let windows: Windows;
+    try {
+      windows = (await options.runtime.governance.get()).windows;
+    } catch (err) {
+      log(
+        `[worker] governance read failed; skipping auto-launch this sweep (fail closed): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return;
+    }
     const policies: Record<string, IntakePolicy> = { ...envPolicies };
     const storeBudgets: Record<string, number> = {};
     for (const p of stored) {
@@ -710,6 +739,7 @@ export function startWorker(options: WorkerOptions): {
       spend: options.runtime.spend,
       admission,
       policies,
+      windows,
       dailyAutoLimit: options.dailyAutoLimit ?? envInt("SHIP_DAILY_AUTO_LIMIT") ?? 10,
       maxConcurrentRuns,
       budgetFor: (source) => storeBudgets[source] ?? budgets[source] ?? defaultBudget,

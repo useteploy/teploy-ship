@@ -1,4 +1,7 @@
 import { shipRuntime } from "../lib/store.server.js";
+import { currentUser } from "../lib/session.server.js";
+import { may } from "../lib/authority.server.js";
+import { autoAllowedNow, formatWindow, windowFor } from "../lib/ship.server.js";
 import type { SourcePolicy } from "teploy-ship/runtime";
 
 export const config = { mode: "app" };
@@ -11,17 +14,32 @@ const POLICIES = ["ignore", "propose", "auto"] as const;
 interface SourceRow extends SourcePolicy {
   seen: boolean; // has a task actually arrived from this source?
   proposed: number;
+  /** The auto window governing this source, if any, and whether it is open now. */
+  window?: string;
+  windowOpen?: boolean;
 }
 
 interface SourcesData {
   rows: SourceRow[];
   store: string;
   hookBase: string;
+  /** May this account change policies at all / set auto (governance.ts)? */
+  canEdit: boolean;
+  canAuto: boolean;
+  denied: string | null;
 }
 
-export async function loader(): Promise<SourcesData> {
+export async function loader({ request }: { request: Request }): Promise<SourcesData> {
   const runtime = await shipRuntime();
-  const [stored, proposed] = await Promise.all([runtime.policies.list(), runtime.intake.list("proposed")]);
+  const me = await currentUser(request);
+  const [stored, proposed, governance, canEdit, canAuto] = await Promise.all([
+    runtime.policies.list(),
+    runtime.intake.list("proposed"),
+    runtime.governance.get(),
+    may("policies", me),
+    may("auto", me),
+  ]);
+  const now = new Date();
 
   const bySource = new Map<string, SourcePolicy>();
   for (const p of stored) bySource.set(p.source, p);
@@ -36,17 +54,19 @@ export async function loader(): Promise<SourcesData> {
   const names = new Set<string>([...KNOWN_SOURCES, ...bySource.keys(), ...observed]);
   const rows: SourceRow[] = [...names].sort().map((source) => {
     const p = bySource.get(source);
+    const w = windowFor(governance.windows, source);
     return {
       source,
       policy: p?.policy ?? "propose",
       ...(p?.dailyBudgetUSD !== undefined ? { dailyBudgetUSD: p.dailyBudgetUSD } : {}),
       seen: observed.has(source) || bySource.has(source),
       proposed: proposedCount.get(source) ?? 0,
+      ...(w !== undefined ? { window: formatWindow(w), windowOpen: autoAllowedNow(governance.windows, source, now) } : {}),
     };
   });
 
   const hookBase = (process.env.SHIP_PUBLIC_URL ?? "").replace(/\/+$/, "");
-  return { rows, store: runtime.kind, hookBase };
+  return { rows, store: runtime.kind, hookBase, canEdit, canAuto, denied: new URL(request.url).searchParams.get("denied") };
 }
 
 export async function action({ request }: { request: Request }): Promise<Response> {
@@ -54,9 +74,19 @@ export async function action({ request }: { request: Request }): Promise<Respons
   const source = String(form.get("source") ?? "").trim();
   if (source === "") return redirect("/sources");
   const runtime = await shipRuntime();
+  const me = await currentUser(request);
 
   const policyRaw = String(form.get("policy") ?? "propose");
   const policy = (POLICIES as readonly string[]).includes(policyRaw) ? (policyRaw as SourcePolicy["policy"]) : "propose";
+
+  // Two grants (governance.ts): changing any policy needs `policies`; turning a
+  // source to auto — unattended execution and spend — additionally needs
+  // `auto`, unless the source already is auto and only its budget moved.
+  if (!(await may("policies", me))) return redirect("/sources?denied=policies");
+  if (policy === "auto") {
+    const current = (await runtime.policies.list()).find((p) => p.source === source)?.policy;
+    if (current !== "auto" && !(await may("auto", me))) return redirect("/sources?denied=auto");
+  }
 
   const budgetRaw = String(form.get("budget") ?? "").trim();
   const budget = budgetRaw === "" ? undefined : Number(budgetRaw);
@@ -70,6 +100,11 @@ function redirect(location: string): Response {
   return new Response(null, { status: 302, headers: { location } });
 }
 
+function deniedText(denied: string): string {
+  if (denied === "auto") return "your account may not set a source to auto. An admin can grant it on Policies.";
+  return "your account may not change policies. An admin can grant it on Policies.";
+}
+
 function badge(policy: string): { cls: string; text: string } {
   if (policy === "auto") return { cls: "status", text: "auto" };
   if (policy === "ignore") return { cls: "meta", text: "ignore" };
@@ -80,6 +115,16 @@ export default function Sources({ data }: { data: SourcesData }) {
   return (
     <>
       <h1 class="page">Sources & policies</h1>
+      {data.denied !== null && (
+        <p class="card attn" style="margin:12px 0;color:var(--red)">
+          Not applied — {deniedText(data.denied)}
+        </p>
+      )}
+      {!data.canEdit && (
+        <p class="card" style="margin:12px 0;color:var(--dim)">
+          Read-only: your account may not change policies. An admin can grant it on <a href="/policies">Policies</a>.
+        </p>
+      )}
       <p class="meta">
         What happens to an incoming task, per source. <b>ignore</b> drops it · <b>propose</b> queues it for your
         approval in the Inbox · <b>auto</b> launches it immediately (bounded by the source's daily budget). · store: {data.store}
@@ -96,6 +141,11 @@ export default function Sources({ data }: { data: SourcesData }) {
               <span class={b.cls}>{b.text}</span>
               {r.proposed > 0 && <span class="count">{r.proposed} proposed</span>}
               {!r.seen && <span class="meta">no tasks yet</span>}
+              {r.policy === "auto" && r.window !== undefined && (
+                <span class="meta" style={r.windowOpen ? "" : "color:var(--yellow)"}>
+                  window {r.window} · {r.windowOpen ? "open now" : "closed now — tasks park as propose"}
+                </span>
+              )}
               <span style="flex:1" />
               <label class="meta">
                 policy{" "}
