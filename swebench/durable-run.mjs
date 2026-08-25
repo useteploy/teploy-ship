@@ -51,6 +51,7 @@ const { autoApprove, defaultApprovalPolicy, defaultRecoveryConfig, durableAgent,
   join(here, "..", "dist", "index.js")
 );
 const { durableRecoveryInput } = await import(join(here, "..", "dist", "durable.js"));
+const { harnessRef } = await import(join(here, "..", "dist", "harness.js"));
 const { usageFromEvents } = await import(join(here, "..", "dist", "worker.js"));
 const { executeRun } = await import(join(here, "..", "node_modules", "@neutron-build", "workflow", "dist", "index.js"));
 
@@ -144,7 +145,9 @@ export function durableInput({ task, arm, settle = false, critic = false, index 
     // webhook-launched run. steer with no store configured drains empty; guard
     // is inert without a repo. Both still record their steps, which is the
     // point — this arm is meant to be the real thing, not a tidied one.
-    ...(arm === "product" ? { steer: true, index: true, guard: true } : {}),
+    // The product arm records its harness like enqueueRun does (harness.ts):
+    // the benchmark measures the native loop, and the log should say so.
+    ...(arm === "product" ? { steer: true, index: true, guard: true, harness: harnessRef(undefined) } : {}),
     ...(critic === true ? { critic: true } : {}),
     ...(index === true ? { index: true } : {}),
     ...(workspaceKey !== undefined ? { workspaceKey } : {}),

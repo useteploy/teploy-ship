@@ -47,6 +47,8 @@ import type { PlanDecisionPayload } from "./plan.js";
 import type { ApprovalPolicy } from "./approval.js";
 import { formatObservation, systemPrompt } from "./prompt.js";
 import { costUSD } from "./pricing.js";
+import { HARNESS_VERSIONS, NATIVE_HARNESS_ID, selectAdapter } from "./harness.js";
+import type { HarnessAdapter, HarnessBudget, HarnessRef, HarnessResult, HarnessTask, HarnessUsage, HarnessWorkspace } from "./harness.js";
 
 export interface DurableAgentInput {
   task: string;
@@ -234,6 +236,15 @@ export interface DurableAgentInput {
    * It is NOT a substitute for `repo`: no clone, no branch, no commit, no PR.
    */
   workspaceKey?: string;
+  /**
+   * Which harness executes this run, materialised at ENQUEUE from
+   * `SHIP_HARNESS` (see harness.ts). Absent = the native loop, so every log
+   * written before adapters existed replays through exactly the steps it
+   * contains. The executing worker refuses a harness it does not carry, or
+   * one whose version differs from the recorded one, rather than substituting
+   * — the recorded steps belong to that program.
+   */
+  harness?: HarnessRef;
 }
 
 /**
@@ -256,7 +267,7 @@ export interface DurableAgentOutput {
    * tree that holds a complete-looking change and stopped moving. Both publish
    * their work as an INCOMPLETE (draft/WIP) pull request for that reason.
    */
-  status: "finished" | "max-steps" | "plan-rejected" | "budget-exhausted" | "stuck" | "settled";
+  status: "finished" | "max-steps" | "plan-rejected" | "budget-exhausted" | "stuck" | "settled" | "error";
   summary: string;
   turns: number;
   /** PR opened by a repo run (absent for workspace runs or empty diffs). */
@@ -265,13 +276,8 @@ export interface DurableAgentOutput {
   usage?: RunUsage;
 }
 
-export interface RunUsage {
-  inputTokens: number;
-  outputTokens: number;
-  totalTokens: number;
-  cacheReadTokens?: number;
-  cacheWriteTokens?: number;
-}
+/** Model usage summed across a run. `priced`/`costUSD` are the P5-3 honesty fields; see harness.ts. */
+export type RunUsage = HarnessUsage;
 
 // (review follow-ups set input.pr — the run works the EXISTING PR branch
 // and replies on the thread instead of opening a new PR)
@@ -414,6 +420,12 @@ export interface DurableAgentConfig {
    * whenever input.index is set and record "unavailable" results.
    */
   codeSearch?: CodeSearch;
+  /**
+   * External harness adapters this worker can execute (claude-code, opencode —
+   * see harness-external.ts). The native loop is always available and is not
+   * listed here. Selection is by the run INPUT, never by this list.
+   */
+  harnesses?: HarnessAdapter[];
 }
 
 export { PLAN_EVENT } from "./plan.js";
@@ -471,14 +483,6 @@ export function durableAgent(
   // SWE-bench gauge recorded a run spending its last ten steps just locating
   // pytest). Cost is bounded by the daily spend caps, not by this.
   const maxSteps = config.maxSteps ?? 40;
-  // How many executing turns a held finish gets to produce an edit before the
-  // run stops waiting. See heldCleanAtTurn: the hold tells an agent its tree is
-  // unchanged, and an agent that has still written nothing this many turns
-  // later is not going to. Ending then costs a hypothetical late edit and saves
-  // the rest of the run; grinding on to the cap costs the run and saves nothing,
-  // because a clean tree publishes nothing either way.
-  const HOLD_GRACE_TURNS = 8;
-  const maxObs = config.maxObservationChars ?? 8000;
   // Single-token config folds into the policy so credential selection and the
   // allowlist are one lookup rather than two places that can disagree.
   const repoPolicy: RepoPolicyConfig = {
@@ -497,7 +501,10 @@ export function durableAgent(
       // forever. Refusing the specific run instead keeps the dashboard, manual
       // runs and operator-launched work fully functional, and puts the reason
       // on the run where whoever triggered it will actually read it.
-      if (input.trust === "external" && config.executor.isolated !== true && !allowUnsandboxedIntake()) {
+      // Resolved before any step: a pure lookup, and a harness this worker does
+      // not carry must fail the run before a sandbox is allocated for it.
+      const adapter = selectAdapter([nativeAdapter(config), ...(config.harnesses ?? [])], input.harness);
+      if (input.trust === "external" && (config.executor.isolated !== true || !adapter.isolated) && !allowUnsandboxedIntake()) {
         throw new Error(
           "refusing to run an externally-sourced task without an isolated executor: this task came from a webhook, " +
             "chat message, or issue body, and agent commands would run directly on the host. Configure a sandbox " +
@@ -505,8 +512,8 @@ export function durableAgent(
             "genuinely disposable.",
         );
       }
-      let handle = await ctx.step("sandbox", async () => (await config.executor.create()).handle);
-      let executor = config.executor.attach(handle);
+      const handle = await ctx.step("sandbox", async () => (await config.executor.create()).handle);
+      const executor = config.executor.attach(handle);
 
       // Repo runs: clone + branch as a recorded step, then hand the agent
       // a repo-aware task. On replay the step returns the recorded
@@ -590,8 +597,56 @@ export function durableAgent(
             : fixPrompt({ task: input.task, branch: checkout.branch, base: checkout.base, context: repoContext })
           : input.task;
 
-      const searchable = input.index === true && scopeKey !== null && config.codeSearch !== undefined;
-      let messages: Message[] = [{ role: "system", content: systemPrompt({ workdir, task, search: searchable }) }];
+      const budget: HarnessBudget = { maxSteps, maxRunCostUSD: config.maxRunCostUSD ?? 0 };
+      const harnessTask: HarnessTask = {
+        prompt: task,
+        task: input.task,
+        input,
+        ...(input.repo !== undefined ? { repo: input.repo } : {}),
+        ...(checkout !== null ? { baseBranch: checkout.base } : {}),
+      };
+      const ws: HarnessWorkspace = { ctx, handle, executor, workdir, checkout, scopeKey, stepPrefix: "" };
+      // The loop below used to hold these as `let` locals and reassign them on
+      // a snapshot restore; the workspace carries them now so the publish gate
+      // reads whichever container the attempt ended in.
+      const result = await adapter.run(harnessTask, ws, budget, () => {});
+      const pr =
+        result.status === "plan-rejected"
+          ? null
+          : await publishIfRepoRun(ctx, ws.executor, config, input, checkout, result.summary, repoPolicy, result.incomplete);
+      await dispose(config, ws.handle);
+      return { status: result.status, summary: result.summary, turns: result.turns, usage: result.usage, ...(pr !== null ? { pr } : {}) };
+    },
+    config.runTimeout !== undefined ? { timeout: config.runTimeout } : {},
+  );
+}
+
+
+/**
+ * The native CodeAct loop as a harness adapter — the current code,
+ * re-entry-pointed. Every recorded step name is unchanged when `stepPrefix`
+ * is empty, which the replay fixtures in harness.test.ts pin.
+ */
+export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
+  // How many executing turns a held finish gets to produce an edit before the
+  // run stops waiting. See heldCleanAtTurn: the hold tells an agent its tree is
+  // unchanged, and an agent that has still written nothing this many turns
+  // later is not going to. Ending then costs a hypothetical late edit and saves
+  // the rest of the run; grinding on to the cap costs the run and saves nothing,
+  // because a clean tree publishes nothing either way.
+  const HOLD_GRACE_TURNS = 8;
+  const maxObs = config.maxObservationChars ?? 8000;
+  return {
+    id: NATIVE_HARNESS_ID,
+    version: HARNESS_VERSIONS[NATIVE_HARNESS_ID]!,
+    isolated: true,
+    async run(task, ws, budget, onEvent): Promise<HarnessResult> {
+      const input = task.input;
+      const p = ws.stepPrefix;
+      const maxSteps = budget.maxSteps;
+      const searchable = input.index === true && ws.scopeKey !== null && config.codeSearch !== undefined;
+      onEvent({ kind: "started", harness: NATIVE_HARNESS_ID });
+      let messages: Message[] = [{ role: "system", content: systemPrompt({ workdir: ws.workdir, task: task.prompt, search: searchable }) }];
       let anySuccessfulAction = false;
       /** Bounded holds for a finish over an unchanged tree. See FINISH_NUDGE_CLEAN_TREE. */
       let cleanTreeNudges = 0;
@@ -636,9 +691,9 @@ export function durableAgent(
           })
         : null;
 
-      const maxRunCostUSD = config.maxRunCostUSD ?? 0;
+      const maxRunCostUSD = budget.maxRunCostUSD;
       const modelId = config.modelId ?? "";
-      const usage: RunUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+      const usage: HarnessUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
       const addUsage = (u: Partial<RunUsage> | undefined): void => {
         if (u === undefined) return;
         usage.inputTokens += u.inputTokens ?? 0;
@@ -654,7 +709,7 @@ export function durableAgent(
       // so a plan reviewed days later still has its workspace.
       if (input.plan === true) {
         messages.push({ role: "user", content: PLAN_REQUEST });
-        const planStep = await ctx.step("plan-think", async () => {
+        const planStep = await ws.ctx.step(`${p}plan-think`, async () => {
           const generated = await generateText({ model: config.model, messages });
           return { text: generated.text, usage: generated.usage };
         });
@@ -663,23 +718,21 @@ export function durableAgent(
         const canSnapshot = config.executor.snapshot !== undefined && config.executor.createFrom !== undefined;
         let parkImage: string | undefined;
         if (canSnapshot) {
-          parkImage = await ctx.step("plan-snapshot", () => config.executor.snapshot!(handle));
+          parkImage = await ws.ctx.step(`${p}plan-snapshot`, () => config.executor.snapshot!(ws.handle));
         }
-        const decision = await ctx.waitForEvent<PlanDecisionPayload>(PLAN_EVENT);
+        const decision = await ws.ctx.waitForEvent<PlanDecisionPayload>(PLAN_EVENT);
         if (parkImage !== undefined) {
-          const superseded = handle;
-          handle = await ctx.step("plan-restore", async () => (await config.executor.createFrom!(parkImage)).handle);
-          executor = config.executor.attach(handle);
+          const superseded = ws.handle;
+          ws.handle = await ws.ctx.step(`${p}plan-restore`, async () => (await config.executor.createFrom!(parkImage)).handle);
+          ws.executor = config.executor.attach(ws.handle);
           // The snapshot captured everything the old container held; keeping it
           // allocated through the park (and every later park) is pure waste.
-          if (superseded !== handle) await dispose(config, superseded);
+          if (superseded !== ws.handle) await dispose(config, superseded);
         }
 
         if (!decision.approved) {
           const reason = decision.reason !== undefined ? `: ${decision.reason}` : "";
-          // Nothing will run in the freshly restored workspace — let it go.
-          await dispose(config, handle);
-          return { status: "plan-rejected", summary: `Plan rejected by the operator${reason}.`, turns: 0, usage };
+          return { status: "plan-rejected", summary: `Plan rejected by the operator${reason}.`, turns: 0, usage, incomplete: false };
         }
         const edited =
           typeof decision.plan === "string" &&
@@ -704,9 +757,7 @@ export function durableAgent(
         if (maxRunCostUSD > 0 && costUSD(modelId, usage) >= maxRunCostUSD) {
           const spent = costUSD(modelId, usage);
           const summary = `Stopped at the $${maxRunCostUSD.toFixed(2)} per-run cost ceiling (spent ~$${spent.toFixed(2)}) after ${turn} turns.`;
-          const pr = await publishIfRepoRun(ctx, executor, config, input, checkout, summary, repoPolicy, true);
-          await dispose(config, handle);
-          return { status: "budget-exhausted", summary, turns: turn, usage, ...(pr !== null ? { pr } : {}) };
+          return { status: "budget-exhausted", summary: summary, turns: turn, usage, incomplete: true };
         }
         // Mid-run steering: drain the operator's pending notes as a
         // recorded step (the store is read once, live; replay returns the
@@ -716,8 +767,8 @@ export function durableAgent(
           // before the step result is committed, and a crash in that window
           // would otherwise consume the operator's notes without delivering
           // them (they are not in the log, and they are no longer pending).
-          const steers = await ctx.step(`turn-${turn}-steer`, async () =>
-            config.steer !== undefined ? config.steer.drain(ctx.runId, turn).catch(() => []) : [],
+          const steers = await ws.ctx.step(`${p}turn-${turn}-steer`, async () =>
+            config.steer !== undefined ? config.steer.drain(ws.ctx.runId, turn).catch(() => []) : [],
           );
           for (const text of steers) {
             messages.push({ role: "user", content: `Operator steering — adjust course accordingly: ${text}` });
@@ -728,7 +779,7 @@ export function durableAgent(
           messages = await condenseIfNeeded(
             messages,
             async (transcript) => {
-              const summaryStep = await ctx.step(`turn-${turn}-condense`, async () => {
+              const summaryStep = await ws.ctx.step(`${p}turn-${turn}-condense`, async () => {
                 const generated = await generateText({
                   model: config.model,
                   system:
@@ -748,7 +799,8 @@ export function durableAgent(
         // The step records { text, usage } so replay re-accumulates cost
         // without re-calling the model. Logs from before telemetry
         // recorded the bare text — both shapes replay.
-        const generatedStep = await ctx.step(`turn-${turn}-think`, async () => {
+        onEvent({ kind: "turn", turn });
+        const generatedStep = await ws.ctx.step(`${p}turn-${turn}-think`, async () => {
           const generated = await generateText({ model: config.model, messages });
           return { text: generated.text, usage: generated.usage };
         });
@@ -798,9 +850,9 @@ export function durableAgent(
               // a checkout would make this inert for plain durable runs — which
               // are exactly the ones with no PR review to catch an empty result.
               cleanTreeNudges < 2 &&
-              (await ctx.step(`turn-${turn}-finish-tree`, async () => {
+              (await ws.ctx.step(`${p}turn-${turn}-finish-tree`, async () => {
                 try {
-                  const fp = await workspaceFingerprint(executor);
+                  const fp = await workspaceFingerprint(ws.executor);
                   return fp !== undefined && !fp.dirty;
                 } catch {
                   return false;
@@ -817,7 +869,7 @@ export function durableAgent(
               // alone made `--durable --critic` with no `--repo` a silent
               // no-op, and made the critic unreachable on the product's own
               // benchmark path.
-              (checkout !== null || input.workspaceKey !== undefined) &&
+              (ws.checkout !== null || input.workspaceKey !== undefined) &&
               !criticDone
             ) {
               criticDone = true;
@@ -826,17 +878,17 @@ export function durableAgent(
               // re-run on replay and could take a different branch, breaking
               // determinism. Same fail-open-on-broken-review rule as the live
               // loop in agent.ts — a real non-approval verdict still blocks.
-              const diff = await ctx.step(`turn-${turn}-critic-diff`, async () => {
+              const diff = await ws.ctx.step(`${p}turn-${turn}-critic-diff`, async () => {
                 try {
-                  return await workingDiff(executor);
+                  return await workingDiff(ws.executor);
                 } catch {
                   return "";
                 }
               });
               if (diff.trim() !== "") {
-                const reviewStep = await ctx.step(`turn-${turn}-critic`, async () => {
+                const reviewStep = await ws.ctx.step(`${p}turn-${turn}-critic`, async () => {
                   try {
-                    const review = await reviewWork(config.model, { task: input.task, summary: action.message, diff });
+                    const review = await reviewWork(config.model, { task: task.task, summary: action.message, diff });
                     return { text: review.text, usage: review.usage, reviewed: true };
                   } catch {
                     return { text: "", usage: undefined, reviewed: false };
@@ -862,9 +914,7 @@ export function durableAgent(
               continue;
             }
           }
-          const pr = await publishIfRepoRun(ctx, executor, config, input, checkout, action.message, repoPolicy);
-          await dispose(config, handle);
-          return { status: "finished", summary: action.message, turns: turn + 1, usage, ...(pr !== null ? { pr } : {}) };
+          return { status: "finished", summary: action.message, turns: turn + 1, usage, incomplete: false };
         }
         if (action.kind === "none" || action.kind === "invalid") {
           messages.push({
@@ -881,12 +931,12 @@ export function durableAgent(
         // replay returns the recorded hits on any executor, wired or not.
         if (action.kind === "search") {
           const query = action.query;
-          const observation = await ctx.step(`turn-${turn}-search`, async () => {
-            if (config.codeSearch === undefined || scopeKey === null) {
+          const observation = await ws.ctx.step(`${p}turn-${turn}-search`, async () => {
+            if (config.codeSearch === undefined || ws.scopeKey === null) {
               return "Code search is not available in this run. Use grep/rg via ```bash instead.";
             }
             try {
-              return formatSearchHits(query, await config.codeSearch.search(scopeKey, query));
+              return formatSearchHits(query, await config.codeSearch.search(ws.scopeKey, query));
             } catch (error) {
               return `Code search failed (${error instanceof Error ? error.message : String(error)}). Use grep/rg via \`\`\`bash instead.`;
             }
@@ -906,20 +956,20 @@ export function durableAgent(
           const canSnapshot = config.executor.snapshot !== undefined && config.executor.createFrom !== undefined;
           let parkImage: string | undefined;
           if (canSnapshot) {
-            parkImage = await ctx.step(`turn-${turn}-snapshot`, () => config.executor.snapshot!(handle));
+            parkImage = await ws.ctx.step(`${p}turn-${turn}-snapshot`, () => config.executor.snapshot!(ws.handle));
           }
 
-          const approval = await ctx.waitForEvent<ApprovalDecisionPayload>(approvalEvent(turn));
+          const approval = await ws.ctx.waitForEvent<ApprovalDecisionPayload>(approvalEvent(turn));
 
           // Restore AFTER the park either way (approved or denied — the
           // run continues in both cases and the original container may
           // be long gone). The new handle is a recorded step result, so
           // replay re-attaches identically without re-creating anything.
           if (parkImage !== undefined) {
-            const superseded = handle;
-            handle = await ctx.step(`turn-${turn}-restore`, async () => (await config.executor.createFrom!(parkImage)).handle);
-            executor = config.executor.attach(handle);
-            if (superseded !== handle) await dispose(config, superseded);
+            const superseded = ws.handle;
+            ws.handle = await ws.ctx.step(`${p}turn-${turn}-restore`, async () => (await config.executor.createFrom!(parkImage)).handle);
+            ws.executor = config.executor.attach(ws.handle);
+            if (superseded !== ws.handle) await dispose(config, superseded);
           }
 
           if (!approval.approved) {
@@ -929,8 +979,8 @@ export function durableAgent(
           }
         }
 
-        const result = await ctx.step(`turn-${turn}-exec`, () =>
-          executeAction(executor, action, config.actionTimeoutMs, `t${turn}`),
+        const result = await ws.ctx.step(`${p}turn-${turn}-exec`, () =>
+          executeAction(ws.executor, action, config.actionTimeoutMs, `t${turn}`),
         );
         if (result.exitCode === 0) anySuccessfulAction = true;
         execsSinceNudge += 1;
@@ -960,9 +1010,9 @@ export function durableAgent(
         // --porcelain`, which still reports staged entries, then stages again
         // itself.
         if (recovery !== null) {
-          const fingerprint = await ctx.step(`turn-${turn}-fingerprint`, async () => {
+          const fingerprint = await ws.ctx.step(`${p}turn-${turn}-fingerprint`, async () => {
             try {
-              return (await workspaceFingerprint(executor)) ?? null;
+              return (await workspaceFingerprint(ws.executor)) ?? null;
             } catch {
               return null;
             }
@@ -974,15 +1024,7 @@ export function durableAgent(
             // never got to say finish), but as a draft/WIP PR — in neither case
             // did the agent declare itself done.
             const summary = signal.kind === "stop" ? (lastHeldFinish ?? signal.message) : signal.message;
-            const pr = await publishIfRepoRun(ctx, executor, config, input, checkout, summary, repoPolicy, true);
-            await dispose(config, handle);
-            return {
-              status: signal.kind === "stop" ? "settled" : "stuck",
-              summary,
-              turns: turn + 1,
-              usage,
-              ...(pr !== null ? { pr } : {}),
-            };
+            return { status: signal.kind === "stop" ? "settled" : "stuck", summary, turns: turn + 1, usage, incomplete: true };
           }
           if (signal.kind === "nudge") {
             messages.push({ role: "user", content: signal.message });
@@ -1001,9 +1043,9 @@ export function durableAgent(
         // and because a second writer added later would otherwise silently
         // start recording a step that old logs do not contain.
         if (input.requireEdit === true && heldCleanAtTurn !== null && turn - heldCleanAtTurn >= HOLD_GRACE_TURNS) {
-          const stillClean = await ctx.step(`turn-${turn}-hold-recheck`, async () => {
+          const stillClean = await ws.ctx.step(`${p}turn-${turn}-hold-recheck`, async () => {
             try {
-              const fp = await workspaceFingerprint(executor);
+              const fp = await workspaceFingerprint(ws.executor);
               return fp !== undefined && !fp.dirty;
             } catch {
               // Unreadable is not clean. Failing this open would end runs on a
@@ -1020,9 +1062,7 @@ export function durableAgent(
             // the repo-memory note. The outcome is identical to running to the
             // cap; this only stops paying for the turns in between.
             const summary = `Held a finish over an unchanged tree and made no edit in the ${HOLD_GRACE_TURNS} turns since.`;
-            const pr = await publishIfRepoRun(ctx, executor, config, input, checkout, summary, repoPolicy, true);
-            await dispose(config, handle);
-            return { status: "settled", summary, turns: turn + 1, usage, ...(pr !== null ? { pr } : {}) };
+            return { status: "settled", summary: summary, turns: turn + 1, usage, incomplete: true };
           }
           // It wrote something. Normal flow resumes; a later finish is judged
           // on its own tree, not on this one.
@@ -1035,12 +1075,9 @@ export function durableAgent(
       // Non-empty diffs are still published off a max-steps exit — real fixes
       // died in runs that never got to say finish — but as a DRAFT, because
       // "ran out of turns" and "done" must not look alike to a reviewer.
-      const pr = await publishIfRepoRun(ctx, executor, config, input, checkout, `Reached the ${maxSteps}-turn limit.`, repoPolicy, true);
-      await dispose(config, handle);
-      return { status: "max-steps", summary: `Reached the ${maxSteps}-turn limit.`, turns: maxSteps, usage, ...(pr !== null ? { pr } : {}) };
+      return { status: "max-steps", summary: `Reached the ${maxSteps}-turn limit.`, turns: maxSteps, usage, incomplete: true };
     },
-    config.runTimeout !== undefined ? { timeout: config.runTimeout } : {},
-  );
+  };
 }
 
 /**

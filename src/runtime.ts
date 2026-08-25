@@ -16,6 +16,8 @@ import type { SpendStore } from "./spend.js";
 import { FilePolicyStore, NucleusPolicyStore } from "./policies.js";
 import type { PolicyStore } from "./policies.js";
 import { FileEvidenceStore, NucleusEvidenceStore } from "./evidence.js";
+import { harnessRef } from "./harness.js";
+import type { HarnessRef } from "./harness.js";
 import type { EvidenceStore } from "./evidence.js";
 import { FileAttributedSpendStore, NucleusAttributedSpendStore } from "./attributed-spend.js";
 import type { AttributedSpendStore, AttributedSpendEntry, SpendDimension } from "./attributed-spend.js";
@@ -142,6 +144,7 @@ export interface ShipRuntime {
       testTimeoutMs?: number;
       observeService?: string;
       observeRepo?: string;
+      harness?: HarnessRef;
     },
   ): Promise<RunOutcome | null>;
   saveMeta(meta: RunMeta): Promise<void>;
@@ -471,6 +474,13 @@ export async function enqueueRun(
     telemetry?: boolean;
     /** Run the project's suite after the agent stops. See tests.ts. */
     tests?: boolean;
+    /**
+     * Which harness executes the run (see harness.ts). Absent falls back to
+     * `SHIP_HARNESS`, and that to native. Resolved to an id+version HERE and
+     * materialised into the recorded input: a run must replay under the program
+     * that wrote its log, never under whatever the worker's env says today.
+     */
+    harness?: string;
     workflowName?: string;
     /** Intake source, recorded so completion can settle spend against it. */
     source?: string;
@@ -555,6 +565,10 @@ export async function enqueueRun(
   const telemetry = options.telemetry ?? (evidence?.observeService !== undefined || envFlag("SHIP_TELEMETRY") ? true : undefined);
   // Run the project's suite after the agent stops. Same opt-in shape.
   const tests = options.tests ?? (evidence?.testCommand !== undefined || envFlag("SHIP_TESTS") ? true : undefined);
+  // The harness, as id + contract version. Recorded on EVERY new run, native
+  // included, so the log says which program wrote it; a run enqueued before
+  // this field existed has none and is native by definition.
+  const harness = harnessRef(options.harness ?? process.env.SHIP_HARNESS);
   await runtime.store.append(options.runId, {
     v: WIRE_FORMAT_VERSION,
     seq: 0,
@@ -593,6 +607,7 @@ export async function enqueueRun(
         steer: true,
         index: true,
         guard: true,
+        harness,
       },
     },
   });
