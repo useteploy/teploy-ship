@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { sweepIntake, makeTerminalClaim, launchDueBounded } from "./worker.js";
+import { sweepIntake, makeTerminalClaim, launchDueBounded, retrying } from "./worker.js";
 import type { IntakeSweepDeps } from "./worker.js";
 import type { IntakeTask } from "./intake.js";
 import type { RunUsage } from "./durable.js";
@@ -170,6 +170,55 @@ test("the terminal claim settles a run exactly once, per worker and across ticks
     "h1",
   );
   assert.equal(await brokenClaim("run-d"), false, "a KV failure claims nothing");
+});
+
+test("a released terminal claim can be won again — a failed settle is not recorded as done", async () => {
+  // File mode.
+  const fileClaim = makeTerminalClaim({ kind: "file", owner: "w1" }, "h1");
+  assert.equal(await fileClaim("run-a"), true);
+  await fileClaim.release("run-a");
+  assert.equal(await fileClaim("run-a"), true, "released, so claimable again");
+
+  // Nucleus mode: release is compare-and-delete on the holder's OWN value —
+  // a rival's claim is never deleted.
+  const kv = new Map<string, string>();
+  const db = {
+    kv: {
+      setNX: async (key: string, value: string) => (kv.has(key) ? false : (kv.set(key, value), true)),
+      cdel: async (key: string, expected: string) => (kv.get(key) === expected ? kv.delete(key) : false),
+    },
+  } as never;
+  const a = makeTerminalClaim({ kind: "nucleus", owner: "w1", db }, "h1");
+  const b = makeTerminalClaim({ kind: "nucleus", owner: "w2", db }, "h2");
+  assert.equal(await a("run-c"), true);
+  await b.release("run-c");
+  assert.equal(kv.get("ship:done:run-c"), "w1:h1", "w2 cannot release w1's claim");
+  await a.release("run-c");
+  assert.equal(kv.has("ship:done:run-c"), false);
+  assert.equal(await b("run-c"), true, "after the holder releases, the next observer settles");
+});
+
+test("retrying: a transient store failure is retried; a persistent one still throws", async () => {
+  let calls = 0;
+  const retried: number[] = [];
+  const value = await retrying(
+    async () => {
+      calls += 1;
+      if (calls < 3) throw new TypeError("Cannot read properties of undefined (reading 'name')");
+      return "settled";
+    },
+    { attempts: 4, delayMs: 1, onRetry: (attempt) => retried.push(attempt) },
+  );
+  assert.equal(value, "settled");
+  assert.equal(calls, 3);
+  assert.deepEqual(retried, [1, 2]);
+
+  let always = 0;
+  await assert.rejects(
+    retrying(async () => { always += 1; throw new Error("down"); }, { attempts: 3, delayMs: 1 }),
+    /down/,
+  );
+  assert.equal(always, 3, "exactly `attempts` tries, then the error surfaces");
 });
 
 test("P3-4: at the concurrency ceiling, due runs QUEUE — nothing is dropped or errored", async () => {

@@ -287,21 +287,70 @@ export async function sweepIntake(deps: IntakeSweepDeps): Promise<void> {
  * outside. Parks never claim — a run may park and resume repeatedly, and their
  * side effects are already idempotent.
  */
+export interface TerminalClaim {
+  (runId: string): Promise<boolean>;
+  /**
+   * Give a claim back. For the winner whose side effects then FAILED: a
+   * settle that dies after winning the claim would otherwise be lost for good
+   * — the run is no longer due, so nothing fires handleComplete again, and
+   * the claim key says "done" to anyone who looks. Releasing makes the state
+   * honest (unsettled and unclaimed) so a later pass can settle it. Only the
+   * holder's own value is deleted (compare-and-delete), never a rival's.
+   */
+  release: (runId: string) => Promise<void>;
+}
+
 export function makeTerminalClaim(
   runtime: { kind: "file" | "nucleus"; owner: string; db?: NucleusPgwire },
   host: string,
-): (runId: string) => Promise<boolean> {
+): TerminalClaim {
   const doneLocally = new Set<string>();
-  return (runId: string): Promise<boolean> => {
+  const value = `${runtime.owner}:${host}`;
+  const claim = (runId: string): Promise<boolean> => {
     if (runtime.kind === "nucleus" && runtime.db !== undefined) {
       return runtime.db.kv
-        .setNX(`ship:done:${runId}`, `${runtime.owner}:${host}`, { ttl: 7 * 24 * 60 * 60 })
+        .setNX(`ship:done:${runId}`, value, { ttl: 7 * 24 * 60 * 60 })
         .catch(() => false);
     }
     if (doneLocally.has(runId)) return Promise.resolve(false);
     doneLocally.add(runId);
     return Promise.resolve(true);
   };
+  claim.release = async (runId: string): Promise<void> => {
+    if (runtime.kind === "nucleus" && runtime.db !== undefined) {
+      await runtime.db.kv.cdel(`ship:done:${runId}`, value).catch(() => false);
+      return;
+    }
+    doneLocally.delete(runId);
+  };
+  return claim;
+}
+
+/**
+ * Run `fn` up to `attempts` times, waiting `delayMs` (doubling) between tries.
+ *
+ * For the store reads and writes inside a terminal settle. Under load the
+ * pool surfaces a transient rejection (pg-pool rejecting with `undefined`,
+ * seen as "Cannot read properties of undefined (reading 'name')"), and a
+ * settle that gives up on the first one loses the run's cost from the ledger
+ * for good: measured 2026-08-25, 1 of 45 runs, $0.0278 in the audit and
+ * absent from the budget.
+ */
+export async function retrying<T>(
+  fn: () => Promise<T>,
+  opts: { attempts: number; delayMs: number; onRetry?: (attempt: number, error: unknown) => void },
+): Promise<T> {
+  let delay = opts.delayMs;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (attempt >= opts.attempts) throw error;
+      opts.onRetry?.(attempt, error);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      delay *= 2;
+    }
+  }
 }
 
 /**
@@ -456,7 +505,12 @@ export function startWorker(options: WorkerOptions): {
       // run passes through regardless of how it was launched.
       void (async () => {
         if (!(await terminalPass)) return; // a racing tick already processed this outcome
-        const [meta, events] = await Promise.all([options.runtime.loadMeta(runId), options.runtime.store.load(runId)]);
+        const onRetry = (attempt: number, error: unknown): void =>
+          log(`[worker] ${runId}: settle read/write attempt ${attempt} failed, retrying: ${error instanceof Error ? error.message : String(error)}`);
+        const [meta, events] = await retrying(
+          () => Promise.all([options.runtime.loadMeta(runId), options.runtime.store.load(runId)]),
+          { attempts: 4, delayMs: 500, onRetry },
+        );
         const settled = readOutcome(events);
         if (!settled.terminal) return; // a park is not a finish
         // The fleet resources this run held come back whatever the outcome was.
@@ -485,7 +539,7 @@ export function startWorker(options: WorkerOptions): {
           // budget cap is now enforcing against it. Add the model to pricing.ts.
           log(`[worker] ${runId}: model ${model} is not in the pricing table — charging the highest known rate`);
         }
-        await options.runtime.spend.add(source, day, cost);
+        await retrying(() => options.runtime.spend.add(source, day, cost), { attempts: 4, delayMs: 500, onRetry });
         log(`[worker] ${runId} (${source}) cost $${cost.toFixed(4)} recorded to ${day}`);
         // The same cost, cut by repository and by actor. Fire-and-forget with
         // its own guard, in the style of the surrounding side effects:
@@ -512,12 +566,16 @@ export function startWorker(options: WorkerOptions): {
             ),
           );
         }
-      })().catch((error) =>
+      })().catch(async (error) => {
         log(
           `[worker] ${runId}: spend settle failed: ${error instanceof Error ? error.message : String(error)}\n` +
             (error instanceof Error && error.stack !== undefined ? error.stack : ""),
-        ),
-      );
+        );
+        // Give the claim back so the failure is visible as "unsettled" rather
+        // than silently recorded as done — see TerminalClaim.release.
+        await claimTerminalOutcome.release(runId);
+        log(`[worker] ${runId}: terminal claim released — this run's cost is NOT in the ledger`);
+      });
       if (notify.enabled) {
         // Both branches read the event log for context. The park branch used to
         // skip that, but a parked run is exactly the one a consumer must be able
