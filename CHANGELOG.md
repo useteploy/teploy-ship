@@ -27,6 +27,11 @@ All notable changes to Teploy Ship are recorded here.
   `harness-pick` step has the critic choose among the diffs, only the winner
   is published and the losers' workspaces are released.
 - Settings shows the harness variables; `explain` knows the `error` outcome.
+- Proven live 2026-08-25 on deploy-test: a native run and an opencode run
+  (z.ai coding plan, in a sandbox image carrying the binary) each opened a PR
+  with `Tests: passed`; the opencode run settled as an unpriced run. The
+  sandbox daemon's egress allowlist (`SBX_EGRESS_ALLOW`) must name the vendor
+  host for an external harness to reach its model.
 
 ### Fixed — dashboard pre-release pass (2026-08-24)
 - Every Nucleus-backed store cached a FAILED table-ensure for the life of the
