@@ -55,6 +55,11 @@ durable run enqueued under old code and replayed under new — is in
 **[docs/UPGRADING.md](docs/UPGRADING.md)**. Read it before deploying a new
 version with runs in flight.
 
+How many runs one box can carry — measured on a named 4 vCPU / 4 GB VM, with
+the ledger checked for every run, the recommended `SHIP_MAX_CONCURRENT_RUNS`
+for that class of box and a rule of thumb for larger ones — is in
+**[docs/capacity.md](docs/capacity.md)**.
+
 ## Models
 
 Ship is model-agnostic by architecture — two adapter shapes,

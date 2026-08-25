@@ -4,6 +4,22 @@ All notable changes to Teploy Ship are recorded here.
 
 ## [Unreleased]
 
+### Fixed — found by the capacity load test (2026-08-25)
+- The concurrency ceiling was about half real: `launchDueBounded` counted an
+  executing run twice (it is in both `launching` and `inflight` for its whole
+  life), so `SHIP_MAX_CONCURRENT_RUNS=4` never held more than 3 runs and mostly
+  sat at 2. Counts the union now; the test models the real membership.
+- A terminal settle that failed after winning its exactly-once claim lost the
+  run's cost from the ledger for good (one of 45 runs under load, on a
+  transient pool rejection). The settle's reads and ledger write now retry, and
+  a settle that still fails releases its own claim and logs it, so the state
+  reads as unsettled rather than done.
+
+### Added
+- `docs/capacity.md`: a measured capacity figure on named hardware (4 vCPU /
+  4 GB), the ceiling-vs-throughput table, the recommended ceiling for that box
+  class and a rule of thumb for larger ones, with what was not measured and why.
+
 ### Added — pluggable harness (2026-08-24)
 - `HarnessAdapter` (`src/harness.ts`): the loop that edits the tree is one
   implementation behind an interface. `native` (the existing durable loop,
