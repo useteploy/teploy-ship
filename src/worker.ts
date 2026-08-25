@@ -463,7 +463,11 @@ export function startWorker(options: WorkerOptions): {
         if (settled.usage?.priced === false) {
           // The run consumed a quota Ship cannot price (a subscription-fed
           // harness). Counted, never priced, and never written as $0 — the
-          // Spend page shows the count as its own line (P5-3).
+          // Spend page shows the count as its own line (P5-3). A run that
+          // consumed NOTHING (the binary never answered, a credential was
+          // refused) is not a quota draw and is not counted — the same gate
+          // as `cost <= 0` below for priced runs.
+          if (!(settled.usage.totalTokens > 0)) return;
           await options.runtime.unpricedRuns.add(source, day, runId);
           log(`[worker] ${runId} (${source}) ran unpriced (${settled.usage.totalTokens} tokens on a quota Ship cannot price) — counted to ${day}, not priced`);
           return;

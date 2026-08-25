@@ -27,7 +27,7 @@ import type { HarnessAdapter, HarnessResult, HarnessStatus, HarnessUsage } from 
 /** Env var names forwarded from the worker into the harness process, per adapter. */
 export const DEFAULT_FORWARDED_ENV: Record<string, string[]> = {
   "claude-code": ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"],
-  opencode: ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "ZAI_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY", "OPENCODE_CONFIG_CONTENT"],
+  opencode: ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "ZHIPU_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY", "OPENCODE_CONFIG_CONTENT"],
 };
 
 const PROMPT_PATH = ".teploy-agent/harness-prompt.md";

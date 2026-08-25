@@ -39,8 +39,10 @@ completed with a turn count. A whole-attempt deadline bounds it
 error, and whatever tree exists goes through the publish gate as incomplete.
 
 The external harness must reach its model vendor, so the sandbox needs
-`SHIP_SANDBOX_NETWORK=egress`, and the binary has to be in
-`SHIP_SANDBOX_IMAGE`. Neither is checked at enqueue — a run asking for a
+`SHIP_SANDBOX_NETWORK=egress` AND the daemon's egress allowlist
+(`SBX_EGRESS_ALLOW` on teploy-sandbox) must name the vendor host — e.g.
+`api.z.ai:443,models.opencode.ai:443` for opencode on z.ai, `api.anthropic.com:443`
+for claude — and the binary has to be in `SHIP_SANDBOX_IMAGE`. Neither is checked at enqueue — a run asking for a
 harness the image lacks fails at preflight, on the run's own timeline.
 
 ## Configuration
@@ -56,8 +58,8 @@ harness the image lacks fails at preflight, on the run's own timeline.
 
 Default forwarded variables: claude-code `CLAUDE_CODE_OAUTH_TOKEN`,
 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`; opencode
-`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `ZAI_API_KEY`,
-`GOOGLE_GENERATIVE_AI_API_KEY`, `OPENCODE_CONFIG_CONTENT`. A variable that is
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `ZHIPU_API_KEY`
+(z.ai, per models.dev), `GOOGLE_GENERATIVE_AI_API_KEY`, `OPENCODE_CONFIG_CONTENT`. A variable that is
 unset on the worker is simply not forwarded.
 
 Per-repo evidence config (`teploy-ship evidence set`) is harness-independent
