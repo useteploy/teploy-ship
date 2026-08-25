@@ -1,6 +1,6 @@
 {
   "name": "teploy-ship",
-  "version": "0.0.1",
+  "version": "0.2.0",
   "private": true,
   "description": "Teploy Ship \u2014 Teploy's coding agent: a CodeAct brain on the Neutron primitives. Issues in, PRs out, self-hosted.",
   "author": "Tyler",

@@ -4,6 +4,8 @@ All notable changes to Teploy Ship are recorded here.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-25
+
 ### Fixed — found by the capacity load test (2026-08-25)
 - The concurrency ceiling was about half real: `launchDueBounded` counted an
   executing run twice (it is in both `launching` and `inflight` for its whole

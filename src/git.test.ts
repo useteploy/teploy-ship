@@ -36,18 +36,18 @@ test("parseRepoUrl refuses an owner/repo with injection characters", () => {
 });
 
 test("parseRepoUrl: forgejo and github, .git suffix, credentials URL", () => {
-  const forgejo = parseRepoUrl("http://100.108.123.49:49152/Tyler/teploy-ship.git");
+  const forgejo = parseRepoUrl("http://forgejo.example.com:3000/Tyler/teploy-ship.git");
   assert.equal(forgejo.kind, "forgejo");
-  assert.equal(forgejo.base, "http://100.108.123.49:49152");
+  assert.equal(forgejo.base, "http://forgejo.example.com:3000");
   assert.equal(forgejo.owner, "Tyler");
   assert.equal(forgejo.repo, "teploy-ship");
-  assert.equal(forgejo.cloneUrl, "http://100.108.123.49:49152/Tyler/teploy-ship.git");
+  assert.equal(forgejo.cloneUrl, "http://forgejo.example.com:3000/Tyler/teploy-ship.git");
 
   const github = parseRepoUrl("https://github.com/useteploy/teploy");
   assert.equal(github.kind, "github");
   assert.equal(github.cloneUrl, "https://github.com/useteploy/teploy.git");
 
-  assert.equal(authenticatedUrl(forgejo, "s3cr3t"), "http://s3cr3t@100.108.123.49:49152/Tyler/teploy-ship.git");
+  assert.equal(authenticatedUrl(forgejo, "s3cr3t"), "http://s3cr3t@forgejo.example.com:3000/Tyler/teploy-ship.git");
   assert.throws(() => parseRepoUrl("git@github.com:a/b.git"));
   assert.throws(() => parseRepoUrl("http://host/onlyowner"));
 });
@@ -120,7 +120,7 @@ test("openPullRequest hits the right endpoint per host kind", async () => {
 
 test("credentialFor picks the GitHub token for github.com, default elsewhere", () => {
   const github = parseRepoUrl("https://github.com/o/r");
-  const forgejo = parseRepoUrl("http://100.108.123.49:49152/o/r.git");
+  const forgejo = parseRepoUrl("http://forgejo.example.com:3000/o/r.git");
   assert.equal(credentialFor(github, { gitToken: "fj", githubToken: "gh" }), "gh");
   assert.equal(credentialFor(github, { gitToken: "fj" }), "fj", "single-token deploys keep working");
   assert.equal(credentialFor(forgejo, { gitToken: "fj", githubToken: "gh" }), "fj");
@@ -129,9 +129,9 @@ test("credentialFor picks the GitHub token for github.com, default elsewhere", (
 
 test("TS-044: the human PR path is /pull on GitHub and /pulls elsewhere", () => {
   const gh = parseRepoUrl("https://github.com/useteploy/teploy-cli");
-  const fj = parseRepoUrl("http://100.108.123.49:49152/tyler/teploy-ship");
+  const fj = parseRepoUrl("http://forgejo.example.com:3000/tyler/teploy-ship");
   assert.equal(pullRequestUrl(gh, 12), "https://github.com/useteploy/teploy-cli/pull/12");
-  assert.equal(pullRequestUrl(fj, 12), "http://100.108.123.49:49152/tyler/teploy-ship/pulls/12");
+  assert.equal(pullRequestUrl(fj, 12), "http://forgejo.example.com:3000/tyler/teploy-ship/pulls/12");
 });
 
 test("TS-023: a fork PR keeps the head repository, a same-repo PR does not", async () => {
