@@ -131,6 +131,12 @@ env:
   # 40). Raise it for repos where tasks need more exploration; the spend
   # caps above are what actually bound cost.
   #
+  # SHIP_HARNESS picks what edits the tree: native (default, Ship's own loop,
+  # needs nothing in the sandbox image), claude-code or opencode (the vendor
+  # binary must be in SHIP_SANDBOX_IMAGE and the sandbox needs egress). It is
+  # recorded on each run at enqueue. See docs/adapters.md — including why a
+  # subscription-fed run is counted as unpriced rather than shown as $0.
+  #
   # Run durable worker tasks in a teploy-sandbox container (instead of the
   # slim worker image, which has no python/curl) so repo tasks whose tests
   # need other tools can complete. The daemon is a host systemd service, so

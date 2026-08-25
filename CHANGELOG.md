@@ -4,6 +4,30 @@ All notable changes to Teploy Ship are recorded here.
 
 ## [Unreleased]
 
+### Added — pluggable harness (2026-08-24)
+- `HarnessAdapter` (`src/harness.ts`): the loop that edits the tree is one
+  implementation behind an interface. `native` (the existing durable loop,
+  re-entry-pointed with no behaviour change — two pre-adapter run logs replay
+  through the new path step-for-step in `harness.test.ts`) stays the default
+  and the air-gapped fallback. Adapter id + contract version are materialised
+  into every run input at enqueue (`SHIP_HARNESS`); a worker refuses a
+  harness it lacks or a version the log did not record.
+- `claude-code` and `opencode` adapters (`src/harness-external.ts`): the
+  vendor binary runs headless inside the sandbox executor behind a recorded
+  preflight step; credentials are forwarded by name (`SHIP_HARNESS_ENV`) and
+  the log records names only. Publish gate, evidence legs and spend settle run
+  on the tree the harness left. Contracts and sources in `docs/adapters.md`.
+- Cost honesty for subscription-fed harnesses: usage carries `priced: false`,
+  such runs go to a new unpriced-runs ledger (never the dollar ledger, never
+  shown as $0), the Spend page shows "Unpriced runs" per source, and the run
+  page shows an "unpriced run" chip. A priced external run records the
+  harness's own dollar figure.
+- Multi-harness attempts (`SHIP_HARNESS_ATTEMPTS`, repo runs, off by
+  default): each listed harness works its own checkout, a recorded
+  `harness-pick` step has the critic choose among the diffs, only the winner
+  is published and the losers' workspaces are released.
+- Settings shows the harness variables; `explain` knows the `error` outcome.
+
 ### Fixed — dashboard pre-release pass (2026-08-24)
 - Every Nucleus-backed store cached a FAILED table-ensure for the life of the
   process: one transient engine error at startup left that page 500ing on every

@@ -106,6 +106,17 @@ export async function loader({ request }: { request: Request }): Promise<Setting
         ],
       },
       {
+        title: "Harness",
+        rows: [
+          { label: "harness", value: (process.env.SHIP_HARNESS ?? "").trim() || "native", ok: true, hint: "SHIP_HARNESS — native (Ship's loop, the default) | claude-code | opencode; recorded on each run at enqueue" },
+          value("SHIP_HARNESS_ATTEMPTS", "not set — one attempt per run"),
+          value("SHIP_HARNESS_MODEL", "not set — the harness's own default"),
+          value("SHIP_HARNESS_ENV", "not set — per-adapter default credential names"),
+          num("SHIP_HARNESS_TIMEOUT_MS", "1800000"),
+          secret("CLAUDE_CODE_OAUTH_TOKEN"),
+        ],
+      },
+      {
         title: "Budget & concurrency",
         rows: [
           num("SHIP_DAILY_BUDGET_USD", "$10"),

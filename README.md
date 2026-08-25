@@ -68,6 +68,24 @@ routing seam actually guarantees, every model we have measured with its
 sample size and confidence interval, and the one known cross-family
 limitation. Read it before quoting a number from anywhere else.
 
+## Harnesses
+
+Ship is the control plane, not the agent. The loop that edits the tree sits
+behind one interface, and a run's harness is recorded in its input at enqueue:
+
+```
+SHIP_HARNESS=native        # default: Ship's own loop — no binary needed, air-gapped
+SHIP_HARNESS=claude-code   # `claude -p`, headless, inside the sandbox
+SHIP_HARNESS=opencode      # `opencode run`, headless, inside the sandbox
+SHIP_HARNESS_ATTEMPTS=native,claude-code   # every harness tries; the critic picks
+```
+
+Whichever harness runs, intake, approvals, the publish gate, the evidence
+legs, spend and audit are Ship's. A harness fed by a subscription is counted
+as an unpriced run rather than shown as $0. The native loop stays the default
+and the measured baseline. **[docs/adapters.md](docs/adapters.md)** has the
+CLI contracts, the forwarded credentials, and the cost-honesty rules.
+
 ## Preview deploys
 
 Ship owns a deployer, so a run does not have to stop at the pull request. With
