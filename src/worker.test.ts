@@ -231,6 +231,42 @@ test("P3-4: at the concurrency ceiling, due runs QUEUE — nothing is dropped or
   assert.deepEqual(launched, ["r1", "r2", "r3"]);
 });
 
+test("P3-4: a run that is both launching and in flight occupies ONE slot, not two", async () => {
+  // The real worker keeps a run in `launching` until driveOne returns AND in
+  // `inflight` from the moment the lease is won — so during execution it is in
+  // both. Counting it twice halved the effective ceiling (found under load).
+  const due = [
+    { runId: "r1", sleeping: false },
+    { runId: "r2", sleeping: false },
+    { runId: "r3", sleeping: false },
+    { runId: "r4", sleeping: false },
+  ];
+  const inflight = new Set<string>();
+  const launching = new Set<string>();
+  const launched: string[] = [];
+  const launch = (runId: string): void => {
+    launched.push(runId);
+    launching.add(runId);
+    inflight.add(runId); // lease won — exactly what the real driveOne does via onStart
+  };
+
+  const first = await launchDueBounded({ due: async () => due, inflight, launching, maxConcurrent: 4, launch });
+  assert.equal(first, 4, "four slots, four launches — a run in both sets is still one run");
+  assert.deepEqual(launched, ["r1", "r2", "r3", "r4"]);
+
+  // r1 leaves inflight first (onComplete) and launching a beat later (driveOne
+  // returns); between the two it must still hold exactly one slot.
+  inflight.delete("r1");
+  due.push({ runId: "r5", sleeping: false });
+  const between = await launchDueBounded({ due: async () => due, inflight, launching, maxConcurrent: 4, launch });
+  assert.equal(between, 0, "r1 is still launching: its slot is not free yet");
+  launching.delete("r1");
+  due.shift();
+  const after = await launchDueBounded({ due: async () => due, inflight, launching, maxConcurrent: 4, launch });
+  assert.equal(after, 1);
+  assert.deepEqual(launched.at(-1), "r5");
+});
+
 test("worker sweep bounds simultaneously-running auto-launches to maxConcurrentRuns", async () => {
   const h = harness({ maxConcurrentRuns: 2 }, [mkTask("t1"), mkTask("t2"), mkTask("t3")]);
 

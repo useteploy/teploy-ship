@@ -319,7 +319,13 @@ export async function launchDueBounded(deps: {
   launch: (runId: string, sleeping: boolean) => void;
 }): Promise<number> {
   let launched = 0;
-  while (deps.inflight.size + deps.launching.size < deps.maxConcurrent) {
+  // A run occupies ONE slot however many sets it is in. During execution it is
+  // in both: `launching` from launch until driveOne returns, `inflight` from
+  // lease-won until completion. Summing the two sizes counted every executing
+  // run twice, and the worker held at ~half the configured ceiling under load
+  // (measured 2026-08-25: ceiling 4, never more than 2-3 in flight).
+  const occupied = (): number => new Set([...deps.inflight, ...deps.launching]).size;
+  while (occupied() < deps.maxConcurrent) {
     const due = await deps.due();
     const next = due.find((d) => !deps.inflight.has(d.runId) && !deps.launching.has(d.runId));
     if (next === undefined) break;
