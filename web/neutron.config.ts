@@ -4,6 +4,6 @@ export default defineConfig({
   runtime: "preact",
   adapter: adapterNode(),
   server: {
-    port: Number(process.env.SHIP_WEB_PORT ?? 7460),
+    port: Number(process.env.SHIP_WEB_PORT ?? process.env.PORT ?? 7460),
   },
 });
