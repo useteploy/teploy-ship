@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 
 import { durableAgent } from "./durable.js";
+import { externalAdapters } from "./harness-external.js";
 import { previewTargetFromEnv } from "./deploy.js";
 import { telemetryTargetFromEnv } from "./observe.js";
 import { testTargetFromEnv } from "./tests.js";
@@ -369,6 +370,9 @@ export function startWorker(options: WorkerOptions): {
     repoMemory: options.runtime.memory,
     steer: options.runtime.steer,
     ...(options.codeSearch !== undefined ? { codeSearch: options.codeSearch } : {}),
+    // External harnesses (claude-code, opencode). Always carried; whether the
+    // binary is in the sandbox image is a recorded preflight step per run.
+    harnesses: externalAdapters(),
     // Where this worker may deploy previews (SHIP_PREVIEW_DIR and friends).
     // Absent on a worker that has no app checkout to run the CLI in; a run
     // that asked for a preview then records the step as disabled rather than

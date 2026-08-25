@@ -34,6 +34,7 @@ import { refusalMessage } from "./publish-policy.js";
 import { defaultApprovalPolicy } from "./approval.js";
 import { secretEnvNames } from "./guard.js";
 import { durableAgent, durableRecoveryInput, repoKeyOf, sandboxProvider } from "./durable.js";
+import { externalAdapters } from "./harness-external.js";
 import type { ExecutorProvider } from "./durable.js";
 import { formatReport, runEval } from "./eval.js";
 import type { EvalTask } from "./eval.js";
@@ -688,6 +689,7 @@ async function executePass(
     // the honest working directory to show the agent.
     workdir: usingSandbox ? "/work" : ".",
     steer: runtime.steer,
+    harnesses: externalAdapters(),
     ...((): { codeSearch?: CodeSearch } => {
       const codeSearch = resolveCodeSearch(runtime);
       return codeSearch !== undefined ? { codeSearch } : {};
