@@ -88,3 +88,53 @@ export function isApproved(review: string): boolean {
 export function criticFeedback(review: string): string {
   return `An independent review of your changes found problems:\n\n${review.trim()}\n\nAddress this feedback — make the necessary changes and verify them — then finish again.`;
 }
+
+/**
+ * Multi-harness attempts (P5-4): several harnesses tried the same task in
+ * their own workspaces; the critic picks the diff to publish. Reply format is
+ * one line, "ATTEMPT <n>", so the choice parses without ambiguity.
+ */
+export interface PickCandidate {
+  /** 1-based label the model answers with. */
+  attempt: number;
+  harness: string;
+  summary: string;
+  diff: string;
+}
+
+export const PICK_INSTRUCTIONS =
+  "You are a strict code reviewer choosing between several candidate changes for the same task, each made independently. " +
+  "Judge correctness and completeness against the task first, then minimality and style. " +
+  "Do not reward length. A candidate that changes nothing relevant loses. " +
+  "Reply with exactly one line: ATTEMPT <n> — the number of the candidate to publish — and nothing else.";
+
+export function pickPrompt(task: string, candidates: PickCandidate[], maxDiffChars = 12_000): string {
+  const per = Math.max(1000, Math.floor(maxDiffChars / Math.max(1, candidates.length)));
+  const blocks = candidates.map((c) => {
+    const diff = c.diff.length > per ? `${c.diff.slice(0, per)}\n... [${c.diff.length - per} chars truncated]` : c.diff;
+    return `## ATTEMPT ${c.attempt} (harness: ${c.harness})\n\nSummary: ${c.summary.slice(0, 600)}\n\n\`\`\`diff\n${diff}\n\`\`\``;
+  });
+  return `Task:\n${task}\n\n${blocks.join("\n\n")}\n\nWhich attempt should be published? Reply: ATTEMPT <n>`;
+}
+
+export function pickAttempt(model: ModelAdapter, input: { task: string; candidates: PickCandidate[] }): Promise<GenerateTextResult> {
+  const picker: LoadedAgent = {
+    definition: { name: "picker", model, maxSteps: 1 },
+    instructions: PICK_INSTRUCTIONS,
+    tools: [],
+  };
+  const team = defineTeam({ name: "ship-picker", members: { picker }, policy: pipeline(["picker"]) });
+  return runTeamTurn(team, { input: pickPrompt(input.task, input.candidates) });
+}
+
+/** The chosen 1-based attempt from a verdict, or null when it does not name one of `valid`. */
+export function parsePick(text: string, valid: number[]): number | null {
+  const lines = text.trim().split("\n").map((l) => l.trim()).filter((l) => l !== "");
+  // Verdict on the last line, like the critic: reasoning-then-answer is how
+  // models naturally reply, and only the last line is unambiguous.
+  const last = lines[lines.length - 1] ?? "";
+  const m = /^ATTEMPT\s+(\d+)\b/i.exec(last) ?? /^ATTEMPT\s+(\d+)\b/im.exec(text);
+  if (m === null) return null;
+  const n = Number(m[1]);
+  return valid.includes(n) ? n : null;
+}

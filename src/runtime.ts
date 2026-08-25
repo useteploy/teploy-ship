@@ -16,7 +16,7 @@ import type { SpendStore, UnpricedRunStore } from "./spend.js";
 import { FilePolicyStore, NucleusPolicyStore } from "./policies.js";
 import type { PolicyStore } from "./policies.js";
 import { FileEvidenceStore, NucleusEvidenceStore } from "./evidence.js";
-import { harnessRef } from "./harness.js";
+import { harnessAttempts, harnessRef } from "./harness.js";
 import type { HarnessRef } from "./harness.js";
 import type { EvidenceStore } from "./evidence.js";
 import { FileGovernanceStore, NucleusGovernanceStore, reviewersFor } from "./governance.js";
@@ -164,6 +164,7 @@ export interface ShipRuntime {
       observeService?: string;
       observeRepo?: string;
       harness?: HarnessRef;
+      harnessAttempts?: HarnessRef[];
     },
   ): Promise<RunOutcome | null>;
   saveMeta(meta: RunMeta): Promise<void>;
@@ -599,6 +600,9 @@ export async function enqueueRun(
   // included, so the log says which program wrote it; a run enqueued before
   // this field existed has none and is native by definition.
   const harness = harnessRef(options.harness ?? process.env.SHIP_HARNESS);
+  // Multi-harness attempts (P5-4): repo runs only, two or more ids, off unless
+  // SHIP_HARNESS_ATTEMPTS says so. Materialised like everything else here.
+  const attempts = options.repo !== undefined ? harnessAttempts(process.env.SHIP_HARNESS_ATTEMPTS) : [];
   // Required reviewers for this repo (governance.ts), resolved HERE for the
   // same reason as evidence: it adds a recorded step (`repo-reviewers`), so
   // its presence must be a function of the recorded input, and the rule is
@@ -645,6 +649,7 @@ export async function enqueueRun(
         index: true,
         guard: true,
         harness,
+        ...(attempts.length >= 2 ? { harnessAttempts: attempts } : {}),
       },
     },
   });

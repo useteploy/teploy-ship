@@ -7,7 +7,8 @@ import type { WorkflowContext, WorkflowDefinition } from "@neutron-build/workflo
 
 import { executeAction, workspaceFingerprint } from "./agent.js";
 import { FINISH_NUDGE_CLEAN_TREE, FINISH_NUDGE_FAILED, FINISH_NUDGE_NO_EVIDENCE, FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, parseAction } from "./actions.js";
-import { criticFeedback, isApproved, reviewWork } from "./critic.js";
+import { criticFeedback, isApproved, parsePick, pickAttempt, reviewWork } from "./critic.js";
+import type { PickCandidate } from "./critic.js";
 import {
   commentOnPr,
   commitAndPush,
@@ -254,6 +255,15 @@ export interface DurableAgentInput {
    * — the recorded steps belong to that program.
    */
   harness?: HarnessRef;
+  /**
+   * Multi-harness attempts (P5-4), materialised at ENQUEUE from
+   * `SHIP_HARNESS_ATTEMPTS` on repo runs only. Two or more refs: every
+   * listed harness tries the task in its own workspace, a recorded
+   * `harness-pick` step has the critic choose, and only the winner's tree
+   * goes through the publish gate. Absent = one attempt on `harness`. Off by
+   * default — the measurements argue for diverse harnesses, not more loops.
+   */
+  harnessAttempts?: HarnessRef[];
 }
 
 /**
@@ -512,8 +522,17 @@ export function durableAgent(
       // on the run where whoever triggered it will actually read it.
       // Resolved before any step: a pure lookup, and a harness this worker does
       // not carry must fail the run before a sandbox is allocated for it.
-      const adapter = selectAdapter([nativeAdapter(config), ...(config.harnesses ?? [])], input.harness);
-      if (input.trust === "external" && (config.executor.isolated !== true || !adapter.isolated) && !allowUnsandboxedIntake()) {
+      const registry = [nativeAdapter(config), ...(config.harnesses ?? [])];
+      const adapter = selectAdapter(registry, input.harness);
+      // Multi-attempt is a repo-run capability (each extra attempt clones its
+      // own checkout); a recorded list on a workspace run is a single attempt.
+      const attemptRefs = input.repo !== undefined && (input.harnessAttempts?.length ?? 0) >= 2 ? input.harnessAttempts! : null;
+      const attemptAdapters = attemptRefs !== null ? attemptRefs.map((ref) => selectAdapter(registry, ref)) : [adapter];
+      if (
+        input.trust === "external" &&
+        (config.executor.isolated !== true || attemptAdapters.some((a) => !a.isolated)) &&
+        !allowUnsandboxedIntake()
+      ) {
         throw new Error(
           "refusing to run an externally-sourced task without an isolated executor: this task came from a webhook, " +
             "chat message, or issue body, and agent commands would run directly on the host. Configure a sandbox " +
@@ -614,17 +633,103 @@ export function durableAgent(
         ...(input.repo !== undefined ? { repo: input.repo } : {}),
         ...(checkout !== null ? { baseBranch: checkout.base } : {}),
       };
-      const ws: HarnessWorkspace = { ctx, handle, executor, workdir, checkout, scopeKey, stepPrefix: "" };
-      // The loop below used to hold these as `let` locals and reassign them on
-      // a snapshot restore; the workspace carries them now so the publish gate
-      // reads whichever container the attempt ended in.
-      const result = await adapter.run(harnessTask, ws, budget, () => {});
+      // The loop used to hold handle/executor as `let` locals and reassign them
+      // on a snapshot restore; the workspace carries them now so the publish
+      // gate reads whichever container the attempt ended in.
+      const primary: HarnessWorkspace = { ctx, handle, executor, workdir, checkout, scopeKey, stepPrefix: "" };
+
+      if (attemptRefs === null) {
+        const result = await adapter.run(harnessTask, primary, budget, () => {});
+        const pr =
+          result.status === "plan-rejected"
+            ? null
+            : await publishIfRepoRun(ctx, primary.executor, config, input, checkout, result.summary, repoPolicy, result.incomplete);
+        await dispose(config, primary.handle);
+        return { status: result.status, summary: result.summary, turns: result.turns, usage: result.usage, ...(pr !== null ? { pr } : {}) };
+      }
+
+      // Multi-harness attempts (P5-4). Attempt 0 runs in the primary workspace
+      // already set up above; every further attempt gets its own sandbox and
+      // checkout as recorded steps. Each attempt's diff is recorded, the
+      // critic picks once, and only the winner reaches the publish gate.
+      const attempts: Array<{ ws: HarnessWorkspace; adapter: HarnessAdapter; result: HarnessResult; diff: string }> = [];
+      for (let i = 0; i < attemptAdapters.length; i++) {
+        const attemptAdapter = attemptAdapters[i]!;
+        const p = `attempt-${i}-`;
+        let ws: HarnessWorkspace;
+        if (i === 0) {
+          ws = { ...primary, stepPrefix: p };
+        } else {
+          const attemptHandle = await ctx.step(`${p}sandbox`, async () => (await config.executor.create()).handle);
+          const attemptExecutor = config.executor.attach(attemptHandle);
+          const attemptCheckout = await ctx.step(`${p}repo-setup`, async () => {
+            const ref = assertRepoAllowed(input.repo!, { trust: input.trust ?? "operator", config: repoPolicy });
+            return setupRepo(attemptExecutor, { ref, token: credentialFor(ref, repoPolicy), runId: ctx.runId });
+          });
+          ws = { ctx, handle: attemptHandle, executor: attemptExecutor, workdir, checkout: attemptCheckout, scopeKey, stepPrefix: p };
+        }
+        const result = await attemptAdapter.run(harnessTask, ws, budget, () => {});
+        const diff = await ctx.step(`${p}diff`, async () => {
+          try {
+            return await workingDiff(ws.executor);
+          } catch {
+            return "";
+          }
+        });
+        attempts.push({ ws, adapter: attemptAdapter, result, diff });
+      }
+
+      const pick = await ctx.step("harness-pick", async () => {
+        const candidates: PickCandidate[] = attempts
+          .map((a, i) => ({ attempt: i + 1, harness: a.adapter.id, summary: a.result.summary, diff: a.diff }))
+          .filter((c) => c.diff.trim() !== "");
+        if (candidates.length === 0) {
+          return { winner: 0, reason: "no attempt produced a diff", candidates: [] as number[], usage: undefined };
+        }
+        if (candidates.length === 1) {
+          return { winner: candidates[0]!.attempt - 1, reason: "only one attempt produced a diff", candidates: [candidates[0]!.attempt], usage: undefined };
+        }
+        try {
+          const verdict = await pickAttempt(config.model, { task: input.task, candidates });
+          const chosen = parsePick(verdict.text, candidates.map((c) => c.attempt));
+          return chosen === null
+            ? { winner: candidates[0]!.attempt - 1, reason: `critic verdict did not name an attempt (${verdict.text.trim().slice(0, 200)}); first candidate published`, candidates: candidates.map((c) => c.attempt), usage: verdict.usage }
+            : { winner: chosen - 1, reason: verdict.text.trim().slice(0, 400), candidates: candidates.map((c) => c.attempt), usage: verdict.usage };
+        } catch (error) {
+          // Fail open to the first candidate, recorded as such: a broken picker
+          // must not throw away every attempt's work, and must not throw from
+          // a step (it would re-run on replay).
+          return { winner: candidates[0]!.attempt - 1, reason: `critic unavailable (${error instanceof Error ? error.message : String(error)}); first candidate published`, candidates: candidates.map((c) => c.attempt), usage: undefined };
+        }
+      });
+
+      const usage: HarnessUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+      const addUsage = (u: HarnessUsage | Partial<HarnessUsage> | undefined): void => {
+        if (u === undefined) return;
+        usage.inputTokens += u.inputTokens ?? 0;
+        usage.outputTokens += u.outputTokens ?? 0;
+        usage.totalTokens += u.totalTokens ?? 0;
+        if (u.cacheReadTokens !== undefined) usage.cacheReadTokens = (usage.cacheReadTokens ?? 0) + u.cacheReadTokens;
+        if (u.cacheWriteTokens !== undefined) usage.cacheWriteTokens = (usage.cacheWriteTokens ?? 0) + u.cacheWriteTokens;
+        if (u.priced === false) usage.priced = false;
+        if (typeof u.costUSD === "number") usage.costUSD = (usage.costUSD ?? 0) + u.costUSD;
+      };
+      for (const a of attempts) addUsage(a.result.usage);
+      addUsage(pick.usage);
+      if (usage.priced === false) delete usage.costUSD;
+      const turns = attempts.reduce((n, a) => n + a.result.turns, 0);
+
+      const winner = attempts[pick.winner]!;
+      const losers = attempts.filter((a) => a !== winner);
+      for (const loser of losers) await dispose(config, loser.ws.handle);
+      const names = attempts.map((a, i) => `${a.adapter.id}${i === pick.winner ? " (published)" : ""}`).join(", ");
+      const summary = `${winner.result.summary}\n\nPicked from ${attempts.length} harness attempts: ${names}.`;
       const pr =
-        result.status === "plan-rejected"
+        winner.result.status === "plan-rejected"
           ? null
-          : await publishIfRepoRun(ctx, ws.executor, config, input, checkout, result.summary, repoPolicy, result.incomplete);
-      await dispose(config, ws.handle);
-      return { status: result.status, summary: result.summary, turns: result.turns, usage: result.usage, ...(pr !== null ? { pr } : {}) };
+          : await publishIfRepoRun(ctx, winner.ws.executor, config, input, winner.ws.checkout, summary, repoPolicy, winner.result.incomplete);
+      await dispose(config, winner.ws.handle);
+      return { status: winner.result.status, summary, turns, usage, ...(pr !== null ? { pr } : {}) };
     },
     config.runTimeout !== undefined ? { timeout: config.runTimeout } : {},
   );
