@@ -31,7 +31,7 @@ import {
 import { deployPreview, type PreviewOutcome, type PreviewTarget } from "./deploy.js";
 import { compareAroundNow, effectiveTelemetryTarget, telemetryAppliesTo, type TelemetryTarget, type TelemetryVerdict } from "./observe.js";
 import { spliceVerification, verificationSection, type Evidence } from "./verification.js";
-import { runTests, testComment, testTargetFromInput, type TestOutcome, type TestTarget } from "./tests.js";
+import { preExisting, runTests, testComment, testTargetFromInput, testsFailedNudge, type TestOutcome, type TestTarget } from "./tests.js";
 import { refusalMessage, warningMessage } from "./publish-policy.js";
 import type { RepoCheckout, RepoRef } from "./git.js";
 import { assertRepoAllowed, credentialFor, policyFromEnv } from "./repo-policy.js";
@@ -54,6 +54,29 @@ import { formatObservation, systemPrompt } from "./prompt.js";
 import { costUSD } from "./pricing.js";
 import { HARNESS_VERSIONS, NATIVE_HARNESS_ID, selectAdapter } from "./harness.js";
 import type { HarnessAdapter, HarnessBudget, HarnessRef, HarnessResult, HarnessTask, HarnessUsage, HarnessWorkspace } from "./harness.js";
+
+/**
+ * Retry policy for steps whose failure loses real work.
+ *
+ * There were 33 `ctx.step(` calls in this file and NONE of them had a retry, so
+ * one transient blip from the forge — a 502 from Forgejo, a dropped connection
+ * mid-push — failed a whole run that had already spent forty turns and real
+ * money producing a correct change. These four steps (push, open PR, comment,
+ * request reviewers) are the ones that talk to something across a network at
+ * the very end of a run, which is exactly where a failure is most expensive and
+ * least likely to be the run's own fault.
+ *
+ * IN-PROCESS retries (retryDelay 0), deliberately not a durable park. The
+ * engine parks the run for any non-zero delay, and a park here would release
+ * the sandbox the publish gate is still working out of — trading a lost run for
+ * a differently lost run. A per-attempt timeout bounds a hung connection, which
+ * is the failure an immediate retry does not fix on its own.
+ *
+ * Adding retries changes no step NAME, so a run whose log predates this replays
+ * untouched: the extra events only ever exist on a path that previously ended
+ * the run outright.
+ */
+const EXTERNAL_EFFECT_RETRY = { retries: 3, retryDelay: 0, timeout: 120_000 } as const;
 
 export interface DurableAgentInput {
   task: string;
@@ -196,6 +219,20 @@ export interface DurableAgentInput {
    * by default — it adds a recorded `tests` step.
    */
   tests?: boolean;
+  /**
+   * The evidence loop (C4): take a BASELINE suite run before the agent edits,
+   * and send a finish back to work when the suite it leaves is red for a
+   * reason this run caused.
+   *
+   * Input-gated, like every other optional feature here, and for the sharpest
+   * version of the reason: both halves ADD RECORDED STEPS (`baseline-tests`,
+   * `turn-N-finish-tests`). A worker that ran them on a run whose log predates
+   * them requests a step the log does not have, which is a NondeterminismError
+   * that executeRun THROWS rather than records — the run becomes permanently
+   * unrunnable, not merely failed. The P5-1 replay fence in harness.test.ts
+   * caught exactly that during this change.
+   */
+  testsFeedback?: boolean;
   /**
    * Per-repo evidence, materialised at ENQUEUE from the evidence store
    * (`teploy-ship evidence set`): the test command this repo runs and the
@@ -573,6 +610,35 @@ export function durableAgent(
       const handle = await ctx.step("sandbox", async () => (await config.executor.create(sandboxOverrides)).handle);
       const executor = config.executor.attach(handle);
 
+      // C5: is the container this run recorded still ALIVE?
+      //
+      // `sandbox` is a recorded step, so a replay gets the original handle back
+      // and attaches to it without asking whether it still exists. After the
+      // sandbox TTL it does not, and every subsequent command failed with the
+      // daemon's own `run not found` — an error that names nothing an operator
+      // can act on and that reads like a bug in Ship. Snapshots are only taken
+      // at approval parks, so for an ordinary run there is nothing to restore
+      // from; the honest thing is to say precisely what happened and why the
+      // run cannot continue.
+      //
+      // Deliberately NOT a recorded step: it is a liveness probe about the
+      // container, not a fact about the run, and recording it would make its
+      // answer replay as "alive" forever — which is the exact bug.
+      if (config.executor.isolated === true) {
+        const alive = await executor.exec("true", { timeoutMs: 15_000 }).then(
+          (r) => r.exitCode === 0,
+          () => false,
+        );
+        if (!alive) {
+          throw new Error(
+            `the sandbox this run recorded (${handle}) is no longer available — it has almost certainly outlived its TTL ` +
+              `(SHIP_SANDBOX_TTL_SEC). A durable run replays its recorded container rather than creating a new one, and ` +
+              `there is no snapshot to restore from unless the run parked for an approval. Re-enqueue the task; the run's ` +
+              `log is intact and explains what it had done.`,
+          );
+        }
+      }
+
       // Repo runs: clone + branch as a recorded step, then hand the agent
       // a repo-aware task. On replay the step returns the recorded
       // checkout without touching the network.
@@ -661,6 +727,19 @@ export function durableAgent(
           }
         });
       }
+      // BASELINE (C4). Run the suite once before the agent has touched
+      // anything, so "Tests: FAILED" on the pull request can distinguish a
+      // regression this run caused from breakage it inherited. On 2026-08-26 a
+      // Go 1.24/1.25 base-image mismatch made every Go pull request arrive
+      // marked `tests: failed` and cost a day of reading them as the agent's
+      // fault — there was no way to tell, because nobody had run the suite
+      // first. Repo runs only: a keyed workspace has no base branch to be a
+      // baseline OF.
+      const baseline =
+        checkout !== null && input.testsFeedback === true
+          ? await runSuite(ctx, executor, config, input, "baseline-")
+          : undefined;
+
       // Surface injection attempts in the external task text on the run
       // timeline. screenUntrusted is a pure function of the recorded
       // input, so step PRESENCE (only when flagged) replays identically.
@@ -719,6 +798,9 @@ export function durableAgent(
       const budget: HarnessBudget = { maxSteps, maxRunCostUSD: config.maxRunCostUSD ?? 0 };
       const harnessTask: HarnessTask = {
         prompt: task,
+        // So the finish gate can tell a suite this run broke from one it
+        // inherited, and only send the agent back for the former.
+        ...(baseline !== undefined ? { testsBaseline: baseline } : {}),
         task: input.task,
         input,
         ...(input.repo !== undefined ? { repo: input.repo } : {}),
@@ -730,7 +812,33 @@ export function durableAgent(
       const primary: HarnessWorkspace = { ctx, handle, executor, workdir, checkout, scopeKey, stepPrefix: "" };
 
       if (attemptRefs === null) {
-        const result = await adapter.run(harnessTask, primary, budget, () => {});
+        let result: HarnessResult;
+        try {
+          result = await adapter.run(harnessTask, primary, budget, () => {});
+        } catch (error) {
+          // C5: DO NOT LOSE THE WORK.
+          //
+          // publishIfRepoRun used to sit only on the normal return path, so a
+          // run that made thirty turns of real edits and then threw — a
+          // provider 500 on turn 31, a step that ran out of retries — lost all
+          // of it. The tree was correct and nobody ever saw it.
+          //
+          // The deliverable is the edited tree, whatever the loop believes
+          // happened. So the tree is published, marked incomplete, and the
+          // error is re-thrown afterwards: the run is still a failure and must
+          // still be reported as one. Best-effort, and swallowing its own
+          // failure, because a rescue that turns one error into a different
+          // error tells the operator less than the original did.
+          const rescued = await rescuePublish(ctx, primary, config, input, checkout, repoPolicy, error, baseline);
+          await dispose(config, primary.handle);
+          if (rescued !== null) {
+            await ctx.step("publish-on-failure", () => ({
+              pr: rescued,
+              note: "the run failed, but the work it had already done was pushed and published as an incomplete pull request",
+            }));
+          }
+          throw error;
+        }
         const pr =
           result.status === "plan-rejected"
             ? null
@@ -744,6 +852,7 @@ export function durableAgent(
                 repoPolicy,
                 result.incomplete,
                 result.evidence,
+                baseline,
               );
         await dispose(config, primary.handle);
         return { status: result.status, summary: result.summary, turns: result.turns, usage: result.usage, ...(pr !== null ? { pr } : {}) };
@@ -840,6 +949,7 @@ export function durableAgent(
               // The winner's own workspace produced it, and the publish gate
               // runs against that same workspace — see the executor above.
               winner.result.evidence,
+              baseline,
             );
       await dispose(config, winner.ws.handle);
       return { status: winner.result.status, summary, turns, usage, ...(pr !== null ? { pr } : {}) };
@@ -905,6 +1015,8 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
        */
       let criticEvidence: TestOutcome | undefined;
       let criticEvidenceTurn = -1;
+      /** How many times a red suite has sent this run back to work (C4). */
+      let testsNudges = 0;
       /**
        * The most recent finish the gate HELD, and only when the hold was the
        * benign "prove it" one. A run that ends on a harness sentence while one
@@ -1101,6 +1213,45 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
               heldCleanAtTurn = turn;
               nudge = FINISH_NUDGE_CLEAN_TREE;
             } else if (
+              // RED SUITE (C4). Ship reported a failing suite on the pull
+              // request and ENDED the run — no iterate-until-green, even with
+              // turns left and the failure output in hand. The suite runs here
+              // instead, at the finish gate, and a failure this run caused
+              // sends it back to work with the real output.
+              //
+              // Gated on a baseline having been taken, or on the failure
+              // differing from the baseline's: a repo whose suite was already
+              // red must not have the agent chase breakage it did not cause,
+              // which is precisely the Go 1.24/1.25 day.
+              //
+              // Bounded at two. A model that cannot fix the suite in two
+              // attempts will not fix it in six, and every attempt costs a full
+              // suite run — so the third failure publishes, marked, and a human
+              // decides. Same shape as the other nudges above.
+              input.tests === true &&
+              input.testsFeedback === true &&
+              testsNudges < 2 &&
+              (await (async (): Promise<boolean> => {
+                const outcome = await runSuite(ws.ctx, ws.executor, config, input, `${p}turn-${turn}-finish-`);
+                if (outcome === undefined) return false;
+                // Cache it either way: if this finish is allowed through, the
+                // critic below and the publish gate both reuse it rather than
+                // running a minutes-long suite again over the same bytes.
+                criticEvidence = outcome;
+                criticEvidenceTurn = turn;
+                if (outcome.kind !== "failed") return false;
+                if (preExisting(task.testsBaseline, outcome)) return false;
+                testsNudges += 1;
+                nudge = testsFailedNudge(outcome);
+                // The agent is going back to work, so this outcome describes a
+                // tree that is about to change.
+                criticEvidence = undefined;
+                criticEvidenceTurn = -1;
+                return true;
+              })())
+            ) {
+              // nudge was set inside the predicate; nothing further to do here.
+            } else if (
               input.critic === true &&
               // A git diff is all the critic needs, so a keyed workspace run
               // qualifies as well as a repo checkout. Gating on the checkout
@@ -1135,7 +1286,13 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
                 // carried out on the result and reused there rather than run
                 // twice; a rejected review sends the agent back to editing and
                 // the publish gate runs the suite again over what it produced.
-                const evidence = await runSuite(ws.ctx, ws.executor, config, input, `${p}turn-${turn}-critic-`);
+                // The red-suite gate above already ran the suite this turn and
+                // let the finish through, so the outcome is cached; only run it
+                // here when that gate did not (tests off for this run).
+                const evidence =
+                  criticEvidenceTurn === turn && criticEvidence !== undefined
+                    ? criticEvidence
+                    : await runSuite(ws.ctx, ws.executor, config, input, `${p}turn-${turn}-critic-`);
                 if (evidence !== undefined) {
                   criticEvidence = evidence;
                   criticEvidenceTurn = turn;
@@ -1407,6 +1564,49 @@ export function repoKeyOf(repoUrl: string): string {
  * becomes a draft/WIP pull request so a reviewer, and any merge automation,
  * can tell the difference.
  */
+/**
+ * Publish whatever the tree holds after the run threw.
+ *
+ * Separate from publishIfRepoRun so the failure path can be read on its own,
+ * and so its swallow-everything posture is explicit rather than smuggled into
+ * the happy path. Returns the pull request URL, or null when there was nothing
+ * to publish or the rescue itself failed.
+ */
+async function rescuePublish(
+  ctx: WorkflowContext,
+  ws: HarnessWorkspace,
+  config: DurableAgentConfig,
+  input: DurableAgentInput,
+  checkout: RepoCheckout | null,
+  policy: RepoPolicyConfig,
+  cause: unknown,
+  baseline?: TestOutcome,
+): Promise<string | null> {
+  if (checkout === null || input.repo === undefined) return null;
+  const why = cause instanceof Error ? cause.message : String(cause);
+  try {
+    return await publishIfRepoRun(
+      ctx,
+      ws.executor,
+      config,
+      input,
+      checkout,
+      `This run FAILED before it could finish, and this is the work it had already done.\n\n` +
+        `The failure was: ${why.slice(0, 500)}\n\n` +
+        "Treat the change as partial. Nothing here was reviewed by the agent's own finish gate, and the summary " +
+        "it would have written does not exist.",
+      policy,
+      // Always incomplete: a run that threw did not finish, whatever its tree
+      // looks like, and a reviewer must be able to tell that at a glance.
+      true,
+      undefined,
+      baseline,
+    );
+  } catch {
+    return null;
+  }
+}
+
 async function publishIfRepoRun(
   ctx: WorkflowContext,
   executor: AgentExecutor,
@@ -1417,6 +1617,7 @@ async function publishIfRepoRun(
   policy: RepoPolicyConfig,
   incomplete = false,
   evidence?: TestOutcome,
+  baseline?: TestOutcome,
 ): Promise<string | null> {
   if (checkout === null || input.repo === undefined) return null;
   const repoUrl = input.repo;
@@ -1431,7 +1632,9 @@ async function publishIfRepoRun(
   const tests = await testsIfAsked(ctx, executor, config, input, evidence);
 
   // 1. Commit + push. Screened first; a refusal is recorded and stops here.
-  const push = await ctx.step("repo-push", async () => {
+  const push = await ctx.step(
+    "repo-push",
+    async () => {
     const result = await commitAndPush(executor, {
       ref,
       token,
@@ -1450,7 +1653,9 @@ async function publishIfRepoRun(
             ...(result.screen !== undefined ? { warning: warningMessage(result.screen) } : {}),
           }
         : { kind: "empty" as const };
-  });
+    },
+    EXTERNAL_EFFECT_RETRY,
+  );
 
   const remember = async (pr?: string): Promise<void> => {
     if (config.repoMemory === undefined) return;
@@ -1480,16 +1685,21 @@ async function publishIfRepoRun(
         : push.kind === "empty"
           ? `No code change was needed for this feedback (run ${ctx.runId}).\n\n${summary.slice(0, 800)}`
           : `Pushed ${push.sha.slice(0, 10)} addressing this (run ${ctx.runId}).\n\n${summary.slice(0, 800)}`;
-    await ctx.step("repo-comment", async () => {
-      await commentOnPr(ref, token, input.pr!, body);
-      return true;
-    });
+    await ctx.step(
+      "repo-comment",
+      async () => {
+        await commentOnPr(ref, token, input.pr!, body);
+        return true;
+      },
+      EXTERNAL_EFFECT_RETRY,
+    );
     // A review follow-up pushed new commits to the same branch, so the preview
     // that branch is on is now stale. Refresh it, unless nothing was pushed.
     // A review follow-up pushed new commits, so any preview is stale and the
     // numbers moved. Refresh both, then amend the same Verification section.
     const followUp: Evidence = {
       ...(tests !== undefined ? { tests } : {}),
+      ...(baseline !== undefined ? { testsBaseline: baseline } : {}),
       ...(push.kind === "pushed" ? { preview: await previewIfAsked(ctx, config, input, co.branch) } : {}),
       telemetry: await telemetryIfAsked(ctx, config, input),
     };
@@ -1513,7 +1723,9 @@ async function publishIfRepoRun(
   // agent finished cleanly.
   const flagged = push.kind === "pushed" && push.warning !== undefined;
   const asDraft = incomplete || flagged;
-  const pr = await ctx.step("repo-pr", async () => {
+  const pr = await ctx.step(
+    "repo-pr",
+    async () => {
     const existing = await findOpenPullRequest({ ref, token, head: co.branch, owner: ref.owner }).catch(() => null);
     if (existing !== null) return { url: existing.url, number: existing.number };
     const created = await openPullRequest({
@@ -1530,11 +1742,14 @@ async function publishIfRepoRun(
           : "") +
         (push.kind === "pushed" && push.warning !== undefined ? `\n\n${push.warning}` : ""),
     });
-    return { url: created.url, number: created.number };
-  });
+      return { url: created.url, number: created.number };
+    },
+    EXTERNAL_EFFECT_RETRY,
+  );
   await requestReviewersIfAsked(ctx, ref, token, pr.number, input);
   await publishVerification(ctx, ref, token, pr.number, {
     ...(tests !== undefined ? { tests } : {}),
+    ...(baseline !== undefined ? { testsBaseline: baseline } : {}),
     preview: await previewIfAsked(ctx, config, input, co.branch),
     telemetry: await telemetryIfAsked(ctx, config, input),
   });
@@ -1710,7 +1925,12 @@ async function testsIfAsked(
   already?: TestOutcome,
 ): Promise<TestOutcome | undefined> {
   if (input.tests !== true) return undefined;
-  if (already !== undefined) return already;
+  // Reused, but still RECORDED under the historical `tests` key. The step is
+  // what the run timeline, explain.ts and the P5-1 replay fence all look for,
+  // so skipping it entirely would make a reused outcome invisible — and would
+  // change the step sequence of a replay. Recording a value the caller already
+  // has is free; running the suite twice over identical bytes is minutes.
+  if (already !== undefined) return await ctx.step("tests", async () => already);
   return await runSuite(ctx, executor, config, input, "");
 }
 

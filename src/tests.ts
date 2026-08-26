@@ -114,21 +114,75 @@ export async function runTests(
   }
 }
 
+/**
+ * Was the suite ALREADY failing before the agent touched anything?
+ *
+ * Without this, "Tests: FAILED" cannot separate a regression this run caused
+ * from breakage it inherited — and on 2026-08-26 a Go 1.24/1.25 base-image
+ * mismatch made every Go pull request arrive marked `tests: failed`, which cost
+ * a day of reading them as the agent's fault. A baseline run before the agent
+ * edits is the whole fix, and it is cheap relative to being wrong about it.
+ */
+export function preExisting(baseline: TestOutcome | undefined, after: TestOutcome): boolean {
+  if (baseline === undefined || after.kind !== "failed") return false;
+  if (baseline.kind !== "failed") return false;
+  // Same command, and the failure did not get worse. Comparing exit codes
+  // rather than output because output carries timings and paths that differ run
+  // to run; a DIFFERENT exit code means something else broke and the run owns
+  // it.
+  return baseline.command === after.command && baseline.exitCode === after.exitCode;
+}
+
 /** The tests line for the pull request. */
-export function testComment(outcome: TestOutcome): string {
+export function testComment(outcome: TestOutcome, baseline?: TestOutcome): string {
   switch (outcome.kind) {
     case "passed":
-      return `Tests: **passed** — \`${outcome.command}\`, ${Math.round(outcome.durationMs / 1000)}s.\n\nRun by Teploy Ship after the agent stopped, not reported by the agent.`;
-    case "failed":
+      return (
+        `Tests: **passed** — \`${outcome.command}\`, ${Math.round(outcome.durationMs / 1000)}s.\n\n` +
+        "Run by Teploy Ship after the agent stopped, not reported by the agent." +
+        (baseline?.kind === "failed"
+          ? `\n\nThe suite was already failing on the base branch (exit ${baseline.exitCode}) and passes here, so this change FIXED it.`
+          : "")
+      );
+    case "failed": {
+      const inherited = preExisting(baseline, outcome);
       return (
         `Tests: **FAILED** — \`${outcome.command}\` exited ${outcome.exitCode} after ${Math.round(outcome.durationMs / 1000)}s.\n\n` +
         "```\n" +
         outcome.output +
-        "\n```\n\nThe change is published anyway so a human can judge it; a failing suite here may or may not be caused by this change."
+        "\n```\n\n" +
+        (inherited
+          ? "**This suite was already failing on the base branch, the same way, before this run made any change.** " +
+            "It is pre-existing breakage, not a regression from this pull request."
+          : baseline?.kind === "passed"
+            ? "The suite PASSED on the base branch before this run started, so this change broke it."
+            : "The change is published anyway so a human can judge it; a failing suite here may or may not be caused by this change.")
       );
+    }
     case "errored":
       return `Tests: **not run** — \`${outcome.command}\` could not be executed: ${outcome.reason}. This is not a test failure.`;
     case "disabled":
       return `Tests: not run (${outcome.reason}).`;
   }
+}
+
+/**
+ * The nudge that sends a run back to work over a red suite.
+ *
+ * Ship used to report a failing suite on the pull request and end the run —
+ * no iterate-until-green at all, even though the agent had turns left and the
+ * failure output in hand. This is the feedback: the real command, the real
+ * exit code, the real tail, and an explicit instruction that the deliverable is
+ * a green suite rather than a description of why it is red.
+ */
+export function testsFailedNudge(outcome: Extract<TestOutcome, { kind: "failed" }>): string {
+  return (
+    `The project's test suite FAILED over your changes. Ship ran it, not you, so this is not something you can talk past:\n\n` +
+    `$ ${outcome.command}\nexit ${outcome.exitCode}\n\n` +
+    "```\n" +
+    outcome.output +
+    "\n```\n\n" +
+    "Fix it. Read the failure, change the code that is actually wrong, re-run the suite yourself to confirm it is green, and only then finish. " +
+    "If the failure is genuinely unrelated to your change and was already broken, say so explicitly in your finish message and explain why."
+  );
 }

@@ -313,7 +313,7 @@ export const FINISH_NUDGE_FAILED =
  * being asked to prove its work. Bounded: it is asked once, then honoured.
  */
 export const FINISH_NUDGE_NO_EVIDENCE =
-  "You did not run anything between being asked to verify and finishing again — so nothing has been demonstrated. Run one command that actually proves the task is done (execute the tests, run the program, read back the files you created) and show its real output. If you genuinely cannot verify, say so explicitly in your finish message instead of implying success.";
+  "You did not run anything between being asked to verify and finishing again — so nothing has been demonstrated. Run one command that actually proves the task is done and PASSES: the project's tests, the program itself, a check that reads back what you claim to have changed. A command that merely executes is not evidence — `ls` runs successfully and proves nothing. Show its real output, including its exit status if it is not obvious. If you genuinely cannot verify, say so explicitly in your finish message instead of implying success.";
 
 export const FINISH_NUDGE_VERIFY =
   "Before finishing, verify your work. Re-read the task, then run one command that PROVES each artifact or change it requires actually exists and is correct (list or cat the files you claim to have created, run the tests, execute the program). If any check fails or anything is missing, fix it before finishing. If everything is already proven, finish again.";

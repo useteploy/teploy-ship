@@ -104,7 +104,8 @@ Usage:
   teploy-ship runs                    list durable runs
   teploy-ship explain <run-id>        why a run ended the way it did, and what to do
       [--json]                        the same, as an object
-  teploy-ship resume <run-id>         continue a durable run (after a crash or park)
+  teploy-ship resume <run-id>         continue a durable run (after a crash or park;
+                                      a FAILED run's log is closed — re-enqueue instead)
   teploy-ship approve <run-id>        approve a parked action and continue
       [--handoff]                     deliver the decision, let a worker finish the run
   teploy-ship deny <run-id> [reason]  deny a parked action and continue
@@ -804,6 +805,34 @@ async function resumeCommand(rest: string[]): Promise<void> {
   const runtime = await makeRuntime(args, config);
   const meta = await runtime.loadMeta(runId);
   if (meta === null) fail(`unknown run: ${runId}`);
+  // `resume` is advertised as "continue a durable run (after a crash or park)",
+  // and after a PARK that is exactly what it does. After a FAILURE it is a
+  // no-op, because `run-failed` is a terminal event in the log and the engine
+  // replays straight back to it.
+  //
+  // PRE-DECIDED (2026-08-26): say so, rather than build retry-from-step-N.
+  // Making a failed run resumable means teaching the workflow engine to
+  // reopen a terminal log, which is a change to @neutron-build/workflow — and
+  // the standing rule here is that Neutron changes are made upstream as a
+  // standalone piece of work, never as a side effect of a Teploy session. The
+  // substantive half of "stop losing work" is done in durable.ts instead: a
+  // run that throws now publishes the tree it had already produced, and the
+  // steps that talk to the forge retry rather than failing the run outright.
+  // Reverses when the engine gains a reopen primitive.
+  if (meta.status === "failed") {
+    await runtime.close();
+    process.stderr.write(
+      `${yellow("cannot resume")} ${bold(runId)} — it FAILED, and a failed run's log is closed.
+` +
+        `${dim("Its work is not lost: a run that fails after making changes publishes them as an incomplete pull request.")}
+` +
+        `${dim("Read what happened, then re-enqueue the task:")}
+` +
+        `  teploy-ship explain ${runId}
+`,
+    );
+    process.exit(1);
+  }
   const outcome = await executePass(runtime, runId, meta.task, args, config);
   reportOutcome(runId, outcome);
   await runtime.close();

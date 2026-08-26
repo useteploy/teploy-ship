@@ -2187,21 +2187,301 @@ test("the suite runs before the critic's verdict, reaches the reviewer, and is n
         repo: `file://${bareDir}/owner/repo.git`,
         critic: true,
         tests: true,
+        // C4's evidence loop: the baseline run, and the finish gate that sends
+        // a red suite back to work. enqueueRun turns it on by default; a
+        // hand-built input has to say so.
+        testsFeedback: true,
         testCommand: "echo SUITE-MARKER-42",
       },
     });
 
     assert.equal(outcome.status, "completed");
     assert.equal(sawEvidenceInReview, true, "the reviewer's prompt carried the suite's output");
-    assert.equal(suiteRuns, 1, "one suite run, not two: the publish gate reuses the critic's outcome over the same tree");
+    // Two: the C4 baseline before the agent edits, and one at the finish gate.
+    // NOT three — the publish gate reuses the finish gate's outcome rather than
+    // running a minutes-long suite again over bytes nothing has touched.
+    assert.equal(suiteRuns, 2, "baseline + finish gate, and no third run at publish");
 
     const stepNames = (await store.load("run-critic-tests"))
       .filter((e) => e.type === "step-completed")
       .map((e) => e.name ?? "");
-    const criticTests = stepNames.findIndex((n) => n.endsWith("-critic-tests"));
+    assert.ok(stepNames.includes("baseline-tests"), `the baseline must be recorded: ${stepNames.join(",")}`);
+    assert.ok(stepNames.includes("tests"), "and the publish gate's `tests` step must still exist on the timeline");
+    const criticTests = stepNames.findIndex((n) => n.endsWith("-finish-tests") || n.endsWith("-critic-tests"));
     const review = stepNames.findIndex((n) => n.endsWith("-critic") && !n.endsWith("-critic-diff") && !n.endsWith("-critic-tests"));
-    assert.ok(criticTests >= 0, `the critic's own suite step must be recorded: ${stepNames.join(",")}`);
+    assert.ok(criticTests >= 0, `the finish gate's suite step must be recorded: ${stepNames.join(",")}`);
     assert.ok(review > criticTests, "and it must be recorded BEFORE the review — that is the whole fix");
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+// --- C4 done-check: a run that breaks a test fixes it without a human, and a
+// repo with a pre-existing red suite does not get blamed for it -------------
+
+/**
+ * A repo whose suite reads `answer.txt` and demands 42, plus a workspace
+ * provider over one shared directory. The suite is a real command against real
+ * bytes, so "the agent fixed it" means the file actually changed.
+ */
+async function suiteRepo(name: string, seed: string): Promise<{ bare: string; work: string; provider: ExecutorProvider }> {
+  const bare = await mkdtemp(join(tmpdir(), `${name}-bare-`));
+  const seedDir = await mkdtemp(join(tmpdir(), `${name}-seed-`));
+  const seeder = new LocalExecutor({ root: seedDir });
+  await seeder.exec(
+    `git init -q -b main . && git config user.email t@t && git config user.name t && ` +
+      `printf '${seed}\\n' > answer.txt && ` +
+      `printf '#!/bin/sh\\n[ "$(cat answer.txt)" = "42" ] || { echo "answer.txt is not 42"; exit 1; }\\necho SUITE_OK\\n' > check.sh && ` +
+      `git add -A && git commit -qm seed && git clone -q --bare . ${bare}/owner/repo.git`,
+  );
+  const work = await mkdtemp(join(tmpdir(), `${name}-work-`));
+  return {
+    bare,
+    work,
+    provider: {
+      async create() {
+        return { handle: work };
+      },
+      attach(handle: string) {
+        return new LocalExecutor({ root: handle });
+      },
+    },
+  };
+}
+
+test("C4: a red suite sends the run back to work, and it fixes it — no human", async () => {
+  const { bare, provider } = await suiteRepo("durable-c4-red", "42");
+
+  // The agent breaks the suite, claims done, is shown the real failure, and
+  // repairs it. Nothing here is a human decision.
+  let sawFailureOutput = false;
+  const { model } = reactiveModel([
+    "```bash\necho 41 > answer.txt\n```",
+    "```finish\nchanged the answer\n```", // held by the verify nudge
+    "```bash\ncat answer.txt\n```", // proof, as asked
+    "```finish\nchanged the answer\n```", // the finish gate runs the suite: RED
+    (obs) => {
+      if (/answer\.txt is not 42/.test(obs) && /Ship ran it, not you/.test(obs)) sawFailureOutput = true;
+      return "```bash\necho 42 > answer.txt\n```";
+    },
+    "```finish\nfixed it\n```", // suite is green now, so this one is honoured
+  ]);
+
+  const orig = globalThis.fetch;
+  (globalThis as unknown as { fetch: unknown }).fetch = () =>
+    Promise.resolve({ ok: true, json: () => Promise.resolve({ number: 1, html_url: "http://example/owner/repo/pulls/1" }) });
+  try {
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: durableAgent({ model, executor: provider, workdir: "." }),
+      runId: "run-c4-red",
+      store,
+      input: {
+        task: "set answer.txt to 42",
+        repo: `file://${bare}/owner/repo.git`,
+        tests: true,
+        testsFeedback: true,
+        testCommand: "sh check.sh",
+      },
+    });
+
+    assert.equal(outcome.status, "completed");
+    assert.equal(sawFailureOutput, true, "the agent was shown the suite's real output, not a summary of it");
+
+    const events = await store.load("run-c4-red");
+    const step = (name: string): unknown =>
+      ([...events].reverse().find((e) => e.type === "step-completed" && (e.name ?? "") === name)?.data as { result?: unknown } | undefined)
+        ?.result;
+    assert.equal((step("baseline-tests") as { kind: string } | undefined)?.kind, "passed", "the base branch was green");
+    assert.equal((step("tests") as { kind: string } | undefined)?.kind, "passed", "and the published result is green");
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+test("C4: a repo whose suite was ALREADY red is not sent chasing it, and the PR says so", async () => {
+  // The Go 1.24/1.25 day in one test: the suite is broken on the base branch
+  // for a reason that has nothing to do with the task.
+  const { bare, provider } = await suiteRepo("durable-c4-inherited", "41");
+
+  let nudgedAboutTests = false;
+  const { model } = reactiveModel([
+    "```bash\necho hello > note.txt\n```",
+    "```finish\nadded a note\n```", // held by the verify nudge
+    "```bash\ncat note.txt\n```", // proof, as asked
+    (obs) => {
+      if (/Ship ran it, not you/.test(obs)) nudgedAboutTests = true;
+      return "```finish\nadded a note\n```";
+    },
+    "```finish\nadded a note\n```",
+  ]);
+
+  const orig = globalThis.fetch;
+  const bodies: string[] = [];
+  (globalThis as unknown as { fetch: unknown }).fetch = (_url: string, init?: { body?: string }) => {
+    if (init?.body !== undefined) bodies.push(init.body);
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ number: 1, html_url: "http://example/owner/repo/pulls/1" }) });
+  };
+  try {
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: durableAgent({ model, executor: provider, workdir: "." }),
+      runId: "run-c4-inherited",
+      store,
+      input: {
+        task: "add a note file",
+        repo: `file://${bare}/owner/repo.git`,
+        tests: true,
+        testsFeedback: true,
+        testCommand: "sh check.sh",
+      },
+    });
+
+    assert.equal(outcome.status, "completed");
+    assert.equal(nudgedAboutTests, false, "a suite that was already red must not send the agent chasing it");
+
+    const events = await store.load("run-c4-inherited");
+    const step = (name: string): unknown =>
+      ([...events].reverse().find((e) => e.type === "step-completed" && (e.name ?? "") === name)?.data as { result?: unknown } | undefined)
+        ?.result;
+    assert.equal((step("baseline-tests") as { kind: string } | undefined)?.kind, "failed", "the base branch was red");
+    const published = bodies.join("\n");
+    assert.match(published, /pre-existing breakage, not a regression/, "and the pull request says so");
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+// --- C5: a run that dies must not take its work with it --------------------
+
+test("C5: a run that throws after real edits still publishes them, marked incomplete", async () => {
+  // publishIfRepoRun used to sit only on the normal return path, so a run that
+  // made thirty turns of correct edits and then hit a provider 500 lost all of
+  // them. The tree was right and nobody ever saw it.
+  const bareDir = await mkdtemp(join(tmpdir(), "durable-c5-bare-"));
+  const seedDir = await mkdtemp(join(tmpdir(), "durable-c5-seed-"));
+  const seeder = new LocalExecutor({ root: seedDir });
+  await seeder.exec(
+    `git init -q -b main . && git config user.email t@t && git config user.name t && printf 'hello\\n' > f.txt && git add -A && git commit -qm seed && git clone -q --bare . ${bareDir}/owner/repo.git`,
+  );
+
+  // Real work, then the provider dies.
+  let calls = 0;
+  const model: ModelAdapter = {
+    provider: "scripted",
+    modelId: "dies",
+    async doGenerate(): Promise<AdapterGenerateResult> {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          content: [{ type: "text", text: "```bash\necho REAL_WORK >> f.txt\n```" }],
+          finishReason: "stop",
+          usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+          raw: null,
+        };
+      }
+      throw new Error("provider returned 500 (upstream capacity)");
+    },
+    async *doStream() {
+      throw new Error("unused");
+    },
+  };
+
+  const work = await mkdtemp(join(tmpdir(), "durable-c5-work-"));
+  const provider: ExecutorProvider = {
+    async create() {
+      return { handle: work };
+    },
+    attach(handle: string) {
+      return new LocalExecutor({ root: handle });
+    },
+  };
+
+  const bodies: string[] = [];
+  const orig = globalThis.fetch;
+  (globalThis as unknown as { fetch: unknown }).fetch = (_url: string, init?: { body?: string }) => {
+    if (init?.body !== undefined) bodies.push(init.body);
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ number: 7, html_url: "http://example/owner/repo/pulls/7" }) });
+  };
+  try {
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: durableAgent({ model, executor: provider, workdir: "." }),
+      runId: "run-c5-rescue",
+      store,
+      input: { task: "append REAL_WORK to f.txt", repo: `file://${bareDir}/owner/repo.git` },
+    });
+
+    // The run is still a failure. That is not negotiable — the rescue must not
+    // launder a dead run into a successful one.
+    assert.equal(outcome.status, "failed", "a run that threw is a failed run, published or not");
+
+    const events = await store.load("run-c5-rescue");
+    const names = events.filter((e) => e.type === "step-completed").map((e) => e.name ?? "");
+    assert.ok(names.includes("repo-push"), `the work must have been pushed: ${names.join(",")}`);
+    assert.ok(names.includes("publish-on-failure"), "and the timeline must say the publish happened on the failure path");
+
+    // Pushed to the real bare repo, so this is the tree and not a claim about it.
+    const log = await seeder.exec(`git --git-dir=${bareDir}/owner/repo.git log --all --format=%s`);
+    assert.match(log.stdout, /append REAL_WORK/, "the branch exists in the remote");
+
+    const published = bodies.join("\n");
+    assert.match(published, /This run FAILED before it could finish/);
+    assert.match(published, /provider returned 500/, "and names what killed it");
+    assert.match(published, /\[incomplete\]|WIP:/, "and is unmistakably not a finished change");
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+test("C5: a run that throws having changed NOTHING publishes nothing", async () => {
+  // The rescue must not open an empty pull request for every failed run.
+  const bareDir = await mkdtemp(join(tmpdir(), "durable-c5-empty-bare-"));
+  const seedDir = await mkdtemp(join(tmpdir(), "durable-c5-empty-seed-"));
+  const seeder = new LocalExecutor({ root: seedDir });
+  await seeder.exec(
+    `git init -q -b main . && git config user.email t@t && git config user.name t && printf 'hello\\n' > f.txt && git add -A && git commit -qm seed && git clone -q --bare . ${bareDir}/owner/repo.git`,
+  );
+
+  const model: ModelAdapter = {
+    provider: "scripted",
+    modelId: "dies-immediately",
+    async doGenerate(): Promise<AdapterGenerateResult> {
+      throw new Error("provider returned 500 (upstream capacity)");
+    },
+    async *doStream() {
+      throw new Error("unused");
+    },
+  };
+  const work = await mkdtemp(join(tmpdir(), "durable-c5-empty-work-"));
+  const provider: ExecutorProvider = {
+    async create() {
+      return { handle: work };
+    },
+    attach(handle: string) {
+      return new LocalExecutor({ root: handle });
+    },
+  };
+
+  let prCalls = 0;
+  const orig = globalThis.fetch;
+  (globalThis as unknown as { fetch: unknown }).fetch = (url: string) => {
+    if (String(url).includes("/pulls")) prCalls += 1;
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ number: 1, html_url: "http://example/x/pulls/1" }) });
+  };
+  try {
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: durableAgent({ model, executor: provider, workdir: "." }),
+      runId: "run-c5-empty",
+      store,
+      input: { task: "do something", repo: `file://${bareDir}/owner/repo.git` },
+    });
+    assert.equal(outcome.status, "failed");
+    const events = await store.load("run-c5-empty");
+    const names = events.filter((e) => e.type === "step-completed").map((e) => e.name ?? "");
+    assert.equal(names.includes("publish-on-failure"), false, "nothing was done, so nothing is published");
+    assert.equal(prCalls, 0, "and no pull request was opened");
   } finally {
     globalThis.fetch = orig;
   }

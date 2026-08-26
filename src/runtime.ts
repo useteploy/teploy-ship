@@ -544,6 +544,12 @@ export async function enqueueRun(
     /** Run the project's suite after the agent stops. See tests.ts. */
     tests?: boolean;
     /**
+     * Baseline the suite before the agent edits, and send a red finish back to
+     * work (C4). Materialised here because it adds recorded steps — see
+     * DurableAgentInput.testsFeedback in durable.ts.
+     */
+    testsFeedback?: boolean;
+    /**
      * Which harness executes the run (see harness.ts). Absent falls back to
      * `SHIP_HARNESS`, and that to native. Resolved to an id+version HERE and
      * materialised into the recorded input: a run must replay under the program
@@ -638,6 +644,14 @@ export async function enqueueRun(
   const telemetry = options.telemetry ?? (evidence?.observeService !== undefined || envFlag("SHIP_TELEMETRY") ? true : undefined);
   // Run the project's suite after the agent stops. Same opt-in shape.
   const tests = options.tests ?? (evidence?.testCommand !== undefined || envFlag("SHIP_TESTS") ? true : undefined);
+  // On by default wherever the suite itself is on, with an env off-switch —
+  // the same shape as requireEdit above. Without a baseline, "Tests: FAILED"
+  // cannot separate a regression from inherited breakage, and without the
+  // finish gate a red suite ends the run instead of being fixed. Both are
+  // strictly better defaults; the switch exists for a repo whose suite is too
+  // expensive to run twice.
+  const testsFeedback =
+    options.testsFeedback ?? (tests === true && !envFlagOff("SHIP_TESTS_FEEDBACK") ? true : undefined);
   // The harness, as id + contract version. Recorded on EVERY new run, native
   // included, so the log says which program wrote it; a run enqueued before
   // this field existed has none and is native by definition.
@@ -675,6 +689,7 @@ export async function enqueueRun(
         ...(preview === true ? { preview: true } : {}),
         ...(telemetry === true ? { telemetry: true } : {}),
         ...(tests === true ? { tests: true } : {}),
+        ...(testsFeedback === true ? { testsFeedback: true } : {}),
         // Per-repo evidence values (see the resolution above). Absent on runs
         // enqueued before this existed, which replay and fall back to the
         // worker's env wiring exactly as before.

@@ -43,6 +43,15 @@ export interface HarnessTask {
   repo?: string;
   baseBranch?: string;
   /**
+   * The project's suite, run before the agent edited anything (C4).
+   *
+   * Only the native loop reads it, and only to decide whether a red suite at
+   * finish time is this run's doing. Absent means "no baseline was taken", in
+   * which case a red suite is treated as the run's problem — the conservative
+   * default, and what every run before C4 did.
+   */
+  testsBaseline?: TestOutcome;
+  /**
    * The recorded run input. The native loop's capabilities (plan, steer,
    * critic, recovery, requireEdit, ...) are input-gated for replay safety and
    * it reads them from here; external adapters read nothing but `prompt`.

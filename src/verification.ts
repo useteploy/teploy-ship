@@ -29,6 +29,12 @@ export const VERIFICATION_END = "<!-- /teploy-ship:verification -->";
 
 export interface Evidence {
   tests?: TestOutcome;
+  /**
+   * The same suite, run BEFORE the agent edited anything. Present only on runs
+   * that took a baseline; absent means "we cannot tell a regression from
+   * inherited breakage", which is what every run before C4 was.
+   */
+  testsBaseline?: TestOutcome;
   preview?: PreviewOutcome;
   telemetry?: TelemetryVerdict;
 }
@@ -46,7 +52,7 @@ export function verificationSection(evidence: Evidence, runId: string): string |
   // Tests first: it is the question a reviewer asks before "where can I see it".
   const tests = evidence.tests;
   if (tests !== undefined && tests.kind !== "disabled") {
-    parts.push(testComment(tests));
+    parts.push(testComment(tests, evidence.testsBaseline));
   }
   const preview = evidence.preview;
   if (preview !== undefined && preview.kind !== "skipped") {
