@@ -6,7 +6,7 @@ export type { Action } from "./actions.js";
 
 export { ensureKernel, installKernel, runCell, stopKernel } from "./kernel.js";
 
-export { autoApprove, defaultApprovalPolicy } from "./approval.js";
+export { autoApprove, defaultApprovalPolicy, resolveApprovalPolicy, sandboxApprovalPolicy } from "./approval.js";
 export type { ApprovalDecision, ApprovalPolicy } from "./approval.js";
 
 export { RecoveryTracker, SETTLE_NUDGE, SETTLE_STOP, defaultRecoveryConfig } from "./recovery.js";

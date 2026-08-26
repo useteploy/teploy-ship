@@ -4,6 +4,24 @@ All notable changes to Teploy Ship are recorded here.
 
 ## [Unreleased]
 
+### Changed
+- **A sandboxed run no longer parks on every ordinary verification step.**
+  `defaultApprovalPolicy` is written for the LocalExecutor, where `rm -rf`
+  and `curl` really do reach the operator's machine; it was being applied
+  unchanged inside disposable sandboxes. Measured over the L0 round-2 batch,
+  that cost twelve runs thirty-two approval parks — and all thirty-two were
+  approved, because all thirty-two were the same thing: copy the tree to
+  `/tmp`, run the suite, fetch a module from an already-allowlisted proxy.
+  Unattended the batch simply stopped, taking its completion rate from 89%
+  to 33%. New `sandboxApprovalPolicy` gates only what outlives the container
+  (`git push`, `npm`/`pnpm`/`yarn`/`bun`/`cargo`/`poetry` publish, `twine
+  upload`, `gh release|pr create`, `docker push`) and lets the sandbox
+  boundary contain the rest. `resolveApprovalPolicy` picks it for durable
+  runs that have a sandbox; a run without one is unchanged, since there is
+  no boundary to lean on. `SHIP_SANDBOX_APPROVAL=strict|auto|boundary`
+  overrides, and an unrecognised value falls back to the default rather than
+  silently disabling the gate.
+
 ### Fixed — what the first real-backlog batch found (L0, 2026-08-26)
 - **The worker never read `SHIP_MODEL`.** `worker`, `run`, `enqueue`, `fix`
   and `eval` resolved `--model` > config file > `anthropic/claude-sonnet-5`;

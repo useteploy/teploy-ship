@@ -32,7 +32,7 @@ import type { RepoPolicyConfig } from "./repo-policy.js";
 import { loadRepoContext, runNote } from "./repo-memory.js";
 import { runAgent } from "./agent.js";
 import { refusalMessage } from "./publish-policy.js";
-import { defaultApprovalPolicy } from "./approval.js";
+import { defaultApprovalPolicy, resolveApprovalPolicy } from "./approval.js";
 import { secretEnvNames } from "./guard.js";
 import { durableAgent, durableRecoveryInput, repoKeyOf, sandboxProvider } from "./durable.js";
 import { externalAdapters } from "./harness-external.js";
@@ -715,7 +715,7 @@ async function executePass(
     model: resolveModel(modelId),
     executor: durableProvider(args, config),
     projects: runtime.projects,
-    approveAction: defaultApprovalPolicy,
+    approveAction: resolveApprovalPolicy({ sandboxed: usingSandbox }),
     // Local workspaces root every path at the run's own dir, so "." is
     // the honest working directory to show the agent.
     workdir: usingSandbox ? "/work" : ".",
