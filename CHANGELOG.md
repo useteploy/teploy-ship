@@ -4,6 +4,21 @@ All notable changes to Teploy Ship are recorded here.
 
 ## [Unreleased]
 
+### Changed — nav compression (C4, 2026-08-25)
+- The header is five links — Inbox · Runs · Projects · Fleet · Settings — plus
+  an avatar menu (Account, Sign out; new `POST /logout`). The other pages are
+  sub-views switched by a link row under the title, driven by `?view=`:
+  Runs → Reviews; Projects → Repos, Sources, Knowledge; Fleet → Workers,
+  Spend; Settings → Governance, Team, System. Every old path still resolves:
+  `/reviews`, `/sources`, `/knowledge`, `/spend` 302 to their new location
+  (query preserved). `/policies` keeps its own path on purpose — its RBAC
+  exemption is path-based, so a named viewer holding the `policies` grant
+  must still reach it — and renders as the Governance sub-view of Settings.
+  `/projects` joins the authority-governed paths (its edits check the
+  `policies` grant in the route); Knowledge notes under it keep their editor
+  rule in-route. One shared `redirect()` in `web/src/lib/http.server.ts`.
+  Screenshot: `docs/images/nav-c4.png` (the dashboard has one theme).
+
 ### Added — load-aware admission (C2, 2026-08-25)
 - The worker no longer fills the ceiling on a box that has no room: below
   `SHIP_MIN_FREE_MB` (default 600, measured `MemAvailable`) or above

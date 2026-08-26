@@ -3,6 +3,15 @@ import type { Project } from "teploy-ship/runtime";
 import { shipRuntime } from "../lib/store.server.js";
 import { currentUser } from "../lib/session.server.js";
 import { may } from "../lib/authority.server.js";
+import { redirect } from "../lib/http.server.js";
+import { SubNav } from "../lib/subnav.js";
+import { PROJECT_VIEWS } from "../views/project-views.js";
+import Sources from "../views/sources.js";
+import { loader as sourcesLoader, action as sourcesAction } from "../views/sources.server.js";
+import type { SourcesData } from "../views/sources.js";
+import Knowledge from "../views/knowledge.js";
+import { loader as knowledgeLoader, action as knowledgeAction } from "../views/knowledge.server.js";
+import type { KnowledgeData } from "../views/knowledge.js";
 
 export const config = { mode: "app" };
 
@@ -13,6 +22,7 @@ const NETWORKS = ["", "none", "egress"] as const;
 const POLICIES = ["", "ignore", "propose", "auto"] as const;
 
 interface ProjectsData {
+  view: "repos";
   projects: Project[];
   /** The record ?repo= names, if any. */
   selected: Project | null;
@@ -26,7 +36,14 @@ interface ProjectsData {
   store: string;
 }
 
-export async function loader({ request }: { request: Request }): Promise<ProjectsData> {
+function viewOf(request: Request): string {
+  return new URL(request.url).searchParams.get("view") ?? "";
+}
+
+export async function loader({ request }: { request: Request }): Promise<ProjectsData | SourcesData | KnowledgeData> {
+  const view = viewOf(request);
+  if (view === "sources") return sourcesLoader({ request });
+  if (view === "knowledge") return knowledgeLoader({ request });
   const runtime = await shipRuntime();
   const me = await currentUser(request);
   const url = new URL(request.url);
@@ -34,6 +51,7 @@ export async function loader({ request }: { request: Request }): Promise<Project
   const repo = url.searchParams.get("repo") ?? "";
   const selected = repo !== "" ? (await runtime.projects.forRepo(repo)) : null;
   return {
+    view: "repos",
     projects,
     selected,
     hookBase: (process.env.SHIP_PUBLIC_URL ?? "").replace(/\/+$/, ""),
@@ -48,6 +66,9 @@ export async function loader({ request }: { request: Request }): Promise<Project
 }
 
 export async function action({ request }: { request: Request }): Promise<Response> {
+  const view = viewOf(request);
+  if (view === "sources") return sourcesAction({ request });
+  if (view === "knowledge") return knowledgeAction({ request });
   const form = await request.formData();
   const runtime = await shipRuntime();
   const me = await currentUser(request);
@@ -102,10 +123,6 @@ export async function action({ request }: { request: Request }): Promise<Respons
   }
   const saved = await runtime.projects.forRepo(next.url ?? next.repo);
   return redirect(saved !== null ? `/projects?repo=${encodeURIComponent(saved.repo)}` : "/projects");
-}
-
-function redirect(location: string): Response {
-  return new Response(null, { status: 302, headers: { location } });
 }
 
 function deniedText(denied: string): string {
@@ -168,11 +185,14 @@ function ProjectForm({ p, data }: { p: Project | null; data: ProjectsData }) {
   );
 }
 
-export default function Projects({ data }: { data: ProjectsData }) {
+export default function Projects({ data }: { data: ProjectsData | SourcesData | KnowledgeData }) {
+  if (data.view === "sources") return <Sources data={data} />;
+  if (data.view === "knowledge") return <Knowledge data={data} />;
   const p = data.selected;
   return (
     <>
       <h1 class="page">Projects</h1>
+      <SubNav items={PROJECT_VIEWS} current="repos" />
       {data.denied !== null && (
         <p class="card attn" style="margin:12px 0;color:var(--red)">Not applied — {deniedText(data.denied)}</p>
       )}
@@ -201,7 +221,7 @@ export default function Projects({ data }: { data: ProjectsData }) {
             Point the repo's webhook at{" "}
             <code>{data.hookBase || "<server-url>"}/hooks/forgejo</code> or <code>{data.hookBase || "<server-url>"}/hooks/github</code>{" "}
             with the secret from <code>SHIP_WEBHOOK_SECRET</code>, then label an issue or PR <code>ship</code>. Policy for the
-            source overall is on <a href="/sources">Sources</a>; this project's own policy above wins for its tasks.
+            source overall is on <a href="/projects?view=sources">Sources</a>; this project's own policy above wins for its tasks.
           </p>
         </>
       ) : (

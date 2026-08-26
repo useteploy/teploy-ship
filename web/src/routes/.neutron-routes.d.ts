@@ -15,6 +15,7 @@ declare module "@neutron-build/core" {
     | "/hooks/slack"
     | "/knowledge"
     | "/login"
+    | "/logout"
     | "/oidc/callback"
     | "/oidc/login"
     | "/policies"

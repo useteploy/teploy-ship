@@ -5,6 +5,7 @@ import type { RunMeta } from "teploy-ship/runtime";
 import type { IntakeTask } from "teploy-ship/runtime";
 
 import { defaultModel, shipRuntime } from "../lib/store.server.js";
+import { redirect } from "../lib/http.server.js";
 import { currentUser } from "../lib/session.server.js";
 import { may } from "../lib/authority.server.js";
 
@@ -134,9 +135,6 @@ export async function action({ request }: { request: Request }): Promise<Respons
   return redirect(`/runs/${runId}`);
 }
 
-function redirect(location: string): Response {
-  return new Response(null, { status: 302, headers: { location } });
-}
 
 function short(s: string, n: number): string {
   return s.length > n ? `${s.slice(0, n)}…` : s;

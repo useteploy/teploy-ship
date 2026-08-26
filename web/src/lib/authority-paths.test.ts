@@ -16,4 +16,5 @@ test("authority-governed paths are role-open so the route's grant decides; the r
   assert.equal(requiredRole("POST", "/knowledge"), "editor");
   assert.equal(requiredRole("GET", "/knowledge"), "viewer");
   assert.equal(requiredRole("POST", "/account"), "viewer");
+  assert.equal(requiredRole("POST", "/logout"), "viewer", "anyone signed in can sign out");
 });

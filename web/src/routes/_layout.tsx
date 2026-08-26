@@ -10,34 +10,34 @@ import { installProcessErrorHooks, reportError } from "../lib/observe.server.js"
 
 /** Cross-product dashboard switcher config (top-left). Server-side loader so it
  * renders with SSR and never causes a hydration mismatch. */
-export async function loader({ request }: { request: Request }): Promise<{ nav: NavData; signedIn: boolean; path: string }> {
+export async function loader({ request }: { request: Request }): Promise<{ nav: NavData; signedIn: boolean; path: string; user: string }> {
+  const me = await currentUser(request);
   return {
     nav: teployNav("ship"),
-    signedIn: (await currentUser(request)) !== null,
+    signedIn: me !== null,
     path: new URL(request.url).pathname,
+    user: me?.user ?? "",
   };
 }
 
 /** Nav links, with the one owning `path` marked. Longest href wins so "/runs"
  *  is not shadowed by "/". */
+// Five groups; the old top-level pages are sub-views (`?view=`) of these, and
+// `match` lists the paths that still serve under a group (see C4 in the
+// changelog). `/policies` keeps its own path because its RBAC exemption is
+// path-based.
 const NAV_LINKS = [
-  { href: "/", label: "Inbox" },
-  { href: "/runs", label: "Runs" },
-  { href: "/reviews", label: "Reviews" },
-  { href: "/fleet", label: "Fleet" },
-  { href: "/knowledge", label: "Knowledge" },
-  { href: "/projects", label: "Projects" },
-  { href: "/sources", label: "Sources" },
-  { href: "/policies", label: "Policies" },
-  { href: "/spend", label: "Spend" },
-  { href: "/settings", label: "Settings" },
-  { href: "/account", label: "Account" },
+  { href: "/", label: "Inbox", match: [] as string[] },
+  { href: "/runs", label: "Runs", match: ["/reviews"] },
+  { href: "/projects", label: "Projects", match: ["/sources", "/knowledge"] },
+  { href: "/fleet", label: "Fleet", match: ["/spend"] },
+  { href: "/settings", label: "Settings", match: ["/policies", "/users"] },
 ];
 
 function activeHref(path: string): string | null {
   let best: string | null = null;
   for (const l of NAV_LINKS) {
-    const hit = l.href === "/" ? path === "/" : path === l.href || path.startsWith(l.href + "/");
+    const hit = l.href === "/" ? path === "/" : [l.href, ...l.match].some((h) => path === h || path.startsWith(h + "/"));
     if (hit && (best === null || l.href.length > best.length)) best = l.href;
   }
   return best;
@@ -218,6 +218,14 @@ header.top nav.nav a { color: var(--dim); padding: 5px 11px; border-radius: 6px;
 header.top nav.nav a:hover { color: var(--text); background: var(--panel); text-decoration: none; }
 header.top nav.nav a.active { color: var(--text); background: var(--panel); }
 header.top .spacer { flex: 1; }
+details.switcher.avatar .switcher-menu { left: auto; right: 0; min-width: 160px; }
+details.switcher.avatar > summary { padding: 3px 8px 3px 3px; }
+.avatar-dot { display: inline-flex; width: 24px; height: 24px; align-items: center; justify-content: center;
+  border-radius: 50%; background: var(--panel); border: 1px solid var(--border); font-size: 12px; font-weight: 600; }
+details.switcher .switcher-menu form { margin: 0; }
+details.switcher button.switcher-item { width: 100%; text-align: left; background: none; border: 0; font: inherit; cursor: pointer; }
+details.switcher button.switcher-item:hover { background: var(--bg); }
+.chips.subnav { margin: 2px 0 12px; }
 header.top .env { color: var(--dim); font-size: 12px; }
 header.top .env b { color: var(--text); font-weight: 500; }
 main { max-width: 1080px; margin: 0 auto; padding: 22px 20px 60px; }
@@ -346,10 +354,12 @@ const NAV_PROGRESS = `(function(){
   // the moment the router swaps a page without re-rendering the header.
   function syncActive(){
     var links=document.querySelectorAll('header.top nav.nav a');
-    var path=location.pathname, best=null, i;
+    var path=location.pathname, best=null, i, j;
     for(i=0;i<links.length;i++){
       var h=links[i].getAttribute('href')||'';
-      var hit = h==='/' ? path==='/' : (path===h || path.indexOf(h+'/')===0);
+      var all=[h].concat((links[i].getAttribute('data-match')||'').split(',').filter(Boolean));
+      var hit=false;
+      for(j=0;j<all.length;j++){ if(all[j]==='/' ? path==='/' : (path===all[j] || path.indexOf(all[j]+'/')===0)) hit=true; }
       if(hit && (best===null || h.length>best.length)) best=h;
     }
     for(i=0;i<links.length;i++){
@@ -438,7 +448,7 @@ export function head() {
   return `<link rel="icon" type="image/svg+xml" href="${faviconUrl}" />`;
 }
 
-export default function Layout({ children, data }: { children: ComponentChildren; data?: { nav: NavData; signedIn?: boolean; path?: string } }) {
+export default function Layout({ children, data }: { children: ComponentChildren; data?: { nav: NavData; signedIn?: boolean; path?: string; user?: string } }) {
   const nav = data?.nav;
   // /login renders inside this layout, so without this the sign-in page shows
   // the full app nav — every link bounces straight back to /login.
@@ -470,11 +480,21 @@ export default function Layout({ children, data }: { children: ComponentChildren
         {signedIn && (
           <nav class="nav">
             {NAV_LINKS.map((l) => (
-              <a href={l.href} class={l.href === current ? "active" : undefined}>{l.label}</a>
+              <a href={l.href} data-match={l.match.join(",")} class={l.href === current ? "active" : undefined}>{l.label}</a>
             ))}
           </nav>
         )}
         <span class="spacer" />
+        {signedIn && (
+          <details class="switcher avatar">
+            <summary title={data?.user ?? "account"}><span class="avatar-dot">{(data?.user ?? "?").slice(0, 1).toUpperCase()}</span><span class="caret">▾</span></summary>
+            <div class="switcher-menu">
+              <span class="switcher-item current">{data?.user ?? ""}</span>
+              <a class="switcher-item" href="/account">Account</a>
+              <form method="post" action="/logout"><button class="switcher-item" type="submit">Sign out</button></form>
+            </div>
+          </details>
+        )}
         <span class="load-bar" id="load-bar" />
       </header>
       <script dangerouslySetInnerHTML={{ __html: NAV_PROGRESS }} />

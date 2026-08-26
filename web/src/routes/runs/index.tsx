@@ -1,14 +1,21 @@
 import type { RunMeta } from "teploy-ship/runtime";
 
 import { shipRuntime } from "../../lib/store.server.js";
+import { SubNav } from "../../lib/subnav.js";
+import { RUN_VIEWS } from "../../views/run-views.js";
+import Reviews from "../../views/reviews.js";
+import { loader as reviewsLoader } from "../../views/reviews.server.js";
+import type { ReviewsData } from "../../views/reviews.js";
 
 export const config = { mode: "app" };
 
 interface RunsData {
+  view: "runs";
   runs: RunMeta[];
 }
 
-export async function loader(): Promise<RunsData> {
+export async function loader({ request }: { request: Request }): Promise<RunsData | ReviewsData> {
+  if (new URL(request.url).searchParams.get("view") === "reviews") return reviewsLoader();
   const runtime = await shipRuntime();
   const [runs, places] = await Promise.all([runtime.listMeta(), runtime.placement.all()]);
   for (const r of runs) {
@@ -17,7 +24,7 @@ export async function loader(): Promise<RunsData> {
   }
   // Most-recent first.
   runs.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
-  return { runs };
+  return { view: "runs", runs };
 }
 
 function short(s: string, n: number): string {
@@ -61,10 +68,12 @@ const CHIPS: Array<{ f: string; label: string }> = [
   { f: "cancelled", label: "Cancelled" },
 ];
 
-export default function RunsList({ data }: { data: RunsData }) {
+export default function RunsList({ data }: { data: RunsData | ReviewsData }) {
+  if (data.view === "reviews") return <Reviews data={data} />;
   return (
     <>
       <h1 class="page">Runs</h1>
+      <SubNav items={RUN_VIEWS} current="runs" />
       <p class="meta">{data.runs.length} run{data.runs.length === 1 ? "" : "s"} total. Open one for its timeline and the recorded steps behind the pull request.</p>
 
       <div class="chips">

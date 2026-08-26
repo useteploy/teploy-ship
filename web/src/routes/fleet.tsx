@@ -1,6 +1,11 @@
 import type { WorkerInfo } from "teploy-ship/runtime";
 
 import { shipRuntime } from "../lib/store.server.js";
+import { SubNav } from "../lib/subnav.js";
+import { FLEET_VIEWS } from "../views/fleet-views.js";
+import Spend from "../views/spend.js";
+import { loader as spendLoader } from "../views/spend.server.js";
+import type { SpendData } from "../views/spend.js";
 
 export const config = { mode: "app" };
 
@@ -13,11 +18,13 @@ interface FleetWorker extends WorkerInfo {
 }
 
 interface FleetData {
+  view: "workers";
   workers: FleetWorker[];
   store: string;
 }
 
-export async function loader(): Promise<FleetData> {
+export async function loader({ request }: { request: Request }): Promise<FleetData | SpendData> {
+  if (new URL(request.url).searchParams.get("view") === "spend") return spendLoader();
   const runtime = await shipRuntime();
   const now = Date.now();
   const list = await runtime.fleet.list();
@@ -28,7 +35,7 @@ export async function loader(): Promise<FleetData> {
       return { ...w, online: ageMs < STALE_MS, ageMs };
     })
     .sort((a, b) => (a.online !== b.online ? (a.online ? -1 : 1) : a.host.localeCompare(b.host)));
-  return { workers, store: runtime.kind };
+  return { view: "workers", workers, store: runtime.kind };
 }
 
 function ago(ms: number): string {
@@ -42,7 +49,8 @@ function ago(ms: number): string {
 
 const POLL = `__shipLive("route:fleet.tsx");`;
 
-export default function Fleet({ data }: { data: FleetData }) {
+export default function Fleet({ data }: { data: FleetData | SpendData }) {
+  if (data.view === "spend") return <Spend data={data} />;
   const online = data.workers.filter((w) => w.online);
   const activeRuns = online.reduce((n, w) => n + w.activeRuns, 0);
   const capacity = online.reduce((n, w) => n + w.maxConcurrent, 0);
@@ -51,6 +59,7 @@ export default function Fleet({ data }: { data: FleetData }) {
   return (
     <>
       <h1 class="page">Fleet</h1>
+      <SubNav items={FLEET_VIEWS} current="workers" />
       <p class="meta">
         Workers claim runs from one shared queue via leases, so many can run at once across servers. A worker marked
         <b> held</b> has slots but is refusing launches until its host has room again (SHIP_MIN_FREE_MB / SHIP_MAX_LOAD_PER_CPU). · store: {data.store}

@@ -4,6 +4,8 @@ import { shipRuntime } from "../lib/store.server.js";
 import { currentUser } from "../lib/session.server.js";
 import { may, deniedMessage } from "../lib/authority.server.js";
 import { AUTHORITY_ACTIONS, GLOBAL_WINDOW, autoAllowedNow, formatWindow } from "../lib/ship.server.js";
+import { SubNav } from "../lib/subnav.js";
+import { SETTINGS_VIEWS } from "../views/settings-views.js";
 
 export const config = { mode: "app" };
 
@@ -171,10 +173,11 @@ export default function Policies({ data, actionData }: { data: PoliciesData; act
   const g = data.governance;
   return (
     <>
-      <h1 class="page">Policies</h1>
+      <h1 class="page">Settings</h1>
+      <SubNav items={SETTINGS_VIEWS} current="governance" />
       <p class="meta">
         Who may do what, when auto sources may run unattended, and who reviews what Ship opens. Per-source
-        ignore / propose / auto and budgets are on <a href="/sources">Sources</a>. The CLI edits the same store:{" "}
+        ignore / propose / auto and budgets are on <a href="/projects?view=sources">Sources</a>. The CLI edits the same store:{" "}
         <code>teploy-ship policy</code>.
       </p>
       {actionData?.error !== undefined && <p class="card attn" style="margin:12px 0;color:var(--red)">{actionData.error}</p>}

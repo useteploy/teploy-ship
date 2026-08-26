@@ -2,6 +2,8 @@ import { normalizeRole } from "../lib/ship.server.js";
 import type { Role, UserView, ShipRuntime } from "teploy-ship/runtime";
 
 import { shipRuntime, defaultModel } from "../lib/store.server.js";
+import { SubNav } from "../lib/subnav.js";
+import { SETTINGS_VIEWS } from "../views/settings-views.js";
 import { currentUser } from "../lib/session.server.js";
 import type { Principal } from "../lib/session.server.js";
 
@@ -20,6 +22,7 @@ interface Group {
 }
 
 interface SettingsData {
+  view: "team" | "system";
   groups: Group[];
   users: UserView[];
   me: Principal;
@@ -91,9 +94,11 @@ export async function loader({ request }: { request: Request }): Promise<Setting
   const num = (name: string, def: string): Row => value(name, `default (${def})`);
   const me = (await currentUser(request)) ?? { user: "token", role: "admin" as Role };
   const users = await runtime.users.list();
+  const view = new URL(request.url).searchParams.get("view") === "team" ? "team" : "system";
 
   const sandboxOn = (process.env.SHIP_SANDBOX_URL ?? "") !== "";
   return {
+    view,
     me,
     users,
     groups: [
@@ -267,9 +272,10 @@ export default function Settings({ data, actionData }: { data: SettingsData; act
   return (
     <>
       <h1 class="page">Settings</h1>
+      <SubNav items={SETTINGS_VIEWS} current={data.view} />
       <p class="meta">
         The effective configuration this server is running. Set via environment on deploy (teploy.yml / secrets);
-        secrets show only as set/not set. Policies are edited on <a href="/sources">Sources</a>.
+        secrets show only as set/not set. Intake policies are edited on <a href="/projects?view=sources">Sources</a>.
       </p>
 
       <h2 class="section">Team access</h2>

@@ -218,7 +218,7 @@ const AUTHORITY_PATHS = ["/runs", "/api/runs", "/sources", "/projects", "/polici
 export function requiredRole(method: string, path: string): Role {
   if (ADMIN_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`))) return "admin";
   if (path === "/" || AUTHORITY_PATHS.some((p) => path === p || path.startsWith(`${p}/`))) return "viewer";
-  if (path === "/account" || path.startsWith("/account/")) return "viewer";
+  if (path === "/account" || path.startsWith("/account/") || path === "/logout") return "viewer";
   return method === "GET" || method === "HEAD" ? "viewer" : "editor";
 }
 

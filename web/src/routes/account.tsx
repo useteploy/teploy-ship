@@ -45,7 +45,7 @@ export default function Account({ data, actionData }: { data: AccountData; actio
       {data.tokenSession ? (
         <p class="meta">
           You are signed in with the server access token, not a personal account. Ask an admin to create you an account
-          on <a href="/settings">Settings</a>.
+          on <a href="/settings?view=team">Settings</a>.
         </p>
       ) : (
         <>
