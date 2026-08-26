@@ -1,4 +1,10 @@
-import { ciFixTaskFromWorkflowRun, requesterOf } from "../../lib/ship.server.js";
+import {
+  ciFixTaskFromWorkflowRun,
+  requesterOf,
+  reviewGateSatisfied,
+  reviewTaskFromReviewEvent,
+  shipAuthored,
+} from "../../lib/ship.server.js";
 
 import { BodyTooLarge, claimDelivery, firstHeader, json, parseJson, proposeFromWebhook, readCappedBody } from "../../lib/webhook.server.js";
 
@@ -8,8 +14,13 @@ export const config = { mode: "app" };
  * GitHub webhook receiver — the Forgejo receiver's dialect twin. HMAC is
  * X-Hub-Signature-256 ("sha256=<hex>" over the raw body with the same
  * SHIP_WEBHOOK_SECRET); events arrive as X-GitHub-Event. Same rules:
- * issues labeled "ship" become tasks; new comments on PRs become review
- * tasks; Ship's own [teploy-ship] replies are skipped.
+ * issues labeled "ship" become tasks; comments, reviews and inline review
+ * comments on a followable PR become review tasks; Ship's own
+ * [teploy-ship] replies are skipped.
+ *
+ * Subscribe the hook to issues, issue_comment, pull_request_review and
+ * pull_request_review_comment. Without the last two, "Request changes"
+ * with inline notes is delivered and discarded.
  */
 export async function action({ request }: { request: Request }): Promise<Response> {
   const secret = process.env.SHIP_WEBHOOK_SECRET;
@@ -44,6 +55,11 @@ export async function action({ request }: { request: Request }): Promise<Respons
     if (input === null) return json(200, { ok: true, skipped: "not a failed run on a ship PR" });
     return proposeFromWebhook(input);
   }
+  // C3: review events. Their payload shape has no `issue`, so they are
+  // handled before the issue-shaped parse below.
+  if (event === "pull_request_review" || event === "pull_request_review_comment") {
+    return handleReview(body, "github");
+  }
   const payload = parseJson<{
     action?: string;
     issue?: {
@@ -68,7 +84,7 @@ export async function action({ request }: { request: Request }): Promise<Respons
       return json(200, { ok: true, skipped: "not a PR comment" });
     }
     const text = payload.comment?.body ?? "";
-    if (text.includes("[teploy-ship]")) return json(200, { ok: true, skipped: "own comment" });
+    if (shipAuthored(text)) return json(200, { ok: true, skipped: "own comment" });
     // Gate on the `ship` label, same as issues — otherwise any commenter on any
     // PR drives an agent run (with the git token) from their raw comment text.
     const prLabels = payload.issue.labels?.map((l) => l.name ?? "") ?? [];
@@ -110,6 +126,43 @@ export async function action({ request }: { request: Request }): Promise<Respons
     ...requesterOf(payload.issue.user?.login),
     dedupeKey: `github:${fullName}#${payload.issue.number}`,
   });
+}
+
+/**
+ * C3 — `pull_request_review` and `pull_request_review_comment`. "Request
+ * changes" with five inline notes is SIX deliveries (one review + one per
+ * note); until this existed all six fell out of the catch-all below and the
+ * most common way a human asks for a change produced nothing at all.
+ *
+ * Placed below claimDelivery so replay protection still covers these, and
+ * above the catch-all so they are reached at all. The presence checks differ
+ * from the issue_comment path on purpose: a review event carries the PR at
+ * payload.pull_request, and has no `issue` at all, so `issue.pull_request` is
+ * not the "is this a PR?" test here.
+ */
+async function handleReview(body: string, source: "github"): Promise<Response> {
+  const payload = parseJson<Parameters<typeof reviewTaskFromReviewEvent>[0]>(body);
+  if (payload === null) return json(400, { title: "malformed JSON body" });
+  const pr = payload.pull_request?.number ?? payload.number;
+  if (payload.repository?.full_name === undefined || pr === undefined) {
+    return json(400, { title: "payload missing repository/pull_request" });
+  }
+  // The loop guard, applied to REVIEW text too: the marker was only ever
+  // checked against issue comments, so a Ship reply posted as a review comment
+  // would have re-triggered Ship.
+  if (
+    shipAuthored(payload.review?.body) ||
+    shipAuthored(payload.review?.content) ||
+    shipAuthored(payload.comment?.body)
+  ) {
+    return json(200, { ok: true, skipped: "own comment" });
+  }
+  if (!reviewGateSatisfied(payload)) {
+    return json(200, { ok: true, skipped: "PR is not ship-labeled and is not a ship/ branch on this repo" });
+  }
+  const input = reviewTaskFromReviewEvent(payload, source);
+  if (input === null) return json(200, { ok: true, skipped: "not an actionable review event" });
+  return proposeFromWebhook(input);
 }
 
 export default function Never() {

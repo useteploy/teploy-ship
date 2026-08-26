@@ -52,7 +52,9 @@ export function renderActionForApproval(action: Action): string {
     case "python":
       return `python:\n${indent(action.code)}`;
     case "edit":
-      return `edit ${action.file}:\n${indent(`SEARCH:\n${action.search}\nREPLACE:\n${action.replace}`)}`;
+      return action.edits
+        .map((e) => `edit ${e.file}${e.all ? " (all occurrences)" : ""}:\n${indent(`SEARCH:\n${e.search}\nREPLACE:\n${e.replace}`)}`)
+        .join("\n");
     case "create":
       return `create ${action.file} (${action.content.length} chars)`;
     default:

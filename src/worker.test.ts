@@ -495,3 +495,84 @@ test("usageFromEvents: one unpriced leg makes the reconstructed usage unpriced, 
   assert.equal(mixed?.costUSD, undefined, "no dollar figure survives on an unpriced run");
   assert.equal(mixed?.totalTokens, 12);
 });
+
+test("B1: a ceiling that DROPS below what is already in flight stops new launches without killing them", async () => {
+  // The derived ceiling moves at runtime (a co-tenant eats the RAM, the docker
+  // root fills). The invariant that matters is that lowering it is a decision
+  // about ADMISSION only: runs already executing are never touched.
+  const due = [
+    { runId: "d1", sleeping: false },
+    { runId: "d2", sleeping: false },
+    { runId: "d3", sleeping: false },
+  ];
+  const inflight = new Set<string>(["d1", "d2", "d3"]);
+  const launching = new Set<string>();
+  const launched: string[] = [];
+  const pass = (maxConcurrent: number) =>
+    launchDueBounded({
+      due: async () => due.filter((d) => !inflight.has(d.runId)),
+      inflight,
+      launching,
+      maxConcurrent,
+      launch: (runId) => {
+        launched.push(runId);
+        launching.add(runId);
+      },
+    });
+
+  assert.equal(await pass(1), 0, "the box shrank to one slot while three were running: no new launch");
+  assert.equal(inflight.size, 3, "and the three keep running — nothing is cancelled to fit the new ceiling");
+  assert.deepEqual(launched, []);
+
+  // Two finish. Still over the ceiling by one, so still no admission.
+  inflight.delete("d1");
+  inflight.delete("d2");
+  due.push({ runId: "d4", sleeping: false });
+  assert.equal(await pass(1), 0, "one in flight, ceiling 1: full");
+  // The squeeze clears and the ceiling comes back up.
+  assert.equal(await pass(3), 2, "d1 and d2 are due again plus d4 — two admitted to reach the new ceiling of 3");
+  assert.equal(launched.length, 2);
+});
+
+test("B1: a disk squeeze holds every launch and the due queue survives it intact", async () => {
+  // Same wait-never-drop contract the memory hold has, for the new "disk"
+  // variant: hostOk is the whole mechanism, so the reason it says no does not
+  // change what happens to the work.
+  const due = [
+    { runId: "k1", sleeping: false },
+    { runId: "k2", sleeping: false },
+  ];
+  const launched: string[] = [];
+  const launching = new Set<string>();
+  let diskFull = true;
+  const pass = () =>
+    launchDueBounded({
+      due: async () => due.filter((d) => !launched.includes(d.runId)),
+      inflight: new Set<string>(),
+      launching,
+      maxConcurrent: 1, // the ceiling the disk squeeze derived
+      hostOk: () => !diskFull,
+      launch: (runId) => {
+        launched.push(runId);
+        launching.add(runId);
+      },
+    });
+
+  assert.equal(await pass(), 0, "held on disk");
+  assert.equal((await Promise.resolve(due)).length, 2, "both runs are still due — nothing dropped or errored");
+  diskFull = false;
+  assert.equal(await pass(), 1, "recovered, and the derived ceiling of 1 is what now bounds it");
+  launching.clear();
+  assert.equal(await pass(), 1, "the second follows when the slot frees");
+  assert.deepEqual(launched, ["k1", "k2"]);
+});
+
+test("B1: the intake sweep defers rather than drops when the derived ceiling falls to 1", async () => {
+  const h = harness({ maxConcurrentRuns: 1 }, [mkTask("t1"), mkTask("t2")]);
+  await sweepIntake(h.deps);
+  assert.equal(h.launched.length, 1, "a one-slot box launches one");
+  assert.equal((await h.intake.list("proposed")).length, 1, "the other stays proposed, not failed");
+  h.terminal.set(h.launched[0]!, { terminal: true });
+  await sweepIntake(h.deps);
+  assert.equal(h.launched.length, 2, "and goes when the slot frees");
+});

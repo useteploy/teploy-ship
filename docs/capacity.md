@@ -130,6 +130,78 @@ Examples: 8 vCPU / 16 GB → min(8, 36) = **8**. 4 vCPU / 8 GB → min(4, 16) =
 Whatever you pick, the daily budgets bound cost, not the ceiling: a higher
 ceiling spends the same money faster.
 
+## The worker now derives that rule of thumb itself (B1)
+
+Everything above was an operator doing arithmetic and setting
+`SHIP_MAX_CONCURRENT_RUNS`. As of 2026-08-26 the worker measures the box and
+does it. `SHIP_MAX_CONCURRENT_RUNS` and `--max-concurrent` still exist and
+still win outright — they are overrides now, not the mechanism.
+
+**What is sensed** (`src/host-load.ts`, every 15 s on the heartbeat and again
+before every launch attempt): `MemTotal` and `MemAvailable` from
+`/proc/meminfo`, the 1-minute load average, the core count, and — new — free
+bytes, used percent and **inode** percent on the docker root via `statfs`.
+Disk was sensed nowhere before this; the load test above never looked at it,
+and the box it ran on is at 97% today.
+
+**The ceiling**, three terms, minimum wins, floored at 1:
+
+```
+cpu     = cores
+memory  = min( floor((MemTotal_MB     - 1536) / 400) ,          <- the rule of thumb above
+               activeRuns + floor((MemAvailable_MB - SHIP_MIN_FREE_MB) / 400) )
+disk    = activeRuns + floor((diskFree_MB - SHIP_MIN_FREE_DISK_MB) / 1024)
+```
+
+- 1536 MB and 400 MB are this document's own numbers: the idle stack's ~1.3 GB
+  rounded up, and the measured 350–400 MB per in-flight run.
+- The memory term is the **min of two readings** on purpose. From `MemTotal` it
+  is stable, so the ceiling does not oscillate as runs start and stop. From
+  `MemAvailable` it responds to a *co-tenant* eating the box — while cancelling
+  out this worker's own runs, because each one lowers `MemAvailable` by ~400 MB
+  and raises `activeRuns` by 1 at the same time.
+- 1024 MB per run of disk is a clone plus a module/build cache for one more
+  repo. The image is not in it: it is pulled once and is already on disk.
+- **Floored at 1, never 0.** A ceiling of 0 wedges the worker permanently — no
+  launch, so no completion, so nothing ever frees the resource. Refusing to
+  launch is `hostHold`'s job, and `hostHold` re-senses every pass, so a squeezed
+  box holds and then *recovers*. The ceiling only says how many runs to plan for.
+- Bounded at 16. Nothing above 4 was ever measured (see below); an operator who
+  genuinely wants 32 sets the override and owns it.
+
+**Per-sandbox limits** are sized from the same numbers when the project record
+does not specify its own (`sandboxLimitsFor`): `(MemTotal - 1536) / slots`
+rounded to 64 MB, and `cores / slots`, so the sum of the caps is what the host
+can actually back. Before this Ship's TypeScript set no limits at all and every
+run got the teploy-sandbox daemon's fixed 1 CPU / 1 GB whatever the box was.
+The project record still wins, per field.
+
+**Admission** gained a `disk` hold alongside `memory` and `load`, and disk is
+checked **first**: being out of memory delays work and the kernel resolves it,
+being out of disk breaks the docker daemon for every tenant and needs a human.
+
+### Proven live on deploy-test, 2026-08-26
+
+`src/host-load.ts` compiled and run unmodified inside a throwaway
+`node:22-bookworm` container against real filesystems. Nothing was deployed and
+the running worker was not touched.
+
+| what the box looked like | ceiling | binding | hold |
+|---|---|---|---|
+| roomy fs (30 GB free), 2614 MB available | **4** | cpu | none |
+| the real root: 2844 MB free, 96.1% used, 40.8% inodes | **1** | disk | none |
+| 2.5 GB fs filled to 1860 MB free | **1** | disk | **disk** |
+| filled further, 960 MB free | **1** | disk | **disk** |
+| squeeze released, 2560 MB free | **1** | disk | none |
+| roomy fs, 1.4 GB taken by another tenant (1192 MB available) | **1** | memory | none |
+| that tenant gone (2570 MB available) | **4** | memory | none |
+
+The ceiling moved 4 → 1 → 4 in both directions, on both resources, with no
+operator and no knob; the hold appeared and cleared with the squeeze. Note the
+real box: **the ceiling `SHIP_MAX_CONCURRENT_RUNS=4` recommended above is wrong
+for deploy-test today**, because the disk filled up after the load test and
+nothing was measuring it. That is the whole argument for deriving it.
+
 ## Not measured, and why
 
 - **Ceiling 8.** The whole test was budgeted under $1.50 of model spend and

@@ -11,7 +11,7 @@ import { externalAdapters } from "./harness-external.js";
 import { previewTargetFromEnv } from "./deploy.js";
 import { telemetryTargetFromEnv } from "./observe.js";
 import { testTargetFromEnv } from "./tests.js";
-import type { ExecutorProvider, RunUsage } from "./durable.js";
+import type { ExecutorProvider, RunUsage, SandboxOverrides } from "./durable.js";
 import { enqueueRun } from "./runtime.js";
 import { attributionsFrom } from "./attributed-spend.js";
 import { intakeActor } from "./actor.js";
@@ -21,8 +21,18 @@ import type { IntakeStore, IntakePolicy, IntakeTask } from "./intake.js";
 import type { SourcePolicy } from "./policies.js";
 import type { Project, ProjectStore } from "./projects.js";
 import { repoSlug } from "./observe.js";
-import { DEFAULT_MAX_LOAD_PER_CPU, DEFAULT_MIN_FREE_MB, hostHold, hostLoad } from "./host-load.js";
-import type { HostLimits, HostLoad } from "./host-load.js";
+import {
+  DEFAULT_MAX_INODE_USED_PCT,
+  DEFAULT_MAX_LOAD_PER_CPU,
+  DEFAULT_MIN_FREE_DISK_MB,
+  DEFAULT_MIN_FREE_MB,
+  capacityPlan,
+  describeCapacity,
+  hostHold,
+  hostLoad,
+  sandboxLimitsFor,
+} from "./host-load.js";
+import type { Capacity, HostHold, HostLimits, HostLoad } from "./host-load.js";
 import { autoAllowedNow, formatWindow, windowFor } from "./governance.js";
 import type { Windows } from "./governance.js";
 import { makeObserveEmitter } from "./observe.js";
@@ -64,15 +74,21 @@ export interface WorkerOptions {
   /** Auto-launches allowed per source per day (default 10, process-local). */
   dailyAutoLimit?: number;
   /**
-   * Ceiling on simultaneously-executing auto-launched runs (default 3, or
-   * SHIP_MAX_CONCURRENT_RUNS). A run that would exceed it is deferred —
-   * its task stays proposed and a later sweep picks it up. Parked runs
-   * still hold a slot (conservative).
+   * OVERRIDE for the ceiling on simultaneously-executing runs (or
+   * SHIP_MAX_CONCURRENT_RUNS / --max-concurrent). Unset is the normal case:
+   * the ceiling is then DERIVED from what the box has (capacityPlan in
+   * host-load.ts) and re-derived on every heartbeat, so adding RAM, cores or
+   * disk raises it and a squeeze lowers it without anyone touching a knob.
+   * A run that would exceed the ceiling is deferred — its task stays proposed
+   * and a later sweep picks it up. Parked runs still hold a slot (conservative).
    */
   maxConcurrentRuns?: number;
   /** Load-aware admission thresholds (host-load.ts); env SHIP_MIN_FREE_MB / SHIP_MAX_LOAD_PER_CPU. */
   minFreeMB?: number;
   maxLoadPerCpu?: number;
+  /** Disk-aware admission on the docker root; env SHIP_MIN_FREE_DISK_MB / SHIP_MAX_INODE_USED_PCT. */
+  minFreeDiskMB?: number;
+  maxInodeUsedPct?: number;
   /**
    * Per-source daily spend cap in USD (default 10, or SHIP_DAILY_BUDGET_USD;
    * <= 0 disables). Enforced ALONGSIDE the count cap: a source whose
@@ -441,6 +457,44 @@ export function startWorker(options: WorkerOptions): {
     const n = Number(raw);
     return Number.isFinite(n) ? n : undefined;
   };
+  /**
+   * Per-sandbox limits sized from the host (B1). Ship's TypeScript set none at
+   * all before this, so every run got the teploy-sandbox daemon's fixed
+   * default (1 CPU / 1 GB) whatever the box was — starving a 16 GB builder and
+   * over-committing a 2 GB VM.
+   *
+   * Precedence is unchanged and explicit per field: the project record wins
+   * (projects.ts sandboxLimits, materialised into the run input at enqueue and
+   * arriving here via sandboxOverridesOf), and the derived value only fills in
+   * what it did not say. Filling in HERE rather than at enqueue is deliberate:
+   * the sandbox step records the container handle, not the overrides, so this
+   * changes nothing about a replay's step sequence.
+   */
+  function hostSizedOverrides(o?: SandboxOverrides): SandboxOverrides {
+    const derived = sandboxLimitsFor(lastLoad, capacity.maxConcurrent);
+    return {
+      ...(o ?? {}),
+      limits: {
+        memoryMb: o?.limits?.memoryMb ?? derived.memoryMb,
+        cpus: o?.limits?.cpus ?? derived.cpus,
+        ...(o?.limits?.pids !== undefined ? { pids: o.limits.pids } : {}),
+      },
+    };
+  }
+  // Forwarded call-by-call rather than spread, so the source provider keeps its
+  // own `this`, and the optional members stay ABSENT when the source has none
+  // (durable.ts gates snapshot/restore on both being present).
+  const src = options.executor;
+  const executor: ExecutorProvider = {
+    create: (o) => src.create(hostSizedOverrides(o)),
+    attach: (handle) => src.attach(handle),
+    ...(src.isolated !== undefined ? { isolated: src.isolated } : {}),
+    ...(src.snapshot !== undefined ? { snapshot: (handle: string) => src.snapshot!(handle) } : {}),
+    ...(src.createFrom !== undefined
+      ? { createFrom: (image: string, o?: SandboxOverrides) => src.createFrom!(image, hostSizedOverrides(o)) }
+      : {}),
+    ...(src.destroy !== undefined ? { destroy: (handle: string) => src.destroy!(handle) } : {}),
+  };
   const wf = durableAgent({
     ...(maxSteps !== undefined ? { maxSteps } : {}),
     model: options.model,
@@ -448,13 +502,13 @@ export function startWorker(options: WorkerOptions): {
     // Per-run cost ceiling (SHIP_MAX_RUN_COST_USD). Off unless configured —
     // the daily caps remain the primary bound; this stops ONE pathological run.
     maxRunCostUSD: options.maxRunCostUSD ?? envNum("SHIP_MAX_RUN_COST_USD") ?? 0,
-    executor: options.executor,
     // The provider's own isolation flag decides the gate, not an env guess:
     // it is already load-bearing (an externally-sourced task refuses to run
     // on a non-isolating provider) and its contract says false is the safe
     // answer. Isolated -> gate only what outlives the container; not isolated
     // -> the strict LocalExecutor list, because commands reach the host.
     approveAction: resolveApprovalPolicy({ sandboxed: options.executor.isolated === true }),
+    executor,
     workdir: options.workdir,
     ...(options.gitToken !== undefined ? { gitToken: options.gitToken } : {}),
     ...(options.githubToken !== undefined ? { githubToken: options.githubToken } : {}),
@@ -699,7 +753,10 @@ export function startWorker(options: WorkerOptions): {
   };
   const modelId = options.modelId ?? "worker-default";
   const admission = options.admission ?? new NucleusAdmission(options.runtime.db);
-  const maxConcurrentRuns = options.maxConcurrentRuns ?? envInt("SHIP_MAX_CONCURRENT_RUNS") ?? 3;
+  // Unset is the normal case — the ceiling is measured, not configured (B1).
+  // Set, and it wins outright and says so on the Fleet page, because an
+  // operator who typed a number meant it.
+  const maxConcurrentOverride = options.maxConcurrentRuns ?? envInt("SHIP_MAX_CONCURRENT_RUNS");
   // What a run is assumed to cost while it is in flight. Held against the
   // source's daily budget from admission until settlement replaces it with the
   // real number, so a burst of launches cannot all pass the same budget read.
@@ -722,18 +779,52 @@ export function startWorker(options: WorkerOptions): {
   const hostLimits: HostLimits = {
     minFreeMB: options.minFreeMB ?? envNum("SHIP_MIN_FREE_MB") ?? DEFAULT_MIN_FREE_MB,
     maxLoadPerCpu: options.maxLoadPerCpu ?? envNum("SHIP_MAX_LOAD_PER_CPU") ?? DEFAULT_MAX_LOAD_PER_CPU,
+    minFreeDiskMB: options.minFreeDiskMB ?? envNum("SHIP_MIN_FREE_DISK_MB") ?? DEFAULT_MIN_FREE_DISK_MB,
+    maxInodeUsedPct: options.maxInodeUsedPct ?? envNum("SHIP_MAX_INODE_USED_PCT") ?? DEFAULT_MAX_INODE_USED_PCT,
   };
   let lastLoad: HostLoad = hostLoad();
-  let held: "memory" | "load" | null = null;
+  let held: HostHold | null = null;
   let heldLoggedAt = 0;
+  // The ceiling, derived from the box (host-load.ts capacityPlan) and re-derived
+  // on every heartbeat below. Read at call time everywhere it is used — the
+  // drive loop, the intake sweep and the heartbeat all see the current value.
+  let capacity: Capacity = capacityPlan(lastLoad, {
+    limits: hostLimits,
+    activeRuns: 0,
+    ...(maxConcurrentOverride !== undefined ? { override: maxConcurrentOverride } : {}),
+  });
+  log(`[worker] capacity: ${describeCapacity(lastLoad, capacity)}`);
+  /**
+   * Re-sense the box and re-derive the ceiling. Logs only on a CHANGE — the
+   * derived value must be visible, not silent, and not a line every 15s.
+   * `held` is recomputed from the same snapshot so the heartbeat never
+   * publishes a hold that belongs to different numbers.
+   */
+  const resense = (): void => {
+    lastLoad = hostLoad();
+    held = hostHold(lastLoad, hostLimits);
+    const next = capacityPlan(lastLoad, {
+      limits: hostLimits,
+      activeRuns: inflight.size,
+      ...(maxConcurrentOverride !== undefined ? { override: maxConcurrentOverride } : {}),
+    });
+    if (next.maxConcurrent !== capacity.maxConcurrent || next.binding !== capacity.binding) {
+      log(`[worker] capacity ${capacity.maxConcurrent} -> ${describeCapacity(lastLoad, next)}`);
+    }
+    capacity = next;
+  };
   const hostOk = (): boolean => {
     lastLoad = hostLoad();
     held = hostHold(lastLoad, hostLimits);
     if (held !== null && Date.now() - heldLoggedAt > 60_000) {
       heldLoggedAt = Date.now();
+      const disk =
+        lastLoad.disk === undefined
+          ? "disk unsensed"
+          : `${lastLoad.disk.freeMB} MB disk free (${lastLoad.disk.usedPct}% used, ${lastLoad.disk.inodeUsedPct}% inodes)`;
       log(
-        `[worker] holding launches: ${held} (${lastLoad.freeMemMB} MB available, load ${lastLoad.load1.toFixed(2)} on ${lastLoad.cpus} cpus; ` +
-          `limits ${hostLimits.minFreeMB} MB / ${hostLimits.maxLoadPerCpu} per cpu)`,
+        `[worker] holding launches: ${held} (${lastLoad.freeMemMB} MB available, load ${lastLoad.load1.toFixed(2)} on ${lastLoad.cpus} cpus, ${disk}; ` +
+          `limits ${hostLimits.minFreeMB} MB / ${hostLimits.maxLoadPerCpu} per cpu / ${hostLimits.minFreeDiskMB} MB disk / ${hostLimits.maxInodeUsedPct}% inodes)`,
       );
     }
     return held === null;
@@ -781,7 +872,7 @@ export function startWorker(options: WorkerOptions): {
         due: () => options.runtime.index.due(new Date()),
         inflight,
         launching,
-        maxConcurrent: maxConcurrentRuns,
+        maxConcurrent: capacity.maxConcurrent,
         hostOk,
         launch: (runId, sleeping) => {
           launching.add(runId);
@@ -883,7 +974,7 @@ export function startWorker(options: WorkerOptions): {
       policies,
       windows,
       dailyAutoLimit: options.dailyAutoLimit ?? envInt("SHIP_DAILY_AUTO_LIMIT") ?? 10,
-      maxConcurrentRuns,
+      maxConcurrentRuns: capacity.maxConcurrent,
       budgetFor: (source) => storeBudgets[source] ?? budgets[source] ?? defaultBudget,
       projects: options.runtime.projects,
       estimatedRunCostUSD,
@@ -933,27 +1024,46 @@ export function startWorker(options: WorkerOptions): {
   // inferred from lastSeen, so the interval doubles as the liveness signal.
   const startedAt = new Date().toISOString();
   const sandboxLabel = process.env.SHIP_SANDBOX_URL ?? "host";
-  const beat = (): Promise<void> =>
-    // Renewing first: a concurrency slot carries a TTL so a dead worker cannot
-    // wedge the fleet, which means a LIVE worker has to keep saying it is alive.
-    admission
-      .renewSlots()
-      .catch(() => {})
-      .then(() => options.runtime.fleet
-      .heartbeat({
-        owner: options.runtime.owner,
-        host,
-        sandbox: sandboxLabel,
-        maxConcurrent: maxConcurrentRuns,
-        activeRuns: inflight.size,
-        startedAt,
-        lastSeen: new Date().toISOString(),
-        freeMemMB: lastLoad.freeMemMB,
-        load1: Math.round(lastLoad.load1 * 100) / 100,
-        cpus: lastLoad.cpus,
-        ...(held !== null ? { held } : {}),
-      }))
-      .catch((error) => log(`[worker] fleet heartbeat: ${error instanceof Error ? error.message : String(error)}`));
+  const beat = (): Promise<void> => {
+    // Sense on the beat rather than relying on the drive loop's hostOk() having
+    // run: the numbers this publishes and the ceiling it reports then come from
+    // ONE snapshot, and both are at most one beat old. This is where the
+    // ceiling is re-derived, so adding a VM's worth of RAM or clearing a full
+    // disk raises it within 15s, and a squeeze lowers it within 15s.
+    resense();
+    return (
+      // Renewing first: a concurrency slot carries a TTL so a dead worker cannot
+      // wedge the fleet, which means a LIVE worker has to keep saying it is alive.
+      admission
+        .renewSlots()
+        .catch(() => {})
+        .then(() =>
+          options.runtime.fleet.heartbeat({
+            owner: options.runtime.owner,
+            host,
+            sandbox: sandboxLabel,
+            maxConcurrent: capacity.maxConcurrent,
+            activeRuns: inflight.size,
+            startedAt,
+            lastSeen: new Date().toISOString(),
+            freeMemMB: lastLoad.freeMemMB,
+            load1: Math.round(lastLoad.load1 * 100) / 100,
+            cpus: lastLoad.cpus,
+            ...(held !== null ? { held } : {}),
+            totalMemMB: lastLoad.totalMemMB,
+            capacityBinding: capacity.binding,
+            ...(lastLoad.disk !== undefined
+              ? {
+                  diskFreeMB: lastLoad.disk.freeMB,
+                  diskUsedPct: lastLoad.disk.usedPct,
+                  inodeUsedPct: lastLoad.disk.inodeUsedPct,
+                }
+              : {}),
+          }),
+        )
+        .catch((error) => log(`[worker] fleet heartbeat: ${error instanceof Error ? error.message : String(error)}`))
+    );
+  };
   void beat();
   const heartbeatTimer = setInterval(() => void beat(), 15000);
   heartbeatTimer.unref?.();

@@ -29,6 +29,9 @@ export {
   linearTaskFromIssue,
   normalizeRole,
   requesterOf,
+  reviewGateSatisfied,
+  reviewTaskFromReviewEvent,
+  shipAuthored,
   slackTaskFromMention,
   utcDay,
 } from "teploy-ship/runtime";

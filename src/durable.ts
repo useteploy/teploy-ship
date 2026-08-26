@@ -14,6 +14,8 @@ import {
   commitAndPush,
   findOpenPullRequest,
   fixPrompt,
+  formatReviewComments,
+  listPrReviewComments,
   openPullRequest,
   requestReviewers,
   parseRepoUrl,
@@ -43,7 +45,7 @@ import type { ProjectStore } from "./projects.js";
 import type { RepoMemoryStore } from "./repo-memory.js";
 import type { SteerStore } from "./steer.js";
 import { formatSearchHits } from "./code-index.js";
-import { screenUntrusted } from "./guard.js";
+import { frameUntrusted, screenUntrusted } from "./guard.js";
 import type { CodeSearch } from "./code-index.js";
 import { PLAN_EVENT } from "./plan.js";
 import type { PlanDecisionPayload } from "./plan.js";
@@ -631,8 +633,29 @@ export function durableAgent(
             // materialised into the input — the step's OUTPUT is what replays,
             // and a slower or faster index on replay changes nothing recorded.
             const capMs = Number(process.env.SHIP_INDEX_TIMEOUT_MS) || 120_000;
-            const stats = await config.codeSearch.refresh(executor, scopeKey, { deadlineMs: Date.now() + capMs });
-            return `${stats.indexed} files indexed (${stats.chunks} chunks), ${stats.removed} removed of ${stats.files} tracked${stats.timedOut ? ` (stopped at the ${Math.round(capMs / 1000)}s index cap)` : stats.capped ? " (capped)" : ""}`;
+            const stats = await config.codeSearch.refresh(executor, scopeKey, {
+              deadlineMs: Date.now() + capMs,
+              // Ordering is the highest-leverage lever this step has. The
+              // budget is roughly a hundred chunks at the measured embedding
+              // rate, so the question is which hundred — see orderPaths.
+              task: input.task,
+            });
+            // Say what the INDEX now holds, not only what this sweep did. "3
+            // files indexed" on a 400-file repo read as success; the number
+            // that matters to anyone reading a run is coverage, and it was
+            // nowhere on the timeline.
+            const coverage = await config.codeSearch.coverage(scopeKey).catch(() => null);
+            const held =
+              coverage === null
+                ? ""
+                : `; index holds ${coverage.indexedFiles}/${coverage.trackedFiles} files` +
+                  (coverage.trackedFiles > 0 ? ` (${Math.round((coverage.indexedFiles / coverage.trackedFiles) * 100)}%)` : "");
+            const rate = stats.msPerChunk !== null ? `, ${stats.msPerChunk}ms/chunk` : "";
+            return (
+              `${stats.indexed} files indexed (${stats.chunks} chunks${rate}), ${stats.unchanged} unchanged, ` +
+              `${stats.removed} removed of ${stats.files} tracked` +
+              `${stats.timedOut ? ` (stopped at the ${Math.round(capMs / 1000)}s index cap)` : stats.capped ? " (capped)" : ""}${held}`
+            );
           } catch (error) {
             return `index refresh failed: ${error instanceof Error ? error.message : String(error)}`;
           }
@@ -650,10 +673,46 @@ export function durableAgent(
           }));
         }
       }
+      // A batched review arrives as one submitted review plus N inline
+      // comments, and the intake layer deliberately coalesces those N+1
+      // deliveries into ONE task so the reviewer gets one run and one push
+      // (see reviewTaskFromReviewEvent in intake-sources.ts). The cost of that
+      // coalescing is that the task text carries whichever comment arrived
+      // first — so the run reads the rest of the thread here, from the forge,
+      // rather than addressing one of three complaints and calling it done.
+      //
+      // A recorded step, and best-effort inside it: review context is
+      // advisory, and a follow-up run that dies because the comments API
+      // rate-limited would be worse than one that addresses only what it was
+      // handed.
+      const reviewContext =
+        checkout !== null && input.pr !== undefined && input.repo !== undefined
+          ? await ctx.step("pr-review-comments", async () => {
+              try {
+                const ref = assertRepoAllowed(input.repo!, { trust: input.trust ?? "operator", config: repoPolicy });
+                const rendered = formatReviewComments(await listPrReviewComments(ref, credentialFor(ref, repoPolicy), input.pr!));
+                // Comment bodies are written by whoever can comment on the PR.
+                // reviewPrompt frames its `task` argument but NOT `context`
+                // (which normally carries Ship's own repo notes), so the
+                // framing has to happen here — otherwise reading the rest of
+                // the thread would be a way to smuggle instructions into a run
+                // that the task text itself is screened for.
+                return rendered === "" ? "" : frameUntrusted(rendered);
+              } catch {
+                return "";
+              }
+            })
+          : "";
+
       const task =
         checkout !== null
           ? input.pr !== undefined
-            ? reviewPrompt({ task: input.task, branch: checkout.branch, pr: input.pr, context: repoContext })
+            ? reviewPrompt({
+                task: input.task,
+                branch: checkout.branch,
+                pr: input.pr,
+                context: [repoContext, reviewContext].filter((c) => c !== undefined && c !== "").join("\n\n"),
+              })
             : fixPrompt({ task: input.task, branch: checkout.branch, base: checkout.base, context: repoContext })
           : input.task;
 
@@ -1158,7 +1217,15 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
               return "Code search is not available in this run. Use grep/rg via ```bash instead.";
             }
             try {
-              return formatSearchHits(query, await config.codeSearch.search(ws.scopeKey, query));
+              // Coverage rides along with every observation. A miss with no
+              // coverage figure reads as "that code is not in this repo",
+              // which on the deployed index was wrong far more often than it
+              // was right — see coverageLine in code-index.ts.
+              const [hits, coverage] = await Promise.all([
+                config.codeSearch.search(ws.scopeKey, query),
+                config.codeSearch.coverage(ws.scopeKey).catch(() => null),
+              ]);
+              return formatSearchHits(query, hits, coverage);
             } catch (error) {
               return `Code search failed (${error instanceof Error ? error.message : String(error)}). Use grep/rg via \`\`\`bash instead.`;
             }

@@ -25,6 +25,8 @@ export interface CodeSearchHit {
   end: number;
   text: string;
   distance: number;
+  /** Symbols declared in the chunk (see symbolsIn). Empty on rows indexed before this existed. */
+  symbols?: string[];
 }
 
 export interface RefreshStats {
@@ -36,11 +38,47 @@ export interface RefreshStats {
   capped: boolean;
   /** True when the refresh deadline stopped the sweep early (what was embedded is kept). */
   timedOut: boolean;
+  /** Files this refresh skipped because their content had not changed. */
+  unchanged: number;
+  /** Measured embedding cost, ms per chunk, over this refresh. Null when nothing was embedded. */
+  msPerChunk: number | null;
+  /** Where the sweep stopped, so the next refresh resumes there instead of restarting at "a". */
+  cursor: string | null;
+}
+
+/**
+ * How much of a repo the index actually holds.
+ *
+ * This exists because a search MISS was indistinguishable from "the file was
+ * never indexed", while prompt.ts told the agent to PREFER search over grep. On
+ * 2026-08-26 the production index held 12 files of teploy-ship and 4 of
+ * teploy-cli — so nearly every miss was the second kind, and the agent had no
+ * way to know.
+ */
+export interface IndexCoverage {
+  repo: string;
+  indexedFiles: number;
+  trackedFiles: number;
+  chunks: number;
+  /** The last sweep stopped early — at the chunk cap, or out of time. */
+  partial: boolean;
+  /** ISO-8601 of the last refresh that wrote this row. */
+  at: string;
 }
 
 export interface RefreshOptions {
   /** Absolute epoch ms; the sweep stops between files/batches once passed and no single embed call may outlive it. */
   deadlineMs?: number;
+  /**
+   * What the run is trying to do. Used to ORDER the sweep, which matters far
+   * more than it sounds: at the measured embedding rate the budget is around a
+   * hundred chunks per run, so the question is not "how much of the repo do we
+   * index" but "which hundred chunks". Ordering by relevance to the task puts
+   * that budget on files the run might actually search for, instead of on
+   * whatever sorts first (`.env.example`, `CHANGELOG.md` — the two files the
+   * production index provably spent its entire budget on).
+   */
+  task?: string;
 }
 
 /** Reject after `ms` — used so one hung embedding call cannot hold a run past its sandbox TTL. */
@@ -60,13 +98,45 @@ export interface CodeSearch {
   refresh(executor: AgentExecutor, repo: string, options?: RefreshOptions): Promise<RefreshStats>;
   /** Semantic retrieval over the repo's indexed chunks. */
   search(repo: string, query: string, limit?: number): Promise<CodeSearchHit[]>;
+  /**
+   * How much of `repo` the index holds, from the last refresh. Null when the
+   * repo has never been indexed — which a caller must render differently from
+   * "indexed and nothing matched".
+   */
+  coverage(repo: string): Promise<IndexCoverage | null>;
 }
 
 const CHUNK_LINES = 60;
 const CHUNK_OVERLAP = 10;
 const MAX_FILE_BYTES = 100_000;
 const MAX_CHUNKS_PER_REFRESH = 3000;
-const EMBED_BATCH = 64;
+
+/**
+ * Ceiling on one embedding call. It used to be a flat 64, which is the single
+ * reason the production index recorded `indexed: 0` on run after run.
+ *
+ * MEASURED 2026-08-26, against the deployed embedder (nomic-embed-text on a
+ * 1 GB CPU ollama behind the gateway): **1.0 s per chunk, and it does not
+ * parallelise** — 1, 4 and 8 concurrent requests all came back at ~1000 ms per
+ * chunk of effective throughput. So a 64-chunk batch is a 64-second call, and
+ * against the 120 s `SHIP_INDEX_TIMEOUT_MS` two of them overrun the deadline.
+ * `withDeadline` then REJECTED mid-batch, the rejection escaped `refresh()`,
+ * and durable.ts recorded `index refresh failed: embedding CHANGELOG.md
+ * exceeded 119402ms` — throwing away every chunk the sweep had already
+ * committed. Eleven of the last forty runs ended exactly that way.
+ *
+ * The batch is now sized to what the remaining budget can actually pay for, at
+ * the rate this refresh has measured. See `#embedBudgeted`.
+ */
+const EMBED_BATCH_MAX = 64;
+
+/**
+ * Starting guess at ms-per-chunk, before this refresh has measured its own.
+ * Deliberately the measured production figure rather than something
+ * optimistic: guessing low is what produces an over-long first batch, and the
+ * first batch is the one with no measurement to correct it.
+ */
+const EMBED_MS_PER_CHUNK_GUESS = 1000;
 
 /** Extensions that are never worth embedding (binary or generated). */
 const SKIP_EXT = new Set([
@@ -75,14 +145,141 @@ const SKIP_EXT = new Set([
   "so", "dylib", "dll", "exe", "bin", "lock", "min.js", "min.css", "map",
 ]);
 
+/**
+ * Files that are text, tracked, and still not worth a second of embedding.
+ *
+ * This list earns its keep only because the budget is tiny. At 1 s per chunk a
+ * run indexes on the order of a hundred chunks, and the production logs show
+ * where those seconds went: `CHANGELOG.md` and `.env.example`, over and over,
+ * because they sort early. A changelog answers no question an agent asks of a
+ * code index — "where is X handled?" — and a lockfile answers none either.
+ */
+const SKIP_BASENAMES = new Set([
+  "pnpm-lock.yaml", "package-lock.json", "yarn.lock", "cargo.lock", "go.sum", "composer.lock", "gemfile.lock", "poetry.lock",
+  "changelog.md", "changelog", "license", "license.md", "license.txt", "notice", "authors", "contributors",
+  ".env.example", ".env.sample", ".env.template", ".gitignore", ".gitattributes", ".dockerignore", ".npmignore",
+]);
+
+/** Directories whose contents are vendored, generated or otherwise not this repo's own code. */
+const SKIP_DIRS = new Set(["node_modules", "dist", "build", "vendor", "third_party", "target", ".git", "__pycache__", ".next", ".output", "coverage"]);
+
 export function indexablePath(path: string): boolean {
-  const base = path.split("/").pop() ?? path;
-  if (base === "pnpm-lock.yaml" || base === "package-lock.json" || base === "yarn.lock" || base === "Cargo.lock" || base === "go.sum") return false;
+  const segments = path.split("/");
+  for (const segment of segments.slice(0, -1)) {
+    if (SKIP_DIRS.has(segment)) return false;
+  }
+  const base = segments[segments.length - 1] ?? path;
   const lower = base.toLowerCase();
+  if (SKIP_BASENAMES.has(lower)) return false;
   for (const ext of SKIP_EXT) {
     if (lower.endsWith(`.${ext}`)) return false;
   }
   return true;
+}
+
+/**
+ * The order the sweep visits files in — the highest-leverage thing in this
+ * file, given the budget.
+ *
+ * `git ls-files` is path-sorted, and the sweep breaks when it runs out of
+ * time. Visiting in that order means a repo gets an ALPHABETICAL PREFIX of
+ * itself indexed, which is not a sample of anything: `src/actions.ts` is in and
+ * `src/worker.ts` is out, forever, because of their initials.
+ *
+ * Three rules, in order:
+ *   1. Resume where the last sweep stopped, so repeated runs converge on full
+ *      coverage instead of re-walking the same prefix. Unchanged files are free
+ *      (the hash ledger skips them), so the cost of the wrap-around is small.
+ *   2. Files whose path words overlap the task go first. With a hundred-chunk
+ *      budget, "which hundred" is the whole question.
+ *   3. Otherwise round-robin across top-level directories, so no single
+ *      directory can eat the budget just by sorting first.
+ */
+export function orderPaths(paths: string[], options: { task?: string; cursor?: string | null } = {}): string[] {
+  const words = new Set(
+    (options.task ?? "")
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((w) => w.length >= 3),
+  );
+  const score = (path: string): number => {
+    if (words.size === 0) return 0;
+    let hits = 0;
+    for (const token of path.toLowerCase().split(/[^a-z0-9]+/)) {
+      if (token.length >= 3 && words.has(token)) hits += 1;
+    }
+    return hits;
+  };
+
+  const relevant = paths.filter((p) => score(p) > 0).sort((a, b) => score(b) - score(a) || a.localeCompare(b));
+  const relevantSet = new Set(relevant);
+  const rest = paths.filter((p) => !relevantSet.has(p));
+
+  // Round-robin the remainder across top-level directories.
+  const groups = new Map<string, string[]>();
+  for (const path of rest) {
+    const top = path.includes("/") ? path.slice(0, path.indexOf("/")) : ".";
+    const list = groups.get(top);
+    if (list === undefined) groups.set(top, [path]);
+    else list.push(path);
+  }
+  const keys = [...groups.keys()].sort();
+  const interleaved: string[] = [];
+  for (let i = 0; ; i++) {
+    let added = false;
+    for (const key of keys) {
+      const item = groups.get(key)![i];
+      if (item !== undefined) {
+        interleaved.push(item);
+        added = true;
+      }
+    }
+    if (!added) break;
+  }
+
+  // Resume: rotate the non-relevant remainder so the sweep continues past
+  // where it stopped. Relevance still wins — a task-relevant file is worth
+  // re-checking (it is free when unchanged) ahead of continuing the walk.
+  const cursor = options.cursor ?? null;
+  if (cursor !== null) {
+    const at = interleaved.indexOf(cursor);
+    if (at >= 0) {
+      const rotated = [...interleaved.slice(at + 1), ...interleaved.slice(0, at + 1)];
+      return [...relevant, ...rotated];
+    }
+  }
+  return [...relevant, ...interleaved];
+}
+
+/**
+ * Symbol names declared inside a chunk, for the hit header.
+ *
+ * A hit used to read `## src/agent.ts:520-580` and a snippet, so a reader (the
+ * agent, and a human reading a run log) had to reconstruct what they were
+ * looking at from the body. Deliberately regex-based and language-agnostic
+ * rather than a parser: this runs once per chunk during a sweep whose budget is
+ * already spent on embeddings, and a wrong guess costs a slightly worse header,
+ * not a wrong answer.
+ */
+export function symbolsIn(text: string): string[] {
+  const found: string[] = [];
+  const patterns = [
+    /\b(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/g,
+    /\b(?:export\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)/g,
+    /\b(?:export\s+)?(?:interface|type|enum)\s+([A-Za-z_$][\w$]*)/g,
+    /\b(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?:[:=]\s*(?:async\s*)?(?:\(|function\b))/g,
+    /^\s*def\s+([A-Za-z_][\w]*)/gm,
+    /^\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z_][\w]*)/gm,
+    /^\s*(?:pub\s+)?fn\s+([A-Za-z_][\w]*)/gm,
+    /^\s*([a-z_][\w]*)\s*\(\)\s*\{/gm, // shell functions
+  ];
+  for (const pattern of patterns) {
+    for (const match of text.matchAll(pattern)) {
+      const name = match[1];
+      if (name !== undefined && !found.includes(name)) found.push(name);
+    }
+  }
+  return found.slice(0, 6);
 }
 
 export interface CodeChunk {
@@ -151,6 +348,7 @@ export class NucleusCodeIndex implements CodeSearch {
   #embedder: EmbeddingAdapter;
   #ready: Promise<void> | null = null;
   #chunksReady: Promise<void> | null = null;
+  #reposReady: Promise<void> | null = null;
   #maxChunks: number;
 
   constructor(db: NucleusPgwire, embedder: EmbeddingAdapter, options: CodeIndexOptions = {}) {
@@ -196,14 +394,187 @@ export class NucleusCodeIndex implements CodeSearch {
     return this.#chunksReady;
   }
 
+  /**
+   * The per-repo coverage row, in its own table.
+   *
+   * A SIBLING table rather than columns on an existing one: `ship_code_files`
+   * is populated on every deployed box, and Nucleus cannot ALTER-ADD to a
+   * populated table — the same constraint that put host load in
+   * `ship_fleet_load` (see fleet.ts:207). Created lazily and used
+   * best-effort: coverage is a reporting signal, and a run must not fail
+   * because a reporting table could not be written.
+   */
+  #ensureRepos(): Promise<void> {
+    this.#reposReady ??= this.#db
+      .query(
+        `CREATE TABLE IF NOT EXISTS ship_code_repos (
+          repo TEXT,
+          indexed_files TEXT,
+          tracked_files TEXT,
+          chunks TEXT,
+          partial TEXT,
+          cursor TEXT,
+          at TEXT
+        )`,
+      )
+      .then(() => undefined)
+      .catch((error) => {
+        // Unlike #ensureChunks, a failure is NOT cached: a transient Nucleus
+        // catalog write must not disable coverage for the life of the process.
+        this.#reposReady = null;
+        throw error;
+      });
+    return this.#reposReady;
+  }
+
+  async coverage(repo: string): Promise<IndexCoverage | null> {
+    try {
+      await this.#ensureRepos();
+      const rows = await this.#db.query(
+        "SELECT repo, indexed_files, tracked_files, chunks, partial, at FROM ship_code_repos WHERE repo = $1",
+        [repo],
+      );
+      const row = rows[0];
+      if (row === undefined) return null;
+      return {
+        repo,
+        indexedFiles: Number(row.indexed_files) || 0,
+        trackedFiles: Number(row.tracked_files) || 0,
+        chunks: Number(row.chunks) || 0,
+        partial: String(row.partial) === "true",
+        at: String(row.at ?? ""),
+      };
+    } catch {
+      // Absent and unreadable are the same thing to a caller: it must not
+      // claim coverage it cannot see.
+      return null;
+    }
+  }
+
+  async #readCursor(repo: string): Promise<string | null> {
+    try {
+      const rows = await this.#db.query("SELECT cursor FROM ship_code_repos WHERE repo = $1", [repo]);
+      const cursor = rows[0]?.cursor;
+      return cursor === undefined || cursor === null || String(cursor) === "" ? null : String(cursor);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Record what this refresh left behind.
+   *
+   * `indexedFiles` is the ledger's size AFTER the sweep, not this sweep's
+   * count: coverage is a statement about the index, and a run that indexed
+   * three files into an index that already held forty has forty-three.
+   */
+  async #writeCoverage(repo: string, stats: RefreshStats, ledgerSizeBefore: number): Promise<void> {
+    const indexedFiles = Math.max(0, ledgerSizeBefore + stats.indexed - stats.removed);
+    const now = new Date().toISOString();
+    try {
+      await this.#db.query("DELETE FROM ship_code_repos WHERE repo = $1", [repo]).catch(() => {});
+      await this.#db.query(
+        "INSERT INTO ship_code_repos (repo, indexed_files, tracked_files, chunks, partial, cursor, at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        [
+          repo,
+          String(indexedFiles),
+          String(stats.files),
+          String(stats.chunks),
+          String(stats.capped || stats.timedOut || indexedFiles < stats.files),
+          stats.cursor ?? "",
+          now,
+        ],
+      );
+    } catch {
+      // Advisory. A refresh that worked must not be reported as failed because
+      // its bookkeeping row could not be written.
+    }
+  }
+
   async #deleteFileChunks(repo: string, path: string, count: number): Promise<void> {
     for (let i = 0; i < count; i++) {
       await this.#db.query("DELETE FROM ship_code_chunks WHERE id = $1", [chunkId(repo, path, i)]).catch(() => {});
     }
   }
 
+  /**
+   * Embed `values`, never overrunning `budgetMs`, and report what it cost.
+   *
+   * The old code handed the WHOLE remaining budget to a 64-chunk call and let
+   * `withDeadline` reject if it overran. That rejection escaped `refresh()`
+   * entirely, so a sweep that had already committed fifty chunks reported
+   * `index refresh failed` and zero — see EMBED_BATCH_MAX for the production
+   * evidence. Here the call is sized to what the budget can pay for at the
+   * measured rate, and a timeout returns what it has instead of throwing.
+   */
+  async #embedBudgeted(
+    values: string[],
+    budgetMs: number,
+    label: string,
+    rate: { msPerChunk: number; measured: boolean },
+  ): Promise<{ embeddings: number[][]; timedOut: boolean }> {
+    if (values.length === 0) return { embeddings: [], timedOut: false };
+    if (budgetMs <= 0) return { embeddings: [], timedOut: true };
+    const affordable = Number.isFinite(budgetMs) ? Math.floor(budgetMs / Math.max(1, rate.msPerChunk)) : values.length;
+    // Nothing is affordable AT THE ESTIMATED RATE. Stop — unless the estimate
+    // is still the seeded guess, in which case try exactly one chunk to learn
+    // the real rate. A guess that is too high must not deadlock a fast
+    // embedder at zero progress, which is what refusing here would do.
+    const floor = rate.measured ? 0 : 1;
+    const take = Math.max(floor, Math.min(values.length, affordable, EMBED_BATCH_MAX));
+    if (take === 0) return { embeddings: [], timedOut: true };
+    const started = Date.now();
+    try {
+      const { embeddings } = await withDeadline(
+        embedMany({ model: this.#embedder, values: values.slice(0, take) }),
+        budgetMs,
+        `embedding ${label}`,
+      );
+      const elapsed = Date.now() - started;
+      // Learn the real rate from this refresh rather than trusting the guess.
+      // A refresh against a fast embedder should not be held to the slow one's
+      // batch size, and vice versa.
+      rate.msPerChunk = Math.max(1, Math.round(elapsed / Math.max(1, take)));
+      rate.measured = true;
+      return { embeddings, timedOut: false };
+    } catch {
+      // Out of time, or the embedder failed. Either way the sweep keeps what
+      // it has already written; it does not unwind it.
+      rate.msPerChunk = Math.max(rate.msPerChunk, Math.round((Date.now() - started) / Math.max(1, take)));
+      rate.measured = true;
+      return { embeddings: [], timedOut: true };
+    }
+  }
+
+  /**
+   * Content hashes for every path, in ONE executor round-trip.
+   *
+   * `git hash-object --stdin-paths` hashes the WORKING TREE copy of each path,
+   * which is what an index of a checked-out sandbox must key on. It replaces
+   * one `getFile` per file whose only purpose was to compute a hash and then,
+   * for the overwhelming majority of files, discard the bytes because the hash
+   * had not changed. On a 500-file repo that is 500 round-trips traded for one.
+   *
+   * Returns null when git cannot do it (an old git, a path git refuses), and
+   * the caller falls back to the per-file read it always did.
+   */
+  async #hashAll(executor: AgentExecutor, paths: string[]): Promise<Map<string, string> | null> {
+    if (paths.length === 0) return new Map();
+    try {
+      const script = `printf '%s\\n' ${paths.map((p) => `'${p.replace(/'/g, "'\\''")}'`).join(" ")} | git hash-object --stdin-paths`;
+      const result = await executor.exec(script, { timeoutMs: 120_000 });
+      if (result.exitCode !== 0) return null;
+      const hashes = result.stdout.split("\n").map((h) => h.trim()).filter((h) => h !== "");
+      if (hashes.length !== paths.length) return null;
+      return new Map(paths.map((path, i) => [path, hashes[i]!]));
+    } catch {
+      return null;
+    }
+  }
+
   async refresh(executor: AgentExecutor, repo: string, options: RefreshOptions = {}): Promise<RefreshStats> {
     await this.#ensure();
+    await this.#ensureRepos();
     const deadline = options.deadlineMs ?? Number.POSITIVE_INFINITY;
     const remaining = (): number => deadline - Date.now();
 
@@ -211,12 +582,28 @@ export class NucleusCodeIndex implements CodeSearch {
     if (listing.exitCode !== 0) {
       throw new Error(`git ls-files failed: ${listing.stderr.slice(0, 200)}`);
     }
-    const paths = listing.stdout.split("\n").map((p) => p.trim()).filter((p) => p !== "" && indexablePath(p));
+    const tracked = listing.stdout.split("\n").map((p) => p.trim()).filter((p) => p !== "" && indexablePath(p));
 
     const rows = await this.#db.query("SELECT path, hash, chunks FROM ship_code_files WHERE repo = $1", [repo]);
     const ledger = new Map(rows.map((r) => [String(r.path), { hash: String(r.hash), chunks: Number(r.chunks) }]));
 
-    const stats: RefreshStats = { files: paths.length, indexed: 0, removed: 0, chunks: 0, capped: false, timedOut: false };
+    const previous = await this.coverage(repo);
+    const paths = orderPaths(tracked, {
+      ...(options.task !== undefined ? { task: options.task } : {}),
+      cursor: previous === null ? null : await this.#readCursor(repo),
+    });
+
+    const stats: RefreshStats = {
+      files: tracked.length,
+      indexed: 0,
+      removed: 0,
+      chunks: 0,
+      capped: false,
+      timedOut: false,
+      unchanged: 0,
+      msPerChunk: null,
+      cursor: null,
+    };
     // Every path GIT still tracks, established up front.
     //
     // This used to be built incrementally as the loop visited files, and the
@@ -226,22 +613,33 @@ export class NucleusCodeIndex implements CodeSearch {
     // the cap therefore destroyed the tail of its own index on every refresh,
     // then re-embedded it next time: expensive, and search silently missed
     // files that were right there.
-    const tracked = new Set(paths);
+    const trackedSet = new Set(tracked);
+    const rate = { msPerChunk: EMBED_MS_PER_CHUNK_GUESS, measured: false };
+    const hashes = await this.#hashAll(executor, paths);
 
     for (const path of paths) {
       if (stats.chunks >= this.#maxChunks) {
         stats.capped = true;
         break;
       }
-      // Time is the other budget. On 2026-08-25 a 1 GB ollama behind the
-      // gateway answered one 235-token embedding at a time and four runs sat
-      // in this loop until the sandbox reaper took their containers. Stop
-      // between files, keep what is committed, and say so in the stats.
+      // Time is the other budget, and on the deployed embedder it is the one
+      // that binds: 1.0 s per chunk, measured 2026-08-26, against a 120 s cap.
       if (remaining() <= 0) {
         stats.capped = true;
         stats.timedOut = true;
         break;
       }
+
+      // The cheap skip first: a file whose content has not changed costs
+      // nothing, and after #hashAll it costs nothing to KNOW that either.
+      const known = ledger.get(path);
+      const preHash = hashes?.get(path);
+      if (known !== undefined && preHash !== undefined && known.hash === preHash) {
+        stats.unchanged += 1;
+        stats.cursor = path;
+        continue;
+      }
+
       let data: Uint8Array;
       try {
         data = await executor.getFile(path);
@@ -249,9 +647,12 @@ export class NucleusCodeIndex implements CodeSearch {
         continue; // unreadable (submodule stub, broken symlink) — skip
       }
       if (data.byteLength === 0 || data.byteLength > MAX_FILE_BYTES || isBinary(data)) continue;
-      const hash = sha256(data);
-      const known = ledger.get(path);
-      if (known !== undefined && known.hash === hash) continue;
+      const hash = preHash ?? sha256(data);
+      if (known !== undefined && known.hash === hash) {
+        stats.unchanged += 1;
+        stats.cursor = path;
+        continue;
+      }
 
       const text = new TextDecoder().decode(data);
       const chunks = chunkText(text);
@@ -264,48 +665,83 @@ export class NucleusCodeIndex implements CodeSearch {
       const room = Math.max(0, this.#maxChunks - stats.chunks);
       const budgeted = chunks.slice(0, room);
       if (budgeted.length < chunks.length) stats.capped = true;
-      for (let offset = 0; offset < budgeted.length; offset += EMBED_BATCH) {
+      let written = 0;
+      let ranOut = false;
+      for (let offset = 0; offset < budgeted.length; ) {
         if (remaining() <= 0) {
-          stats.capped = true;
-          stats.timedOut = true;
+          ranOut = true;
           break;
         }
-        const batch = budgeted.slice(offset, offset + EMBED_BATCH);
-        const { embeddings } = await withDeadline(
-          embedMany({
-            model: this.#embedder,
-            values: batch.map((c) => `${path}\n${c.text}`),
-          }),
+        const slice = budgeted.slice(offset, offset + EMBED_BATCH_MAX);
+        const { embeddings, timedOut } = await this.#embedBudgeted(
+          slice.map((c) => `${path}\n${c.text}`),
           remaining(),
-          `embedding ${path}`,
+          path,
+          rate,
         );
-        for (let i = 0; i < batch.length; i++) {
+        if (embeddings.length === 0) {
+          ranOut = ranOut || timedOut;
+          break;
+        }
+        for (let i = 0; i < embeddings.length; i++) {
           const vector = embeddings[i];
-          if (vector === undefined || vector.length === 0) continue;
+          const chunk = slice[i];
+          if (vector === undefined || vector.length === 0 || chunk === undefined) continue;
           await this.#ensureChunks(vector.length);
           const id = chunkId(repo, path, offset + i);
-          const meta = JSON.stringify({ repo, path, start: batch[i]!.start, end: batch[i]!.end, text: batch[i]!.text });
+          const meta = JSON.stringify({
+            repo,
+            path,
+            start: chunk.start,
+            end: chunk.end,
+            text: chunk.text,
+            // What a reader needs to know what they are looking at without
+            // reading the body. Absent on rows written before symbols existed,
+            // and the hit renderer treats absent as "no symbols found".
+            symbols: symbolsIn(chunk.text),
+          });
           await this.#db.query("DELETE FROM ship_code_chunks WHERE id = $1", [id]).catch(() => {});
           await this.#db.query("INSERT INTO ship_code_chunks (id, embedding, metadata) VALUES ($1, VECTOR($2), $3)", [
             id,
             vectorLiteral(vector),
             meta,
           ]);
+          written += 1;
+        }
+        offset += embeddings.length;
+        if (timedOut) {
+          ranOut = true;
+          break;
         }
       }
 
-      await this.#db.query("DELETE FROM ship_code_files WHERE repo = $1 AND path = $2", [repo, path]);
-      // Record what was actually indexed. Writing chunks.length while only
-      // storing `budgeted` would leave the ledger claiming chunks that do not
-      // exist, and #deleteFileChunks counts on this number being true.
-      await this.#db.query("INSERT INTO ship_code_files (repo, path, hash, chunks) VALUES ($1, $2, $3, $4)", [
-        repo,
-        path,
-        hash,
-        String(budgeted.length),
-      ]);
-      stats.indexed += 1;
-      stats.chunks += budgeted.length;
+      // A file that was only PARTLY embedded must record what it actually
+      // wrote, not what it wanted to. #deleteFileChunks counts on this number,
+      // and the next refresh's hash comparison must see a hash that matches
+      // the rows that exist — so a partial file keeps no ledger row at all and
+      // is re-attempted next time from scratch.
+      if (written > 0 && (written === budgeted.length || !ranOut)) {
+        await this.#db.query("DELETE FROM ship_code_files WHERE repo = $1 AND path = $2", [repo, path]);
+        await this.#db.query("INSERT INTO ship_code_files (repo, path, hash, chunks) VALUES ($1, $2, $3, $4)", [
+          repo,
+          path,
+          hash,
+          String(written),
+        ]);
+        stats.indexed += 1;
+        stats.cursor = path;
+      } else if (written > 0) {
+        // Partial: the rows exist but the file is not fully represented. Drop
+        // them rather than leave a ledger row claiming the file is done.
+        await this.#deleteFileChunks(repo, path, written);
+        written = 0;
+      }
+      stats.chunks += written;
+      if (ranOut) {
+        stats.timedOut = true;
+        stats.capped = true;
+        break;
+      }
       if (stats.capped) break;
     }
 
@@ -313,12 +749,14 @@ export class NucleusCodeIndex implements CodeSearch {
     // decided by what git tracks NOW, not by how far this refresh happened to
     // get before the cap.
     for (const [path, known] of ledger) {
-      if (tracked.has(path)) continue;
+      if (trackedSet.has(path)) continue;
       await this.#deleteFileChunks(repo, path, known.chunks);
       await this.#db.query("DELETE FROM ship_code_files WHERE repo = $1 AND path = $2", [repo, path]);
       stats.removed += 1;
     }
 
+    stats.msPerChunk = stats.chunks > 0 ? rate.msPerChunk : null;
+    await this.#writeCoverage(repo, stats, ledger.size);
     return stats;
   }
 
@@ -341,6 +779,7 @@ export class NucleusCodeIndex implements CodeSearch {
         start?: number;
         end?: number;
         text?: string;
+        symbols?: unknown;
       };
       return {
         path: String(meta.path ?? ""),
@@ -348,14 +787,49 @@ export class NucleusCodeIndex implements CodeSearch {
         end: Number(meta.end ?? 0),
         text: String(meta.text ?? ""),
         distance: Number(row.distance),
+        ...(Array.isArray(meta.symbols) && meta.symbols.length > 0 ? { symbols: meta.symbols.map(String) } : {}),
       };
     });
   }
 }
 
-/** The observation a ```search action produces. */
-export function formatSearchHits(query: string, hits: CodeSearchHit[]): string {
-  if (hits.length === 0) return `No indexed code matched "${query}".`;
-  const parts = hits.map((h) => `## ${h.path}:${h.start}-${h.end}\n${h.text}`);
-  return `Top ${hits.length} matches for "${query}":\n\n${parts.join("\n\n")}`;
+/**
+ * One line stating how much of the repo the index actually holds.
+ *
+ * This is the whole point of IndexCoverage. Without it, "No indexed code
+ * matched" reads as "that code is not in this repository" — and the system
+ * prompt was simultaneously telling the agent to PREFER search over grep. On
+ * the deployed index that combination was actively misleading: it held 12
+ * files of teploy-ship, so nearly every miss meant "never indexed", and the
+ * agent had no way to tell.
+ */
+export function coverageLine(coverage: IndexCoverage | null | undefined): string {
+  if (coverage === null || coverage === undefined) {
+    return "This repository has not been indexed, so a miss here means nothing. Use grep/rg via ```bash.";
+  }
+  if (coverage.trackedFiles <= 0) {
+    return "The index holds no files for this repository. Use grep/rg via ```bash.";
+  }
+  const pct = Math.round((coverage.indexedFiles / coverage.trackedFiles) * 100);
+  const scope = `${coverage.indexedFiles} of ${coverage.trackedFiles} files (${pct}%)`;
+  return coverage.partial || pct < 95
+    ? `Index coverage: ${scope} of this repository. A miss may simply mean "not indexed" — confirm with grep/rg via \`\`\`bash before concluding something does not exist.`
+    : `Index coverage: ${scope} of this repository.`;
+}
+
+/**
+ * The observation a ```search action produces.
+ *
+ * Coverage is stated on BOTH the hit and the miss path, on purpose. On a miss
+ * it is the difference between a fact and a false one; on a hit it warns that
+ * a better match may exist in the part of the tree that was never indexed.
+ */
+export function formatSearchHits(query: string, hits: CodeSearchHit[], coverage?: IndexCoverage | null): string {
+  const note = coverage === undefined ? "" : `\n\n${coverageLine(coverage)}`;
+  if (hits.length === 0) return `No indexed code matched "${query}".${note}`;
+  const parts = hits.map((h) => {
+    const symbols = h.symbols !== undefined && h.symbols.length > 0 ? `  (${h.symbols.join(", ")})` : "";
+    return `## ${h.path}:${h.start}-${h.end}${symbols}\n${h.text}`;
+  });
+  return `Top ${hits.length} matches for "${query}":\n\n${parts.join("\n\n")}${note}`;
 }

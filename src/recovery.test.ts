@@ -186,7 +186,7 @@ test("the settle nudge fires at most once per run, even after real progress in b
 
 test("TS-056: loop detection covers edits and ignores cosmetic whitespace", () => {
   const tracker = new RecoveryTracker({ loopThreshold: 2, failureThreshold: 99, maxNudges: 3, noProgressThreshold: 99 });
-  const edit: Action = { kind: "edit", file: "a.ts", search: "const x = 1;", replace: "const x = 2;" };
+  const edit: Action = { kind: "edit", edits: [{ file: "a.ts", search: "const x = 1;", replace: "const x = 2;", all: false }] };
   assert.equal(tracker.observe(edit, 0).kind, "ok");
   // The same edit again — previously invisible to the tracker entirely.
   assert.equal(tracker.observe({ ...edit }, 0).kind, "nudge");

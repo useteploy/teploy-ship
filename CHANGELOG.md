@@ -18,6 +18,28 @@ All notable changes to Teploy Ship are recorded here.
   provider-specific rate still beats a bare one.
 
 ### Added
+- **Pull request reviews close the loop.** Only `issue_comment` was handled, so
+  "Request changes" with five inline comments produced *nothing at all* —
+  `pull_request_review` and `pull_request_review_comment` fell out of both
+  receivers' catch-all. Both events are now mapped, on GitHub and on
+  Forgejo/Gitea. Three things came with that:
+  - **Ship's own PRs are followable without a human labelling them.** The gate
+    was a `ship` label on the PR and nothing in Ship ever applied one, so the
+    follow-up loop was dead on exactly the pull requests Ship opens. A head
+    branch named `ship/…` **in the base repository** now satisfies it too. The
+    same-repository half is load-bearing: anyone can open a fork PR from a
+    branch called `ship/x`, and the gate exists so that a commenter cannot
+    drive an agent run holding the git token from their own comment text.
+  - **The task carries the location, not just the complaint.** File, line, diff
+    side and the anchoring diff hunk travel with an inline comment; previously
+    only the comment body did, so the agent was told "this is wrong" with no
+    idea where.
+  - **A batched review is one run, not N+1.** A review with three inline
+    comments is four webhook deliveries; they now share one dedupe key (the
+    review id, or the PR head SHA on Forgejo, which sends no review id), so
+    they collapse into a single task, a single agent run and a single push.
+    `listPrReviewComments` reads the whole review back off either forge, since
+    coalescing means the later deliveries' bodies are dropped at intake.
 - **`SHIP_QUOTA_MODEL_PREFIXES`: models billed as a flat plan, not per
   token.** The external-harness path already recorded a claude-code run on an
   OAuth token as `priced: false` — counted, not priced — but the native loop

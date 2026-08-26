@@ -198,7 +198,9 @@ function actionSignature(action: Action): string | null {
     case "python":
       return `${action.kind}:${norm(action.code)}`;
     case "edit":
-      return `edit:${action.file}:${norm(action.search)}`;
+      // Every hunk, so two different multi-file edits are not mistaken for the
+      // same repeated action just because they start in the same file.
+      return `edit:${action.edits.map((e) => `${e.file}:${norm(e.search)}`).join("|")}`;
     case "create":
       return `create:${action.file}:${norm(action.content)}`;
     case "search":

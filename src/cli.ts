@@ -125,7 +125,10 @@ Usage:
       whenever --sandbox is used; plain --sandbox defaults to "none".
   teploy-ship worker                  resident worker: picks up due nucleus-store runs
       [--interval seconds]            poll interval (default 5)
-      [--max-concurrent N]            cap simultaneously-running auto runs (default 3, SHIP_MAX_CONCURRENT_RUNS)
+      [--max-concurrent N]            OVERRIDE the ceiling Ship derives from the box
+                                      (also SHIP_MAX_CONCURRENT_RUNS). Unset, the worker
+                                      measures cpu/memory/disk and picks its own, saying
+                                      which limit binds — see the Fleet page.
       [--daily-budget USD]            per-source daily spend cap (default 10, SHIP_DAILY_BUDGET_USD; <=0 off)
       run in a sandbox (needed for repo tasks whose tests want tools the
       worker image lacks): SHIP_SANDBOX_URL + SHIP_SANDBOX_TOKEN

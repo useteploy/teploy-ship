@@ -609,3 +609,165 @@ Requirements:
 - Make the requested change, then run the repository's tests to prove nothing broke.
 - Your deliverable is the EDITED WORKING TREE. Do not commit, push, or touch git config. Never revert the branch's existing work unless the feedback explicitly asks for it.`;
 }
+
+/**
+ * C3 — one inline review comment, as Ship reads it back off the forge.
+ *
+ * `line` is the position in the CURRENT diff; a comment whose anchor has since
+ * been outdated by a push keeps only `original_line`, which is why both are
+ * folded into one field here rather than made the caller's problem.
+ */
+export interface PrReviewComment {
+  id: number;
+  /** The review this was submitted as part of, when the forge says so. */
+  reviewId?: number;
+  path?: string;
+  line?: number;
+  /** LEFT = the pre-change side of the diff, RIGHT = the post-change side. */
+  side?: string;
+  diffHunk?: string;
+  body: string;
+  user?: string;
+}
+
+/** Bound on how many reviews the Forgejo walk will open comments for, newest first. */
+const FORGEJO_REVIEW_PAGE = 10;
+
+/**
+ * Read the inline review comments on a pull request.
+ *
+ * Why this exists: a batched review arrives as N+1 webhook deliveries, and
+ * intake COALESCES them onto one task (reviewTaskFromReviewEvent in
+ * intake-sources.ts) so the reviewer gets one run and one push instead of N+1.
+ * Coalescing has a cost: IntakeStore.propose returns the FIRST task for a
+ * dedupe key unchanged (intake.ts:136), so the later deliveries' bodies are
+ * dropped on the floor. Reading the review back here is the only way the run
+ * can see the whole set it is supposed to address.
+ *
+ * The two forges disagree on the route. GitHub exposes every inline comment on
+ * a PR flat at .../pulls/{n}/comments. Gitea/Forgejo has no such endpoint — its
+ * inline comments hang off a review (.../pulls/{n}/reviews, then
+ * .../reviews/{id}/comments) — so this walks the most recent reviews.
+ *
+ * Never throws. Review context is advisory: a follow-up run that dies because
+ * the comments API rate-limited is worse than one that addresses only the
+ * comment it was handed.
+ */
+export async function listPrReviewComments(
+  ref: RepoRef,
+  token: string,
+  pr: number,
+  options: { reviewId?: number; max?: number; fetchImpl?: typeof fetch } = {},
+): Promise<PrReviewComment[]> {
+  const doFetch = options.fetchImpl ?? fetch;
+  const max = options.max ?? 50;
+  const headers = {
+    authorization: ref.kind === "github" ? `Bearer ${token}` : `token ${token}`,
+    ...(ref.kind === "github" ? { accept: "application/vnd.github+json" } : {}),
+  };
+  const getJson = async (url: string): Promise<unknown> => {
+    try {
+      const response = await doFetch(url, { headers });
+      if (!response.ok) return null;
+      return await response.json();
+    } catch {
+      return null;
+    }
+  };
+
+  const raw: Array<Record<string, unknown>> = [];
+  if (ref.kind === "github") {
+    const data = await getJson(
+      `https://api.github.com/repos/${ref.owner}/${ref.repo}/pulls/${pr}/comments?per_page=100`,
+    );
+    if (Array.isArray(data)) raw.push(...(data as Array<Record<string, unknown>>));
+  } else {
+    const base = `${ref.base}/api/v1/repos/${ref.owner}/${ref.repo}/pulls/${pr}`;
+    const reviews = await getJson(`${base}/reviews`);
+    if (Array.isArray(reviews)) {
+      const ids = (reviews as Array<Record<string, unknown>>)
+        .map((review) => review["id"])
+        .filter((id): id is number => typeof id === "number")
+        // Newest first, then bounded: a long-lived PR can carry dozens of
+        // reviews and each one is its own round trip.
+        .reverse()
+        .slice(0, FORGEJO_REVIEW_PAGE);
+      for (const id of ids) {
+        if (options.reviewId !== undefined && options.reviewId !== id) continue;
+        const comments = await getJson(`${base}/reviews/${id}/comments`);
+        if (!Array.isArray(comments)) continue;
+        for (const comment of comments as Array<Record<string, unknown>>) {
+          raw.push({ pull_request_review_id: id, ...comment });
+        }
+      }
+    }
+  }
+
+  const num = (value: unknown): number | undefined => (typeof value === "number" ? value : undefined);
+  const str = (value: unknown): string | undefined =>
+    typeof value === "string" && value !== "" ? value : undefined;
+
+  const out: PrReviewComment[] = [];
+  for (const item of raw) {
+    const body = str(item["body"]) ?? "";
+    // Ship's own notes are not feedback for Ship — same loop guard the
+    // receivers apply to an incoming delivery.
+    if (body.includes(SHIP_COMMENT_MARKER)) continue;
+    const reviewId = num(item["pull_request_review_id"]);
+    if (options.reviewId !== undefined && reviewId !== undefined && reviewId !== options.reviewId) continue;
+    const id = num(item["id"]);
+    if (id === undefined) continue;
+    const user = item["user"];
+    const comment: PrReviewComment = { id, body };
+    if (reviewId !== undefined) comment.reviewId = reviewId;
+    const path = str(item["path"]);
+    if (path !== undefined) comment.path = path;
+    const line = num(item["line"]) ?? num(item["original_line"]) ?? num(item["start_line"]);
+    if (line !== undefined) comment.line = line;
+    const side = str(item["side"]);
+    if (side !== undefined) comment.side = side;
+    const hunk = str(item["diff_hunk"]);
+    if (hunk !== undefined) comment.diffHunk = hunk;
+    const handle =
+      typeof user === "object" && user !== null
+        ? (str((user as Record<string, unknown>)["login"]) ?? str((user as Record<string, unknown>)["username"]))
+        : undefined;
+    if (handle !== undefined) comment.user = handle;
+    out.push(comment);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+/** Cap on one comment's body and on one diff hunk in the assembled context. */
+const REVIEW_CONTEXT_BODY_MAX = 2_000;
+const REVIEW_CONTEXT_HUNK_MAX = 1_200;
+
+/**
+ * Render read-back review comments as prompt context.
+ *
+ * Deliberately the same shape the intake builder produces for the ONE comment
+ * that created the task (reviewDetail in intake-sources.ts), so a run does not
+ * see the same review described two different ways. Returns "" when there is
+ * nothing to say, so a caller can append it unconditionally.
+ *
+ * The caller passes the result as reviewPrompt's `context`, which is NOT inside
+ * frameUntrusted — so keep this to labelled quotations of the comment text and
+ * never phrase it as an instruction to the agent. durable.ts's caller wraps the
+ * result in frameUntrusted for the same reason; do not remove that.
+ */
+export function formatReviewComments(comments: PrReviewComment[]): string {
+  if (comments.length === 0) return "";
+  const blocks = comments.map((comment) => {
+    const where =
+      comment.path === undefined
+        ? "(no file anchor)"
+        : `${comment.path}${comment.line !== undefined ? `, line ${comment.line}` : ""}${comment.side !== undefined ? ` (${comment.side} side of the diff)` : ""}`;
+    const hunk =
+      comment.diffHunk !== undefined
+        ? `\n${truncateMiddle(comment.diffHunk, REVIEW_CONTEXT_HUNK_MAX)}`
+        : "";
+    return `- ${where}${comment.user !== undefined ? ` — ${comment.user}` : ""}:${hunk}\n${truncateMiddle(comment.body, REVIEW_CONTEXT_BODY_MAX)}`;
+  });
+  return `All ${comments.length} inline review comment(s) currently open on this pull request, as data:\n\n${blocks.join("\n\n")}`;
+}

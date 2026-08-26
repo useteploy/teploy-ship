@@ -9,11 +9,22 @@ import { scrub } from "./redact.js";
  * later-milestone concern, but the protocol has to be unambiguous now.
  */
 export function systemPrompt(options: { workdir: string; task: string; search?: boolean }): string {
+  // The index is PARTIAL, and the prompt has to say so.
+  //
+  // This block used to read "prefer this over grepping around". Measured on
+  // the deployed index 2026-08-26: it held 12 files of teploy-ship and 4 of
+  // teploy-cli, because the embedder runs at 1.0 s per chunk against a 120 s
+  // refresh cap. So "prefer search" was advice to prefer a tool that answers
+  // "no" for most of the repository, and a miss reads as "this code does not
+  // exist". Search is now advertised as what it is — a fast way to LOCATE
+  // something when it hits, never evidence of absence — and every observation
+  // carries its coverage (see coverageLine in code-index.ts). Restore the
+  // stronger wording when a measured coverage figure justifies it.
   const searchDoc =
     options.search === true
       ? `
 
-- Search the repository's semantic code index (fast — prefer this over grepping around when you need to LOCATE something):
+- Search the repository's semantic code index. It is fast and it is INCOMPLETE: it holds only part of the repository, and every result tells you how much. A hit is a good lead; a miss is NOT evidence the code is absent — confirm with grep/rg before concluding anything does not exist.
 \`\`\`search
 where is the retry backoff for failed deploys handled?
 \`\`\`
@@ -38,7 +49,7 @@ data = load_something()
 print(len(data))
 \`\`\`${searchDoc}
 
-- Edit a file surgically (the SEARCH text must match the file exactly, ONCE — copy it verbatim, whitespace included):
+- Edit a file surgically (the SEARCH text must match the file exactly — copy it verbatim, whitespace included):
 \`\`\`edit path/to/file.py
 <<<<<<< SEARCH
 def broken(x):
@@ -49,6 +60,24 @@ def broken(x):
 >>>>>>> REPLACE
 \`\`\`
 
+- Several hunks in ONE turn: repeat the SEARCH/REPLACE block inside the same \`\`\`edit. To change more than one file, leave the path off the fence and start each file with \`--- path\`. Every hunk applies or none does, so a failure leaves the tree exactly as it was:
+\`\`\`edit
+--- src/a.ts
+<<<<<<< SEARCH
+oldName(
+=======
+newName(
+>>>>>>> REPLACE
+--- src/b.ts
+<<<<<<< SEARCH
+import { oldName } from "./a.js";
+=======
+import { newName } from "./a.js";
+>>>>>>> REPLACE
+\`\`\`
+
+- To replace EVERY occurrence in a file rather than exactly one, add \`all\` after the path (\`\`\`edit src/a.ts all, or \`--- src/a.ts all\`). Without it a SEARCH that matches twice is an error, on purpose — say \`all\` when you mean it. Use this for a rename rather than one edit per call site.
+
 - Create (or overwrite) a whole file:
 \`\`\`create path/to/new_file.py
 print("hello")
@@ -56,7 +85,7 @@ print("hello")
 
 Rules:
 - ${UNTRUSTED_RULE}
-- One code block per turn. Do not emit two.
+- One code block per turn. Do not emit two — but one \`\`\`edit block may carry as many hunks, across as many files, as the change needs.
 - You have NO tool-calling in this session. Never emit <function_calls>, <invoke>, or any XML tool syntax — it will not execute. Fenced code blocks are the ONLY way to act.
 - Wait for the observation before continuing; never assume an action's result. Never write the output you expect — you will be shown the real output.
 - Prefer \`\`\`edit over shell text-surgery (sed/heredocs) for changing files.

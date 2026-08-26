@@ -38,6 +38,34 @@ export async function loader({ request }: { request: Request }): Promise<FleetDa
   return { view: "workers", workers, store: runtime.kind };
 }
 
+/** MB as a number an operator reads at a glance: GB above a gigabyte, MB below. */
+function size(mb: number): string {
+  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`;
+}
+
+/**
+ * Why this worker has the ceiling it has. The whole point of B1 is that the
+ * number is measured rather than configured, so the page has to say which
+ * measurement produced it — otherwise a silently-derived ceiling is worse than
+ * a configured one.
+ */
+function bindingNote(w: FleetWorker): string {
+  const slots = `${w.maxConcurrent} slot${w.maxConcurrent === 1 ? "" : "s"}`;
+  switch (w.capacityBinding) {
+    case "override":
+      return `${slots} — set by hand (SHIP_MAX_CONCURRENT_RUNS), not measured`;
+    case "cpu":
+      return `${slots} — cpu binding${w.cpus !== undefined ? ` (${w.cpus} cores)` : ""}`;
+    case "memory":
+      return `${slots} — memory binding${w.totalMemMB !== undefined ? ` (${size(w.totalMemMB)} on the box)` : ""}`;
+    case "disk":
+      return `${slots} — disk binding${w.diskFreeMB !== undefined ? ` (${size(w.diskFreeMB)} free on the docker root)` : ""}`;
+    default:
+      // A worker on an older build: it reports a ceiling but not what set it.
+      return `${slots} — ceiling not reported`;
+  }
+}
+
 function ago(ms: number): string {
   if (!Number.isFinite(ms)) return "never";
   const s = Math.round(ms / 1000);
@@ -55,14 +83,20 @@ export default function Fleet({ data }: { data: FleetData | SpendData }) {
   const activeRuns = online.reduce((n, w) => n + w.activeRuns, 0);
   const capacity = online.reduce((n, w) => n + w.maxConcurrent, 0);
   const hosts = new Set(online.map((w) => w.host)).size;
+  const held = online.filter((w) => w.held !== undefined);
 
   return (
     <>
       <h1 class="page">Fleet</h1>
       <SubNav items={FLEET_VIEWS} current="workers" />
       <p class="meta">
-        Workers claim runs from one shared queue via leases, so many can run at once across servers. A worker marked
-        <b> held</b> has slots but is refusing launches until its host has room again (SHIP_MIN_FREE_MB / SHIP_MAX_LOAD_PER_CPU). · store: {data.store}
+        Workers claim runs from one shared queue via leases, so many can run at once across servers. Each one <b>measures
+        its own box</b> — cores, memory, and free space and inodes on the docker root — and derives its slot count from
+        that every 15 seconds, so adding a VM raises the fleet's capacity and a squeeze lowers it with no knob touched.
+        The binding constraint is named on each card. A worker marked <b>held</b> has slots but is refusing launches
+        until its host has room again; its due runs wait in the queue and go the moment it clears — nothing is dropped.
+        The env knobs (SHIP_MAX_CONCURRENT_RUNS, SHIP_MIN_FREE_MB, SHIP_MAX_LOAD_PER_CPU, SHIP_MIN_FREE_DISK_MB,
+        SHIP_MAX_INODE_USED_PCT) are overrides on top, not the mechanism. · store: {data.store}
         {data.store === "file" && " · file store runs no worker daemon — nothing to show here"}
       </p>
 
@@ -71,7 +105,12 @@ export default function Fleet({ data }: { data: FleetData | SpendData }) {
           <span><b>{online.length}</b> <span class="meta">worker{online.length === 1 ? "" : "s"} online</span></span>
           <span><b>{hosts}</b> <span class="meta">host{hosts === 1 ? "" : "s"}</span></span>
           <span><b>{activeRuns}</b> <span class="meta">runs active</span></span>
-          <span><b>{activeRuns}/{capacity}</b> <span class="meta">capacity</span></span>
+          <span><b>{activeRuns}/{capacity}</b> <span class="meta">capacity, measured from the boxes</span></span>
+          {held.length > 0 && (
+            <span>
+              <b>{held.length}</b> <span class="meta">held ({[...new Set(held.map((w) => w.held))].join(", ")})</span>
+            </span>
+          )}
         </div>
       )}
 
@@ -88,8 +127,20 @@ export default function Fleet({ data }: { data: FleetData | SpendData }) {
                 <span style="font-weight:600">{w.host}</span>
                 <span class="chip">{w.sandbox === "host" ? "runs on host" : "sandbox"}</span>
                 {w.held !== undefined && <span class="status waiting">held: {w.held}</span>}
+                {w.inodeUsedPct !== undefined && w.inodeUsedPct >= 90 && (
+                  <span class="status waiting">inodes {w.inodeUsedPct}%</span>
+                )}
                 <span style="flex:1" />
-                {w.freeMemMB !== undefined && <span class="meta">{w.freeMemMB} MB free</span>}
+                {w.diskFreeMB !== undefined && (
+                  <span class="meta">
+                    {size(w.diskFreeMB)} disk{w.diskUsedPct !== undefined ? ` (${w.diskUsedPct}% used)` : ""}
+                  </span>
+                )}
+                {w.freeMemMB !== undefined && (
+                  <span class="meta">
+                    {size(w.freeMemMB)} free{w.totalMemMB !== undefined ? ` / ${size(w.totalMemMB)}` : ""}
+                  </span>
+                )}
                 {w.load1 !== undefined && <span class="meta">load {w.load1}{w.cpus !== undefined ? ` / ${w.cpus} cpu` : ""}</span>}
                 <span class="meta">{w.activeRuns}/{w.maxConcurrent} slots</span>
                 <span class="meta">seen {ago(w.ageMs)}</span>
@@ -98,7 +149,7 @@ export default function Fleet({ data }: { data: FleetData | SpendData }) {
                 <div style={`height:100%;width:${pct}%;background:${full ? "var(--yellow)" : "var(--green)"}`} />
               </div>
               <div class="meta" style="margin-top:8px;font-size:12px">
-                {w.owner}{w.sandbox !== "host" ? ` · ${w.sandbox}` : ""}
+                {bindingNote(w)} · {w.owner}{w.sandbox !== "host" ? ` · ${w.sandbox}` : ""}
               </div>
             </div>
           );

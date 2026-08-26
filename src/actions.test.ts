@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { parseAction } from "./actions.js";
+import { describeAction, parseAction } from "./actions.js";
 
 test("parses a bash action", () => {
   assert.deepEqual(parseAction("Let me list files.\n```bash\nls -la\n```"), { kind: "bash", code: "ls -la\n" });
@@ -127,4 +127,104 @@ test("TS-055: the XML rescue picks the command parameter by NAME, not by positio
   // No recognisable command parameter at all is a correction, not a guess.
   const vague = '<invoke name="bash"><parameter name="notes">something</parameter></invoke>';
   assert.equal(parseAction(vague).kind, "invalid");
+});
+
+// --- C2: the change-size ceiling -------------------------------------------
+//
+// The loop is one action per turn, and an `edit` action used to carry exactly
+// one hunk whose SEARCH had to be globally unique in the file. So a rename
+// across 30 call sites cost 30 of the run's 40 turns and could not finish —
+// while the publish gate's own caps are 200 files and 20k lines. The ceiling
+// was entirely in the action format.
+
+test("one edit block can carry several hunks for the same file", () => {
+  const action = parseAction(
+    "```edit src/a.ts\n" +
+      "<<<<<<< SEARCH\nconst a = 1;\n=======\nconst a = 2;\n>>>>>>> REPLACE\n" +
+      "<<<<<<< SEARCH\nconst b = 1;\n=======\nconst b = 2;\n>>>>>>> REPLACE\n" +
+      "```",
+  );
+  assert.equal(action.kind, "edit");
+  assert.equal(action.kind === "edit" ? action.edits.length : 0, 2);
+  assert.deepEqual(
+    action.kind === "edit" ? action.edits.map((e) => e.file) : [],
+    ["src/a.ts", "src/a.ts"],
+  );
+});
+
+test("one edit block can carry several FILES, via --- headers", () => {
+  const action = parseAction(
+    "```edit\n" +
+      "--- src/a.ts\n<<<<<<< SEARCH\noldName(\n=======\nnewName(\n>>>>>>> REPLACE\n" +
+      "--- src/b.ts\n<<<<<<< SEARCH\noldName(\n=======\nnewName(\n>>>>>>> REPLACE\n" +
+      "```",
+  );
+  assert.equal(action.kind, "edit");
+  const edits = action.kind === "edit" ? action.edits : [];
+  assert.deepEqual(edits.map((e) => e.file), ["src/a.ts", "src/b.ts"]);
+  assert.deepEqual(edits.map((e) => e.search), ["oldName(\n", "oldName(\n"]);
+});
+
+test("the single-file form is unchanged, so every existing transcript still parses", () => {
+  const action = parseAction("```edit path/to/file.py\n<<<<<<< SEARCH\nreturn x - 1\n=======\nreturn x + 1\n>>>>>>> REPLACE\n```");
+  assert.deepEqual(action, {
+    kind: "edit",
+    edits: [{ file: "path/to/file.py", search: "return x - 1\n", replace: "return x + 1\n", all: false }],
+  });
+});
+
+test("`all` is opt-in and parsed off the fence and off a --- header", () => {
+  const fence = parseAction("```edit src/a.ts all\n<<<<<<< SEARCH\nold\n=======\nnew\n>>>>>>> REPLACE\n```");
+  assert.equal(fence.kind === "edit" ? fence.edits[0]?.all : null, true);
+  assert.equal(fence.kind === "edit" ? fence.edits[0]?.file : null, "src/a.ts");
+
+  const header = parseAction("```edit\n--- src/a.ts all\n<<<<<<< SEARCH\nold\n=======\nnew\n>>>>>>> REPLACE\n```");
+  assert.equal(header.kind === "edit" ? header.edits[0]?.all : null, true);
+  assert.equal(header.kind === "edit" ? header.edits[0]?.file : null, "src/a.ts");
+
+  const plain = parseAction("```edit src/a.ts\n<<<<<<< SEARCH\nold\n=======\nnew\n>>>>>>> REPLACE\n```");
+  assert.equal(plain.kind === "edit" ? plain.edits[0]?.all : null, false, "never on by default");
+});
+
+test("path validation still binds every file in a multi-file edit", () => {
+  const escape = parseAction(
+    "```edit\n--- src/a.ts\n<<<<<<< SEARCH\na\n=======\nb\n>>>>>>> REPLACE\n" +
+      "--- ../../etc/passwd\n<<<<<<< SEARCH\na\n=======\nb\n>>>>>>> REPLACE\n```",
+  );
+  assert.equal(escape.kind, "invalid");
+  assert.match(escape.kind === "invalid" ? escape.message : "", /'\.\.' is not allowed/);
+
+  const git = parseAction("```edit\n--- .git/config\n<<<<<<< SEARCH\na\n=======\nb\n>>>>>>> REPLACE\n```");
+  assert.equal(git.kind, "invalid");
+});
+
+test("an edit block with no hunk is an actionable error, not a silent no-op", () => {
+  const empty = parseAction("```edit src/a.ts\njust some prose\n```");
+  assert.equal(empty.kind, "invalid");
+  assert.match(empty.kind === "invalid" ? empty.message : "", /SEARCH/);
+  assert.match(empty.kind === "invalid" ? empty.message : "", /more than one file/, "and it teaches the way out");
+
+  const headerOnly = parseAction("```edit\n--- src/a.ts\nnothing here\n```");
+  assert.equal(headerOnly.kind, "invalid");
+  assert.match(headerOnly.kind === "invalid" ? headerOnly.message : "", /no SEARCH\/REPLACE hunk under "--- src\/a\.ts"/);
+});
+
+test("a bare edit fence with no path and no headers still says what it needs", () => {
+  const bare = parseAction("```edit\n<<<<<<< SEARCH\na\n=======\nb\n>>>>>>> REPLACE\n```");
+  assert.equal(bare.kind, "invalid");
+  assert.match(bare.kind === "invalid" ? bare.message : "", /needs a file path/);
+});
+
+test("describeAction summarises a multi-file edit without dumping it", () => {
+  const one = describeAction({ kind: "edit", edits: [{ file: "a.ts", search: "x", replace: "y", all: false }] });
+  assert.equal(one, "edit: a.ts");
+  const many = describeAction({
+    kind: "edit",
+    edits: [
+      { file: "a.ts", search: "x", replace: "y", all: false },
+      { file: "b.ts", search: "x", replace: "y", all: false },
+      { file: "b.ts", search: "p", replace: "q", all: false },
+    ],
+  });
+  assert.equal(many, "edit: 2 files (3 hunks)");
 });

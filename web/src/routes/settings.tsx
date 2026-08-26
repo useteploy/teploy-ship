@@ -122,13 +122,25 @@ export async function loader({ request }: { request: Request }): Promise<Setting
         ],
       },
       {
-        title: "Budget & concurrency",
+        title: "Budget & capacity",
         rows: [
           num("SHIP_DAILY_BUDGET_USD", "$10"),
-          num("SHIP_MAX_CONCURRENT_RUNS", "3"),
           num("SHIP_DAILY_AUTO_LIMIT", "10"),
-          num("SHIP_MIN_FREE_MB", "600"),
-          num("SHIP_MAX_LOAD_PER_CPU", "1.5"),
+          {
+            ...value("SHIP_MAX_CONCURRENT_RUNS", "not set — derived from the box"),
+            hint: "an OVERRIDE. Unset, each worker measures its cores, memory and docker-root free space and derives its own ceiling every 15s (Fleet shows the binding constraint). Set, this number wins outright and the measurement is ignored.",
+          },
+          {
+            ...num("SHIP_MIN_FREE_MB", "600"),
+            hint: "hold launches below this much MemAvailable; due runs wait, nothing is dropped. 0 disables",
+          },
+          { ...num("SHIP_MAX_LOAD_PER_CPU", "1.5"), hint: "hold launches above this 1-minute load per core. 0 disables" },
+          {
+            ...num("SHIP_MIN_FREE_DISK_MB", "2048"),
+            hint: "hold launches below this much free space on the docker root — a full disk breaks the daemon for every tenant on the box. 0 disables",
+          },
+          { ...num("SHIP_MAX_INODE_USED_PCT", "95"), hint: "hold launches above this share of inodes used; caches of tiny files exhaust these before bytes. 0 disables" },
+          { ...value("SHIP_DISK_PATH", "not set — /var/lib/docker, then /"), hint: "which mount to measure, when docker's root is not on either" },
         ],
       },
       {

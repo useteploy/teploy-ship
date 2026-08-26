@@ -1,5 +1,6 @@
 import { join } from "node:path";
 
+import type { CapacityBinding, HostHold } from "./host-load.js";
 import type { NucleusPgwire } from "./nucleus-pgwire.js";
 import { readJsonFile, updateJsonFile } from "./file-store.js";
 import { upsertByKey } from "./upsert.js";
@@ -26,7 +27,19 @@ export interface WorkerInfo {
   load1?: number;
   cpus?: number;
   /** Why this worker is refusing launches right now, if it is. */
-  held?: "memory" | "load";
+  held?: HostHold;
+  /** Sensed capacity at the last beat (B1). Absent on heartbeats from older workers. */
+  totalMemMB?: number;
+  /** Docker-root filesystem. Absent when the worker could not statfs it at all. */
+  diskFreeMB?: number;
+  diskUsedPct?: number;
+  inodeUsedPct?: number;
+  /**
+   * Which term produced `maxConcurrent`. "override" means an operator set
+   * SHIP_MAX_CONCURRENT_RUNS / --max-concurrent and the sensed terms were
+   * ignored; anything else names the resource the box is shortest of.
+   */
+  capacityBinding?: CapacityBinding;
 }
 
 export interface FleetStore {
@@ -176,6 +189,7 @@ export class NucleusFleetStore implements FleetStore {
   #db: NucleusPgwire;
   #ready: Promise<void> | null = null;
   #readyLoad: Promise<void> | null = null;
+  #readyCapacity: Promise<void> | null = null;
 
   constructor(db: NucleusPgwire) {
     this.#db = db;
@@ -236,6 +250,54 @@ export class NucleusFleetStore implements FleetStore {
     });
   }
 
+  // A THIRD sibling table, for the same reason ship_fleet_load is the second:
+  // ship_fleet_load is itself populated on deployed boxes now, so its columns
+  // are as fixed as ship_fleet's. Sensed capacity (B1) therefore gets its own
+  // fresh table whose columns exist from CREATE. Same owner key, same
+  // best-effort read, same write-after-liveness ordering.
+  #ensureCapacity(): Promise<void> {
+    this.#readyCapacity ??= this.#db
+      .query(
+        "CREATE TABLE IF NOT EXISTS ship_fleet_capacity (owner TEXT, total_mem_mb TEXT, disk_free_mb TEXT, disk_used_pct TEXT, inode_used_pct TEXT, binding TEXT)",
+      )
+      .then(() => undefined)
+      .catch((error: unknown) => {
+        this.#readyCapacity = null;
+        throw error;
+      });
+    return this.#readyCapacity;
+  }
+
+  async #heartbeatCapacity(info: WorkerInfo): Promise<void> {
+    if (
+      info.totalMemMB === undefined &&
+      info.diskFreeMB === undefined &&
+      info.diskUsedPct === undefined &&
+      info.inodeUsedPct === undefined &&
+      info.capacityBinding === undefined
+    ) {
+      return;
+    }
+    await this.#ensureCapacity();
+    const txt = (n: number | undefined): string | null => (n !== undefined ? String(n) : null);
+    const vals = [txt(info.totalMemMB), txt(info.diskFreeMB), txt(info.diskUsedPct), txt(info.inodeUsedPct), info.capacityBinding ?? null];
+    await upsertByKey(this.#db, {
+      table: "ship_fleet_capacity",
+      keyColumn: "owner",
+      key: info.owner,
+      update: () =>
+        this.#db.query(
+          "UPDATE ship_fleet_capacity SET total_mem_mb = $1, disk_free_mb = $2, disk_used_pct = $3, inode_used_pct = $4, binding = $5 WHERE owner = $6",
+          [...vals, info.owner],
+        ),
+      insert: () =>
+        this.#db.query(
+          "INSERT INTO ship_fleet_capacity (total_mem_mb, disk_free_mb, disk_used_pct, inode_used_pct, binding, owner) VALUES ($1, $2, $3, $4, $5, $6)",
+          [...vals, info.owner],
+        ),
+    });
+  }
+
   async heartbeat(info: WorkerInfo): Promise<void> {
     await this.#ensure();
     await this.#heartbeatBase(info);
@@ -243,6 +305,7 @@ export class NucleusFleetStore implements FleetStore {
     // Nucleus catalog write failing on CREATE TABLE) still leaves the worker's
     // liveness fresh; the error propagates to the worker's log.
     await this.#heartbeatLoad(info);
+    await this.#heartbeatCapacity(info);
   }
 
   async #heartbeatBase(info: WorkerInfo): Promise<void> {
@@ -283,15 +346,26 @@ export class NucleusFleetStore implements FleetStore {
     } catch {
       loads = [];
     }
+    let caps: Array<Record<string, unknown>> = [];
+    try {
+      await this.#ensureCapacity();
+      caps = await this.#db.query("SELECT owner, total_mem_mb, disk_free_mb, disk_used_pct, inode_used_pct, binding FROM ship_fleet_capacity");
+    } catch {
+      caps = [];
+    }
     const loadOf = new Map(loads.map((l) => [String(l.owner), l]));
+    const capOf = new Map(caps.map((c) => [String(c.owner), c]));
     const num = (v: unknown): number | undefined => {
       if (v === null || v === undefined || v === "") return undefined;
       const n = Number(v);
       return Number.isFinite(n) ? n : undefined;
     };
+    const BINDINGS: ReadonlySet<string> = new Set(["override", "cpu", "memory", "disk"]);
     return rows.map((r) => {
       const l = loadOf.get(String(r.owner));
-      const held = l?.held === "memory" || l?.held === "load" ? l.held : undefined;
+      const c = capOf.get(String(r.owner));
+      const held = l?.held === "memory" || l?.held === "load" || l?.held === "disk" ? l.held : undefined;
+      const binding = typeof c?.binding === "string" && BINDINGS.has(c.binding) ? (c.binding as CapacityBinding) : undefined;
       return {
         owner: String(r.owner),
         host: String(r.host),
@@ -304,6 +378,11 @@ export class NucleusFleetStore implements FleetStore {
         ...(num(l?.load1) !== undefined ? { load1: num(l?.load1) } : {}),
         ...(num(l?.cpus) !== undefined ? { cpus: num(l?.cpus) } : {}),
         ...(held !== undefined ? { held } : {}),
+        ...(num(c?.total_mem_mb) !== undefined ? { totalMemMB: num(c?.total_mem_mb) } : {}),
+        ...(num(c?.disk_free_mb) !== undefined ? { diskFreeMB: num(c?.disk_free_mb) } : {}),
+        ...(num(c?.disk_used_pct) !== undefined ? { diskUsedPct: num(c?.disk_used_pct) } : {}),
+        ...(num(c?.inode_used_pct) !== undefined ? { inodeUsedPct: num(c?.inode_used_pct) } : {}),
+        ...(binding !== undefined ? { capacityBinding: binding } : {}),
       };
     });
   }
@@ -321,6 +400,12 @@ export class NucleusFleetStore implements FleetStore {
       for (const d of doomed) await this.#db.query("DELETE FROM ship_fleet_load WHERE owner = $1", [String(d.owner)]);
     } catch {
       // Best-effort: a stale load row for a pruned worker is never listed (list joins on ship_fleet).
+    }
+    try {
+      await this.#ensureCapacity();
+      for (const d of doomed) await this.#db.query("DELETE FROM ship_fleet_capacity WHERE owner = $1", [String(d.owner)]);
+    } catch {
+      // Same: unreferenced once the base row is gone.
     }
     return doomed.length;
   }

@@ -2,10 +2,36 @@
 // code (a fenced block), not structured tool-call JSON. One action per
 // turn — the model thinks in prose, then emits a single code block.
 
+/**
+ * One search/replace within one file.
+ *
+ * An `edit` action carries a LIST of these, which is the whole of C2. It used
+ * to carry exactly one, and the loop is one action per turn — so a rename
+ * across 30 call sites cost 30 of the run's 40 turns and could not finish, and
+ * the SEARCH text had to be globally unique in the file, which forced the agent
+ * to quote surrounding lines it did not want to change. Both limits were on the
+ * ACTION FORMAT, not on anything the publisher enforces (publish caps are 200
+ * files / 20k lines), so they were pure self-inflicted ceiling.
+ */
+export interface EditHunk {
+  file: string;
+  search: string;
+  replace: string;
+  /**
+   * Replace every occurrence rather than requiring exactly one.
+   *
+   * Opt-in, and it must stay opt-in: a SEARCH that accidentally matches twice
+   * is the agent misreading the file, and silently changing both is how a
+   * surgical edit becomes a blast radius. `all` is the agent saying it means
+   * it, and the observation reports the count so a wrong guess is visible.
+   */
+  all: boolean;
+}
+
 export type Action =
   | { kind: "bash"; code: string }
   | { kind: "python"; code: string }
-  | { kind: "edit"; file: string; search: string; replace: string }
+  | { kind: "edit"; edits: EditHunk[] }
   | { kind: "create"; file: string; content: string }
   | { kind: "search"; query: string } // semantic code retrieval (repo runs with an index)
   | { kind: "finish"; message: string }
@@ -44,6 +70,85 @@ const BASH_LANGS = new Set(["bash", "sh", "shell", ""]);
 const PYTHON_LANGS = new Set(["python", "py", "python3"]);
 
 const SEARCH_REPLACE = /^<{7} SEARCH\n([\s\S]*?)^={7}\n([\s\S]*?)^>{7} REPLACE\s*$/m;
+const SEARCH_REPLACE_ALL = /^<{7} SEARCH\n([\s\S]*?)^={7}\n([\s\S]*?)^>{7} REPLACE[^\S\n]*$/gm;
+/** A `--- path/to/file` line inside a multi-file edit block. */
+const EDIT_FILE_HEADER = /^---[^\S\n]+(\S[^\n]*?)[^\S\n]*$/;
+
+const EDIT_FORMAT_HELP =
+  "```edit block must contain at least one:\n<<<<<<< SEARCH\n(old text)\n=======\n(new text)\n>>>>>>> REPLACE\n\n" +
+  "Several hunks may follow one another in the same block. To edit more than one file in a turn, omit the path " +
+  'from the fence and start each file with a "--- path/to/file" line. Add "all" after the path (```edit path/to/file all) ' +
+  "to replace every occurrence instead of requiring exactly one.";
+
+/**
+ * Parse an ```edit body into one or more hunks.
+ *
+ * Two shapes, and the single-file one is unchanged so every existing prompt,
+ * transcript and replayed run parses exactly as before:
+ *
+ *   ```edit path/to/file [all]      -> hunks all apply to that file
+ *   ```edit                         -> body carries "--- path" headers
+ */
+export function parseEditBlock(arg: string, code: string): Action {
+  const words = arg.trim().split(/\s+/).filter((w) => w !== "");
+  const all = words[words.length - 1]?.toLowerCase() === "all";
+  const file = (all ? words.slice(0, -1) : words).join(" ").trim();
+
+  if (file !== "") {
+    const bad = validateActionPath(file);
+    if (bad !== null) return { kind: "invalid", message: `cannot edit ${file}: ${bad}` };
+    const hunks = hunksIn(code).map((h) => ({ ...h, file, all }));
+    if (hunks.length === 0) return { kind: "invalid", message: EDIT_FORMAT_HELP };
+    return { kind: "edit", edits: hunks };
+  }
+
+  // No path on the fence: the body must name its files.
+  const sections = splitByFileHeader(code);
+  if (sections.length === 0) {
+    return {
+      kind: "invalid",
+      message: "```edit needs a file path: ```edit path/to/file\n\n" + EDIT_FORMAT_HELP,
+    };
+  }
+  const edits: EditHunk[] = [];
+  for (const section of sections) {
+    const bad = validateActionPath(section.file);
+    if (bad !== null) return { kind: "invalid", message: `cannot edit ${section.file}: ${bad}` };
+    const hunks = hunksIn(section.body);
+    if (hunks.length === 0) {
+      return { kind: "invalid", message: `no SEARCH/REPLACE hunk under "--- ${section.file}".\n\n${EDIT_FORMAT_HELP}` };
+    }
+    for (const hunk of hunks) edits.push({ ...hunk, file: section.file, all: section.all });
+  }
+  return { kind: "edit", edits };
+}
+
+function hunksIn(code: string): Array<{ search: string; replace: string }> {
+  SEARCH_REPLACE_ALL.lastIndex = 0;
+  return [...code.matchAll(SEARCH_REPLACE_ALL)].map((m) => ({ search: m[1]!, replace: m[2]! }));
+}
+
+function splitByFileHeader(code: string): Array<{ file: string; all: boolean; body: string }> {
+  const sections: Array<{ file: string; all: boolean; body: string }> = [];
+  let current: { file: string; all: boolean; body: string[] } | null = null;
+  for (const line of code.split("\n")) {
+    const header = EDIT_FILE_HEADER.exec(line);
+    // A "--- " line inside a hunk body is diff context, not a header. Only a
+    // line that appears BEFORE any hunk content, or between hunks, can start a
+    // file — cheaply approximated by requiring the current section to have a
+    // complete hunk before a new header is honoured.
+    if (header !== null && (current === null || hunksIn(current.body.join("\n")).length > 0)) {
+      if (current !== null) sections.push({ file: current.file, all: current.all, body: current.body.join("\n") });
+      const words = header[1]!.trim().split(/\s+/);
+      const all = words[words.length - 1]?.toLowerCase() === "all";
+      current = { file: (all ? words.slice(0, -1) : words).join(" "), all, body: [] };
+      continue;
+    }
+    if (current !== null) current.body.push(line);
+  }
+  if (current !== null) sections.push({ file: current.file, all: current.all, body: current.body.join("\n") });
+  return sections.filter((s) => s.file !== "");
+}
 
 /**
  * Parse the first action from a model response. CodeAct is one action per
@@ -80,21 +185,7 @@ function parseFencedAction(text: string): { index: number; action: Action } | nu
       return { index, action: { kind: "finish", message: code.trim() } };
     }
     if (lang === "edit") {
-      if (arg === "") return { index, action: { kind: "invalid", message: "```edit needs a file path: ```edit path/to/file" } };
-      const bad = validateActionPath(arg);
-      if (bad !== null) return { index, action: { kind: "invalid", message: `cannot edit ${arg}: ${bad}` } };
-      const sr = SEARCH_REPLACE.exec(code);
-      if (sr === null) {
-        return {
-          index,
-          action: {
-            kind: "invalid",
-            message:
-              "```edit block must contain exactly:\n<<<<<<< SEARCH\n(old text)\n=======\n(new text)\n>>>>>>> REPLACE",
-          },
-        };
-      }
-      return { index, action: { kind: "edit", file: arg, search: sr[1]!, replace: sr[2]! } };
+      return { index, action: parseEditBlock(arg, code) };
     }
     if (lang === "create") {
       if (arg === "") return { index, action: { kind: "invalid", message: "```create needs a file path: ```create path/to/file" } };
@@ -172,8 +263,11 @@ export function describeAction(action: Action): string {
       return `bash: ${firstLine(action.code)}`;
     case "python":
       return `python: ${firstLine(action.code)}`;
-    case "edit":
-      return `edit: ${action.file}`;
+    case "edit": {
+      const files = [...new Set(action.edits.map((e) => e.file))];
+      const where = files.length === 1 ? files[0]! : `${files.length} files`;
+      return `edit: ${where}${action.edits.length > 1 ? ` (${action.edits.length} hunks)` : ""}`;
+    }
     case "create":
       return `create: ${action.file}`;
     case "search":

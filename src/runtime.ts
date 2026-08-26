@@ -79,6 +79,24 @@ export {
 export type { AttributedSpendStore, AttributedSpendEntry, SpendDimension } from "./attributed-spend.js";
 export { FileAttributedSpendStore, NucleusAttributedSpendStore } from "./attributed-spend.js";
 export type { FleetStore, WorkerInfo, PlacementStore } from "./fleet.js";
+// Sensing and the derived ceiling (B1). Re-exported for the dashboard, which
+// renders `capacityBinding`/`terms` and needs the same names the worker uses.
+export type { HostLoad, HostDisk, HostLimits, HostHold, HostProbes, Capacity, CapacityBinding, CapacityInput } from "./host-load.js";
+export {
+  BASE_RESERVE_MB,
+  DEFAULT_MAX_INODE_USED_PCT,
+  DEFAULT_MAX_LOAD_PER_CPU,
+  DEFAULT_MIN_FREE_DISK_MB,
+  DEFAULT_MIN_FREE_MB,
+  DERIVED_CEILING_CAP,
+  PER_RUN_DISK_MB,
+  PER_RUN_MB,
+  capacityPlan,
+  describeCapacity,
+  hostHold,
+  hostLoad,
+  sandboxLimitsFor,
+} from "./host-load.js";
 export { FileFleetStore, NucleusFleetStore, FilePlacementStore, NucleusPlacementStore } from "./fleet.js";
 export type { RepoMemoryStore, RepoNote } from "./repo-memory.js";
 export { FileRepoMemory, NucleusRepoMemory, loadRepoContext, runNote } from "./repo-memory.js";
@@ -112,7 +130,16 @@ export {
 } from "./users.js";
 export type { CodeSearch, CodeSearchHit, RefreshStats } from "./code-index.js";
 export { NucleusCodeIndex } from "./code-index.js";
-export { parseRepoToken, requesterOf, slackTaskFromMention, linearTaskFromIssue, ciFixTaskFromWorkflowRun } from "./intake-sources.js";
+export {
+  parseRepoToken,
+  requesterOf,
+  reviewGateSatisfied,
+  reviewTaskFromReviewEvent,
+  shipAuthored,
+  slackTaskFromMention,
+  linearTaskFromIssue,
+  ciFixTaskFromWorkflowRun,
+} from "./intake-sources.js";
 export type { RepoTrust, RepoPolicyConfig, RepoAllowEntry } from "./repo-policy.js";
 export {
   RepoNotAllowedError,

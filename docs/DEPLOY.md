@@ -167,7 +167,15 @@ Add a webhook on the repo (or org):
 - URL: `http://<server>:7460/hooks/forgejo` or `/hooks/github`
 - Secret: the `SHIP_WEBHOOK_SECRET` value (Forgejo: HMAC signature;
   GitHub: `X-Hub-Signature-256`)
-- Events: issues, issue comments (PR review loop), labels
+- Events: issues, issue comments, **pull request reviews**, **pull request
+  review comments**, labels
+  - GitHub: `issues`, `issue_comment`, `pull_request_review`,
+    `pull_request_review_comment`, `label`
+  - Forgejo/Gitea: `issues`, `issue_comment`, `pull_request_comment`,
+    `pull_request_review`, `pull_request_review_comment`, `pull_request_label`
+    (Forgejo splits an approval out under `pull_request_review_approved` /
+    `_rejected`; subscribing to all of them is harmless — Ship drops
+    approvals, since an approval is not a request for work)
 
 Then label an issue **`ship`**. Unlabeled events are ignored — the label
 is the opt-in. The issue appears in the dashboard inbox as a *proposed*
@@ -175,8 +183,31 @@ task; Launch it, or flip the source to **auto** on the Sources page.
 Auto is bounded three ways: a daily launch cap, a concurrency ceiling,
 and a per-source daily spend budget (`SHIP_DAILY_BUDGET_USD`).
 
-PR review loop: any non-`[teploy-ship]` comment on a `ship`-labeled PR
-proposes a follow-up task; the run pushes to the PR branch and replies.
+### PR review loop
+
+Any non-`[teploy-ship]` comment, review, or inline review comment on a
+followable PR proposes a follow-up task; the run checks out the PR
+branch, addresses the feedback, pushes, and replies.
+
+**Followable** means either of:
+
+- the PR carries the `ship` label (exact, case-sensitive), or
+- the PR's head branch starts with `ship/` **and lives in the same
+  repository** — which is every PR Ship opens, so Ship's own PRs need no
+  human labelling.
+
+The same-repository half is not optional. Anyone may open a pull request
+from a *fork* whose branch is named `ship/anything`; without that clause
+an outsider could self-authorise an agent run driven by their own comment
+text, holding the repository's git token. Labelling a fork PR `ship` is
+still a deliberate maintainer action and still works.
+
+A batched review ("Request changes" with N inline notes) is delivered as
+**N+1 webhooks** — one review plus one per note. Ship coalesces them onto
+a single task keyed on the review, so three inline comments produce one
+run and one push, not four. An inline comment carries its file, line,
+diff side and diff hunk into the task, so the agent gets an address and
+not just a complaint.
 
 ### Slack and Linear
 
@@ -397,8 +428,12 @@ The CLI speaks SSH through Go's `crypto/ssh` rather than shelling out, so
 `known_hosts`, so that file has to be there and readable by uid 1000 (`node`).
 Deploy credentials stay on the worker and never enter the agent's sandbox,
 which executes model-authored commands.
+| `SHIP_MAX_CONCURRENT_RUNS` | unset — **derived** | An override, not the mechanism. Left unset, each worker measures its own box (cores, `MemTotal`/`MemAvailable`, free space and inodes on the docker root) and derives its slot count every 15 s — so adding a VM raises the fleet's capacity and a squeeze lowers it with nobody touching a knob. Set it and this number wins outright; the Fleet page then says `set by hand, not measured` instead of naming a binding constraint. `--max-concurrent` is the same override on the command line. See the derivation in `docs/capacity.md`. |
 | `SHIP_MIN_FREE_MB` | `600` | Load-aware admission: a worker launches no run while the host has less than this much available memory (`MemAvailable`), however many slots are free. One run plus headroom, from the measured ~350–400 MB per in-flight run (`docs/capacity.md`). Due runs wait; nothing is dropped. `0` disables. |
 | `SHIP_MAX_LOAD_PER_CPU` | `1.5` | Same, for the 1-minute load average divided by CPU count. The Fleet page shows a held worker and why. `0` disables. |
+| `SHIP_MIN_FREE_DISK_MB` | `2048` | Same, for free bytes on the docker root. Checked **ahead of** memory: running out of memory delays work and the kernel resolves it, while running out of disk breaks the docker daemon for every tenant on the box and needs a human. Sized as one run's clone + module/build cache plus the same again as headroom; the sandbox image is not in it (pulled once, already on disk). `0` disables. |
+| `SHIP_MAX_INODE_USED_PCT` | `95` | Same, for inodes. Its own knob because it fails independently: a module cache is millions of tiny files, so a box can exhaust inodes with tens of GB of bytes still free and every write still fails. A filesystem with no inode accounting (btrfs) reads as no pressure. `0` disables. |
+| `SHIP_DISK_PATH` | unset — `/var/lib/docker`, then `/` | Which mount to measure, when docker's data root is on neither. A worker in a container has no `/var/lib/docker`; its own `/` is an overlayfs whose `statfs` reports the underlying filesystem, which is the host's docker root anyway — so the fallback is usually right and this is rarely needed. |
 | `SHIP_SANDBOX_TTL_SEC` | `7200` | Container TTL Ship requests from the sandbox daemon for each run (floor 600). The daemon's own default is 30 minutes, which is shorter than a real run on a large repository — that is how four runs were reaped before their first command on 2026-08-25. The run's own caps end it; this is the backstop for a worker that dies mid-run. |
 | `SHIP_INDEX_TIMEOUT_MS` | `120000` | Time budget for the `repo-index` step. Past it the refresh stops between files, keeps what it embedded, and the step records `stopped at the 120s index cap`; ```search still works over whatever is indexed. |
 | `SHIP_TESTS` | unset | Ask every newly-enqueued run to execute its test suite after the agent stops, and put the result on the pull request. Ship runs it — the agent's own account of its testing is not used. The command is the repo's `evidence` entry when one is set, else `SHIP_TEST_COMMAND`. |

@@ -11,11 +11,14 @@ import {
   authenticatedUrl,
   commitAndPush,
   findOpenPullRequest,
+  formatReviewComments,
+  listPrReviewComments,
   openPullRequest,
   parseRepoUrl,
   pullRequestUrl,
   resolvePr,
   setupRepo,
+  SHIP_COMMENT_MARKER,
   truncateMiddle,
   WORKING_DIFF_MAX_CHARS,
 } from "./git.js";
@@ -254,4 +257,109 @@ test("WORKING_DIFF_MAX_CHARS is large enough for a real multi-file change", () =
   // The regression this guards: a default small enough that the reviewer only
   // ever sees the first few files of the diff it is judging.
   assert.ok(WORKING_DIFF_MAX_CHARS >= 20_000, `got ${WORKING_DIFF_MAX_CHARS}`);
+});
+
+// --- C3: reading a review back off the forge ---
+//
+// Intake coalesces a batched review onto ONE task, which means the later
+// deliveries' bodies are dropped (intake.ts:136 returns the existing task
+// unchanged). Reading the comments back is the only way the run that addresses
+// the task can see the whole review.
+
+/** A fetch that answers a fixed url→body map and records what was asked for. */
+function stubFetch(routes: Record<string, unknown>, seen: string[] = []): typeof fetch {
+  return (async (url: string) => {
+    seen.push(String(url));
+    const key = Object.keys(routes).find((route) => String(url).startsWith(route));
+    if (key === undefined) return { ok: false, status: 404, json: async () => ({}) };
+    return { ok: true, status: 200, json: async () => routes[key] };
+  }) as unknown as typeof fetch;
+}
+
+test("listPrReviewComments reads GitHub's flat comments route and drops Ship's own notes", async () => {
+  const ref = parseRepoUrl("https://github.com/o/r");
+  const seen: string[] = [];
+  const fetchImpl = stubFetch(
+    {
+      "https://api.github.com/repos/o/r/pulls/12/comments": [
+        {
+          id: 1,
+          pull_request_review_id: 55,
+          body: "this leaks the handle",
+          path: "src/pool.ts",
+          line: 42,
+          side: "RIGHT",
+          diff_hunk: "@@ -40,6 +40,7 @@",
+          user: { login: "reviewer" },
+        },
+        { id: 2, pull_request_review_id: 55, body: "rename this", path: "src/a.ts", original_line: 9 },
+        { id: 3, pull_request_review_id: 55, body: `${SHIP_COMMENT_MARKER} addressed in 1a2b3c`, path: "src/a.ts" },
+      ],
+    },
+    seen,
+  );
+  const comments = await listPrReviewComments(ref, "t", 12, { fetchImpl });
+  assert.equal(comments.length, 2, "Ship's own note is not feedback for Ship");
+  assert.deepEqual(comments[0], {
+    id: 1,
+    reviewId: 55,
+    path: "src/pool.ts",
+    line: 42,
+    side: "RIGHT",
+    diffHunk: "@@ -40,6 +40,7 @@",
+    body: "this leaks the handle",
+    user: "reviewer",
+  });
+  assert.equal(comments[1]?.line, 9, "an outdated anchor falls back to original_line");
+  assert.equal(seen.length, 1, "GitHub answers in one call");
+});
+
+test("listPrReviewComments walks Forgejo's per-review comments route (it has no flat one)", async () => {
+  const ref = parseRepoUrl("http://forge.test/o/r");
+  const seen: string[] = [];
+  const fetchImpl = stubFetch(
+    {
+      "http://forge.test/api/v1/repos/o/r/pulls/12/reviews/9/comments": [
+        { id: 2, body: "second round", path: "src/b.ts", line: 3 },
+      ],
+      "http://forge.test/api/v1/repos/o/r/pulls/12/reviews/8/comments": [
+        { id: 1, body: "first round", path: "src/a.ts", line: 1 },
+      ],
+      "http://forge.test/api/v1/repos/o/r/pulls/12/reviews": [{ id: 8 }, { id: 9 }],
+    },
+    seen,
+  );
+  const all = await listPrReviewComments(ref, "t", 12, { fetchImpl });
+  assert.deepEqual(all.map((c) => c.id).sort(), [1, 2]);
+  // The review id the forge did not put on the comment is filled in from the
+  // review it was fetched under — without it nothing could be filtered later.
+  assert.deepEqual(all.map((c) => c.reviewId).sort(), [8, 9]);
+  assert.ok(seen.some((u) => u.endsWith("/pulls/12/reviews")), "reviews are listed first");
+
+  const one = await listPrReviewComments(ref, "t", 12, { reviewId: 9, fetchImpl });
+  assert.deepEqual(one.map((c) => c.id), [2], "a single round can be asked for");
+});
+
+test("listPrReviewComments never throws — a failed read is an empty set, not a failed run", async () => {
+  const ref = parseRepoUrl("https://github.com/o/r");
+  const refused = (async () => ({ ok: false, status: 403, json: async () => ({}) })) as unknown as typeof fetch;
+  assert.deepEqual(await listPrReviewComments(ref, "t", 12, { fetchImpl: refused }), []);
+  const thrown = (async () => {
+    throw new Error("ECONNRESET");
+  }) as unknown as typeof fetch;
+  assert.deepEqual(await listPrReviewComments(ref, "t", 12, { fetchImpl: thrown }), []);
+  const garbage = (async () => ({ ok: true, status: 200, json: async () => ({ message: "nope" }) })) as unknown as typeof fetch;
+  assert.deepEqual(await listPrReviewComments(ref, "t", 12, { fetchImpl: garbage }), []);
+});
+
+test("formatReviewComments names every comment's file and line, and says nothing when there is nothing", () => {
+  assert.equal(formatReviewComments([]), "");
+  const text = formatReviewComments([
+    { id: 1, path: "src/pool.ts", line: 42, side: "RIGHT", diffHunk: "@@ -40 +40 @@", body: "leaks", user: "reviewer" },
+    { id: 2, body: "no anchor" },
+  ]);
+  assert.match(text, /All 2 inline review comment\(s\)/);
+  assert.match(text, /src\/pool\.ts, line 42 \(RIGHT side of the diff\)/);
+  assert.match(text, /@@ -40 \+40 @@/);
+  assert.match(text, /no file anchor/);
 });

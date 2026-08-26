@@ -6,6 +6,7 @@ import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 
 import type { Action } from "./actions.js";
 import { FINISH_NUDGE_CLEAN_TREE, FINISH_NUDGE_FAILED, FINISH_NUDGE_NO_EVIDENCE, FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, describeAction, parseAction } from "./actions.js";
+import type { EditHunk } from "./actions.js";
 import type { ApprovalPolicy } from "./approval.js";
 import { formatSearchHits } from "./code-index.js";
 import type { CodeSearchHit } from "./code-index.js";
@@ -545,28 +546,71 @@ export async function executeAction(
       await executor.putFile(action.file, action.content);
       return ok(`created ${action.file} (${action.content.length} chars)`);
 
-    case "edit": {
-      let current: string;
-      try {
-        current = new TextDecoder().decode(await executor.getFile(action.file));
-      } catch {
-        return fail(`edit failed: no such file: ${action.file} (use \`\`\`create for new files)`);
-      }
-      const occurrences = action.search === "" ? 0 : current.split(action.search).length - 1;
-      if (occurrences === 0) {
-        return fail(
-          `edit failed: SEARCH text not found in ${action.file}. Read the file and copy the exact text (whitespace matters).`,
-        );
-      }
-      if (occurrences > 1) {
-        return fail(
-          `edit failed: SEARCH text appears ${occurrences} times in ${action.file}. Include more surrounding lines to make it unique.`,
-        );
-      }
-      await executor.putFile(action.file, current.replace(action.search, action.replace));
-      return ok(`edited ${action.file}: 1 replacement`);
-    }
+    case "edit":
+      return applyEdits(executor, action.edits);
   }
+}
+
+/**
+ * Apply every hunk of an edit action, all or nothing.
+ *
+ * ATOMIC ACROSS FILES on purpose. A multi-file rename that applied to three of
+ * five files would leave the tree not compiling and the agent with no clean
+ * statement of what happened — and the publish gate ships whatever tree it
+ * finds. So every hunk is resolved against in-memory copies first, and nothing
+ * is written until all of them succeed. A failure writes nothing and says
+ * exactly which hunk failed and why, which is the observation the agent needs
+ * to fix it in one more turn rather than bisecting by hand.
+ */
+async function applyEdits(executor: AgentExecutor, edits: EditHunk[]): Promise<ExecResult> {
+  const files = new Map<string, string>();
+  const counts: Array<{ file: string; replacements: number }> = [];
+
+  for (let i = 0; i < edits.length; i++) {
+    const hunk = edits[i]!;
+    const label = edits.length === 1 ? "" : ` (hunk ${i + 1} of ${edits.length})`;
+    let current = files.get(hunk.file);
+    if (current === undefined) {
+      try {
+        current = new TextDecoder().decode(await executor.getFile(hunk.file));
+      } catch {
+        return fail(`edit failed${label}: no such file: ${hunk.file} (use \`\`\`create for new files)`);
+      }
+    }
+    const occurrences = hunk.search === "" ? 0 : current.split(hunk.search).length - 1;
+    if (occurrences === 0) {
+      return fail(
+        `edit failed${label}: SEARCH text not found in ${hunk.file}. Read the file and copy the exact text (whitespace matters).` +
+          (i > 0 ? " No hunk in this block was applied." : ""),
+      );
+    }
+    if (occurrences > 1 && !hunk.all) {
+      return fail(
+        `edit failed${label}: SEARCH text appears ${occurrences} times in ${hunk.file}. ` +
+          "Include more surrounding lines to make it unique, or add `all` after the path to replace every occurrence." +
+          (i > 0 ? " No hunk in this block was applied." : ""),
+      );
+    }
+    files.set(hunk.file, hunk.all ? current.split(hunk.search).join(hunk.replace) : current.replace(hunk.search, hunk.replace));
+    counts.push({ file: hunk.file, replacements: hunk.all ? occurrences : 1 });
+  }
+
+  for (const [file, content] of files) {
+    await executor.putFile(file, content);
+  }
+
+  const total = counts.reduce((n, c) => n + c.replacements, 0);
+  const touched = [...files.keys()];
+  if (touched.length === 1) return ok(`edited ${touched[0]} (${total} replacement${total === 1 ? "" : "s"})`);
+  const per = counts
+    .reduce((acc: Array<{ file: string; n: number }>, c) => {
+      const seen = acc.find((a) => a.file === c.file);
+      if (seen === undefined) acc.push({ file: c.file, n: c.replacements });
+      else seen.n += c.replacements;
+      return acc;
+    }, [])
+    .map((a) => `${a.file} (${a.n})`);
+  return ok(`edited ${touched.length} files, ${total} replacements: ${per.join(", ")}`);
 }
 
 function ok(message: string): ExecResult {
