@@ -4,6 +4,16 @@ All notable changes to Teploy Ship are recorded here.
 
 ## [Unreleased]
 
+### Added — load-aware admission (C2, 2026-08-25)
+- The worker no longer fills the ceiling on a box that has no room: below
+  `SHIP_MIN_FREE_MB` (default 600, measured `MemAvailable`) or above
+  `SHIP_MAX_LOAD_PER_CPU` (default 1.5) a due run waits exactly as it does at
+  the ceiling, the reason is logged once a minute, and the heartbeat carries
+  `freeMemMB`, `load1`, `cpus` and `held` so the Fleet page says "held:
+  memory" / "held: load". Removing the pressure resumes launches on the next
+  pass, no restart. Sandbox CPU / memory limits come from the repo's project
+  record (default 1 CPU / 1 GB, the daemon's).
+
 ### Added — Projects (C1, 2026-08-25)
 - One record per repository (`src/projects.ts`; `projects.json` / `ship_projects`):
   clone URL, sandbox image / network / limits, intake policy and budget, test

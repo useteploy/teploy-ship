@@ -21,6 +21,12 @@ export interface WorkerInfo {
   activeRuns: number;
   startedAt: string;
   lastSeen: string;
+  /** Host headroom at the last beat (C2). Absent on heartbeats from older workers. */
+  freeMemMB?: number;
+  load1?: number;
+  cpus?: number;
+  /** Why this worker is refusing launches right now, if it is. */
+  held?: "memory" | "load";
 }
 
 export interface FleetStore {
@@ -169,6 +175,7 @@ export class FileFleetStore implements FleetStore {
 export class NucleusFleetStore implements FleetStore {
   #db: NucleusPgwire;
   #ready: Promise<void> | null = null;
+  #readyLoad: Promise<void> | null = null;
 
   constructor(db: NucleusPgwire) {
     this.#db = db;
@@ -197,8 +204,41 @@ export class NucleusFleetStore implements FleetStore {
     return this.#ready;
   }
 
+  // Host load rides a sibling table: ship_fleet already exists on deployed
+  // boxes with its columns fixed, and Nucleus cannot ALTER-ADD to a populated
+  // table. Same owner key; joined in list().
+  #ensureLoad(): Promise<void> {
+    this.#readyLoad ??= this.#db
+      .query("CREATE TABLE IF NOT EXISTS ship_fleet_load (owner TEXT, free_mem_mb TEXT, load1 TEXT, cpus TEXT, held TEXT)")
+      .then(() => undefined)
+      .catch((error: unknown) => {
+        this.#readyLoad = null;
+        throw error;
+      });
+    return this.#readyLoad;
+  }
+
+  async #heartbeatLoad(info: WorkerInfo): Promise<void> {
+    if (info.freeMemMB === undefined && info.load1 === undefined && info.cpus === undefined) return;
+    await this.#ensureLoad();
+    const vals = [
+      info.freeMemMB !== undefined ? String(info.freeMemMB) : null,
+      info.load1 !== undefined ? String(info.load1) : null,
+      info.cpus !== undefined ? String(info.cpus) : null,
+      info.held ?? null,
+    ];
+    await upsertByKey(this.#db, {
+      table: "ship_fleet_load",
+      keyColumn: "owner",
+      key: info.owner,
+      update: () => this.#db.query("UPDATE ship_fleet_load SET free_mem_mb = $1, load1 = $2, cpus = $3, held = $4 WHERE owner = $5", [...vals, info.owner]),
+      insert: () => this.#db.query("INSERT INTO ship_fleet_load (free_mem_mb, load1, cpus, held, owner) VALUES ($1, $2, $3, $4, $5)", [...vals, info.owner]),
+    });
+  }
+
   async heartbeat(info: WorkerInfo): Promise<void> {
     await this.#ensure();
+    await this.#heartbeatLoad(info);
     const vals = [
       info.host,
       info.sandbox,
@@ -226,18 +266,34 @@ export class NucleusFleetStore implements FleetStore {
 
   async list(): Promise<WorkerInfo[]> {
     await this.#ensure();
-    const rows = await this.#db.query(
-      "SELECT owner, host, sandbox, max_concurrent, active_runs, started_at, last_seen FROM ship_fleet",
-    );
-    return rows.map((r) => ({
-      owner: String(r.owner),
-      host: String(r.host),
-      sandbox: String(r.sandbox),
-      maxConcurrent: Number(r.max_concurrent) || 0,
-      activeRuns: Number(r.active_runs) || 0,
-      startedAt: String(r.started_at),
-      lastSeen: String(r.last_seen),
-    }));
+    await this.#ensureLoad();
+    const [rows, loads] = await Promise.all([
+      this.#db.query("SELECT owner, host, sandbox, max_concurrent, active_runs, started_at, last_seen FROM ship_fleet"),
+      this.#db.query("SELECT owner, free_mem_mb, load1, cpus, held FROM ship_fleet_load"),
+    ]);
+    const loadOf = new Map(loads.map((l) => [String(l.owner), l]));
+    const num = (v: unknown): number | undefined => {
+      if (v === null || v === undefined || v === "") return undefined;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : undefined;
+    };
+    return rows.map((r) => {
+      const l = loadOf.get(String(r.owner));
+      const held = l?.held === "memory" || l?.held === "load" ? l.held : undefined;
+      return {
+        owner: String(r.owner),
+        host: String(r.host),
+        sandbox: String(r.sandbox),
+        maxConcurrent: Number(r.max_concurrent) || 0,
+        activeRuns: Number(r.active_runs) || 0,
+        startedAt: String(r.started_at),
+        lastSeen: String(r.last_seen),
+        ...(num(l?.free_mem_mb) !== undefined ? { freeMemMB: num(l?.free_mem_mb) } : {}),
+        ...(num(l?.load1) !== undefined ? { load1: num(l?.load1) } : {}),
+        ...(num(l?.cpus) !== undefined ? { cpus: num(l?.cpus) } : {}),
+        ...(held !== undefined ? { held } : {}),
+      };
+    });
   }
 
   async prune(before: Date): Promise<number> {
@@ -248,6 +304,8 @@ export class NucleusFleetStore implements FleetStore {
     const doomed = await this.#db.query("SELECT owner FROM ship_fleet WHERE last_seen < $1", [cutoff]);
     if (doomed.length === 0) return 0;
     await this.#db.query("DELETE FROM ship_fleet WHERE last_seen < $1", [cutoff]);
+    await this.#ensureLoad();
+    for (const d of doomed) await this.#db.query("DELETE FROM ship_fleet_load WHERE owner = $1", [String(d.owner)]);
     return doomed.length;
   }
 }

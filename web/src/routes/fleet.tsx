@@ -52,7 +52,8 @@ export default function Fleet({ data }: { data: FleetData }) {
     <>
       <h1 class="page">Fleet</h1>
       <p class="meta">
-        Workers claim runs from one shared queue via leases, so many can run at once across servers. · store: {data.store}
+        Workers claim runs from one shared queue via leases, so many can run at once across servers. A worker marked
+        <b> held</b> has slots but is refusing launches until its host has room again (SHIP_MIN_FREE_MB / SHIP_MAX_LOAD_PER_CPU). · store: {data.store}
         {data.store === "file" && " · file store runs no worker daemon — nothing to show here"}
       </p>
 
@@ -77,7 +78,10 @@ export default function Fleet({ data }: { data: FleetData }) {
                 <span class={`status ${w.online ? "completed" : "failed"}`}>{w.online ? "online" : "stale"}</span>
                 <span style="font-weight:600">{w.host}</span>
                 <span class="chip">{w.sandbox === "host" ? "runs on host" : "sandbox"}</span>
+                {w.held !== undefined && <span class="status waiting">held: {w.held}</span>}
                 <span style="flex:1" />
+                {w.freeMemMB !== undefined && <span class="meta">{w.freeMemMB} MB free</span>}
+                {w.load1 !== undefined && <span class="meta">load {w.load1}{w.cpus !== undefined ? ` / ${w.cpus} cpu` : ""}</span>}
                 <span class="meta">{w.activeRuns}/{w.maxConcurrent} slots</span>
                 <span class="meta">seen {ago(w.ageMs)}</span>
               </div>

@@ -397,6 +397,8 @@ The CLI speaks SSH through Go's `crypto/ssh` rather than shelling out, so
 `known_hosts`, so that file has to be there and readable by uid 1000 (`node`).
 Deploy credentials stay on the worker and never enter the agent's sandbox,
 which executes model-authored commands.
+| `SHIP_MIN_FREE_MB` | `600` | Load-aware admission: a worker launches no run while the host has less than this much available memory (`MemAvailable`), however many slots are free. One run plus headroom, from the measured ~350–400 MB per in-flight run (`docs/capacity.md`). Due runs wait; nothing is dropped. `0` disables. |
+| `SHIP_MAX_LOAD_PER_CPU` | `1.5` | Same, for the 1-minute load average divided by CPU count. The Fleet page shows a held worker and why. `0` disables. |
 | `SHIP_TESTS` | unset | Ask every newly-enqueued run to execute its test suite after the agent stops, and put the result on the pull request. Ship runs it — the agent's own account of its testing is not used. The command is the repo's `evidence` entry when one is set, else `SHIP_TEST_COMMAND`. |
 | `SHIP_TEST_COMMAND` | unset | The worker-wide default suite, e.g. `pnpm test`. A repo with its own command (`teploy-ship evidence set <repo> --test-command …`) uses that instead — one worker can serve repos with different suites. Run in the run's workspace **before** the push, so "tests passed" describes the code that becomes the PR. Without either, a run that asked for tests records the step as disabled. |
 | `SHIP_TEST_TIMEOUT_MS` | `900000` | Ceiling. A suite that hits it is reported as **not run**, never as failed — a killed suite did not fail, it never finished. |

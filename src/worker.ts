@@ -21,6 +21,8 @@ import type { IntakeStore, IntakePolicy, IntakeTask } from "./intake.js";
 import type { SourcePolicy } from "./policies.js";
 import type { Project, ProjectStore } from "./projects.js";
 import { repoSlug } from "./observe.js";
+import { DEFAULT_MAX_LOAD_PER_CPU, DEFAULT_MIN_FREE_MB, hostHold, hostLoad } from "./host-load.js";
+import type { HostLimits, HostLoad } from "./host-load.js";
 import { autoAllowedNow, formatWindow, windowFor } from "./governance.js";
 import type { Windows } from "./governance.js";
 import { makeObserveEmitter } from "./observe.js";
@@ -68,6 +70,9 @@ export interface WorkerOptions {
    * still hold a slot (conservative).
    */
   maxConcurrentRuns?: number;
+  /** Load-aware admission thresholds (host-load.ts); env SHIP_MIN_FREE_MB / SHIP_MAX_LOAD_PER_CPU. */
+  minFreeMB?: number;
+  maxLoadPerCpu?: number;
   /**
    * Per-source daily spend cap in USD (default 10, or SHIP_DAILY_BUDGET_USD;
    * <= 0 disables). Enforced ALONGSIDE the count cap: a source whose
@@ -381,6 +386,12 @@ export async function launchDueBounded(deps: {
   inflight: ReadonlySet<string>;
   launching: ReadonlySet<string>;
   maxConcurrent: number;
+  /**
+   * Load-aware admission (C2): does the HOST have room for one more run right
+   * now? Checked before every launch, so a pass that starts with room stops
+   * the moment the box does not. Absent = only the ceiling applies.
+   */
+  hostOk?: () => boolean;
   launch: (runId: string, sleeping: boolean) => void;
 }): Promise<number> {
   let launched = 0;
@@ -390,7 +401,7 @@ export async function launchDueBounded(deps: {
   // run twice, and the worker held at ~half the configured ceiling under load
   // (measured 2026-08-25: ceiling 4, never more than 2-3 in flight).
   const occupied = (): number => new Set([...deps.inflight, ...deps.launching]).size;
-  while (occupied() < deps.maxConcurrent) {
+  while (occupied() < deps.maxConcurrent && (deps.hostOk?.() ?? true)) {
     const due = await deps.due();
     const next = due.find((d) => !deps.inflight.has(d.runId) && !deps.launching.has(d.runId));
     if (next === undefined) break;
@@ -699,6 +710,29 @@ export function startWorker(options: WorkerOptions): {
   // replayed again (the racing-tick double-processing that double-settled
   // spend, observed live on 2026-08-24).
   const launching = new Set<string>();
+  // Load-aware admission (C2): below SHIP_MIN_FREE_MB of available memory or
+  // above SHIP_MAX_LOAD_PER_CPU, a due run waits exactly as it does at the
+  // ceiling — nothing dropped, nothing errored. The reason is logged once a
+  // minute (not once a tick) and carried on the heartbeat for the Fleet page.
+  const hostLimits: HostLimits = {
+    minFreeMB: options.minFreeMB ?? envNum("SHIP_MIN_FREE_MB") ?? DEFAULT_MIN_FREE_MB,
+    maxLoadPerCpu: options.maxLoadPerCpu ?? envNum("SHIP_MAX_LOAD_PER_CPU") ?? DEFAULT_MAX_LOAD_PER_CPU,
+  };
+  let lastLoad: HostLoad = hostLoad();
+  let held: "memory" | "load" | null = null;
+  let heldLoggedAt = 0;
+  const hostOk = (): boolean => {
+    lastLoad = hostLoad();
+    held = hostHold(lastLoad, hostLimits);
+    if (held !== null && Date.now() - heldLoggedAt > 60_000) {
+      heldLoggedAt = Date.now();
+      log(
+        `[worker] holding launches: ${held} (${lastLoad.freeMemMB} MB available, load ${lastLoad.load1.toFixed(2)} on ${lastLoad.cpus} cpus; ` +
+          `limits ${hostLimits.minFreeMB} MB / ${hostLimits.maxLoadPerCpu} per cpu)`,
+      );
+    }
+    return held === null;
+  };
   const TERMINAL_EVENTS: ReadonlySet<string> = new Set(["run-completed", "run-failed", "run-cancelled"]);
   /** Execute one due run. Returns true when this pass made progress (a slot likely freed). */
   const driveOne = async (runId: string, sleeping: boolean): Promise<boolean> => {
@@ -743,6 +777,7 @@ export function startWorker(options: WorkerOptions): {
         inflight,
         launching,
         maxConcurrent: maxConcurrentRuns,
+        hostOk,
         launch: (runId, sleeping) => {
           launching.add(runId);
           void driveOne(runId, sleeping)
@@ -908,6 +943,10 @@ export function startWorker(options: WorkerOptions): {
         activeRuns: inflight.size,
         startedAt,
         lastSeen: new Date().toISOString(),
+        freeMemMB: lastLoad.freeMemMB,
+        load1: Math.round(lastLoad.load1 * 100) / 100,
+        cpus: lastLoad.cpus,
+        ...(held !== null ? { held } : {}),
       }))
       .catch((error) => log(`[worker] fleet heartbeat: ${error instanceof Error ? error.message : String(error)}`));
   void beat();

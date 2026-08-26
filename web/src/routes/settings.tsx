@@ -122,6 +122,8 @@ export async function loader({ request }: { request: Request }): Promise<Setting
           num("SHIP_DAILY_BUDGET_USD", "$10"),
           num("SHIP_MAX_CONCURRENT_RUNS", "3"),
           num("SHIP_DAILY_AUTO_LIMIT", "10"),
+          num("SHIP_MIN_FREE_MB", "600"),
+          num("SHIP_MAX_LOAD_PER_CPU", "1.5"),
         ],
       },
       {

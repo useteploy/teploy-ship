@@ -124,6 +124,34 @@ function harness(overrides: Partial<IntakeSweepDeps>, tasks: IntakeTask[]): Harn
   return { deps, launched, terminal, spend, intake, admission };
 }
 
+test("launchDueBounded: a host without room holds launches below the ceiling, and resumes when it clears", async () => {
+  const due = [
+    { runId: "h1", sleeping: false },
+    { runId: "h2", sleeping: false },
+  ];
+  const inflight = new Set<string>();
+  const launching = new Set<string>();
+  const launched: string[] = [];
+  let room = false;
+  const pass = () =>
+    launchDueBounded({
+      due: async () => due.filter((d) => !launched.includes(d.runId)),
+      inflight,
+      launching,
+      maxConcurrent: 4,
+      hostOk: () => room,
+      launch: (runId) => {
+        launched.push(runId);
+        launching.add(runId);
+      },
+    });
+  assert.equal(await pass(), 0, "held: nothing launched though the ceiling has room");
+  assert.deepEqual(launched, []);
+  room = true;
+  assert.equal(await pass(), 2, "the hog is gone: both due runs launch, no restart needed");
+  assert.deepEqual(launched, ["h1", "h2"]);
+});
+
 test("the terminal claim settles a run exactly once, per worker and across ticks", async () => {
   // File mode: a Set is the whole guarantee, and the claim is per-process.
   const fileClaim = makeTerminalClaim({ kind: "file", owner: "w1" }, "h1");
