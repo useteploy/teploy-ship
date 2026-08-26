@@ -231,6 +231,18 @@ with the official evaluator, thinking 32768, step cap 40, critic off, code
 index off, 2026-08-16.** (Previously 22/50 with GLM 5.2, whose model id z.ai
 has since retired.)
 
+**The PRODUCT loop's number is different and lower.** `durableAgent` — the
+webhook -> intake -> worker -> PR path the worker actually drives — resolves
+**30 of 49 = 61.2%, 95% CI roughly 47–74%**, parity arm (`SHIP_DURABLE=1
+SHIP_CRITIC=1`), same seeded sample, same model, same thinking budget, same step
+cap, 2026-08-20. On the identical 49 instances the live loop resolved 34; the
+difference is **not** statistically distinguishable (12 discordant pairs,
+McNemar exact two-sided p = 0.388), and that cuts both ways — the loops cannot
+be called equivalent either. Predictions `preds-durable-parity-50.json`, report
+`report-durable-parity-50.json`, working
+`evals/2026-08-20-swebench-durable-parity.md`. **The figure to quote for the
+product is 61.2%, named with its arm; 70.0% describes `runAgent`.**
+
 Quote it in that shape or not at all. It is a property of **Ship together with
 GLM 5.3**, not of Ship — no model control at 50 instances has been run — and a
 quarter-sample is not comparable to a full-300 leaderboard entry. Bare "70%"
@@ -283,9 +295,21 @@ delta is meaningless:
 
 6. **The LOOP itself** (`SHIP_DURABLE=1`) is the one experiment that decides
    whether any of the numbers above describe the product at all — every one of
-   them was measured on `runAgent`, and `worker.ts` runs `durableAgent`. Run
-   the parity arm against the same seeded 50 and the same model, change nothing
-   else, and compare to 35/50. **Not yet run at time of writing.**
+   them was measured on `runAgent`, and `worker.ts` runs `durableAgent`.
+   **RUN 2026-08-20: 30/49 = 61.2% on the parity arm** against the live loop's
+   34 on the same 49. See the product figure above and
+   `evals/2026-08-20-swebench-durable-parity.md`. The **product arm**
+   (`SHIP_DURABLE=product`, enqueueRun's own defaults) is still not run and
+   answers a different question.
+
+   The aggregated `report-durable-parity-50.json` was missing until 2026-08-26
+   because the evaluator process died on a MagicDNS failure before writing it;
+   it was reconstructed from the per-instance `report.json` cache on infra-home
+   (`logs/run_evaluation/durable-parity-50` + `durable-retry`) and re-verified
+   independently on 2026-08-26 — 43 non-empty patches, all with a cached
+   report, all applied cleanly, 30 resolved. **Absence of a report file is not
+   absence of a measurement**; check `evals/` before concluding an arm was
+   never scored.
 
 Resist doing two at once in one sweep. The urge is strong and it costs the ability to
 say which fix bought what.
