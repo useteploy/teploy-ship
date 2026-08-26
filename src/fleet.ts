@@ -238,7 +238,14 @@ export class NucleusFleetStore implements FleetStore {
 
   async heartbeat(info: WorkerInfo): Promise<void> {
     await this.#ensure();
+    await this.#heartbeatBase(info);
+    // After the base row, so a failure on the load table (found live: a
+    // Nucleus catalog write failing on CREATE TABLE) still leaves the worker's
+    // liveness fresh; the error propagates to the worker's log.
     await this.#heartbeatLoad(info);
+  }
+
+  async #heartbeatBase(info: WorkerInfo): Promise<void> {
     const vals = [
       info.host,
       info.sandbox,
@@ -266,11 +273,16 @@ export class NucleusFleetStore implements FleetStore {
 
   async list(): Promise<WorkerInfo[]> {
     await this.#ensure();
-    await this.#ensureLoad();
-    const [rows, loads] = await Promise.all([
-      this.#db.query("SELECT owner, host, sandbox, max_concurrent, active_runs, started_at, last_seen FROM ship_fleet"),
-      this.#db.query("SELECT owner, free_mem_mb, load1, cpus, held FROM ship_fleet_load"),
-    ]);
+    const rows = await this.#db.query("SELECT owner, host, sandbox, max_concurrent, active_runs, started_at, last_seen FROM ship_fleet");
+    // The load table is additive: if it cannot be ensured or read, the page
+    // still lists the workers, just without the host numbers.
+    let loads: Array<Record<string, unknown>> = [];
+    try {
+      await this.#ensureLoad();
+      loads = await this.#db.query("SELECT owner, free_mem_mb, load1, cpus, held FROM ship_fleet_load");
+    } catch {
+      loads = [];
+    }
     const loadOf = new Map(loads.map((l) => [String(l.owner), l]));
     const num = (v: unknown): number | undefined => {
       if (v === null || v === undefined || v === "") return undefined;
@@ -304,8 +316,12 @@ export class NucleusFleetStore implements FleetStore {
     const doomed = await this.#db.query("SELECT owner FROM ship_fleet WHERE last_seen < $1", [cutoff]);
     if (doomed.length === 0) return 0;
     await this.#db.query("DELETE FROM ship_fleet WHERE last_seen < $1", [cutoff]);
-    await this.#ensureLoad();
-    for (const d of doomed) await this.#db.query("DELETE FROM ship_fleet_load WHERE owner = $1", [String(d.owner)]);
+    try {
+      await this.#ensureLoad();
+      for (const d of doomed) await this.#db.query("DELETE FROM ship_fleet_load WHERE owner = $1", [String(d.owner)]);
+    } catch {
+      // Best-effort: a stale load row for a pruned worker is never listed (list joins on ship_fleet).
+    }
     return doomed.length;
   }
 }
