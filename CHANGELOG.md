@@ -4,6 +4,30 @@ All notable changes to Teploy Ship are recorded here.
 
 ## [Unreleased]
 
+### Added — Projects (C1, 2026-08-25)
+- One record per repository (`src/projects.ts`; `projects.json` / `ship_projects`):
+  clone URL, sandbox image / network / limits, intake policy and budget, test
+  command, Observe service. Adding a project ALLOWS its repo — the effective
+  allowlist is `SHIP_REPO_ALLOWLIST` (the floor) plus every project's clone URL,
+  by exact repo. Its sandbox image, network and limits are materialised into
+  the run input at enqueue and override the worker's `SHIP_SANDBOX_IMAGE` for
+  that repo's runs, so a Go repo and a pnpm repo share one worker. A project's
+  `sourcePolicy` (ignore / propose / auto) and daily budget override the
+  source's for that repo's tasks in the intake sweep.
+- Evidence is now a view of projects: `teploy-ship evidence set|list|remove`
+  and `enqueueRun` are unchanged; existing `ship_evidence` rows are read
+  through, and every `evidence set` moves the repo onto its project record.
+- Dashboard `/projects` (list, add, `?repo=` detail with the webhook hint;
+  edits need the `policies` grant, `auto` needs the `auto` grant) and
+  `teploy-ship project set|list|remove`.
+- Proven live on deploy-test: two throwaway Forgejo repos added through the
+  page alone, one Go (`golang:1.24`, `go test ./...`) and one pnpm
+  (`ship-sandbox-node:dev`, `pnpm test`), both webhook-proposed, both ran on
+  the same worker in their own images side by side and opened PRs carrying
+  `Tests: passed` with their own command; the same pnpm repo BEFORE its
+  project existed ran in the worker image and reported `Tests: FAILED — go
+  test ./...`.
+
 ## [0.2.0] - 2026-08-25
 
 ### Fixed — found by the capacity load test (2026-08-25)

@@ -39,7 +39,9 @@
 # The single-token SHIP_GIT_TOKEN still works, but because it has no host
 # attached it also needs SHIP_REPO_ALLOWLIST to say where it may be sent —
 # otherwise a repository URL arriving from a webhook, a Slack message, or an
-# issue body is refused rather than being handed the token.
+# issue body is refused rather than being handed the token. Adding a repo on
+# the dashboard's Projects page allows it too (the allowlist is the union);
+# the env value is the floor.
 
 app: ship
 server: smoke # your server name from servers.yml (smoke = the dev test box)
@@ -142,6 +144,10 @@ env:
   # need other tools can complete. The daemon is a host systemd service, so
   # containers reach it at the teploy bridge gateway (172.18.0.1). Set
   # SHIP_SANDBOX_TOKEN via `teploy secret set`.
+  # SHIP_SANDBOX_IMAGE is the worker-wide DEFAULT. A repo's project record
+  # (dashboard Projects page / `teploy-ship project set <repo> --image …`)
+  # overrides it for that repo's runs, so one worker serves a Go repo and a
+  # pnpm repo in their own images.
   SHIP_SANDBOX_URL: http://172.18.0.1:7439
   SHIP_SANDBOX_IMAGE: golang:1.24
   SHIP_SANDBOX_NETWORK: egress

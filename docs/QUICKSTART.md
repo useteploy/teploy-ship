@@ -133,6 +133,13 @@ Two things to get right:
   A repo with a `testCommand` gets its suite run even where `SHIP_TESTS` was
   never set: the config is the ask.
 
+  The same record is the dashboard's **Projects** page (`/projects`): adding a
+  repo there allows it (no `SHIP_REPO_ALLOWLIST` edit), picks the sandbox
+  image its runs boot (a Go repo and a pnpm repo can share one worker) and
+  sets its test command. `teploy-ship project set <clone-url> --image node:22
+  --test-command "pnpm test"` is the CLI form; `evidence set` writes the
+  same record.
+
 Enqueue another task and the pull request now carries a Verification section:
 
 ```

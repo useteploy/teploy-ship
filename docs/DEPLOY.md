@@ -315,7 +315,10 @@ Extend the egress allowlist per host (your git server!) via the unit env:
 Point ship at it (in `teploy.yml` env or secrets):
 `SHIP_SANDBOX_URL=http://172.18.0.1:7439`, `SHIP_SANDBOX_TOKEN=<token
 from /var/lib/teploy-sandbox/token>`, `SHIP_SANDBOX_IMAGE=golang:1.24`
-(pick your stack), `SHIP_SANDBOX_NETWORK=egress`.
+(pick your stack), `SHIP_SANDBOX_NETWORK=egress`. That image is the
+worker-wide default: a repo's project record (dashboard Projects page, or
+`teploy-ship project set <repo> --image node:22 --network egress`) overrides
+the image, network and limits for that repo's runs.
 
 ## 4. Codebase indexing (optional)
 
