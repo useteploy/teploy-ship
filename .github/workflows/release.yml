@@ -67,8 +67,15 @@ jobs:
         uses: docker/metadata-action@8e5442c4ef9f78752691e2d8f8d19755c6f78e81 # v5.5.1
         with:
           images: ghcr.io/${{ github.repository }}
+          # `stable` is the tag the public template and README actually deploy,
+          # so a release that does not move it changes nothing for anyone
+          # installing Ship. It was hand-flipped for v0.2.0 and then missed for
+          # v0.2.1, which shipped with `stable` still serving the pre-fix build.
+          # A prerelease tag (v1.2.3-rc1) must not move it.
           tags: |
             type=semver,pattern={{version}}
+            type=semver,pattern=v{{version}}
+            type=raw,value=stable,enable=${{ !contains(github.ref_name, '-') }}
             type=raw,value=latest
 
       - name: Build and push
