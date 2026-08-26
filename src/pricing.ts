@@ -85,16 +85,34 @@ function normalizeModelId(modelId: string): string {
   return (slash >= 0 ? modelId.slice(slash + 1) : modelId).toLowerCase();
 }
 
-/** Look up a model's pricing, tolerating a `provider/` prefix. Undefined for unknown models. */
+/**
+ * Look up a model's pricing, tolerating a `provider/` prefix. Undefined for
+ * unknown models.
+ *
+ * An override is matched on the FULL id first, then on the bare id. Both
+ * forms have to work, and this used to be a silent, expensive bug: overrides
+ * were stored under the key exactly as written, but looked up only under the
+ * prefix-stripped key, so the documented form — `{"my-org/some-model":{...}}`,
+ * the example in {@link pricingOverrides} — never matched anything. The rate
+ * fell through to {@link UNKNOWN_MODEL_PRICING}, i.e. the most expensive model
+ * on every axis. A real deployment declaring `zai/glm-5.3` at $1/$3.20 was
+ * billed at $10/$50 for weeks of runs, and the daily spend cap throttled real
+ * work against dollars nobody had spent.
+ *
+ * Full-id first is deliberate rather than incidental: the same bare model name
+ * can be served by two providers at different rates, and the more specific key
+ * should win.
+ */
 export function pricingFor(modelId: string, env?: NodeJS.ProcessEnv): ModelPricing | undefined {
-  const key = normalizeModelId(modelId);
+  const overrides = pricingOverrides(env);
+  const bare = normalizeModelId(modelId);
   // Operator-declared rates win: they know what they are paying, we are guessing.
-  return pricingOverrides(env)[key] ?? PRICING[key];
+  return overrides[modelId.toLowerCase()] ?? overrides[bare] ?? PRICING[bare];
 }
 
 /** Is this model in the table, or are we about to estimate its cost? */
 export function isPricedModel(modelId: string): boolean {
-  return pricingFor(modelId) !== undefined || isLocalModel(modelId);
+  return pricingFor(modelId) !== undefined || isLocalModel(modelId) || isQuotaModel(modelId);
 }
 
 /**
@@ -123,6 +141,40 @@ export function localModelPrefixes(env: NodeJS.ProcessEnv = process.env): string
 export function isLocalModel(modelId: string, env?: NodeJS.ProcessEnv): boolean {
   const id = modelId.toLowerCase();
   return localModelPrefixes(env).some((prefix) => id.startsWith(prefix));
+}
+
+/**
+ * Model prefixes billed as a flat subscription rather than per token, as a
+ * comma list: `SHIP_QUOTA_MODEL_PREFIXES=zai/,zai-coding-plan/`.
+ *
+ * The external-harness path already models this — a claude-code run on an
+ * OAuth token is recorded `priced: false`, "counted, not priced" — but the
+ * native loop had no equivalent, so a run on a coding-plan endpoint was
+ * assigned a per-token dollar figure that nobody was ever billed. Those
+ * invented dollars are then enforced by the daily spend cap, which throttles
+ * real work against spend that did not happen.
+ *
+ * Deliberately opt-in with NO default. Guessing that a provider is free is
+ * the failure direction this file already refuses elsewhere (see
+ * {@link UNKNOWN_MODEL_PRICING}): a wrong "free" removes the cap silently,
+ * while a wrong "priced" only refuses work early. The operator knows which
+ * of their endpoints is a subscription; Ship does not.
+ */
+export function quotaModelPrefixes(env: NodeJS.ProcessEnv = process.env): string[] {
+  return (env.SHIP_QUOTA_MODEL_PREFIXES ?? "")
+    .split(",")
+    .map((p) => p.trim().toLowerCase())
+    .filter((p) => p !== "")
+    .map((p) => (p.endsWith("/") ? p : `${p}/`));
+}
+
+/**
+ * Does this model draw on a flat plan (so its tokens have no dollar price)?
+ * Such a run is still counted by the count-based cap; it is just not priced.
+ */
+export function isQuotaModel(modelId: string, env?: NodeJS.ProcessEnv): boolean {
+  const id = modelId.toLowerCase();
+  return quotaModelPrefixes(env).some((prefix) => id.startsWith(prefix));
 }
 
 /**
@@ -201,6 +253,10 @@ export function costUSD(modelId: string, usage: UsageLike | undefined, env?: Nod
   // unknown-model ceiling would exhaust a self-hosted user's budget on the
   // first run for spend that never happened.
   if (isLocalModel(modelId, env)) return 0;
+  // A flat-rate plan (SHIP_QUOTA_MODEL_PREFIXES) spends quota, not dollars.
+  // Same reasoning as local inference: pricing it would invent a bill and
+  // then enforce a spend cap against it.
+  if (isQuotaModel(modelId, env)) return 0;
   const price = pricingFor(modelId, env) ?? UNKNOWN_MODEL_PRICING;
   const input = usage.inputTokens ?? 0;
   const output = usage.outputTokens ?? 0;

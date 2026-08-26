@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { PRICING, costUSD, isPricedModel, pricingFor } from "./pricing.js";
+import { PRICING, costUSD, isPricedModel, isQuotaModel, pricingFor } from "./pricing.js";
 
 test("pricing: basic input+output cost for a known model", () => {
   // sonnet-5: $3/1M in, $15/1M out. 1M in + 1M out = 3 + 15 = $18.
@@ -99,4 +99,44 @@ test("pricing: an unpriced run costs nothing HERE — it is counted, not priced 
   assert.equal(costUSD("claude-sonnet-5", { ...usage, priced: true, costUSD: 0.42 }), 0.42);
   assert.equal(costUSD("claude-sonnet-5", { ...usage, costUSD: 0.42 }), 0.42);
   assert.ok(costUSD("claude-sonnet-5", usage) > 1, "the table still prices ordinary usage");
+});
+
+test("an operator-declared override matches the documented prefixed form", () => {
+  // The docstring's own example is `{"my-org/some-model":{...}}`. That form
+  // silently matched nothing: overrides were keyed as written, looked up
+  // prefix-stripped, and fell through to the most expensive rate in the table.
+  const env = { SHIP_MODEL_PRICING: '{"zai/glm-5.3":{"inputPer1M":1,"outputPer1M":3.2}}' };
+  const rate = pricingFor("zai/glm-5.3", env);
+  assert.ok(rate !== undefined, "the declared rate must be found");
+  assert.equal(rate.inputPer1M, 1);
+  assert.equal(rate.outputPer1M, 3.2);
+  // 1M input + 100k output: $1.32 at the declared rate, $15 at UNKNOWN.
+  const cost = costUSD("zai/glm-5.3", { inputTokens: 1_000_000, outputTokens: 100_000 }, env);
+  assert.ok(Math.abs(cost - 1.32) < 1e-9, `expected 1.32, got ${cost}`);
+});
+
+test("a bare-id override still matches a prefixed model id", () => {
+  const env = { SHIP_MODEL_PRICING: '{"glm-5.3":{"inputPer1M":1,"outputPer1M":3.2}}' };
+  assert.equal(pricingFor("zai/glm-5.3", env)?.inputPer1M, 1);
+});
+
+test("the more specific full-id override wins over a bare one", () => {
+  const env = {
+    SHIP_MODEL_PRICING:
+      '{"glm-5.3":{"inputPer1M":9,"outputPer1M":9},"zai/glm-5.3":{"inputPer1M":1,"outputPer1M":3.2}}',
+  };
+  assert.equal(pricingFor("zai/glm-5.3", env)?.inputPer1M, 1);
+  assert.equal(pricingFor("other/glm-5.3", env)?.inputPer1M, 9);
+});
+
+test("a quota model spends no dollars, but only when declared", () => {
+  const usage = { inputTokens: 1_000_000, outputTokens: 100_000 };
+  // Undeclared: still priced (guessing "free" is the direction that fails open).
+  assert.ok(costUSD("zai/glm-5.3", usage, {}) > 0);
+  const env = { SHIP_QUOTA_MODEL_PREFIXES: "zai/" };
+  assert.equal(costUSD("zai/glm-5.3", usage, env), 0);
+  assert.equal(isQuotaModel("zai/glm-5.3", env), true);
+  assert.equal(isQuotaModel("anthropic/claude-sonnet-5", env), false);
+  // A declared prefix without its trailing slash still matches.
+  assert.equal(isQuotaModel("zai/glm-5.3", { SHIP_QUOTA_MODEL_PREFIXES: "zai" }), true);
 });
