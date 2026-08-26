@@ -2,7 +2,7 @@
 
 All notable changes to Teploy Ship are recorded here.
 
-## [Unreleased]
+## [0.2.1] - 2026-08-26
 
 ### Changed
 - **A sandboxed run no longer parks on every ordinary verification step.**
