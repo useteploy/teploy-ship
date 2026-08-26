@@ -2,6 +2,31 @@
 
 All notable changes to Teploy Ship are recorded here.
 
+## [Unreleased]
+
+### Fixed
+- **An operator-declared `SHIP_MODEL_PRICING` override never applied to a
+  prefixed model id — the documented form.** Overrides were stored under the
+  key exactly as written but looked up under the prefix-stripped key, so
+  `{"zai/glm-5.3":{...}}` (the shape of the docstring's own example) matched
+  nothing and fell through to `UNKNOWN_MODEL_PRICING`: the most expensive
+  entry in the table on every axis. A deployment declaring $1/$3.20 per 1M
+  was charged $10/$50 — 10x on input, 15.6x on output — across every run.
+  Not a cosmetic figure: the daily spend cap enforces against it, so runs
+  were refused for exceeding a budget nothing had consumed. `pricingFor` now
+  matches the full id first, then the bare id, so both forms work and a
+  provider-specific rate still beats a bare one.
+
+### Added
+- **`SHIP_QUOTA_MODEL_PREFIXES`: models billed as a flat plan, not per
+  token.** The external-harness path already recorded a claude-code run on an
+  OAuth token as `priced: false` — counted, not priced — but the native loop
+  had no equivalent, so a run against a coding-plan endpoint was assigned a
+  per-token dollar figure nobody was billed. Declared prefixes now cost 0,
+  the way local inference already does. Opt-in with no default on purpose:
+  guessing "free" removes the spend cap silently, while guessing "priced"
+  only refuses work early.
+
 ## [0.2.1] - 2026-08-26
 
 ### Changed
