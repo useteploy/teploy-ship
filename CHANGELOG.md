@@ -13,6 +13,18 @@ All notable changes to Teploy Ship are recorded here.
   `SHIP_MODEL=zai/glm-5.3`. All six surfaces now go through
   `resolveModelId` (`src/model-id.ts`): flag > `SHIP_MODEL` > config >
   default, with a test.
+- **Runs on large repositories died at the sandbox reaper before their first
+  command.** Ship never asked the daemon for a TTL, so every container got
+  its 30-minute default, while the `repo-index` step waited on a 1 GB
+  ollama answering one embedding at a time — four runs were reaped mid-index
+  and failed as `turn-0-exec: run not found`. Two changes: the worker now
+  requests `SHIP_SANDBOX_TTL_SEC` (default 7200, floor 600) on every
+  sandbox, and the index refresh is bounded by `SHIP_INDEX_TIMEOUT_MS`
+  (default 120000): it stops between files and batches once the deadline
+  passes, keeps what it committed, no single embedding call may outlive
+  the budget, and the recorded step says `stopped at the 120s index cap`.
+  PRE-DECIDED: a time cap over a "skip when slow" probe — a probe measures
+  one call, and the failure mode was a slow *endpoint*, not a dead one.
 
 ### Changed — nav compression (C4, 2026-08-25)
 - The header is five links — Inbox · Runs · Projects · Fleet · Settings — plus

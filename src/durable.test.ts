@@ -351,7 +351,7 @@ test("index-enabled repo runs refresh the code index and answer ```search from i
   const codeSearch = {
     async refresh(_executor: AgentExecutor, repo: string) {
       refreshed.push(repo);
-      return { files: 1, indexed: 1, removed: 0, chunks: 1, capped: false };
+      return { files: 1, indexed: 1, removed: 0, chunks: 1, capped: false, timedOut: false };
     },
     async search(repo: string, query: string) {
       queries.push(`${repo}:${query}`);
@@ -1534,7 +1534,7 @@ test("SEAM: workspaceKey scopes the code index and the ```search action on a rep
   const codeSearch = {
     async refresh(_executor: AgentExecutor, repo: string) {
       refreshed.push(repo);
-      return { files: 1, indexed: 1, chunks: 2, removed: 0, capped: false };
+      return { files: 1, indexed: 1, chunks: 2, removed: 0, capped: false, timedOut: false };
     },
     async search(repo: string, query: string) {
       searched.push(`${repo}::${query}`);

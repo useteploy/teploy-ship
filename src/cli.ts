@@ -404,6 +404,24 @@ interface SandboxSettings {
   token: string;
   image: string;
   network: "none" | "egress";
+  /** Container TTL requested from the daemon, seconds. */
+  ttlSec: number;
+}
+
+/**
+ * How long a run's sandbox may live before the daemon's reaper takes it,
+ * SHIP_SANDBOX_TTL_SEC, default 2 h. Ship never asked for a TTL before, so
+ * every run got the daemon's 30-minute default — and on 2026-08-25 four runs
+ * on large repositories were reaped before their first exec (their index step
+ * was still embedding), surfacing as `turn-0-exec: run not found`. Two hours
+ * covers a 40-turn run with the suite; the run's own caps still end it, the
+ * TTL is only the backstop for a worker that died mid-run. Floor 600 s.
+ */
+export function resolveSandboxTtlSec(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.SHIP_SANDBOX_TTL_SEC;
+  const n = raw === undefined || raw.trim() === "" ? NaN : Number(raw);
+  if (!Number.isFinite(n)) return 7200;
+  return Math.max(600, Math.trunc(n));
 }
 
 /**
@@ -433,7 +451,7 @@ function resolveSandbox(args: ReturnType<typeof parseArgs>, config: Config): San
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error));
   }
-  return { url, token, image, network };
+  return { url, token, image, network, ttlSec: resolveSandboxTtlSec() };
 }
 
 /**
@@ -640,6 +658,7 @@ function durableProvider(args: ReturnType<typeof parseArgs>, config: Config): Ex
       token: sandbox.token,
       image: sandbox.image,
       network: sandbox.network,
+      ttlSec: sandbox.ttlSec,
     });
   }
   // Local durable runs: a persistent per-run workspace under the state

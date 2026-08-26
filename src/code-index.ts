@@ -34,11 +34,30 @@ export interface RefreshStats {
   chunks: number;
   /** True when the per-refresh chunk cap stopped the sweep early. */
   capped: boolean;
+  /** True when the refresh deadline stopped the sweep early (what was embedded is kept). */
+  timedOut: boolean;
+}
+
+export interface RefreshOptions {
+  /** Absolute epoch ms; the sweep stops between files/batches once passed and no single embed call may outlive it. */
+  deadlineMs?: number;
+}
+
+/** Reject after `ms` — used so one hung embedding call cannot hold a run past its sandbox TTL. */
+export function withDeadline<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+  if (!Number.isFinite(ms)) return promise;
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${what} exceeded ${Math.max(0, Math.round(ms))}ms`)), Math.max(0, ms));
+    promise.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); },
+    );
+  });
 }
 
 export interface CodeSearch {
   /** Incrementally (re)index the executor's worktree for this repo. */
-  refresh(executor: AgentExecutor, repo: string): Promise<RefreshStats>;
+  refresh(executor: AgentExecutor, repo: string, options?: RefreshOptions): Promise<RefreshStats>;
   /** Semantic retrieval over the repo's indexed chunks. */
   search(repo: string, query: string, limit?: number): Promise<CodeSearchHit[]>;
 }
@@ -168,8 +187,10 @@ export class NucleusCodeIndex implements CodeSearch {
     }
   }
 
-  async refresh(executor: AgentExecutor, repo: string): Promise<RefreshStats> {
+  async refresh(executor: AgentExecutor, repo: string, options: RefreshOptions = {}): Promise<RefreshStats> {
     await this.#ensure();
+    const deadline = options.deadlineMs ?? Number.POSITIVE_INFINITY;
+    const remaining = (): number => deadline - Date.now();
 
     const listing = await executor.exec("git ls-files");
     if (listing.exitCode !== 0) {
@@ -180,7 +201,7 @@ export class NucleusCodeIndex implements CodeSearch {
     const rows = await this.#db.query("SELECT path, hash, chunks FROM ship_code_files WHERE repo = $1", [repo]);
     const ledger = new Map(rows.map((r) => [String(r.path), { hash: String(r.hash), chunks: Number(r.chunks) }]));
 
-    const stats: RefreshStats = { files: paths.length, indexed: 0, removed: 0, chunks: 0, capped: false };
+    const stats: RefreshStats = { files: paths.length, indexed: 0, removed: 0, chunks: 0, capped: false, timedOut: false };
     // Every path GIT still tracks, established up front.
     //
     // This used to be built incrementally as the loop visited files, and the
@@ -195,6 +216,15 @@ export class NucleusCodeIndex implements CodeSearch {
     for (const path of paths) {
       if (stats.chunks >= MAX_CHUNKS_PER_REFRESH) {
         stats.capped = true;
+        break;
+      }
+      // Time is the other budget. On 2026-08-25 a 1 GB ollama behind the
+      // gateway answered one 235-token embedding at a time and four runs sat
+      // in this loop until the sandbox reaper took their containers. Stop
+      // between files, keep what is committed, and say so in the stats.
+      if (remaining() <= 0) {
+        stats.capped = true;
+        stats.timedOut = true;
         break;
       }
       let data: Uint8Array;
@@ -220,11 +250,20 @@ export class NucleusCodeIndex implements CodeSearch {
       const budgeted = chunks.slice(0, room);
       if (budgeted.length < chunks.length) stats.capped = true;
       for (let offset = 0; offset < budgeted.length; offset += EMBED_BATCH) {
+        if (remaining() <= 0) {
+          stats.capped = true;
+          stats.timedOut = true;
+          break;
+        }
         const batch = budgeted.slice(offset, offset + EMBED_BATCH);
-        const { embeddings } = await embedMany({
-          model: this.#embedder,
-          values: batch.map((c) => `${path}\n${c.text}`),
-        });
+        const { embeddings } = await withDeadline(
+          embedMany({
+            model: this.#embedder,
+            values: batch.map((c) => `${path}\n${c.text}`),
+          }),
+          remaining(),
+          `embedding ${path}`,
+        );
         for (let i = 0; i < batch.length; i++) {
           const vector = embeddings[i];
           if (vector === undefined || vector.length === 0) continue;

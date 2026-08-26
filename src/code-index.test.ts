@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { chunkText, formatSearchHits, indexablePath } from "./code-index.js";
+import type { AgentExecutor } from "@neutron-build/agents";
+import type { EmbeddingAdapter } from "@neutron-build/ai";
+import { NucleusCodeIndex, chunkText, formatSearchHits, indexablePath, withDeadline } from "./code-index.js";
+import type { NucleusPgwire } from "./nucleus-pgwire.js";
 
 test("chunkText: windows with overlap, 1-indexed inclusive ranges, blank-only chunks dropped", () => {
   const lines = Array.from({ length: 130 }, (_, i) => `line ${i + 1}`);
@@ -70,4 +73,48 @@ test("TS-021: reaching the chunk cap must not delete the index for files it neve
     afterDelete.push(path);
   }
   assert.deepEqual(afterDelete, ["b.ts"]);
+});
+
+function fakeDb(): { db: NucleusPgwire; sql: string[] } {
+  const sql: string[] = [];
+  const db = {
+    query: async (text: string) => {
+      sql.push(text);
+      return [];
+    },
+  } as unknown as NucleusPgwire;
+  return { db, sql };
+}
+
+function fakeExecutor(files: Record<string, string>): AgentExecutor {
+  return {
+    exec: async (cmd: string) => ({
+      exitCode: 0,
+      stdout: cmd === "git ls-files" ? Object.keys(files).join("\n") : "",
+      stderr: "",
+    }),
+    getFile: async (path: string) => new TextEncoder().encode(files[path] ?? ""),
+  } as unknown as AgentExecutor;
+}
+
+test("a refresh whose deadline has passed stops before embedding anything and says so", async () => {
+  const { db, sql } = fakeDb();
+  let embedCalls = 0;
+  const embedder = new Proxy({}, { get: () => { embedCalls++; return undefined; } }) as unknown as EmbeddingAdapter;
+  const index = new NucleusCodeIndex(db, embedder);
+  const stats = await index.refresh(fakeExecutor({ "a.ts": "export const a = 1;\n" }), "o/r", {
+    deadlineMs: Date.now() - 1,
+  });
+  assert.equal(stats.timedOut, true);
+  assert.equal(stats.capped, true);
+  assert.equal(stats.indexed, 0);
+  assert.equal(embedCalls, 0, "no embedding call may start once the deadline has passed");
+  assert.ok(!sql.some((s) => s.startsWith("INSERT INTO ship_code_chunks")), "nothing was inserted");
+});
+
+test("withDeadline rejects a call that outlives its budget, and passes a fast one through", async () => {
+  const slow = new Promise<string>((resolve) => setTimeout(() => resolve("late"), 200));
+  await assert.rejects(withDeadline(slow, 10, "embedding x"), /embedding x exceeded 10ms/);
+  assert.equal(await withDeadline(Promise.resolve("fast"), 1000, "embedding y"), "fast");
+  assert.equal(await withDeadline(Promise.resolve("no cap"), Number.POSITIVE_INFINITY, "z"), "no cap");
 });

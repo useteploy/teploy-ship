@@ -627,8 +627,12 @@ export function durableAgent(
         await ctx.step("repo-index", async () => {
           if (config.codeSearch === undefined) return "disabled (no code index configured on this worker)";
           try {
-            const stats = await config.codeSearch.refresh(executor, scopeKey);
-            return `${stats.indexed} files indexed (${stats.chunks} chunks), ${stats.removed} removed of ${stats.files} tracked${stats.capped ? " (capped)" : ""}`;
+            // Bounded: SHIP_INDEX_TIMEOUT_MS (default 2 min). Read here, not
+            // materialised into the input — the step's OUTPUT is what replays,
+            // and a slower or faster index on replay changes nothing recorded.
+            const capMs = Number(process.env.SHIP_INDEX_TIMEOUT_MS) || 120_000;
+            const stats = await config.codeSearch.refresh(executor, scopeKey, { deadlineMs: Date.now() + capMs });
+            return `${stats.indexed} files indexed (${stats.chunks} chunks), ${stats.removed} removed of ${stats.files} tracked${stats.timedOut ? ` (stopped at the ${Math.round(capMs / 1000)}s index cap)` : stats.capped ? " (capped)" : ""}`;
           } catch (error) {
             return `index refresh failed: ${error instanceof Error ? error.message : String(error)}`;
           }
