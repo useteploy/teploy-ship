@@ -2117,3 +2117,86 @@ test("SEAM: the run's per-repo observe service is the one read, not the worker's
     fixture.restore();
   }
 });
+
+// --- A3: the critic sees the suite, and the suite is not run twice ---
+//
+// The critic used to run BEFORE the suite: `publishIfRepoRun` ran the tests
+// after the loop had already returned, so the reviewer formed its verdict
+// without the single most informative signal in the run and could approve a
+// change that broke the build.
+test("the suite runs before the critic's verdict, reaches the reviewer, and is not re-run at publish", async () => {
+  const bareDir = await mkdtemp(join(tmpdir(), "durable-critic-tests-bare-"));
+  const seedDir = await mkdtemp(join(tmpdir(), "durable-critic-tests-seed-"));
+  const seeder = new LocalExecutor({ root: seedDir });
+  await seeder.exec(
+    `git init -q -b main . && git config user.email t@t && git config user.name t && printf 'hello\\n' > f.txt && git add -A && git commit -qm seed && git clone -q --bare . ${bareDir}/owner/repo.git`,
+  );
+
+  let sawEvidenceInReview = false;
+  const { model } = reactiveModel([
+    "```bash\necho changed >> f.txt\n```",
+    "```finish\nfirst claim\n```", // held by the verify nudge
+    "```bash\ncat f.txt\n```", // proof, as asked
+    "```finish\nsecond claim\n```", // the critic pass runs
+    (obs) => {
+      // This turn IS the critic's call: its prompt is the review prompt.
+      if (/SUITE-MARKER-42/.test(obs)) sawEvidenceInReview = true;
+      return "APPROVE";
+    },
+  ]);
+
+  const work = await mkdtemp(join(tmpdir(), "durable-critic-tests-work-"));
+  let suiteRuns = 0;
+  const provider: ExecutorProvider = {
+    async create() {
+      return { handle: work };
+    },
+    attach(handle: string) {
+      const inner = new LocalExecutor({ root: handle });
+      return {
+        async exec(cmd: string, opts?: { timeoutMs?: number }) {
+          if (cmd.includes("SUITE-MARKER-42")) suiteRuns += 1;
+          return inner.exec(cmd, opts);
+        },
+        putFile: (p: string, d: Uint8Array | string) => inner.putFile(p, d),
+        getFile: (p: string) => inner.getFile(p),
+        destroy: () => inner.destroy(),
+      };
+    },
+  };
+
+  const orig = globalThis.fetch;
+  (globalThis as unknown as { fetch: unknown }).fetch = () =>
+    Promise.resolve({ ok: true, json: () => Promise.resolve({ number: 1, html_url: "http://example/owner/repo/pulls/1" }) });
+
+  try {
+    const wf = durableAgent({ model, executor: provider, workdir: "." });
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: wf,
+      runId: "run-critic-tests",
+      store,
+      input: {
+        task: "improve f.txt",
+        repo: `file://${bareDir}/owner/repo.git`,
+        critic: true,
+        tests: true,
+        testCommand: "echo SUITE-MARKER-42",
+      },
+    });
+
+    assert.equal(outcome.status, "completed");
+    assert.equal(sawEvidenceInReview, true, "the reviewer's prompt carried the suite's output");
+    assert.equal(suiteRuns, 1, "one suite run, not two: the publish gate reuses the critic's outcome over the same tree");
+
+    const stepNames = (await store.load("run-critic-tests"))
+      .filter((e) => e.type === "step-completed")
+      .map((e) => e.name ?? "");
+    const criticTests = stepNames.findIndex((n) => n.endsWith("-critic-tests"));
+    const review = stepNames.findIndex((n) => n.endsWith("-critic") && !n.endsWith("-critic-diff") && !n.endsWith("-critic-tests"));
+    assert.ok(criticTests >= 0, `the critic's own suite step must be recorded: ${stepNames.join(",")}`);
+    assert.ok(review > criticTests, "and it must be recorded BEFORE the review — that is the whole fix");
+  } finally {
+    globalThis.fetch = orig;
+  }
+});

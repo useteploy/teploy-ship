@@ -3,6 +3,7 @@ import type { WorkflowContext } from "@neutron-build/workflow";
 
 import type { DurableAgentInput } from "./durable.js";
 import type { RepoCheckout } from "./git.js";
+import type { TestOutcome } from "./tests.js";
 
 /**
  * The harness adapter boundary (P5-1, `_internal/P5-1_ADAPTER_DESIGN.md`).
@@ -101,6 +102,16 @@ export interface HarnessResult {
    * an incomplete (draft/WIP) pull request.
    */
   incomplete: boolean;
+  /**
+   * A suite result the harness already produced over the tree it is handing
+   * back, when nothing touched that tree afterwards — the critic pass runs the
+   * suite so the reviewer can see it, and the publish gate reuses the outcome
+   * rather than running a minutes-long suite twice over identical bytes.
+   *
+   * Absent means "no suite result you can trust for this tree", which is the
+   * safe default: the publish gate then runs it itself.
+   */
+  evidence?: TestOutcome;
 }
 
 /**

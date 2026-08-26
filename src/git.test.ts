@@ -16,6 +16,8 @@ import {
   pullRequestUrl,
   resolvePr,
   setupRepo,
+  truncateMiddle,
+  WORKING_DIFF_MAX_CHARS,
 } from "./git.js";
 import { credentialFor } from "./repo-policy.js";
 
@@ -209,4 +211,47 @@ test("TS-015: an existing open PR is found rather than duplicated on replay", as
   // A failed lookup must not block publishing — it returns null and the caller creates.
   const broken = (async () => ({ ok: false, json: async () => ({}) })) as unknown as typeof fetch;
   assert.equal(await findOpenPullRequest({ ref, token: "t", head: "ship/run-1", owner: "o", fetchImpl: broken }), null);
+});
+
+// --- A3: the critic's diff window ---
+//
+// The default was 6000 chars taken from the HEAD of the diff, which is two or
+// three files of a real change: a 15-file diff was reviewed on its opening
+// files. `git diff` orders hunks by path, so head-truncation is not a neutral
+// sample either — it is alphabetical.
+
+test("truncateMiddle returns short text untouched", () => {
+  assert.equal(truncateMiddle("short", 100), "short");
+  assert.equal(truncateMiddle("", 100), "");
+});
+
+test("truncateMiddle keeps BOTH ends of an oversized diff and says what it dropped", () => {
+  const lines = Array.from({ length: 400 }, (_, i) => `line ${i}`);
+  const out = truncateMiddle(lines.join("\n"), 600);
+  assert.match(out, /^line 0\n/, "the head survives");
+  assert.match(out, /line 399$/, "and so does the tail — this is the whole point");
+  assert.match(out, /chars omitted from the middle/);
+  assert.ok(out.length <= 700, `stayed near the window, got ${out.length}`);
+});
+
+test("truncateMiddle cuts on line boundaries so neither half ends mid-hunk", () => {
+  const lines = Array.from({ length: 200 }, (_, i) => `+ some source line number ${i}`);
+  const out = truncateMiddle(lines.join("\n"), 800);
+  const [head, tail] = out.split(/\n\n\.\.\. \[\d+ chars omitted from the middle of this diff\] \.\.\.\n\n/);
+  assert.ok(head !== undefined && tail !== undefined, "the marker splits it in two");
+  for (const line of `${head}\n${tail}`.split("\n")) {
+    assert.match(line, /^\+ some source line number \d+$/, `a whole line, not a fragment: ${JSON.stringify(line)}`);
+  }
+});
+
+test("truncateMiddle survives a single line longer than the whole window", () => {
+  const out = truncateMiddle("x".repeat(5000), 200);
+  assert.ok(out.length <= 300);
+  assert.match(out, /chars omitted from the middle/);
+});
+
+test("WORKING_DIFF_MAX_CHARS is large enough for a real multi-file change", () => {
+  // The regression this guards: a default small enough that the reviewer only
+  // ever sees the first few files of the diff it is judging.
+  assert.ok(WORKING_DIFF_MAX_CHARS >= 20_000, `got ${WORKING_DIFF_MAX_CHARS}`);
 });

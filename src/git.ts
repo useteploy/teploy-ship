@@ -245,14 +245,50 @@ export async function findOpenPullRequest(options: {
  * feeds the critic pass (critic.ts). Empty string when there's no repo, no
  * git, or nothing changed; advisory, never throws (a diff failure degrades
  * the critic pass, never the run — same posture as the code-index refresh).
+ *
+ * The default was 6000 chars, head-truncated, which is roughly two or three
+ * files of a real diff: a 15-file change was reviewed on its opening files and
+ * the critic never saw the rest. `git diff` orders hunks by path, so
+ * head-truncation is not a neutral sample either — it is alphabetical, the
+ * same bias the code index has. Both are fixed here: the window is large
+ * enough for an ordinary change, and what does not fit is dropped from the
+ * MIDDLE so the reviewer sees both ends of the diff and an explicit count of
+ * what it is not being shown.
  */
-export async function workingDiff(executor: AgentExecutor, maxChars = 6000): Promise<string> {
+export const WORKING_DIFF_MAX_CHARS = 40_000;
+
+export async function workingDiff(executor: AgentExecutor, maxChars = WORKING_DIFF_MAX_CHARS): Promise<string> {
   const added = await executor.exec("git add -A", { timeoutMs: 60_000 });
   if (added.exitCode !== 0) return "";
   const diff = await executor.exec("git diff --cached", { timeoutMs: 60_000 });
   if (diff.exitCode !== 0) return "";
-  const text = diff.stdout;
-  return text.length > maxChars ? `${text.slice(0, maxChars)}\n... [truncated]` : text;
+  return truncateMiddle(diff.stdout, maxChars);
+}
+
+/**
+ * Keep both ends of `text`, drop the middle, and say how much was dropped.
+ *
+ * Split 60/40 in favour of the head: the first hunks carry the change's
+ * intent, the last carry whatever was tacked on at the end of the run — which
+ * is where a half-finished edit tends to be. The cut lands on a line boundary
+ * so neither half ends mid-hunk.
+ */
+export function truncateMiddle(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const marker = "\n\n... [omitted from the middle of this diff] ...\n\n";
+  const room = Math.max(0, maxChars - marker.length);
+  const headRoom = Math.floor(room * 0.6);
+  const tailRoom = room - headRoom;
+  const head = text.slice(0, headRoom);
+  const tail = text.slice(text.length - tailRoom);
+  // Land both cuts on line boundaries; fall back to the raw slice when a
+  // single line is longer than the window (a minified file, a generated lock).
+  const headCut = head.lastIndexOf("\n");
+  const tailCut = tail.indexOf("\n");
+  const headText = headCut > 0 ? head.slice(0, headCut) : head;
+  const tailText = tailCut >= 0 ? tail.slice(tailCut + 1) : tail;
+  const dropped = text.length - headText.length - tailText.length;
+  return `${headText}\n\n... [${dropped} chars omitted from the middle of this diff] ...\n\n${tailText}`;
 }
 
 export interface PullRequest {

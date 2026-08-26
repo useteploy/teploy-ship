@@ -29,7 +29,7 @@ import {
 import { deployPreview, type PreviewOutcome, type PreviewTarget } from "./deploy.js";
 import { compareAroundNow, effectiveTelemetryTarget, telemetryAppliesTo, type TelemetryTarget, type TelemetryVerdict } from "./observe.js";
 import { spliceVerification, verificationSection, type Evidence } from "./verification.js";
-import { runTests, testTargetFromInput, type TestOutcome, type TestTarget } from "./tests.js";
+import { runTests, testComment, testTargetFromInput, type TestOutcome, type TestTarget } from "./tests.js";
 import { refusalMessage, warningMessage } from "./publish-policy.js";
 import type { RepoCheckout, RepoRef } from "./git.js";
 import { assertRepoAllowed, credentialFor, policyFromEnv } from "./repo-policy.js";
@@ -675,7 +675,17 @@ export function durableAgent(
         const pr =
           result.status === "plan-rejected"
             ? null
-            : await publishIfRepoRun(ctx, primary.executor, config, input, checkout, result.summary, repoPolicy, result.incomplete);
+            : await publishIfRepoRun(
+                ctx,
+                primary.executor,
+                config,
+                input,
+                checkout,
+                result.summary,
+                repoPolicy,
+                result.incomplete,
+                result.evidence,
+              );
         await dispose(config, primary.handle);
         return { status: result.status, summary: result.summary, turns: result.turns, usage: result.usage, ...(pr !== null ? { pr } : {}) };
       }
@@ -759,7 +769,19 @@ export function durableAgent(
       const pr =
         winner.result.status === "plan-rejected"
           ? null
-          : await publishIfRepoRun(ctx, winner.ws.executor, config, input, winner.ws.checkout, summary, repoPolicy, winner.result.incomplete);
+          : await publishIfRepoRun(
+              ctx,
+              winner.ws.executor,
+              config,
+              input,
+              winner.ws.checkout,
+              summary,
+              repoPolicy,
+              winner.result.incomplete,
+              // The winner's own workspace produced it, and the publish gate
+              // runs against that same workspace — see the executor above.
+              winner.result.evidence,
+            );
       await dispose(config, winner.ws.handle);
       return { status: winner.result.status, summary, turns, usage, ...(pr !== null ? { pr } : {}) };
     },
@@ -813,6 +835,17 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
       let failNudges = 0;
       let lastExecFailed = false;
       let criticDone = false;
+      /**
+       * The suite result the critic was shown, and the turn it describes.
+       *
+       * Carried out on the harness result so the publish gate can reuse it
+       * instead of running the suite a second time over an identical tree —
+       * but only when the run FINISHED on that same turn, which is exactly the
+       * case where nothing touched the workspace in between. Any other ending
+       * leaves it unset and the publish gate runs the suite itself.
+       */
+      let criticEvidence: TestOutcome | undefined;
+      let criticEvidenceTurn = -1;
       /**
        * The most recent finish the gate HELD, and only when the hold was the
        * benign "prove it" one. A run that ends on a harness sentence while one
@@ -1032,9 +1065,40 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
                 }
               });
               if (diff.trim() !== "") {
+                // The suite runs BEFORE the review, not after it.
+                //
+                // It used to run in publishIfRepoRun, after the loop had
+                // already returned — so the reviewer formed its verdict
+                // without the single most informative signal in the run, and a
+                // change that broke the build could be approved on a diff that
+                // read well. The tree is not touched between here and the
+                // publish gate when the review approves, so the outcome is
+                // carried out on the result and reused there rather than run
+                // twice; a rejected review sends the agent back to editing and
+                // the publish gate runs the suite again over what it produced.
+                const evidence = await runSuite(ws.ctx, ws.executor, config, input, `${p}turn-${turn}-critic-`);
+                if (evidence !== undefined) {
+                  criticEvidence = evidence;
+                  criticEvidenceTurn = turn;
+                }
                 const reviewStep = await ws.ctx.step(`${p}turn-${turn}-critic`, async () => {
                   try {
-                    const review = await reviewWork(config.model, { task: task.task, summary: action.message, diff });
+                    const review = await reviewWork(
+                      config.model,
+                      {
+                        task: task.task,
+                        summary: action.message,
+                        diff,
+                        ...(evidence !== undefined ? { evidence: testComment(evidence) } : {}),
+                      },
+                      // A reviewer that can read the file it is judging is the
+                      // difference between "this diff looks wrong" and "this
+                      // diff IS wrong": a diff shows changed lines without the
+                      // function around them, the caller that must still
+                      // compile, or the test that covers it. Read-only — see
+                      // readFileTool in critic.ts for why it is not exec.
+                      { readFile: (path) => readWorkspaceFile(ws.executor, ws.workdir, path) },
+                    );
                     return { text: review.text, usage: review.usage, reviewed: true };
                   } catch {
                     return { text: "", usage: undefined, reviewed: false };
@@ -1043,6 +1107,11 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
                 addUsage(reviewStep.usage);
                 if (reviewStep.reviewed && !isApproved(reviewStep.text)) {
                   nudge = criticFeedback(reviewStep.text);
+                  // The agent is going back to work, so whatever the suite said
+                  // describes a tree that is about to change. Drop it; the
+                  // publish gate will run the suite over the final state.
+                  criticEvidence = undefined;
+                  criticEvidenceTurn = -1;
                 }
               }
             }
@@ -1060,7 +1129,14 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
               continue;
             }
           }
-          return { status: "finished", summary: action.message, turns: turn + 1, usage, incomplete: false };
+          return {
+            status: "finished",
+            summary: action.message,
+            turns: turn + 1,
+            usage,
+            incomplete: false,
+            ...(criticEvidenceTurn === turn && criticEvidence !== undefined ? { evidence: criticEvidence } : {}),
+          };
         }
         if (action.kind === "none" || action.kind === "invalid") {
           messages.push({
@@ -1273,6 +1349,7 @@ async function publishIfRepoRun(
   summary: string,
   policy: RepoPolicyConfig,
   incomplete = false,
+  evidence?: TestOutcome,
 ): Promise<string | null> {
   if (checkout === null || input.repo === undefined) return null;
   const repoUrl = input.repo;
@@ -1283,7 +1360,8 @@ async function publishIfRepoRun(
 
   // 0. Run the suite BEFORE the push, so "tests passed" describes the code that
   // is about to become the pull request rather than an earlier state of it.
-  const tests = await testsIfAsked(ctx, executor, config, input);
+  // Unless the critic already ran it over this same tree — see testsIfAsked.
+  const tests = await testsIfAsked(ctx, executor, config, input, evidence);
 
   // 1. Commit + push. Screened first; a refusal is recorded and stops here.
   const push = await ctx.step("repo-push", async () => {
@@ -1556,9 +1634,37 @@ async function testsIfAsked(
   executor: AgentExecutor,
   config: DurableAgentConfig,
   input: DurableAgentInput,
+  /**
+   * A suite result already produced over this exact tree — the critic's, when
+   * the run finished on the turn the critic reviewed. Reused rather than
+   * re-run: it is the same command over the same bytes, and a project suite is
+   * minutes, not milliseconds.
+   */
+  already?: TestOutcome,
 ): Promise<TestOutcome | undefined> {
   if (input.tests !== true) return undefined;
-  return await ctx.step("tests", async (): Promise<TestOutcome> => {
+  if (already !== undefined) return already;
+  return await runSuite(ctx, executor, config, input, "");
+}
+
+/**
+ * Run the project's suite as a recorded step.
+ *
+ * `stepPrefix` keys the step. The publish gate uses "" — the historical
+ * `tests` key, so every existing run replays untouched — and the critic pass
+ * uses its own turn-scoped prefix, because the two are different runs of the
+ * suite at different points in the run and a shared key would make the second
+ * one silently replay the first.
+ */
+async function runSuite(
+  ctx: WorkflowContext,
+  executor: AgentExecutor,
+  config: DurableAgentConfig,
+  input: DurableAgentInput,
+  stepPrefix: string,
+): Promise<TestOutcome | undefined> {
+  if (input.tests !== true) return undefined;
+  return await ctx.step(`${stepPrefix}tests`, async (): Promise<TestOutcome> => {
     // Per-repo first: one worker serving many repos runs each repo's own
     // suite. The env default remains for repos with no entry and for runs
     // enqueued before per-repo evidence existed.
@@ -1568,6 +1674,23 @@ async function testsIfAsked(
     }
     return await runTests(executor, target);
   });
+}
+
+/**
+ * Read one workspace file as text, for the critic's `read_file` tool.
+ *
+ * Paths are resolved under the run's workdir and confined to it: the reviewer
+ * names a repo-relative path and a traversal out of the tree is refused rather
+ * than served. Read-only by construction — the executor's getFile cannot
+ * write.
+ */
+async function readWorkspaceFile(executor: AgentExecutor, workdir: string, path: string): Promise<string> {
+  const relative = path.replace(/^\.\//, "");
+  if (relative.startsWith("/") || relative.split("/").includes("..")) {
+    throw new Error("path must be relative to the repository root");
+  }
+  const full = `${workdir.replace(/\/$/, "")}/${relative}`;
+  return new TextDecoder().decode(await executor.getFile(full));
 }
 
 /**
