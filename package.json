@@ -27,9 +27,10 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "lint": "tsc --noEmit --pretty false",
-    "test": "pnpm run build && node --test --experimental-test-isolation=none \"dist/**/*.test.js\" && node --test \"swebench/*.test.mjs\"",
+    "test": "pnpm run build && node --test --experimental-test-isolation=none \"dist/**/*.test.js\" && node --test \"swebench/*.test.mjs\" \"scripts/*.test.mjs\"",
     "start": "node dist/cli.js",
-    "scan:secrets": "node scripts/scan-secrets.mjs"
+    "scan:secrets": "node scripts/scan-secrets.mjs",
+    "smoke": "pnpm run build && node scripts/smoke-e2e.mjs"
   },
   "dependencies": {
     "@neutron-build/agents": "^0.1.0",

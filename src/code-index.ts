@@ -136,15 +136,30 @@ function isBinary(data: Uint8Array): boolean {
   return scan.includes(0);
 }
 
+export interface CodeIndexOptions {
+  /**
+   * Ceiling on chunks written by one refresh. Exposed so a test can reach the
+   * cap without building a 150,000-line fixture — the cap's behaviour at the
+   * boundary is exactly what the TS-021 regression is about, and a test that
+   * cannot reach it has to re-implement the rule instead of exercising it.
+   */
+  maxChunksPerRefresh?: number;
+}
+
 export class NucleusCodeIndex implements CodeSearch {
   #db: NucleusPgwire;
   #embedder: EmbeddingAdapter;
   #ready: Promise<void> | null = null;
   #chunksReady: Promise<void> | null = null;
+  #maxChunks: number;
 
-  constructor(db: NucleusPgwire, embedder: EmbeddingAdapter) {
+  constructor(db: NucleusPgwire, embedder: EmbeddingAdapter, options: CodeIndexOptions = {}) {
     this.#db = db;
     this.#embedder = embedder;
+    this.#maxChunks =
+      options.maxChunksPerRefresh !== undefined && Number.isFinite(options.maxChunksPerRefresh) && options.maxChunksPerRefresh > 0
+        ? Math.trunc(options.maxChunksPerRefresh)
+        : MAX_CHUNKS_PER_REFRESH;
   }
 
   /** The file-hash ledger has no dimension dependency — create eagerly. */
@@ -214,7 +229,7 @@ export class NucleusCodeIndex implements CodeSearch {
     const tracked = new Set(paths);
 
     for (const path of paths) {
-      if (stats.chunks >= MAX_CHUNKS_PER_REFRESH) {
+      if (stats.chunks >= this.#maxChunks) {
         stats.capped = true;
         break;
       }
@@ -246,7 +261,7 @@ export class NucleusCodeIndex implements CodeSearch {
       // The cap is enforced INSIDE the file too: checking only before a file
       // meant one large file could carry stats.chunks far past the advertised
       // ceiling in a single refresh.
-      const room = Math.max(0, MAX_CHUNKS_PER_REFRESH - stats.chunks);
+      const room = Math.max(0, this.#maxChunks - stats.chunks);
       const budgeted = chunks.slice(0, room);
       if (budgeted.length < chunks.length) stats.capped = true;
       for (let offset = 0; offset < budgeted.length; offset += EMBED_BATCH) {

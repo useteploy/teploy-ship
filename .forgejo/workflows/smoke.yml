@@ -1,0 +1,47 @@
+# The one CI job that executes an agent.
+#
+# The other workflow runs lint, 530 unit tests, a web build and a secret scan
+# and never starts a run — which is how four config-vs-behaviour bugs shipped
+# green in one week of 2026-08. This one files a real task against a real
+# throwaway repo, lets a real worker drive it in a real sandbox, and asserts on
+# the pull request that comes back. See scripts/smoke-e2e.mjs for what it
+# proves and why it cannot be done in-process.
+#
+# It lives in the Forgejo workflow set rather than the GitHub one because it
+# needs a Nucleus, a sandbox daemon and a forge, and the runner on the worker
+# host is the only place all three are reachable.
+name: Smoke (end to end)
+
+on:
+  schedule:
+    # Nightly, after the box is quiet. A run costs one model call's worth of
+    # tokens and a few minutes of a sandbox.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: docker
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        run: npm install -g pnpm@10
+
+      - name: Build
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+
+      - name: One real run, end to end
+        env:
+          NUCLEUS_URL: ${{ secrets.SMOKE_NUCLEUS_URL }}
+          SHIP_SANDBOX_URL: ${{ secrets.SMOKE_SANDBOX_URL }}
+          SHIP_SANDBOX_TOKEN: ${{ secrets.SMOKE_SANDBOX_TOKEN }}
+          SHIP_SANDBOX_NETWORK: egress
+          SHIP_SMOKE_REPO: ${{ secrets.SMOKE_REPO }}
+          SHIP_MODEL: ${{ secrets.SMOKE_MODEL }}
+          SHIP_GIT_TOKENS: ${{ secrets.SMOKE_GIT_TOKENS }}
+          AI_GATEWAY_URL: ${{ secrets.AI_GATEWAY_URL }}
+          AI_GATEWAY_KEY: ${{ secrets.AI_GATEWAY_KEY }}
+        run: node scripts/smoke-e2e.mjs --timeout-sec 900

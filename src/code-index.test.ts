@@ -44,35 +44,127 @@ test("formatSearchHits: path:line ranges + snippets; empty is a clear miss", () 
   assert.match(formatSearchHits("nothing", []), /No indexed code matched/);
 });
 
+/**
+ * A NucleusPgwire fake that actually STORES rows.
+ *
+ * The previous TS-021 test re-implemented the removal rule in its own body and
+ * asserted against its own copy: deleting the fix in code-index.ts left it
+ * green. A regression test that cannot fail when the code regresses is worse
+ * than no test, because it reads as coverage. This fake understands exactly
+ * the statements refresh() issues, so the test below drives the real function.
+ */
+function storingDb(): { db: NucleusPgwire; files: Map<string, { hash: string; chunks: string }>; chunks: Set<string> } {
+  const files = new Map<string, { hash: string; chunks: string }>();
+  const chunks = new Set<string>();
+  const key = (repo: string, path: string): string => `${repo}\u0000${path}`;
+  const db = {
+    query: async (text: string, params: unknown[] = []): Promise<Array<Record<string, unknown>>> => {
+      const sql = text.trim();
+      if (sql.startsWith("CREATE ")) return [];
+      if (sql.startsWith("SELECT path, hash, chunks FROM ship_code_files")) {
+        const repo = String(params[0]);
+        return [...files.entries()]
+          .filter(([k]) => k.startsWith(`${repo}\u0000`))
+          .map(([k, v]) => ({ path: k.split("\u0000")[1], hash: v.hash, chunks: v.chunks }));
+      }
+      if (sql.startsWith("DELETE FROM ship_code_files")) {
+        files.delete(key(String(params[0]), String(params[1])));
+        return [];
+      }
+      if (sql.startsWith("INSERT INTO ship_code_files")) {
+        files.set(key(String(params[0]), String(params[1])), { hash: String(params[2]), chunks: String(params[3]) });
+        return [];
+      }
+      if (sql.startsWith("DELETE FROM ship_code_chunks")) {
+        chunks.delete(String(params[0]));
+        return [];
+      }
+      if (sql.startsWith("INSERT INTO ship_code_chunks")) {
+        chunks.add(String(params[0]));
+        return [];
+      }
+      return [];
+    },
+  } as unknown as NucleusPgwire;
+  return { db, files, chunks };
+}
+
+/** An embedder that returns a fixed-dimension vector per value, and counts calls. */
+function countingEmbedder(): { embedder: EmbeddingAdapter; calls: () => number } {
+  let calls = 0;
+  const embedder: EmbeddingAdapter = {
+    provider: "test",
+    modelId: "fake-embed",
+    async doEmbed(values: string[]) {
+      calls += 1;
+      return { embeddings: values.map(() => [0.1, 0.2, 0.3]), usage: { inputTokens: values.length } };
+    },
+  };
+  return { embedder, calls: () => calls };
+}
+
 test("TS-021: reaching the chunk cap must not delete the index for files it never visited", async () => {
   // The refresh loop breaks at the cap. `seen` was built as the loop went, so
   // everything after the break looked "removed from the repo" and had its
   // chunks and ledger row deleted — every refresh, on any repo bigger than the
   // cap, silently destroying the tail of its own index.
-  const deleted: string[] = [];
-  const ledger = new Map([
-    ["a.ts", { hash: "old", chunks: 1 }],
-    ["b.ts", { hash: "old", chunks: 1 }],
-    ["c.ts", { hash: "old", chunks: 1 }],
-  ]);
-  const tracked = new Set(["a.ts", "b.ts", "c.ts"]);
+  //
+  // This drives the REAL refresh() with a cap of 1 chunk, so the break fires
+  // on the second file and c.ts is never visited. Reverting code-index.ts's
+  // `const tracked = new Set(paths)` to an incrementally-built set fails here.
+  const { db, files } = storingDb();
+  const { embedder } = countingEmbedder();
+  const source = "export const x = 1;\n";
+  const executor = fakeExecutor({ "a.ts": source, "b.ts": source, "c.ts": source });
 
-  // Simulate the removal phase with the FIXED membership rule: what git tracks
-  // now, not how far the loop got.
-  for (const [path] of ledger) {
-    if (tracked.has(path)) continue;
-    deleted.push(path);
-  }
-  assert.deepEqual(deleted, [], "no tracked file is treated as removed, capped or not");
+  // Pass 1, uncapped: all three files land in the ledger.
+  const seeded = new NucleusCodeIndex(db, embedder);
+  const first = await seeded.refresh(executor, "o/r");
+  assert.equal(first.indexed, 3);
+  assert.deepEqual([...files.keys()].map((k) => k.split("\u0000")[1]).sort(), ["a.ts", "b.ts", "c.ts"]);
 
-  // And a genuinely deleted file is still cleaned up.
-  tracked.delete("b.ts");
-  const afterDelete: string[] = [];
-  for (const [path] of ledger) {
-    if (tracked.has(path)) continue;
-    afterDelete.push(path);
-  }
-  assert.deepEqual(afterDelete, ["b.ts"]);
+  // Pass 2, capped at one chunk, with every file's content changed so the
+  // hash-match shortcut cannot skip the work and hide the break.
+  const changed = "export const x = 2;\n";
+  const capped = new NucleusCodeIndex(db, embedder, { maxChunksPerRefresh: 1 });
+  const stats = await capped.refresh(fakeExecutor({ "a.ts": changed, "b.ts": changed, "c.ts": changed }), "o/r");
+
+  assert.equal(stats.capped, true, "the cap must have been reached — otherwise this test proves nothing");
+  assert.ok(stats.indexed < 3, `the sweep must have stopped short, indexed ${stats.indexed}`);
+  assert.equal(stats.removed, 0, "no tracked file may be treated as removed just because the sweep stopped early");
+  assert.deepEqual(
+    [...files.keys()].map((k) => k.split("\u0000")[1]).sort(),
+    ["a.ts", "b.ts", "c.ts"],
+    "every tracked file keeps its ledger row",
+  );
+});
+
+test("a file that really left the repo is still cleaned up", async () => {
+  const { db, files, chunks } = storingDb();
+  const { embedder } = countingEmbedder();
+  const source = "export const x = 1;\n";
+  const index = new NucleusCodeIndex(db, embedder);
+  await index.refresh(fakeExecutor({ "a.ts": source, "b.ts": source }), "o/r");
+  assert.equal(files.size, 2);
+  assert.ok(chunks.size >= 2);
+
+  const stats = await index.refresh(fakeExecutor({ "a.ts": source }), "o/r");
+  assert.equal(stats.removed, 1, "b.ts is gone from git and must leave the index");
+  assert.deepEqual([...files.keys()].map((k) => k.split("\u0000")[1]), ["a.ts"]);
+});
+
+test("an unchanged file is not re-embedded on the next refresh", async () => {
+  const { db } = storingDb();
+  const { embedder, calls } = countingEmbedder();
+  const index = new NucleusCodeIndex(db, embedder);
+  const tree = { "a.ts": "export const a = 1;\n", "b.ts": "export const b = 2;\n" };
+  await index.refresh(fakeExecutor(tree), "o/r");
+  const afterFirst = calls();
+  assert.ok(afterFirst > 0);
+  const stats = await index.refresh(fakeExecutor(tree), "o/r");
+  assert.equal(calls(), afterFirst, "the hash ledger must make a no-op refresh free");
+  assert.equal(stats.indexed, 0);
+  assert.equal(stats.removed, 0);
 });
 
 function fakeDb(): { db: NucleusPgwire; sql: string[] } {
