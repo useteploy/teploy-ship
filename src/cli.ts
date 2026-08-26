@@ -19,6 +19,7 @@ import type { RunOutcome } from "@neutron-build/workflow";
 
 import { ArgError, COMMAND_FLAGS, enumFlag, numberFlag, parseArgs } from "./args.js";
 import { explainRun } from "./explain.js";
+import { resolveModelId } from "./model-id.js";
 import { auditRow, toCsv, withinWindow } from "./audit.js";
 import type { NumberRange } from "./args.js";
 import { commitAndPush, fixPrompt, openPullRequest, setupRepo } from "./git.js";
@@ -62,7 +63,7 @@ const USAGE = `teploy-ship — coding agent on your own stack
 
 Usage:
   teploy-ship run "<task>"            live run in the terminal (streamed, interactive approvals)
-      [--model provider/model]        default anthropic/claude-sonnet-5
+      [--model provider/model]        default SHIP_MODEL, else anthropic/claude-sonnet-5
       [--sandbox <url> --sandbox-token <t> [--sandbox-image <img>] [--sandbox-network none|egress]]
       [--max-steps N] [--yes] [--json] [--critic] [--settle]
                      --critic adds an independent review pass before finishing
@@ -352,7 +353,7 @@ async function runCommand(rest: string[]): Promise<void> {
     return;
   }
 
-  const modelId = (args.flags.model as string) ?? config.model ?? "anthropic/claude-sonnet-5";
+  const modelId = resolveModelId(args.flags.model, process.env, config.model);
   const model = resolveModel(modelId);
   const { executor, workdir } = await makeExecutor(args, config);
 
@@ -514,7 +515,7 @@ async function fixCommand(rest: string[]): Promise<void> {
   }
   if (token === "") fail("a git token is required: --git-token, SHIP_GIT_TOKEN, SHIP_GIT_TOKENS, or gitToken in config");
   const runId = `run-${randomUUID().slice(0, 8)}`;
-  const modelId = (args.flags.model as string) ?? config.model ?? "anthropic/claude-sonnet-5";
+  const modelId = resolveModelId(args.flags.model, process.env, config.model);
   const model = resolveModel(modelId);
   const { executor } = await makeExecutor(args, config);
 
@@ -689,7 +690,7 @@ async function executePass(
   config: Config,
   opts?: { plan?: boolean; critic?: boolean; settle?: boolean },
 ): Promise<RunOutcome | null> {
-  const modelId = (args.flags.model as string) ?? config.model ?? "anthropic/claude-sonnet-5";
+  const modelId = resolveModelId(args.flags.model, process.env, config.model);
   const usingSandbox = resolveSandbox(args, config) !== undefined;
   const wf = durableAgent({
     model: resolveModel(modelId),
@@ -929,7 +930,7 @@ async function enqueueCommand(rest: string[]): Promise<void> {
     await enqueueRun(runtime, {
       runId,
       task,
-      model: (args.flags.model as string) ?? config.model ?? "anthropic/claude-sonnet-5",
+      model: resolveModelId(args.flags.model, process.env, config.model),
       source: "manual",
       // Whoever holds this shell. Attested by the OS, not by Ship — see actor.ts.
       actor: cliActor(),
@@ -1441,7 +1442,7 @@ async function workerCommand(rest: string[]): Promise<void> {
 
   const runtime = await makeRuntime(args, config);
   if (runtime.kind !== "nucleus") fail("worker needs --store nucleus");
-  const modelId = (args.flags.model as string) ?? config.model ?? "anthropic/claude-sonnet-5";
+  const modelId = resolveModelId(args.flags.model, process.env, config.model);
   const gitToken = (args.flags["git-token"] as string) ?? process.env.SHIP_GIT_TOKEN ?? config.gitToken;
   const githubToken = process.env.SHIP_GITHUB_TOKEN ?? config.githubToken;
   // A teploy-deployed worker has no config file — everything is env. Intake
@@ -1602,7 +1603,7 @@ async function webCommand(rest: string[]): Promise<void> {
 async function evalCommand(rest: string[]): Promise<void> {
   const config = loadConfig();
   const args = parseArgs(rest);
-  const modelId = (args.flags.model as string) ?? config.model ?? "anthropic/claude-sonnet-5";
+  const modelId = resolveModelId(args.flags.model, process.env, config.model);
   const model = resolveModel(modelId);
   const repeats = numFlag(args.flags.repeats, "repeats", 1, { min: 1, max: 100, integer: true });
   const suiteName = (args.flags.suite as string) ?? "builtin";

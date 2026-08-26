@@ -4,6 +4,16 @@ All notable changes to Teploy Ship are recorded here.
 
 ## [Unreleased]
 
+### Fixed — what the first real-backlog batch found (L0, 2026-08-26)
+- **The worker never read `SHIP_MODEL`.** `worker`, `run`, `enqueue`, `fix`
+  and `eval` resolved `--model` > config file > `anthropic/claude-sonnet-5`;
+  only the web process looked at the environment, so a teploy-deployed
+  worker (no config file) ran every intake task on the default whatever
+  `teploy.yml` said — eleven runs recorded Sonnet under
+  `SHIP_MODEL=zai/glm-5.3`. All six surfaces now go through
+  `resolveModelId` (`src/model-id.ts`): flag > `SHIP_MODEL` > config >
+  default, with a test.
+
 ### Changed — nav compression (C4, 2026-08-25)
 - The header is five links — Inbox · Runs · Projects · Fleet · Settings — plus
   an avatar menu (Account, Sign out; new `POST /logout`). The other pages are
