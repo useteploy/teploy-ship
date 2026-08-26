@@ -18,6 +18,7 @@ declare module "@neutron-build/core" {
     | "/oidc/callback"
     | "/oidc/login"
     | "/policies"
+    | "/projects"
     | "/reviews"
     | "/runs"
     | `/runs/${string}`

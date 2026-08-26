@@ -39,6 +39,7 @@ import type { CondenseConfig } from "./memory.js";
 import { RecoveryTracker, defaultRecoveryConfig } from "./recovery.js";
 import type { RecoveryConfig } from "./recovery.js";
 import { loadRepoContext, runNote } from "./repo-memory.js";
+import type { ProjectStore } from "./projects.js";
 import type { RepoMemoryStore } from "./repo-memory.js";
 import type { SteerStore } from "./steer.js";
 import { formatSearchHits } from "./code-index.js";
@@ -221,6 +222,15 @@ export interface DurableAgentInput {
    */
   reviewers?: { users: string[]; teams: string[] };
   /**
+   * The repo's own sandbox image / network / limits (projects.ts), copied
+   * from the project record at enqueue so a replay boots the image the log
+   * was written under. Absent = the worker's defaults. No recorded step
+   * depends on these, so adding them changed no in-flight run's replay.
+   */
+  sandboxImage?: string;
+  sandboxNetwork?: "none" | "egress";
+  sandboxLimits?: { memoryMb?: number; cpus?: number; pids?: number };
+  /**
    * "This run has no `repo`, but its workspace is already a git tree — scope
    * its code index here and let the diff-based passes run."
    *
@@ -327,8 +337,19 @@ export function durableRecoveryInput(
   return opts?.settle === true ? { recovery: true, settle: true } : {};
 }
 
+/**
+ * Per-run overrides of the provider's defaults, recorded in the run input at
+ * enqueue from the repo's project record (projects.ts). A provider that has no
+ * such knobs (the local one) ignores them.
+ */
+export interface SandboxOverrides {
+  image?: string;
+  network?: "none" | "egress";
+  limits?: { memoryMb?: number; cpus?: number; pids?: number };
+}
+
 export interface ExecutorProvider {
-  create: () => Promise<{ handle: string }>;
+  create: (overrides?: SandboxOverrides) => Promise<{ handle: string }>;
   attach: (handle: string) => AgentExecutor;
   /**
    * Optional snapshot support (both or neither). With it, the durable
@@ -346,7 +367,7 @@ export interface ExecutorProvider {
    */
   isolated?: boolean;
   snapshot?: (handle: string) => Promise<string>;
-  createFrom?: (image: string) => Promise<{ handle: string }>;
+  createFrom?: (image: string, overrides?: SandboxOverrides) => Promise<{ handle: string }>;
   /**
    * Release a workspace. Optional, and deliberately best-effort: the provider
    * had no way to say "done with this" at all, so every run's container sat
@@ -394,6 +415,8 @@ export interface DurableAgentConfig {
    * environment; gitToken/githubToken above fold into it as the fallbacks.
    */
   repoPolicy?: RepoPolicyConfig;
+  /** Project records: their clone URLs join the allowlist for every run. See projects.ts. */
+  projects?: Pick<ProjectStore, "list">;
   /** Per-repo memory: recent-run notes injected into and recorded by repo runs. */
   repoMemory?: RepoMemoryStore;
   /**
@@ -504,7 +527,7 @@ export function durableAgent(
   const maxSteps = config.maxSteps ?? 40;
   // Single-token config folds into the policy so credential selection and the
   // allowlist are one lookup rather than two places that can disagree.
-  const repoPolicy: RepoPolicyConfig = {
+  const basePolicy: RepoPolicyConfig = {
     ...policyFromEnv(),
     ...config.repoPolicy,
     ...(config.gitToken !== undefined ? { gitToken: config.gitToken } : {}),
@@ -540,7 +563,12 @@ export function durableAgent(
             "genuinely disposable.",
         );
       }
-      const handle = await ctx.step("sandbox", async () => (await config.executor.create()).handle);
+      const sandboxOverrides = sandboxOverridesOf(input);
+      // The allowlist is the env floor plus every project record, read once
+      // per execution (a store read, not a step — it decides nothing about
+      // the step sequence) so a project added while the worker runs counts.
+      const repoPolicy = await withProjects(basePolicy, config.projects);
+      const handle = await ctx.step("sandbox", async () => (await config.executor.create(sandboxOverrides)).handle);
       const executor = config.executor.attach(handle);
 
       // Repo runs: clone + branch as a recorded step, then hand the agent
@@ -660,7 +688,7 @@ export function durableAgent(
         if (i === 0) {
           ws = { ...primary, stepPrefix: p };
         } else {
-          const attemptHandle = await ctx.step(`${p}sandbox`, async () => (await config.executor.create()).handle);
+          const attemptHandle = await ctx.step(`${p}sandbox`, async () => (await config.executor.create(sandboxOverrides)).handle);
           const attemptExecutor = config.executor.attach(attemptHandle);
           const attemptCheckout = await ctx.step(`${p}repo-setup`, async () => {
             const ref = assertRepoAllowed(input.repo!, { trust: input.trust ?? "operator", config: repoPolicy });
@@ -837,7 +865,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
         const decision = await ws.ctx.waitForEvent<PlanDecisionPayload>(PLAN_EVENT);
         if (parkImage !== undefined) {
           const superseded = ws.handle;
-          ws.handle = await ws.ctx.step(`${p}plan-restore`, async () => (await config.executor.createFrom!(parkImage)).handle);
+          ws.handle = await ws.ctx.step(`${p}plan-restore`, async () => (await config.executor.createFrom!(parkImage, sandboxOverridesOf(input))).handle);
           ws.executor = config.executor.attach(ws.handle);
           // The snapshot captured everything the old container held; keeping it
           // allocated through the park (and every later park) is pure waste.
@@ -1081,7 +1109,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
           // replay re-attaches identically without re-creating anything.
           if (parkImage !== undefined) {
             const superseded = ws.handle;
-            ws.handle = await ws.ctx.step(`${p}turn-${turn}-restore`, async () => (await config.executor.createFrom!(parkImage)).handle);
+            ws.handle = await ws.ctx.step(`${p}turn-${turn}-restore`, async () => (await config.executor.createFrom!(parkImage, sandboxOverridesOf(input))).handle);
             ws.executor = config.executor.attach(ws.handle);
             if (superseded !== ws.handle) await dispose(config, superseded);
           }
@@ -1578,8 +1606,8 @@ export function sandboxProvider(options: {
   };
   return {
     isolated: true,
-    async create() {
-      const sandbox = await SandboxExecutor.start({ ...base, create });
+    async create(overrides?: SandboxOverrides) {
+      const sandbox = await SandboxExecutor.start({ ...base, create: { ...create, ...definedOverrides(overrides) } });
       return { handle: sandbox.runId };
     },
     attach(handle: string) {
@@ -1588,14 +1616,40 @@ export function sandboxProvider(options: {
     async snapshot(handle: string) {
       return SandboxExecutor.attach(handle, base).snapshot();
     },
-    async createFrom(image: string) {
-      const sandbox = await SandboxExecutor.start({ ...base, create: { ...create, image } });
+    async createFrom(image: string, overrides?: SandboxOverrides) {
+      const { image: _snapshotted, ...rest } = definedOverrides(overrides);
+      const sandbox = await SandboxExecutor.start({ ...base, create: { ...create, ...rest, image } });
       return { handle: sandbox.runId };
     },
     async destroy(handle: string) {
       await SandboxExecutor.attach(handle, base).destroy();
     },
   };
+}
+
+function definedOverrides(o?: SandboxOverrides): SandboxOverrides {
+  return {
+    ...(o?.image !== undefined ? { image: o.image } : {}),
+    ...(o?.network !== undefined ? { network: o.network } : {}),
+    ...(o?.limits !== undefined ? { limits: o.limits } : {}),
+  };
+}
+
+/** The run's recorded sandbox overrides, if any. */
+export function sandboxOverridesOf(input: DurableAgentInput): SandboxOverrides | undefined {
+  if (input.sandboxImage === undefined && input.sandboxNetwork === undefined && input.sandboxLimits === undefined) return undefined;
+  return {
+    ...(input.sandboxImage !== undefined ? { image: input.sandboxImage } : {}),
+    ...(input.sandboxNetwork !== undefined ? { network: input.sandboxNetwork } : {}),
+    ...(input.sandboxLimits !== undefined ? { limits: input.sandboxLimits } : {}),
+  };
+}
+
+/** The policy widened by every project record's clone URL. */
+export async function withProjects(policy: RepoPolicyConfig, projects?: Pick<ProjectStore, "list">): Promise<RepoPolicyConfig> {
+  if (projects === undefined) return policy;
+  const urls = (await projects.list()).map((p) => p.url).filter((u): u is string => u !== undefined);
+  return urls.length > 0 ? { ...policy, projects: [...(policy.projects ?? []), ...urls] } : policy;
 }
 
 function truncate(text: string, max: number): string {

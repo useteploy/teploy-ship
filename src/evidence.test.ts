@@ -24,6 +24,7 @@ function captureRuntime(evidence: EvidenceStore): { runtime: ShipRuntime; inputs
   const runtime = {
     kind: "file",
     evidence,
+    projects: { forRepo: async () => null },
     governance: { get: async () => ({ authority: {}, windows: {}, reviewers: [] }) },
     store: {
       append: async (_runId: string, event: { type: string; data?: { input?: Record<string, unknown> } }) => {

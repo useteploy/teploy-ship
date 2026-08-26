@@ -19,6 +19,8 @@ import { FileEvidenceStore, NucleusEvidenceStore } from "./evidence.js";
 import { harnessAttempts, harnessRef } from "./harness.js";
 import type { HarnessRef } from "./harness.js";
 import type { EvidenceStore } from "./evidence.js";
+import { FileProjectStore, NucleusProjectStore, ProjectEvidenceStore } from "./projects.js";
+import type { ProjectStore } from "./projects.js";
 import { FileGovernanceStore, NucleusGovernanceStore, reviewersFor } from "./governance.js";
 import type { GovernanceStore } from "./governance.js";
 import { FileAttributedSpendStore, NucleusAttributedSpendStore } from "./attributed-spend.js";
@@ -38,7 +40,8 @@ import { FileOutbox, NucleusOutbox } from "./outbox.js";
 import type { Outbox } from "./outbox.js";
 import { NucleusPgwire } from "./nucleus-pgwire.js";
 import { migrate } from "./migrations.js";
-import { assertRepoAllowed } from "./repo-policy.js";
+import { assertRepoAllowed, policyFromEnv } from "./repo-policy.js";
+import { withProjects } from "./durable.js";
 import type { RepoTrust } from "./repo-policy.js";
 import type { RecoveryTuning } from "./durable.js";
 import type { ProposeInput as IntakeProposeInput, IntakeTask as IntakeTaskType } from "./intake.js";
@@ -54,6 +57,8 @@ export type { PolicyStore, SourcePolicy } from "./policies.js";
 export { FilePolicyStore, NucleusPolicyStore } from "./policies.js";
 export type { EvidenceStore, RepoEvidence } from "./evidence.js";
 export { FileEvidenceStore, NucleusEvidenceStore } from "./evidence.js";
+export type { Project, ProjectStore } from "./projects.js";
+export { FileProjectStore, NucleusProjectStore, ProjectEvidenceStore, normalizeProject } from "./projects.js";
 export type { GovernanceStore, Governance, Grant, Authority, AuthorityAction, AutoWindow, Windows, ReviewerRule } from "./governance.js";
 export {
   FileGovernanceStore,
@@ -203,7 +208,9 @@ export interface ShipRuntime {
   unpricedRuns: UnpricedRunStore;
   /** Editable per-source intake policies (dashboard-managed, env-seeded). */
   policies: PolicyStore;
-  /** Per-repo evidence config (test command, Observe service). See evidence.ts. */
+  /** One record per repo: allowlist, sandbox image, evidence, policy. See projects.ts. */
+  projects: ProjectStore;
+  /** Per-repo evidence config — a view of `projects`, legacy rows read through. See projects.ts. */
   evidence: EvidenceStore;
   /** Who may do what, auto windows, required reviewers. See governance.ts. */
   governance: GovernanceStore;
@@ -236,6 +243,7 @@ export interface ShipRuntime {
 export function fileRuntime(): ShipRuntime {
   const store = new FileEventStore();
   const meta = new RunMetaStore();
+  const projects = new FileProjectStore();
   return {
     kind: "file",
     store,
@@ -244,7 +252,8 @@ export function fileRuntime(): ShipRuntime {
     attributedSpend: new FileAttributedSpendStore(),
     unpricedRuns: new FileUnpricedRunStore(),
     policies: new FilePolicyStore(),
-    evidence: new FileEvidenceStore(),
+    projects,
+    evidence: new ProjectEvidenceStore(projects, new FileEvidenceStore()),
     governance: new FileGovernanceStore(),
     fleet: new FileFleetStore(),
     placement: new FilePlacementStore(),
@@ -350,6 +359,7 @@ export async function nucleusRuntime(
     return overlaid;
   };
 
+  const projects = new NucleusProjectStore(db);
   return {
     kind: "nucleus",
     store,
@@ -362,7 +372,8 @@ export async function nucleusRuntime(
     attributedSpend: new NucleusAttributedSpendStore(db),
     unpricedRuns: new NucleusUnpricedRunStore(db),
     policies: new NucleusPolicyStore(db),
-    evidence: new NucleusEvidenceStore(db),
+    projects,
+    evidence: new ProjectEvidenceStore(projects, new NucleusEvidenceStore(db)),
     governance: new NucleusGovernanceStore(db),
     fleet: new NucleusFleetStore(db),
     placement: new NucleusPlacementStore(db),
@@ -438,11 +449,11 @@ export async function nucleusRuntime(
  * rather than silently getting no run.
  */
 export async function proposeExternal(
-  runtime: Pick<ShipRuntime, "intake">,
+  runtime: Pick<ShipRuntime, "intake" | "projects">,
   input: IntakeProposeInput,
 ): Promise<{ created: boolean; task: IntakeTaskType }> {
   if (input.repo !== undefined && input.repo !== "") {
-    assertRepoAllowed(input.repo, { trust: "external" });
+    assertRepoAllowed(input.repo, { trust: "external", config: await withProjects(policyFromEnv(), runtime.projects) });
   }
   return runtime.intake.propose(input);
 }
@@ -592,6 +603,10 @@ export async function enqueueRun(
   // a worker whose env never set SHIP_TESTS/SHIP_TELEMETRY. The config is the
   // operator saying what evidence this repo owes a reviewer.
   const evidence = options.repo !== undefined ? await runtime.evidence.forRepo(options.repo) : null;
+  // The repo's project record (projects.ts): its sandbox image, network and
+  // limits are copied into the input so the run boots the image the log was
+  // written under, whatever the worker's SHIP_SANDBOX_IMAGE says today.
+  const project = options.repo !== undefined ? await runtime.projects.forRepo(options.repo) : null;
   // Read the affected service's telemetry around the change. Same opt-in shape.
   const telemetry = options.telemetry ?? (evidence?.observeService !== undefined || envFlag("SHIP_TELEMETRY") ? true : undefined);
   // Run the project's suite after the agent stops. Same opt-in shape.
@@ -641,6 +656,9 @@ export async function enqueueRun(
         ...(evidence?.observeService !== undefined ? { observeService: evidence.observeService } : {}),
         ...(evidence?.observeService !== undefined ? { observeRepo: evidence.repo } : {}),
         ...(reviewers !== null ? { reviewers: { users: reviewers.users, teams: reviewers.teams } } : {}),
+        ...(project?.sandboxImage !== undefined ? { sandboxImage: project.sandboxImage } : {}),
+        ...(project?.sandboxNetwork !== undefined ? { sandboxNetwork: project.sandboxNetwork } : {}),
+        ...(project?.sandboxLimits !== undefined ? { sandboxLimits: project.sandboxLimits } : {}),
         // Every newly-enqueued run is steerable and index-eligible; runs
         // enqueued before these flags existed replay without the extra
         // steps (input-gated in durable). The executing worker's config

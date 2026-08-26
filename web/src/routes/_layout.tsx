@@ -26,6 +26,7 @@ const NAV_LINKS = [
   { href: "/reviews", label: "Reviews" },
   { href: "/fleet", label: "Fleet" },
   { href: "/knowledge", label: "Knowledge" },
+  { href: "/projects", label: "Projects" },
   { href: "/sources", label: "Sources" },
   { href: "/policies", label: "Policies" },
   { href: "/spend", label: "Spend" },

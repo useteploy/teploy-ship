@@ -200,6 +200,7 @@ test("enqueueRun materialises the repo's reviewers into the run input, and nothi
   const runtime = {
     kind: "file",
     evidence: { forRepo: async () => null },
+    projects: { forRepo: async () => null },
     governance: s,
     store: {
       append: async (_runId: string, event: { type: string; data?: { input?: Record<string, unknown> } }) => {

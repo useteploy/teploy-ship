@@ -46,6 +46,8 @@ import { AUTHORITY_ACTIONS, GLOBAL_WINDOW, autoAllowedNow, formatWindow, parseDa
 import type { AuthorityAction } from "./governance.js";
 import { repoSlug } from "./observe.js";
 import type { NucleusShipRuntime, ShipRuntime } from "./runtime.js";
+import type { Project } from "./projects.js";
+import type { IntakePolicy } from "./intake.js";
 import { NucleusCodeIndex } from "./code-index.js";
 import type { CodeSearch } from "./code-index.js";
 import { startWorker } from "./worker.js";
@@ -82,6 +84,14 @@ Usage:
       [--observe-service <svc>]       enqueue; a flag omitted clears its field)
   teploy-ship evidence list [--json]
   teploy-ship evidence remove <repo>
+  teploy-ship project set <repo>      one record per repo: clone URL (joins the
+      --url <clone-url>                allowlist), sandbox image/network/limits,
+      [--image <img>] [--network none|egress] [--memory-mb N] [--cpus N]
+      [--policy inherit|ignore|propose|auto] [--budget <usd>]
+      [--test-command <cmd>] [--test-timeout-ms N] [--observe-service <svc>]
+      [--label <text>]                 flags you pass are set; others keep their value
+  teploy-ship project list [--json]
+  teploy-ship project remove <repo>
   teploy-ship policy show [--json]    who may do what, auto windows, required reviewers
   teploy-ship policy authority <approve|auto|steer|policies> --roles admin,editor [--users a,b]
   teploy-ship policy window set [--source <s>] --days mon-fri --start 09:00 --end 18:00 --tz <zone>
@@ -684,6 +694,7 @@ async function executePass(
   const wf = durableAgent({
     model: resolveModel(modelId),
     executor: durableProvider(args, config),
+    projects: runtime.projects,
     approveAction: defaultApprovalPolicy,
     // Local workspaces root every path at the run's own dir, so "." is
     // the honest working directory to show the agent.
@@ -1016,6 +1027,104 @@ async function evidenceCommand(rest: string[]): Promise<void> {
     return;
   }
   fail('usage: teploy-ship evidence set <repo> [--test-command <cmd>] [--test-timeout-ms N] [--observe-service <svc>]\n       teploy-ship evidence list [--json]\n       teploy-ship evidence remove <repo>');
+}
+
+const PROJECT_USAGE =
+  "usage: teploy-ship project set <repo> [--url <clone-url>] [--image <img>] [--network none|egress] [--memory-mb N] [--cpus N]\n" +
+  "           [--policy inherit|ignore|propose|auto] [--budget <usd>] [--test-command <cmd>] [--test-timeout-ms N]\n" +
+  "           [--observe-service <svc>] [--label <text>]\n" +
+  "       teploy-ship project list [--json]\n       teploy-ship project remove <repo>";
+
+/**
+ * One record per repository (C1, projects.ts). `set` MERGES: a flag you pass
+ * is set, a flag you omit keeps its stored value — unlike `evidence set`, a
+ * project has too many fields for a full upsert to be the safe shape.
+ */
+async function projectCommand(rest: string[]): Promise<void> {
+  const config = loadConfig();
+  const [sub, target] = rest;
+  const args = parseArgs(rest);
+  if (sub === "list") {
+    const runtime = await makeRuntime(args, config);
+    try {
+      const entries = await runtime.projects.list();
+      if (args.flags.json === true) {
+        process.stdout.write(`${JSON.stringify(entries, null, 2)}\n`);
+        return;
+      }
+      if (entries.length === 0) {
+        process.stderr.write(dim("no projects; repos are allowed by SHIP_REPO_ALLOWLIST alone and run in SHIP_SANDBOX_IMAGE\n"));
+        return;
+      }
+      for (const p of entries) {
+        process.stdout.write(`${bold(p.repo)}${p.label !== undefined ? `  ${dim(p.label)}` : ""}\n`);
+        if (p.url !== undefined) process.stdout.write(`  url:      ${p.url}\n`);
+        if (p.sandboxImage !== undefined) process.stdout.write(`  image:    ${p.sandboxImage}${p.sandboxNetwork !== undefined ? ` (${p.sandboxNetwork})` : ""}\n`);
+        if (p.sandboxLimits !== undefined) process.stdout.write(`  limits:   ${JSON.stringify(p.sandboxLimits)}\n`);
+        if (p.sourcePolicy !== undefined) process.stdout.write(`  policy:   ${p.sourcePolicy}\n`);
+        if (p.dailyBudgetUSD !== undefined) process.stdout.write(`  budget:   $${p.dailyBudgetUSD}/day\n`);
+        if (p.testCommand !== undefined) process.stdout.write(`  tests:    ${p.testCommand}\n`);
+        if (p.testTimeoutMs !== undefined) process.stdout.write(`  timeout:  ${p.testTimeoutMs}ms\n`);
+        if (p.observeService !== undefined) process.stdout.write(`  observe:  ${p.observeService}\n`);
+      }
+    } finally {
+      await runtime.close();
+    }
+    return;
+  }
+  if (sub === "remove") {
+    if (target === undefined) fail("a repo is required: teploy-ship project remove owner/name");
+    const runtime = await makeRuntime(args, config);
+    try {
+      await runtime.projects.remove(target);
+    } finally {
+      await runtime.close();
+    }
+    process.stderr.write(`${green("removed")} ${target}\n`);
+    return;
+  }
+  if (sub === "set") {
+    if (target === undefined || target === "") fail("a repo is required: teploy-ship project set <clone-url|owner/name> …");
+    const str = (name: string): string | undefined => (args.flags[name] !== undefined ? String(args.flags[name]) : undefined);
+    const num = (name: string): number | undefined => {
+      if (args.flags[name] === undefined) return undefined;
+      const n = Number(args.flags[name]);
+      if (!Number.isFinite(n) || n <= 0) fail(`--${name} must be a positive number, got: ${String(args.flags[name])}`);
+      return n;
+    };
+    const network = str("network");
+    if (network !== undefined && network !== "none" && network !== "egress") fail(`--network must be none or egress, got: ${network}`);
+    const policy = str("policy");
+    if (policy !== undefined && !["inherit", "ignore", "propose", "auto"].includes(policy)) fail(`--policy must be inherit, ignore, propose or auto, got: ${policy}`);
+    const runtime = await makeRuntime(args, config);
+    try {
+      // A clone URL as the target sets --url too; a bare slug needs --url to join the allowlist.
+      const url = str("url") ?? (/^[a-z]+:\/\//i.test(target) || target.startsWith("git@") ? target : undefined);
+      const existing = (await runtime.projects.forRepo(target)) ?? { repo: target, autoMerge: false, autoDeploy: false };
+      const { sourcePolicy: _p, ...keep } = existing;
+      const next: Project = {
+        ...keep,
+        ...(url !== undefined ? { url } : {}),
+        ...(str("label") !== undefined ? { label: str("label") } : {}),
+        ...(str("image") !== undefined ? { sandboxImage: str("image") } : {}),
+        ...(network !== undefined ? { sandboxNetwork: network as "none" | "egress" } : {}),
+        ...(num("memory-mb") !== undefined || num("cpus") !== undefined
+          ? { sandboxLimits: { ...existing.sandboxLimits, ...(num("memory-mb") !== undefined ? { memoryMb: num("memory-mb") } : {}), ...(num("cpus") !== undefined ? { cpus: num("cpus") } : {}) } }
+          : {}),
+        ...(policy === undefined ? (existing.sourcePolicy !== undefined ? { sourcePolicy: existing.sourcePolicy } : {}) : policy === "inherit" ? {} : { sourcePolicy: policy as IntakePolicy }),
+        ...(num("budget") !== undefined ? { dailyBudgetUSD: num("budget") } : {}),
+        ...(str("test-command") !== undefined ? { testCommand: str("test-command") } : {}),
+        ...(num("test-timeout-ms") !== undefined ? { testTimeoutMs: num("test-timeout-ms") } : {}),
+        ...(str("observe-service") !== undefined ? { observeService: str("observe-service") } : {}),
+      };
+      await runtime.projects.set(next);
+    } finally {
+      await runtime.close();
+    }
+    process.stderr.write(`${green("set")} ${target}\n`);
+    return;
+  }
+  fail(PROJECT_USAGE);
 }
 
 /**
@@ -1553,6 +1662,8 @@ async function main(): Promise<void> {
       return enqueueCommand(rest);
     case "evidence":
       return evidenceCommand(rest);
+    case "project":
+      return projectCommand(rest);
     case "policy":
       return policyCommand(rest);
     case "audit":

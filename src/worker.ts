@@ -19,6 +19,8 @@ import type { NucleusShipRuntime } from "./runtime.js";
 import type { NucleusPgwire } from "./nucleus-pgwire.js";
 import type { IntakeStore, IntakePolicy, IntakeTask } from "./intake.js";
 import type { SourcePolicy } from "./policies.js";
+import type { Project, ProjectStore } from "./projects.js";
+import { repoSlug } from "./observe.js";
 import { autoAllowedNow, formatWindow, windowFor } from "./governance.js";
 import type { Windows } from "./governance.js";
 import { makeObserveEmitter } from "./observe.js";
@@ -159,6 +161,12 @@ export interface IntakeSweepDeps {
   maxConcurrentRuns: number;
   /** Per-source daily budget in USD; <= 0 disables the cap for that source. */
   budgetFor: (source: string) => number;
+  /**
+   * Project records (projects.ts): a task from a repo whose project sets a
+   * sourcePolicy follows THAT instead of its source's, and a project budget
+   * is checked in place of the source's for that task. Absent = sources only.
+   */
+  projects?: Pick<ProjectStore, "list">;
   /** What one run is assumed to cost while it is in flight (budget reservation). */
   estimatedRunCostUSD: number;
   /** Runs this worker launched that may still be executing: runId -> source. */
@@ -198,12 +206,20 @@ export async function sweepIntake(deps: IntakeSweepDeps): Promise<void> {
     await deps.admission.releaseSlot(runId);
   }
 
-  // 2) Launch, if any source is configured "auto".
-  if (!Object.values(deps.policies).some((p) => p === "auto")) return;
+  // 2) Launch, if any source or project is configured "auto".
+  const projects = new Map<string, Project>();
+  for (const p of (await deps.projects?.list()) ?? []) projects.set(p.repo, p);
+  const projectOf = (task: IntakeTask): Project | undefined => {
+    const slug = task.repo !== undefined ? repoSlug(task.repo) : null;
+    return slug === null ? undefined : projects.get(slug);
+  };
+  const anyAuto = Object.values(deps.policies).some((p) => p === "auto") || [...projects.values()].some((p) => p.sourcePolicy === "auto");
+  if (!anyAuto) return;
 
   const parkedOutsideWindow = new Set<string>();
   for (const task of await deps.intake.list("proposed")) {
-    if (deps.policies[task.source] !== "auto") continue;
+    const project = projectOf(task);
+    if ((project?.sourcePolicy ?? deps.policies[task.source]) !== "auto") continue;
     // Outside its window an auto source is a propose source: the task waits
     // for a human, nothing is claimed, and the next in-window sweep takes it.
     if (!autoAllowedNow(deps.windows ?? {}, task.source, deps.now())) {
@@ -232,7 +248,7 @@ export async function sweepIntake(deps: IntakeSweepDeps): Promise<void> {
       }
       slotTaken = true;
 
-      const budget = deps.budgetFor(task.source);
+      const budget = project?.dailyBudgetUSD ?? deps.budgetFor(task.source);
       if (budget > 0) {
         // Reserve BEFORE reading the total, so two workers admitting at once
         // see each other's commitment instead of both reading the same room.
@@ -428,6 +444,7 @@ export function startWorker(options: WorkerOptions): {
     ...(options.githubToken !== undefined ? { githubToken: options.githubToken } : {}),
     ...(options.repoPolicy !== undefined ? { repoPolicy: options.repoPolicy } : {}),
     repoMemory: options.runtime.memory,
+    projects: options.runtime.projects,
     steer: options.runtime.steer,
     ...(options.codeSearch !== undefined ? { codeSearch: options.codeSearch } : {}),
     // External harnesses (claude-code, opencode). Always carried; whether the
@@ -828,6 +845,7 @@ export function startWorker(options: WorkerOptions): {
       dailyAutoLimit: options.dailyAutoLimit ?? envInt("SHIP_DAILY_AUTO_LIMIT") ?? 10,
       maxConcurrentRuns,
       budgetFor: (source) => storeBudgets[source] ?? budgets[source] ?? defaultBudget,
+      projects: options.runtime.projects,
       estimatedRunCostUSD,
       inFlight,
       outcomeOf: async (runId) => readOutcome(await options.runtime.store.load(runId)),

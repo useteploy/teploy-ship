@@ -100,6 +100,11 @@ export interface RepoPolicyConfig {
   originTokens?: string;
   gitToken?: string;
   githubToken?: string;
+  /**
+   * Clone URLs of the deployment's project records (projects.ts). Each is an
+   * exact-repo allowlist entry: adding a project is what allows that repo.
+   */
+  projects?: string[];
 }
 
 export function policyFromEnv(env: NodeJS.ProcessEnv = process.env): RepoPolicyConfig {
@@ -155,6 +160,12 @@ export function parseOriginTokens(raw: string | undefined): Record<string, strin
  */
 export function effectiveAllowlist(config: RepoPolicyConfig): RepoAllowEntry[] {
   const declared = parseAllowlist(config.allowlist);
+  // Project records widen the list by exact repo (never by origin or owner):
+  // the env stays as the floor a stranger install sets once, and each project
+  // added through the page or CLI is one more repo the token may reach.
+  for (const entry of parseAllowlist((config.projects ?? []).join(","))) {
+    if (entry.repo !== undefined) declared.push(entry);
+  }
   const implied: RepoAllowEntry[] = Object.keys(parseOriginTokens(config.originTokens)).map((origin) => ({ origin }));
   const seen = new Set(declared.map((e) => `${e.origin}|${e.owner ?? ""}|${e.repo ?? ""}`));
   for (const entry of implied) {

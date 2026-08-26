@@ -210,7 +210,7 @@ const ADMIN_PREFIXES = ["/settings", "/users"];
 // editor or admin, and a viewer may read what the rules are. Every mutation on
 // these paths calls `may()` itself — see authority.server.ts. The Inbox ("/")
 // is exact-match: its approve / launch / new-run posts are all `approve`-gated.
-const AUTHORITY_PATHS = ["/runs", "/api/runs", "/sources", "/policies", "/api/policies"];
+const AUTHORITY_PATHS = ["/runs", "/api/runs", "/sources", "/projects", "/policies", "/api/policies"];
 
 /** Minimum role for a request. Reads → viewer, mutations → editor, admin areas
  * → admin. Fails closed: an unclassified mutation requires editor, never
