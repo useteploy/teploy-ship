@@ -25,6 +25,20 @@ All notable changes to Teploy Ship are recorded here.
   the budget, and the recorded step says `stopped at the 120s index cap`.
   PRE-DECIDED: a time cap over a "skip when slow" probe — a probe measures
   one call, and the failure mode was a slow *endpoint*, not a dead one.
+- **Store writes failing under load wedged meta, settle and `approve`.**
+  With four sandboxes plus CLI traffic on the 4-connection pool, pg-pool
+  rejected with `TypeError: Cannot read properties of undefined (reading
+  'name')` — its `promisify` catch calls `Error.captureStackTrace` on a
+  rejection value that was not an Error, masking the real reason
+  (pg-pool@3.14.0 `index.js:45`; seen alongside Nucleus catalog write
+  failures). Eight of nine runs kept `queued` meta, one settle lost its
+  cost, and a parked run could not be approved ("no longer waiting"). Every
+  statement now goes through one path that retries a non-database
+  rejection once on a freshly checked-out client and destroys that client
+  if it fails again (`src/nucleus-pgwire.ts`, injectable pool, five tests).
+  Genuine database errors (SQLSTATE) are never retried. The root cause —
+  what rejects with a non-Error under contention — is recorded there for a
+  proper fix; the pool size and acquire timeout are unchanged.
 
 ### Changed — nav compression (C4, 2026-08-25)
 - The header is five links — Inbox · Runs · Projects · Fleet · Settings — plus

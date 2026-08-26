@@ -17,8 +17,47 @@ function int(n: number): number {
  * (the union of RunRecord and RunMeta), and the document scalar functions
  * have no update — while SQL UPDATE is the engine's best-tested path.
  */
+export interface QueryResultLike {
+  rows: unknown[];
+  rowCount: number | null;
+}
+
+export interface PoolClientLike {
+  query(sql: string, params?: unknown[]): Promise<QueryResultLike>;
+  /** `release(true)` destroys the client instead of returning it to the pool. */
+  release(destroy?: boolean): void;
+}
+
+/** The slice of pg.Pool Ship uses — narrow so a test can stand in a fake. */
+export interface PoolLike {
+  query(sql: string, params?: unknown[]): Promise<QueryResultLike>;
+  connect(): Promise<PoolClientLike>;
+  on(event: "error", listener: (err: Error) => void): unknown;
+  end(): Promise<void>;
+}
+
+function describe(error: unknown): string {
+  return error instanceof Error ? error.message : `${typeof error}: ${String(error)}`;
+}
+
+/**
+ * A pool rejection worth one retry on a fresh connection: anything that is
+ * not an Error at all, pg-pool's masked `reading 'name'` TypeError, a
+ * connection that died under us, or an acquire timeout. Database errors
+ * (`pg` DatabaseError carries a SQLSTATE `code`) are never retried.
+ */
+export function isTransientPoolFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return true;
+  if ("code" in error && typeof (error as { code?: unknown }).code === "string" && /^[0-9A-Z]{5}$/.test((error as { code: string }).code)) {
+    return false;
+  }
+  return /reading 'name'|Connection terminated|ECONNRESET|ECONNREFUSED|timeout exceeded when trying to connect|Client has encountered a connection error/.test(
+    error.message,
+  );
+}
+
 export class NucleusPgwire {
-  #pool: pg.Pool;
+  #pool: PoolLike;
   #owner: string;
   #docsReady: Promise<void> | null = null;
 
@@ -28,9 +67,9 @@ export class NucleusPgwire {
    *   here as the correlation tag on pool-level log lines, since a pool
    *   'error' isn't tied to any single in-flight query/run.
    */
-  constructor(url: string, owner = "unknown") {
+  constructor(url: string, owner = "unknown", deps: { pool?: PoolLike } = {}) {
     this.#owner = owner;
-    this.#pool = new pg.Pool({
+    this.#pool = deps.pool ?? new pg.Pool({
       connectionString: url,
       max: 4,
       // Fail loud instead of hanging forever when ship-nucleus is down or
@@ -64,20 +103,55 @@ export class NucleusPgwire {
     });
   }
 
+  /**
+   * Every statement goes through here. Under load on 2026-08-24/25 the pool
+   * rejected with `TypeError: Cannot read properties of undefined (reading
+   * 'name')` from pg-pool@3.14.0 index.js:45 — its `promisify` catch calls
+   * `Error.captureStackTrace(err)` on whatever the connect path rejected
+   * with, and that value was not an Error. The real reason is masked by the
+   * TypeError (seen only with four sandboxes plus CLI traffic on a
+   * 4-connection pool with a 5 s acquire timeout, alongside Nucleus catalog
+   * write failures). It broke settle, meta updates and `approve` on live
+   * runs. Bounded fix: a rejection that is not a real database error is
+   * retried ONCE on a freshly checked-out client, which is destroyed if it
+   * fails again, so a poisoned pooled connection cannot be handed back out.
+   * A rejection that is a genuine database error (bad SQL, constraint) is
+   * thrown as-is — those are not transient.
+   */
+  async #run(sql: string, params: unknown[] = []): Promise<QueryResultLike> {
+    try {
+      return await this.#pool.query(sql, params);
+    } catch (error) {
+      if (!isTransientPoolFailure(error)) throw error;
+      console.error(
+        `[nucleus-pgwire] pool query failed (${this.#owner}), retrying on a fresh connection: ${describe(error)}`,
+      );
+      const client = await this.#pool.connect();
+      try {
+        const result = await client.query(sql, params);
+        client.release();
+        return result;
+      } catch (again) {
+        client.release(true);
+        throw again instanceof Error ? again : new Error(`nucleus query rejected with a non-error value: ${describe(again)}`);
+      }
+    }
+  }
+
   /** Raw parameterized query — rows as objects. The intake store builds on this. */
   async query(sql: string, params: unknown[] = []): Promise<Record<string, unknown>[]> {
-    const result = await this.#pool.query(sql, params);
+    const result = await this.#run(sql, params);
     return result.rows as Record<string, unknown>[];
   }
 
   /** Parameterized statement returning the affected-row count (conditional claims). */
   async exec(sql: string, params: unknown[] = []): Promise<number> {
-    const result = await this.#pool.query(sql, params);
+    const result = await this.#run(sql, params);
     return result.rowCount ?? 0;
   }
 
   async #fetchval<T>(sql: string, params: unknown[] = []): Promise<T | null> {
-    const result = await this.#pool.query(sql, params);
+    const result = await this.#run(sql, params);
     const row = result.rows[0] as Record<string, unknown> | undefined;
     if (row === undefined) return null;
     const value = Object.values(row)[0];
@@ -137,7 +211,7 @@ export class NucleusPgwire {
         values.push(String(value));
       }
       const placeholders = values.map((_, i) => `$${i + 1}`).join(", ");
-      await this.#pool.query(
+      await this.#run(
         `INSERT INTO ship_docs (${cols.join(", ")}) VALUES (${placeholders})`,
         values,
       );
@@ -149,7 +223,7 @@ export class NucleusPgwire {
     ): Promise<Record<string, unknown>[]> => {
       await this.#ensureDocs();
       const { where, params } = whereClause(collection, filter);
-      const result = await this.#pool.query(`SELECT * FROM ship_docs WHERE ${where}`, params);
+      const result = await this.#run(`SELECT * FROM ship_docs WHERE ${where}`, params);
       return (result.rows as Record<string, unknown>[]).map(rowToDoc);
     },
     update: async (
@@ -167,7 +241,7 @@ export class NucleusPgwire {
         return v === undefined || v === null ? null : String(v);
       });
       const { where, params } = whereClause(collection, filter, setParams.length);
-      const result = await this.#pool.query(
+      const result = await this.#run(
         `UPDATE ship_docs SET ${sets} WHERE ${where}`,
         [...setParams, ...params],
       );
