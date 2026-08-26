@@ -6,12 +6,12 @@ import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 
 import { durableAgent } from "./durable.js";
+import { resolveApprovalPolicy } from "./approval.js";
 import { externalAdapters } from "./harness-external.js";
 import { previewTargetFromEnv } from "./deploy.js";
 import { telemetryTargetFromEnv } from "./observe.js";
 import { testTargetFromEnv } from "./tests.js";
 import type { ExecutorProvider, RunUsage } from "./durable.js";
-import { defaultApprovalPolicy } from "./approval.js";
 import { enqueueRun } from "./runtime.js";
 import { attributionsFrom } from "./attributed-spend.js";
 import { intakeActor } from "./actor.js";
@@ -449,7 +449,12 @@ export function startWorker(options: WorkerOptions): {
     // the daily caps remain the primary bound; this stops ONE pathological run.
     maxRunCostUSD: options.maxRunCostUSD ?? envNum("SHIP_MAX_RUN_COST_USD") ?? 0,
     executor: options.executor,
-    approveAction: defaultApprovalPolicy,
+    // The provider's own isolation flag decides the gate, not an env guess:
+    // it is already load-bearing (an externally-sourced task refuses to run
+    // on a non-isolating provider) and its contract says false is the safe
+    // answer. Isolated -> gate only what outlives the container; not isolated
+    // -> the strict LocalExecutor list, because commands reach the host.
+    approveAction: resolveApprovalPolicy({ sandboxed: options.executor.isolated === true }),
     workdir: options.workdir,
     ...(options.gitToken !== undefined ? { gitToken: options.gitToken } : {}),
     ...(options.githubToken !== undefined ? { githubToken: options.githubToken } : {}),

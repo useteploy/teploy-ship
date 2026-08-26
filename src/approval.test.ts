@@ -82,3 +82,18 @@ test("resolveApprovalPolicy honours SHIP_SANDBOX_APPROVAL", () => {
   const bogus = resolveApprovalPolicy({ sandboxed: false }, { SHIP_SANDBOX_APPROVAL: "yolo" });
   assert.equal(bogus({ kind: "bash", code: "curl https://example.com" }), "required");
 });
+
+// Regression: the policy is chosen from the executor provider's own isolation
+// flag. The first cut of this change wired it at the CLI's enqueue path only,
+// so the worker — the thing that actually executes a durable run — kept the
+// strict list and a live proof run parked on `rm -rf /tmp/... && go build`
+// exactly as before. The signal has to come from the provider.
+test("an isolated provider gets the boundary policy, a local one does not", () => {
+  const forProvider = (isolated: boolean) => resolveApprovalPolicy({ sandboxed: isolated }, {});
+  const verify = { kind: "bash" as const, code: "rm -rf /tmp/dnstest && cp -r /work/. /tmp/dnstest/ && go build ./..." };
+  assert.equal(forProvider(true)(verify), "auto");
+  assert.equal(forProvider(false)(verify), "required");
+  // `isolated` is optional on the provider; an absent flag must read as false.
+  const provider: { isolated?: boolean } = {};
+  assert.equal(resolveApprovalPolicy({ sandboxed: provider.isolated === true }, {})(verify), "required");
+});

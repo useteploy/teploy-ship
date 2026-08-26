@@ -711,11 +711,13 @@ async function executePass(
 ): Promise<RunOutcome | null> {
   const modelId = resolveModelId(args.flags.model, process.env, config.model);
   const usingSandbox = resolveSandbox(args, config) !== undefined;
+  const provider = durableProvider(args, config);
   const wf = durableAgent({
     model: resolveModel(modelId),
-    executor: durableProvider(args, config),
+    executor: provider,
     projects: runtime.projects,
-    approveAction: resolveApprovalPolicy({ sandboxed: usingSandbox }),
+    // Same rule as the worker: the provider's isolation flag decides the gate.
+    approveAction: resolveApprovalPolicy({ sandboxed: provider.isolated === true }),
     // Local workspaces root every path at the run's own dir, so "." is
     // the honest working directory to show the agent.
     workdir: usingSandbox ? "/work" : ".",
