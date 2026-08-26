@@ -351,7 +351,7 @@ test("index-enabled repo runs refresh the code index and answer ```search from i
   const codeSearch = {
     async refresh(_executor: AgentExecutor, repo: string) {
       refreshed.push(repo);
-      return { files: 1, indexed: 1, removed: 0, chunks: 1, capped: false, timedOut: false, unchanged: 0, msPerChunk: 5, cursor: "lib.ts" };
+      return { files: 1, indexed: 1, removed: 0, chunks: 1, capped: false, timedOut: false, unchanged: 0, added: 1, msPerChunk: 5, cursor: "lib.ts" };
     },
     async coverage(repo: string) {
       return { repo, indexedFiles: 1, trackedFiles: 1, chunks: 1, partial: false, at: "2026-08-26T00:00:00Z" };
@@ -1537,7 +1537,7 @@ test("SEAM: workspaceKey scopes the code index and the ```search action on a rep
   const codeSearch = {
     async refresh(_executor: AgentExecutor, repo: string) {
       refreshed.push(repo);
-      return { files: 1, indexed: 1, chunks: 2, removed: 0, capped: false, timedOut: false, unchanged: 0, msPerChunk: 5, cursor: "f.txt" };
+      return { files: 1, indexed: 1, chunks: 2, removed: 0, capped: false, timedOut: false, unchanged: 0, added: 1, msPerChunk: 5, cursor: "f.txt" };
     },
     async coverage(repo: string) {
       return { repo, indexedFiles: 1, trackedFiles: 1, chunks: 2, partial: false, at: "2026-08-26T00:00:00Z" };

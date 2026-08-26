@@ -411,3 +411,30 @@ test("the budget is not spent on files that answer no question a code index is a
   assert.equal(indexablePath("docs/DEPLOY.md"), true);
   assert.equal(indexablePath("Makefile"), true);
 });
+
+test("coverage counts DISTINCT files, so re-indexing a changed file cannot push it past 100%", async () => {
+  // Found on a live run, which reported "index holds 6/3 files (200%)": the
+  // arithmetic was ledgerSize + indexed, and every re-indexed file was already
+  // in ledgerSize.
+  const { db } = storingDb();
+  const index = new NucleusCodeIndex(db, countingEmbedder().embedder);
+  const tree = { "a.ts": "export const a = 1;\n", "b.ts": "export const b = 1;\n", "c.ts": "export const c = 1;\n" };
+  await index.refresh(fakeExecutor(tree), "o/r");
+  assert.equal((await index.coverage("o/r"))?.indexedFiles, 3);
+
+  // Same three files, all changed. Coverage must not move.
+  const changed = { "a.ts": "export const a = 2;\n", "b.ts": "export const b = 2;\n", "c.ts": "export const c = 2;\n" };
+  const second = await index.refresh(fakeExecutor(changed), "o/r");
+  assert.equal(second.indexed, 3, "all three were re-indexed");
+  assert.equal(second.added, 0, "and none of them were new");
+  const after = await index.coverage("o/r");
+  assert.equal(after?.indexedFiles, 3, `still three distinct files, got ${after?.indexedFiles}`);
+  assert.equal(after?.trackedFiles, 3);
+  assert.equal(after?.partial, false, "3 of 3 is complete coverage");
+
+  // A genuinely new file does move it.
+  const grown = { ...changed, "d.ts": "export const d = 1;\n" };
+  const third = await index.refresh(fakeExecutor(grown), "o/r");
+  assert.equal(third.added, 1);
+  assert.equal((await index.coverage("o/r"))?.indexedFiles, 4);
+});

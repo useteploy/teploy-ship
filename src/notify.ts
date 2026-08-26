@@ -6,6 +6,35 @@
  * advisory — failures log and never touch the run.
  */
 
+/**
+ * Where a run's work came from (L1).
+ *
+ * The consumer this exists for is Akiroo: a run that started as one of its work
+ * items has to be able to say so, or the item sits at "assigned" forever while
+ * the pull request it produced goes unnoticed. `dedupe_key` is the intake key,
+ * which is also how a consumer that missed the work_item_ref can still match a
+ * run to the issue it came from.
+ *
+ * PRE-DECIDED: the field is defined and emitted here, and the worker does not
+ * yet populate it — the notification-construction region of worker.ts is being
+ * edited concurrently by another agent this session, and reaching into it for
+ * one optional field is how a merge conflict eats a working feature. The hop
+ * does not depend on it: Ship stamps `Akiroo: <ref>` into the issue body
+ * (src/akiroo.ts AKIROO_REF_MARKER), that body becomes the intake detail, the
+ * detail becomes the run's task text, and `task` carries it here already —
+ * Akiroo reads either. Reverses the moment worker.ts is free: populate origin
+ * from the intake task at src/worker.ts's context builder and the structured
+ * field takes precedence on Akiroo's side automatically.
+ */
+export interface RunOrigin {
+  /** Intake source: forgejo | github | akiroo | scan | … */
+  source: string;
+  /** The intake dedupe key, e.g. forgejo:owner/repo#12. */
+  dedupeKey: string;
+  /** The originating work item, when the task came from a workspace. */
+  workItemRef?: string;
+}
+
 export interface RunNotification {
   runId: string;
   status: string;
@@ -16,6 +45,8 @@ export interface RunNotification {
   repo?: string;
   /** One-line description of what the run is doing, when known. */
   task?: string;
+  /** Where the task came from, when the launcher recorded it. */
+  origin?: RunOrigin;
 }
 
 export interface Notifier {
@@ -146,6 +177,8 @@ export interface RunWebhookPayload {
   task?: string;
   /** Where the run can be inspected, when SHIP_PUBLIC_URL is configured. */
   url?: string;
+  /** snake_case on the wire, matching every other field on this payload. */
+  origin?: { source: string; dedupe_key: string; work_item_ref?: string };
 }
 
 export function runWebhookPayload(event: RunNotification, publicUrl?: string): RunWebhookPayload {
@@ -158,6 +191,15 @@ export function runWebhookPayload(event: RunNotification, publicUrl?: string): R
     ...(event.repo !== undefined ? { repo: event.repo } : {}),
     ...(event.task !== undefined ? { task: event.task } : {}),
     ...(base !== "" ? { url: `${base}/runs/${event.runId}` } : {}),
+    ...(event.origin !== undefined
+      ? {
+          origin: {
+            source: event.origin.source,
+            dedupe_key: event.origin.dedupeKey,
+            ...(event.origin.workItemRef !== undefined ? { work_item_ref: event.origin.workItemRef } : {}),
+          },
+        }
+      : {}),
   };
 }
 

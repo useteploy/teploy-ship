@@ -45,6 +45,9 @@ import { utcDay } from "./spend.js";
 import { NucleusAdmission } from "./admission.js";
 import type { AdmissionControl } from "./admission.js";
 import type { RepoPolicyConfig } from "./repo-policy.js";
+import { policyFromEnv } from "./repo-policy.js";
+import { NucleusAkirooCursor, akirooTargetFromEnv, makeAkirooDecider, makeAkirooState, sweepAkiroo } from "./akiroo.js";
+import type { AkirooSweepDeps } from "./akiroo.js";
 import type { CodeSearch } from "./code-index.js";
 import { costUSD, isPricedModel } from "./pricing.js";
 import { makeObserveLogEmitter, selfwatchOnce } from "./selfwatch.js";
@@ -1003,14 +1006,51 @@ export function startWorker(options: WorkerOptions): {
     });
   };
 
+  // L1: the Akiroo hop. Ship PULLS — a worker behind a tailnet needs only
+  // outbound HTTPS, and Akiroo never holds a forge token. No-op unless both
+  // AKIROO_URL and AKIROO_PULL_TOKEN are set. See src/akiroo.ts.
+  const akirooTarget = akirooTargetFromEnv();
+  const akirooState = makeAkirooState(akirooTarget);
+  const akirooDeps: AkirooSweepDeps | undefined =
+    akirooTarget === undefined
+      ? undefined
+      : {
+          target: akirooTarget,
+          cursor: new NucleusAkirooCursor(options.runtime.db),
+          deliveries: options.runtime.deliveries,
+          intake: options.runtime.intake,
+          decide: makeAkirooDecider(options.runtime),
+          repoPolicy: options.repoPolicy ?? policyFromEnv(),
+          log,
+        };
+  if (akirooDeps !== undefined) log(`[worker] akiroo: pulling work from ${akirooTarget!.url}`);
+  const akirooSweep = async (): Promise<void> => {
+    if (akirooDeps === undefined) return;
+    try {
+      const result = await sweepAkiroo(akirooDeps);
+      akirooState.recordPull(result);
+      if (result.pulled > 0) {
+        log(`[worker] akiroo: pulled ${result.pulled}, handled ${result.handled}, acked ${result.acked}`);
+      }
+    } catch (error) {
+      // Logged, never thrown: Akiroo being unreachable must not stop the intake
+      // sweep that shares this tick.
+      akirooState.recordError(error);
+      log(`[worker] akiroo sweep: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
   // Reentrancy guard: a sweep can outlast intervalMs when Nucleus is slow, and
   // two overlapping sweeps re-launch the same proposed task (duplicate PRs) and
   // double-count its spend. Skip a tick if the previous sweep is still running.
+  // The Akiroo pull rides the same guard and the same tick for the same reason:
+  // two overlapping pulls would both hand the same row to a handler.
   let sweeping = false;
   const intakeTimer = setInterval(() => {
     if (sweeping) return;
     sweeping = true;
     void sweep()
+      .then(() => akirooSweep())
       .then(() => retryNotifications())
       .catch((error) => log(`[worker] intake sweep: ${error instanceof Error ? error.message : String(error)}`))
       .finally(() => {

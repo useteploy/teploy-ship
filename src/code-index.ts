@@ -40,6 +40,16 @@ export interface RefreshStats {
   timedOut: boolean;
   /** Files this refresh skipped because their content had not changed. */
   unchanged: number;
+  /**
+   * Of `indexed`, how many were NOT in the ledger before.
+   *
+   * Coverage is a count of distinct files the index holds, so re-indexing a
+   * changed file must not increase it. Conflating the two produced
+   * "index holds 6/3 files (200%)" on a real run, which is how this got
+   * noticed — the arithmetic was `ledgerSize + indexed`, and three of those
+   * three were already counted.
+   */
+  added: number;
   /** Measured embedding cost, ms per chunk, over this refresh. Null when nothing was embedded. */
   msPerChunk: number | null;
   /** Where the sweep stopped, so the next refresh resumes there instead of restarting at "a". */
@@ -465,11 +475,13 @@ export class NucleusCodeIndex implements CodeSearch {
    * Record what this refresh left behind.
    *
    * `indexedFiles` is the ledger's size AFTER the sweep, not this sweep's
-   * count: coverage is a statement about the index, and a run that indexed
-   * three files into an index that already held forty has forty-three.
+   * count: coverage is a statement about the index, and a run that added three
+   * files to an index that already held forty has forty-three.
    */
   async #writeCoverage(repo: string, stats: RefreshStats, ledgerSizeBefore: number): Promise<void> {
-    const indexedFiles = Math.max(0, ledgerSizeBefore + stats.indexed - stats.removed);
+    // ADDED, not indexed: re-indexing a file that changed leaves the number of
+    // distinct files the index holds exactly where it was.
+    const indexedFiles = Math.max(0, ledgerSizeBefore + stats.added - stats.removed);
     const now = new Date().toISOString();
     try {
       await this.#db.query("DELETE FROM ship_code_repos WHERE repo = $1", [repo]).catch(() => {});
@@ -601,6 +613,7 @@ export class NucleusCodeIndex implements CodeSearch {
       capped: false,
       timedOut: false,
       unchanged: 0,
+      added: 0,
       msPerChunk: null,
       cursor: null,
     };
@@ -729,6 +742,7 @@ export class NucleusCodeIndex implements CodeSearch {
           String(written),
         ]);
         stats.indexed += 1;
+        if (known === undefined) stats.added += 1;
         stats.cursor = path;
       } else if (written > 0) {
         // Partial: the rows exist but the file is not fully represented. Drop
