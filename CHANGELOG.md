@@ -13,6 +13,11 @@ All notable changes to Teploy Ship are recorded here.
   `SHIP_MODEL=zai/glm-5.3`. All six surfaces now go through
   `resolveModelId` (`src/model-id.ts`): flag > `SHIP_MODEL` > config >
   default, with a test.
+- **…and once it did, `zai/glm-5.3` 404'd.** Ship spoke every non-`anthropic/`
+  id over the OpenAI wire, but the gateway's z.ai coding-plan builtin is
+  Anthropic-wire only. `usesAnthropicWire` (`src/model-id.ts`) now routes
+  `anthropic/`, `zai/` and `zai-coding-plan/` over `/v1/messages`;
+  `SHIP_ANTHROPIC_WIRE_PREFIXES` overrides the list for other gateways.
 - **Runs on large repositories died at the sandbox reaper before their first
   command.** Ship never asked the daemon for a TTL, so every container got
   its 30-minute default, while the `repo-index` step waited on a 1 GB

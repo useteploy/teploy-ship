@@ -23,3 +23,21 @@ export function resolveModelId(
   if (configModel !== undefined && configModel !== "") return configModel;
   return DEFAULT_MODEL_ID;
 }
+
+/**
+ * Which wire a model id is spoken on through teploy-gateway. Anthropic's own
+ * models, and z.ai's coding plan — the gateway routes `zai/…` as an
+ * Anthropic-wire builtin (`teploy-gateway` c0b07dd) and answers 404 on
+ * `/v1/chat/completions` for it. Found on the round-2 proof run
+ * (2026-08-26): `turn-0-think failed: Request failed with status 404` the
+ * moment the worker finally honoured `SHIP_MODEL=zai/glm-5.3`.
+ * `SHIP_ANTHROPIC_WIRE_PREFIXES` overrides the list (comma-separated).
+ */
+export function usesAnthropicWire(modelId: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env.SHIP_ANTHROPIC_WIRE_PREFIXES;
+  const prefixes =
+    raw !== undefined && raw.trim() !== ""
+      ? raw.split(",").map((p) => p.trim()).filter((p) => p !== "")
+      : ["anthropic/", "zai/", "zai-coding-plan/"];
+  return prefixes.some((p) => modelId.startsWith(p));
+}

@@ -19,7 +19,7 @@ import type { RunOutcome } from "@neutron-build/workflow";
 
 import { ArgError, COMMAND_FLAGS, enumFlag, numberFlag, parseArgs } from "./args.js";
 import { explainRun } from "./explain.js";
-import { resolveModelId } from "./model-id.js";
+import { resolveModelId, usesAnthropicWire } from "./model-id.js";
 import { auditRow, toCsv, withinWindow } from "./audit.js";
 import type { NumberRange } from "./args.js";
 import { commitAndPush, fixPrompt, openPullRequest, setupRepo } from "./git.js";
@@ -313,7 +313,7 @@ function baseModel(modelId: string): ModelAdapter {
     if (gatewayKey === undefined || gatewayKey === "") {
       fail("AI_GATEWAY_URL is set but AI_GATEWAY_KEY is missing.");
     }
-    if (modelId.startsWith("anthropic/")) {
+    if (usesAnthropicWire(modelId)) {
       return createAnthropic({ baseURL: gatewayURL, apiKey: gatewayKey })(modelId, { cache: true });
     }
     return createOpenAI({ baseURL: gatewayURL, apiKey: gatewayKey, provider: "gateway" })(modelId);
