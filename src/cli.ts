@@ -35,6 +35,7 @@ import { refusalMessage } from "./publish-policy.js";
 import { defaultApprovalPolicy, resolveApprovalPolicy } from "./approval.js";
 import { secretEnvNames } from "./guard.js";
 import { durableAgent, durableRecoveryInput, repoKeyOf, sandboxProvider } from "./durable.js";
+import { SandboxPool, parseSandboxUrls } from "./sandbox-pool.js";
 import { externalAdapters } from "./harness-external.js";
 import type { ExecutorProvider } from "./durable.js";
 import { formatReport, runEval } from "./eval.js";
@@ -125,6 +126,9 @@ Usage:
       --sandbox-network egress (or sandboxNetwork:"egress" in config)
       whenever --sandbox is used; plain --sandbox defaults to "none".
   teploy-ship worker                  resident worker: picks up due nucleus-store runs
+      SHIP_SANDBOX_URL may list SEVERAL daemons (comma-separated): each run is
+      placed on the least-loaded healthy one, and a host that refuses work is
+      skipped until it recovers. Adding a box is adding it to that list.
       [--interval seconds]            poll interval (default 5)
       [--max-concurrent N]            OVERRIDE the ceiling Ship derives from the box
                                       (also SHIP_MAX_CONCURRENT_RUNS). Unset, the worker
@@ -404,6 +408,11 @@ async function runCommand(rest: string[]): Promise<void> {
 }
 
 interface SandboxSettings {
+  /**
+   * One daemon URL, or several separated by commas or whitespace (B2). A list
+   * of one behaves exactly as a single URL always did; adding a host to the
+   * list is the whole of "add a box".
+   */
   url: string;
   token: string;
   image: string;
@@ -657,12 +666,25 @@ async function makeRuntime(args: ReturnType<typeof parseArgs>, config: Config): 
 function durableProvider(args: ReturnType<typeof parseArgs>, config: Config): ExecutorProvider {
   const sandbox = resolveSandbox(args, config);
   if (sandbox !== undefined) {
-    return sandboxProvider({
-      baseURL: sandbox.url,
-      token: sandbox.token,
-      image: sandbox.image,
-      network: sandbox.network,
-      ttlSec: sandbox.ttlSec,
+    // B2: SHIP_SANDBOX_URL may name SEVERAL daemons. Runs are bound by model
+    // latency rather than by the box (docs/capacity.md: 57 s median execution
+    // at both 2 and 4 in flight), so throughput comes from more places to put a
+    // container, not more processes to drive them — and one worker driving N
+    // daemons opens no new network surface and leaves the exactly-once claim
+    // exactly where it is. A list of one behaves precisely as before.
+    const urls = parseSandboxUrls(sandbox.url);
+    const build = (baseURL: string): ExecutorProvider =>
+      sandboxProvider({
+        baseURL,
+        token: sandbox.token,
+        image: sandbox.image,
+        network: sandbox.network,
+        ttlSec: sandbox.ttlSec,
+      });
+    if (urls.length <= 1) return build(urls[0] ?? sandbox.url);
+    return new SandboxPool({
+      hosts: urls.map((url) => ({ url, provider: build(url) })),
+      log: (line) => process.stderr.write(`${line}\n`),
     });
   }
   // Local durable runs: a persistent per-run workspace under the state
