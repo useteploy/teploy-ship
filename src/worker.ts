@@ -45,7 +45,14 @@ import { utcDay } from "./spend.js";
 import { NucleusAdmission } from "./admission.js";
 import type { AdmissionControl } from "./admission.js";
 import type { RepoPolicyConfig } from "./repo-policy.js";
-import { policyFromEnv } from "./repo-policy.js";
+import { effectiveAllowlist, parseOriginTokens, policyFromEnv } from "./repo-policy.js";
+import {
+  colocationOverrideNotice,
+  colocationOverridden,
+  colocationRefusal,
+  detectForgeColocation,
+  type SandboxProbe,
+} from "./colocation.js";
 import { NucleusAkirooCursor, akirooTargetFromEnv, makeAkirooDecider, makeAkirooState, sweepAkiroo } from "./akiroo.js";
 import type { AkirooSweepDeps } from "./akiroo.js";
 import type { CodeSearch } from "./code-index.js";
@@ -1064,6 +1071,18 @@ export function startWorker(options: WorkerOptions): {
   // inferred from lastSeen, so the interval doubles as the liveness signal.
   const startedAt = new Date().toISOString();
   const sandboxLabel = process.env.SHIP_SANDBOX_URL ?? "host";
+
+  // B4: is this the forge's own box?
+  //
+  // Once, at startup, before any run is claimed. It costs one sandbox and it is
+  // the one decision an operator must never be left to remember — see
+  // colocation.ts for why the answer is a refusal rather than a warning.
+  // Deliberately fire-and-forget with its own error handling: a probe that
+  // cannot run must not stop a worker from starting, but it also must not be
+  // silently read as "safe" (detectForgeColocation reports it as unknown).
+  void checkForgeColocation({ executor: options.executor, repoPolicy: options.repoPolicy, log }).catch((error) => {
+    log(`[worker] forge co-location check: ${error instanceof Error ? error.message : String(error)}`);
+  });
   const beat = (): Promise<void> => {
     // Sense on the beat rather than relying on the drive loop's hostOk() having
     // run: the numbers this publishes and the ceiling it reports then come from
@@ -1169,4 +1188,80 @@ export function startWorker(options: WorkerOptions): {
     /** True while runs are still executing or a sweep is mid-flight. */
     busy: () => inflight.size > 0 || launching.size > 0 || sweeping,
   };
+}
+
+/**
+ * Run the B4 co-location gate once, at worker startup.
+ *
+ * Exported for the test, and because an operator standing up a new box wants to
+ * be able to ask the question before committing to it.
+ *
+ * When it fires the process EXITS. A worker that keeps running while refusing
+ * every launch looks healthy on the Fleet page and quietly does nothing, which
+ * is the worst of both — and the operator's next action is the same either way:
+ * move the worker, or set the override.
+ */
+export async function checkForgeColocation(deps: {
+  executor: ExecutorProvider;
+  repoPolicy?: RepoPolicyConfig;
+  log: (line: string) => void;
+  /** Injected by the test; production exits the process. */
+  onRefuse?: (message: string) => void;
+}): Promise<void> {
+  const origins = forgeOrigins(deps.repoPolicy);
+  if (origins.length === 0) return;
+
+  // The probe runs in a real sandbox on the host the sandboxes run on, which is
+  // the whole point — nothing else can see past this process's netns.
+  const probe: SandboxProbe | undefined =
+    deps.executor.isolated === true
+      ? async (command: string) => {
+          const created = await deps.executor.create();
+          try {
+            const result = await deps.executor.attach(created.handle).exec(command, { timeoutMs: 20_000 });
+            return { exitCode: result.exitCode, stdout: result.stdout };
+          } finally {
+            await deps.executor.destroy?.(created.handle).catch(() => {});
+          }
+        }
+      : undefined;
+
+  const result = await detectForgeColocation({ origins, ...(probe !== undefined ? { probe } : {}) });
+  for (const note of result.unknown) deps.log(`[worker] forge co-location: could not determine — ${note}`);
+  if (result.colocated.length === 0) return;
+
+  if (colocationOverridden()) {
+    deps.log(colocationOverrideNotice(result.colocated));
+    return;
+  }
+  const message = colocationRefusal(result.colocated);
+  deps.log(`[worker] ${message}`);
+  if (deps.onRefuse !== undefined) {
+    deps.onRefuse(message);
+    return;
+  }
+  process.exit(3);
+}
+
+/**
+ * The origins Ship would send a git credential to: every allowlist entry, plus
+ * every origin with a token configured. Those are exactly the forges a run can
+ * clone from, so they are exactly the ones worth asking about.
+ */
+export function forgeOrigins(policy?: RepoPolicyConfig): string[] {
+  const out = new Set<string>();
+  const add = (value: string | undefined): void => {
+    if (value === undefined || value === "") return;
+    try {
+      out.add(new URL(value).origin);
+    } catch {
+      // Allowlist entries may be origin+owner ("http://host:1234/tyler"); the
+      // URL parse above already handles those. Anything else is not an origin.
+    }
+  };
+  // effectiveAllowlist folds SHIP_REPO_ALLOWLIST together with every project
+  // record's clone URL, which is exactly the set a run can be pointed at.
+  for (const entry of effectiveAllowlist(policy ?? {})) add(entry.origin);
+  for (const origin of Object.keys(parseOriginTokens(policy?.originTokens))) add(origin);
+  return [...out];
 }
