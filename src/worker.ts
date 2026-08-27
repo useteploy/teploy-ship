@@ -14,6 +14,7 @@ import { testTargetFromEnv } from "./tests.js";
 import type { ExecutorProvider, RunUsage, SandboxOverrides } from "./durable.js";
 import { enqueueRun, proposeExternal } from "./runtime.js";
 import { changeClassRequired, sweepBulletin } from "./bulletin.js";
+import { parseSandboxUrls } from "./sandbox-pool.js";
 import { attributionsFrom } from "./attributed-spend.js";
 import { intakeActor } from "./actor.js";
 import type { NucleusShipRuntime } from "./runtime.js";
@@ -1282,7 +1283,13 @@ export async function checkForgeColocation(deps: {
         }
       : undefined;
 
-  const result = await detectForgeColocation({ origins, ...(probe !== undefined ? { probe } : {}) });
+  const result = await detectForgeColocation({
+    origins,
+    // What the gate is actually about: where the agent's code runs. A remote
+    // pool means the worker may sit beside the forge — see colocation.ts.
+    sandboxUrls: parseSandboxUrls(process.env.SHIP_SANDBOX_URL),
+    ...(probe !== undefined ? { probe } : {}),
+  });
   for (const note of result.unknown) deps.log(`[worker] forge co-location: could not determine — ${note}`);
   if (result.colocated.length === 0) return;
 

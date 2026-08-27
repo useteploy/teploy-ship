@@ -11,6 +11,7 @@ import {
   isPrivateAddress,
   parseDefaultGateway,
   sandboxHostProbeCommand,
+  sandboxLocality,
   tcpProbe,
 } from "./colocation.js";
 import type { ColocationResult, DetectOptions } from "./colocation.js";
@@ -126,7 +127,9 @@ test("the refusal names the forge, the reason, and BOTH ways forward", () => {
   assert.match(text, /http:\/\/100\.108\.123\.49:49152/, "names the forge it detected");
   assert.match(text, /answers on 172\.18\.0\.1/, "and the evidence");
   assert.match(text, /clone and push/, "and why the egress allowlist makes this specific");
-  assert.match(text, /teploy-ship join/, "and the way to fix it properly");
+  // The guidance changed when the gate learned what it was actually about:
+  // the fix is to move the SANDBOX, not to move the whole worker.
+  assert.match(text, /SHIP_SANDBOX_URL at a daemon on another/, "and the way to fix it properly");
   assert.match(text, new RegExp(`${COLOCATION_OVERRIDE_ENV}=1`), "and the override");
 });
 
@@ -351,4 +354,100 @@ test("isPrivateAddress knows the tailnet, the docker bridges and nothing else", 
   for (const address of ["140.82.121.4", "8.8.8.8", "172.32.0.1", "100.128.0.1", "2606:4700::1", "not an address"]) {
     assert.equal(isPrivateAddress(address), false, address);
   }
+});
+
+// --- what the gate is actually about: where the CODE runs -------------------
+//
+// The first version asked "is the forge on the WORKER's box", which conflated
+// the worker process with the sandbox and would have refused the intended
+// architecture: Ship's control plane on the forge box, sandboxes on dedicated
+// compute. That is the Forgejo Actions shape and it is SAFER than the
+// alternative, not riskier — the worker runs Ship's own TypeScript, and the
+// model's code runs a network away from the repositories.
+
+/** infra-home: runs the forge, and would run the worker in the intended setup. */
+const ON_THE_FORGE_BOX = { eth0: [{ address: "172.18.0.5" }] };
+const forgeResolves = async (): Promise<string[]> => ["100.108.123.49"];
+
+test("THE INTENDED TOPOLOGY: worker beside the forge, sandboxes on their own box — permitted", async () => {
+  const result = await detectForgeColocation({
+    origins: [FORGE],
+    sandboxUrls: ["http://100.90.116.118:7439"], // a dedicated compute box
+    interfaces: ON_THE_FORGE_BOX,
+    resolve: async (host) => (host === "100.108.123.49" ? ["100.108.123.49"] : ["100.90.116.118"]),
+    // The forge DOES answer on this worker's own gateway — it is on this box.
+    // That must no longer be enough to refuse, because no agent code runs here.
+    gateway: async () => "172.18.0.1",
+    connect: async () => "open" as const,
+  });
+  assert.deepEqual(result.colocated, [], "the worker sharing a box with the forge is not the hazard");
+  assert.deepEqual(result.unknown, [], "and the verdict is complete, not a shrug");
+});
+
+test("several compute boxes, still permitted — adding compute is adding an address", async () => {
+  const result = await detectForgeColocation({
+    origins: [FORGE],
+    sandboxUrls: ["http://100.90.116.118:7439", "http://100.114.237.12:7439"],
+    interfaces: ON_THE_FORGE_BOX,
+    resolve: async (host) => [host],
+    gateway: async () => "172.18.0.1",
+    connect: async () => "open" as const,
+  });
+  assert.deepEqual(result.colocated, []);
+});
+
+test("THE HAZARD, still caught: a sandbox daemon ON the forge's machine", async () => {
+  const result = await detectForgeColocation({
+    origins: [FORGE],
+    // The daemon is named by a real address that IS the forge's machine.
+    sandboxUrls: ["http://100.108.123.49:7439"],
+    interfaces: { eth0: [{ address: "10.9.9.9" }] },
+    resolve: async () => ["100.108.123.49"],
+    gateway: async () => "10.9.9.1",
+    connect: async () => "closed" as const,
+  });
+  assert.equal(result.colocated.length, 1);
+  assert.equal(result.colocated[0]?.how, "sandbox-host");
+  assert.match(result.colocated[0]!.detail, /would run on the forge's own machine/);
+});
+
+test("no sandbox at all: the worker IS the executor, so its own box matters again", async () => {
+  // LocalExecutor, isolated: false — agent commands run on the host.
+  const result = await detectForgeColocation({
+    origins: [FORGE],
+    sandboxUrls: [],
+    interfaces: { tailscale0: [{ address: "100.108.123.49" }] },
+    resolve: forgeResolves,
+  });
+  assert.equal(result.colocated.length, 1, "with no sandbox the worker's box is where code runs");
+  assert.equal(result.colocated[0]?.how, "local-interface");
+});
+
+test("sandboxLocality reads the three cases it has to distinguish", async () => {
+  const remote = await sandboxLocality(["http://100.90.116.118:7439"], {
+    resolve: async () => ["100.90.116.118"],
+    interfaces: ON_THE_FORGE_BOX,
+    gateway: async () => "172.18.0.1",
+  });
+  assert.equal(remote.kind, "remote");
+
+  // A bridge address is how a containerised worker names its OWN host.
+  const local = await sandboxLocality(["http://172.18.0.1:7439"], {
+    resolve: async () => ["172.18.0.1"],
+    interfaces: ON_THE_FORGE_BOX,
+    gateway: async () => "172.18.0.1",
+  });
+  assert.equal(local.kind, "local");
+
+  assert.equal((await sandboxLocality([], {})).kind, "none");
+});
+
+test("the refusal explains the topology that IS allowed, not just the one that is not", () => {
+  const text = colocationRefusal([
+    { origin: FORGE, how: "sandbox-host", detail: "the sandbox daemon at http://100.108.123.49:7439 resolves to 100.108.123.49" },
+  ]);
+  assert.match(text, /the worker PROCESS living beside the forge is fine/);
+  assert.match(text, /What must not share that machine is the SANDBOX/);
+  assert.match(text, /Forgejo Actions shape/);
+  assert.match(text, /comma-separated list/, "and says how to add the compute box");
 });

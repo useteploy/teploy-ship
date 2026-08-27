@@ -16,22 +16,30 @@
  * and takes an explicit override — safe by default, overridable, and zero
  * decisions in the happy path.
  *
- * HOW IT DETECTS IT, and what each check can and cannot see:
+ * WHAT IS ACTUALLY BEING ASKED — and this took a correction to get right.
  *
- *  1. The forge origin is loopback. Decisive, free, and catches the obvious
- *     case of a forge on the same machine addressed as localhost.
- *  2. The forge origin resolves to an address on one of THIS PROCESS's own
- *     interfaces. Decisive when Ship runs on the host. It is blind when Ship
- *     runs in a container, because the container's netns has none of the host's
- *     addresses — which is the normal deployment, hence check 3.
- *  3. The forge answers on THIS PROCESS'S OWN DEFAULT GATEWAY. A container's
- *     default gateway is the docker bridge on its host, so if the forge's port
- *     answers there, the forge is on the worker's own box. Costs one TCP
- *     connect and no container. See PRE-DECIDED below for why this exists.
- *  4. The forge answers on the SANDBOX HOST'S OWN ADDRESS. Same question asked
- *     from inside a sandbox, which is the right question when the sandbox pool
- *     (src/sandbox-pool.ts) puts sandboxes on hosts the worker is not on. It
- *     costs one sandbox at startup, once.
+ * The risk is where MODEL-AUTHORED CODE EXECUTES, and that is the sandbox, not
+ * the worker. The worker process runs Ship's own TypeScript; it holds
+ * credentials wherever it lives. So a worker sitting next to the forge is NOT
+ * the hazard, provided its sandboxes are somewhere else — that is the Forgejo
+ * Actions shape (forge and coordinator together, runners elsewhere) and it is
+ * a legitimate, and safer, topology.
+ *
+ * The first version of this gate asked "is the forge on the WORKER's box",
+ * which conflated the two and would have refused exactly that architecture.
+ * The question is per sandbox daemon: IS THAT DAEMON ON THE SAME MACHINE AS
+ * THE FORGE?
+ *
+ *   - A daemon at a remote address: resolve it, compare with the forge. Same
+ *     machine means co-located; different machines mean the code runs a network
+ *     away from the repositories, which is the whole point.
+ *   - A daemon that is local to this process (loopback, an address on our own
+ *     interfaces, or our own default gateway — a bridge address means "the
+ *     daemon is on my box"): then, and only then, the question collapses to
+ *     "is the forge also on MY box", which the checks below answer.
+ *   - NO sandbox configured at all: the worker executes agent code itself on
+ *     the host (LocalExecutor, isolated: false). Then the worker IS the
+ *     executor and worker-co-location is exactly the hazard.
  *
  * A check that cannot run (no sandbox configured, a probe that errors) reports
  * "unknown" rather than "safe": this gate must fail loud, not open.
@@ -277,6 +285,14 @@ export const tcpProbe: TcpProbe = (host, port, timeoutMs) =>
 export interface DetectOptions {
   /** Forge origins Ship is configured to clone from. */
   origins: string[];
+  /**
+   * The sandbox daemons this worker places runs on (SHIP_SANDBOX_URL, which is
+   * a list since B2). THIS is what the gate is about — see the header.
+   *
+   * An empty list means no sandbox is configured, so the worker executes agent
+   * code on its own host and the worker's own box is the one that matters.
+   */
+  sandboxUrls?: string[];
   /** Runs a command inside a sandbox. Omit and check 4 reports "unknown". */
   probe?: SandboxProbe;
   /** Injected for tests. */
@@ -300,10 +316,80 @@ async function resolveHost(host: string, resolver?: (host: string) => Promise<st
   }
 }
 
+/**
+ * Where do sandboxes run, relative to this process?
+ *
+ * "local" means a daemon on this very box (loopback, one of our own addresses,
+ * or our default gateway — a docker bridge address is how a containerised
+ * worker names its own host). "remote" carries the resolved addresses of a
+ * daemon somewhere else. "none" means no sandbox at all, so the worker is the
+ * executor.
+ */
+export async function sandboxLocality(
+  urls: string[],
+  options: { resolve?: (host: string) => Promise<string[]>; interfaces?: NodeJS.Dict<Array<{ address: string }>>; gateway?: () => Promise<string | null> },
+): Promise<{ kind: "none" } | { kind: "local"; urls: string[] } | { kind: "remote"; hosts: Array<{ url: string; addresses: string[] }> } | { kind: "mixed"; urls: string[]; hosts: Array<{ url: string; addresses: string[] }> }> {
+  if (urls.length === 0) return { kind: "none" };
+  const mine = localAddresses(options.interfaces);
+  const gateway = await (options.gateway ?? (() => readDefaultGateway()))().catch(() => null);
+  const local: string[] = [];
+  const remote: Array<{ url: string; addresses: string[] }> = [];
+  for (const url of urls) {
+    const parts = originParts(url);
+    if (parts === null) continue;
+    if (isLoopback(parts.host)) {
+      local.push(url);
+      continue;
+    }
+    const addresses = await resolveHost(parts.host, options.resolve);
+    if (addresses.some((a) => mine.has(a)) || (gateway !== null && addresses.includes(gateway)) || parts.host === gateway) {
+      local.push(url);
+      continue;
+    }
+    remote.push({ url, addresses });
+  }
+  if (local.length > 0 && remote.length > 0) return { kind: "mixed", urls: local, hosts: remote };
+  if (local.length > 0) return { kind: "local", urls: local };
+  if (remote.length > 0) return { kind: "remote", hosts: remote };
+  return { kind: "none" };
+}
+
 export async function detectForgeColocation(options: DetectOptions): Promise<ColocationResult> {
   const colocated: ColocationFinding[] = [];
   const unknown: string[] = [];
   const mine = localAddresses(options.interfaces);
+
+  // Where the agent's code actually runs decides which question to ask.
+  const where = await sandboxLocality(options.sandboxUrls ?? [], {
+    ...(options.resolve !== undefined ? { resolve: options.resolve } : {}),
+    ...(options.interfaces !== undefined ? { interfaces: options.interfaces } : {}),
+    ...(options.gateway !== undefined ? { gateway: options.gateway } : {}),
+  });
+
+  // A REMOTE-only sandbox pool is the safe topology this gate exists to permit:
+  // the worker may sit beside the forge because nothing model-authored runs
+  // there. The only thing left to check is whether a sandbox host IS the forge.
+  if (where.kind === "remote") {
+    for (const origin of options.origins) {
+      const parts = originParts(origin);
+      if (parts === null) continue;
+      const forge = await resolveHost(parts.host, options.resolve);
+      for (const host of where.hosts) {
+        const shared = host.addresses.filter((a) => forge.includes(a));
+        if (shared.length > 0) {
+          colocated.push({
+            origin,
+            how: "sandbox-host",
+            detail: `the sandbox daemon at ${host.url} resolves to ${shared.join(", ")}, which is also where ${parts.host} is — the agent's code would run on the forge's own machine`,
+          });
+        }
+      }
+      if (forge.length === 0) {
+        unknown.push(`${origin}: could not be resolved, so it could not be compared against the sandbox hosts`);
+      }
+    }
+    return { colocated, unknown };
+  }
 
   for (const origin of options.origins) {
     const parts = originParts(origin);
@@ -434,8 +520,12 @@ export function colocationRefusal(findings: ColocationFinding[]): string {
     "Ship executes code a model wrote, and its sandbox egress allowlist permits the forge by design — a run has to " +
     "clone and push. On the forge's own box that permission is a local hop to every repository and every credential " +
     "it holds, with one container boundary between them instead of a container boundary plus a network.\n\n" +
-    "Move the worker to a box that is not the forge (this is what `teploy-ship join` is for), or, if you have " +
-    `decided the blast radius is acceptable, set ${COLOCATION_OVERRIDE_ENV}=1. The override is logged on every start.`
+    "Note what this is NOT objecting to: the worker PROCESS living beside the forge is fine. It runs Ship's own code, " +
+    "not the model's. What must not share that machine is the SANDBOX. Point SHIP_SANDBOX_URL at a daemon on another " +
+    "box — that is the Forgejo Actions shape, forge and coordinator together with runners elsewhere, and it is the " +
+    "topology this gate is built to let you have. SHIP_SANDBOX_URL takes a comma-separated list, so adding compute is " +
+    "adding an address.\n\n" +
+    `If you have decided the blast radius is acceptable, set ${COLOCATION_OVERRIDE_ENV}=1. The override is logged on every start.`
   );
 }
 
