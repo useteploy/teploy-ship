@@ -14,3 +14,22 @@ export interface PlanDecisionPayload {
   plan?: string;
   reason?: string;
 }
+
+/**
+ * The event a run parks on when its change is classified `serious` (L3 / D2).
+ *
+ * Kept HERE next to PLAN_EVENT, and for the same reason: the web bundle
+ * dispatches on the event name and cannot import durable.ts. Deliver a
+ * ChangeDecisionPayload.
+ *
+ * Distinct from PLAN_EVENT deliberately. A plan approval is "is this the right
+ * thing to do"; this is "the work is done, here is what it touched, may it be
+ * pushed" — a different question, asked with the diff in hand, and a run can
+ * legitimately be asked both.
+ */
+export const CHANGE_EVENT = "change-approval";
+
+export interface ChangeDecisionPayload {
+  approved: boolean;
+  reason?: string;
+}

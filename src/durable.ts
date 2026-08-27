@@ -47,7 +47,10 @@ import type { SteerStore } from "./steer.js";
 import { formatSearchHits } from "./code-index.js";
 import { frameUntrusted, screenUntrusted } from "./guard.js";
 import type { CodeSearch } from "./code-index.js";
-import { PLAN_EVENT } from "./plan.js";
+import { CHANGE_EVENT, PLAN_EVENT } from "./plan.js";
+import type { ChangeDecisionPayload } from "./plan.js";
+import { classifyChange, parseNumstat } from "./change-class.js";
+import type { ChangedFile } from "./change-class.js";
 import type { PlanDecisionPayload } from "./plan.js";
 import type { ApprovalPolicy } from "./approval.js";
 import { formatObservation, systemPrompt } from "./prompt.js";
@@ -233,6 +236,17 @@ export interface DurableAgentInput {
    * caught exactly that during this change.
    */
   testsFeedback?: boolean;
+  /**
+   * The change-class gate (L3): before pushing, classify what the run actually
+   * touched and PARK when it is `serious` — a migration, an auth file, a
+   * deletion, or a change too large for "review it" to be a real answer.
+   *
+   * Input-gated for the usual reason, sharpened by the fact that this one adds
+   * a `waitForEvent`: a worker that parked a run whose log predates the gate
+   * would request an event the log has no record of, and the replay would fail
+   * as a NondeterminismError rather than merely behaving differently.
+   */
+  changeClass?: boolean;
   /**
    * Per-repo evidence, materialised at ENQUEUE from the evidence store
    * (`teploy-ship evidence set`): the test command this repo runs and the
@@ -509,7 +523,7 @@ export interface DurableAgentConfig {
   harnesses?: HarnessAdapter[];
 }
 
-export { PLAN_EVENT } from "./plan.js";
+export { CHANGE_EVENT, PLAN_EVENT } from "./plan.js";
 export type { PlanDecisionPayload } from "./plan.js";
 
 const PLAN_REQUEST =
@@ -1631,6 +1645,42 @@ async function publishIfRepoRun(
   // Unless the critic already ran it over this same tree — see testsIfAsked.
   const tests = await testsIfAsked(ctx, executor, config, input, evidence);
 
+  // 0b. Classify the change, and park if it is serious (L3 / D2).
+  //
+  // BEFORE the push, deliberately. Once a branch exists on the forge the
+  // question "may this be pushed" has already been answered, and a park that
+  // happens afterwards is a park about a fact rather than a decision.
+  //
+  // PRE-DECIDED (2026-08-26): the gate is implemented at THIS point only, not
+  // also after `plan-think`. The plan-time check adds no mechanism — it reuses
+  // the existing `plan-approval` park — so it is a prompt change (teach the
+  // plan to emit `DECISION:`) plus a classify call, and it answers a different
+  // and weaker question: a plan's declared file list is a guess, while this
+  // point has the actual diff. Reverses if plan-preview runs become common
+  // enough that catching a serious change before the work is done is worth the
+  // second gate; the classifier already accepts `planText` for that day.
+  if (input.changeClass === true) {
+    const verdict = await ctx.step("change-class", async () => {
+      const files = await changedFiles(executor);
+      return { ...classifyChange({ files, testsPassed: tests?.kind === "passed" }), files };
+    });
+    if (verdict.class === "serious") {
+      const decision = await ctx.waitForEvent<ChangeDecisionPayload>(CHANGE_EVENT);
+      if (!decision.approved) {
+        // The work is NOT discarded: the tree is still in the workspace and the
+        // classification, the reasons and the denial are all on the timeline.
+        // A denial is a decision about publishing, not a judgement that the run
+        // was worthless.
+        await ctx.step("change-rejected", () => ({
+          reason: decision.reason ?? "denied without a reason",
+          class: verdict.class,
+          reasons: verdict.reasons,
+        }));
+        return null;
+      }
+    }
+  }
+
   // 1. Commit + push. Screened first; a refusal is recorded and stops here.
   const push = await ctx.step(
     "repo-push",
@@ -1971,6 +2021,28 @@ async function runSuite(
  * than served. Read-only by construction — the executor's getFile cannot
  * write.
  */
+/**
+ * What this run actually changed, as numbers the classifier can judge.
+ *
+ * Two git calls, not one: `--numstat` gives the counts but cannot distinguish a
+ * DELETED file from a fully-rewritten one (both read as N deletions, 0
+ * additions), and "deletes a file" is one of the rules that makes a change
+ * serious. `--diff-filter=D` answers that directly.
+ *
+ * Staged, because that is what would be committed — the same thing the publish
+ * screen looks at.
+ */
+async function changedFiles(executor: AgentExecutor): Promise<ChangedFile[]> {
+  await executor.exec("git add -A", { timeoutMs: 60_000 });
+  const numstat = await executor.exec("git diff --cached --numstat", { timeoutMs: 60_000 });
+  if (numstat.exitCode !== 0) return [];
+  const deleted = await executor.exec("git diff --cached --name-only --diff-filter=D", { timeoutMs: 60_000 });
+  const deletedSet = new Set(
+    deleted.exitCode === 0 ? deleted.stdout.split("\n").map((p) => p.trim()).filter((p) => p !== "") : [],
+  );
+  return parseNumstat(numstat.stdout).map((file) => ({ ...file, isDelete: deletedSet.has(file.path) }));
+}
+
 async function readWorkspaceFile(executor: AgentExecutor, workdir: string, path: string): Promise<string> {
   const relative = path.replace(/^\.\//, "");
   if (relative.startsWith("/") || relative.split("/").includes("..")) {

@@ -550,6 +550,12 @@ export async function enqueueRun(
      */
     testsFeedback?: boolean;
     /**
+     * Classify the change before pushing and park when it is `serious` (L3).
+     * Materialised here because it adds a recorded step AND a waitForEvent —
+     * see DurableAgentInput.changeClass in durable.ts.
+     */
+    changeClass?: boolean;
+    /**
      * Which harness executes the run (see harness.ts). Absent falls back to
      * `SHIP_HARNESS`, and that to native. Resolved to an id+version HERE and
      * materialised into the recorded input: a run must replay under the program
@@ -652,6 +658,11 @@ export async function enqueueRun(
   // expensive to run twice.
   const testsFeedback =
     options.testsFeedback ?? (tests === true && !envFlagOff("SHIP_TESTS_FEEDBACK") ? true : undefined);
+  // The change-class gate is OPT-IN, unlike testsFeedback above, because it can
+  // PARK a run — and a park with nobody to answer it is a hang. It is turned on
+  // per deployment once someone is watching the inbox, which is exactly the
+  // condition L5 and L6 also depend on.
+  const changeClass = options.changeClass ?? (options.repo !== undefined && envFlag("SHIP_CHANGE_CLASS") ? true : undefined);
   // The harness, as id + contract version. Recorded on EVERY new run, native
   // included, so the log says which program wrote it; a run enqueued before
   // this field existed has none and is native by definition.
@@ -690,6 +701,7 @@ export async function enqueueRun(
         ...(telemetry === true ? { telemetry: true } : {}),
         ...(tests === true ? { tests: true } : {}),
         ...(testsFeedback === true ? { testsFeedback: true } : {}),
+        ...(changeClass === true ? { changeClass: true } : {}),
         // Per-repo evidence values (see the resolution above). Absent on runs
         // enqueued before this existed, which replay and fall back to the
         // worker's env wiring exactly as before.

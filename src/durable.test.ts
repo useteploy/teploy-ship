@@ -9,7 +9,7 @@ import { LocalExecutor } from "@neutron-build/agents";
 import type { AgentExecutor } from "@neutron-build/agents";
 import { MemoryEventStore, cancelRun, deliverEvent, executeRun } from "@neutron-build/workflow";
 
-import { PLAN_EVENT, approvalEvent, durableAgent } from "./durable.js";
+import { CHANGE_EVENT, PLAN_EVENT, approvalEvent, durableAgent } from "./durable.js";
 import { FileRepoMemory } from "./repo-memory.js";
 import type { ExecutorProvider, RecoveryTuning } from "./durable.js";
 import { defaultApprovalPolicy } from "./approval.js";
@@ -2482,6 +2482,214 @@ test("C5: a run that throws having changed NOTHING publishes nothing", async () 
     const names = events.filter((e) => e.type === "step-completed").map((e) => e.name ?? "");
     assert.equal(names.includes("publish-on-failure"), false, "nothing was done, so nothing is published");
     assert.equal(prCalls, 0, "and no pull request was opened");
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+// --- D2 / L3: the change-class gate, end to end ----------------------------
+
+async function classRepo(name: string): Promise<{ bare: string; provider: ExecutorProvider }> {
+  const bare = await mkdtemp(join(tmpdir(), `${name}-bare-`));
+  const seedDir = await mkdtemp(join(tmpdir(), `${name}-seed-`));
+  const seeder = new LocalExecutor({ root: seedDir });
+  await seeder.exec(
+    `git init -q -b main . && git config user.email t@t && git config user.name t && ` +
+      `printf 'hello\\n' > f.txt && git add -A && git commit -qm seed && git clone -q --bare . ${bare}/owner/repo.git`,
+  );
+  const work = await mkdtemp(join(tmpdir(), `${name}-work-`));
+  return {
+    bare,
+    provider: {
+      async create() {
+        return { handle: work };
+      },
+      attach(handle: string) {
+        return new LocalExecutor({ root: handle });
+      },
+    },
+  };
+}
+
+test("D2: a change touching a migration PARKS before pushing, with its reasons on the timeline", async () => {
+  const { bare, provider } = await classRepo("durable-d2-serious");
+  const { model } = reactiveModel([
+    "```bash\nmkdir -p db/migrations && echo 'ALTER TABLE runs ADD COLUMN x TEXT;' > db/migrations/0007.sql\n```",
+    "```finish\nadded the migration\n```",
+    "```bash\ncat db/migrations/0007.sql\n```",
+    "```finish\nadded the migration\n```",
+  ]);
+
+  let pushed = false;
+  const orig = globalThis.fetch;
+  (globalThis as unknown as { fetch: unknown }).fetch = () => {
+    pushed = true;
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ number: 1, html_url: "http://example/pulls/1" }) });
+  };
+  try {
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: durableAgent({ model, executor: provider, workdir: "." }),
+      runId: "run-d2-serious",
+      store,
+      input: { task: "add a migration", repo: `file://${bare}/owner/repo.git`, changeClass: true },
+    });
+
+    assert.equal(outcome.status, "waiting", "a serious change waits for a person");
+    assert.equal(outcome.eventName, CHANGE_EVENT);
+    assert.equal(pushed, false, "and nothing reached the forge before the decision");
+
+    const events = await store.load("run-d2-serious");
+    const verdict = [...events]
+      .reverse()
+      .find((e) => e.type === "step-completed" && e.name === "change-class")?.data as
+      | { result?: { class?: string; reasons?: string[] } }
+      | undefined;
+    assert.equal(verdict?.result?.class, "serious");
+    assert.match((verdict?.result?.reasons ?? []).join(" "), /migrations/, "and says why, in words");
+
+    // The branch must not exist on the remote: the gate is BEFORE the push, so
+    // "may this be pushed" is still an open question.
+    const seeder = new LocalExecutor({ root: bare });
+    const branches = await seeder.exec(`git --git-dir=${bare}/owner/repo.git branch -a`);
+    assert.doesNotMatch(branches.stdout, /ship\//, "no branch was created");
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+test("D2: approving the park pushes and opens the pull request", async () => {
+  const { bare, provider } = await classRepo("durable-d2-approve");
+  const { model } = reactiveModel([
+    "```bash\nmkdir -p db/migrations && echo 'ALTER TABLE runs ADD COLUMN x TEXT;' > db/migrations/0007.sql\n```",
+    "```finish\nadded the migration\n```",
+    "```bash\ncat db/migrations/0007.sql\n```",
+    "```finish\nadded the migration\n```",
+  ]);
+
+  const orig = globalThis.fetch;
+  (globalThis as unknown as { fetch: unknown }).fetch = () =>
+    Promise.resolve({ ok: true, json: () => Promise.resolve({ number: 4, html_url: "http://example/owner/repo/pulls/4" }) });
+  try {
+    const store = new MemoryEventStore();
+    const wf = durableAgent({ model, executor: provider, workdir: "." });
+    const input = { task: "add a migration", repo: `file://${bare}/owner/repo.git`, changeClass: true };
+    const parked = await executeRun({ workflow: wf, runId: "run-d2-approve", store, input });
+    assert.equal(parked.status, "waiting");
+
+    await deliverEvent(store, "run-d2-approve", CHANGE_EVENT, { approved: true });
+    const resumed = await executeRun({ workflow: wf, runId: "run-d2-approve", store, input });
+
+    assert.equal(resumed.status, "completed");
+    const names = (await store.load("run-d2-approve")).filter((e) => e.type === "step-completed").map((e) => e.name ?? "");
+    assert.ok(names.includes("repo-push"), `the push happened after approval: ${names.join(",")}`);
+    assert.ok(names.includes("repo-pr"));
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+test("D2: denying the park pushes NOTHING, and says so on the timeline", async () => {
+  const { bare, provider } = await classRepo("durable-d2-deny");
+  const { model } = reactiveModel([
+    "```bash\nmkdir -p db/migrations && echo 'DROP TABLE runs;' > db/migrations/0008.sql\n```",
+    "```finish\ndropped it\n```",
+    "```bash\ncat db/migrations/0008.sql\n```",
+    "```finish\ndropped it\n```",
+  ]);
+
+  let touchedForge = false;
+  const orig = globalThis.fetch;
+  (globalThis as unknown as { fetch: unknown }).fetch = () => {
+    touchedForge = true;
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ number: 1, html_url: "http://example/pulls/1" }) });
+  };
+  try {
+    const store = new MemoryEventStore();
+    const wf = durableAgent({ model, executor: provider, workdir: "." });
+    const input = { task: "drop the runs table", repo: `file://${bare}/owner/repo.git`, changeClass: true };
+    await executeRun({ workflow: wf, runId: "run-d2-deny", store, input });
+
+    await deliverEvent(store, "run-d2-deny", CHANGE_EVENT, { approved: false, reason: "we are not dropping that table" });
+    const done = await executeRun({ workflow: wf, runId: "run-d2-deny", store, input });
+
+    assert.equal(done.status, "completed", "a denial is a decision, not a failure");
+    assert.equal(touchedForge, false, "and nothing reached the forge");
+    const events = await store.load("run-d2-deny");
+    const names = events.filter((e) => e.type === "step-completed").map((e) => e.name ?? "");
+    assert.ok(names.includes("change-rejected"));
+    assert.equal(names.includes("repo-push"), false);
+    const rejected = [...events].reverse().find((e) => e.name === "change-rejected")?.data as
+      | { result?: { reason?: string } }
+      | undefined;
+    assert.equal(rejected?.result?.reason, "we are not dropping that table");
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+test("D2: a two-file fix classifies trivial and does NOT park", async () => {
+  const { bare, provider } = await classRepo("durable-d2-trivial");
+  const { model } = reactiveModel([
+    "```bash\necho world >> f.txt\n```",
+    "```finish\nfixed the typo\n```",
+    "```bash\ncat f.txt\n```",
+    "```finish\nfixed the typo\n```",
+  ]);
+
+  const orig = globalThis.fetch;
+  (globalThis as unknown as { fetch: unknown }).fetch = () =>
+    Promise.resolve({ ok: true, json: () => Promise.resolve({ number: 2, html_url: "http://example/owner/repo/pulls/2" }) });
+  try {
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: durableAgent({ model, executor: provider, workdir: "." }),
+      runId: "run-d2-trivial",
+      store,
+      input: {
+        task: "fix the greeting",
+        repo: `file://${bare}/owner/repo.git`,
+        changeClass: true,
+        tests: true,
+        testCommand: "true",
+      },
+    });
+
+    assert.equal(outcome.status, "completed", "no park");
+    const events = await store.load("run-d2-trivial");
+    const verdict = [...events].reverse().find((e) => e.name === "change-class")?.data as
+      | { result?: { class?: string } }
+      | undefined;
+    assert.equal(verdict?.result?.class, "trivial");
+    const names = events.filter((e) => e.type === "step-completed").map((e) => e.name ?? "");
+    assert.ok(names.includes("repo-pr"));
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+test("D2: the gate is OFF unless the run's input says so — an old run replays untouched", async () => {
+  const { bare, provider } = await classRepo("durable-d2-off");
+  const { model } = reactiveModel([
+    "```bash\nmkdir -p db/migrations && echo 'ALTER TABLE x ADD y TEXT;' > db/migrations/0009.sql\n```",
+    "```finish\ndone\n```",
+    "```bash\ncat db/migrations/0009.sql\n```",
+    "```finish\ndone\n```",
+  ]);
+  const orig = globalThis.fetch;
+  (globalThis as unknown as { fetch: unknown }).fetch = () =>
+    Promise.resolve({ ok: true, json: () => Promise.resolve({ number: 9, html_url: "http://example/owner/repo/pulls/9" }) });
+  try {
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: durableAgent({ model, executor: provider, workdir: "." }),
+      runId: "run-d2-off",
+      store,
+      input: { task: "add a migration", repo: `file://${bare}/owner/repo.git` },
+    });
+    assert.equal(outcome.status, "completed", "no gate, no park — today's behaviour exactly");
+    const names = (await store.load("run-d2-off")).filter((e) => e.type === "step-completed").map((e) => e.name ?? "");
+    assert.equal(names.includes("change-class"), false, "and no new step in the log");
   } finally {
     globalThis.fetch = orig;
   }
