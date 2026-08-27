@@ -41,11 +41,59 @@ export interface SpendStore {
   reserve(reservationId: string, source: string, day: string, amountUSD: number): Promise<void>;
   /** Drop a reservation — on refusal, or when the real cost is recorded. */
   release(reservationId: string): Promise<void>;
+  /**
+   * Is a reservation already outstanding under this id?
+   *
+   * Exists so the budget check at ENQUEUE (assertDailyBudget in runtime.ts) can
+   * tell "nobody has admitted this run yet" from "the intake sweep already
+   * reserved for it and is now calling enqueueRun" (worker.ts:286 reserves
+   * under the same runId it then passes to `launch`). Without that distinction
+   * an enqueue-side check either double-counts the sweep's launches against the
+   * budget or re-decides an admission the sweep already made — and the sweep
+   * cannot pass a flag, because it calls `enqueueRun` through an injected
+   * `launch` callback it constructs itself.
+   *
+   * OPTIONAL on the interface, not required: several test doubles implement
+   * SpendStore, and a required method would break files this change does not
+   * own. A store without it is treated as "not held", which falls back to the
+   * idempotent-reserve safety below rather than to overspending.
+   */
+  held?(reservationId: string): Promise<boolean>;
 }
 
 /** Today's date as the UTC "YYYY-MM-DD" bucket key. */
 export function utcDay(now = new Date()): string {
   return now.toISOString().slice(0, 10);
+}
+
+/** Per-source daily cap when nothing overrides it. Mirrors worker.ts:774. */
+export const DEFAULT_DAILY_BUDGET_USD = 10;
+/** What one in-flight run is assumed to cost. Mirrors worker.ts:773. */
+export const DEFAULT_ESTIMATED_RUN_COST_USD = 0.5;
+
+function envNumber(name: string, env: NodeJS.ProcessEnv): number | undefined {
+  const raw = env[name];
+  if (raw === undefined || raw === "") return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/**
+ * The default per-source daily cap, from the environment.
+ *
+ * Read HERE as well as in the worker because there are now two places that
+ * admit a run against a budget — the intake sweep and `enqueueRun` — and the
+ * second of them (the CLI, the dashboard, the scan API) runs in processes that
+ * never construct a worker. Same env var, same default, so an operator who sets
+ * SHIP_DAILY_BUDGET_USD gets one number across both.
+ */
+export function defaultDailyBudgetUSD(env: NodeJS.ProcessEnv = process.env): number {
+  return envNumber("SHIP_DAILY_BUDGET_USD", env) ?? DEFAULT_DAILY_BUDGET_USD;
+}
+
+/** The in-flight estimate held against a budget until settlement replaces it. */
+export function estimatedRunCostUSD(env: NodeJS.ProcessEnv = process.env): number {
+  return envNumber("SHIP_ESTIMATED_RUN_COST_USD", env) ?? DEFAULT_ESTIMATED_RUN_COST_USD;
 }
 
 /**
@@ -75,6 +123,9 @@ export class FileSpendStore implements SpendStore {
     return total;
   }
 
+  // Map.set is already idempotent by id — reserving twice under one runId
+  // holds the amount once, which is the property NucleusSpendStore had to be
+  // taught explicitly. See the note on its reserve().
   async reserve(reservationId: string, source: string, day: string, amountUSD: number): Promise<void> {
     if (!(amountUSD > 0)) return;
     this.#reservations.set(reservationId, { source, day, amountUSD });
@@ -82,6 +133,10 @@ export class FileSpendStore implements SpendStore {
 
   async release(reservationId: string): Promise<void> {
     this.#reservations.delete(reservationId);
+  }
+
+  async held(reservationId: string): Promise<boolean> {
+    return this.#reservations.has(reservationId);
   }
 
   /** Sum a day's deltas into source -> total. */
@@ -165,9 +220,18 @@ export class NucleusSpendStore implements SpendStore {
     return this.#ready;
   }
 
+  /**
+   * IDEMPOTENT BY id. A bare INSERT was not: two reservations under one runId
+   * held the estimate twice and the budget read high, which now matters because
+   * two admission points can reserve for the same run — the intake sweep
+   * (worker.ts:286) and the enqueue check (assertDailyBudget in runtime.ts).
+   * A hold is a statement about one run, so the second write must replace the
+   * first rather than add to it.
+   */
   async reserve(reservationId: string, source: string, day: string, amountUSD: number): Promise<void> {
     if (!(amountUSD > 0)) return;
     await this.#ensure();
+    await this.#db.query("DELETE FROM ship_spend_holds WHERE hold_id = $1", [reservationId]);
     await this.#db.query(
       "INSERT INTO ship_spend_holds (hold_id, day, source, amount_usd, created_at) VALUES ($1, $2, $3, $4, $5)",
       [reservationId, day, source, String(amountUSD), new Date().toISOString()],
@@ -177,6 +241,12 @@ export class NucleusSpendStore implements SpendStore {
   async release(reservationId: string): Promise<void> {
     await this.#ensure();
     await this.#db.query("DELETE FROM ship_spend_holds WHERE hold_id = $1", [reservationId]);
+  }
+
+  async held(reservationId: string): Promise<boolean> {
+    await this.#ensure();
+    const rows = await this.#db.query("SELECT hold_id FROM ship_spend_holds WHERE hold_id = $1", [reservationId]);
+    return rows.length > 0;
   }
 
   /** Sum of holds still outstanding for a bucket. Stale holds are ignored by age. */

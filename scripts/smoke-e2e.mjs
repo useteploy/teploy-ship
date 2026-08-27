@@ -269,6 +269,8 @@ function preflight() {
 const started = Date.now();
 let worker = null;
 let workerOutput = "";
+/** The ledger as it stood before this run, so the check can measure a delta. */
+let before = { pricedBefore: 0, unpricedBefore: 0 };
 
 async function main() {
   preflight();
@@ -315,6 +317,9 @@ async function main() {
 
   const runtimeModule = await import(join(ROOT, "dist", "runtime.js"));
   const runtime = await runtimeModule.nucleusRuntime(process.env.NUCLEUS_URL, "smoke", { log: () => {} });
+  // Read the ledger BEFORE the run, so the assertion below is about this run.
+  const opening = await readLedger(runtime);
+  before = { pricedBefore: opening.priced, unpricedBefore: opening.unpriced };
 
   try {
     const terminal = new Set(["completed", "failed", "cancelled"]);
@@ -334,7 +339,7 @@ async function main() {
     }
 
     const events = await runtime.store.load(runId);
-    const ledger = await readLedger(runtime);
+    const ledger = { ...before, ...(await readLedger(runtime)) };
     reportChecks(evaluateSmoke({ meta, events, ledger, askedModel, testCommand: TEST_COMMAND }), events);
   } finally {
     await runtime.close().catch(() => {});
@@ -394,11 +399,23 @@ export function evaluateSmoke({ meta, events, ledger, askedModel, testCommand })
   const usage = output?.usage ?? undefined;
   const tokens = Number(usage?.totalTokens ?? 0) || Number(usage?.inputTokens ?? 0) + Number(usage?.outputTokens ?? 0);
   check("the run recorded model usage", tokens > 0, `usage=${JSON.stringify(usage ?? null)}`);
+  // The DELTA this run caused, not the day's total.
+  //
+  // The first version asserted "the ledger is non-empty today", which passed on
+  // 2026-08-26 against $36.86 that other runs had put there — while the smoke's
+  // own runs were contributing nothing. An assertion that can be satisfied by
+  // someone else's evidence is not an assertion. It only failed once the UTC day
+  // rolled over and the borrowed total went to zero, which is luck, not testing.
+  const pricedDelta = (ledger?.priced ?? 0) - (ledger?.pricedBefore ?? 0);
+  const unpricedDelta = (ledger?.unpriced ?? 0) - (ledger?.unpricedBefore ?? 0);
   check(
-    "that usage reached a spend ledger",
-    (ledger?.priced ?? 0) > 0 || (ledger?.unpriced ?? 0) > 0,
-    `priced today: ${ledger?.priced ?? 0}, unpriced runs today: ${ledger?.unpriced ?? 0}` +
-      (ledger?.error !== undefined ? ` (ledger read failed: ${ledger.error})` : ""),
+    "THIS run's usage reached a spend ledger",
+    pricedDelta > 0 || unpricedDelta > 0,
+    `priced ${ledger?.pricedBefore ?? 0} -> ${ledger?.priced ?? 0}, unpriced runs ${ledger?.unpricedBefore ?? 0} -> ${ledger?.unpriced ?? 0}` +
+      (ledger?.error !== undefined ? ` (ledger read failed: ${ledger.error})` : "") +
+      (pricedDelta <= 0 && unpricedDelta <= 0
+        ? ". A run that burned tokens and reached NEITHER ledger is counted nowhere — that is the failure P5-3 exists to prevent."
+        : ""),
   );
 
   // 4. The model id used matches the model id asked for.

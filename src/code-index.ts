@@ -148,6 +148,24 @@ const EMBED_BATCH_MAX = 64;
  */
 const EMBED_MS_PER_CHUNK_GUESS = 1000;
 
+/**
+ * How many chunks the FIRST call of a refresh may ask for, before this refresh
+ * has measured anything.
+ *
+ * Small on purpose, and this is the second thing a live run taught. The seeded
+ * guess of 1 s/chunk came from probing the embedder with one-line strings; on
+ * real code — 60-line windows of dense TypeScript — the deployed embedder takes
+ * **16 s per chunk**. So the first batch of every refresh was sized sixteen
+ * times too large, overran the whole 60 s budget in a single call, and the
+ * round wrote NOTHING: rounds 3 and 4 of a live convergence probe against
+ * teploy-ship recorded `0 chunks @ null ms, timedOut=true`.
+ *
+ * A short probe batch costs one round of slightly lower throughput and buys a
+ * measurement that sizes every batch after it. Combined with the rate persisted
+ * across refreshes (see #writeCoverage), a repo only pays this once.
+ */
+const EMBED_PROBE_CHUNKS = 4;
+
 /** Extensions that are never worth embedding (binary or generated). */
 const SKIP_EXT = new Set([
   "png", "jpg", "jpeg", "gif", "webp", "ico", "svg", "pdf", "zip", "gz", "tar", "tgz",
@@ -359,6 +377,7 @@ export class NucleusCodeIndex implements CodeSearch {
   #ready: Promise<void> | null = null;
   #chunksReady: Promise<void> | null = null;
   #reposReady: Promise<void> | null = null;
+  #ratesReady: Promise<void> | null = null;
   #maxChunks: number;
 
   constructor(db: NucleusPgwire, embedder: EmbeddingAdapter, options: CodeIndexOptions = {}) {
@@ -472,13 +491,31 @@ export class NucleusCodeIndex implements CodeSearch {
   }
 
   /**
+   * The embedding rate this repo measured last time, if any.
+   *
+   * Persisted across refreshes because the rate is a property of the EMBEDDER
+   * and the code, not of one run — and a refresh that has to rediscover it
+   * spends a probe batch doing so. A repo pays for the measurement once.
+   */
+  async #readRate(repo: string): Promise<number | null> {
+    try {
+      await this.#ensureRates();
+      const rows = await this.#db.query("SELECT ms_per_chunk FROM ship_code_rates WHERE repo = $1", [repo]);
+      const value = Number(rows[0]?.ms_per_chunk);
+      return Number.isFinite(value) && value > 0 ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Record what this refresh left behind.
    *
    * `indexedFiles` is the ledger's size AFTER the sweep, not this sweep's
    * count: coverage is a statement about the index, and a run that added three
    * files to an index that already held forty has forty-three.
    */
-  async #writeCoverage(repo: string, stats: RefreshStats, ledgerSizeBefore: number): Promise<void> {
+  async #writeCoverage(repo: string, stats: RefreshStats, ledgerSizeBefore: number, previousRate?: number | null): Promise<void> {
     // ADDED, not indexed: re-indexing a file that changed leaves the number of
     // distinct files the index holds exactly where it was.
     const indexedFiles = Math.max(0, ledgerSizeBefore + stats.added - stats.removed);
@@ -501,6 +538,45 @@ export class NucleusCodeIndex implements CodeSearch {
       // Advisory. A refresh that worked must not be reported as failed because
       // its bookkeeping row could not be written.
     }
+    // The measured rate rides a SIBLING table, not a column on the one above.
+    //
+    // Found by a live run: `CREATE TABLE IF NOT EXISTS` is a no-op against an
+    // existing table, and Nucleus cannot ALTER-ADD to a populated one — so
+    // adding `ms_per_chunk` to ship_code_repos made every INSERT fail against
+    // any engine that already had the table, and coverage silently stopped
+    // being recorded at all. This is the same constraint that put host load in
+    // `ship_fleet_load` (fleet.ts:207); it applies here for the same reason and
+    // I had to be shown it.
+    //
+    // Carry the previous measurement forward when this sweep measured nothing,
+    // so a refresh that timed out before embedding does not throw away what the
+    // last one learned.
+    const rate = stats.msPerChunk ?? previousRate ?? null;
+    if (rate !== null) {
+      try {
+        await this.#ensureRates();
+        await this.#db.query("DELETE FROM ship_code_rates WHERE repo = $1", [repo]).catch(() => {});
+        await this.#db.query("INSERT INTO ship_code_rates (repo, ms_per_chunk, at) VALUES ($1, $2, $3)", [
+          repo,
+          String(rate),
+          now,
+        ]);
+      } catch {
+        // Advisory too: without it the next refresh spends one probe batch
+        // rediscovering the rate, which is a cost, not a failure.
+      }
+    }
+  }
+
+  #ensureRates(): Promise<void> {
+    this.#ratesReady ??= this.#db
+      .query("CREATE TABLE IF NOT EXISTS ship_code_rates (repo TEXT, ms_per_chunk TEXT, at TEXT)")
+      .then(() => undefined)
+      .catch((error) => {
+        this.#ratesReady = null;
+        throw error;
+      });
+    return this.#ratesReady;
   }
 
   async #deleteFileChunks(repo: string, path: string, count: number): Promise<void> {
@@ -532,8 +608,13 @@ export class NucleusCodeIndex implements CodeSearch {
     // is still the seeded guess, in which case try exactly one chunk to learn
     // the real rate. A guess that is too high must not deadlock a fast
     // embedder at zero progress, which is what refusing here would do.
+    // Until this refresh has measured its own rate, ask for a PROBE-sized batch
+    // rather than whatever the estimate says it can afford: an estimate that is
+    // wrong by 16x turns the first call into one that cannot possibly fit, and
+    // a call that overruns writes nothing at all.
+    const ceiling = rate.measured ? EMBED_BATCH_MAX : Math.min(EMBED_BATCH_MAX, EMBED_PROBE_CHUNKS);
     const floor = rate.measured ? 0 : 1;
-    const take = Math.max(floor, Math.min(values.length, affordable, EMBED_BATCH_MAX));
+    const take = Math.max(floor, Math.min(values.length, affordable, ceiling));
     if (take === 0) return { embeddings: [], timedOut: true };
     const started = Date.now();
     try {
@@ -627,7 +708,11 @@ export class NucleusCodeIndex implements CodeSearch {
     // then re-embedded it next time: expensive, and search silently missed
     // files that were right there.
     const trackedSet = new Set(tracked);
-    const rate = { msPerChunk: EMBED_MS_PER_CHUNK_GUESS, measured: false };
+    const learned = await this.#readRate(repo);
+    // `measured: true` when the rate came from a previous refresh of THIS repo:
+    // it is a real measurement over this repo's own chunk sizes, so there is no
+    // reason to spend another probe batch rediscovering it.
+    const rate = { msPerChunk: learned ?? EMBED_MS_PER_CHUNK_GUESS, measured: learned !== null };
     const hashes = await this.#hashAll(executor, paths);
 
     for (const path of paths) {
@@ -752,9 +837,19 @@ export class NucleusCodeIndex implements CodeSearch {
       }
       stats.chunks += written;
       if (ranOut) {
+        // One file being unaffordable is not the sweep being over.
+        //
+        // This used to `break`, and a live run showed what that costs: the
+        // first file in relevance order needed 114 s for its single chunk
+        // against a 90 s budget, so the sweep gave up having indexed NOTHING —
+        // while the old code, which happened to meet small files first,
+        // managed three. Chunk cost varies enormously with content (16 s for a
+        // source window, 114 s for a dense JSON blob), so the next file may
+        // well fit. Stop only when the clock has actually run out.
         stats.timedOut = true;
         stats.capped = true;
-        break;
+        if (remaining() <= 0) break;
+        continue;
       }
       if (stats.capped) break;
     }
@@ -770,7 +865,7 @@ export class NucleusCodeIndex implements CodeSearch {
     }
 
     stats.msPerChunk = stats.chunks > 0 ? rate.msPerChunk : null;
-    await this.#writeCoverage(repo, stats, ledger.size);
+    await this.#writeCoverage(repo, stats, ledger.size, learned);
     return stats;
   }
 

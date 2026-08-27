@@ -58,10 +58,12 @@ function storingDb(): {
   files: Map<string, { hash: string; chunks: string }>;
   chunks: Set<string>;
   repos: Map<string, Record<string, string>>;
+  rates: Map<string, string>;
 } {
   const files = new Map<string, { hash: string; chunks: string }>();
   const chunks = new Set<string>();
   const repos = new Map<string, Record<string, string>>();
+  const rates = new Map<string, string>();
   const key = (repo: string, path: string): string => `${repo}\u0000${path}`;
   const db = {
     query: async (text: string, params: unknown[] = []): Promise<Array<Record<string, unknown>>> => {
@@ -97,6 +99,18 @@ function storingDb(): {
         const row = repos.get(String(params[0]));
         return row === undefined ? [] : [{ cursor: row.cursor }];
       }
+      if (sql.startsWith("SELECT ms_per_chunk FROM ship_code_rates")) {
+        const row = rates.get(String(params[0]));
+        return row === undefined ? [] : [{ ms_per_chunk: row }];
+      }
+      if (sql.startsWith("DELETE FROM ship_code_rates")) {
+        rates.delete(String(params[0]));
+        return [];
+      }
+      if (sql.startsWith("INSERT INTO ship_code_rates")) {
+        rates.set(String(params[0]), String(params[1]));
+        return [];
+      }
       if (sql.startsWith("DELETE FROM ship_code_repos")) {
         repos.delete(String(params[0]));
         return [];
@@ -116,7 +130,7 @@ function storingDb(): {
       return [];
     },
   } as unknown as NucleusPgwire;
-  return { db, files, chunks, repos };
+  return { db, files, chunks, repos, rates };
 }
 
 /** An embedder that returns a fixed-dimension vector per value, and counts calls. */
@@ -437,4 +451,40 @@ test("coverage counts DISTINCT files, so re-indexing a changed file cannot push 
   const third = await index.refresh(fakeExecutor(grown), "o/r");
   assert.equal(third.added, 1);
   assert.equal((await index.coverage("o/r"))?.indexedFiles, 4);
+});
+
+// Found by a live run against teploy-ship, not by reading the code: rounds 3
+// and 4 of a convergence probe recorded `0 chunks @ null ms, timedOut=true`.
+// The seeded rate (1 s/chunk, probed with one-line strings) is 16x too
+// optimistic on real code, so the first batch of every refresh was sized to
+// something that could not possibly fit in the budget — and a call that
+// overruns writes nothing at all, so the entire round was wasted.
+
+test("the first batch of a refresh is a small PROBE, so a wrong estimate cannot waste the budget", async () => {
+  const { db, files } = storingDb();
+  // 25 ms per chunk against a seeded guess of 1 ms would size the first batch
+  // at the whole file if the probe cap did not exist.
+  const index = new NucleusCodeIndex(db, slowEmbedder(25));
+  const long = Array.from({ length: 600 }, (_, i) => `export const v${i} = ${i};`).join("\n");
+  const stats = await index.refresh(fakeExecutor({ "src/big.ts": long }), "o/probe", { deadlineMs: Date.now() + 400 });
+
+  assert.ok(stats.chunks > 0, `the probe batch must fit and write something, got ${stats.chunks} chunks`);
+  assert.ok(stats.msPerChunk !== null && stats.msPerChunk >= 15, `and it must MEASURE the rate, got ${stats.msPerChunk}`);
+  void files;
+});
+
+test("the measured rate survives to the next refresh, so a repo pays for the probe once", async () => {
+  const { db, rates } = storingDb();
+  const index = new NucleusCodeIndex(db, slowEmbedder(20));
+  await index.refresh(fakeExecutor(manyFiles(4)), "o/rate", { deadlineMs: Date.now() + 600 });
+
+  const stored = Number(rates.get("o/rate"));
+  assert.ok(Number.isFinite(stored) && stored >= 15, `the rate is persisted, got ${rates.get("o/rate")}`);
+
+  // A refresh that measures nothing must not erase what the last one learned —
+  // otherwise a timed-out round throws away the measurement and the next round
+  // starts from the bad guess again.
+  const before = rates.get("o/rate");
+  await index.refresh(fakeExecutor(manyFiles(4)), "o/rate", { deadlineMs: Date.now() + 600 });
+  assert.equal(rates.get("o/rate"), before, "an all-unchanged sweep keeps the previous rate");
 });

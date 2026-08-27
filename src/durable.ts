@@ -53,7 +53,9 @@ import { classifyChange, parseNumstat } from "./change-class.js";
 import type { ChangedFile } from "./change-class.js";
 import type { PlanDecisionPayload } from "./plan.js";
 import type { ApprovalPolicy } from "./approval.js";
-import { formatObservation, systemPrompt } from "./prompt.js";
+import { SCAN_EDIT_REFUSED, SCAN_MIDPOINT_REMINDER, formatObservation, scanFindingsNudge, scanPrompt, systemPrompt } from "./prompt.js";
+import { parseFindings } from "./findings.js";
+import type { ParsedFindings, ScanFinding } from "./findings.js";
 import { costUSD } from "./pricing.js";
 import { HARNESS_VERSIONS, NATIVE_HARNESS_ID, selectAdapter } from "./harness.js";
 import type { HarnessAdapter, HarnessBudget, HarnessRef, HarnessResult, HarnessTask, HarnessUsage, HarnessWorkspace } from "./harness.js";
@@ -248,6 +250,30 @@ export interface DurableAgentInput {
    */
   changeClass?: boolean;
   /**
+   * What this run is FOR (L2 / D3). Absent — the only value any existing log
+   * carries — is the ordinary fix run. `"scan"` is a read-only audit: the agent
+   * reads the repository and reports findings, and Ship publishes nothing.
+   *
+   * Everything scan mode changes is gated on this field, which is why it is on
+   * the run input rather than resolved from config at execution time. That is
+   * the standing rule here (see `testsFeedback` and `changeClass` above) and it
+   * is load-bearing in both directions for this one:
+   *
+   * - Scan mode ADDS a step (`scan-findings`), so a worker that decided "scan"
+   *   from its own env would request a step an older log does not contain — a
+   *   NondeterminismError that executeRun THROWS rather than records, leaving
+   *   the run permanently unrunnable.
+   * - Scan mode also REMOVES steps: `publishIfRepoRun` returns before
+   *   `repo-push`. A worker that decided that at execution time would leave the
+   *   log's recorded publish steps unconsumed, which is the same failure from
+   *   the other side (`leftoverCursorEvent`).
+   *
+   * The mode is what disables publishing — not the prompt. Five of the seven
+   * 2026-08-26 nightly scans pushed code they had been asked in prose not to
+   * push; a run mode cannot be forgotten mid-run.
+   */
+  mode?: "fix" | "scan";
+  /**
    * Per-repo evidence, materialised at ENQUEUE from the evidence store
    * (`teploy-ship evidence set`): the test command this repo runs and the
    * Observe service it is built from.
@@ -356,6 +382,17 @@ export interface DurableAgentOutput {
   pr?: string;
   /** Model usage summed across the run's turns (cache fields included). */
   usage?: RunUsage;
+  /**
+   * What a `mode: "scan"` run found (L2 / D3). Absent on every other run, so
+   * no recorded output shape changes — the P5-1 replay fence in harness.test.ts
+   * compares the replayed output to the recorded one byte for byte.
+   *
+   * On the OUTPUT as well as on the `scan-findings` step because these two
+   * surfaces answer different questions: the step is "what happened in this
+   * run", the output is "what does this run mean", and the outcome is what the
+   * API, the CLI and Akiroo read without walking the event log.
+   */
+  findings?: ScanFinding[];
 }
 
 /** Model usage summed across a run. `priced`/`costUSD` are the P5-3 honesty fields; see harness.ts. */
@@ -797,8 +834,18 @@ export function durableAgent(
             })
           : "";
 
+      // A scan is framed as a scan wherever it runs — repo checkout or bare
+      // workspace — because the framing is the ONLY thing that tells the agent
+      // what its deliverable is. The enforcement (no publish, no edits) is in
+      // the loop and the publish gate below and does not depend on this.
       const task =
-        checkout !== null
+        input.mode === "scan"
+          ? scanPrompt({
+              task: input.task,
+              ...(checkout !== null ? { branch: checkout.branch } : {}),
+              ...(repoContext !== "" ? { context: repoContext } : {}),
+            })
+          : checkout !== null
           ? input.pr !== undefined
             ? reviewPrompt({
                 task: input.task,
@@ -824,6 +871,21 @@ export function durableAgent(
       // on a snapshot restore; the workspace carries them now so the publish
       // gate reads whichever container the attempt ended in.
       const primary: HarnessWorkspace = { ctx, handle, executor, workdir, checkout, scopeKey, stepPrefix: "" };
+
+      /**
+       * Collect a scan's findings out of the agent's own finish message, as a
+       * recorded step, on scan runs only.
+       *
+       * A step and not a bare call: the parse is pure, but its RESULT is the
+       * run's deliverable, and a deliverable that only exists in a return value
+       * is invisible to the run page, the API and `explain`. Recording it puts
+       * the findings, the drop reasons and "no array at all" on the timeline
+       * where the run is read. Nothing here touches the sandbox, so it is also
+       * the one sink a scan cannot fail to deliver — see findings.ts's header
+       * for what happened to the file-shaped one.
+       */
+      const collectFindings = async (summary: string): Promise<ParsedFindings | null> =>
+        input.mode === "scan" ? await ctx.step("scan-findings", () => parseFindings(summary)) : null;
 
       if (attemptRefs === null) {
         let result: HarnessResult;
@@ -853,6 +915,10 @@ export function durableAgent(
           }
           throw error;
         }
+        // BEFORE the publish gate, so a scan whose findings step throws never
+        // reaches a push. (It cannot throw — parseFindings is total — but the
+        // ordering is the guarantee, not the implementation.)
+        const scanned = await collectFindings(result.summary);
         const pr =
           result.status === "plan-rejected"
             ? null
@@ -869,7 +935,14 @@ export function durableAgent(
                 baseline,
               );
         await dispose(config, primary.handle);
-        return { status: result.status, summary: result.summary, turns: result.turns, usage: result.usage, ...(pr !== null ? { pr } : {}) };
+        return {
+          status: result.status,
+          summary: result.summary,
+          turns: result.turns,
+          usage: result.usage,
+          ...(pr !== null ? { pr } : {}),
+          ...(scanned !== null ? { findings: scanned.findings } : {}),
+        };
       }
 
       // Multi-harness attempts (P5-4). Attempt 0 runs in the primary workspace
@@ -948,6 +1021,12 @@ export function durableAgent(
       for (const loser of losers) await dispose(config, loser.ws.handle);
       const names = attempts.map((a, i) => `${a.adapter.id}${i === pick.winner ? " (published)" : ""}`).join(", ");
       const summary = `${winner.result.summary}\n\nPicked from ${attempts.length} harness attempts: ${names}.`;
+      // Unreachable today — enqueueRun does not materialise `harnessAttempts`
+      // on a scan (runtime.ts), so a scan always takes the single-attempt path
+      // above. Kept because "the findings step is next to every publish call"
+      // is the invariant, and a future enqueue surface that pairs the two
+      // should not have to rediscover it.
+      const scanned = await collectFindings(winner.result.summary);
       const pr =
         winner.result.status === "plan-rejected"
           ? null
@@ -966,7 +1045,14 @@ export function durableAgent(
               baseline,
             );
       await dispose(config, winner.ws.handle);
-      return { status: winner.result.status, summary, turns, usage, ...(pr !== null ? { pr } : {}) };
+      return {
+        status: winner.result.status,
+        summary,
+        turns,
+        usage,
+        ...(pr !== null ? { pr } : {}),
+        ...(scanned !== null ? { findings: scanned.findings } : {}),
+      };
     },
     config.runTimeout !== undefined ? { timeout: config.runTimeout } : {},
   );
@@ -1038,6 +1124,27 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
        * which becomes the PR body and the repo-memory note.
        */
       let lastHeldFinish: string | undefined;
+
+      /**
+       * Read-only scan mode (L2 / D3).
+       *
+       * Everything scan mode does inside this loop is derived from the recorded
+       * INPUT and from turn state that is already re-derived on replay
+       * (`finishNudged`, `criticDone` and friends above). It records NO new
+       * step and consumes none — a scan pushes messages and refuses actions, so
+       * an old log replays through exactly the steps it contains and a scan
+       * log's step sequence is a strict subset of a fix run's.
+       */
+      const scanRun = input.mode === "scan";
+      /** Bounded like every other hold here. Two re-asks, then take what came. */
+      let scanFindingsNudges = 0;
+      /**
+       * When to tell a scan to start writing up. 60% of the budget: early
+       * enough that a re-ask still has turns to land in, late enough that the
+       * reading is real. Derived from the same `maxSteps` the loop bounds on,
+       * so it moves with the budget rather than being a magic 12.
+       */
+      const scanWriteUpTurn = Math.max(1, Math.floor(maxSteps * 0.6));
 
       // Stuck detection. The tracker itself is never persisted: it is a pure
       // state machine over (action, exitCode, fingerprint), so replaying the
@@ -1139,6 +1246,15 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
           }
         }
 
+        // The write-up deadline. Ship's own steer, not the operator's, and
+        // deliberately NOT routed through the steer store: it is a property of
+        // the mode, must not depend on a store being configured, and must not
+        // consume an operator note's turn slot. A pushed message records no
+        // step, so this is invisible to replay.
+        if (scanRun && turn === scanWriteUpTurn) {
+          messages.push({ role: "user", content: SCAN_MIDPOINT_REMINDER });
+        }
+
         if (condense !== null) {
           messages = await condenseIfNeeded(
             messages,
@@ -1177,6 +1293,27 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
         messages.push({ role: "assistant", content: thought.trim() === "" ? "(no response)" : thought });
 
         const action = parseAction(thought);
+        // A SCAN'S FINISH GATE, and it replaces the fix-run chain below rather
+        // than adding to it. Every hold in that chain asks a question about an
+        // EDIT — did a command succeed, is the tree still clean, does the suite
+        // pass, does the critic approve the diff — and a scan makes no edit, so
+        // those holds would send a correct scan back to work for failing to do
+        // the one thing it is forbidden to do.
+        //
+        // The question a scan is held on instead is whether it delivered. Two
+        // re-asks, then whatever came back is accepted: a model that cannot
+        // emit the array in three attempts will not emit it in six, and the
+        // free text is still on the timeline either way.
+        if (scanRun && action.kind === "finish") {
+          const parsed = parseFindings(action.message);
+          if (!parsed.found && scanFindingsNudges < 2 && turn + 1 < maxSteps) {
+            scanFindingsNudges += 1;
+            messages.push({ role: "user", content: scanFindingsNudge(parsed.errors) });
+            continue;
+          }
+          // `incomplete` is about a pull request, and a scan opens none.
+          return { status: "finished", summary: action.message, turns: turn + 1, usage, incomplete: false };
+        }
         if (action.kind === "finish") {
           // First finish is held once (verify-or-do-the-work), second is
           // honored; a finish on the final turn is honored immediately.
@@ -1376,6 +1513,26 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
                 ? action.message
                 : "No code block found. Respond with exactly one fenced code block, or a ```finish block if done.",
           });
+          continue;
+        }
+
+        // A scan may not modify the tree — enforced HERE, before the action
+        // reaches a step or the executor, so nothing is written and no
+        // `turn-N-exec` is recorded for it.
+        //
+        // Belt to the publish gate's braces, and worth having on its own: the
+        // 2026-08-26 scans that pushed code were not malicious, they were
+        // BLOCKED from their real deliverable and spent a 40-turn budget doing
+        // the thing they knew how to do. Refusing the edit with an explanation
+        // and a place to put it (a finding's "fix") points that energy back at
+        // the scan instead of merely discarding it later.
+        //
+        // ```bash can still write files, and that is fine: the publish gate is
+        // what decides whether anything leaves the sandbox, and the remote has
+        // been credential-free since the clone (git.ts setupRepo), so the agent
+        // cannot push either.
+        if (scanRun && (action.kind === "edit" || action.kind === "create")) {
+          messages.push({ role: "user", content: SCAN_EDIT_REFUSED });
           continue;
         }
 
@@ -1633,6 +1790,22 @@ async function publishIfRepoRun(
   evidence?: TestOutcome,
   baseline?: TestOutcome,
 ): Promise<string | null> {
+  // A SCAN PUBLISHES NOTHING (L2 / D3). First line of the function, before any
+  // step, so no call site can forget it — this one guard covers the
+  // single-attempt path, the multi-attempt path and `rescuePublish`, and covers
+  // any call site added later.
+  //
+  // This is the whole fix. The MVP asked the model in prose not to change
+  // files; on 2026-08-26 five of seven nightly scans pushed code anyway (an
+  // invented nginx.conf, a 385-line package-lock regeneration, a doc comment
+  // claiming validation that was never written) and every one of those pull
+  // requests had to be closed by hand. A prompt is a request the model can drop
+  // at turn 30; the publish gate not running is not.
+  //
+  // Returning null rather than throwing: publishing is the thing a scan does
+  // not do, not an error it hit. The run's deliverable is the `scan-findings`
+  // step, and it has already been recorded by the time this is called.
+  if (input.mode === "scan") return null;
   if (checkout === null || input.repo === undefined) return null;
   const repoUrl = input.repo;
   const co = checkout;

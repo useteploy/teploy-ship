@@ -4,6 +4,40 @@ All notable changes to Teploy Ship are recorded here.
 
 ## [Unreleased]
 
+### Added
+- **`mode: "scan"` — read-only audit runs that produce findings instead of pull
+  requests (L2 / D3).** The prompt-only scan MVP was structurally broken and its
+  cron was switched off: it asked the agent to write
+  `.teploy-agent/findings.json`, which is the one path in the workspace that
+  cannot hold a deliverable — `validateActionPath` refuses it
+  (`src/actions.ts:65`), `setupRepo` git-excludes it (`src/git.ts:141`) and the
+  publish screen lists it as never-publishable (`src/publish-policy.ts:62`). All
+  seven nightly scans on 2026-08-26 produced zero findings and five of them
+  pushed code they had been asked in prose not to push. Three things changed.
+  - **Publishing is disabled in the executor, not requested in the prompt.**
+    `publishIfRepoRun` returns on the first line for a scan, so no push, no pull
+    request, no forge call, and no test or change-class step runs. ```edit and
+    ```create are refused by the loop before they reach the sandbox, with an
+    observation telling the agent to record the change as a finding's `fix`
+    instead. A prompt is a request a model drops at turn 30; a mode is not.
+  - **Findings are run data, not a repo path.** The agent emits them in its
+    ```finish block; a `scan-findings` step parses and validates them and they
+    ride on the run's output, so they are readable from the run page, from
+    `GET /api/runs/:id/findings`, and from the event log — with no file anywhere
+    that could be refused, excluded, parked on, or accidentally pushed. A finish
+    carrying no array is sent back to work twice before the run is allowed to
+    end; an explicit `[]` is accepted as the real answer it is. `POST
+    /api/runs/scan` starts one (the nightly cron's front door).
+- **The daily spend cap is enforced on `enqueue`, not only at intake.** It used
+  to be checked in `sweepIntake` against an intake TASK (`src/worker.ts:282`);
+  `enqueueRun` creates a run directly and never makes one, so the CLI, the
+  dashboard and any cron calling them were outside the cap entirely. That is how
+  one night of scans spent $24.15 against a $10/day budget. `enqueueRun` now
+  reserves and checks before the run's first event is written — a refusal means
+  the run does not exist rather than existing and never being runnable — and the
+  intake sweep is not double-counted, because its reservation is already held
+  under the same run id. `reserve()` is idempotent by id in both spend stores.
+
 ### Fixed
 - **An operator-declared `SHIP_MODEL_PRICING` override never applied to a
   prefixed model id — the documented form.** Overrides were stored under the

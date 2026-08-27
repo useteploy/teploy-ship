@@ -51,7 +51,7 @@ function healthy(overrides = {}) {
       ...extra,
       ...(completed === null ? [] : [completed]),
     ],
-    ledger: overrides.ledger ?? { priced: 1.23, unpriced: 0 },
+    ledger: overrides.ledger ?? { pricedBefore: 0, priced: 1.23, unpricedBefore: 0, unpriced: 0 },
     askedModel: ASKED_MODEL,
     testCommand: TEST_COMMAND,
   };
@@ -73,8 +73,18 @@ test("bug 1: the run used a model nobody asked for", () => {
 });
 
 test("bug 2: the run's cost never reached a ledger", () => {
-  const checks = evaluateSmoke(healthy({ ledger: { priced: 0, unpriced: 0 } }));
-  assert.deepEqual(failed(checks), ["that usage reached a spend ledger"]);
+  const checks = evaluateSmoke(healthy({ ledger: { pricedBefore: 0, priced: 0, unpricedBefore: 0, unpriced: 0 } }));
+  assert.deepEqual(failed(checks), ["THIS run's usage reached a spend ledger"]);
+  assert.match(checks.find((c) => !c.ok).detail, /counted nowhere/);
+});
+
+// The trap the first version of this check fell into, on 2026-08-26: the day's
+// ledger held $36.86 from other runs, so "the ledger is non-empty" passed while
+// the smoke's own runs contributed nothing. It only failed when the UTC day
+// rolled over and the borrowed total went to zero.
+test("bug 2, sharper: a day-wide total someone ELSE put there does not satisfy the check", () => {
+  const checks = evaluateSmoke(healthy({ ledger: { pricedBefore: 36.86, priced: 36.86, unpricedBefore: 0, unpriced: 0 } }));
+  assert.deepEqual(failed(checks), ["THIS run's usage reached a spend ledger"]);
 });
 
 test("bug 2, the other half: an unpriced model is COUNTED, not treated as a miss", () => {
@@ -82,7 +92,7 @@ test("bug 2, the other half: an unpriced model is COUNTED, not treated as a miss
   // the unpriced-run ledger. The smoke must pass on either kind of model
   // without being told which it has, or it will be quietly disabled the first
   // time someone points it at a coding-plan model.
-  const checks = evaluateSmoke(healthy({ ledger: { priced: 0, unpriced: 1 } }));
+  const checks = evaluateSmoke(healthy({ ledger: { pricedBefore: 0, priced: 0, unpricedBefore: 0, unpriced: 1 } }));
   assert.deepEqual(failed(checks), []);
 });
 

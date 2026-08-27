@@ -80,6 +80,9 @@ Usage:
   teploy-ship enqueue "<task>"        hand a task to a worker (the issue -> PR flow)
       [--repo <url>]                  the repository to work in
       [--model …] [--plan] [--critic] [--settle] [--json]
+      [--scan]                        read-only: report findings on the run, never
+                                      push. Editing is refused in the loop and the
+                                      publish gate does not run.
   teploy-ship evidence set <repo>     per-repo evidence: the suite command and the
       [--test-command "<cmd>"]        Observe service that belong to ONE repo, so
       [--test-timeout-ms N]           one worker can serve many repos (resolved at
@@ -1013,6 +1016,9 @@ async function enqueueCommand(rest: string[]): Promise<void> {
       ...(args.flags.plan === true ? { plan: true } : {}),
       ...(args.flags.critic === true ? { critic: true } : {}),
       ...(args.flags.settle === true ? { settle: true } : {}),
+      // Scan mode (D3/L2): read the repo and report findings, never push.
+      // The refusal lives in the executor, not in the prompt — see durable.ts.
+      ...(args.flags.scan === true ? { mode: "scan" as const } : {}),
     });
   } finally {
     await runtime.close();

@@ -133,6 +133,8 @@ test("SEAM: every enqueueRun call site passes an actor", async () => {
     ["../src/cli.ts", 1],
     ["../src/worker.ts", 1],
     ["../web/src/routes/index.tsx", 2],
+    // D3's scan launcher. Added deliberately, which is what this list is for.
+    ["../web/src/routes/api/runs/scan.tsx", 1],
   ];
   for (const [rel, expected] of sites) {
     const source = await readFile(new URL(rel, import.meta.url), "utf8");

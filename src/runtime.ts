@@ -1,3 +1,4 @@
+import { resolveTestTarget } from "./test-detect.js";
 import {
   LeaseManager,
   NucleusEventStore,
@@ -11,7 +12,7 @@ import type { EventStore, RunOutcome, WorkflowDefinition } from "@neutron-build/
 import { defaultRecoveryConfig } from "./recovery.js";
 import { FileIntakeStore, NucleusIntakeStore } from "./intake.js";
 import type { IntakeStore } from "./intake.js";
-import { FileSpendStore, NucleusSpendStore, FileUnpricedRunStore, NucleusUnpricedRunStore } from "./spend.js";
+import { FileSpendStore, NucleusSpendStore, FileUnpricedRunStore, NucleusUnpricedRunStore, defaultDailyBudgetUSD, estimatedRunCostUSD, utcDay as spendDay } from "./spend.js";
 import type { SpendStore, UnpricedRunStore } from "./spend.js";
 import { FilePolicyStore, NucleusPolicyStore } from "./policies.js";
 import type { PolicyStore } from "./policies.js";
@@ -52,6 +53,8 @@ export type { RunMeta } from "./run-store.js";
 export type { IntakeStore, IntakeTask, ProposeInput } from "./intake.js";
 export { FileIntakeStore, NucleusIntakeStore } from "./intake.js";
 export type { SpendStore, SpendEntry, UnpricedRunStore, UnpricedRunEntry } from "./spend.js";
+export type { FindingSeverity, ParsedFindings, ScanFinding } from "./findings.js";
+export { MAX_FINDINGS, findingsSummary, parseFindings } from "./findings.js";
 export { FileSpendStore, NucleusSpendStore, FileUnpricedRunStore, NucleusUnpricedRunStore, utcDay } from "./spend.js";
 export type { PolicyStore, SourcePolicy } from "./policies.js";
 export { FilePolicyStore, NucleusPolicyStore } from "./policies.js";
@@ -191,6 +194,8 @@ export interface ShipRuntime {
       preview?: boolean;
       telemetry?: boolean;
       tests?: boolean;
+      /** Read-only scan run (L2 / D3) — see DurableAgentInput.mode. */
+      mode?: "fix" | "scan";
       testCommand?: string;
       testTimeoutMs?: number;
       observeService?: string;
@@ -485,6 +490,133 @@ export async function proposeExternal(
   return runtime.intake.propose(input);
 }
 
+/**
+ * The repository allowlist, as an operator-typed URL sees it.
+ *
+ * `proposeExternal` above is the same check at "external" trust for a URL that
+ * came out of a payload. This is its counterpart for a surface where an
+ * authenticated human (or their cron, holding their token) named the repo: the
+ * allowlist still binds, and the project records still widen it, but an
+ * operator may also name a repo when no allowlist is configured at all.
+ *
+ * Exists so an API surface can refuse at the door with a 403 rather than
+ * enqueueing a run that dies at `repo-setup` twenty seconds later with the same
+ * message buried in a step. Throws RepoNotAllowedError.
+ */
+export async function assertRepoAllowedForOperator(
+  runtime: Pick<ShipRuntime, "projects">,
+  repo: string,
+): Promise<void> {
+  assertRepoAllowed(repo, { trust: "operator", config: await withProjects(policyFromEnv(), runtime.projects) });
+}
+
+/**
+ * A run refused at enqueue because its source has spent its daily budget.
+ *
+ * Its own class so a caller can answer it properly: the CLI prints it, the API
+ * returns 429, and the intake sweep never sees it (it holds a reservation
+ * already — see assertDailyBudget).
+ */
+export class DailyBudgetExceededError extends Error {
+  readonly source: string;
+  readonly budgetUSD: number;
+  readonly committedUSD: number;
+  constructor(source: string, budgetUSD: number, committedUSD: number) {
+    super(
+      `${source} has spent its daily budget ($${budgetUSD.toFixed(2)}; $${committedUSD.toFixed(2)} committed today) — ` +
+        "the run was not enqueued. Raise SHIP_DAILY_BUDGET_USD, set a per-source budget on the Policies page, or wait for the UTC day to roll over.",
+    );
+    this.name = "DailyBudgetExceededError";
+    this.source = source;
+    this.budgetUSD = budgetUSD;
+    this.committedUSD = committedUSD;
+  }
+}
+
+/**
+ * THE DAILY BUDGET, ENFORCED AT ENQUEUE.
+ *
+ * It used to be enforced only at intake (worker.ts:282-296), against an intake
+ * TASK. `enqueueRun` creates a run directly and never makes one, so every
+ * surface that calls it — the CLI, the dashboard's launch and quick-run forms,
+ * the scan API — was outside the cap entirely. That is not theoretical: the
+ * 2026-08-26 nightly scan cron enqueued seven runs a night through the CLI and
+ * spent $24.15 against a $10/day cap, for zero findings, on its way to about
+ * $720/month.
+ *
+ * NOT DOUBLE-COUNTING THE SWEEP. `sweepIntake` reserves against the budget
+ * BEFORE it calls `launch` (worker.ts:286), and `launch` is what calls
+ * `enqueueRun` (worker.ts:996) — with the very runId the reservation is keyed
+ * on. So an outstanding hold under this runId means "somebody already admitted
+ * this run", and this function returns without touching the ledger. Two
+ * independent guards make that safe:
+ *
+ *  - `held()` skips the whole check, so the sweep's admission decision is never
+ *    re-made here. Re-deciding it would be worse than double-counting: a
+ *    refusal thrown out of `launch` propagates through sweepIntake's rethrow
+ *    and out of the worker tick.
+ *  - `reserve()` is idempotent by id in both stores (spend.ts), so even a store
+ *    that does not implement `held` holds one estimate per run rather than two.
+ *
+ * The hold taken here is released at settlement by the same line that releases
+ * the sweep's (worker.ts:615), whatever launched the run.
+ */
+export async function assertDailyBudget(
+  runtime: Pick<ShipRuntime, "spend" | "policies" | "projects">,
+  options: { runId: string; source?: string; repo?: string; now?: Date },
+): Promise<void> {
+  const source = options.source ?? "";
+  // An unsourced run is never SETTLED against a budget either (worker.ts:617
+  // returns early on it), so holding budget for one would leak an estimate that
+  // nothing ever releases. Nothing on the product path is unsourced.
+  if (source === "") return;
+  // Capture-only test doubles cast themselves to ShipRuntime without a spend
+  // store (see the captureRuntime helpers in evidence.test.ts and
+  // projects.test.ts). Typed non-optional, so this is a runtime lie rather than
+  // a type hole — but a budget check that throws a TypeError instead of
+  // enqueueing is a worse failure than one that no-ops on a fake.
+  const spend = (runtime as { spend?: SpendStore }).spend;
+  if (spend === undefined) return;
+  if ((await spend.held?.(options.runId)) === true) return;
+
+  const budget = await dailyBudgetForSource(runtime, source, options.repo);
+  if (!(budget > 0)) return; // <= 0 disables the cap for that source, as in the worker
+
+  const day = spendDay(options.now ?? new Date());
+  const estimate = estimatedRunCostUSD();
+  // Reserve BEFORE reading the total, exactly as the sweep does: two surfaces
+  // admitting at once must see each other's commitment rather than both reading
+  // the same room. Over-reserving briefly is the safe direction.
+  await spend.reserve(options.runId, source, day, estimate);
+  const committed = await spend.get(source, day);
+  if (committed > budget) {
+    await spend.release(options.runId).catch(() => {});
+    throw new DailyBudgetExceededError(source, budget, committed);
+  }
+}
+
+/**
+ * The cap this run is judged against: the repo's own budget if it has one, then
+ * the source's, then the global default. Same precedence the worker uses
+ * (worker.ts:282 and :988), so one run does not get two different answers
+ * depending on which surface enqueued it.
+ */
+async function dailyBudgetForSource(
+  runtime: Pick<ShipRuntime, "policies" | "projects">,
+  source: string,
+  repo?: string,
+): Promise<number> {
+  if (repo !== undefined) {
+    const project = await runtime.projects.forRepo(repo).catch(() => null);
+    if (project?.dailyBudgetUSD !== undefined) return project.dailyBudgetUSD;
+  }
+  // A policy store that cannot be read must not silently mean "no cap" — that
+  // is the failure the cap exists to prevent — so fall through to the default.
+  const policies = await runtime.policies.list().catch(() => []);
+  const entry = policies.find((p) => p.source === source);
+  return entry?.dailyBudgetUSD ?? defaultDailyBudgetUSD();
+}
+
 /** A boolean environment switch, read at use so it stays testable. */
 function envFlag(name: string, env: NodeJS.ProcessEnv = process.env): boolean {
   const raw = (env[name] ?? "").toLowerCase();
@@ -556,6 +688,19 @@ export async function enqueueRun(
      */
     changeClass?: boolean;
     /**
+     * `"scan"` makes this a read-only audit run (L2 / D3): the agent reports
+     * findings and Ship publishes nothing. Materialised here, like every other
+     * optional feature, because it both adds a recorded step (`scan-findings`)
+     * and removes several (`repo-push` and everything after it) — see
+     * DurableAgentInput.mode in durable.ts for why either direction is a
+     * NondeterminismError if a worker decides it at execution time.
+     *
+     * It also SUPPRESSES the flags that only make sense for a change: see the
+     * resolution below, where a scan overrides them rather than merging with
+     * them.
+     */
+    mode?: "fix" | "scan";
+    /**
      * Which harness executes the run (see harness.ts). Absent falls back to
      * `SHIP_HARNESS`, and that to native. Resolved to an id+version HERE and
      * materialised into the recorded input: a run must replay under the program
@@ -602,10 +747,21 @@ export async function enqueueRun(
   // every in-flight run enqueued before it. Reproduced end to end: enqueue
   // with `recovery: true`, change noProgressThreshold 6 -> 2, replay, and the
   // run is unrecoverable. Expanding here means the log carries the numbers.
+  // SCAN MODE (L2 / D3). A scan reads a repository and reports findings; it
+  // makes no change. Every optional feature resolved below is ABOUT a change —
+  // hold a finish that edited nothing, run the suite over the edit, measure the
+  // service around it, classify it before pushing, review the diff — so a scan
+  // forces them off HERE rather than leaving each caller to remember.
+  //
+  // Forced at enqueue and not in durable.ts's branches, for the reason the
+  // block below spells out at length: the recorded input is what gates step
+  // presence, so "off for a scan" has to be a fact in the log, not a decision a
+  // worker makes while replaying one.
+  const scan = options.mode === "scan";
   const recoveryFlag = options.recovery ?? (envFlag("SHIP_RECOVERY") ? true : undefined);
   const recovery =
     recoveryFlag === true ? { ...defaultRecoveryConfig } : recoveryFlag;
-  const settle = options.settle ?? (envFlag("SHIP_SETTLE") ? true : undefined);
+  const settle = scan ? undefined : (options.settle ?? (envFlag("SHIP_SETTLE") ? true : undefined));
   // Hold a finish over an unchanged tree. ON by default, unlike the knobs
   // above, because it is not a tuning knob: without it a webhook-launched run
   // can finish "fixed" having written nothing and open a pull request that
@@ -624,13 +780,15 @@ export async function enqueueRun(
   // log contains. Changing the branch instead would make every in-flight run
   // look for a step its log does not have, which is a NondeterminismError and
   // leaves the run permanently unrunnable rather than merely failed.
-  const requireEdit = options.requireEdit ?? (envFlagOff("SHIP_REQUIRE_EDIT") ? false : true);
+  // ...and OFF for a scan: the hold exists to catch a finish that changed
+  // nothing, which is precisely what a correct scan does.
+  const requireEdit = scan ? undefined : (options.requireEdit ?? (envFlagOff("SHIP_REQUIRE_EDIT") ? false : true));
   // Deploy the pushed branch to a preview environment and link it on the PR.
   // Opt-in for the same reason as the three above: it adds recorded steps, so
   // turning it on must never change how an already-enqueued run replays. The
   // executing worker's config decides whether a preview can actually happen —
   // this only records that the run asked.
-  const preview = options.preview ?? (envFlag("SHIP_PREVIEW") ? true : undefined);
+  const preview = scan ? undefined : (options.preview ?? (envFlag("SHIP_PREVIEW") ? true : undefined));
   // Per-repo evidence, resolved HERE so every enqueue surface (CLI, dashboard,
   // webhook, intake sweep) gets the same treatment without each knowing about
   // the store. Materialised into the recorded input below, never re-read at
@@ -647,9 +805,9 @@ export async function enqueueRun(
   // written under, whatever the worker's SHIP_SANDBOX_IMAGE says today.
   const project = options.repo !== undefined ? await runtime.projects.forRepo(options.repo) : null;
   // Read the affected service's telemetry around the change. Same opt-in shape.
-  const telemetry = options.telemetry ?? (evidence?.observeService !== undefined || envFlag("SHIP_TELEMETRY") ? true : undefined);
+  const telemetry = scan ? undefined : (options.telemetry ?? (evidence?.observeService !== undefined || envFlag("SHIP_TELEMETRY") ? true : undefined));
   // Run the project's suite after the agent stops. Same opt-in shape.
-  const tests = options.tests ?? (evidence?.testCommand !== undefined || envFlag("SHIP_TESTS") ? true : undefined);
+  const tests = scan ? undefined : (options.tests ?? (evidence?.testCommand !== undefined || envFlag("SHIP_TESTS") ? true : undefined));
   // On by default wherever the suite itself is on, with an env off-switch —
   // the same shape as requireEdit above. Without a baseline, "Tests: FAILED"
   // cannot separate a regression from inherited breakage, and without the
@@ -658,24 +816,62 @@ export async function enqueueRun(
   // expensive to run twice.
   const testsFeedback =
     options.testsFeedback ?? (tests === true && !envFlagOff("SHIP_TESTS_FEEDBACK") ? true : undefined);
+  // WHICH command the suite is (B5), resolved here for the same reason as
+  // everything else in this block: evidence is materialised at enqueue so a
+  // replay runs the command the log was written under. An explicit per-repo
+  // entry always wins; detection only answers a question nobody answered.
+  //
+  // Deliberately does NOT flip `tests` above. Detection says which command, not
+  // whether to run one — flipping it would silently start baseline and retry
+  // suites on a deployment that never opted in.
+  //
+  // Only DETECTION is gated on `tests`; the explicit per-repo command is
+  // recorded either way. A run that declined to run the suite should still say
+  // WHICH suite it declined — evidence.test.ts asserts exactly that, and it
+  // caught this wiring getting it wrong.
+  const testTarget =
+    tests === true
+      ? await resolveTestTarget(options.repo, evidence, { projects: runtime.projects })
+      : evidence?.testCommand !== undefined
+        ? {
+            command: evidence.testCommand,
+            ...(evidence.testTimeoutMs !== undefined ? { timeoutMs: evidence.testTimeoutMs } : {}),
+            source: "project" as const,
+          }
+        : undefined;
   // The change-class gate is OPT-IN, unlike testsFeedback above, because it can
   // PARK a run — and a park with nobody to answer it is a hang. It is turned on
   // per deployment once someone is watching the inbox, which is exactly the
   // condition L5 and L6 also depend on.
-  const changeClass = options.changeClass ?? (options.repo !== undefined && envFlag("SHIP_CHANGE_CLASS") ? true : undefined);
+  const changeClass = scan ? undefined : (options.changeClass ?? (options.repo !== undefined && envFlag("SHIP_CHANGE_CLASS") ? true : undefined));
   // The harness, as id + contract version. Recorded on EVERY new run, native
   // included, so the log says which program wrote it; a run enqueued before
   // this field existed has none and is native by definition.
-  const harness = harnessRef(options.harness ?? process.env.SHIP_HARNESS);
+  // The project record's declared harness (B5) sits between an explicit
+  // request and the worker's env: the repo says what its image was baked with,
+  // and a caller naming one explicitly still wins.
+  const harness = harnessRef(options.harness ?? project?.harness ?? process.env.SHIP_HARNESS);
   // Multi-harness attempts (P5-4): repo runs only, two or more ids, off unless
   // SHIP_HARNESS_ATTEMPTS says so. Materialised like everything else here.
-  const attempts = options.repo !== undefined ? harnessAttempts(process.env.SHIP_HARNESS_ATTEMPTS) : [];
+  // Not on a scan: N harnesses producing N sets of findings is N times the
+  // cost for an answer the critic picks between on the strength of a DIFF,
+  // which a scan does not have.
+  const attempts = options.repo !== undefined && !scan ? harnessAttempts(process.env.SHIP_HARNESS_ATTEMPTS) : [];
   // Required reviewers for this repo (governance.ts), resolved HERE for the
   // same reason as evidence: it adds a recorded step (`repo-reviewers`), so
   // its presence must be a function of the recorded input, and the rule is
   // editable, so a replay must request the reviewers the log was written
   // under. Absent on runs enqueued before the rule existed.
   const reviewers = options.repo !== undefined ? reviewersFor((await runtime.governance.get()).reviewers, options.repo) : null;
+  // The spend cap, checked BEFORE the run exists. Order matters: a refusal
+  // after `store.append` would leave a `run-started` event for a run no worker
+  // is allowed to execute — a ghost in the runs list that no surface can
+  // explain. Throwing here means the caller's enqueue simply did not happen.
+  await assertDailyBudget(runtime, {
+    runId: options.runId,
+    ...(options.source !== undefined ? { source: options.source } : {}),
+    ...(options.repo !== undefined ? { repo: options.repo } : {}),
+  });
   await runtime.store.append(options.runId, {
     v: WIRE_FORMAT_VERSION,
     seq: 0,
@@ -688,8 +884,11 @@ export async function enqueueRun(
         ...(options.repo !== undefined ? { repo: options.repo } : {}),
         ...(options.repo !== undefined ? { trust: options.trust ?? "external" } : {}),
         ...(options.pr !== undefined ? { pr: options.pr } : {}),
-        ...(options.plan === true ? { plan: true } : {}),
-        ...(options.critic === true ? { critic: true } : {}),
+        // Both suppressed on a scan: the plan park asks an operator to approve
+        // work that will not happen, and the critic reviews a diff there is none of.
+        ...(options.plan === true && !scan ? { plan: true } : {}),
+        ...(options.critic === true && !scan ? { critic: true } : {}),
+        ...(scan ? { mode: "scan" as const } : {}),
         // Deliberately NOT in the unconditional block below: stuck detection
         // costs an extra sandbox round trip per executing turn and can end a
         // run earlier than it would have ended, so it stays opt-in until it is
@@ -705,8 +904,8 @@ export async function enqueueRun(
         // Per-repo evidence values (see the resolution above). Absent on runs
         // enqueued before this existed, which replay and fall back to the
         // worker's env wiring exactly as before.
-        ...(evidence?.testCommand !== undefined ? { testCommand: evidence.testCommand } : {}),
-        ...(evidence?.testTimeoutMs !== undefined ? { testTimeoutMs: evidence.testTimeoutMs } : {}),
+        ...(testTarget !== undefined ? { testCommand: testTarget.command } : {}),
+        ...(testTarget?.timeoutMs !== undefined ? { testTimeoutMs: testTarget.timeoutMs } : {}),
         ...(evidence?.observeService !== undefined ? { observeService: evidence.observeService } : {}),
         ...(evidence?.observeService !== undefined ? { observeRepo: evidence.repo } : {}),
         ...(reviewers !== null ? { reviewers: { users: reviewers.users, teams: reviewers.teams } } : {}),

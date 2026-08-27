@@ -4,7 +4,7 @@ import { cancelRun, deliverEvent, costUSD, isPricedModel, actorFromPrincipal } f
 // component (client bundle), where teploy-ship/runtime (node-only) can't go.
 import { PLAN_EVENT } from "teploy-ship/plan";
 
-import type { RunMeta } from "teploy-ship/runtime";
+import type { RunMeta, ScanFinding } from "teploy-ship/runtime";
 
 import { shipRuntime } from "../../lib/store.server.js";
 import { currentUser } from "../../lib/session.server.js";
@@ -28,6 +28,18 @@ interface RunData {
   eventCount: number;
   /** The agent's proposed plan, when this run is parked on plan approval. */
   plan?: string;
+  /**
+   * What a scan run found (L2 / D3), read off its `scan-findings` step.
+   *
+   * A scan opens no pull request, so without this the run page shows a
+   * completed run with no deliverable on it at all — which is exactly how the
+   * prompt-only MVP managed to produce seven scans nobody could read.
+   */
+  findings: ScanFinding[];
+  /** Why entries were dropped, or why no array was found. Shown when non-empty. */
+  findingsNotes: string[];
+  /** True when this run is a scan, even if it found nothing. */
+  isScan: boolean;
   /** Steerable run (input.steer): show the steer box while active. */
   steerable: boolean;
   /** Steer notes sent but not yet consumed by a turn. */
@@ -40,6 +52,27 @@ interface RunData {
   cancelFailed: boolean;
   /** ?denied=approve|steer — the authority grant this account lacks. */
   denied: string | null;
+}
+
+/**
+ * The `scan-findings` step's recorded result (a ParsedFindings).
+ *
+ * Read from the STEP rather than from the run's output because a scan that is
+ * still running, or that failed after its findings were recorded, has the step
+ * and no output. Shape-checked field by field: this is JSON out of an event
+ * log, and a log written by an older build is a normal thing to be reading.
+ */
+function findingsFrom(events: { type: string; name?: string; data?: unknown }[]): { findings: ScanFinding[]; notes: string[] } {
+  const step = events.find((e) => e.type === "step-completed" && e.name === "scan-findings");
+  const result = (step?.data as { result?: unknown } | undefined)?.result as
+    | { findings?: unknown; errors?: unknown; found?: unknown }
+    | undefined;
+  if (result === undefined) return { findings: [], notes: [] };
+  const findings = Array.isArray(result.findings)
+    ? result.findings.filter((f): f is ScanFinding => typeof f === "object" && f !== null && typeof (f as ScanFinding).title === "string")
+    : [];
+  const notes = Array.isArray(result.errors) ? result.errors.filter((e): e is string => typeof e === "string") : [];
+  return { findings, notes };
 }
 
 /** The plan-think step's recorded text ({text, usage} or a bare string). */
@@ -75,6 +108,7 @@ export async function loader({ params, request }: { params: { id: string }; requ
     const steerable =
       (started?.data as { input?: { steer?: boolean } } | undefined)?.input?.steer === true;
     const plan = planFrom(events);
+    const scanned = findingsFrom(events);
     const data: RunData = {
       meta,
       items: toTimeline(events),
@@ -86,6 +120,9 @@ export async function loader({ params, request }: { params: { id: string }; requ
       runId,
       eventCount: events.length,
       ...(plan !== undefined ? { plan } : {}),
+      findings: scanned.findings,
+      findingsNotes: scanned.notes,
+      isScan: (started?.data as { input?: { mode?: string } } | undefined)?.input?.mode === "scan",
       steerable,
       steerPending: steerNotes.map((n) => n.text),
       steps: recordedSteps(events),
@@ -216,6 +253,9 @@ export async function action({
 // an active run — a terminal run's timeline no longer changes.
 const POLL = `__shipLive("route:runs/[id].tsx");`;
 
+/** Severity -> the palette variable already used elsewhere in the dashboard. */
+const SEVERITY_COLOR: Record<string, string> = { high: "var(--red)", med: "var(--yellow)", low: "var(--fg-dim, inherit)" };
+
 export default function RunDetail({ data }: { data: RunData }) {
   const active = data.meta !== null && !["completed", "failed", "cancelled", "cancelling"].includes(data.meta.status);
   const decision = data.decision;
@@ -288,6 +328,47 @@ export default function RunDetail({ data }: { data: RunData }) {
               </div>
               {data.outcome.summary !== undefined && data.outcome.summary !== "" && (
                 <div style="margin-top:8px">{data.outcome.summary}</div>
+              )}
+            </div>
+          )}
+          {data.isScan && (
+            <div class="card" style="margin:12px 0">
+              <div class="kind" style="margin-bottom:8px">
+                Scan findings{data.findings.length > 0 ? ` (${data.findings.length})` : ""}
+              </div>
+              {data.findings.length === 0 ? (
+                <p class="meta" style="margin:0">
+                  {data.findingsNotes.length > 0
+                    ? "This scan produced no usable findings."
+                    : "No findings reported. A scan publishes nothing, so this is its whole result."}
+                </p>
+              ) : (
+                <ul style="margin:0;padding-left:0;list-style:none">
+                  {data.findings.map((f, i) => (
+                    <li key={i} style={i === 0 ? "padding:8px 0" : "padding:8px 0;border-top:1px solid var(--line)"}>
+                      <div class="row-actions" style="gap:8px;align-items:baseline;flex-wrap:wrap">
+                        {/* Colour carries the severity, and the word carries it
+                            too — colour alone is not a label. No new CSS class:
+                            the stylesheet is not this change's to edit. */}
+                        <span class="chip" style={`color:${SEVERITY_COLOR[f.severity]}`}>{f.severity}</span>
+                        <strong>{f.title}</strong>
+                        <span class="meta">
+                          {f.file}
+                          {f.line !== undefined ? `:${f.line}` : ""}
+                        </span>
+                      </div>
+                      <div style="margin-top:4px">{f.detail}</div>
+                      {f.fix !== undefined && <div class="meta" style="margin-top:4px">Fix: {f.fix}</div>}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {data.findingsNotes.length > 0 && (
+                <p class="meta" style="margin:8px 0 0">
+                  {/* Why entries were dropped. Visible on purpose: a silently
+                      shortened findings list is how a scan lies by omission. */}
+                  {data.findingsNotes.join(" · ")}
+                </p>
               )}
             </div>
           )}
