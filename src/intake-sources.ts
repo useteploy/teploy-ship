@@ -411,3 +411,193 @@ export function reviewTaskFromReviewEvent(
     dedupeKey: `${source}:${fullName}#review-${round}`,
   };
 }
+
+/**
+ * P1-5 — an Observe alert becomes an incident proposal.
+ *
+ * THE PAYLOAD IS REAL AND IT IS THIN. Observe already POSTs alerts:
+ * `platform.AlertPayload` is marshalled whole and is the entire request body
+ * (teploy-observe/internal/platform/webhooks.go:99-108, fired from
+ * internal/platform/alerts.go:260-270). Seven fields, and the two numeric ones
+ * disagree with each other on purpose — `value` is a JSON number while
+ * `threshold` arrives as a string (webhooks.go formats one with
+ * strconv.FormatFloat and leaves the other alone), so both are accepted here as
+ * `string | number` rather than trusting either spelling.
+ *
+ * What the payload does NOT carry is everything the incident detail was
+ * specified to carry: there is no error fingerprint, no first/last seen, no
+ * sample stack and no service name anywhere on Observe's alerting path.
+ * `AlertRule` and `AlertHistoryEntry` (internal/platform/alerts.go:29-55) are
+ * scoped to a SITE and to four aggregate metrics (pageviews, visitors,
+ * error_count, error_rate); the fingerprint/first_seen/last_seen/stack fields
+ * live on a different subsystem entirely — the error `Issue`
+ * (internal/errors/issues.go:55-69, grouped by `GroupHash`,
+ * internal/errors/grouping.go:26) — which nothing in alert evaluation reads.
+ *
+ * So the enrichment fields below are declared OPTIONAL and rendered only when
+ * present. Inventing a payload Observe does not send would have produced a
+ * builder that is green in tests and dead in production; accepting a superset
+ * means Ship works against today's alert body and gets strictly better the day
+ * Observe grows an issue-backed alert without a second change here.
+ */
+export interface ObserveAlertPayload {
+  /** webhooks.go:100. The dedupe identity — no alert_id, no task. */
+  alert_id?: string;
+  /**
+   * The RULE, where alert_id is one firing of it. Added to Observe's payload
+   * alongside this receiver (webhooks.go AlertPayload) because a rule that
+   * keeps breaching fires once per cooldown with a FRESH alert_id, so the
+   * `observe:<alert_id>` key below opens one incident per cooldown for a
+   * single ongoing outage. Rendered into the detail today; see the note on
+   * incidentTaskFromObserveAlert for why the key has not moved yet.
+   */
+  rule_id?: string;
+  rule_name?: string;
+  metric?: string;
+  value?: number | string;
+  threshold?: number | string;
+  site_id?: string;
+  /** RFC3339, stamped at fire time (not the alert's own triggered_at). */
+  timestamp?: string;
+
+  // --- Not sent by Observe today. See the note above. ---
+  /** The Observe service this alert belongs to; the key the repo lookup uses. */
+  service?: string;
+  service_name?: string;
+  /** internal/errors/grouping.go:26 — the MD5 group hash, or a custom fingerprint. */
+  fingerprint?: string;
+  group_hash?: string;
+  issue_id?: string;
+  title?: string;
+  /** "funcName in basename.js" of the topmost in-app frame (grouping.go:140). */
+  culprit?: string;
+  severity?: string;
+  level?: string;
+  first_seen?: string;
+  last_seen?: string;
+  event_count?: number;
+  url?: string;
+  sample_stack?: string;
+  stack_trace?: string;
+}
+
+/** How much of a sample stack reaches the task detail. */
+const DETAIL_STACK_MAX = 2_000;
+
+/**
+ * The Observe identifier this alert belongs to, in the order a repo binding
+ * should be attempted. Exported because the receiver resolves the repo (an I/O
+ * step) before calling the builder, and both must agree on the key.
+ */
+export function observeAlertKey(payload: Pick<ObserveAlertPayload, "service" | "service_name" | "site_id">): string {
+  return (payload.service ?? payload.service_name ?? payload.site_id ?? "").trim();
+}
+
+function observeIncidentDetail(payload: ObserveAlertPayload, repo: string | undefined): string {
+  const key = oneLine(observeAlertKey(payload), 200);
+  const parts: string[] = [
+    `Observe raised an alert${key === "" ? "" : ` on ${key}`}. This is a production incident, not a feature request:` +
+      ` find the cause and propose the smallest fix that addresses it.`,
+  ];
+
+  const facts: string[] = [];
+  const push = (label: string, value: string | number | undefined | null, max = 300): void => {
+    const text = oneLine(value === undefined || value === null ? "" : String(value), max);
+    if (text !== "") facts.push(`${label}: ${text}`);
+  };
+  push("Alert id", payload.alert_id, 200);
+  push("Rule", payload.rule_name);
+  push("Rule id", payload.rule_id, 200);
+  push("Metric", payload.metric, 120);
+  push("Observed value", payload.value, 120);
+  push("Threshold", payload.threshold, 120);
+  push("Severity", payload.severity ?? payload.level, 60);
+  push("Site", payload.site_id, 200);
+  push("Triggered at", payload.timestamp, 60);
+  // The fingerprint is what makes two incidents the same incident; it is worth
+  // printing even though nothing in Observe fills it yet.
+  push("Error fingerprint", payload.fingerprint ?? payload.group_hash, 200);
+  push("Issue", payload.issue_id, 200);
+  push("Culprit", payload.culprit);
+  push("First seen", payload.first_seen, 60);
+  push("Last seen", payload.last_seen, 60);
+  push("Events", payload.event_count, 40);
+  push("Link", payload.url, 500);
+  if (facts.length > 0) parts.push(facts.join("\n"));
+
+  const stack = payload.sample_stack ?? payload.stack_trace ?? "";
+  if (stack.trim() !== "") {
+    parts.push(`Sample stack from Observe:\n${clip(stack, DETAIL_STACK_MAX)}`);
+  } else {
+    // Say what is missing rather than let the agent assume it was given a
+    // stack and go looking for one in the payload it cannot see.
+    parts.push(
+      "Observe's alert webhook carries no error fingerprint, no first/last-seen window and no sample stack" +
+        " (its alert payload is a threshold breach on a site-wide metric, teploy-observe" +
+        " internal/platform/webhooks.go:99-108). Read the failing code path from the repository and, if the" +
+        " metric is error_count or error_rate, from the errors the service is emitting.",
+    );
+  }
+
+  if (repo === undefined) {
+    parts.push(
+      "No repository is bound to this alert: no project record names this Observe service. Set one with" +
+        " `teploy-ship evidence set --repo <url> --observe-service <name>` and this alert will bind next time.",
+    );
+  }
+  return parts.join("\n\n");
+}
+
+/**
+ * An Observe alert → an `incident` intake task.
+ *
+ * `repo` is resolved by the CALLER, not here: the binding is a reverse lookup
+ * over the evidence store (repoForObserveService, evidence.ts) which is I/O,
+ * and this module's only real property is that it is pure — it is the one part
+ * of the intake pipeline with test coverage precisely because of that.
+ *
+ * No `requestedBy`, for the same reason ciFixTaskFromWorkflowRun has none: an
+ * alert is a machine event. Nobody asked Ship to do this, and naming whoever
+ * created the alert rule as the requester would put a real person on a run they
+ * never authorised.
+ *
+ * Deduped on `observe:<alert_id>`, which is also what stands in for delivery
+ * replay protection on this path: a replayed body re-proposes the same key and
+ * intake.propose returns the existing task (intake.ts:136) instead of opening a
+ * second incident.
+ *
+ * PRE-DECIDED: the key stays `observe:<alert_id>` rather than moving to
+ * `observe:rule:<rule_id>`, even though rule_id is the better key and now
+ * arrives in the payload. Reasoning: alert_id is the contract P1-5 specifies,
+ * and it is the only identity every Observe deployment sends today — a receiver
+ * that keys on a field older Observe builds omit would fall back to alert_id
+ * anyway, so both keys would be live at once and the SAME outage could hold two
+ * open incidents across an Observe upgrade. Reverses the moment every Observe
+ * in the fleet sends rule_id: the key becomes `observe:rule:<rule_id>` and one
+ * ongoing outage stops opening a fresh incident every cooldown period.
+ */
+export function incidentTaskFromObserveAlert(
+  payload: ObserveAlertPayload,
+  options: { repo?: string } = {},
+): ProposeInput | null {
+  const alertId = oneLine(payload.alert_id, 200);
+  // Without an alert id there is no dedupe key, and an alert storm on one rule
+  // would open one task per evaluation tick (every 60s, main.go:463).
+  if (alertId === "") return null;
+
+  const rule = oneLine(payload.rule_name, 80);
+  const metric = oneLine(payload.metric, 60);
+  const value = oneLine(payload.value === undefined ? "" : String(payload.value), 40);
+  const threshold = oneLine(payload.threshold === undefined ? "" : String(payload.threshold), 40);
+  const measured = metric === "" ? "" : ` (${metric}${value === "" ? "" : ` ${value}`}${threshold === "" ? "" : ` vs ${threshold}`})`;
+  const subject = rule !== "" ? rule : oneLine(payload.title, 80) !== "" ? oneLine(payload.title, 80) : `alert ${alertId}`;
+
+  return {
+    source: "observe",
+    kind: "incident",
+    ...(options.repo !== undefined && options.repo !== "" ? { repo: options.repo } : {}),
+    title: clip(`Incident: ${subject}${measured}`, 140),
+    detail: observeIncidentDetail(payload, options.repo === "" ? undefined : options.repo),
+    dedupeKey: `observe:${alertId}`,
+  };
+}

@@ -19,6 +19,16 @@
 # gitignored, and it is yours to delete once the new box is up. Nothing else in
 # this repo ever writes a secret to disk.
 #
+# --export-secrets writes a COMPLETE worker environment: the secret store plus
+# the non-secret settings read back off the running worker container, because a
+# bundle of secrets alone was never startable (NUCLEUS_URL and friends live in
+# teploy.yml, not in the secret store). That is what makes the second command
+# below possible — a box that joins an EXISTING fleet as another worker rather
+# than standing up a whole second Ship:
+#
+#   teploy-ship join http://<old-ip>:7460 --secrets ship.env \
+#     --nucleus-url postgres://nucleus:<pw>@<old-ip>:5432/nucleus --start
+#
 # Options:
 #   --host <addr>            server address (required)
 #   --user <name>            ssh user (default: root)
@@ -70,7 +80,7 @@ while [ $# -gt 0 ]; do
     --skip-images) skip_images=1; shift ;;
     --skip-setup) skip_setup=1; shift ;;
     -y|--yes) assume_yes=1; shift ;;
-    -h|--help) sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) die "unknown option: $1" ;;
     *) server="$1"; shift ;;
   esac
@@ -134,10 +144,55 @@ if [ -n "${export_only}" ]; then
     printf '%s=%s\n' "${key}" "$(tp secret get "${key}" | tail -n 1)" >> "${export_only}"
     note "${key}"
   done
+
+  # The NON-secret half of the worker's environment.
+  #
+  # `teploy secret list` holds credentials only, so a bundle of secrets alone
+  # was never a startable configuration: NUCLEUS_URL, AI_GATEWAY_URL, SHIP_MODEL
+  # and SHIP_REPO_ALLOWLIST all live in teploy.yml's env block and reach the
+  # container that way. `teploy-ship join` needs the whole environment or it
+  # cannot verify anything, so read it back off the running worker — which is
+  # also the only copy that reflects what the box is ACTUALLY running, rather
+  # than what a tracked yml says it should be.
+  #
+  # Read from the container rather than from teploy.yml on purpose: a value
+  # edited on the server, or defaulted by a deploy overlay, is in one place and
+  # it is here.
+  say "reading the worker's environment from ${host}"
+  worker="$(remote 'docker ps --format "{{.Names}}" | grep "^ship-worker-" | head -n 1' || true)"
+  if [ -z "${worker}" ]; then
+    note "no ship-worker container is running — the bundle carries secrets only."
+    note "teploy-ship join will tell you exactly which settings are missing."
+  else
+    {
+      echo ""
+      echo "# Non-secret worker settings, read from container ${worker}."
+      echo "# NUCLEUS_URL below is almost certainly a docker network alias, which"
+      echo "# only THIS box can resolve. teploy-ship join refuses it and says so;"
+      echo "# pass --nucleus-url with the controller's tailnet address."
+    } >> "${export_only}"
+    # Only the families Ship reads. A blanket dump would carry PATH, NODE_VERSION
+    # and the container's own TEPLOY_SHIP_STATE=/data into a bundle that is then
+    # sourced on a host where none of them are true.
+    remote "docker inspect ${worker} --format '{{range .Config.Env}}{{println .}}{{end}}'" \
+      | grep -E '^(NUCLEUS_URL|AI_GATEWAY_URL|OBSERVE_[A-Z_]*|SHIP_[A-Z0-9_]*|ANTHROPIC_BASE_URL)=' \
+      | while IFS= read -r line; do
+          key="${line%%=*}"
+          # Anything already written above came from the secret store, which is
+          # authoritative; never write a key twice into a file that gets sourced.
+          if grep -q "^${key}=" "${export_only}"; then continue; fi
+          printf '%s\n' "${line}" >> "${export_only}"
+          note "${key}"
+        done
+  fi
+
   chmod 600 "${export_only}"
   say "wrote ${export_only}"
   note "install elsewhere with:"
   note "  ./install.sh --secrets-file ${export_only} --host <new-ip> --user <user> <name>"
+  note "or join an EXISTING fleet as a second worker, without deploying a dashboard:"
+  note "  teploy-ship join http://${host}:7460 --secrets ${export_only} \\"
+  note "    --nucleus-url postgres://nucleus:<pw>@${host}:5432/nucleus"
   exit 0
 fi
 

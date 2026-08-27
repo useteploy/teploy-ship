@@ -67,6 +67,10 @@ export const COMMAND_FLAGS: Record<string, FlagSpec> = {
   worker: {
     value: ["model", "interval", "max-concurrent", "daily-budget", "git-token", "sandbox", "sandbox-token", "sandbox-image", "sandbox-network"],
   },
+  join: {
+    boolean: ["start"],
+    value: ["secrets", "token", "nucleus-url", "sandbox", "sandbox-token", "sandbox-image", "git-token", "github-token", "model", "allow"],
+  },
   web: { boolean: ["dev"], value: ["port", "token", "model"] },
   eval: { boolean: ["critic", "settle"], value: ["model", "suite", "repeats"] },
 };

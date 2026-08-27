@@ -179,3 +179,44 @@ export class NucleusEvidenceStore implements EvidenceStore {
     await this.#db.query("DELETE FROM ship_evidence WHERE repo = $1", [key]);
   }
 }
+
+/**
+ * P1-5 — the reverse of `forRepo`: which repository is built from this Observe
+ * service?
+ *
+ * An Observe alert names a service (or, today, only a site — see
+ * ObserveAlertPayload in intake-sources.ts); it never names a repository. The
+ * only place Ship already records that correspondence is `observeService` on
+ * the evidence record, written by `teploy-ship evidence set --observe-service`
+ * and read at enqueue to point telemetry at the right service. Read backwards,
+ * it is the incident receiver's repo binding.
+ *
+ * A FREE FUNCTION OVER `list()`, not a method on EvidenceStore, and that is
+ * load-bearing: `ProjectEvidenceStore` (projects.ts:277) implements this same
+ * interface as a view over project records, so a new required method would
+ * have to be implemented in three places — and only two of them own their own
+ * rows. Over `list()` it works identically for the file store, the Nucleus
+ * store and the project view, which is also the only one that unions legacy
+ * `ship_evidence` rows with project records.
+ *
+ * Matching is exact after trim + case-fold. AMBIGUITY RESOLVES TO NULL, never
+ * to a guess: two repos declaring the same Observe service is a configuration
+ * mistake, and picking one of them would open an incident against a repository
+ * that is not the one that broke — a wrong repo is worse than an unbound
+ * proposal a human can bind in the inbox.
+ */
+export function repoForObserveService(entries: readonly RepoEvidence[], service: string): string | null {
+  const wanted = service.trim().toLowerCase();
+  if (wanted === "") return null;
+  const matches = entries.filter((e) => (e.observeService ?? "").trim().toLowerCase() === wanted);
+  return matches.length === 1 ? matches[0]!.repo : null;
+}
+
+/** `repoForObserveService` against a live store. Returns the repo SLUG, not a clone URL. */
+export async function lookupRepoForObserveService(
+  store: Pick<EvidenceStore, "list">,
+  service: string,
+): Promise<string | null> {
+  if (service.trim() === "") return null;
+  return repoForObserveService(await store.list(), service);
+}

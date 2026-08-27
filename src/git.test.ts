@@ -10,6 +10,7 @@ import {
   assertGitSafe,
   authenticatedUrl,
   commitAndPush,
+  mergePullRequest,
   findOpenPullRequest,
   formatReviewComments,
   listPrReviewComments,
@@ -362,4 +363,66 @@ test("formatReviewComments names every comment's file and line, and says nothing
   assert.match(text, /src\/pool\.ts, line 42 \(RIGHT side of the diff\)/);
   assert.match(text, /@@ -40 \+40 @@/);
   assert.match(text, /no file anchor/);
+});
+
+// --- D5 / L5: merging a pull request ---------------------------------------
+
+const FORGEJO_REF = parseRepoUrl("https://forge.example/tyler/ship.git");
+const GITHUB_REF = parseRepoUrl("https://github.com/tyler/ship.git");
+
+/** Records the one call and answers with `reply`. */
+function captureFetch(reply: { ok: boolean; status?: number; body?: unknown; text?: string }): {
+  impl: typeof fetch;
+  seen: { url: string; init: RequestInit }[];
+} {
+  const seen: { url: string; init: RequestInit }[] = [];
+  const impl = (async (url: string, init: RequestInit) => {
+    seen.push({ url: String(url), init });
+    return {
+      ok: reply.ok,
+      status: reply.status ?? (reply.ok ? 200 : 405),
+      json: async () => {
+        if (reply.body === undefined) throw new Error("no body");
+        return reply.body;
+      },
+      text: async () => reply.text ?? "",
+    };
+  }) as unknown as typeof fetch;
+  return { impl, seen };
+}
+
+test("D5: the merge call is PUT + merge_method on GitHub and POST + Do on Forgejo", async () => {
+  const gh = captureFetch({ ok: true, body: { sha: "deadbeef", merged: true } });
+  assert.deepEqual(await mergePullRequest(GITHUB_REF, "tok", 7, {}, gh.impl), { kind: "merged", sha: "deadbeef" });
+  assert.equal(gh.seen[0]!.url, "https://api.github.com/repos/tyler/ship/pulls/7/merge");
+  assert.equal(gh.seen[0]!.init.method, "PUT");
+  assert.equal((gh.seen[0]!.init.headers as Record<string, string>).authorization, "Bearer tok");
+  assert.deepEqual(JSON.parse(String(gh.seen[0]!.init.body)), { merge_method: "squash" });
+
+  const fj = captureFetch({ ok: true, body: {} });
+  assert.deepEqual(await mergePullRequest(FORGEJO_REF, "tok", 7, { message: "why" }, fj.impl), { kind: "merged" });
+  assert.equal(fj.seen[0]!.url, "https://forge.example/api/v1/repos/tyler/ship/pulls/7/merge");
+  assert.equal(fj.seen[0]!.init.method, "POST");
+  assert.equal((fj.seen[0]!.init.headers as Record<string, string>).authorization, "token tok");
+  assert.deepEqual(JSON.parse(String(fj.seen[0]!.init.body)), { Do: "squash", MERGE_MESSAGE_FIELD: "why" });
+});
+
+test("D5: a Forgejo 200 with an empty body is a merge, not a crash", async () => {
+  // Gitea/Forgejo answer this endpoint with no JSON at all. A `.json()` that
+  // throws must not turn a successful merge into a failed one.
+  const empty = (async () => ({ ok: true, status: 200, json: async () => { throw new Error("Unexpected end of JSON input"); }, text: async () => "" })) as unknown as typeof fetch;
+  assert.deepEqual(await mergePullRequest(FORGEJO_REF, "tok", 3, {}, empty), { kind: "merged" });
+});
+
+test("D5: a refused merge is DATA — never a throw, so the PR stays open and the run succeeds", async () => {
+  const refused = captureFetch({ ok: false, status: 405, text: "Pull Request is not mergeable" });
+  assert.deepEqual(await mergePullRequest(FORGEJO_REF, "tok", 9, {}, refused.impl), {
+    kind: "failed",
+    status: 405,
+    reason: "Pull Request is not mergeable",
+  });
+
+  const thrown = (async () => { throw new Error("ECONNRESET"); }) as unknown as typeof fetch;
+  // status 0 distinguishes "never reached the forge" from "the forge said no".
+  assert.deepEqual(await mergePullRequest(GITHUB_REF, "tok", 9, {}, thrown), { kind: "failed", status: 0, reason: "ECONNRESET" });
 });

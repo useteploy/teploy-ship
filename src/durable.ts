@@ -17,6 +17,7 @@ import {
   formatReviewComments,
   listPrReviewComments,
   openPullRequest,
+  mergePullRequest,
   requestReviewers,
   parseRepoUrl,
   pullRequestUrl,
@@ -28,8 +29,8 @@ import {
   updatePullRequestBody,
   workingDiff,
 } from "./git.js";
-import { deployPreview, type PreviewOutcome, type PreviewTarget } from "./deploy.js";
-import { compareAroundNow, effectiveTelemetryTarget, telemetryAppliesTo, type TelemetryTarget, type TelemetryVerdict } from "./observe.js";
+import { deployPreview, rollbackDeploy, type PreviewOutcome, type PreviewTarget } from "./deploy.js";
+import { compareAroundNow, effectiveTelemetryTarget, telemetryAppliesTo, telemetryRegression, type TelemetryTarget, type TelemetryVerdict } from "./observe.js";
 import { spliceVerification, verificationSection, type Evidence } from "./verification.js";
 import { preExisting, runTests, testComment, testTargetFromInput, testsFailedNudge, type TestOutcome, type TestTarget } from "./tests.js";
 import { refusalMessage, warningMessage } from "./publish-policy.js";
@@ -50,7 +51,7 @@ import type { CodeSearch } from "./code-index.js";
 import { CHANGE_EVENT, PLAN_EVENT } from "./plan.js";
 import type { ChangeDecisionPayload } from "./plan.js";
 import { classifyChange, parseNumstat } from "./change-class.js";
-import type { ChangedFile } from "./change-class.js";
+import type { ChangedFile, ChangeVerdict } from "./change-class.js";
 import type { PlanDecisionPayload } from "./plan.js";
 import type { ApprovalPolicy } from "./approval.js";
 import { SCAN_EDIT_REFUSED, SCAN_MIDPOINT_REMINDER, formatObservation, scanFindingsNudge, scanPrompt, systemPrompt } from "./prompt.js";
@@ -249,6 +250,48 @@ export interface DurableAgentInput {
    * as a NondeterminismError rather than merely behaving differently.
    */
   changeClass?: boolean;
+  /**
+   * Auto-merge (L5 / D5): when the change classified `trivial`, the suite
+   * PASSED, the pull request opened non-draft and telemetry did not get worse,
+   * merge the pull request instead of leaving it for a human.
+   *
+   * Materialised at ENQUEUE from the repo's project record (`autoMerge`,
+   * projects.ts) — never read from the store at execution time. The usual
+   * replay rule applies (it adds an `auto-merge` step, so step presence must
+   * be a function of the recorded input), and one specific to this field: the
+   * project record is EDITABLE from the dashboard, so a worker that re-read it
+   * mid-replay could merge a pull request the log says was left open, or
+   * refuse to replay a merge that already happened.
+   *
+   * Off unless the repo says on, and additionally requires `changeClass` —
+   * `trivial` is the whole authority for merging without a human, and without
+   * the gate there is no verdict to read. See enqueueRun in runtime.ts.
+   */
+  autoMerge?: boolean;
+  /**
+   * Auto-rollback OBSERVATION (P1-4 / L4): after `preview-deploy` and
+   * `telemetry-check`, judge the measured before/after and record a `rollback`
+   * step saying whether the service got worse and what would happen about it.
+   *
+   * Separate flag from `autoDeploy` below because they answer different
+   * questions: this one turns the WATCHING on and costs nothing (it is a pure
+   * function of two steps that already ran), `autoDeploy` turns the ACTING on.
+   * The plan's instruction is to build the observable half first and let the
+   * recorded steps argue for the thresholds before anything is rolled back.
+   *
+   * Input-gated for the standard reason: it adds a recorded step.
+   */
+  rollback?: boolean;
+  /**
+   * Auto-deploy authority (L4 / L5, per repo): permission for this run to run
+   * `teploy` against the real app rather than only to say what it would do.
+   * Today the one thing it authorises is the rollback above actually running.
+   *
+   * Materialised at enqueue from the project record's `autoDeploy`, and never
+   * set without `rollback` — a permission to act with nothing watching is not
+   * a feature.
+   */
+  autoDeploy?: boolean;
   /**
    * What this run is FOR (L2 / D3). Absent — the only value any existing log
    * carries — is the ordinary fix run. `"scan"` is a read-only audit: the agent
@@ -1832,11 +1875,16 @@ async function publishIfRepoRun(
   // point has the actual diff. Reverses if plan-preview runs become common
   // enough that catching a serious change before the work is done is worth the
   // second gate; the classifier already accepts `planText` for that day.
+  // Hoisted out of the block below so the auto-merge gate can read it. It is
+  // the verdict of a RECORDED step, so a replay sees the same class it saw the
+  // first time — which is what makes "trivial" usable as merge authority.
+  let changeVerdict: ChangeVerdict | undefined;
   if (input.changeClass === true) {
     const verdict = await ctx.step("change-class", async () => {
       const files = await changedFiles(executor);
       return { ...classifyChange({ files, testsPassed: tests?.kind === "passed" }), files };
     });
+    changeVerdict = verdict;
     if (verdict.class === "serious") {
       const decision = await ctx.waitForEvent<ChangeDecisionPayload>(CHANGE_EVENT);
       if (!decision.approved) {
@@ -1927,6 +1975,13 @@ async function publishIfRepoRun(
       telemetry: await telemetryIfAsked(ctx, config, input),
     };
     await publishVerification(ctx, ref, token, input.pr, followUp);
+    // NO auto-merge and NO rollback watch on this path, deliberately. A review
+    // follow-up is a run answering a comment on a pull request a person is
+    // already reading — there is a human on the thread by definition, and
+    // merging out from under them, or acting on a preview refresh they asked
+    // for, is the wrong actor. PRE-DECIDED (2026-08-26); reverses if follow-up
+    // runs ever become the unattended path, which would be a bigger change
+    // than this one line.
     await remember(prUrl);
     return prUrl;
   }
@@ -1970,14 +2025,190 @@ async function publishIfRepoRun(
     EXTERNAL_EFFECT_RETRY,
   );
   await requestReviewersIfAsked(ctx, ref, token, pr.number, input);
+  // Hoisted into locals rather than left inline in the publishVerification call:
+  // the rollback watch (P1-4) and the auto-merge gate (L5) both need to read
+  // what these two steps produced, and neither may re-run them.
+  const preview = await previewIfAsked(ctx, config, input, co.branch);
+  const telemetry = await telemetryIfAsked(ctx, config, input);
   await publishVerification(ctx, ref, token, pr.number, {
     ...(tests !== undefined ? { tests } : {}),
     ...(baseline !== undefined ? { testsBaseline: baseline } : {}),
-    preview: await previewIfAsked(ctx, config, input, co.branch),
-    telemetry: await telemetryIfAsked(ctx, config, input),
+    preview,
+    telemetry,
+  });
+  // Computed ONCE, outside any step, and fed to both gates below. It is a pure
+  // function of the `telemetry-check` step's recorded verdict (see
+  // telemetryRegression in observe.ts), so it replays identically — and
+  // deriving it twice would leave two places that could disagree about whether
+  // the same numbers were a regression.
+  const regression = telemetry === undefined ? undefined : telemetryRegression(telemetry);
+  await rollbackIfWorse(ctx, config, input, preview, regression);
+  await autoMergeIfAllowed(ctx, ref, token, input, pr.number, {
+    ...(changeVerdict !== undefined ? { verdict: changeVerdict } : {}),
+    ...(tests !== undefined ? { tests } : {}),
+    draft: asDraft,
+    ...(regression !== undefined ? { regression } : {}),
   });
   await remember(pr.url);
   return pr.url;
+}
+
+/** What the `rollback` step recorded. Every branch is an outcome, never a throw. */
+type RollbackStep =
+  | { kind: "not-deployed"; reason: string }
+  | { kind: "healthy"; reasons: string[] }
+  | { kind: "would-roll-back"; reasons: string[] }
+  | { kind: "rolled-back"; reasons: string[]; output: string }
+  | { kind: "failed"; reasons: string[]; reason: string };
+
+/**
+ * Watch what the change did to the service, and say what should happen (P1-4).
+ *
+ * OBSERVABLE FIRST, and that is the design rather than a stage of it. The
+ * default outcome of this step is a sentence — "the service got worse, here is
+ * the measurement, this is what I would have done" — and only a repo whose
+ * project record carries `autoDeploy` gets the act. Nothing has ever been
+ * rolled back by a machine in this system, so there is no distribution behind
+ * `defaultRegressionThresholds` (observe.ts) yet; these recorded steps are how
+ * one gets collected before anything destructive runs on them.
+ *
+ * TWO conditions, not one. The service must have got worse AND this run must
+ * have actually deployed something — a repo whose p95 moved while Ship only
+ * opened a pull request is watching an unrelated deploy, which is the same
+ * false-attribution failure that cost the telemetry leg a live run on
+ * 2026-08-21 (see telemetryIfAsked above).
+ *
+ * The step is recorded whenever `input.rollback` is set, refusals included, so
+ * step presence stays a function of the recorded input — the same shape as
+ * requestReviewersIfAsked and previewIfAsked.
+ */
+async function rollbackIfWorse(
+  ctx: WorkflowContext,
+  config: DurableAgentConfig,
+  input: DurableAgentInput,
+  preview: PreviewOutcome | undefined,
+  regression: { worse: boolean; reasons: string[] } | undefined,
+): Promise<void> {
+  if (input.rollback !== true) return;
+  await ctx.step("rollback", async (): Promise<RollbackStep> => {
+    if (preview?.kind !== "deployed") {
+      return {
+        kind: "not-deployed",
+        reason:
+          preview === undefined
+            ? "this run deployed nothing, so there is nothing to roll back"
+            : `the deploy did not happen (${preview.kind}: ${preview.reason}), so there is nothing to roll back`,
+      };
+    }
+    if (regression === undefined) {
+      return { kind: "not-deployed", reason: "telemetry was not read for this run, so there is nothing to judge" };
+    }
+    if (!regression.worse) return { kind: "healthy", reasons: regression.reasons };
+    // Worse, and the run deployed. From here the only question is authority.
+    if (input.autoDeploy !== true) {
+      return { kind: "would-roll-back", reasons: regression.reasons };
+    }
+    if (config.preview === undefined) {
+      return {
+        kind: "would-roll-back",
+        reasons: [...regression.reasons, "this worker has no teploy working copy configured, so it could not act"],
+      };
+    }
+    try {
+      const outcome = await rollbackDeploy(config.preview);
+      return outcome.kind === "rolled-back"
+        ? { kind: "rolled-back", reasons: regression.reasons, output: outcome.output }
+        : { kind: "failed", reasons: regression.reasons, reason: outcome.reason };
+    } catch (error) {
+      // rollbackDeploy is written not to throw; if it ever does, the run must
+      // still end with its pull request. A rollback that failed is a page for a
+      // human, not a failed run.
+      return { kind: "failed", reasons: regression.reasons, reason: error instanceof Error ? error.message : String(error) };
+    }
+  });
+}
+
+/** What the `auto-merge` step recorded. `held` is the interesting one: it says WHY not. */
+type AutoMergeStep =
+  | { kind: "merged"; why: string[]; sha?: string }
+  | { kind: "held"; reasons: string[] }
+  | { kind: "failed"; status: number; reason: string };
+
+/**
+ * Merge a `trivial` change without a human (L5 / D5).
+ *
+ * EVERY condition below has to hold, and the run input carrying `autoMerge` is
+ * already three of them — it is only materialised at enqueue for a repo whose
+ * project record says `autoMerge`, on a run that is not a scan, and on a run
+ * whose change-class gate is on (runtime.ts). What is left to check here are
+ * the four facts that only exist once the work is done:
+ *
+ *   1. the change classified `trivial` — small, contained, and green;
+ *   2. the suite PASSED. Not "ran", not "disabled", not "errored": a
+ *      `disabled` outcome means nobody configured a suite, and merging on the
+ *      strength of a test run that did not happen is the exact shape of the
+ *      one rejected run in the 2026-08-26 round-2 sweep — confident,
+ *      sourced-looking and false;
+ *   3. the pull request opened NON-DRAFT. Draft here means the run stopped at
+ *      a limit or the diff tripped a shape screen, and both say "a person
+ *      should look";
+ *   4. telemetry did not get worse (P1-4's judgement, reused).
+ *
+ * A FAILED MERGE IS NOT A FAILED RUN. mergePullRequest never throws and this
+ * step never retries: the pull request is the deliverable and the merge is a
+ * convenience on top of it. A retry is also actively wrong here — a timeout
+ * after the forge merged, retried, comes back 405 "already merged" and would
+ * record `failed` for a merge that happened.
+ *
+ * Recorded whenever `input.autoMerge` is set, refusals included. That is what
+ * makes the timeline answer the question a reader of an unattended merge
+ * actually has, which is not "did it merge" but "why was it allowed to".
+ */
+async function autoMergeIfAllowed(
+  ctx: WorkflowContext,
+  ref: RepoRef,
+  token: string,
+  input: DurableAgentInput,
+  pr: number,
+  facts: {
+    verdict?: ChangeVerdict;
+    tests?: TestOutcome;
+    draft: boolean;
+    regression?: { worse: boolean; reasons: string[] };
+  },
+): Promise<void> {
+  if (input.autoMerge !== true) return;
+  await ctx.step("auto-merge", async (): Promise<AutoMergeStep> => {
+    const held: string[] = [];
+    if (facts.verdict === undefined) {
+      held.push("the change was never classified, so nothing authorises merging it");
+    } else if (facts.verdict.class !== "trivial") {
+      held.push(`the change classified ${facts.verdict.class}, and only trivial merges unattended`);
+    }
+    if (facts.tests === undefined) {
+      held.push("the suite did not run for this run");
+    } else if (facts.tests.kind !== "passed") {
+      held.push(
+        facts.tests.kind === "disabled"
+          ? `no suite is configured for this repo (${facts.tests.reason})`
+          : `the suite did not pass (${facts.tests.kind})`,
+      );
+    }
+    if (facts.draft) held.push("the pull request opened as a draft, so a person is expected to read it");
+    if (facts.regression?.worse === true) held.push(`the service got worse after this change: ${facts.regression.reasons.join("; ")}`);
+    if (held.length > 0) return { kind: "held", reasons: held };
+
+    const why = facts.verdict?.reasons ?? [];
+    const outcome = await mergePullRequest(ref, token, pr, {
+      method: "squash",
+      message:
+        `Merged by Teploy Ship (run ${ctx.runId}) without a human.\n\n` +
+        `Classified trivial: ${why.join("; ")}\nSuite: passed.`,
+    });
+    return outcome.kind === "merged"
+      ? { kind: "merged", why, ...(outcome.sha !== undefined ? { sha: outcome.sha } : {}) }
+      : { kind: "failed", status: outcome.status, reason: outcome.reason };
+  });
 }
 
 /**

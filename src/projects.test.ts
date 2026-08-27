@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { FileProjectStore, ProjectEvidenceStore, normalizeProject } from "./projects.js";
+import type { ProjectStore } from "./projects.js";
 import { FileEvidenceStore } from "./evidence.js";
 import { assertRepoAllowed, effectiveAllowlist, RepoNotAllowedError } from "./repo-policy.js";
 import { enqueueRun, proposeExternal } from "./runtime.js";
@@ -237,4 +238,90 @@ test("project record: harness survives a store round trip", async () => {
   const store = new FileProjectStore(await tempDir());
   await store.set({ repo: TS_URL, url: TS_URL, harness: "claude-code", autoMerge: false, autoDeploy: false });
   assert.equal((await store.forRepo(TS_URL))?.harness, "claude-code");
+});
+
+// --- D5 / L5 + P1-4 / L4: the unattended flags reach the run input ----------
+
+/** Capture-only runtime: enqueueRun touches store.append, saveMeta and kind. */
+function captureEnqueue(projects: ProjectStore): { runtime: ShipRuntime; inputs: Array<Record<string, unknown>> } {
+  const inputs: Array<Record<string, unknown>> = [];
+  const runtime = {
+    kind: "file",
+    evidence: { forRepo: async () => null },
+    projects,
+    governance: { get: async () => ({ authority: {}, windows: {}, reviewers: [] }) },
+    store: {
+      append: async (_runId: string, event: { type: string; data?: { input?: Record<string, unknown> } }) => {
+        if (event.type === "run-started") inputs.push(event.data!.input!);
+      },
+    },
+    saveMeta: async () => {},
+  } as unknown as ShipRuntime;
+  return { runtime, inputs };
+}
+
+const AUTO_ENV = ["SHIP_CHANGE_CLASS", "SHIP_AUTO_MERGE", "SHIP_ROLLBACK", "SHIP_PREVIEW", "SHIP_TELEMETRY", "SHIP_TESTS"] as const;
+function clearAutoEnv(): void {
+  for (const k of AUTO_ENV) delete process.env[k];
+}
+
+test("D5: autoMerge reaches the run input only for a repo that asked for it, with the class gate on", async () => {
+  clearAutoEnv();
+  const dir = await mkdtemp(join(tmpdir(), "ship-projects-automerge-"));
+  const projects = new FileProjectStore(dir);
+  await projects.set({ repo: "tyler/on", url: "https://git.example.com/tyler/on", autoMerge: true, autoDeploy: false });
+  await projects.set({ repo: "tyler/off", url: "https://git.example.com/tyler/off", autoMerge: false, autoDeploy: false });
+  const { runtime, inputs } = captureEnqueue(projects);
+
+  // Without the change-class gate there is no `trivial` verdict to merge on,
+  // so the flag would be a silent no-op — it is not recorded at all.
+  await enqueueRun(runtime, { runId: "r1", task: "t", model: "m", repo: "https://git.example.com/tyler/on" });
+  assert.equal(inputs[0]!.autoMerge, undefined, "no class gate, no merge authority");
+
+  process.env.SHIP_CHANGE_CLASS = "1";
+  await enqueueRun(runtime, { runId: "r2", task: "t", model: "m", repo: "https://git.example.com/tyler/on" });
+  await enqueueRun(runtime, { runId: "r3", task: "t", model: "m", repo: "https://git.example.com/tyler/off" });
+  await enqueueRun(runtime, { runId: "r4", task: "t", model: "m", repo: "https://git.example.com/tyler/unknown" });
+  assert.equal(inputs[1]!.autoMerge, true);
+  assert.equal(inputs[2]!.autoMerge, undefined, "off by default, per repo");
+  assert.equal(inputs[3]!.autoMerge, undefined, "a repo with no record is off");
+
+  // A scan changes nothing, so it can merge nothing.
+  await enqueueRun(runtime, { runId: "r5", task: "t", model: "m", repo: "https://git.example.com/tyler/on", mode: "scan" });
+  assert.equal(inputs[4]!.autoMerge, undefined);
+
+  // The 3am switch: one env var turns it off everywhere without a per-repo edit.
+  process.env.SHIP_AUTO_MERGE = "0";
+  await enqueueRun(runtime, { runId: "r6", task: "t", model: "m", repo: "https://git.example.com/tyler/on" });
+  assert.equal(inputs[5]!.autoMerge, undefined, "SHIP_AUTO_MERGE=0 is a deployment-wide kill switch");
+  clearAutoEnv();
+});
+
+test("P1-4: the rollback WATCH follows preview+telemetry; the authority to ACT is per repo", async () => {
+  clearAutoEnv();
+  const dir = await mkdtemp(join(tmpdir(), "ship-projects-rollback-"));
+  const projects = new FileProjectStore(dir);
+  await projects.set({ repo: "tyler/deploys", url: "https://git.example.com/tyler/deploys", autoMerge: false, autoDeploy: true });
+  await projects.set({ repo: "tyler/watches", url: "https://git.example.com/tyler/watches", autoMerge: false, autoDeploy: false });
+  const { runtime, inputs } = captureEnqueue(projects);
+
+  // Neither leg on: nothing to judge, so no watch.
+  await enqueueRun(runtime, { runId: "r1", task: "t", model: "m", repo: "https://git.example.com/tyler/deploys" });
+  assert.equal(inputs[0]!.rollback, undefined);
+  assert.equal(inputs[0]!.autoDeploy, undefined, "the authority is never recorded without the watch");
+
+  process.env.SHIP_PREVIEW = "1";
+  process.env.SHIP_TELEMETRY = "1";
+  await enqueueRun(runtime, { runId: "r2", task: "t", model: "m", repo: "https://git.example.com/tyler/watches" });
+  await enqueueRun(runtime, { runId: "r3", task: "t", model: "m", repo: "https://git.example.com/tyler/deploys" });
+  assert.equal(inputs[1]!.rollback, true, "watching is free and on by default where it can happen");
+  assert.equal(inputs[1]!.autoDeploy, undefined, "but acting is not");
+  assert.equal(inputs[2]!.rollback, true);
+  assert.equal(inputs[2]!.autoDeploy, true);
+
+  process.env.SHIP_ROLLBACK = "0";
+  await enqueueRun(runtime, { runId: "r4", task: "t", model: "m", repo: "https://git.example.com/tyler/deploys" });
+  assert.equal(inputs[3]!.rollback, undefined);
+  assert.equal(inputs[3]!.autoDeploy, undefined, "no watch, no authority — even for a repo that granted it");
+  clearAutoEnv();
 });

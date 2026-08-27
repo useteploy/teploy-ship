@@ -2694,3 +2694,349 @@ test("D2: the gate is OFF unless the run's input says so — an old run replays 
     globalThis.fetch = orig;
   }
 });
+
+// --- D5 / L5: auto-merge, and P1-4 / L4: the rollback watch -----------------
+
+/**
+ * Like repoFixture, but it records the URL and METHOD of every forge call —
+ * which is the only way to tell an auto-merge from a PR that was merely opened.
+ */
+async function mergeFixture(name: string, mergeReply: { ok: boolean; status?: number } = { ok: true }): Promise<{
+  repo: string;
+  calls: { url: string; method: string; body: unknown }[];
+  merges: () => { url: string; method: string; body: unknown }[];
+  provider: ExecutorProvider;
+  restore: () => void;
+}> {
+  const bareDir = await mkdtemp(join(tmpdir(), `durable-${name}-bare-`));
+  const seedDir = await mkdtemp(join(tmpdir(), `durable-${name}-seed-`));
+  const seeder = new LocalExecutor({ root: seedDir });
+  await seeder.exec(
+    `git init -q -b main . && git config user.email t@t && git config user.name t && printf 'hello\\n' > f.txt && git add -A && git commit -qm seed && git clone -q --bare . ${bareDir}/owner/repo.git`,
+  );
+  const work = await mkdtemp(join(tmpdir(), `durable-${name}-work-`));
+  const calls: { url: string; method: string; body: unknown }[] = [];
+  const orig = globalThis.fetch;
+  (globalThis as unknown as { fetch: unknown }).fetch = (url: unknown, init?: { method?: string; body?: string }) => {
+    const href = String(url);
+    calls.push({
+      url: href,
+      method: init?.method ?? "GET",
+      body: typeof init?.body === "string" ? (JSON.parse(init.body) as unknown) : undefined,
+    });
+    if (href.endsWith("/merge")) {
+      return Promise.resolve({
+        ok: mergeReply.ok,
+        status: mergeReply.status ?? (mergeReply.ok ? 200 : 405),
+        json: () => Promise.resolve({ sha: "merged1234" }),
+        text: () => Promise.resolve("Pull Request is not mergeable"),
+      });
+    }
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ number: 1, html_url: "http://example/owner/repo/pulls/1", body: "" }),
+      text: () => Promise.resolve(""),
+    });
+  };
+  return {
+    repo: `file://${bareDir}/owner/repo.git`,
+    calls,
+    merges: () => calls.filter((c) => c.url.endsWith("/merge")),
+    provider: {
+      async create() {
+        return { handle: work };
+      },
+      attach(handle: string) {
+        return new LocalExecutor({ root: handle });
+      },
+    },
+    restore: () => {
+      globalThis.fetch = orig;
+    },
+  };
+}
+
+/** A one-line change with a green suite: the only shape auto-merge accepts. */
+const TRIVIAL_SCRIPT = ["```bash\necho world >> f.txt\n```", "```finish\nfixed the typo\n```", ...PROBES];
+
+function stepResult(events: Awaited<ReturnType<MemoryEventStore["load"]>>, name: string): Record<string, unknown> | undefined {
+  const found = [...events].reverse().find((e) => e.type === "step-completed" && e.name === name);
+  return (found?.data as { result?: Record<string, unknown> } | undefined)?.result;
+}
+
+test("D5: a trivial change with a green suite merges itself, and the step says why it was allowed to", async () => {
+  const fixture = await mergeFixture("d5-merge");
+  try {
+    const { model } = reactiveModel(TRIVIAL_SCRIPT);
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-d5-merge",
+      store,
+      input: {
+        task: "fix the greeting",
+        repo: fixture.repo,
+        changeClass: true,
+        tests: true,
+        testCommand: "true",
+        autoMerge: true,
+      },
+    });
+    assert.equal(outcome.status, "completed");
+
+    const merges = fixture.merges();
+    assert.equal(merges.length, 1, `exactly one merge call: ${JSON.stringify(fixture.calls.map((c) => c.url))}`);
+    assert.equal(merges[0]!.method, "POST", "a file:// remote is not github, so the Forgejo shape");
+    assert.equal((merges[0]!.body as { Do?: string }).Do, "squash");
+
+    const result = stepResult(await store.load("run-d5-merge"), "auto-merge");
+    assert.equal(result?.kind, "merged");
+    assert.equal(result?.sha, "merged1234");
+    // The timeline has to answer "why was a machine allowed to merge this",
+    // not just "did it merge".
+    assert.match(JSON.stringify(result?.why), /suite green/);
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("D5: EVERY condition is required — a non-trivial class, a suite that did not pass, and a draft each hold the merge", async () => {
+  // 1. Not trivial: a migration classifies serious. It parks, so it never even
+  //    reaches the merge gate — asserted here so the two gates cannot silently
+  //    swap order.
+  const serious = await mergeFixture("d5-serious");
+  try {
+    const { model } = reactiveModel([
+      "```bash\nmkdir -p db/migrations && echo 'ALTER TABLE runs ADD COLUMN x TEXT;' > db/migrations/1.sql\n```",
+      "```finish\nadded it\n```",
+      ...PROBES,
+    ]);
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: durableAgent({ model, executor: serious.provider, workdir: "." }),
+      runId: "run-d5-serious",
+      store,
+      input: { task: "add a migration", repo: serious.repo, changeClass: true, tests: true, testCommand: "true", autoMerge: true },
+    });
+    assert.equal(outcome.status, "waiting");
+    assert.equal(serious.merges().length, 0, "a serious change must never merge itself");
+  } finally {
+    serious.restore();
+  }
+
+  // 2. No suite. `disabled` is not `passed`: merging on the strength of a test
+  //    run that never happened is the exact failure the merge gate exists for.
+  const noSuite = await mergeFixture("d5-nosuite");
+  try {
+    const { model } = reactiveModel(TRIVIAL_SCRIPT);
+    const store = new MemoryEventStore();
+    await executeRun({
+      workflow: durableAgent({ model, executor: noSuite.provider, workdir: "." }),
+      runId: "run-d5-nosuite",
+      store,
+      // tests asked for, but no command configured anywhere -> `disabled`.
+      input: { task: "fix the greeting", repo: noSuite.repo, changeClass: true, tests: true, autoMerge: true },
+    });
+    assert.equal(noSuite.merges().length, 0);
+    const result = stepResult(await store.load("run-d5-nosuite"), "auto-merge");
+    assert.equal(result?.kind, "held");
+    assert.match(JSON.stringify(result?.reasons), /no suite is configured/);
+    // ...and the class also failed, because "small" without "tested" is not trivial.
+    assert.match(JSON.stringify(result?.reasons), /classified normal/);
+  } finally {
+    noSuite.restore();
+  }
+
+  // 3. A draft. A run that stopped at a limit publishes as a draft, and a
+  //    draft is the run saying a person should look.
+  const draft = await mergeFixture("d5-draft");
+  try {
+    const { model } = reactiveModel(["```bash\necho world >> f.txt\n```"]);
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: durableAgent({ model, executor: draft.provider, workdir: ".", maxSteps: 1 }),
+      runId: "run-d5-draft",
+      store,
+      input: { task: "fix the greeting", repo: draft.repo, changeClass: true, tests: true, testCommand: "true", autoMerge: true },
+    });
+    assert.equal(outcome.status, "completed");
+    assert.equal(draft.merges().length, 0, "an unfinished run must never merge itself");
+    const result = stepResult(await store.load("run-d5-draft"), "auto-merge");
+    assert.equal(result?.kind, "held");
+    assert.match(JSON.stringify(result?.reasons), /draft/);
+  } finally {
+    draft.restore();
+  }
+});
+
+test("D5: a REFUSED merge leaves the pull request open and the run successful", async () => {
+  // The PR is the deliverable; the merge is a convenience on top of it. A
+  // forge that says "not mergeable" must not cost the run its work.
+  const fixture = await mergeFixture("d5-refused", { ok: false, status: 405 });
+  try {
+    const { model } = reactiveModel(TRIVIAL_SCRIPT);
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-d5-refused",
+      store,
+      input: { task: "fix the greeting", repo: fixture.repo, changeClass: true, tests: true, testCommand: "true", autoMerge: true },
+    });
+    assert.equal(outcome.status, "completed", "a failed merge is not a failed run");
+    assert.ok(outcome.output !== undefined && String((outcome.output as { pr?: string }).pr).includes("pulls/1"), "the PR is still the output");
+    assert.equal(fixture.merges().length, 1, "one attempt, never retried — a retry after a timeout reads back as 405");
+    const result = stepResult(await store.load("run-d5-refused"), "auto-merge");
+    assert.equal(result?.kind, "failed");
+    assert.equal(result?.status, 405);
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("D5: with autoMerge absent from the input there is no auto-merge step at all", async () => {
+  // The replay rule: step PRESENCE is a function of the recorded input, so a
+  // run enqueued before this feature existed replays through exactly the steps
+  // its log contains.
+  const fixture = await mergeFixture("d5-off");
+  try {
+    const { model } = reactiveModel(TRIVIAL_SCRIPT);
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-d5-off",
+      store,
+      input: { task: "fix the greeting", repo: fixture.repo, changeClass: true, tests: true, testCommand: "true" },
+    });
+    assert.equal(outcome.status, "completed");
+    assert.equal(fixture.merges().length, 0);
+    const names = (await store.load("run-d5-off")).filter((e) => e.type === "step-completed").map((e) => e.name ?? "");
+    assert.equal(names.includes("auto-merge"), false, "no new step in a log that never asked for one");
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("P1-4: a worse service after a deploy records what it WOULD roll back, with the evidence", async () => {
+  const fixture = await repoFixture("p14-observe");
+  const teploy = scriptedTeploy();
+  // Before: 5% errors, p95 200ms. After: 20% errors, p95 900ms.
+  const observe = scriptedObserve([[RED_ROW()], [RED_ROW({ error_count: 200, p95_ms: 900 })]]);
+  try {
+    const { model } = reactiveModel(["```bash\necho changed >> f.txt\n```", "```finish\nFixed.\n```", ...PROBES]);
+    const wf = durableAgent({
+      model,
+      executor: fixture.provider,
+      workdir: ".",
+      preview: { dir: "/srv/app", run: teploy.run },
+      telemetry: { url: "https://o.example.com", token: "tok", service: "api", repo: "owner/repo", fetch: observe.fetchStub },
+    });
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: wf,
+      runId: "run-p14-observe",
+      store,
+      // rollback WITHOUT autoDeploy: the observation half, which is the whole
+      // point of building this before anything acts on it.
+      input: { task: "append to f.txt", repo: fixture.repo, preview: true, telemetry: true, rollback: true },
+    });
+
+    assert.equal(outcome.status, "completed");
+    const result = stepResult(await store.load("run-p14-observe"), "rollback");
+    assert.equal(result?.kind, "would-roll-back");
+    assert.match(JSON.stringify(result?.reasons), /error rate up 15\.00%/);
+    assert.match(JSON.stringify(result?.reasons), /p95 up 700ms/);
+    // Nothing was actually rolled back.
+    for (const argv of teploy.calls) {
+      assert.notEqual(argv[1], "rollback", `it acted without autoDeploy: ${argv.join(" ")}`);
+    }
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("P1-4: with autoDeploy on, the same evidence actually runs `teploy rollback`", async () => {
+  const fixture = await repoFixture("p14-act");
+  const teploy = scriptedTeploy({ rollback: { code: 0, stdout: "Rolled back to abc1234\n", stderr: "" } });
+  const observe = scriptedObserve([[RED_ROW()], [RED_ROW({ error_count: 200, p95_ms: 900 })]]);
+  try {
+    const { model } = reactiveModel(["```bash\necho changed >> f.txt\n```", "```finish\nFixed.\n```", ...PROBES]);
+    const wf = durableAgent({
+      model,
+      executor: fixture.provider,
+      workdir: ".",
+      preview: { dir: "/srv/app", run: teploy.run },
+      telemetry: { url: "https://o.example.com", token: "tok", service: "api", repo: "owner/repo", fetch: observe.fetchStub },
+    });
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: wf,
+      runId: "run-p14-act",
+      store,
+      input: { task: "append to f.txt", repo: fixture.repo, preview: true, telemetry: true, rollback: true, autoDeploy: true },
+    });
+
+    assert.equal(outcome.status, "completed");
+    const result = stepResult(await store.load("run-p14-act"), "rollback");
+    assert.equal(result?.kind, "rolled-back");
+    assert.ok(
+      teploy.calls.some((argv) => argv[1] === "rollback"),
+      `teploy rollback was never called: ${JSON.stringify(teploy.calls)}`,
+    );
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("P1-4: a healthy service, and a run that deployed nothing, both record a no-op — never a rollback", async () => {
+  // Healthy: errors DOWN, latency down.
+  const healthy = await repoFixture("p14-healthy");
+  const teploy = scriptedTeploy();
+  const observe = scriptedObserve([[RED_ROW()], [RED_ROW({ error_count: 10, p95_ms: 150 })]]);
+  try {
+    const { model } = reactiveModel(["```bash\necho changed >> f.txt\n```", "```finish\nFixed.\n```", ...PROBES]);
+    const store = new MemoryEventStore();
+    await executeRun({
+      workflow: durableAgent({
+        model,
+        executor: healthy.provider,
+        workdir: ".",
+        preview: { dir: "/srv/app", run: teploy.run },
+        telemetry: { url: "https://o.example.com", token: "tok", service: "api", repo: "owner/repo", fetch: observe.fetchStub },
+      }),
+      runId: "run-p14-healthy",
+      store,
+      input: { task: "append to f.txt", repo: healthy.repo, preview: true, telemetry: true, rollback: true, autoDeploy: true },
+    });
+    const result = stepResult(await store.load("run-p14-healthy"), "rollback");
+    assert.equal(result?.kind, "healthy");
+    for (const argv of teploy.calls) assert.notEqual(argv[1], "rollback");
+  } finally {
+    healthy.restore();
+  }
+
+  // Nothing deployed: a service that got worse while Ship only opened a pull
+  // request is watching somebody else's deploy. Same false attribution the
+  // telemetry leg was fixed for on 2026-08-21.
+  const noDeploy = await repoFixture("p14-nodeploy");
+  const worse = scriptedObserve([[RED_ROW()], [RED_ROW({ error_count: 200, p95_ms: 900 })]]);
+  try {
+    const { model } = reactiveModel(["```bash\necho changed >> f.txt\n```", "```finish\nFixed.\n```", ...PROBES]);
+    const store = new MemoryEventStore();
+    await executeRun({
+      workflow: durableAgent({
+        model,
+        executor: noDeploy.provider,
+        workdir: ".",
+        telemetry: { url: "https://o.example.com", token: "tok", service: "api", repo: "owner/repo", fetch: worse.fetchStub },
+      }),
+      runId: "run-p14-nodeploy",
+      store,
+      input: { task: "append to f.txt", repo: noDeploy.repo, telemetry: true, rollback: true, autoDeploy: true },
+    });
+    const result = stepResult(await store.load("run-p14-nodeploy"), "rollback");
+    assert.equal(result?.kind, "not-deployed");
+  } finally {
+    noDeploy.restore();
+  }
+});

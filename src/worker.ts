@@ -12,7 +12,8 @@ import { previewTargetFromEnv } from "./deploy.js";
 import { telemetryTargetFromEnv } from "./observe.js";
 import { testTargetFromEnv } from "./tests.js";
 import type { ExecutorProvider, RunUsage, SandboxOverrides } from "./durable.js";
-import { enqueueRun } from "./runtime.js";
+import { enqueueRun, proposeExternal } from "./runtime.js";
+import { changeClassRequired, sweepBulletin } from "./bulletin.js";
 import { attributionsFrom } from "./attributed-spend.js";
 import { intakeActor } from "./actor.js";
 import type { NucleusShipRuntime } from "./runtime.js";
@@ -1004,6 +1005,13 @@ export function startWorker(options: WorkerOptions): {
           // A swept task was proposed by a webhook, a chat message, or an
           // issue body — never by a human typing into this process.
           trust: "external",
+          // L6: a task whose text came from a PUBLIC board is classified before
+          // it can push, whatever SHIP_CHANGE_CLASS says for this deployment.
+          // The board's own gate already refuses to run automatically unless
+          // the deployment-wide flag is on, so this is the narrower belt: it
+          // survives someone turning that flag off without remembering that a
+          // public board depends on it.
+          ...(changeClassRequired(task.source) ? { changeClass: true } : {}),
           ...(task.repo !== undefined ? { repo: task.repo } : {}),
           ...(task.pr !== undefined ? { pr: task.pr } : {}),
         });
@@ -1047,6 +1055,27 @@ export function startWorker(options: WorkerOptions): {
     }
   };
 
+  // L6: promote notes that have crossed their board's threshold.
+  //
+  // Resident rather than an API route someone has to call: a board whose policy
+  // is `auto` is a promise that Ship is watching it, and a promise kept only
+  // when a cron remembers is not one. Same tick and same reentrancy guard as
+  // the intake and Akiroo sweeps, and errors are logged rather than thrown for
+  // the same reason — a board being unreadable must not stop the queue.
+  const bulletinSweep = async (): Promise<void> => {
+    try {
+      const result = await sweepBulletin({
+        store: options.runtime.bulletin,
+        propose: (input) => proposeExternal(options.runtime, input),
+        projectFor: (repo) => options.runtime.projects.forRepo(repo),
+        log,
+      });
+      if (result.sent > 0) log(`[worker] bulletin: promoted ${result.sent} note(s)`);
+    } catch (error) {
+      log(`[worker] bulletin sweep: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
   // Reentrancy guard: a sweep can outlast intervalMs when Nucleus is slow, and
   // two overlapping sweeps re-launch the same proposed task (duplicate PRs) and
   // double-count its spend. Skip a tick if the previous sweep is still running.
@@ -1058,6 +1087,7 @@ export function startWorker(options: WorkerOptions): {
     sweeping = true;
     void sweep()
       .then(() => akirooSweep())
+      .then(() => bulletinSweep())
       .then(() => retryNotifications())
       .catch((error) => log(`[worker] intake sweep: ${error instanceof Error ? error.message : String(error)}`))
       .finally(() => {

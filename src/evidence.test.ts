@@ -4,7 +4,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { FileEvidenceStore } from "./evidence.js";
+import { FileEvidenceStore, lookupRepoForObserveService, repoForObserveService } from "./evidence.js";
 import type { EvidenceStore } from "./evidence.js";
 import { repoSlug, effectiveTelemetryTarget } from "./observe.js";
 import { testTargetFromInput, testTargetFromEnv } from "./tests.js";
@@ -157,4 +157,40 @@ test("evidence.json roundtrips through the file the CLI edits", async () => {
   await store.set({ repo: "tyler/a", testCommand: "pnpm test", testTimeoutMs: 90000, observeService: "a" });
   const raw = JSON.parse(await readFile(join(dir, "evidence.json"), "utf8")) as Record<string, unknown>;
   assert.deepEqual(raw["tyler/a"], { testCommand: "pnpm test", testTimeoutMs: 90000, observeService: "a" });
+});
+
+// --- P1-5: the observeService reverse lookup ---------------------------------
+
+const ENTRIES = [
+  { repo: "tyler/api", observeService: "fylun-api" },
+  { repo: "tyler/web", observeService: "Fylun-Web" },
+  { repo: "tyler/docs", testCommand: "pnpm test" },
+];
+
+test("repoForObserveService maps a service back to its repo, case- and space-insensitively", () => {
+  assert.equal(repoForObserveService(ENTRIES, "fylun-api"), "tyler/api");
+  assert.equal(repoForObserveService(ENTRIES, "  FYLUN-WEB "), "tyler/web");
+  assert.equal(repoForObserveService(ENTRIES, "nothing"), null);
+  assert.equal(repoForObserveService(ENTRIES, ""), null, "an alert with no service binds no repo");
+  assert.equal(repoForObserveService([], "fylun-api"), null);
+});
+
+test("an ambiguous observeService binds NO repo rather than guessing one", () => {
+  // Two repos claiming one service is a configuration mistake. Picking either
+  // opens an incident against a repository that is not the one that broke —
+  // strictly worse than an unbound proposal a human binds in the inbox.
+  const dupes = [
+    { repo: "tyler/api", observeService: "shared" },
+    { repo: "tyler/worker", observeService: "shared" },
+  ];
+  assert.equal(repoForObserveService(dupes, "shared"), null);
+});
+
+test("lookupRepoForObserveService reads the reverse lookup off a live store", async () => {
+  const { store } = await tempStore();
+  await store.set({ repo: STORE_URL, testCommand: "pnpm test", observeService: "ship-web" });
+  await store.set({ repo: "https://git.example.com/tyler/other.git", testCommand: "go test ./..." });
+  assert.equal(await lookupRepoForObserveService(store, "ship-web"), "tyler/teploy-ship");
+  assert.equal(await lookupRepoForObserveService(store, "ship-worker"), null);
+  assert.equal(await lookupRepoForObserveService(store, ""), null);
 });

@@ -50,6 +50,20 @@ Clean VM to a working Ship: provisions the server, generates the secrets that
 should never be shared between installs, asks for the two only you can supply,
 builds the sandbox images on the server, deploys. Around ten minutes.
 
+A second box joins the Ship you already have rather than becoming another one:
+
+```sh
+./install.sh --export-secrets ship.env --host <controller> --user <u> oldbox
+teploy-ship join http://<controller>:7460 --secrets ship.env \
+  --nucleus-url postgres://nucleus:<pw>@<controller>:5432/nucleus --start
+```
+
+`join` verifies the controller, its token, the store, every sandbox daemon in
+the pool, the forge (with the token a run will actually present), the model
+route and the forge co-location gate — and writes nothing and starts nothing
+unless all of them answered. It never fetches credentials over the network; you
+carry them in the bundle, and the reasoning is in `src/join.ts`.
+
 **First time? [docs/QUICKSTART.md](docs/QUICKSTART.md)** — nothing to a pull
 request that carries its test result, in about ten minutes, skipping everything
 you do not need to see the loop work.

@@ -771,3 +771,82 @@ export function formatReviewComments(comments: PrReviewComment[]): string {
   });
   return `All ${comments.length} inline review comment(s) currently open on this pull request, as data:\n\n${blocks.join("\n\n")}`;
 }
+
+/**
+ * What a merge attempt produced. A FAILURE IS DATA, not an exception (D5 / L5).
+ *
+ * The pull request is the deliverable and the merge is a convenience on top of
+ * it: a run that produced a correct change and could not merge it has still
+ * done its job, and must end `completed` with the PR open. So this never
+ * throws — a non-2xx, an unreachable forge and a thrown fetch all come back as
+ * `failed` with the status, and the caller records that on the timeline.
+ */
+export type MergeOutcome =
+  | { kind: "merged"; sha?: string }
+  | { kind: "failed"; status: number; reason: string };
+
+/**
+ * Merge a pull request over the host's API.
+ *
+ * The two forges differ in more than the base path here, unlike every other
+ * call in this file — this is the one endpoint where copying the openPullRequest
+ * shape would have been wrong on both counts:
+ *
+ *   GitHub:  PUT  /repos/{o}/{r}/pulls/{n}/merge  {merge_method, commit_title, commit_message}
+ *   Forgejo: POST /repos/{o}/{r}/pulls/{n}/merge  {Do, MERGE_TITLE_FIELD, MERGE_MESSAGE_FIELD}
+ *
+ * Squash by default. A Ship run's branch is a machine's working history — the
+ * commit message is the task title and the run id (see commitAndPush's caller
+ * in durable.ts:1866) — and a reviewer reading `main` a month later wants one
+ * commit per change, not one per attempt.
+ *
+ * `fetchImpl` last and injectable, like commentOnPr (git.ts:578): every test
+ * for this path has to be able to assert the method, the URL and the body
+ * without a forge.
+ */
+export async function mergePullRequest(
+  ref: RepoRef,
+  token: string,
+  pr: number,
+  options: { method?: "squash" | "merge" | "rebase"; title?: string; message?: string } = {},
+  fetchImpl: typeof fetch = fetch,
+): Promise<MergeOutcome> {
+  const method = options.method ?? "squash";
+  const github = ref.kind === "github";
+  const endpoint = github
+    ? `https://api.github.com/repos/${ref.owner}/${ref.repo}/pulls/${pr}/merge`
+    : `${ref.base}/api/v1/repos/${ref.owner}/${ref.repo}/pulls/${pr}/merge`;
+  const body = github
+    ? {
+        merge_method: method,
+        ...(options.title !== undefined ? { commit_title: options.title } : {}),
+        ...(options.message !== undefined ? { commit_message: options.message } : {}),
+      }
+    : {
+        Do: method,
+        ...(options.title !== undefined ? { MERGE_TITLE_FIELD: options.title } : {}),
+        ...(options.message !== undefined ? { MERGE_MESSAGE_FIELD: options.message } : {}),
+      };
+  try {
+    const response = await fetchImpl(endpoint, {
+      method: github ? "PUT" : "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: github ? `Bearer ${token}` : `token ${token}`,
+        ...(github ? { accept: "application/vnd.github+json" } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      return { kind: "failed", status: response.status, reason: detail.slice(0, 300) || `merge refused (${response.status})` };
+    }
+    // GitHub answers {sha, merged, message}; Forgejo answers 200 with an empty
+    // body. Parsed defensively so an empty body is a success, not a crash.
+    const payload = (await response.json().catch(() => ({}))) as { sha?: unknown; merged?: unknown };
+    return { kind: "merged", ...(typeof payload.sha === "string" ? { sha: payload.sha } : {}) };
+  } catch (error) {
+    // status 0 = never reached the forge, as distinct from a forge that said no.
+    return { kind: "failed", status: 0, reason: error instanceof Error ? error.message : String(error) };
+  }
+}

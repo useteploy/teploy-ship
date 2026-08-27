@@ -190,6 +190,7 @@ suite did not fail, it never finished.
 | Preview deploys and telemetry on the pull request | `docs/DEPLOY.md` — `SHIP_PREVIEW_*`, `OBSERVE_*` |
 | Which models actually work, with numbers | `docs/MODELS.md` |
 | Upgrading this install later | `docs/UPGRADING.md` — **read before your second deploy** |
+| A second box: another worker, or another sandbox host | `docs/DEPLOY.md` — `teploy-ship join` |
 
 ## If it does not work
 

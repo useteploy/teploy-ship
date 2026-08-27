@@ -24,24 +24,65 @@
  *     interfaces. Decisive when Ship runs on the host. It is blind when Ship
  *     runs in a container, because the container's netns has none of the host's
  *     addresses — which is the normal deployment, hence check 3.
- *  3. The forge answers on the SANDBOX HOST'S OWN ADDRESS. From inside a
- *     sandbox the host is the container's default gateway, so if the forge's
- *     port answers there, the forge is on the box the sandboxes run on. This is
- *     the check that catches the real case (Ship deployed to infra-home), and
- *     the only one that sees through the container boundary. It costs one
- *     sandbox at startup, once.
+ *  3. The forge answers on THIS PROCESS'S OWN DEFAULT GATEWAY. A container's
+ *     default gateway is the docker bridge on its host, so if the forge's port
+ *     answers there, the forge is on the worker's own box. Costs one TCP
+ *     connect and no container. See PRE-DECIDED below for why this exists.
+ *  4. The forge answers on the SANDBOX HOST'S OWN ADDRESS. Same question asked
+ *     from inside a sandbox, which is the right question when the sandbox pool
+ *     (src/sandbox-pool.ts) puts sandboxes on hosts the worker is not on. It
+ *     costs one sandbox at startup, once.
  *
  * A check that cannot run (no sandbox configured, a probe that errors) reports
  * "unknown" rather than "safe": this gate must fail loud, not open.
+ *
+ * ---------------------------------------------------------------------------
+ * PRE-DECIDED 2026-08-26 — check 3 exists because check 4 is INERT on the real
+ * deployment, and a security gate that silently checks nothing is worse than no
+ * gate.
+ *
+ * Measured on deploy-test, not reasoned about: the sandbox daemon's egress
+ * network is `internal=true` (`docker network inspect teploy-sbx-egress` ->
+ * `"Internal": true`), so a run container has NO default route at all —
+ * `/proc/net/route` holds only the on-link subnet row. `sandboxHostProbeCommand`
+ * therefore returns NOGW every time and check 4 reports "unknown" forever.
+ * Worse, an internal network drops traffic to the bridge gateway too: from that
+ * network even the sandbox daemon's own port (172.31.99.1:7439, listening on
+ * 0.0.0.0) refuses. There is no sandbox-side fix; the isolation that makes the
+ * sandbox safe is exactly what blinds the probe.
+ *
+ * The worker's own container is on a normal bridge and DOES have a default
+ * gateway, and on the standard deployment that gateway is literally the sandbox
+ * host — on deploy-test `SHIP_SANDBOX_URL=http://172.18.0.1:7439` IS the
+ * worker's default gateway. So asking from the worker answers the same question
+ * in the shape that ships.
+ *
+ * Proved both ways 2026-08-26. deploy-test (forge elsewhere): worker gateway
+ * 172.18.0.1, port 49152 does not answer. infra-home (RUNS the forge): a
+ * container on its `teploy` bridge gets gateway 172.18.0.1 and 49152 answers —
+ * the refusal fires.
+ *
+ * A CONNECT TIMEOUT IS TREATED AS "NOT CO-LOCATED", decisively, and this is the
+ * one judgement call here. A co-located forge's port answers from the host's own
+ * bridge in every shape Ship supports: docker-published ports are DNAT'd out of
+ * the DOCKER-USER chain and bypass the host firewall, and a host-bound service
+ * binds 0.0.0.0. A drop means the port is not there. The alternative — calling
+ * every timeout "could not determine" — prints an unknown line on every start of
+ * every correctly-configured box, and a gate whose normal output is a warning is
+ * a gate operators stop reading. Reversal condition: someone runs a forge on the
+ * Ship box behind a host firewall that filters the docker bridge.
+ * ---------------------------------------------------------------------------
  */
 import { networkInterfaces } from "node:os";
 import { lookup } from "node:dns/promises";
+import { readFile } from "node:fs/promises";
+import { connect } from "node:net";
 
 export interface ColocationFinding {
   /** The forge origin that was checked, as configured. */
   origin: string;
   /** Which check fired. */
-  how: "loopback" | "local-interface" | "sandbox-host";
+  how: "loopback" | "local-interface" | "worker-gateway" | "sandbox-host";
   /** What to show a human. Names the forge and the evidence, never just "unsafe". */
   detail: string;
 }
@@ -65,6 +106,25 @@ export function colocationOverridden(env: NodeJS.ProcessEnv = process.env): bool
 
 function isLoopback(host: string): boolean {
   return host === "localhost" || host === "127.0.0.1" || host === "::1" || host.startsWith("127.");
+}
+
+/**
+ * An address a machine of yours can hold: RFC1918, CGNAT (which is the
+ * tailnet's 100.64.0.0/10), link-local, loopback, and the IPv6 equivalents.
+ *
+ * Used only to decide whether check 3 is worth asking — see its call site.
+ */
+export function isPrivateAddress(address: string): boolean {
+  if (address.includes(":")) return /^(::1$|fc|fd|fe8|fe9|fea|feb)/i.test(address);
+  const octets = address.split(".").map(Number);
+  if (octets.length !== 4 || octets.some((n) => !Number.isInteger(n))) return false;
+  const [a, b] = octets as [number, number, number, number];
+  if (a === 10 || a === 127) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  return false;
 }
 
 /** Every address this process can see on its own interfaces. */
@@ -153,14 +213,81 @@ export function sandboxHostProbeCommand(port: number): string {
   ].join("\n");
 }
 
+/**
+ * This process's own default gateway, from `/proc/net/route`.
+ *
+ * Parsed rather than shelled out to: the worker image is `node:22` and has
+ * neither `ip` nor `route` (the same discovery that shaped the sandbox-side
+ * probe above), while /proc/net/route exists in every Linux container.
+ *
+ * The gateway is a LITTLE-ENDIAN hex word, so the octets come out back to
+ * front — `010012AC` is 172.18.0.1, verified against `docker exec … ip route`
+ * on both boxes. Returns null on any shape it does not recognise, including
+ * every non-Linux host, where /proc/net/route does not exist at all.
+ */
+export function parseDefaultGateway(procNetRoute: string): string | null {
+  for (const line of procNetRoute.split("\n").slice(1)) {
+    const cols = line.trim().split(/\s+/);
+    // Iface Destination Gateway Flags RefCnt Use Metric Mask …
+    if (cols.length < 3) continue;
+    const [, destination, gateway] = cols as [string, string, string];
+    if (destination !== "00000000" || gateway === "00000000") continue;
+    if (!/^[0-9A-Fa-f]{8}$/.test(gateway)) continue;
+    const byte = (i: number): number => parseInt(gateway.slice(i, i + 2), 16);
+    return `${byte(6)}.${byte(4)}.${byte(2)}.${byte(0)}`;
+  }
+  return null;
+}
+
+/** Read this process's default gateway. Null when there is none to read. */
+export async function readDefaultGateway(read?: () => Promise<string>): Promise<string | null> {
+  try {
+    const text = read !== undefined ? await read() : await readFile("/proc/net/route", "utf8");
+    return parseDefaultGateway(text);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * "is something listening there?" — one TCP connect, nothing written.
+ *
+ * "unknown" is reserved for a probe that could not ask. A refusal and a
+ * timeout are both answers; see the PRE-DECIDED block at the top of this file
+ * for why a timeout counts as "closed".
+ */
+export type TcpProbe = (host: string, port: number, timeoutMs: number) => Promise<"open" | "closed" | "unknown">;
+
+export const tcpProbe: TcpProbe = (host, port, timeoutMs) =>
+  new Promise((resolve) => {
+    let settled = false;
+    const done = (verdict: "open" | "closed" | "unknown"): void => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(verdict);
+    };
+    const socket = connect({ host, port });
+    socket.setTimeout(timeoutMs);
+    socket.on("connect", () => done("open"));
+    socket.on("timeout", () => done("closed"));
+    socket.on("error", () => done("closed"));
+  });
+
 export interface DetectOptions {
   /** Forge origins Ship is configured to clone from. */
   origins: string[];
-  /** Runs a command inside a sandbox. Omit and check 3 reports "unknown". */
+  /** Runs a command inside a sandbox. Omit and check 4 reports "unknown". */
   probe?: SandboxProbe;
   /** Injected for tests. */
   resolve?: (host: string) => Promise<string[]>;
   interfaces?: NodeJS.Dict<Array<{ address: string }>>;
+  /** This process's default gateway (check 3). Injected for tests. */
+  gateway?: () => Promise<string | null>;
+  /** How check 3 asks whether a port answers. Injected for tests. */
+  connect?: TcpProbe;
+  /** Check 3's connect timeout. */
+  connectTimeoutMs?: number;
 }
 
 async function resolveHost(host: string, resolver?: (host: string) => Promise<string[]>): Promise<string[]> {
@@ -202,12 +329,52 @@ export async function detectForgeColocation(options: DetectOptions): Promise<Col
       continue;
     }
 
-    // Check 3. The only one that sees past the container boundary, and the one
-    // that catches the real case.
+    // Check 3. The worker's own default gateway is the docker bridge on its
+    // host, so this asks "is the forge on MY box?" without needing a sandbox —
+    // which is what makes it the only check that answers on the real
+    // deployment. See the PRE-DECIDED block at the top of this file.
+    const gatewayOf = options.gateway ?? (() => readDefaultGateway());
+    const dial = options.connect ?? tcpProbe;
+    // NOT asked for a public forge on a well-known port, and this exclusion was
+    // written after a live run rather than in advance. With
+    // `https://github.com` in SHIP_REPO_ALLOWLIST the question becomes "does
+    // anything answer on 443 on my default gateway", which on a bare-metal
+    // worker is a home router's admin UI — a false positive that refuses to
+    // start a perfectly good box, and the file's own argument is that a gate
+    // people override on reflex is worse than no gate. github.com is not on
+    // your machine. A SELF-HOSTED forge is still asked about, on any port, and
+    // so is a public-address forge on a non-standard port.
+    const publicWellKnown =
+      (parts.port === 80 || parts.port === 443) && addresses.length > 0 && !addresses.some(isPrivateAddress);
+    const gateway = publicWellKnown ? null : await gatewayOf();
+    let gatewayAnswered = publicWellKnown;
+    if (gateway !== null && !isLoopback(gateway)) {
+      const verdict = await dial(gateway, parts.port, options.connectTimeoutMs ?? 3000);
+      if (verdict === "open") {
+        colocated.push({
+          origin,
+          how: "worker-gateway",
+          detail:
+            `the forge's port ${parts.port} answers on ${gateway}, which is this worker's own default gateway — ` +
+            `so ${parts.host} is the machine this worker (and, on a default install, its sandboxes) runs on`,
+        });
+        continue;
+      }
+      gatewayAnswered = verdict === "closed";
+    }
+
+    // Check 4. The same question asked from inside a sandbox, which is a
+    // different question once the sandbox pool puts containers on other hosts.
     if (options.probe === undefined) {
-      unknown.push(
-        `${origin}: no sandbox is configured, so Ship cannot ask whether the forge is on the box its sandboxes run on`,
-      );
+      // Only worth saying when check 3 could not answer either. On a normal box
+      // check 3 IS the answer, and a gate whose happy path prints a warning is
+      // a gate nobody reads.
+      if (!gatewayAnswered) {
+        unknown.push(
+          `${origin}: no sandbox is configured and this process has no usable default gateway, so Ship could not ` +
+            `ask whether the forge is on the box its code runs on`,
+        );
+      }
       continue;
     }
     let output: string;
@@ -219,7 +386,16 @@ export async function detectForgeColocation(options: DetectOptions): Promise<Col
       continue;
     }
     if (output.includes("NOGW")) {
-      unknown.push(`${origin}: the sandbox has no default route, so its host's address could not be determined`);
+      // Expected, permanently, whenever SHIP_SANDBOX_NETWORK=egress: that
+      // network is docker-`internal`, so a run container has no default route
+      // by design. Saying so once per start teaches nothing when check 3
+      // already answered for this box; it is worth saying when it did not.
+      if (!gatewayAnswered) {
+        unknown.push(
+          `${origin}: the sandbox has no default route (an egress-mode sandbox network is docker-internal, so this ` +
+            `is expected) and this process has no usable default gateway either, so neither check could run`,
+        );
+      }
       continue;
     }
     if (output.includes("NOTOOL")) {

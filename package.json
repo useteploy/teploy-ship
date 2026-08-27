@@ -21,6 +21,10 @@
     "./plan": {
       "types": "./dist/plan.d.ts",
       "import": "./dist/plan.js"
+    },
+    "./bulletin": {
+      "types": "./dist/bulletin.d.ts",
+      "import": "./dist/bulletin.js"
     }
   },
   "scripts": {

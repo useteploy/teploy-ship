@@ -5,6 +5,222 @@ All notable changes to Teploy Ship are recorded here.
 ## [Unreleased]
 
 ### Added
+- **`teploy-ship join <controller-url>` — one command that ends with a box
+  taking work, or with a sentence saying why it cannot (B3).** Adding a second
+  worker meant reproducing a configuration by hand and finding out whether it
+  was right when the first run failed. `join` reads a secrets bundle
+  (`install.sh --export-secrets`), plans the worker's environment, and then
+  **verifies every dependency before writing anything**: the controller's
+  `/health`, that the controller *accepts* the token, a real connection and
+  round trip to Nucleus, `/health` + token on **every** daemon in
+  `SHIP_SANDBOX_URL`, the forge authenticating the deploy token it will actually
+  present, the model route, and the forge co-location gate. On success it writes
+  `~/.config/teploy-ship/worker.env` (mode 0600) and either starts the worker
+  (`--start`) or prints the systemd unit.
+  - **It never transports credentials.** MASTER_PLAN B3's `--token` shape reads
+    as "present a token, receive the configuration" — but that configuration is
+    the Nucleus URL, the forge token, the GitHub PAT and the gateway key, and an
+    endpoint that emits them to a bearer token is the most valuable endpoint in
+    the system. What such an endpoint would need (admin-minted, single-use
+    redeemed atomically, minutes-long TTL, bound and audited) and what a stolen
+    token would get you (everything Ship can do to your code) are written out as
+    the `PRE-DECIDED` block at the top of `src/join.ts`, along with the reversal
+    condition. The controller URL and token are used to **prove**, not to fetch:
+    a wrong controller or a typo'd token fails in this command instead of on the
+    Fleet page, and a stolen join token gets exactly what a stolen
+    `SHIP_WEB_TOKEN` already got you.
+  - **Every check runs, even after one fails.** One round trip listing all four
+    problems is one fix cycle. Nothing is written and no worker is started
+    unless every check passed — the value of the command is that it never leaves
+    a box half-joined and looking fine. Warnings (no sandbox, empty allowlist)
+    never block.
+  - Per-install secrets (`SHIP_SESSION_SECRET`, `SHIP_WEBHOOK_SECRET`,
+    `SHIP_WEB_TOKEN`, the Slack and Linear signing secrets) are dropped on the
+    way in rather than shared between hosts, matching what `install.sh` already
+    refuses to copy. Everything credential-shaped is redacted where join prints
+    its plan back, by suffix match rather than by a list, so a secret added next
+    month is redacted without anyone remembering.
+  - `--sandbox` **appends** to `SHIP_SANDBOX_URL` (deduped) rather than
+    replacing it, which is the whole of "add a sandbox host" under B2's pool.
+  - Proved live 2026-08-26 on deploy-test: a second worker joined and the
+    controller's `/health` reported `worker: "ok (2)"`. Run from a laptop
+    against the same controller, it named the three real blockers to a second
+    box in one pass — `NUCLEUS_URL` and `AI_GATEWAY_URL` are docker network
+    aliases, and `SHIP_SANDBOX_URL` is a bridge-local address.
+- **`install.sh --export-secrets` writes a complete worker environment**, not
+  just the secret store. `teploy secret list` holds credentials only, so
+  `NUCLEUS_URL`, `AI_GATEWAY_URL`, `SHIP_MODEL` and `SHIP_REPO_ALLOWLIST` — all
+  of which live in `teploy.yml`'s env block — were absent, and a bundle of
+  secrets alone was never a startable configuration. The non-secret half is now
+  read back off the running worker container, which is also the only copy that
+  reflects what the box is actually running.
+
+### Fixed
+- **The forge co-location gate was inert on the real deployment (B4).** It has a
+  fourth check that asks, from inside a sandbox, whether the forge answers on
+  the sandbox host's own address — and that check could never answer. Measured,
+  not reasoned about: an egress sandbox network is docker-`internal`
+  (`docker network inspect teploy-sbx-egress` → `"Internal": true`), so a run
+  container has **no default route at all** and the probe returned `NOGW` every
+  time; from that network even the sandbox daemon's own listening port is
+  dropped. There is no sandbox-side fix — the isolation that makes the sandbox
+  safe is what blinds the probe.
+  - New check 3 asks the same question from the **worker's own container**,
+    whose default gateway is the docker bridge on its host — on deploy-test
+    `SHIP_SANDBOX_URL=http://172.18.0.1:7439` *is* the worker's default gateway,
+    so it is the same host. `/proc/net/route` is parsed in-process (the worker
+    image is `node:22` and has neither `ip` nor `route`) and one `net.connect`
+    asks whether the forge's port answers there. No sandbox, no container, no
+    startup cost.
+  - Proved both ways 2026-08-26 through the production `worker.ts` call site,
+    with **no change to `worker.ts`**: on infra-home (which runs Forgejo) the
+    worker now refuses, naming gateway `172.18.0.1` and port `49152`; on
+    deploy-test it starts, and the "could not determine" line it used to print
+    on every start is gone. Before this, on infra-home the gate reported "no
+    sandbox is configured" and the worker started.
+  - A connect **timeout counts as "not co-located"**, deliberately: a
+    co-located forge's port answers from the host's own bridge in every shape
+    Ship supports, and a gate whose normal output is a warning is a gate people
+    stop reading. The reversal condition is written at the call site.
+  - Check 3 is **not** asked for a public forge on port 80/443 — found by
+    running `join` for real, not by reasoning. With `https://github.com` in the
+    allowlist the question becomes "does anything answer on 443 on my default
+    gateway", which on a bare-metal worker is a home router's admin UI. A
+    self-hosted forge is still asked about on any port, and a public-address
+    forge on a non-standard port still is too.
+- **`/hooks/observe` — an Observe alert becomes an incident proposal (P1-5 /
+  L4).** Ship had no way in from its own telemetry: Observe could see a service
+  breaking and Ship could fix it, and nothing connected the two. A firing alert
+  now arrives signed (`SHIP_OBSERVE_SIGNING_SECRET`, verified against
+  `X-Observe-Signature` — hex HMAC-SHA256 over `"<unix-seconds>.<body>"` — with
+  a freshness window on the signed `X-Observe-Timestamp`, default 300s) and
+  becomes a `source: "observe"`, `kind: "incident"` task keyed
+  `observe:<alert_id>`.
+  - **The repository is a reverse lookup, not a payload field.** An alert names
+    a service; it never names a repo. `repoForObserveService`
+    (`src/evidence.ts`) reads the `observeService` correspondence backwards off
+    the evidence store — a free function over `list()`, not a method, because
+    `ProjectEvidenceStore` implements the same interface as a view over project
+    records — and the receiver resolves the slug's clone URL from the project.
+    An ambiguous service (two repos claiming it) binds NOTHING: a proposal a
+    human binds in the inbox beats an incident opened against a repository that
+    is not the one that broke.
+  - **The mapping is a pure builder** (`incidentTaskFromObserveAlert`,
+    `src/intake-sources.ts`), like every other intake source, so the part that
+    decides what the agent reads is the part under test. Alert fields are
+    flattened to one line before they reach the detail — the detail becomes the
+    run's task text and a newline in an attacker-chosen rule name would
+    otherwise forge a section inside the `frameUntrusted` wrapper.
+  - **Policy stays `propose`.** An incident is not something to run unattended;
+    the worker only auto-launches a source explicitly set to `auto`.
+  - **Honest about a thin payload.** Observe's alert webhook carries no error
+    fingerprint, no first/last-seen window, no sample stack and no service name
+    — its alerts are threshold breaches on four site-wide metrics, and the
+    fingerprint/first-seen/stack fields live on the error-issue subsystem that
+    alert evaluation never reads. The builder accepts those fields optionally
+    and renders them when present; when they are absent the detail SAYS so
+    rather than letting the agent hunt for a stack it was never given.
+  - Observe side (`teploy-observe`): the alert payload gained `rule_id` (the
+    stable identity behind a per-cooldown `alert_id`), every delivery now
+    carries an `X-Observe-Delivery` id so a receiver can dedupe a resend
+    without hashing the body, and `internal/platform/webhooks_test.go` covers
+    the signing scheme, the headers and the wire shape — that file had no test
+    at all, for a contract another service verifies byte for byte.
+- **The Bulletin: a public board whose pinned notes Ship picks up (L6 / D6).**
+  `/bulletin/<slug>` is a page anyone can reach and anyone can write to — no
+  account, no JavaScript required, every action a plain form POST. A note is
+  pinned, voted for, and (on a board set to `auto`) promoted into an intake
+  proposal by `POST /api/bulletin/sweep`; the note's public label moves Pinned →
+  Picked up → Fix open as the task and its run move. `docs/bulletin.md` is the
+  trust model and the operator's guide; `/bulletin-admin` (Projects → Bulletin)
+  is where boards are configured and flagged notes are read.
+  - **It is an untrusted input surface, and every automatic behaviour is off by
+    default.** A note becomes a PROPOSAL, never a run — the `bulletin` intake
+    source starts at `propose` like every other source, so a public board and an
+    unattended run are two switches, not one. The repository is named by the
+    BOARD and re-checked against the allowlist at `trust: "external"`
+    (`proposeExternal`), so a poster cannot choose one. The text is carried
+    verbatim and framed as `<untrusted-content>` at the agent boundary, exactly
+    like an issue body, and `screenUntrusted` flags are recorded ON THE NOTE at
+    pin time — so an injection attempt is visible to the operator whether or not
+    it is ever promoted.
+  - **A board cannot be set to `auto` while the change-class gate (L3) is off**,
+    and cannot point at a repository with auto-merge (L5) on. Both are refused at
+    save time AND re-asserted at send time, because the two settings live in
+    different stores and either can move without the other knowing. That gate is
+    the whole dependency of this item: with it on, a public note can only ever
+    produce a `trivial`/`normal` change unattended, and anything `serious` parks
+    for a human.
+  - Volume bounds: a vote threshold (default 3), `bug` only by default, a
+    per-board daily cap on auto sends (default 5) so a vote brigade cannot drain
+    the budget, an in-process rate limit on pinning, similar-title dedupe that
+    counts a re-post as a vote for the note it duplicates, and a staff `Decline`
+    that blocks lookalike titles for 30 days.
+  - Nothing internal reaches the public page: no run ids, no logs, no repository
+    name, no failure states, and no email addresses (an address given for
+    updates is stored, never rendered, and stripped by `redactPost`). The public
+    status vocabulary is four words wide on purpose — `Picked up` deliberately
+    covers a parked or failed run, because a page that distinguished them would
+    be telling strangers how Ship is doing.
+  - The sweep is an API route rather than a worker tick only because
+    `src/worker.ts` belonged to another lane while this landed;
+    `docs/bulletin.md` carries the exact patch that makes it resident, along
+    with the one-line `changeClassRequired(task.source)` patch that makes the
+    class gate per-source instead of deployment-wide.
+- **Auto-merge for `trivial` changes, per repo, off by default (L5 / D5).** A
+  run whose change classified `trivial` can now squash-merge its own pull
+  request. FOUR conditions have to hold at the merge point, and the run records
+  which of them did: the change classified `trivial`; the suite **passed** (not
+  "ran" — a `disabled` outcome means nobody configured a suite, and merging on a
+  test run that never happened is exactly the failure the gate exists for); the
+  pull request opened **non-draft** (a draft is the run saying a person should
+  look); and telemetry did not get worse. Three more are already settled before
+  the run starts, because they are baked into the run input at enqueue: the
+  repo's project record says `autoMerge`, the change-class gate is on (`trivial`
+  is the whole authority for merging without a human, so without a verdict there
+  is nothing to merge on), and the run is not a scan.
+  - `mergePullRequest` (`src/git.ts`) is the one new forge call: `PUT
+    …/pulls/{n}/merge` with `merge_method` on GitHub, `POST` with `Do` on
+    Forgejo, squash on both. **It never throws.** The pull request is the
+    deliverable and the merge is a convenience on top of it, so a forge that
+    refuses leaves the PR open and the run `completed`, with the status and
+    reason on the timeline. It is also never retried: a timeout after the forge
+    merged, retried, comes back 405 "already merged" and would record a failure
+    for a merge that happened.
+  - The `auto-merge` step is recorded whenever the flag is on, refusals
+    included, so the timeline answers the question a reader of an unattended
+    merge actually has — not "did it merge" but "why was it allowed to".
+  - `SHIP_AUTO_MERGE=0` is a deployment-wide kill switch; the per-repo switch is
+    the Projects page (it needs the same `auto` grant as setting a source to
+    auto). Turn it on per repo only after that repo's `change-class` steps have
+    been read for a while: the 2026-08-26 sweep's one bad run was confident,
+    sourced-looking and false, which is the failure a merge gate has to catch.
+- **Auto-rollback, observable first (P1-4 / L4).** After `preview-deploy` and
+  `telemetry-check`, a `rollback` step judges the measured before/after and
+  records what should happen. Two conditions, not one: the service must have got
+  worse **and** this run must actually have deployed something — a repo whose
+  p95 moved while Ship only opened a pull request is watching somebody else's
+  deploy, which is the same false attribution that cost the telemetry leg a live
+  run on 2026-08-21.
+  - `telemetryRegression` (`src/observe.ts`) is the judgement, and only a
+    `compared` verdict can be one: `insufficient`, `unavailable` and `disabled`
+    all answer no, because a rollback is destructive and "we could not measure
+    it" is not evidence for taking one. Error rate is judged on an absolute
+    delta (a point of extra errors is a point of extra errors at any scale) and
+    p95 on a ratio **with** an absolute floor, so a fast service's 4ms → 6ms
+    jitter is not a 50% latency regression. Defaults: 1 percentage point, or
+    1.25x and at least 100ms.
+  - **The default outcome is a sentence, not an action.** A repo gets
+    `would-roll-back` with the numbers unless its project record carries
+    `autoDeploy`, in which case the run calls `rollbackDeploy`
+    (`teploy rollback` in the worker's own working copy — never in the agent's
+    sandbox, which must not hold deploy credentials). Nothing in this system has
+    ever been rolled back by a machine, so there is no distribution behind those
+    thresholds yet; these recorded steps are how one gets collected before
+    anything destructive runs on them.
+  - The watch is on wherever preview and telemetry both are (`SHIP_ROLLBACK=0`
+    turns it off) — it is a pure judgement over two verdicts that were going to
+    be recorded anyway, so watching costs nothing.
 - **`mode: "scan"` — read-only audit runs that produce findings instead of pull
   requests (L2 / D3).** The prompt-only scan MVP was structurally broken and its
   cron was switched off: it asked the agent to write

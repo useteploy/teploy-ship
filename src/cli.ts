@@ -2,7 +2,7 @@
 // teploy-ship — the Ship CLI: run coding-agent tasks live in your
 // terminal (streamed, interactive approvals) or as durable runs that
 // park on approval, survive exits/crashes, and resume later.
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,6 +36,15 @@ import { defaultApprovalPolicy, resolveApprovalPolicy } from "./approval.js";
 import { secretEnvNames } from "./guard.js";
 import { durableAgent, durableRecoveryInput, repoKeyOf, sandboxProvider } from "./durable.js";
 import { SandboxPool, parseSandboxUrls } from "./sandbox-pool.js";
+import {
+  formatChecks,
+  joinReady,
+  parseEnvFile,
+  planJoin,
+  renderEnvFile,
+  runJoinChecks,
+  summarisePlan,
+} from "./join.js";
 import { externalAdapters } from "./harness-external.js";
 import type { ExecutorProvider } from "./durable.js";
 import { formatReport, runEval } from "./eval.js";
@@ -128,6 +137,21 @@ Usage:
       NOTE: fix always needs network to clone/push — pass
       --sandbox-network egress (or sandboxNetwork:"egress" in config)
       whenever --sandbox is used; plain --sandbox defaults to "none".
+  teploy-ship join <controller-url>   stand a NEW box up as a worker in an existing fleet
+      --secrets <file>                the bundle from \`install.sh --export-secrets\`.
+                                      join never fetches credentials over the network;
+                                      you carry them. See src/join.ts for the reasoning.
+      [--token <t>]                   the controller's SHIP_WEB_TOKEN (default: from the bundle)
+      [--nucleus-url <url>]           REQUIRED on a second box — the bundled one is a
+                                      docker alias only the controller's box can resolve
+      [--sandbox <url[,url]>]         sandbox daemons to add to SHIP_SANDBOX_URL (B2: a list)
+      [--sandbox-token <t>] [--sandbox-image <img>]
+      [--git-token <t>] [--github-token <t>] [--model <id>] [--allow <origins>]
+      [--start]                       run the worker in the foreground when every check passes
+      [--json]                        the check results as an object
+      Verifies the controller, its token, the store, every sandbox host, the forge
+      (with the token a run will actually present), the model route, and the forge
+      co-location gate — and writes NOTHING unless all of them answered.
   teploy-ship worker                  resident worker: picks up due nucleus-store runs
       SHIP_SANDBOX_URL may list SEVERAL daemons (comma-separated): each run is
       placed on the least-loaded healthy one, and a host that refuses work is
@@ -346,6 +370,158 @@ function numFlag(value: string | boolean | undefined, name: string, fallback: nu
 function fail(message: string): never {
   process.stderr.write(`${red("error:")} ${message}\n`);
   process.exit(2);
+}
+
+// ---------------------------------------------------------------------------
+// join — one command on a fresh box
+//
+// The reasoning about credentials, join tokens and what a stolen one gets you
+// is the PRE-DECIDED block at the top of src/join.ts. This is the plumbing:
+// read the bundle, plan, verify, write, start.
+// ---------------------------------------------------------------------------
+
+/** Where join writes the worker's environment. Mode 0600, never in the repo. */
+function joinEnvPath(): string {
+  return join(homedir(), ".config", "teploy-ship", "worker.env");
+}
+
+async function joinCommand(rest: string[]): Promise<void> {
+  const args = parseArgs(rest, COMMAND_FLAGS.join);
+  const controller = args.positional[0];
+  if (controller === undefined) {
+    fail("join needs the controller's dashboard URL: teploy-ship join http://<controller>:7460 --secrets ship.env");
+  }
+  const secretsPath = (args.flags.secrets as string) ?? process.env.SHIP_SECRETS_FILE;
+  if (secretsPath === undefined) {
+    fail(
+      "join needs the secrets bundle: --secrets <file>\n" +
+        "  Export one from the box you are joining to:\n" +
+        "    ./install.sh --export-secrets ship.env --host <controller-ip> --user <u> <name>\n" +
+        "  join never fetches credentials over the network — see the PRE-DECIDED block in src/join.ts.",
+    );
+  }
+  let bundleText: string;
+  try {
+    bundleText = readFileSync(secretsPath, "utf8");
+  } catch (error) {
+    fail(`cannot read ${secretsPath}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  const plan = planJoin({
+    controller,
+    bundle: parseEnvFile(bundleText),
+    ...(args.flags.sandbox !== undefined ? { addSandbox: args.flags.sandbox as string } : {}),
+    overrides: {
+      ...(args.flags["nucleus-url"] !== undefined ? { NUCLEUS_URL: args.flags["nucleus-url"] as string } : {}),
+      ...(args.flags["sandbox-token"] !== undefined ? { SHIP_SANDBOX_TOKEN: args.flags["sandbox-token"] as string } : {}),
+      ...(args.flags["sandbox-image"] !== undefined ? { SHIP_SANDBOX_IMAGE: args.flags["sandbox-image"] as string } : {}),
+      ...(args.flags["git-token"] !== undefined ? { SHIP_GIT_TOKEN: args.flags["git-token"] as string } : {}),
+      ...(args.flags["github-token"] !== undefined ? { SHIP_GITHUB_TOKEN: args.flags["github-token"] as string } : {}),
+      ...(args.flags.model !== undefined ? { SHIP_MODEL: args.flags.model as string } : {}),
+      ...(args.flags.allow !== undefined ? { SHIP_REPO_ALLOWLIST: args.flags.allow as string } : {}),
+    },
+  });
+  // --token wins over the bundle's SHIP_WEB_TOKEN: an operator handed a token
+  // out of band should not have to edit the file.
+  if (args.flags.token !== undefined) plan.webToken = args.flags.token as string;
+
+  process.stderr.write(`\n${bold("joining")} ${plan.controller}\n`);
+  for (const note of plan.notes) process.stderr.write(`  ${dim(note)}\n`);
+  process.stderr.write(`\n${bold("verifying")}\n`);
+
+  // The co-location probe wants a live sandbox on the host the sandboxes run
+  // on. join has no executor yet, so it builds a throwaway provider from the
+  // planned config — the check that matters most is the one most likely to be
+  // skipped, and skipping it here means discovering the refusal when the worker
+  // exits 3 during startup instead.
+  let sandboxProbe: import("./colocation.js").SandboxProbe | undefined;
+  const probeUrl = plan.sandboxUrls[0];
+  if (probeUrl !== undefined && (plan.env.SHIP_SANDBOX_TOKEN ?? "") !== "") {
+    const provider = sandboxProvider({
+      baseURL: probeUrl,
+      token: plan.env.SHIP_SANDBOX_TOKEN!,
+      image: plan.env.SHIP_SANDBOX_IMAGE ?? "python:3.12-slim",
+      network: plan.env.SHIP_SANDBOX_NETWORK === "egress" ? "egress" : "none",
+      ttlSec: 600,
+    });
+    sandboxProbe = async (command: string) => {
+      const created = await provider.create();
+      try {
+        const result = await provider.attach(created.handle).exec(command, { timeoutMs: 20_000 });
+        return { exitCode: result.exitCode, stdout: result.stdout };
+      } finally {
+        await provider.destroy?.(created.handle).catch(() => {});
+      }
+    };
+  }
+
+  const checks = await runJoinChecks({
+    plan,
+    fetch: globalThis.fetch,
+    pingStore: async (url) => {
+      // A real connection and a real round trip. Nothing schema-shaped: join
+      // must never migrate a store it is only asking about.
+      const { NucleusPgwire } = await import("./nucleus-pgwire.js");
+      const db = new NucleusPgwire(url, `join-${hostname()}-${process.pid}`);
+      try {
+        await db.query("SELECT 1");
+      } finally {
+        await db.close().catch(() => {});
+      }
+    },
+    ...(sandboxProbe !== undefined ? { sandboxProbe } : {}),
+  });
+
+  process.stderr.write(`${formatChecks(checks)}\n\n`);
+  if (args.flags.json === true) {
+    process.stdout.write(`${JSON.stringify({ controller: plan.controller, ready: joinReady(checks), checks }, null, 2)}\n`);
+  }
+  if (!joinReady(checks)) {
+    const failed = checks.filter((c) => c.status === "fail").map((c) => c.name);
+    process.stderr.write(
+      `${red("not joined")} — ${failed.length} check(s) failed: ${failed.join(", ")}\n` +
+        `${dim("Nothing was written and no worker was started. Fix the above and run join again.")}\n`,
+    );
+    process.exit(1);
+  }
+
+  const path = joinEnvPath();
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(
+    path,
+    renderEnvFile(plan.env, [
+      `Teploy Ship worker environment, written by \`teploy-ship join ${plan.controller}\``,
+      `on ${new Date().toISOString()}. REAL VALUES — mode 0600, never commit this.`,
+      `Every setting below was verified reachable from this box before it was written.`,
+    ]),
+    { mode: 0o600 },
+  );
+  process.stderr.write(`${green("verified")} — wrote ${path}\n${dim(summarisePlan(plan))}\n\n`);
+
+  if (args.flags.start !== true) {
+    process.stderr.write(
+      `${bold("start the worker")}\n` +
+        `  set -a; . ${path}; set +a; teploy-ship worker --store nucleus\n\n` +
+        `${bold("or make it resident")} (systemd, so it survives a reboot)\n` +
+        `  sudo tee /etc/systemd/system/teploy-ship-worker.service <<'UNIT'\n` +
+        `  [Unit]\n  Description=Teploy Ship worker\n  After=network-online.target\n\n` +
+        `  [Service]\n  EnvironmentFile=${path}\n  ExecStart=${process.argv[1] ?? "teploy-ship"} worker --store nucleus\n` +
+        `  Restart=always\n  RestartSec=5\n\n  [Install]\n  WantedBy=multi-user.target\n  UNIT\n` +
+        `  sudo systemctl enable --now teploy-ship-worker\n\n` +
+        `${dim("or re-run with --start to run it in the foreground now.")}\n`,
+    );
+    process.exit(0);
+  }
+
+  process.stderr.write(`${bold("starting the worker")}\n\n`);
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), "worker", "--store", "nucleus"], {
+    stdio: "inherit",
+    env: { ...process.env, ...plan.env },
+  });
+  child.on("exit", (code) => process.exit(code ?? 1));
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.on(signal, () => child.kill(signal));
+  }
 }
 
 
@@ -1762,6 +1938,8 @@ async function main(): Promise<void> {
       return inboxCommand(rest);
     case "fix":
       return fixCommand(rest);
+    case "join":
+      return joinCommand(rest);
     case "worker":
       return workerCommand(rest);
     case "web":

@@ -51,7 +51,70 @@ stand a second box up from them. That is now two commands:
 ```
 
 `ship.env` holds real values. It is chmod 600, gitignored, excluded from the
-teploy build context, and yours to delete once the new box is up.
+teploy build context, and yours to delete once the new box is up. It carries the
+whole worker environment, not just the secret store: `--export-secrets` also
+reads the non-secret settings (`NUCLEUS_URL`, `AI_GATEWAY_URL`, `SHIP_MODEL`,
+`SHIP_REPO_ALLOWLIST`, …) back off the running worker container, because those
+live in `teploy.yml` rather than in the secret store and a bundle without them
+was never a startable configuration.
+
+### Adding a WORKER to an existing fleet — `teploy-ship join`
+
+The two commands above stand up a whole second Ship. To add a second *worker*
+to the Ship you already have — one dashboard, one store, more execution —
+`join` is the one command:
+
+```sh
+teploy-ship join http://<controller>:7460 --secrets ship.env \
+  --nucleus-url postgres://nucleus:<pw>@<controller-tailnet-ip>:5432/nucleus \
+  --sandbox http://172.18.0.1:7439 --start
+```
+
+It verifies, in one pass, that this box can actually reach every dependency
+before it writes anything:
+
+| Check | What it proves |
+|---|---|
+| `bundle` | the file carries a startable configuration, and names what is missing if not |
+| `controller` | `GET /health` is 200 and the controller's own store is `ok` |
+| `controller-token` | the controller *accepts* this token — a typo fails here, not on the Fleet page |
+| `store` | a real connection and a real round trip to Nucleus |
+| `sandbox:<url>` | **every** daemon in the pool answers `/health` and accepts `SHIP_SANDBOX_TOKEN` |
+| `forge:<origin>` | the forge authenticates the deploy token. "Set" is not "works" |
+| `model` | the gateway answers, or the worker will call the provider directly |
+| `colocation` | this box is not the forge's own box ([the B4 gate](#forge-co-location)) |
+
+Failures are listed together, with a fix line each, and **nothing is written and
+no worker is started unless every check passed** — the point of the command is
+that it never leaves a box half-joined and looking fine. Warnings (no sandbox
+configured, an empty allowlist) never block.
+
+On success it writes `~/.config/teploy-ship/worker.env` (mode 0600) and either
+runs the worker in the foreground (`--start`) or prints the systemd unit.
+
+**`join` never fetches credentials over the network.** You carry them, in the
+bundle. The reasoning — what a credential-distribution endpoint would have to
+do, and what a stolen join token would get you — is the `PRE-DECIDED` block at
+the top of `src/join.ts`. Per-install secrets (`SHIP_SESSION_SECRET`,
+`SHIP_WEBHOOK_SECRET`, `SHIP_WEB_TOKEN`, the Slack and Linear signing secrets)
+are dropped on the way in rather than shared between hosts.
+
+Two things a first join usually trips over, both reported by name:
+
+- **`NUCLEUS_URL` is a docker network alias.** `postgres://nucleus@ship-nucleus`
+  resolves only inside the controller's own docker network, and `ship-nucleus`
+  publishes no host port. Publish Nucleus on the tailnet with a password and
+  pass `--nucleus-url`. (This is the store decision in `_internal/MASTER_PLAN.md`
+  B3: Nucleus over the tailnet, with credentials.)
+- **`AI_GATEWAY_URL` is the same shape** (`http://ship-gateway:8089`). Publish
+  the gateway on the tailnet, or clear it and set `ANTHROPIC_API_KEY` so this
+  worker calls the provider directly.
+
+**Adding a sandbox host rather than a worker** is smaller and often the better
+answer — runs are bound by model latency, not by the box (`docs/capacity.md`),
+so one worker driving N sandbox daemons is where the throughput is.
+`SHIP_SANDBOX_URL` is a comma-separated list, and `join --sandbox <url>` appends
+to it (deduped) rather than replacing it.
 
 ### The manual path
 
@@ -257,6 +320,55 @@ not just a complaint.
   URL) and `SHIP_PUBLIC_URL` — Ship pings the channel when a run parks
   for approval/plan review and when it completes or fails, with a link.
 
+### Observe alerts — incidents in
+
+A firing Observe alert becomes an `incident` proposal in Ship's inbox.
+
+Register the webhook in Observe (admin JWT required):
+
+```
+POST /api/v1/platform/webhooks
+{"site_id":"<site>","name":"teploy-ship","webhook_type":"http",
+ "url":"https://ship.example.com/hooks/observe"}
+```
+
+The response carries `secret` **once and only once** — Observe generates
+it and there is no reveal or rotate endpoint, so lose it and you delete
+and recreate the hook. Put it on Ship's **web** process as
+`SHIP_OBSERVE_SIGNING_SECRET`. Without it the route answers 503 and
+nothing is accepted.
+
+Two things will bite before anything else does:
+
+- **The URL must be publicly routable.** Observe dials webhook targets
+  through `netsafe`, which blocks loopback, RFC1918 **and 100.64.0.0/10**
+  at connect time. A Ship reachable only over the tailnet never receives
+  a delivery, and the failure is a log line on the Observe side only.
+- **Register against the site whose service you have bound to a repo.**
+  The repository is a reverse lookup: the alert's service (today, its
+  site) is matched against `observeService` on the project record, the
+  same value `teploy-ship evidence set --repo <url> --observe-service
+  <name>` writes. No match, or two repos claiming one service, and the
+  proposal arrives unbound rather than pointed at the wrong repository —
+  bind it by hand from the inbox and fix the record.
+
+Deliveries are signed Stripe-style: `X-Observe-Signature:
+sha256=<hex HMAC-SHA256(secret, "<unix-seconds>.<body>")>` with the same
+seconds in `X-Observe-Timestamp`. Ship verifies the MAC, then refuses a
+body signed more than `SHIP_OBSERVE_MAX_SKEW_S` seconds ago (default
+300) — that window is the replay bound, because the timestamp is inside
+the signed message and cannot be moved without breaking the MAC.
+
+**Policy: `observe` is never `auto`.** An incident is not something to
+run unattended; leave the source's policy at `propose` and launch from
+the inbox. The worker only auto-launches a source explicitly set to
+`auto`, so an unconfigured `observe` already behaves this way.
+
+An alert that keeps breaching fires once per rule cooldown and each
+firing carries a new `alert_id`, which is the dedupe key — so a long
+outage proposes a fresh incident each cooldown. Dismiss the duplicates,
+or raise the rule's cooldown.
+
 ### Connecting Ship to Akiroo
 
 Akiroo is a workspace; Ship is the thing that does the work. The hop
@@ -430,6 +542,21 @@ worker-wide default: a repo's project record (dashboard Projects page, or
 `teploy-ship project set <repo> --image ship-sandbox-node:dev --network egress`)
 overrides the image, network and limits for that repo's runs.
 
+`SHIP_SANDBOX_URL` is a **list**. Comma-separated, it names several daemons;
+each run is placed on the least-loaded healthy one, a host that refuses work is
+skipped until it recovers, and a run already placed on a host that dies fails
+with the host named rather than being silently moved (its workspace only ever
+existed there). Adding a box is adding a URL:
+
+```sh
+teploy-ship join http://<controller>:7460 --secrets ship.env \
+  --sandbox http://<new-host>:7439        # appended to the list, deduped
+```
+
+Each daemon has its own token in `/var/lib/teploy-sandbox/token`, so a pool
+either shares one token or is joined a host at a time; `join` checks every URL
+in the list and names the one that rejected it.
+
 <a id="sandbox-images"></a>
 ### Sandbox images
 
@@ -557,6 +684,29 @@ agent gets a ```search action.
   harness-side only and are picked per host (Forgejo vs GitHub).
 - **Spend**: per-source daily budgets + global concurrency caps.
 
+### Forge co-location
+
+A worker **refuses to start on the forge's own box**, and says exactly what it
+detected. The reason is not hypothetical: the sandbox egress allowlist permits
+the forge by design — a run has to clone and push — so on the forge's machine
+that permission is a local hop to every repository and every credential it
+holds, with one container boundary between them instead of a container boundary
+plus a network. `SHIP_ALLOW_FORGE_COLOCATION=1` overrides it, and the override
+is logged on every start.
+
+Four checks, in order (`src/colocation.ts`): the origin is loopback; it resolves
+onto this process's own interfaces; **the forge's port answers on this process's
+own default gateway** — a container's gateway is the docker bridge on its host,
+so this asks "is the forge on my box?" and costs one TCP connect; and the same
+question asked from inside a sandbox, which is the right question once
+`SHIP_SANDBOX_URL` names hosts the worker is not on.
+
+The third check exists because the fourth is inert on the standard deployment: an
+egress sandbox network is docker-`internal`, so a run container has no default
+route at all and the sandbox-side probe can never find its host. `join` runs the
+same detector before it writes anything, so a first join on the wrong box fails
+with the explanation rather than with a worker that exits during startup.
+
 ## Day-2
 
 - `teploy deploy` redeploys; secrets persist. Run state lives in
@@ -585,6 +735,8 @@ new deployment actually has to set.
 | `SHIP_PREVIEW_TTL` | `24h` | Passed to `teploy preview deploy --ttl`. The CLI prunes expired previews on the next preview deploy for that app. |
 | `SHIP_PREVIEW_DESTINATION` | unset | Destination overlay (`-d staging`), applied to every command so a preview cannot land on the wrong server. |
 | `SHIP_PREVIEW_TIMEOUT_MS` | `900000` | Per-command ceiling. The server-side image build is the slow step. |
+| `SHIP_AUTO_MERGE` | **on where a repo asks for it** | Deployment-wide kill switch for auto-merge (L5). Auto-merge is per repo and off by default — the switch is `autoMerge` on the project record (Projects page, or `teploy-ship project set`) — but this turns it off everywhere at once without a per-repo edit. It also requires `SHIP_CHANGE_CLASS`: `trivial` is the entire authority for merging without a human, so with the class gate off there is no verdict to merge on and the flag is never recorded. |
+| `SHIP_ROLLBACK` | **on where preview and telemetry both are** | The auto-rollback WATCH (P1-4). After `preview-deploy` and `telemetry-check`, a `rollback` step judges the measured before/after and records what should happen. It is a pure judgement over two verdicts that were going to be recorded anyway, so watching costs nothing; set to `0` to stop recording it. Whether a run may ACT on the judgement is `autoDeploy` on the project record, and it is off by default — until it is set, the step says what it *would* roll back and why. |
 
 **Running a preview from the container image.** The image carries the `teploy`
 binary, so the remaining two things a preview needs are the ones that cannot be

@@ -1,6 +1,8 @@
 import { RepoNotAllowedError, proposeExternal } from "teploy-ship/runtime";
 import type { ProposeInput } from "teploy-ship/runtime";
 
+import { incidentTaskFromObserveAlert, observeAlertKey, repoForObserveService } from "teploy-ship";
+
 import { shipRuntime } from "./store.server.js";
 
 /**
@@ -128,3 +130,73 @@ export async function proposeFromWebhook(input: ProposeInput): Promise<Response>
     throw error;
   }
 }
+
+
+/**
+ * Verify an Observe webhook signature.
+ *
+ * Observe signs Stripe-style: `X-Observe-Signature: sha256=<lowercase hex of
+ * HMAC-SHA256(secret, "<unix-seconds>.<raw body>")>` with the timestamp
+ * repeated in `X-Observe-Timestamp`
+ * (teploy-observe/internal/platform/webhooks.go:134-161). Binding the
+ * timestamp INTO the signed message is what makes the freshness check below
+ * meaningful — an attacker replaying a captured body cannot move the clock
+ * without invalidating the MAC.
+ *
+ * Freshness matters more here than on the forge receivers, because Observe
+ * stamps no delivery id, so `claimDelivery` has nothing of its own to dedupe
+ * on. The window is SHIP_OBSERVE_MAX_SKEW_S seconds either side of now
+ * (default 300); a body older than that is refused even with a valid MAC.
+ *
+ * Returns null on success, or the response to send.
+ */
+export async function verifyObserveSignature(request: Request, body: string, secret: string): Promise<Response | null> {
+  const { createHmac, timingSafeEqual } = await import("node:crypto");
+  const signature = request.headers.get("x-observe-signature") ?? "";
+  const timestamp = request.headers.get("x-observe-timestamp") ?? "";
+  // An unsigned delivery lands here as two empty headers: Observe omits both
+  // when its stored secret is blank (webhooks.go:141). Ship requires the
+  // secret, so that delivery must be refused rather than treated as "no
+  // signature to check".
+  const expected = `sha256=${createHmac("sha256", secret).update(`${timestamp}.${body}`).digest("hex")}`;
+  if (signature.length !== expected.length || !timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {
+    return json(401, { title: "bad observe signature" });
+  }
+  // Checked AFTER the MAC, so the value being range-checked is one Observe
+  // actually signed rather than a header any caller can set.
+  const sent = Number(timestamp);
+  if (!Number.isFinite(sent)) return json(401, { title: "bad observe signature timestamp" });
+  const skew = Number(process.env.SHIP_OBSERVE_MAX_SKEW_S);
+  const window = Number.isFinite(skew) && skew > 0 ? skew : 300;
+  if (Math.abs(Date.now() / 1000 - sent) > window) {
+    return json(401, { title: "observe delivery is outside the freshness window", detail: `${window}s` });
+  }
+  return null;
+}
+
+/**
+ * The repository an Observe alert is about, as a CLONE URL.
+ *
+ * Two hops, and both are needed. The evidence store answers service → repo
+ * SLUG (`repoForObserveService`, src/evidence.ts) because that is the key
+ * every evidence and telemetry record is filed under; a run needs a URL to
+ * clone. The project record is the only place a slug's clone URL is written
+ * (`Project.url`, src/projects.ts:35), so a repo configured through the legacy
+ * `evidence set` path with no project record resolves to a slug and no URL —
+ * which correctly yields an UNBOUND proposal rather than a run pointed at a
+ * repository Ship cannot clone.
+ *
+ * Returns undefined for no match, an ambiguous match, or a slug with no URL.
+ */
+export async function observeRepoFor(payload: Parameters<typeof observeAlertKey>[0]): Promise<string | undefined> {
+  const key = observeAlertKey(payload);
+  if (key === "") return undefined;
+  const runtime = await shipRuntime();
+  const slug = repoForObserveService(await runtime.evidence.list(), key);
+  if (slug === null) return undefined;
+  const project = await runtime.projects.forRepo(slug);
+  return project?.url;
+}
+
+/** Re-exported so the receiver route imports one module. */
+export { incidentTaskFromObserveAlert };

@@ -129,6 +129,13 @@ env:
   # The daily count cap, concurrency ceiling, and per-source spend budget
   # still bound it (SHIP_DAILY_BUDGET_USD, SHIP_MAX_CONCURRENT_RUNS).
   #
+  # SHIP_MAX_CONCURRENT_RUNS is now an OVERRIDE, not the setting (B1): the worker
+  # measures the box's cpu, memory and disk and derives its own ceiling, and the
+  # Fleet page says which limit is binding. Leave it unset unless you have a
+  # reason to disagree with the measurement. Measured on deploy-test 2026-08-26:
+  # the derived ceiling is 1, disk-bound — docs/capacity.md's recommended 4 was
+  # wrong for that box, and nothing was measuring disk at all.
+  #
   # SHIP_MAX_STEPS caps how many model turns one durable run gets (default
   # 40). Raise it for repos where tasks need more exploration; the spend
   # caps above are what actually bound cost.
@@ -148,8 +155,18 @@ env:
   # (dashboard Projects page / `teploy-ship project set <repo> --image …`)
   # overrides it for that repo's runs, so one worker serves a Go repo and a
   # pnpm repo in their own images.
+  #
+  # SHIP_SANDBOX_URL takes a LIST (comma-separated) since B2: each run is placed
+  # on the least-loaded healthy daemon, and adding a box is adding it here.
+  #
+  # The image is built from `images/` in this repo (`images/build.sh`) — it used
+  # to be hand-built on the box and existed nowhere else. Go is pinned to 1.25:
+  # three repos need it, and on 2026-08-26 every Go pull request arrived marked
+  # `tests: failed` against 1.24. This line said `golang:1.24` while the live
+  # worker was already running the harness image, which is the drift that cost
+  # that day.
   SHIP_SANDBOX_URL: http://172.18.0.1:7439
-  SHIP_SANDBOX_IMAGE: golang:1.24
+  SHIP_SANDBOX_IMAGE: ship-sandbox-harness:dev
   SHIP_SANDBOX_NETWORK: egress
 
   # --- Evidence on the pull request (P1) ---------------------------------

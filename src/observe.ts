@@ -328,6 +328,85 @@ export function compareHealth(
 const pct = (n: number): string => `${(n * 100).toFixed(2)}%`;
 
 /**
+ * When a measured comparison is bad enough to act on (P1-4 / L4).
+ *
+ * Two knobs rather than one because the two numbers fail differently. An error
+ * rate is already a proportion, so an ABSOLUTE delta reads correctly at any
+ * scale — a point of extra errors is a point of extra errors. Latency is not:
+ * 4ms -> 6ms is a 50% regression and means nothing, so p95 is judged on a
+ * RATIO and floored by a minimum absolute move, and both have to fire.
+ *
+ * PRE-DECIDED (2026-08-26): one percentage point of errors, or p95 up 25% AND
+ * up at least 100ms. These are starting values, not measurements — nothing has
+ * auto-rolled-back yet, so there is no distribution to fit. They are chosen to
+ * sit well outside the noise of the akiroo-lite and teploy-site services Ship
+ * currently watches. Reverses on the first false positive or the first missed
+ * regression in the recorded `rollback` steps, which is exactly what building
+ * the observation half first is for.
+ */
+export interface RegressionThresholds {
+  /** Absolute increase in error rate (0.01 = one percentage point). */
+  errorRateDelta: number;
+  /** after.p95 / before.p95 above this counts, if minP95DeltaMs also clears. */
+  p95Ratio: number;
+  /** Floor under the ratio rule, so a fast service's jitter is not a regression. */
+  minP95DeltaMs: number;
+}
+
+export const defaultRegressionThresholds: RegressionThresholds = {
+  errorRateDelta: 0.01,
+  p95Ratio: 1.25,
+  minP95DeltaMs: 100,
+};
+
+/**
+ * Is this verdict a regression, and in whose words?
+ *
+ * Only a `compared` verdict can be one. `insufficient`, `unavailable` and
+ * `disabled` all answer NO — deliberately, and it is the same posture as
+ * compareHealth's refusal to compute a number off nine requests (observe.ts:291)
+ * and telemetryAppliesTo's "a comparison that cannot be made is not a match"
+ * (observe.ts:270). A rollback is a destructive act taken on a machine's own
+ * reading; "we could not measure it" is not evidence for taking one.
+ *
+ * Pure, so it can be called OUTSIDE a recorded step over the verdict a
+ * recorded step already produced — the reason durable.ts computes it once and
+ * feeds both the rollback decision and the auto-merge gate from it, rather
+ * than deriving it twice and risking two answers.
+ */
+export function telemetryRegression(
+  verdict: TelemetryVerdict,
+  thresholds: RegressionThresholds = defaultRegressionThresholds,
+): { worse: boolean; reasons: string[] } {
+  if (verdict.kind !== "compared") {
+    return { worse: false, reasons: [`no comparison to judge (${verdict.kind}: ${verdict.reason})`] };
+  }
+  const reasons: string[] = [];
+  if (verdict.errorRateDelta > thresholds.errorRateDelta) {
+    reasons.push(
+      `error rate up ${pct(verdict.errorRateDelta)} (${pct(verdict.before.errorRate)} -> ${pct(verdict.after.errorRate)}), ` +
+        `over the ${pct(thresholds.errorRateDelta)} threshold`,
+    );
+  }
+  const ratio = verdict.before.p95 > 0 ? verdict.after.p95 / verdict.before.p95 : Infinity;
+  if (verdict.p95Delta >= thresholds.minP95DeltaMs && ratio > thresholds.p95Ratio) {
+    reasons.push(
+      `p95 up ${Math.round(verdict.p95Delta)}ms (${Math.round(verdict.before.p95)}ms -> ${Math.round(verdict.after.p95)}ms, ` +
+        `${ratio === Infinity ? "from zero" : `${ratio.toFixed(2)}x`}), over the ${thresholds.p95Ratio}x / ${thresholds.minP95DeltaMs}ms threshold`,
+    );
+  }
+  return reasons.length > 0
+    ? { worse: true, reasons }
+    : {
+        worse: false,
+        reasons: [
+          `error rate ${verdict.errorRateDelta >= 0 ? "+" : ""}${pct(verdict.errorRateDelta)}, ` +
+            `p95 ${verdict.p95Delta >= 0 ? "+" : ""}${Math.round(verdict.p95Delta)}ms — inside the thresholds`,
+        ],
+      };
+}
+
+/**
  * The telemetry section of a pull request.
  *
  * States what was measured and never claims the change CAUSED it. Traffic mix

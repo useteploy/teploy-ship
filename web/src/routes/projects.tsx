@@ -109,9 +109,15 @@ export async function action({ request }: { request: Request }): Promise<Respons
 
   const policy = str("policy");
   const existing = (await runtime.projects.forRepo(target)) ?? { repo: target, autoMerge: false, autoDeploy: false };
-  if (policy === "auto" && existing.sourcePolicy !== "auto" && !(await may("auto", me))) {
+  const canAuto = await may("auto", me);
+  if (policy === "auto" && existing.sourcePolicy !== "auto" && !canAuto) {
     return redirect(`/projects?denied=auto`);
   }
+  // Asking to turn either unattended flag ON without the grant is a refusal,
+  // not a silent downgrade: an operator who ticked the box and got a saved
+  // record with it clear would reasonably believe auto-merge was on.
+  const wantsAuto = form.get("autoMerge") !== null || form.get("autoDeploy") !== null;
+  if (wantsAuto && !canAuto) return redirect(`/projects?denied=auto`);
   const network = str("network");
   const harness = str("harness");
   const memoryMb = num("memoryMb");
@@ -133,6 +139,17 @@ export async function action({ request }: { request: Request }): Promise<Respons
     testCommand: str("testCommand"),
     testTimeoutMs: num("testTimeoutMs"),
     observeService: str("observeService"),
+    // The two unattended-action flags (L5 / L4). Guarded by the same `auto`
+    // grant as setting an intake policy to `auto` — merging without a human is
+    // a stronger form of the same authority, not a different one — and a
+    // checkbox that is absent from the form body reads as false, which is the
+    // safe direction for both.
+    // A user without the grant sees both boxes disabled, so their form body
+    // carries neither — reading that as "off" would let an ordinary save by an
+    // editor silently switch auto-merge off. Their save preserves what is set.
+    autoMerge: canAuto ? form.get("autoMerge") !== null : existing.autoMerge === true,
+    autoDeploy: canAuto ? form.get("autoDeploy") !== null : existing.autoDeploy === true,
+    deployApp: str("deployApp"),
   };
   try {
     await runtime.projects.set(next);
@@ -201,6 +218,15 @@ function ProjectForm({ p, data }: { p: Project | null; data: ProjectsData }) {
       <Field label="test command" name="testCommand" value={p?.testCommand} placeholder="detected from the repo" />
       <Field label="test timeout ms" name="testTimeoutMs" value={p?.testTimeoutMs !== undefined ? String(p.testTimeoutMs) : undefined} placeholder="default" type="number" />
       <Field label="Observe service" name="observeService" value={p?.observeService} placeholder="none" />
+      <Field label="deploy app" name="deployApp" value={p?.deployApp} placeholder="teploy.yml default" />
+      <label class="meta" style="display:flex;gap:6px;align-items:center">
+        <input type="checkbox" name="autoMerge" checked={p?.autoMerge === true} disabled={!data.canAuto} />
+        auto-merge trivial changes
+      </label>
+      <label class="meta" style="display:flex;gap:6px;align-items:center">
+        <input type="checkbox" name="autoDeploy" checked={p?.autoDeploy === true} disabled={!data.canAuto} />
+        auto-rollback a bad deploy
+      </label>
       <div class="row-actions" style="gap:8px">
         <button class="approve sm" type="submit" name="intent" value="save" disabled={!data.canEdit}>{p === null ? "Add project" : "Save"}</button>
         {p !== null && (
@@ -242,6 +268,15 @@ export default function Projects({ data }: { data: ProjectsData | SourcesData | 
         A command typed here always wins. Leave <b>harness</b> at the worker default unless the sandbox image
         actually carries that binary: harnesses are baked in by <code>images/build.sh --harness &lt;id&gt;</code>, never installed per run.
       </p>
+      <p class="meta">
+        <b>auto-merge</b> squash-merges this repo's pull request with no human when the change classifies <code>trivial</code>,
+        the suite <i>passed</i>, the pull request opened non-draft and telemetry did not get worse — all four, every time, and the
+        run records which of them held. It needs the change-class gate on (<code>SHIP_CHANGE_CLASS</code>);
+        <code>SHIP_AUTO_MERGE=0</code> disables it everywhere at once. <b>auto-rollback</b> lets a run actually run
+        <code>teploy rollback</code> when the service got worse after it deployed; with it off, the run still records what it
+        would have done and why. Turn either on only after the <code>change-class</code> steps for this repo have been read for
+        a while — the whole point of the classifier is that its verdict has to earn trust before it is spent.
+      </p>
 
       {p !== null ? (
         <>
@@ -265,7 +300,7 @@ export default function Projects({ data }: { data: ProjectsData | SourcesData | 
             <div class="table-wrap">
               <table class="runs">
                 <thead>
-                  <tr><th>repo</th><th>image</th><th>harness</th><th>policy</th><th>tests</th><th>observe</th></tr>
+                  <tr><th>repo</th><th>image</th><th>harness</th><th>policy</th><th>tests</th><th>observe</th><th>unattended</th></tr>
                 </thead>
                 <tbody>
                   {data.projects.map((r) => (
@@ -280,6 +315,7 @@ export default function Projects({ data }: { data: ProjectsData | SourcesData | 
                       <td class="meta">{r.sourcePolicy ?? "inherit"}{r.dailyBudgetUSD !== undefined ? ` · $${r.dailyBudgetUSD}/day` : ""}</td>
                       <td class="meta">{r.testCommand ?? "detected"}</td>
                       <td class="meta">{r.observeService ?? "—"}</td>
+                      <td class="meta">{[r.autoMerge ? "merge" : null, r.autoDeploy ? "rollback" : null].filter((x) => x !== null).join(" · ") || "—"}</td>
                     </tr>
                   ))}
                 </tbody>

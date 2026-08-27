@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { deployPreview, destroyPreview, previewComment, previewTargetFromEnv, type CommandResult, type CommandRunner } from "./deploy.js";
+import { deployPreview, destroyPreview, previewComment, previewTargetFromEnv, rollbackDeploy, type CommandResult, type CommandRunner } from "./deploy.js";
 
 /** A runner that plays scripted results and records every argv it saw. */
 function scriptedRunner(results: Record<string, CommandResult>): {
@@ -208,4 +208,24 @@ test("a preview directory that is not a clone of the repo fails with a usable re
   assert.equal(outcome.kind, "failed");
   assert.match((outcome as { reason: string }).reason, /must be a clone of the repository being fixed/);
   assert.ok(!calls.some((c) => c[0] === "teploy"), "nothing may be built from an unknown commit");
+});
+
+// --- P1-4 / L4: rolling a bad deploy back ----------------------------------
+
+test("P1-4: rollback is `teploy rollback` in the worker's working copy, with the destination overlay", async () => {
+  // No `--app`: that variant reads state off a server and needs `--host`
+  // (teploy-cli internal/cli/rollback.go:40), which Ship has no wiring for.
+  // The working copy's own teploy.yml names the app, exactly as for a preview.
+  const { run, calls, cwds } = scriptedRunner({ rollback: { code: 0, stdout: "Rolled back to abc1234\n", stderr: "" } });
+  const outcome = await rollbackDeploy({ dir: "/srv/app", destination: "staging", run });
+  assert.deepEqual(outcome, { kind: "rolled-back", output: "Rolled back to abc1234" });
+  assert.deepEqual(calls, [["teploy", "rollback", "-d", "staging"]]);
+  assert.deepEqual(cwds, ["/srv/app"]);
+});
+
+test("P1-4: a failed rollback is reported, not thrown — the run still ends with its pull request", async () => {
+  const { run } = scriptedRunner({ rollback: { code: 1, stdout: "", stderr: "no previous version to roll back to\n" } });
+  const outcome = await rollbackDeploy({ dir: "/srv/app", run });
+  assert.equal(outcome.kind, "failed");
+  assert.match(outcome.kind === "failed" ? outcome.reason : "", /exit 1.*no previous version/s);
 });

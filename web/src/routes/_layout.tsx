@@ -29,7 +29,7 @@ export async function loader({ request }: { request: Request }): Promise<{ nav: 
 const NAV_LINKS = [
   { href: "/", label: "Inbox", match: [] as string[] },
   { href: "/runs", label: "Runs", match: ["/reviews"] },
-  { href: "/projects", label: "Projects", match: ["/sources", "/knowledge"] },
+  { href: "/projects", label: "Projects", match: ["/sources", "/knowledge", "/bulletin-admin"] },
   { href: "/fleet", label: "Fleet", match: ["/spend"] },
   { href: "/settings", label: "Settings", match: ["/policies", "/users"] },
 ];
@@ -69,7 +69,11 @@ export const middleware: MiddlewareFn = async (request, _context, next) => {
   // /health is the family-convention liveness probe (teploy's deploy gate
   // polls it before any login could exist).
   // /oidc/* is the SSO handshake — it carries no session yet and must be reachable.
-  if (path === "/login" || path === "/health" || path.startsWith("/hooks/") || path.startsWith("/oidc/") || path.startsWith("/assets/") || path === "/favicon.ico") {
+  // /bulletin/* is the L6 public board: its visitors are members of the public
+  // and prove nothing, which is exactly why what a note can CAUSE is bounded on
+  // the other side (src/bulletin.ts). The trailing slash is load-bearing — the
+  // operator's page is /bulletin-admin and must stay behind the session.
+  if (path === "/login" || path === "/health" || path.startsWith("/hooks/") || path.startsWith("/bulletin/") || path.startsWith("/oidc/") || path.startsWith("/assets/") || path === "/favicon.ico") {
     return withSecurityHeaders(await next(), request);
   }
 

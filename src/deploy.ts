@@ -223,6 +223,47 @@ async function buildAndDeploy(opts: {
   return { kind: "failed", reason: `preview deployed but no URL could be established: ${tail(deployed.stdout)}` };
 }
 
+/** What a rollback attempt produced. Non-zero exit is data, like everywhere else here. */
+export type RollbackOutcome =
+  | { kind: "rolled-back"; output: string }
+  | { kind: "skipped"; reason: string }
+  | { kind: "failed"; reason: string };
+
+/**
+ * Put the app back on its previous release (P1-4 / L4).
+ *
+ * `teploy rollback` with no `--to` starts the previous version's containers (or
+ * flips the release symlink for a static app), health-checks, re-routes and
+ * stops the current ones — see teploy-cli `internal/cli/rollback.go:22`. No
+ * `--app` flag: that variant reads state off a server and requires `--host`,
+ * which Ship has no wiring for. The working copy's own `teploy.yml` names the
+ * app, which is the same way `deployPreview` above resolves it.
+ *
+ * REUSES PreviewTarget rather than introducing a RollbackTarget. It is the
+ * same fact about the worker — a directory holding a `teploy.yml`, a binary, a
+ * destination overlay and a timeout — and the credentials that reach the
+ * server are the same ones. A second config with identical fields would be two
+ * env blocks to keep in sync and one more way for them to disagree.
+ * PRE-DECIDED (2026-08-26); reverses if a deployment ever needs to preview one
+ * app and roll back a different one, at which point the field is `dir` and the
+ * split is mechanical.
+ *
+ * Like every command in this file it runs on the WORKER host, never in the
+ * agent's sandbox, and never through a shell.
+ */
+export async function rollbackDeploy(target: PreviewTarget): Promise<RollbackOutcome> {
+  const run = target.run ?? hostRunner();
+  const bin = target.bin ?? "teploy";
+  const dest = target.destination !== undefined ? ["-d", target.destination] : [];
+  const result = await run([bin, "rollback", ...dest], {
+    cwd: target.dir,
+    timeoutMs: target.timeoutMs ?? 900_000,
+  });
+  return result.code === 0
+    ? { kind: "rolled-back", output: tail(result.stdout || result.stderr) }
+    : { kind: "failed", reason: `teploy rollback failed (exit ${result.code}): ${tail(result.stderr || result.stdout)}` };
+}
+
 /** Tear a preview down. Used when a PR closes; the CLI's TTL is the backstop. */
 export async function destroyPreview(target: PreviewTarget, branch: string): Promise<PreviewOutcome> {
   const run = target.run ?? hostRunner();

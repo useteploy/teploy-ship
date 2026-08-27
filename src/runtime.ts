@@ -22,6 +22,8 @@ import type { HarnessRef } from "./harness.js";
 import type { EvidenceStore } from "./evidence.js";
 import { FileProjectStore, NucleusProjectStore, ProjectEvidenceStore } from "./projects.js";
 import type { ProjectStore } from "./projects.js";
+import { FileBulletinStore, NucleusBulletinStore } from "./bulletin.js";
+import type { BulletinStore } from "./bulletin.js";
 import { FileGovernanceStore, NucleusGovernanceStore, reviewersFor } from "./governance.js";
 import type { GovernanceStore } from "./governance.js";
 import { FileAttributedSpendStore, NucleusAttributedSpendStore } from "./attributed-spend.js";
@@ -61,6 +63,8 @@ export { FilePolicyStore, NucleusPolicyStore } from "./policies.js";
 export type { EvidenceStore, RepoEvidence } from "./evidence.js";
 export { FileEvidenceStore, NucleusEvidenceStore } from "./evidence.js";
 export type { Project, ProjectStore } from "./projects.js";
+export type { BulletinBoard, BulletinPost, BulletinStore } from "./bulletin.js";
+export { FileBulletinStore, NucleusBulletinStore, changeClassRequired, sweepBulletin } from "./bulletin.js";
 export { FileProjectStore, NucleusProjectStore, ProjectEvidenceStore, normalizeProject } from "./projects.js";
 export type { GovernanceStore, Governance, Grant, Authority, AuthorityAction, AutoWindow, Windows, ReviewerRule } from "./governance.js";
 export {
@@ -242,6 +246,8 @@ export interface ShipRuntime {
   policies: PolicyStore;
   /** One record per repo: allowlist, sandbox image, evidence, policy. See projects.ts. */
   projects: ProjectStore;
+  /** Public request boards and their notes (L6). See bulletin.ts. */
+  bulletin: BulletinStore;
   /** Per-repo evidence config — a view of `projects`, legacy rows read through. See projects.ts. */
   evidence: EvidenceStore;
   /** Who may do what, auto windows, required reviewers. See governance.ts. */
@@ -278,6 +284,7 @@ export function fileRuntime(): ShipRuntime {
   const projects = new FileProjectStore();
   return {
     kind: "file",
+    bulletin: new FileBulletinStore(),
     store,
     intake: new FileIntakeStore(),
     spend: new FileSpendStore(),
@@ -394,6 +401,7 @@ export async function nucleusRuntime(
   const projects = new NucleusProjectStore(db);
   return {
     kind: "nucleus",
+    bulletin: new NucleusBulletinStore(db),
     store,
     index,
     leases,
@@ -688,6 +696,18 @@ export async function enqueueRun(
      */
     changeClass?: boolean;
     /**
+     * Merge a `trivial` change without a human (L5). Absent falls back to the
+     * repo's project record; there is no env default, because "which repos may
+     * merge themselves" is a per-repo decision by construction.
+     */
+    autoMerge?: boolean;
+    /**
+     * Judge the service's before/after and record what should happen about a
+     * regression (P1-4). Absent follows preview+telemetry; `SHIP_ROLLBACK=0`
+     * turns the watch off for a deployment.
+     */
+    rollback?: boolean;
+    /**
      * `"scan"` makes this a read-only audit run (L2 / D3): the agent reports
      * findings and Ship publishes nothing. Materialised here, like every other
      * optional feature, because it both adds a recorded step (`scan-findings`)
@@ -844,6 +864,33 @@ export async function enqueueRun(
   // per deployment once someone is watching the inbox, which is exactly the
   // condition L5 and L6 also depend on.
   const changeClass = scan ? undefined : (options.changeClass ?? (options.repo !== undefined && envFlag("SHIP_CHANGE_CLASS") ? true : undefined));
+  // AUTO-MERGE (L5 / D5). Per repo, off unless the project record says on, and
+  // additionally requires the change-class gate: `trivial` is the entire
+  // authority for merging without a human (see change-class.ts), and with the
+  // gate off there is no verdict for the merge step to read — it would hold
+  // every time and the flag would be a silent no-op.
+  //
+  // Materialised HERE for the standard replay reason (it adds an `auto-merge`
+  // step) and for one sharper than usual: the project record is editable from
+  // the dashboard, so a worker re-reading it mid-replay could merge a pull
+  // request the log says was left open. The log has to carry the permission.
+  //
+  // SHIP_AUTO_MERGE=0 is a deployment-wide kill switch — the one knob an
+  // operator wants at 3am does not belong behind a per-repo edit.
+  const autoMerge =
+    !scan && changeClass === true && !envFlagOff("SHIP_AUTO_MERGE") && (options.autoMerge ?? project?.autoMerge === true)
+      ? true
+      : undefined;
+  // AUTO-ROLLBACK WATCH (P1-4 / L4). On wherever both of its inputs are on,
+  // with an off-switch: the step is a pure judgement over two verdicts that
+  // were going to be recorded anyway, so watching costs nothing, and the whole
+  // point of building the observation half first is to collect the recorded
+  // outcomes before anything acts on them.
+  const rollback =
+    scan ? undefined : (options.rollback ?? (preview === true && telemetry === true && !envFlagOff("SHIP_ROLLBACK") ? true : undefined));
+  // The authority to ACT on that watch, per repo. Never set without the watch:
+  // permission to roll back with nothing judging when to is not a feature.
+  const autoDeploy = rollback === true && project?.autoDeploy === true ? true : undefined;
   // The harness, as id + contract version. Recorded on EVERY new run, native
   // included, so the log says which program wrote it; a run enqueued before
   // this field existed has none and is native by definition.
@@ -901,6 +948,9 @@ export async function enqueueRun(
         ...(tests === true ? { tests: true } : {}),
         ...(testsFeedback === true ? { testsFeedback: true } : {}),
         ...(changeClass === true ? { changeClass: true } : {}),
+        ...(autoMerge === true ? { autoMerge: true } : {}),
+        ...(rollback === true ? { rollback: true } : {}),
+        ...(autoDeploy === true ? { autoDeploy: true } : {}),
         // Per-repo evidence values (see the resolution above). Absent on runs
         // enqueued before this existed, which replay and fall back to the
         // worker's env wiring exactly as before.

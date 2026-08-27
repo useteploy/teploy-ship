@@ -249,3 +249,69 @@ test("a worker reads telemetry only with all four of url, token, service and rep
     { url: "https://o", token: "t", service: "api", repo: "o/api", minRequests: 500 },
   );
 });
+
+// --- P1-4 / L4: is a measured comparison bad enough to act on? --------------
+
+import { defaultRegressionThresholds, telemetryRegression, type TelemetryVerdict } from "./observe.js";
+
+const health = (errorRate: number, p95: number): ServiceHealth => RED({ errorRate, p95 });
+
+const compared = (before: ServiceHealth, after: ServiceHealth): TelemetryVerdict => ({
+  kind: "compared",
+  before,
+  after,
+  errorRateDelta: after.errorRate - before.errorRate,
+  p95Delta: after.p95 - before.p95,
+});
+
+test("P1-4: only a COMPARED verdict can be a regression", () => {
+  // The refusal is the point, and it is the same posture as compareHealth's:
+  // a rollback is destructive, and "we could not measure it" is not evidence.
+  for (const verdict of [
+    { kind: "disabled", reason: "no telemetry target configured on this worker" },
+    { kind: "unavailable", reason: "observe unreachable" },
+    { kind: "insufficient", reason: "too little traffic", before: null, after: null },
+  ] as TelemetryVerdict[]) {
+    const r = telemetryRegression(verdict);
+    assert.equal(r.worse, false, `${verdict.kind} must never be a regression`);
+    assert.match(r.reasons.join(" "), new RegExp(verdict.kind));
+  }
+});
+
+test("P1-4: a point of extra errors is a regression; a tenth of one is not", () => {
+  assert.equal(telemetryRegression(compared(health(0.01, 100), health(0.03, 100))).worse, true);
+  assert.equal(telemetryRegression(compared(health(0.01, 100), health(0.011, 100))).worse, false);
+  assert.match(
+    telemetryRegression(compared(health(0.01, 100), health(0.03, 100))).reasons.join(" "),
+    /error rate up 2\.00%/,
+  );
+});
+
+test("P1-4: p95 needs BOTH a ratio and an absolute move — 4ms to 6ms is not a regression", () => {
+  // The failure this guards against: a fast service's jitter reads as a 50%
+  // latency regression on the ratio alone and would roll a healthy deploy back.
+  assert.equal(telemetryRegression(compared(health(0.001, 4), health(0.001, 6))).worse, false);
+  // Ratio without the absolute floor: 50ms -> 80ms is 1.6x but under 100ms.
+  assert.equal(telemetryRegression(compared(health(0.001, 50), health(0.001, 80))).worse, false);
+  // Absolute without the ratio: 2000ms -> 2150ms is +150ms but only 1.075x.
+  assert.equal(telemetryRegression(compared(health(0.001, 2000), health(0.001, 2150))).worse, false);
+  // Both: 200ms -> 600ms.
+  const bad = telemetryRegression(compared(health(0.001, 200), health(0.001, 600)));
+  assert.equal(bad.worse, true);
+  assert.match(bad.reasons.join(" "), /p95 up 400ms .*3\.00x/);
+});
+
+test("P1-4: p95 rising from a measured zero is a regression once it clears the floor", () => {
+  const r = telemetryRegression(compared(health(0.001, 0), health(0.001, 300)));
+  assert.equal(r.worse, true);
+  assert.match(r.reasons.join(" "), /from zero/);
+  // ...but not below the floor, where it is still noise.
+  assert.equal(telemetryRegression(compared(health(0.001, 0), health(0.001, 30))).worse, false);
+});
+
+test("P1-4: an improvement is never a regression, and says the numbers anyway", () => {
+  const r = telemetryRegression(compared(health(0.05, 900), health(0.01, 200)));
+  assert.equal(r.worse, false);
+  assert.match(r.reasons.join(" "), /inside the thresholds/);
+  assert.deepEqual(defaultRegressionThresholds, { errorRateDelta: 0.01, p95Ratio: 1.25, minP95DeltaMs: 100 });
+});
