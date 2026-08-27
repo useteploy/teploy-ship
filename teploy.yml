@@ -172,9 +172,21 @@ env:
   # `tests: failed` against 1.24. This line said `golang:1.24` while the live
   # worker was already running the harness image, which is the drift that cost
   # that day.
-  SHIP_SANDBOX_URL: http://172.18.0.1:7439
+  # compute-1. NOT a local address: nothing model-authored may run on the forge's
+  # box, and src/colocation.ts refuses to start the worker if a sandbox daemon
+  # ever resolves to the same machine as the forge. Comma-separate to add more
+  # compute; each run is placed on the least-loaded healthy daemon.
+  SHIP_SANDBOX_URL: http://100.107.192.39:7439
   SHIP_SANDBOX_IMAGE: ship-sandbox-harness:dev
   SHIP_SANDBOX_NETWORK: egress
+
+  # Pinned rather than derived, and this is a KNOWN GAP being worked around: B1
+  # senses the box the WORKER runs on — infra-home, 4 cpu / 30 GB — not
+  # compute-1 (4 cpu / 8 GB, shared with the Forgejo Actions runner), which is
+  # where sandboxes actually consume resources. The derived ceiling would be a
+  # number about the wrong machine. Raise it once the sensing understands
+  # remote pools.
+  SHIP_MAX_CONCURRENT_RUNS: "2"
 
   # --- Evidence on the pull request (P1) ---------------------------------
   # Each of these only ASKS. Whether the evidence can actually be produced is
