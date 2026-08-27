@@ -226,7 +226,11 @@ test("a missing binary is a recorded error result, not a thrown step", async () 
   assert.equal(outcome.status, "completed");
   const out = outcome.output as DurableAgentOutput;
   assert.equal(out.status, "error");
-  assert.match(out.summary, /opencode is not available in the sandbox image/);
+  assert.match(out.summary, /opencode is not on PATH in the sandbox image/);
+  // The message has to carry the FIX, not just the fact: harnesses are baked,
+  // and an operator who has just met that word needs the command.
+  assert.match(out.summary, /images\/build\.sh --harness opencode/);
+  assert.match(out.summary, /opencode-ai@/);
   const steps = (await store.load("run-nobin")).filter((e) => e.type === "step-completed").map((e) => e.name);
   assert.deepEqual(steps, ["sandbox", "harness-preflight"]);
 });

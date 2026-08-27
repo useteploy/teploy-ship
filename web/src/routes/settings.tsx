@@ -9,6 +9,11 @@ import type { Principal } from "../lib/session.server.js";
 
 export const config = { mode: "app" };
 
+// Mirrors HARNESS_PACKAGES (src/harness.ts), which mirrors images/versions.json
+// under a test. Named here rather than imported because this route is SSR'd
+// from source and the value is display copy, not behaviour.
+const BAKED_HARNESSES = "claude-code 2.1.246, opencode 1.18.23 — images/build.sh --harness <id>";
+
 interface Row {
   label: string;
   value: string;
@@ -113,7 +118,13 @@ export async function loader({ request }: { request: Request }): Promise<Setting
       {
         title: "Harness",
         rows: [
-          { label: "harness", value: (process.env.SHIP_HARNESS ?? "").trim() || "native", ok: true, hint: "SHIP_HARNESS — native (Ship's loop, the default) | claude-code | opencode; recorded on each run at enqueue" },
+          { label: "harness", value: (process.env.SHIP_HARNESS ?? "").trim() || "native", ok: true, hint: "SHIP_HARNESS — the worker-wide DEFAULT: native (Ship's loop) | claude-code | opencode. A project record's harness field wins for that repo. Recorded on each run at enqueue, so a replay runs under the program that wrote its log." },
+          {
+            label: "baked harnesses",
+            value: BAKED_HARNESSES,
+            ok: true,
+            hint: "what images/build.sh installs into a sandbox image, pinned in images/versions.json. Harnesses are BAKED, never installed per run: a run-time install needs sandbox egress and lets the binary drift under a running worker, which breaks replay. The image a repo boots must already carry the binary its harness names.",
+          },
           value("SHIP_HARNESS_ATTEMPTS", "not set — one attempt per run"),
           value("SHIP_HARNESS_MODEL", "not set — the harness's own default"),
           value("SHIP_HARNESS_ENV", "not set — per-adapter default credential names"),
@@ -183,6 +194,31 @@ export async function loader({ request }: { request: Request }): Promise<Setting
           { label: "preview", value: flagOn("SHIP_PREVIEW") ? "enabled" : "disabled", ok: flagOn("SHIP_PREVIEW"), hint: "SHIP_PREVIEW — deploy the branch with the teploy CLI" },
           value("SHIP_PREVIEW_DIR", "not set — preview leg is off"),
           { label: "per-repo overrides", value: "teploy-ship evidence set <repo> --test-command … --observe-service …", hint: "win over these worker-wide defaults" },
+        ],
+      },
+      {
+        title: "Akiroo (work in, pulled)",
+        rows: [
+          {
+            label: "connector",
+            value:
+              (process.env.AKIROO_URL ?? "") !== "" && (process.env.AKIROO_PULL_TOKEN ?? "") !== ""
+                ? "enabled"
+                : "disabled",
+            ok: (process.env.AKIROO_URL ?? "") !== "" && (process.env.AKIROO_PULL_TOKEN ?? "") !== "",
+            hint: "the worker COLLECTS work from Akiroo — outbound HTTPS only, no open port, no tunnel, no public URL",
+          },
+          safeUrl("AKIROO_URL"),
+          { ...secret("AKIROO_PULL_TOKEN"), hint: "minted once on Akiroo's Settings, Connections, Teploy Ship card" },
+          {
+            label: "last collected",
+            value: "shown on Akiroo's Connections card",
+            // Deliberately not mirrored here: Akiroo is the side that observes
+            // the poll arriving, so its answer is the true one. A second copy
+            // computed from this process could disagree with it and there would
+            // be no way to tell which was right.
+            hint: "Akiroo records when a Ship last polled; a queue that is not falling means this worker is not running",
+          },
         ],
       },
       {

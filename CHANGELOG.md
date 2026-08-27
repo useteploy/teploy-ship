@@ -18,6 +18,54 @@ All notable changes to Teploy Ship are recorded here.
   provider-specific rate still beats a bare one.
 
 ### Added
+- **Ship is installable by someone who is not its author (B5).** Four things
+  that only existed on one box now exist in this repo.
+  - **The sandbox images are here**, in `images/`, with a build script and
+    every version pinned in `images/versions.json` (bases by digest, harness
+    binaries by exact npm version). They were hand-built from Dockerfiles that
+    lived only in `~` on the dev box; if that box had died, Ship could not
+    have run. `images/build.sh` produces `ship-sandbox-go:<tag>`,
+    `ship-sandbox-node:<tag>`, and the `ship-sandbox-harness:<tag>` alias that
+    deployed workers already name. **Go is pinned to 1.25, not 1.24** — three
+    repos need 1.25 and on a 1.24 sandbox every Go pull request arrived marked
+    `tests: failed`; a test now fails if anyone pins it back.
+  - **Harnesses are declared, then baked.** A project record carries a
+    `harness` field (Projects page, `src/projects.ts`), and
+    `images/build.sh --harness <id>` bakes that binary in at a pinned version.
+    Nothing installs a harness at run time, deliberately: that needs the
+    sandbox egress default-deny exists to close, and a binary that drifts under
+    a running worker breaks replay, because `selectAdapter` refuses to replay a
+    run under a version its log did not record. A run whose harness is missing
+    from its image now says which command builds one.
+  - **`./install.sh`: a clean VM to a working Ship in one command.** Provisions
+    the server, generates the secrets that should never be shared between
+    installs, asks for the two only a human can supply, builds the sandbox
+    images on the server, deploys. It also makes secrets portable off a single
+    box for the first time — `--export-secrets` reads them back out of teploy's
+    server-side age store, which is the concrete reason a second host had never
+    existed.
+  - **The test command is detected from the repo**, so no repo owes Ship an
+    `evidence set` before its first pull request carries a suite result.
+    package.json `scripts.test` (with the install a fresh clone needs), a
+    Makefile `test:` target, `go.mod`, `Cargo.toml`, pytest config — read from
+    the forge **at enqueue**, because evidence is materialised into the run
+    input and a replay must run the command its log was written under. An
+    explicit per-repo entry still wins; `SHIP_TEST_COMMAND` drops to last
+    resort. `SHIP_TEST_DETECT=0` turns it off.
+- **Akiroo hop (L1): Ship pulls work from an Akiroo workspace.** Set
+  `AKIROO_URL` + `AKIROO_PULL_TOKEN` on the worker and a "Send to Ship" on
+  an Akiroo work item becomes a `ship`-labelled Forgejo/GitHub issue and an
+  intake proposal, and an approval on a parked run travels back the same
+  way. The direction is the feature: Ship needs only outbound HTTPS — no
+  port, no tunnel, no public URL — and Akiroo never holds a forge token.
+  Rows are claimed in the delivery log before being handled and acked
+  regardless, so a re-delivered batch cannot open a second issue and one bad
+  row cannot wedge the queue. See `docs/DEPLOY.md`, "Connecting Ship to
+  Akiroo".
+- `origin {source, dedupe_key, work_item_ref}` on the outbound run-event
+  payload (`RunWebhookPayload`), so a consumer can tie a run back to the work
+  item it came from. Ship also stamps `Akiroo: <ref>` into the issue body,
+  which reaches the same consumer through the run's task text.
 - **Pull request reviews close the loop.** Only `issue_comment` was handled, so
   "Request changes" with five inline comments produced *nothing at all* —
   `pull_request_review` and `pull_request_review_comment` fell out of both

@@ -63,6 +63,127 @@ export function testTargetFromInput(input: { testCommand?: string; testTimeoutMs
   };
 }
 
+/**
+ * The few root files that say how a repository runs its own tests. Read from
+ * the forge at enqueue by test-detect.ts; kept as a plain value so the
+ * detection below is pure and testable without a network.
+ */
+export interface RepoTree {
+  /** Entry names at the repository root (files and directories, no paths). */
+  names: string[];
+  /** Contents of the root package.json, when there is one. */
+  packageJson?: string;
+  /** Contents of the root Makefile, when there is one. */
+  makefile?: string;
+  /** Contents of the root pyproject.toml, when there is one. */
+  pyproject?: string;
+}
+
+/** npm's own placeholder script. A repo that still has it has no suite. */
+const NPM_PLACEHOLDER = /no test specified/i;
+
+/**
+ * Which package manager a JS repo uses, from `packageManager` first (the field
+ * corepack honours, so it is the repo's own statement) and the lockfile
+ * second.
+ */
+function jsPackageManager(names: readonly string[], pkg: Record<string, unknown>): "pnpm" | "yarn" | "bun" | "npm" {
+  const declared = typeof pkg.packageManager === "string" ? pkg.packageManager.split("@")[0] : "";
+  if (declared === "pnpm" || declared === "yarn" || declared === "bun" || declared === "npm") return declared;
+  if (names.includes("pnpm-lock.yaml")) return "pnpm";
+  if (names.includes("yarn.lock")) return "yarn";
+  if (names.includes("bun.lockb") || names.includes("bun.lock")) return "bun";
+  return "npm";
+}
+
+/**
+ * The install step a JS suite needs before it can run.
+ *
+ * Not optional and not gold-plating: the suite runs in a container over a FRESH
+ * clone, so `pnpm test` with no node_modules exits non-zero and Ship reports
+ * "Tests: FAILED" for a repo whose tests were never executed — strictly worse
+ * than reporting nothing. Go, Rust and pytest need no equivalent (go and cargo
+ * fetch their own dependencies).
+ *
+ * `--frozen-lockfile` / `npm ci` only where a lockfile exists, matching what a
+ * CI job for the same repo would do.
+ */
+function jsInstall(pm: "pnpm" | "yarn" | "bun" | "npm", names: readonly string[]): string {
+  switch (pm) {
+    case "pnpm":
+      return names.includes("pnpm-lock.yaml") ? "pnpm install --frozen-lockfile" : "pnpm install";
+    case "yarn":
+      return names.includes("yarn.lock") ? "yarn install --frozen-lockfile" : "yarn install";
+    case "bun":
+      return "bun install";
+    case "npm":
+      return names.includes("package-lock.json") ? "npm ci" : "npm install";
+  }
+}
+
+/**
+ * Guess the repository's test command from its root.
+ *
+ * This is the DEFAULT for a repo with no explicit entry, not a replacement for
+ * one: `resolveTestTarget` (test-detect.ts) returns the operator's
+ * `testCommand` untouched whenever there is one. Before this, every repo owed
+ * Ship a `teploy-ship evidence set <repo> --test-command …` before a single
+ * pull request could carry a suite result, and a worker-wide
+ * `SHIP_TEST_COMMAND` was wrong for every repo but one.
+ *
+ * Order, and why:
+ *   1. `package.json` scripts.test — the repo's own declared entry point.
+ *   2. a Makefile `test:` target — an operator wrote that on purpose, and it
+ *      usually wraps the language command with the flags the repo needs.
+ *   3. go.mod / Cargo.toml / pytest, which are conventions rather than
+ *      statements.
+ *
+ * Returns undefined when nothing is recognisable, which leaves the worker's
+ * SHIP_TEST_COMMAND in charge exactly as before. A WRONG guess is bounded by
+ * C4: the baseline runs the same command before the agent edits anything, so a
+ * command that cannot run in the sandbox is reported as pre-existing breakage
+ * rather than blamed on the run (see preExisting below).
+ */
+export function testTargetFromTree(tree: RepoTree): TestTarget | undefined {
+  const names = tree.names;
+
+  if (tree.packageJson !== undefined) {
+    let pkg: Record<string, unknown> = {};
+    try {
+      pkg = JSON.parse(tree.packageJson) as Record<string, unknown>;
+    } catch {
+      pkg = {};
+    }
+    const scripts = (pkg.scripts ?? {}) as Record<string, unknown>;
+    const script = typeof scripts.test === "string" ? scripts.test.trim() : "";
+    if (script !== "" && !NPM_PLACEHOLDER.test(script)) {
+      const pm = jsPackageManager(names, pkg);
+      return { command: `${jsInstall(pm, names)} && ${pm} test` };
+    }
+  }
+
+  // A `test:` target at the start of a line, not `pretest:` and not a mention
+  // inside a recipe. Tabs and `.PHONY: test` lines are both handled by
+  // requiring the name at column 0.
+  if (tree.makefile !== undefined && /^test[ \t]*:/m.test(tree.makefile)) {
+    return { command: "make test" };
+  }
+
+  if (names.includes("go.mod")) return { command: "go test ./..." };
+  if (names.includes("Cargo.toml")) return { command: "cargo test" };
+
+  // pytest needs a real signal, not just "there is Python here": a repo with
+  // no pytest config gets nothing rather than a command that exits 4.
+  const pytestConfigured =
+    (tree.pyproject !== undefined && /\[tool\.pytest/.test(tree.pyproject)) ||
+    names.includes("pytest.ini") ||
+    names.includes("conftest.py") ||
+    names.includes("tox.ini");
+  if (pytestConfigured) return { command: "python3 -m pytest -q" };
+
+  return undefined;
+}
+
 /** Keep the tail: a failing suite puts its summary at the end. */
 function tail(text: string, lines = 40): string {
   const kept = text.trimEnd().split("\n").slice(-lines).join("\n");

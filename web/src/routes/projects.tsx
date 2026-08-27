@@ -17,9 +17,17 @@ export const config = { mode: "app" };
 
 // Images an operator is likely to want; the field is free text, this only
 // seeds the browser's suggestions. Empty = the worker's SHIP_SANDBOX_IMAGE.
-const IMAGES = ["golang:1.24", "node:22", "python:3.12-slim", "rust:1", "ruby:3.3"];
+// The two ship-sandbox-* tags are what `images/build.sh` produces (B5) — the
+// only images in this list that carry a harness binary.
+const IMAGES = ["ship-sandbox-go:dev", "ship-sandbox-node:dev", "golang:1.25", "node:22", "python:3.12-slim", "rust:1"];
 const NETWORKS = ["", "none", "egress"] as const;
 const POLICIES = ["", "ignore", "propose", "auto"] as const;
+// Mirrors HARNESS_VERSIONS (src/harness.ts) the way NETWORKS/POLICIES mirror
+// their unions: this route is SSR'd from source and importing a value out of
+// the runtime package for a four-entry list is not worth the coupling.
+// normalizeProject refuses an id this list does not contain, so a drift here
+// surfaces as a rejected save rather than a broken run.
+const HARNESSES = ["", "native", "claude-code", "opencode"] as const;
 
 interface ProjectsData {
   view: "repos";
@@ -29,6 +37,8 @@ interface ProjectsData {
   hookBase: string;
   envAllowlist: string;
   workerImage: string;
+  workerHarness: string;
+  workerTestCommand: string;
   canEdit: boolean;
   canAuto: boolean;
   denied: string | null;
@@ -57,6 +67,8 @@ export async function loader({ request }: { request: Request }): Promise<Project
     hookBase: (process.env.SHIP_PUBLIC_URL ?? "").replace(/\/+$/, ""),
     envAllowlist: process.env.SHIP_REPO_ALLOWLIST ?? "",
     workerImage: process.env.SHIP_SANDBOX_IMAGE ?? "",
+    workerHarness: (process.env.SHIP_HARNESS ?? "").trim(),
+    workerTestCommand: (process.env.SHIP_TEST_COMMAND ?? "").trim(),
     canEdit,
     canAuto,
     denied: url.searchParams.get("denied"),
@@ -101,6 +113,7 @@ export async function action({ request }: { request: Request }): Promise<Respons
     return redirect(`/projects?denied=auto`);
   }
   const network = str("network");
+  const harness = str("harness");
   const memoryMb = num("memoryMb");
   const cpus = num("cpus");
   const next: Project = {
@@ -111,6 +124,11 @@ export async function action({ request }: { request: Request }): Promise<Respons
     sandboxNetwork: network === "none" || network === "egress" ? network : undefined,
     sandboxLimits: memoryMb !== undefined || cpus !== undefined ? { ...(memoryMb !== undefined ? { memoryMb } : {}), ...(cpus !== undefined ? { cpus } : {}) } : undefined,
     sourcePolicy: policy === "ignore" || policy === "propose" || policy === "auto" ? policy : undefined,
+    // Declare-then-bake: this says WHICH program edits the tree. The binary has
+    // to be in the sandbox image already (`images/build.sh --harness <id>`);
+    // nothing installs it per run. normalizeProject rejects an unknown id, and
+    // the redirect below shows the message.
+    harness,
     dailyBudgetUSD: num("budget"),
     testCommand: str("testCommand"),
     testTimeoutMs: num("testTimeoutMs"),
@@ -164,6 +182,14 @@ function ProjectForm({ p, data }: { p: Project | null; data: ProjectsData }) {
       <Field label="memory MB" name="memoryMb" value={p?.sandboxLimits?.memoryMb !== undefined ? String(p.sandboxLimits.memoryMb) : undefined} placeholder="1024" type="number" />
       <Field label="cpus" name="cpus" value={p?.sandboxLimits?.cpus !== undefined ? String(p.sandboxLimits.cpus) : undefined} placeholder="1" type="number" />
       <label class="meta" style="display:flex;flex-direction:column;gap:4px">
+        harness{data.workerHarness !== "" ? ` (worker default ${data.workerHarness})` : ""}
+        <select name="harness" style={INPUT}>
+          {HARNESSES.map((h) => (
+            <option key={h} value={h} selected={(p?.harness ?? "") === h}>{h === "" ? "worker default" : h}</option>
+          ))}
+        </select>
+      </label>
+      <label class="meta" style="display:flex;flex-direction:column;gap:4px">
         intake policy
         <select name="policy" style={INPUT}>
           {POLICIES.map((n) => (
@@ -172,7 +198,7 @@ function ProjectForm({ p, data }: { p: Project | null; data: ProjectsData }) {
         </select>
       </label>
       <Field label="daily budget $" name="budget" value={p?.dailyBudgetUSD !== undefined ? String(p.dailyBudgetUSD) : undefined} placeholder="source default" type="number" />
-      <Field label="test command" name="testCommand" value={p?.testCommand} placeholder="go test ./..." />
+      <Field label="test command" name="testCommand" value={p?.testCommand} placeholder="detected from the repo" />
       <Field label="test timeout ms" name="testTimeoutMs" value={p?.testTimeoutMs !== undefined ? String(p.testTimeoutMs) : undefined} placeholder="default" type="number" />
       <Field label="Observe service" name="observeService" value={p?.observeService} placeholder="none" />
       <div class="row-actions" style="gap:8px">
@@ -207,7 +233,14 @@ export default function Projects({ data }: { data: ProjectsData | SourcesData | 
       <p class="meta">
         One record per repository. Adding a project allows its repo (the allowlist is this list plus{" "}
         <code>SHIP_REPO_ALLOWLIST</code>{data.envAllowlist !== "" ? ` = ${data.envAllowlist}` : ", unset"}), picks the sandbox image its runs boot,
-        and sets the test command the pull request reports. · store: {data.store}
+        which harness edits its tree, and the test command the pull request reports. · store: {data.store}
+      </p>
+      <p class="meta">
+        Leave <b>test command</b> empty and Ship reads the repo's own tree at enqueue — package.json scripts.test, a Makefile{" "}
+        <code>test:</code> target, go.mod, Cargo.toml, pytest — and uses that
+        {data.workerTestCommand !== "" ? <> instead of <code>SHIP_TEST_COMMAND</code> = <code>{data.workerTestCommand}</code></> : null}.
+        A command typed here always wins. Leave <b>harness</b> at the worker default unless the sandbox image
+        actually carries that binary: harnesses are baked in by <code>images/build.sh --harness &lt;id&gt;</code>, never installed per run.
       </p>
 
       {p !== null ? (
@@ -232,7 +265,7 @@ export default function Projects({ data }: { data: ProjectsData | SourcesData | 
             <div class="table-wrap">
               <table class="runs">
                 <thead>
-                  <tr><th>repo</th><th>image</th><th>policy</th><th>tests</th><th>observe</th></tr>
+                  <tr><th>repo</th><th>image</th><th>harness</th><th>policy</th><th>tests</th><th>observe</th></tr>
                 </thead>
                 <tbody>
                   {data.projects.map((r) => (
@@ -243,8 +276,9 @@ export default function Projects({ data }: { data: ProjectsData | SourcesData | 
                         {r.url === undefined && <span class="meta"> · no clone URL — not allowlisted</span>}
                       </td>
                       <td class="meta">{r.sandboxImage ?? "worker default"}{r.sandboxNetwork !== undefined ? ` · ${r.sandboxNetwork}` : ""}</td>
+                      <td class="meta">{r.harness ?? "worker default"}</td>
                       <td class="meta">{r.sourcePolicy ?? "inherit"}{r.dailyBudgetUSD !== undefined ? ` · $${r.dailyBudgetUSD}/day` : ""}</td>
-                      <td class="meta">{r.testCommand ?? "—"}</td>
+                      <td class="meta">{r.testCommand ?? "detected"}</td>
                       <td class="meta">{r.observeService ?? "—"}</td>
                     </tr>
                   ))}

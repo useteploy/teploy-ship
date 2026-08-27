@@ -14,7 +14,7 @@ import { durableAgent } from "./durable.js";
 import type { ExecutorProvider } from "./durable.js";
 import { defaultApprovalPolicy } from "./approval.js";
 import { FileRepoMemory } from "./repo-memory.js";
-import { HARNESS_VERSIONS, NATIVE_HARNESS_ID, harnessAttempts, harnessRef, selectAdapter } from "./harness.js";
+import { HARNESS_PACKAGES, HARNESS_VERSIONS, NATIVE_HARNESS_ID, harnessAttempts, harnessRef, harnessSpecs, selectAdapter } from "./harness.js";
 import type { HarnessAdapter } from "./harness.js";
 
 /**
@@ -148,4 +148,56 @@ test("a run enqueued for a harness the worker lacks fails before a sandbox is al
   });
   assert.equal(outcome.status, "failed");
   assert.equal(created, 0, "no sandbox for a run that cannot execute here");
+});
+
+/**
+ * B5: the sandbox images bake the harness binaries, and images/build.sh reads
+ * images/versions.json to know which. HARNESS_PACKAGES is the copy the
+ * TypeScript can reach at run time (harness-external.ts uses it to tell an
+ * operator what to build). Two copies need a test that fails when they drift,
+ * or "pinned" is a word rather than a property.
+ */
+test("HARNESS_PACKAGES matches images/versions.json and covers every external adapter", async () => {
+  const raw = await readFile(new URL("../images/versions.json", import.meta.url), "utf8");
+  const versions = JSON.parse(raw) as { harnesses: Record<string, { npm: string; version: string; binary: string }> };
+  const declared = Object.fromEntries(Object.entries(versions.harnesses).filter(([k]) => !k.startsWith("$")));
+
+  assert.deepEqual(HARNESS_PACKAGES, declared);
+
+  for (const [id, pkg] of Object.entries(HARNESS_PACKAGES)) {
+    // An id with no adapter is a binary nothing can drive.
+    assert.ok(HARNESS_VERSIONS[id] !== undefined, `${id} has a package but no adapter`);
+    // Exact, never a range: selectAdapter refuses to replay under a different
+    // program, so "^2" in an image build is a replay bug waiting to happen.
+    assert.match(pkg.version, /^\d+\.\d+\.\d+$/, `${id} version must be exact`);
+  }
+  // native is the one adapter that needs nothing installed.
+  assert.equal(HARNESS_PACKAGES[NATIVE_HARNESS_ID], undefined);
+  assert.deepEqual(harnessSpecs(["claude-code", NATIVE_HARNESS_ID]), [
+    `${HARNESS_PACKAGES["claude-code"]!.npm}@${HARNESS_PACKAGES["claude-code"]!.version}`,
+  ]);
+
+  // The dashboard is SSR'd from source and cannot import these values without
+  // pulling the runtime package into a route, so it names them. Named copies
+  // rot; this is the check that stops them.
+  const settings = await readFile(new URL("../web/src/routes/settings.tsx", import.meta.url), "utf8");
+  for (const [id, pkg] of Object.entries(HARNESS_PACKAGES)) {
+    assert.ok(settings.includes(`${id} ${pkg.version}`), `Settings page does not name ${id} ${pkg.version}`);
+  }
+  const projects = await readFile(new URL("../web/src/routes/projects.tsx", import.meta.url), "utf8");
+  const offered = /const HARNESSES = \[([^\]]*)\]/.exec(projects)?.[1] ?? "";
+  for (const id of Object.keys(HARNESS_VERSIONS)) {
+    assert.ok(offered.includes(`"${id}"`), `Projects page does not offer harness ${id}`);
+  }
+});
+
+test("the Go sandbox Dockerfile pins Go 1.25, not 1.24", async () => {
+  // 2026-08-26: three repos need 1.25, and on a 1.24 sandbox every Go pull
+  // request arrived marked `tests: failed`. A future tidy-up that pins this
+  // back re-creates a day of misread pull requests, so it fails here instead.
+  const raw = await readFile(new URL("../images/versions.json", import.meta.url), "utf8");
+  const versions = JSON.parse(raw) as { bases: Record<string, string> };
+  assert.match(versions.bases.go!, /^golang:1\.25\./);
+  const dockerfile = await readFile(new URL("../images/sandbox-go/Dockerfile", import.meta.url), "utf8");
+  assert.ok(dockerfile.includes(`ARG GO_BASE=${versions.bases.go}`), "sandbox-go Dockerfile default drifted from versions.json");
 });

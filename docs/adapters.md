@@ -43,13 +43,21 @@ The external harness must reach its model vendor, so the sandbox needs
 (`SBX_EGRESS_ALLOW` on teploy-sandbox) must name the vendor host — e.g.
 `api.z.ai:443,models.opencode.ai:443` for opencode on z.ai, `api.anthropic.com:443`
 for claude — and the binary has to be in `SHIP_SANDBOX_IMAGE`. Neither is checked at enqueue — a run asking for a
-harness the image lacks fails at preflight, on the run's own timeline.
+harness the image lacks fails at preflight, on the run's own timeline, with the
+build command in the message.
+
+Build an image that carries it with `images/build.sh --harness <id> go` (or
+`node`). The binary is **baked** at the exact version pinned in
+`images/versions.json`, never installed per run: a run-time install would need
+egress the sandbox is not otherwise given, and would let the binary drift under
+a running worker — and `selectAdapter` refuses to replay a run under a harness
+version its log did not record.
 
 ## Configuration
 
 | variable | meaning |
 |---|---|
-| `SHIP_HARNESS` | `native` (default), `claude-code`, `opencode`. Read at enqueue on every surface (CLI, dashboard, webhook, sweep); recorded on the run. |
+| `SHIP_HARNESS` | `native` (default), `claude-code`, `opencode`. The worker-wide default; a project record's `harness` field wins for that repo. Read at enqueue on every surface (CLI, dashboard, webhook, sweep); recorded on the run. |
 | `SHIP_HARNESS_ATTEMPTS` | Comma list of harness ids. When it names two or more, every new run tries each in its own workspace and the critic picks one to publish (P5-4). Off by default. |
 | `SHIP_HARNESS_MODEL` | Model id passed to the harness (`--model`). Absent = the harness's own default. |
 | `SHIP_HARNESS_ENV` | Comma list of worker env var NAMES forwarded into the harness process. Overrides the per-adapter default below. |

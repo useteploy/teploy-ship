@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { preExisting, runTests, testComment, testTargetFromEnv, testsFailedNudge } from "./tests.js";
+import { preExisting, runTests, testComment, testTargetFromEnv, testTargetFromTree, testsFailedNudge } from "./tests.js";
 import type { TestOutcome } from "./tests.js";
 import type { AgentExecutor } from "@neutron-build/agents";
 
@@ -150,4 +150,75 @@ test("the red-suite nudge carries the real command, exit code and output", () =>
   assert.match(nudge, /1 failing/);
   assert.match(nudge, /Ship ran it, not you/, "so the agent cannot dispute it as its own claim");
   assert.match(nudge, /re-run the suite yourself to confirm it is green/);
+});
+
+/**
+ * B5-d: the test command a repo gets when nobody typed one. These are pure
+ * tree -> command cases; the forge read and the precedence rules live in
+ * test-detect.test.ts.
+ */
+test("testTargetFromTree: package.json scripts.test wins, and carries the install the fresh clone needs", () => {
+  const pkg = JSON.stringify({ scripts: { test: "vitest run" } });
+  // A container over a fresh clone has no node_modules, so `pnpm test` alone
+  // would report FAILED for a suite that never executed.
+  assert.deepEqual(testTargetFromTree({ names: ["package.json", "pnpm-lock.yaml"], packageJson: pkg }), {
+    command: "pnpm install --frozen-lockfile && pnpm test",
+  });
+  assert.deepEqual(testTargetFromTree({ names: ["package.json", "package-lock.json"], packageJson: pkg }), {
+    command: "npm ci && npm test",
+  });
+  assert.deepEqual(testTargetFromTree({ names: ["package.json", "yarn.lock"], packageJson: pkg }), {
+    command: "yarn install --frozen-lockfile && yarn test",
+  });
+  // No lockfile: install, not ci.
+  assert.deepEqual(testTargetFromTree({ names: ["package.json"], packageJson: pkg }), {
+    command: "npm install && npm test",
+  });
+  // packageManager is the repo's own statement and beats the lockfile.
+  assert.deepEqual(
+    testTargetFromTree({
+      names: ["package.json", "package-lock.json"],
+      packageJson: JSON.stringify({ packageManager: "pnpm@10.26.1", scripts: { test: "vitest" } }),
+    }),
+    { command: "pnpm install && pnpm test" },
+  );
+});
+
+test("testTargetFromTree: npm's placeholder script is not a suite", () => {
+  const pkg = JSON.stringify({ scripts: { test: 'echo "Error: no test specified" && exit 1' } });
+  // Falling through to go.mod is the point: `npm test` here exits 1 forever.
+  assert.deepEqual(testTargetFromTree({ names: ["package.json", "go.mod"], packageJson: pkg }), { command: "go test ./..." });
+  assert.equal(testTargetFromTree({ names: ["package.json"], packageJson: pkg }), undefined);
+});
+
+test("testTargetFromTree: a Makefile test target beats the language convention", () => {
+  // Someone wrote `make test` on purpose; it usually carries the flags the
+  // repo needs. It does NOT beat package.json, which is more specific still.
+  assert.deepEqual(testTargetFromTree({ names: ["Makefile", "go.mod"], makefile: "test:\n\tgo test -race ./...\n" }), {
+    command: "make test",
+  });
+  assert.deepEqual(testTargetFromTree({ names: ["Makefile", "go.mod"], makefile: ".PHONY: build\nbuild:\n\tgo build ./...\n" }), {
+    command: "go test ./...",
+  });
+  // `pretest:` is not `test:`, and a mention inside a recipe is not a target.
+  assert.deepEqual(testTargetFromTree({ names: ["Makefile", "go.mod"], makefile: "pretest:\n\t@echo run test:\n" }), {
+    command: "go test ./...",
+  });
+});
+
+test("testTargetFromTree: go, cargo, and pytest only on a real signal", () => {
+  assert.deepEqual(testTargetFromTree({ names: ["go.mod", "main.go"] }), { command: "go test ./..." });
+  assert.deepEqual(testTargetFromTree({ names: ["Cargo.toml", "src"] }), { command: "cargo test" });
+  assert.deepEqual(testTargetFromTree({ names: ["pyproject.toml"], pyproject: "[tool.pytest.ini_options]\n" }), {
+    command: "python3 -m pytest -q",
+  });
+  assert.deepEqual(testTargetFromTree({ names: ["conftest.py", "setup.py"] }), { command: "python3 -m pytest -q" });
+  // Python with no pytest configuration gets NOTHING rather than a command
+  // that exits 4 and reads as a failing suite.
+  assert.equal(testTargetFromTree({ names: ["pyproject.toml", "app.py"], pyproject: "[project]\nname='x'\n" }), undefined);
+  assert.equal(testTargetFromTree({ names: ["README.md", "LICENSE"] }), undefined);
+});
+
+test("testTargetFromTree: malformed package.json falls through instead of throwing", () => {
+  assert.deepEqual(testTargetFromTree({ names: ["package.json", "go.mod"], packageJson: "{not json" }), { command: "go test ./..." });
 });

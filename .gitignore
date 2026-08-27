@@ -18,3 +18,10 @@ CLAUDE.md
 # the artifacts worth committing; these are the raw post-mortem record, and
 # committing them mid-sweep captures a half-written log.
 swebench/*.durable-events/
+
+# install.sh output. The bundle holds REAL secret values (it is how a second
+# host gets stood up at all — teploy's age store lives on the server and there
+# is no other way to read them back); the overlay is one operator's box.
+ship-secrets.env
+*.secrets.env
+teploy.install.yml

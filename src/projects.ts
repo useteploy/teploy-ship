@@ -5,6 +5,7 @@ import { readJsonFile, updateJsonFile } from "./file-store.js";
 import { upsertByKey } from "./upsert.js";
 import { stateDir } from "./run-store.js";
 import { repoSlug } from "./observe.js";
+import { HARNESS_VERSIONS } from "./harness.js";
 import type { EvidenceStore, RepoEvidence } from "./evidence.js";
 import type { IntakePolicy } from "./intake.js";
 
@@ -36,6 +37,24 @@ export interface Project {
   sandboxImage?: string;
   sandboxNetwork?: "none" | "egress";
   sandboxLimits?: { memoryMb?: number; cpus?: number; pids?: number };
+  /**
+   * Which program edits this repo's tree: `native` (Ship's own loop) or an
+   * external adapter id from HARNESS_VERSIONS (harness.ts). Absent = the
+   * worker's SHIP_HARNESS, and that = native.
+   *
+   * This is the DECLARE half of declare-then-bake (B5). Declaring a harness
+   * here is a statement about the repo, not an installation: the binary must
+   * already be in the sandbox image the run boots, which is what
+   * `images/build.sh --harness <id>` produces. Nothing installs it at run time,
+   * because that would need sandbox egress AND would let the binary drift under
+   * a running worker — and `selectAdapter` refuses to replay a run under a
+   * version other than the one its log recorded.
+   *
+   * `enqueueRun` materialises it into the run input (as an id+version ref), so
+   * a run replays under the harness it was enqueued for even if this record is
+   * edited afterwards.
+   */
+  harness?: string;
   /** Overrides the source's intake policy for tasks from this repo. Absent = inherit the source's. */
   sourcePolicy?: IntakePolicy;
   dailyBudgetUSD?: number;
@@ -79,6 +98,15 @@ export function normalizeProject(input: Project): Project {
   if (input.sourcePolicy !== undefined && !POLICIES.has(input.sourcePolicy)) {
     throw new Error(`sourcePolicy must be ignore, propose or auto, got: ${String(input.sourcePolicy)}`);
   }
+  // Refuse an unknown harness HERE rather than at enqueue. `harnessRef` throws
+  // on an unknown id (harness.ts), and a project record is read on the enqueue
+  // path of every surface — a typo saved through the dashboard would otherwise
+  // turn into a repo whose every webhook run fails to queue, with the error
+  // arriving nowhere near where it was typed.
+  const harness = str(input.harness);
+  if (harness !== undefined && HARNESS_VERSIONS[harness] === undefined) {
+    throw new Error(`unknown harness "${harness}"; known: ${Object.keys(HARNESS_VERSIONS).join(", ")}`);
+  }
   const limits = input.sandboxLimits;
   const sandboxLimits =
     limits === undefined
@@ -98,6 +126,10 @@ export function normalizeProject(input: Project): Project {
     ...(str(input.label) !== undefined ? { label: str(input.label) } : {}),
     ...(str(input.sandboxImage) !== undefined ? { sandboxImage: str(input.sandboxImage) } : {}),
     ...(input.sandboxNetwork !== undefined ? { sandboxNetwork: input.sandboxNetwork } : {}),
+    // "native" is KEPT rather than folded into absent: it is the operator
+    // saying this repo runs Ship's own loop even on a worker whose
+    // SHIP_HARNESS names a vendor agent. Absent means "inherit".
+    ...(harness !== undefined ? { harness } : {}),
     ...(sandboxLimits !== undefined && Object.keys(sandboxLimits).length > 0 ? { sandboxLimits } : {}),
     ...(input.sourcePolicy !== undefined ? { sourcePolicy: input.sourcePolicy } : {}),
     ...(num(input.dailyBudgetUSD) !== undefined ? { dailyBudgetUSD: num(input.dailyBudgetUSD) } : {}),

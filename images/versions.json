@@ -1,0 +1,51 @@
+{
+  "$comment": [
+    "The pins for every sandbox image Ship builds. ONE source of truth:",
+    "images/build.sh reads this file and passes the values as build args, and",
+    "src/harness.ts:HARNESS_PACKAGES mirrors `harnesses` with a test that fails",
+    "if the two drift (src/harness.test.ts).",
+    "",
+    "Why any of this is pinned at all: before 2026-08-26 the images were built",
+    "by hand from Dockerfiles that lived only in ~ on deploy-test, from moving",
+    "tags. Nothing outside that box could reproduce them, and nothing recorded",
+    "what a given run's sandbox actually contained.",
+    "",
+    "Bumping a harness version is a DELIBERATE act: selectAdapter (src/harness.ts)",
+    "refuses to replay a run under a program other than the one that wrote its",
+    "log, and the vendor binary is that program. Bump, rebuild, redeploy — never",
+    "let the image drift under a running worker."
+  ],
+  "bases": {
+    "$comment": [
+      "Debian 13 (trixie) for both, which is what the production sandbox image",
+      "has actually been running (python 3.13, git 2.47). Digests are the",
+      "multi-arch index digests: a tag moves, a digest does not.",
+      "",
+      "GO 1.25, NOT 1.24. Bumped 2026-08-26 because three repos need 1.25 and",
+      "on a 1.24 sandbox every Go pull request arrived marked `tests: failed` —",
+      "a base-image mismatch read as the agent's fault, which cost a day (see",
+      "the same date in src/tests.ts:preExisting). Do NOT pin this back to 1.24."
+    ],
+    "go": "golang:1.25.14-trixie@sha256:2c4c60ef415fbfa5e90300722293bef36c5e63fae17570ce18f580af933dbd73",
+    "node": "node:22-trixie@sha256:2082d2bf902c8835655c6bcfee3594c00ea900498a9f6e2b96d3352536f9e8d8"
+  },
+  "pnpm": "10.26.1",
+  "harnesses": {
+    "$comment": [
+      "The vendor coding agents an external harness adapter drives",
+      "(src/harness-external.ts). `id` matches HARNESS_VERSIONS in",
+      "src/harness.ts and the `harness` field of a project record.",
+      "Versions are the ones verified working on deploy-test 2026-08-26."
+    ],
+    "claude-code": {
+      "npm": "@anthropic-ai/claude-code",
+      "version": "2.1.246",
+      "binary": "claude"
+    },
+    "opencode": {
+      "npm": "opencode-ai",
+      "version": "1.18.23",
+      "binary": "opencode"
+    }
+  }
+}

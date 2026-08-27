@@ -10,3 +10,8 @@ swebench
 _internal
 /src
 /web/dist/**/*.map
+# install.sh's secret bundle. It holds REAL values; the server already has
+# them, age-encrypted, and a plaintext copy has no business riding along in a
+# build context.
+ship-secrets.env
+*.secrets.env

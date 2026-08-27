@@ -42,6 +42,14 @@ TTLs too. Config defaults live in `~/.config/teploy-ship/config.json`
 
 ## Self-hosting
 
+```sh
+./install.sh --host 203.0.113.10 --user root mybox
+```
+
+Clean VM to a working Ship: provisions the server, generates the secrets that
+should never be shared between installs, asks for the two only you can supply,
+builds the sandbox images on the server, deploys. Around ten minutes.
+
 **First time? [docs/QUICKSTART.md](docs/QUICKSTART.md)** — nothing to a pull
 request that carries its test result, in about ten minutes, skipping everything
 you do not need to see the loop work.
@@ -84,6 +92,14 @@ SHIP_HARNESS=claude-code   # `claude -p`, headless, inside the sandbox
 SHIP_HARNESS=opencode      # `opencode run`, headless, inside the sandbox
 SHIP_HARNESS_ATTEMPTS=native,claude-code   # every harness tries; the critic picks
 ```
+
+Per repo, that is the *harness* field on the Projects page. Declaring a harness
+and installing one are separate acts: the binary is **baked** into the sandbox
+image (`images/build.sh --harness claude-code go`, pinned in
+`images/versions.json`), never installed per run. A run-time install would need
+the sandbox egress that default-deny exists to close, and would let the binary
+drift under a running worker — and a run replays only under the harness version
+its log recorded.
 
 Whichever harness runs, intake, approvals, the publish gate, the evidence
 legs, spend and audit are Ship's. A harness fed by a subscription is counted
@@ -134,11 +150,17 @@ one, and anything written around it — including a reviewer's own notes — is
 left alone. If the body cannot be read or updated, the section is posted as a
 comment instead.
 
-The tests line is produced by **Ship**, not the agent: with `SHIP_TESTS=1` and
-`SHIP_TEST_COMMAND`, the suite runs in the workspace after the agent stops and
-before the push, so "tests passed" describes the code that became the PR. An
-agent's own account of its testing is exactly the claim the verified-finish gate
-exists because models get it wrong.
+The tests line is produced by **Ship**, not the agent: with `SHIP_TESTS=1` the
+suite runs in the workspace after the agent stops and before the push, so
+"tests passed" describes the code that became the PR. An agent's own account of
+its testing is exactly the claim the verified-finish gate exists because models
+get it wrong.
+
+Which command, in order: the repo's own entry (Projects page), else what Ship
+detected from the repo's tree at enqueue — package.json `scripts.test`, a
+Makefile `test:` target, go.mod, Cargo.toml, pytest — else the worker-wide
+`SHIP_TEST_COMMAND`. Nobody has to configure a repo before its first pull
+request carries a suite result, and anyone who wants to still can.
 
 A failing suite still publishes the pull request, marked, with its output — a
 real fix alongside an unrelated red test is still worth a human's attention. A

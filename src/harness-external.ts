@@ -1,6 +1,6 @@
 import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 
-import { HARNESS_VERSIONS } from "./harness.js";
+import { HARNESS_PACKAGES, HARNESS_VERSIONS } from "./harness.js";
 import type { HarnessAdapter, HarnessResult, HarnessStatus, HarnessUsage } from "./harness.js";
 
 /**
@@ -92,17 +92,50 @@ export interface Preflight {
   found: boolean;
   version: string;
   detail?: string;
+  /** The version images/versions.json bakes for this harness, when it names one. */
+  expected?: string;
+  /** Does the installed binary report `expected`? Absent when nothing to compare. */
+  pinned?: boolean;
 }
 
-async function preflight(executor: AgentExecutor, binary: string): Promise<Preflight> {
+/**
+ * What to do about a harness the sandbox image does not carry.
+ *
+ * The old message ("not on PATH in the sandbox image") was true and useless:
+ * it left an operator to work out on their own that harnesses are BAKED, which
+ * image to bake them into, and how to point a repo at it. Ship owns all three
+ * answers, so it says them.
+ */
+export function missingHarnessHelp(id: string, binary: string): string {
+  const pkg = HARNESS_PACKAGES[id];
+  return (
+    `${binary} is not on PATH in the sandbox image. Harnesses are baked into the image, never installed per run ` +
+    `(a run-time install needs sandbox egress and drifts under a running worker, which breaks replay). ` +
+    `Build one that carries it — \`images/build.sh --harness ${id} go\`${pkg !== undefined ? ` (installs ${pkg.npm}@${pkg.version})` : ""} — ` +
+    `then point this repo at it on the dashboard's Projects page, or the whole worker with SHIP_SANDBOX_IMAGE.`
+  );
+}
+
+async function preflight(executor: AgentExecutor, id: string, binary: string): Promise<Preflight> {
+  const expected = HARNESS_PACKAGES[id]?.version;
   try {
     const probe = await executor.exec(`command -v ${binary} >/dev/null 2>&1 && ${binary} --version 2>&1 | head -n 1`, { timeoutMs: 60_000 });
     if (probe.exitCode !== 0) {
-      return { found: false, version: "", detail: `${binary} is not on PATH in the sandbox image` };
+      return { found: false, version: "", detail: missingHarnessHelp(id, binary), ...(expected !== undefined ? { expected } : {}) };
     }
-    return { found: true, version: probe.stdout.trim().slice(0, 120) };
+    const version = probe.stdout.trim().slice(0, 120);
+    return {
+      found: true,
+      version,
+      ...(expected !== undefined ? { expected } : {}),
+      // Recorded, NOT enforced. Refusing here would take a working deployment
+      // offline the moment images/versions.json moved ahead of the image on
+      // the box; what an operator actually needs is the log to say which binary
+      // wrote the tree, which this gives them.
+      ...(expected !== undefined ? { pinned: version.includes(expected) } : {}),
+    };
   } catch (error) {
-    return { found: false, version: "", detail: error instanceof Error ? error.message : String(error) };
+    return { found: false, version: "", detail: error instanceof Error ? error.message : String(error), ...(expected !== undefined ? { expected } : {}) };
   }
 }
 
@@ -341,9 +374,9 @@ export function externalAdapter(id: "claude-code" | "opencode", options: Externa
     async run(task, ws, budget, onEvent): Promise<HarnessResult> {
       const p = ws.stepPrefix;
       onEvent({ kind: "started", harness: id });
-      const pre = await ws.ctx.step(`${p}harness-preflight`, () => preflight(ws.executor, spec.binary));
+      const pre = await ws.ctx.step(`${p}harness-preflight`, () => preflight(ws.executor, id, spec.binary));
       if (!pre.found) {
-        const result = errorResult(`${spec.binary} is not available in the sandbox image (${pre.detail ?? "not found"}); nothing ran`);
+        const result = errorResult(`${pre.detail ?? `${spec.binary} was not found`} Nothing ran.`);
         onEvent({ kind: "completed", status: result.status });
         return result;
       }

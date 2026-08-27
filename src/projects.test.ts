@@ -210,3 +210,31 @@ test("sweep: a project's sourcePolicy overrides its source's for that repo's tas
   await sweepIntake(deps);
   assert.deepEqual(launched, ["go"], "the auto project launched; the propose project and the repo-less task waited");
 });
+
+/**
+ * B5-b, declare-then-bake: a project says WHICH program edits its tree. The
+ * binary itself is baked into the sandbox image (images/build.sh); this record
+ * is the declaration, and enqueueRun materialises it into the run input.
+ */
+test("project record: harness is validated at write time, and native is a real answer", () => {
+  assert.equal(normalizeProject({ repo: "tyler/a", harness: "claude-code", autoMerge: false, autoDeploy: false }).harness, "claude-code");
+  assert.equal(normalizeProject({ repo: "tyler/a", harness: "opencode", autoMerge: false, autoDeploy: false }).harness, "opencode");
+  // "native" is KEPT, not folded away: it is the operator overriding a worker
+  // whose SHIP_HARNESS names a vendor agent.
+  assert.equal(normalizeProject({ repo: "tyler/a", harness: "native", autoMerge: false, autoDeploy: false }).harness, "native");
+  assert.equal(normalizeProject({ repo: "tyler/a", harness: "  ", autoMerge: false, autoDeploy: false }).harness, undefined);
+  assert.equal(normalizeProject({ repo: "tyler/a", autoMerge: false, autoDeploy: false }).harness, undefined);
+  // Rejected HERE rather than at enqueue: harnessRef throws on an unknown id,
+  // and a typo saved through the dashboard would otherwise surface as every
+  // webhook run for that repo failing to queue, nowhere near where it was typed.
+  assert.throws(
+    () => normalizeProject({ repo: "tyler/a", harness: "cluade-code", autoMerge: false, autoDeploy: false }),
+    /unknown harness "cluade-code"/,
+  );
+});
+
+test("project record: harness survives a store round trip", async () => {
+  const store = new FileProjectStore(await tempDir());
+  await store.set({ repo: TS_URL, url: TS_URL, harness: "claude-code", autoMerge: false, autoDeploy: false });
+  assert.equal((await store.forRepo(TS_URL))?.harness, "claude-code");
+});

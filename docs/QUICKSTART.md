@@ -18,6 +18,23 @@ to see the loop work.
 
 ---
 
+## The whole thing, in one command
+
+```sh
+git clone <your-ship-remote> teploy-ship && cd teploy-ship
+./install.sh --host 203.0.113.10 --user root mybox
+```
+
+It provisions the server, generates `SHIP_WEB_TOKEN` / `SHIP_SESSION_SECRET` /
+`SHIP_WEBHOOK_SECRET`, asks for the two values only you can supply (a forge
+token and a model key), builds the sandbox images on the server, builds Ship,
+and deploys. Skip to step 5.
+
+The rest of this page is the same thing by hand, for when you want to see each
+piece.
+
+---
+
 ## 1. Register the server
 
 ```sh
@@ -116,13 +133,20 @@ teploy secret set SHIP_TESTS=1 SHIP_TEST_COMMAND="go test ./..."
 teploy deploy
 ```
 
+You usually do not have to type the command at all. With no per-repo entry,
+Ship reads the repo's root at enqueue and infers the suite — `package.json`
+`scripts.test` (with the install the fresh clone needs), a Makefile `test:`
+target, `go.mod`, `Cargo.toml`, pytest config. `SHIP_TEST_COMMAND` is the
+last resort under that, not the first choice.
+
 Two things to get right:
 
-- `SHIP_TEST_COMMAND` is the worker-wide default, and must be runnable **in
-  the sandbox image** (`SHIP_SANDBOX_IMAGE`, default `golang:1.24`). `pnpm
-  test` against a Go image reports "not run" — correct, and useless.
-- Repos with different suites get their own command, keyed by repo — the same
-  worker can run `go test ./...` for one and `pnpm test` for another:
+- Whatever command runs must be runnable **in the sandbox image**
+  (`SHIP_SANDBOX_IMAGE`). `pnpm test` against a Go image reports "not run" —
+  correct, and useless. `images/build.sh` builds `ship-sandbox-go:dev` and
+  `ship-sandbox-node:dev`; pick per repo on the Projects page.
+- Repos whose suite the guess gets wrong get their own command, keyed by repo,
+  and an explicit entry always wins:
 
   ```sh
   teploy-ship evidence set tyler/my-go-repo --test-command "go test ./..."
@@ -135,10 +159,10 @@ Two things to get right:
 
   The same record is the dashboard's **Projects** page (`/projects`): adding a
   repo there allows it (no `SHIP_REPO_ALLOWLIST` edit), picks the sandbox
-  image its runs boot (a Go repo and a pnpm repo can share one worker) and
-  sets its test command. `teploy-ship project set <clone-url> --image node:22
-  --test-command "pnpm test"` is the CLI form; `evidence set` writes the
-  same record.
+  image its runs boot (a Go repo and a pnpm repo can share one worker), picks
+  which harness edits its tree, and sets its test command. `teploy-ship project
+  set <clone-url> --image ship-sandbox-node:dev --test-command "pnpm test"` is
+  the CLI form; `evidence set` writes the same record.
 
 Enqueue another task and the pull request now carries a Verification section:
 
@@ -183,5 +207,7 @@ you passed. This is the guard working, not a bug.
 **The pull request has no Verification section.** A worker wired for none of the
 evidence legs adds nothing to the body rather than printing "not tested, not
 deployed, not measured" — that would train you to skip the section that
-sometimes carries the real thing. Check `SHIP_TESTS=1` **and**
-`SHIP_TEST_COMMAND` are both set.
+sometimes carries the real thing. Check `SHIP_TESTS=1`, and that the repo has a
+command: detection needs one of `package.json` `scripts.test`, a Makefile
+`test:` target, `go.mod`, `Cargo.toml` or pytest config at the root, otherwise
+set one on the Projects page.

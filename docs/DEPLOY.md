@@ -19,8 +19,41 @@ optional gateway and sandbox daemon complete the production shape.
 | `ship-nucleus` | durable runs, intake, spend, code index | accessory in `teploy.yml` (automatic) |
 | `ship-gateway` | BYO-model AI gateway; provider keys never reach ship | `teploy deploy` from `../teploy-gateway` (optional but recommended) |
 | `teploy-sandbox` | per-run containers with default-deny egress | systemd service on the host (see below) |
+| sandbox images | what a run's container boots | `images/build.sh` on the server (see [Sandbox images](#sandbox-images)) |
 
 ## 1. Bring-up
+
+### The one-command path
+
+```sh
+./install.sh --host 203.0.113.10 --user root mybox
+```
+
+That provisions the server, generates the three secrets nobody should be
+copying between installs, asks for the two only you can supply (a forge token
+and a model key), builds the sandbox images **on the server**, builds Ship, and
+deploys. Roughly ten minutes on a cold box, most of it the sandbox image.
+
+It writes two files, both gitignored: `ship-secrets.env` (mode 0600, real
+values) and `teploy.install.yml` (a teploy destination overlay carrying your
+server name and the env this box needs). The tracked `teploy.yml` is never
+edited — its `env:` block points at the author's own gateway and Observe
+instance, and the overlay blanks those.
+
+**Moving to a second host.** Ship's secrets live in teploy's age store *on the
+server*: `teploy secret list` opens an ssh connection to read them, so an
+install used to have exactly one copy of its own credentials and no way to
+stand a second box up from them. That is now two commands:
+
+```sh
+./install.sh --export-secrets ship.env --host <old-ip> --user <u> oldbox
+./install.sh --secrets-file  ship.env --host <new-ip> --user <u> newbox
+```
+
+`ship.env` holds real values. It is chmod 600, gitignored, excluded from the
+teploy build context, and yours to delete once the new box is up.
+
+### The manual path
 
 Prereqs on your machine: the `teploy` CLI pointed at your server
 (`servers.yml`), Node 22, pnpm, and Docker. The deployment image installs its
@@ -32,6 +65,7 @@ pnpm run build && (cd web && pnpm run build)
 
 # secrets (once; injected into web + worker on every deploy)
 teploy secret set SHIP_WEB_TOKEN=<dashboard login/bearer>
+teploy secret set SHIP_SESSION_SECRET=<signs dashboard sessions>
 teploy secret set SHIP_WEBHOOK_SECRET=<webhook HMAC>
 teploy secret set SHIP_GIT_TOKEN=<forgejo/gitea deploy token>
 teploy secret set SHIP_GITHUB_TOKEN=<github token>        # only for github.com repos
@@ -223,6 +257,51 @@ not just a complaint.
   URL) and `SHIP_PUBLIC_URL` — Ship pings the channel when a run parks
   for approval/plan review and when it completes or fails, with a link.
 
+### Connecting Ship to Akiroo
+
+Akiroo is a workspace; Ship is the thing that does the work. The hop
+between them runs in **one direction only: Ship pulls.**
+
+Set two variables on the **worker** (both or neither):
+
+```
+AKIROO_URL=https://lite.akiroo.com
+AKIROO_PULL_TOKEN=ship_pull_…
+```
+
+Mint the token once, in Akiroo, under **Settings, Connections, Teploy
+Ship, Handing over work**. It is shown exactly once and only ever
+compared thereafter; rotating it stops the old one immediately.
+
+**Ship needs only outbound HTTPS. No inbound port, no tunnel, no public
+URL, no DNS record.** That is the point of the direction: a worker on a
+VPS behind Tailscale, or on a laptop, participates fully. It also means
+**Akiroo never holds a forge token** — Ship, which already has the
+credential it opens pull requests with, is the one that creates the
+issue.
+
+What flows, both ways:
+
+- Someone presses **Send to Ship** on an Akiroo work item. Ship collects
+  it on its next sweep (the intake interval, default 5s), opens a
+  `ship`-labelled issue on the project's repository, and proposes it —
+  under the same dedupe key the forge webhook uses, so the two collapse
+  into one task whether or not that repo has a webhook configured.
+- The run's outcome goes back as a signed run event (set `SHIP_NOTIFY_URL`
+  to Akiroo's `/api/webhooks/teploy_ship/<org>` and `SHIP_NOTIFY_SECRET`
+  to that connection's inbound secret). A pull request moves the work item
+  to **review** with the link; a failure moves it to **blocked** with the
+  reason.
+- Approving or denying a **parked run** from Akiroo's queue also travels
+  by pull: if Akiroo has no reachable Ship URL configured — the normal
+  case — it queues the decision and Ship collects it. A Ship that *does*
+  have a public URL gets the decision pushed directly and nothing is
+  queued.
+
+Health check with no logs: if Akiroo's Connections card shows queued work
+and **Last collected** is not moving, this worker is not polling. Check
+the two variables above and that the worker process is up.
+
 ### CI auto-fix
 
 Subscribe the repo's webhook to **workflow run** events (same endpoint,
@@ -345,11 +424,105 @@ Extend the egress allowlist per host (your git server!) via the unit env:
 
 Point ship at it (in `teploy.yml` env or secrets):
 `SHIP_SANDBOX_URL=http://172.18.0.1:7439`, `SHIP_SANDBOX_TOKEN=<token
-from /var/lib/teploy-sandbox/token>`, `SHIP_SANDBOX_IMAGE=golang:1.24`
+from /var/lib/teploy-sandbox/token>`, `SHIP_SANDBOX_IMAGE=ship-sandbox-go:dev`
 (pick your stack), `SHIP_SANDBOX_NETWORK=egress`. That image is the
 worker-wide default: a repo's project record (dashboard Projects page, or
-`teploy-ship project set <repo> --image node:22 --network egress`) overrides
-the image, network and limits for that repo's runs.
+`teploy-ship project set <repo> --image ship-sandbox-node:dev --network egress`)
+overrides the image, network and limits for that repo's runs.
+
+<a id="sandbox-images"></a>
+### Sandbox images
+
+`images/` is where a run's container comes from. `install.sh` builds them for
+you; to build or rebuild by hand, **on the server** (the images must exist on
+the machine whose docker daemon creates run containers):
+
+```sh
+images/build.sh                       # go + node, every harness baked, :dev
+images/build.sh go                    # just the Go image
+images/build.sh --harness none node   # a plain pnpm sandbox, native runs only
+images/build.sh --tag v3 --harness claude-code go
+```
+
+| Image | Carries |
+|---|---|
+| `ship-sandbox-go:<tag>` | Go 1.25, node 22 + npm, git, python3, plus the declared harnesses |
+| `ship-sandbox-node:<tag>` | node 22, pnpm (pinned), build-essential, git, plus the declared harnesses |
+| `ship-sandbox-harness:<tag>` | alias of `ship-sandbox-go` when harnesses were baked — the name existing workers already carry |
+
+Every version is pinned in `images/versions.json`: base images by digest, the
+harness binaries by exact npm version. That file is the single source of truth
+— `src/harness.ts:HARNESS_PACKAGES` mirrors it and a test fails when they
+drift, and `build.sh` refuses to build if a Dockerfile's `ARG` default has
+wandered off.
+
+**Go is pinned to 1.25, not 1.24.** Three repos need 1.25, and on a 1.24
+sandbox every Go pull request arrived marked `tests: failed` on 2026-08-26 — a
+base-image mismatch that reviewers read as the agent's fault, and it cost a
+day. Do not pin it back; a test enforces this.
+
+### Harnesses: declare, then bake
+
+A harness is the program that edits the tree — `native` (Ship's own loop, which
+needs nothing installed), `claude-code`, or `opencode`.
+
+Declaring one and installing one are separate acts, deliberately:
+
+- **Declare** on the project record — the Projects page's *harness* field, or
+  the worker-wide `SHIP_HARNESS`. `enqueueRun` resolves it to an id + contract
+  version and records it in the run input.
+- **Bake** into the image with `images/build.sh --harness <id>`.
+
+Nothing installs a harness at run time, and it is not an oversight. A run-time
+install needs the sandbox to reach npm — the egress hole default-deny exists to
+close — and it lets the binary drift under a running worker. `selectAdapter`
+(`src/harness.ts`) refuses to replay a run under a harness version other than
+the one its log recorded, so drift does not merely change behaviour, it makes
+old runs unreplayable.
+
+A run whose declared harness is missing from its image records a
+`harness-preflight` step that says so, names the build command, and ends the
+run without spending anything.
+
+<a id="test-detect"></a>
+### Detecting the test command
+
+A repo used to owe Ship a `teploy-ship evidence set <repo> --test-command …`
+before a single pull request could carry a suite result, and the worker-wide
+`SHIP_TEST_COMMAND` is by construction wrong for every repo but the one it was
+written for. So when a repo has no explicit command, Ship reads its root **at
+enqueue** and infers one:
+
+| Signal | Command |
+|---|---|
+| `package.json` with a real `scripts.test` | `<pm> install… && <pm> test` — pnpm/yarn/bun/npm from `packageManager` or the lockfile |
+| a `Makefile` with a `test:` target | `make test` |
+| `go.mod` | `go test ./...` |
+| `Cargo.toml` | `cargo test` |
+| pytest config (`[tool.pytest…]`, `pytest.ini`, `conftest.py`, `tox.ini`) | `python3 -m pytest -q` |
+
+Notes that matter:
+
+- **An explicit entry always wins.** The Projects page's *test command* field
+  and `teploy-ship evidence set` both still do exactly what they did.
+- **The JS commands include the install.** The suite runs in a container over a
+  fresh clone, so `pnpm test` with no `node_modules` would report FAILED for a
+  suite that never executed.
+- **npm's placeholder is not a suite.** A `scripts.test` that is still
+  `echo "Error: no test specified"` falls through to the next signal.
+- **It happens at enqueue, never at execution.** Evidence is materialised into
+  the run input so a replay runs the command the log was written under. Reading
+  the tree at execution time would let a repo change between enqueue and replay
+  and silently run a different suite.
+- **It reads the forge API, not a clone** — one root listing plus at most three
+  small files, against an origin the allowlist names. An origin the allowlist
+  does not name is not contacted at all, authenticated or otherwise.
+- **A wrong guess is bounded.** With `SHIP_TESTS_FEEDBACK` on (the default),
+  the same command runs as a baseline *before* the agent edits anything, so a
+  command the sandbox cannot run is reported as pre-existing breakage rather
+  than blamed on the run.
+- Detection is memoised per repo for ten minutes so a webhook burst is not four
+  forge round trips per event.
 
 ## 4. Codebase indexing (optional)
 
@@ -436,8 +609,9 @@ which executes model-authored commands.
 | `SHIP_DISK_PATH` | unset — `/var/lib/docker`, then `/` | Which mount to measure, when docker's data root is on neither. A worker in a container has no `/var/lib/docker`; its own `/` is an overlayfs whose `statfs` reports the underlying filesystem, which is the host's docker root anyway — so the fallback is usually right and this is rarely needed. |
 | `SHIP_SANDBOX_TTL_SEC` | `7200` | Container TTL Ship requests from the sandbox daemon for each run (floor 600). The daemon's own default is 30 minutes, which is shorter than a real run on a large repository — that is how four runs were reaped before their first command on 2026-08-25. The run's own caps end it; this is the backstop for a worker that dies mid-run. |
 | `SHIP_INDEX_TIMEOUT_MS` | `120000` | Time budget for the `repo-index` step. Past it the refresh stops between files, keeps what it embedded, and the step records `stopped at the 120s index cap`; ```search still works over whatever is indexed. |
-| `SHIP_TESTS` | unset | Ask every newly-enqueued run to execute its test suite after the agent stops, and put the result on the pull request. Ship runs it — the agent's own account of its testing is not used. The command is the repo's `evidence` entry when one is set, else `SHIP_TEST_COMMAND`. |
-| `SHIP_TEST_COMMAND` | unset | The worker-wide default suite, e.g. `pnpm test`. A repo with its own command (`teploy-ship evidence set <repo> --test-command …`) uses that instead — one worker can serve repos with different suites. Run in the run's workspace **before** the push, so "tests passed" describes the code that becomes the PR. Without either, a run that asked for tests records the step as disabled. |
+| `SHIP_TESTS` | unset | Ask every newly-enqueued run to execute its test suite after the agent stops, and put the result on the pull request. Ship runs it — the agent's own account of its testing is not used. Which command, in order: the repo's explicit entry, else what Ship detected from the repo's tree, else `SHIP_TEST_COMMAND`. |
+| `SHIP_TEST_COMMAND` | unset | The worker-wide **last-resort** suite, e.g. `pnpm test`. Used only for a repo with no explicit entry *and* nothing detectable. Run in the run's workspace **before** the push, so "tests passed" describes the code that becomes the PR. Without any of the three, a run that asked for tests records the step as disabled. |
+| `SHIP_TEST_DETECT` | on | Read the repo's root at enqueue and infer its suite (`0` turns it off). See [Detecting the test command](#test-detect). |
 | `SHIP_TEST_TIMEOUT_MS` | `900000` | Ceiling. A suite that hits it is reported as **not run**, never as failed — a killed suite did not fail, it never finished. |
 | `SHIP_TELEMETRY` | unset | Ask every newly-enqueued run to read the affected service's error rate and latency around its change and put the numbers on the pull request. Needs the three `OBSERVE_*` reads below. |
 | `OBSERVE_READ_TOKEN` | unset | An Observe **share token** (`X-Share-Token`), not the ingest key. Share tokens are GET-only, pinned server-side to their own site, long-lived and revocable — the only credential in Observe a worker can hold. Mint one from the site's share menu; revoke it to take the worker's read access away. Requires an Observe with share-token auth on `/api/v1/traces/services`, released in **v0.1.8**. Proven live 2026-08-20. |

@@ -24,6 +24,41 @@ new code**. Everything below is about making that safe.
 - [ ] **Note the current version**, so rollback has a target:
       `docker ps --format '{{.Names}}'` on the host shows `ship-web-<sha>`.
 
+## 1b. Upgrading past the B5 release
+
+Three behaviour changes land together. None touches an in-flight run — every
+one of them is resolved at enqueue and materialised into the run input, so runs
+already in the log replay exactly as they were recorded.
+
+**Test commands are now detected.** A repo with no explicit `testCommand` used
+to fall straight through to the worker's `SHIP_TEST_COMMAND`. It now gets a
+command inferred from its own root (package.json `scripts.test`, a Makefile
+`test:` target, `go.mod`, `Cargo.toml`, pytest config), and `SHIP_TEST_COMMAND`
+becomes the last resort under that. **On a multi-repo worker this is what you
+want** — one `go test ./...` was wrong for every repo but one. If you were
+relying on the worker-wide command reaching a repo whose tree says something
+else, set that repo's command explicitly on the Projects page (an explicit
+entry always wins) or set `SHIP_TEST_DETECT=0`.
+
+Detection makes a small number of read-only API calls to your forge at enqueue,
+using the same credential and the same allowlist as a clone. An origin your
+allowlist does not name is not contacted.
+
+**Sandbox images now live in this repo.** If your worker's
+`SHIP_SANDBOX_IMAGE` names an image you built by hand, it keeps working —
+nothing renames or removes an image. To move onto the reproducible ones, run
+`images/build.sh` **on the server** and point `SHIP_SANDBOX_IMAGE` at
+`ship-sandbox-go:dev`. `build.sh` also tags `ship-sandbox-harness:dev`, which
+is the name existing workers carry, so a rebuild under that tag is a drop-in
+replacement. **It will move you from Go 1.24 to Go 1.25**, which is the point:
+on 1.24 every Go pull request arrived marked `tests: failed`.
+
+**Projects have a `harness` field.** Absent means "inherit `SHIP_HARNESS`",
+which is what every existing record does, so nothing changes until you set one.
+Setting it to `claude-code` or `opencode` requires the sandbox image that repo
+boots to already carry the binary — build it with
+`images/build.sh --harness <id>`. Nothing installs a harness at run time.
+
 ## 2. The upgrade
 
 Ship is deployed as one teploy app with two processes:
