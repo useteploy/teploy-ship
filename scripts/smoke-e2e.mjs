@@ -293,6 +293,23 @@ async function main() {
   ]);
   if (project.code !== 0) fail(`project set failed: ${project.stderr.trim()}`);
 
+  // The opening ledger reading has to happen BEFORE the enqueue.
+  //
+  // `spend.get` includes UNSETTLED HOLDS, and enqueue-then-launch reserves an
+  // estimated cost against the day the moment the run starts. Reading after
+  // that put the hold in the baseline, so a successful run looked like the
+  // ledger going DOWN — 0.5 to 0.0102 — and the check failed on a run that had
+  // worked perfectly. Found by running the migration, not by reading the code.
+  const openingRuntimeModule = await import(join(ROOT, "dist", "runtime.js"));
+  const opening = await openingRuntimeModule
+    .nucleusRuntime(process.env.NUCLEUS_URL, "smoke-open", { log: () => {} })
+    .then(async (rt) => {
+      const seen = await readLedger(rt);
+      await rt.close().catch(() => {});
+      return seen;
+    });
+  before = { pricedBefore: opening.priced, unpricedBefore: opening.unpriced };
+
   const queued = await run(["enqueue", TASK, "--repo", repoUrl, "--json", "--store", "nucleus"]);
   if (queued.code !== 0) fail(`enqueue failed: ${queued.stderr.trim()}`);
   const runId = JSON.parse(queued.stdout.trim()).runId;
@@ -317,9 +334,6 @@ async function main() {
 
   const runtimeModule = await import(join(ROOT, "dist", "runtime.js"));
   const runtime = await runtimeModule.nucleusRuntime(process.env.NUCLEUS_URL, "smoke", { log: () => {} });
-  // Read the ledger BEFORE the run, so the assertion below is about this run.
-  const opening = await readLedger(runtime);
-  before = { pricedBefore: opening.priced, unpricedBefore: opening.unpriced };
 
   try {
     const terminal = new Set(["completed", "failed", "cancelled"]);
