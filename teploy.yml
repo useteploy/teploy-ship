@@ -44,8 +44,15 @@
 # the env value is the floor.
 
 app: ship
-server: smoke # your server name from servers.yml (smoke = the dev test box)
-user: tyler
+# infra-home. Ship's control plane lives beside the forge because its SANDBOXES
+# do not: SHIP_SANDBOX_URL points at compute-1, and src/colocation.ts refuses to
+# start if a sandbox daemon ever resolves to the forge's own machine.
+#
+# This was `smoke` (deploy-test) until 2026-08-27. Pointing the BASE file here
+# rather than leaving it on a decommissioned box means a bare `teploy deploy`
+# cannot quietly aim at a VM that no longer exists.
+server: 100.108.123.49
+user: root
 ingress: host
 port: 7460
 platform: linux/amd64
