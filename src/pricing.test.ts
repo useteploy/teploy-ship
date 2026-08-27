@@ -140,3 +140,51 @@ test("a quota model spends no dollars, but only when declared", () => {
   // A declared prefix without its trailing slash still matches.
   assert.equal(isQuotaModel("zai/glm-5.3", { SHIP_QUOTA_MODEL_PREFIXES: "zai" }), true);
 });
+
+// --- consumption is never counted nowhere -----------------------------------
+//
+// Found by the end-to-end smoke against the deployed build. `costUSD` returns 0
+// for a quota or local model BEFORE consulting an operator's explicit
+// SHIP_MODEL_PRICING entry, while `isPricedModel` sees that entry and answers
+// true. A deployment that sets BOTH — as deploy-test does for zai/glm-5.3 —
+// fell between the two settle branches and the run reached neither ledger,
+// which meant SHIP_DAILY_BUDGET_USD was enforcing nothing for the model the
+// worker actually runs.
+
+test("a quota model with an explicit price is the configuration that fell through the gap", () => {
+  const env = {
+    SHIP_QUOTA_MODEL_PREFIXES: "zai/",
+    SHIP_MODEL_PRICING: '{"zai/glm-5.3":{"inputPer1M":1,"outputPer1M":3.2}}',
+  };
+  const usage = { inputTokens: 4703, outputTokens: 464, totalTokens: 13295 };
+
+  // The two functions disagree, and that disagreement is the bug's shape.
+  // isPricedModel reads process.env directly, so the override has to be there.
+  const savedPricing = process.env.SHIP_MODEL_PRICING;
+  const savedQuota = process.env.SHIP_QUOTA_MODEL_PREFIXES;
+  process.env.SHIP_MODEL_PRICING = env.SHIP_MODEL_PRICING;
+  process.env.SHIP_QUOTA_MODEL_PREFIXES = env.SHIP_QUOTA_MODEL_PREFIXES;
+  try {
+    assert.equal(costUSD("zai/glm-5.3", usage, env), 0, "priced at zero by the quota prefix");
+    assert.equal(isPricedModel("zai/glm-5.3"), true, "yet reported as a priced model by the override");
+  } finally {
+    if (savedPricing === undefined) delete process.env.SHIP_MODEL_PRICING;
+    else process.env.SHIP_MODEL_PRICING = savedPricing;
+    if (savedQuota === undefined) delete process.env.SHIP_QUOTA_MODEL_PREFIXES;
+    else process.env.SHIP_QUOTA_MODEL_PREFIXES = savedQuota;
+  }
+
+  // Neither settle branch fires on its own: `priced` is undefined, so the
+  // unpriced branch is skipped, and cost is 0, so the priced branch returns.
+  assert.equal(usage.totalTokens > 0, true, "and the run genuinely consumed tokens");
+});
+
+test("costUSD stays zero for a genuinely free model, which is not the bug", () => {
+  assert.equal(costUSD("ollama/llama3", { totalTokens: 100 }, { SHIP_LOCAL_MODEL_PREFIXES: "ollama/" }), 0);
+  assert.equal(costUSD("anything", undefined), 0, "no usage is genuinely no cost");
+});
+
+test("an unknown model is priced high rather than free — the cap must fail closed", () => {
+  const cost = costUSD("some-vendor/brand-new", { inputTokens: 1_000_000, outputTokens: 1_000_000 });
+  assert.ok(cost > 0, "guessing zero would remove the cap silently");
+});

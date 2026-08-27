@@ -631,7 +631,33 @@ export function startWorker(options: WorkerOptions): {
           return;
         }
         const cost = costUSD(model, settled.usage);
-        if (cost <= 0) return;
+        // A run that burned tokens and priced at zero is COUNTED, not dropped.
+        //
+        // Found by the end-to-end smoke against the deployed build, which is
+        // exactly what it exists for. `costUSD` returns 0 for a quota or local
+        // model BEFORE consulting an operator's explicit SHIP_MODEL_PRICING
+        // entry, while `isPricedModel` sees that entry and answers true. A
+        // deployment that sets both — as this one does for zai/glm-5.3 — fell
+        // between the two branches: `usage.priced` was undefined so the block
+        // above did not fire, and `cost <= 0` returned here. The run reached
+        // NEITHER ledger, which is precisely the "never reported as $0" failure
+        // P5-3 exists to prevent, and it meant SHIP_DAILY_BUDGET_USD was
+        // enforcing nothing at all for the model this worker actually runs.
+        //
+        // This closes the hole without deciding the precedence question — an
+        // explicit per-model rate is more specific than a prefix and arguably
+        // should win, but that is the operator's call and either answer leaves
+        // this branch correct: consumption that has no dollar figure is
+        // counted, and only a run that consumed nothing is dropped.
+        if (cost <= 0) {
+          if (!((settled.usage?.totalTokens ?? 0) > 0)) return;
+          await options.runtime.unpricedRuns.add(source, day, runId);
+          log(
+            `[worker] ${runId} (${source}) priced at $0 on ${model} but consumed ${settled.usage?.totalTokens} tokens — ` +
+              `counted to ${day} as unpriced rather than dropped`,
+          );
+          return;
+        }
         if (!isPricedModel(model)) {
           // Loud, because the number below is a conservative guess and the
           // budget cap is now enforcing against it. Add the model to pricing.ts.
