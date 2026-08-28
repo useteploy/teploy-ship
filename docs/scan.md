@@ -106,6 +106,35 @@ a step. They are in the event log before the sandbox is disposed of, they
 survive a replay without a round trip, and there is no path anywhere that can
 refuse them.
 
+## Scans from Akiroo
+
+A room agent in Akiroo can ask a question of a repository (L7). It queues an
+outbox row of kind `scan`, which the worker collects on the same pull as
+`task` and `decision` rows:
+
+    kind: "scan"
+    payload: { "repo": "<https clone url>", "question": "<text, up to 4000 chars>",
+               "ref": "room-scan:<id>", "model"?: "<id>" }
+
+Ship checks the repo against the allowlist (external trust, like a task row)
+and enqueues a `mode: "scan"` run with `source: "akiroo"`, the question as the
+task, and `origin: { source: "akiroo", dedupeKey: "akiroo:<ref>", workItemRef:
+<ref> }` on the recorded input. **No issue is opened** — a scan is a question,
+not a work record, and a question does not need a durable row on the forge.
+
+The row is acked whatever happened. A refusal (repo not allowed, malformed
+payload, daily budget spent) is logged with the row id and nothing else; there
+is no refusal webhook, because a refusal has no run id to sign a payload on.
+Akiroo expires a scan nobody picked up after thirty minutes.
+
+When the run settles, the signed run webhook carries `origin.work_item_ref =
+room-scan:<id>`, `mode: "scan"` and a `findings` block — `{ found, findings,
+errors, summary }`, where `summary` is the run's final write-up truncated to
+8000 chars. The block is bounded so the whole payload stays under 64 KB:
+finding `detail`/`fix` text is clipped, then trailing findings are dropped,
+and either shortening is recorded in `errors`. The full list is always at
+`/api/runs/<id>/findings`. See `docs/DEPLOY.md`, "Connecting Ship to Akiroo".
+
 ## Cost
 
 Scans are budgeted like everything else, and — as of this change — the budget is

@@ -220,6 +220,15 @@ function captureRuntime(spend?: SpendStore): { runtime: ShipRuntime; inputs: Arr
   return { runtime, inputs };
 }
 
+test("enqueueRun materialises origin into the recorded input, and omits it when none was given", async () => {
+  const { runtime, inputs } = captureRuntime();
+  const origin = { source: "akiroo", dedupeKey: "akiroo:room-scan:5", workItemRef: "room-scan:5" };
+  await enqueueRun(runtime, { runId: "run-o1", task: "q", model: "m", repo: "https://git.example.com/owner/repo", mode: "scan", origin });
+  await enqueueRun(runtime, { runId: "run-o2", task: "q", model: "m" });
+  assert.deepEqual(inputs[0]!.origin, origin);
+  assert.ok(!Object.hasOwn(inputs[1]!, "origin"), "absent, not null: old logs and new must look alike without one");
+});
+
 test("enqueueRun materialises mode:scan and suppresses every flag that is about a CHANGE", async () => {
   const { runtime, inputs } = captureRuntime();
   // Deliberately hostile environment: every change-shaped feature switched on.

@@ -14,6 +14,7 @@ import { resolveConfigValue } from "./runtime-config.js";
 import type { NucleusPgwire } from "./nucleus-pgwire.js";
 import type { ConfigSource, ResolvedValue, RuntimeConfigStore } from "./runtime-config.js";
 import type { ShipRuntime } from "./runtime.js";
+import type { RunOrigin } from "./notify.js";
 
 /**
  * L1 — the Akiroo connector. Ship PULLS work from Akiroo; Akiroo never calls
@@ -40,6 +41,12 @@ import type { ShipRuntime } from "./runtime.js";
  *       `ship`-labelled issue on the repo and proposes the task under the SAME
  *       dedupe key the forge webhook would use, so the two collapse into one
  *       intake task whether or not the repo has a webhook configured.
+ *
+ *   scan {repo, question, ref: "room-scan:<id>", model?}
+ *     — a room agent asked a question of a repository (L7). Ship enqueues a
+ *       read-only `mode: "scan"` run directly, with the ref on the run's
+ *       origin so the findings webhook finds its way back. No issue is opened:
+ *       a scan is a question, not a durable work record.
  *
  * Every row is claimed in the delivery log before it is handled and acked
  * afterwards, whatever happened. The claim is what makes a re-delivered batch
@@ -544,6 +551,13 @@ export interface AkirooSweepDeps {
    */
   deliveries: DeliveryLog;
   intake: Pick<IntakeStore, "propose">;
+  /**
+   * Enqueue a read-only scan (L7). Injected rather than reaching for the
+   * runtime so the handler stays testable and the run id / model policy stay
+   * the worker's. Rejects when the run cannot be enqueued (budget), which the
+   * sweep logs and acks like any other refused row.
+   */
+  enqueueScan: (input: { repo: string; task: string; model?: string; origin: RunOrigin }) => Promise<{ runId: string }>;
   decide: (row: { runId: string; eventName: string; approved: boolean; reason?: string }) => Promise<DecisionOutcome>;
   repoPolicy: RepoPolicyConfig;
   fetchImpl?: typeof fetch;
@@ -662,6 +676,10 @@ export async function handleAkirooRow(row: AkirooRow, deps: AkirooSweepDeps): Pr
     await handleAkirooTask(row, deps);
     return;
   }
+  if (row.kind === "scan") {
+    await handleAkirooScan(row, deps);
+    return;
+  }
   // Not an error worth throwing over: a newer Akiroo may emit a kind this build
   // does not know, and the correct answer is to ack it and carry on rather than
   // to stop collecting everything behind it.
@@ -719,6 +737,43 @@ async function handleAkirooTask(row: AkirooRow, deps: AkirooSweepDeps): Promise<
     `[worker] akiroo: opened ${issue.fullName}#${issue.number} for ${workItemRef === "" ? "an untracked item" : workItemRef}` +
       ` (${created ? "proposed" : "already proposed"} as ${task.taskId})`,
   );
+}
+
+export const SCAN_QUESTION_LIMIT = 4000;
+export const ROOM_SCAN_REF_PREFIX = "room-scan:";
+
+async function handleAkirooScan(row: AkirooRow, deps: AkirooSweepDeps): Promise<void> {
+  const repo = str(row.payload.repo);
+  const question = str(row.payload.question);
+  const scanRef = str(row.payload.ref);
+  const model = str(row.payload.model);
+  if (repo === "" || question === "") throw new Error("scan row names no repo or no question");
+  if (question.length > SCAN_QUESTION_LIMIT) throw new Error(`scan question exceeds ${SCAN_QUESTION_LIMIT} chars`);
+  if (!scanRef.startsWith(ROOM_SCAN_REF_PREFIX) || scanRef.length === ROOM_SCAN_REF_PREFIX.length) {
+    throw new Error(`scan row ref must start with ${ROOM_SCAN_REF_PREFIX}`);
+  }
+  // Same trust level as a task row: the clone URL was typed into a workspace
+  // product. A refusal throws, is logged by the sweep, and the row is acked;
+  // Akiroo expires a scan nobody picked up.
+  const ref = assertRepoAllowed(repo, { trust: "external", config: deps.repoPolicy });
+  const { runId } = await deps.enqueueScan({
+    repo: ref.cloneUrl,
+    task: question,
+    ...(model !== "" ? { model } : {}),
+    origin: { source: "akiroo", dedupeKey: `akiroo:${scanRef}`, workItemRef: scanRef },
+  });
+  deps.log(`[worker] akiroo: scan of ${ref.owner}/${ref.repo} for ${scanRef} enqueued as ${runId}`);
+}
+
+/**
+ * Recover the work item ref from text that carries the footer above — the
+ * issue body, the intake detail or the run's task, which are the same string
+ * along the chain. Returns undefined when there is none.
+ */
+export function akirooRefFrom(text: string | undefined): string | undefined {
+  if (text === undefined) return undefined;
+  const match = new RegExp(`^${AKIROO_REF_MARKER}(\\S+)\\s*$`, "m").exec(text);
+  return match?.[1];
 }
 
 /** What the Settings page shows about the connector. */

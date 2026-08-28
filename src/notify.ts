@@ -1,3 +1,5 @@
+import type { ScanFinding } from "./findings.js";
+
 /**
  * A4 — outbound notifications: one short Slack message when a run needs
  * a human (parked) or settles (completed/failed), linking back to the
@@ -7,7 +9,7 @@
  */
 
 /**
- * Where a run's work came from (L1).
+ * Where a run's work came from (L1 / L7).
  *
  * The consumer this exists for is Akiroo: a run that started as one of its work
  * items has to be able to say so, or the item sits at "assigned" forever while
@@ -15,16 +17,14 @@
  * which is also how a consumer that missed the work_item_ref can still match a
  * run to the issue it came from.
  *
- * PRE-DECIDED: the field is defined and emitted here, and the worker does not
- * yet populate it — the notification-construction region of worker.ts is being
- * edited concurrently by another agent this session, and reaching into it for
- * one optional field is how a merge conflict eats a working feature. The hop
- * does not depend on it: Ship stamps `Akiroo: <ref>` into the issue body
- * (src/akiroo.ts AKIROO_REF_MARKER), that body becomes the intake detail, the
- * detail becomes the run's task text, and `task` carries it here already —
- * Akiroo reads either. Reverses the moment worker.ts is free: populate origin
- * from the intake task at src/worker.ts's context builder and the structured
- * field takes precedence on Akiroo's side automatically.
+ * Populated for EVERY run since L7. It is materialised into the recorded run
+ * input at enqueue (runtime.ts) and read back off the `run-started` event when
+ * the notification is built (worker.ts), never re-derived at delivery time.
+ * Intake-launched runs derive it from the task at launch — `source` and
+ * `dedupeKey` verbatim, `workItemRef` recovered from the `Akiroo: ` footer
+ * (src/akiroo.ts AKIROO_REF_MARKER) when the issue body carries one. Scan runs
+ * that arrive on the Akiroo outbox carry it from the row. Akiroo keeps its
+ * footer fallback off `task` for runs enqueued before this field existed.
  */
 export interface RunOrigin {
   /** Intake source: forgejo | github | akiroo | scan | … */
@@ -47,6 +47,71 @@ export interface RunNotification {
   task?: string;
   /** Where the task came from, when the launcher recorded it. */
   origin?: RunOrigin;
+  /** Set on scan runs (L2 / L7). Absent means an ordinary fix run. */
+  mode?: "scan";
+  /** What a completed scan found. Absent unless the run recorded its findings step. */
+  findings?: ScanReport;
+}
+
+/**
+ * The findings block a completed scan carries to a consumer (L7). `summary` is
+ * the run's final write-up; `errors` are the parse's drop reasons. Built by
+ * scanReport(), which also enforces the wire budget.
+ */
+export interface ScanReport {
+  found: boolean;
+  findings: ScanFinding[];
+  errors: string[];
+  summary: string;
+}
+
+/** The whole signed payload stays under this; a receiver's body limit is the reason. */
+export const WEBHOOK_PAYLOAD_LIMIT = 64 * 1024;
+/** How much of the run's write-up travels. Enough to answer a question from; not the transcript. */
+export const SCAN_SUMMARY_LIMIT = 8000;
+const SCAN_TEXT_LIMIT = 2000;
+const SCAN_TRUNCATED = "... [truncated by ship]";
+
+function clip(text: string, limit: number): string {
+  return text.length <= limit ? text : `${text.slice(0, limit - SCAN_TRUNCATED.length)}${SCAN_TRUNCATED}`;
+}
+
+function reportBytes(report: ScanReport): number {
+  return Buffer.byteLength(JSON.stringify(report), "utf8");
+}
+
+/**
+ * Bound a scan's findings to the wire budget. Three passes, each recorded in
+ * `errors` so a shortened report says it was shortened: the summary is
+ * truncated to SCAN_SUMMARY_LIMIT always; then, only if the block still
+ * exceeds `budget`, each finding's `detail` and `fix` are clipped; then trailing
+ * findings are dropped until it fits. Findings are never reordered, so the
+ * ones that survive are the ones the agent listed first.
+ */
+export function scanReport(
+  parsed: { found: boolean; findings: ScanFinding[]; errors: string[] },
+  summary: string,
+  budget: number = WEBHOOK_PAYLOAD_LIMIT - 8 * 1024,
+): ScanReport {
+  const report: ScanReport = {
+    found: parsed.found,
+    findings: parsed.findings.map((f) => ({ ...f })),
+    errors: [...parsed.errors],
+    summary: clip(summary, SCAN_SUMMARY_LIMIT),
+  };
+  if (reportBytes(report) <= budget) return report;
+  report.findings = report.findings.map((f) => ({
+    ...f,
+    detail: clip(f.detail, SCAN_TEXT_LIMIT),
+    ...(f.fix !== undefined ? { fix: clip(f.fix, SCAN_TEXT_LIMIT) } : {}),
+  }));
+  report.errors.push(`finding detail/fix text was truncated to ${SCAN_TEXT_LIMIT} chars to fit the webhook payload`);
+  const total = report.findings.length;
+  while (reportBytes(report) > budget && report.findings.length > 0) report.findings.pop();
+  if (report.findings.length < total) {
+    report.errors.push(`${total - report.findings.length} of ${total} finding(s) dropped to fit the webhook payload; read /api/runs/<id>/findings for all of them`);
+  }
+  return report;
 }
 
 export interface Notifier {
@@ -179,6 +244,10 @@ export interface RunWebhookPayload {
   url?: string;
   /** snake_case on the wire, matching every other field on this payload. */
   origin?: { source: string; dedupe_key: string; work_item_ref?: string };
+  /** "scan" on scan runs; absent otherwise (L7). */
+  mode?: "scan";
+  /** Present on a scan run that recorded its findings step (L7). */
+  findings?: ScanReport;
 }
 
 export function runWebhookPayload(event: RunNotification, publicUrl?: string): RunWebhookPayload {
@@ -200,6 +269,8 @@ export function runWebhookPayload(event: RunNotification, publicUrl?: string): R
           },
         }
       : {}),
+    ...(event.mode !== undefined ? { mode: event.mode } : {}),
+    ...(event.findings !== undefined ? { findings: event.findings } : {}),
   };
 }
 

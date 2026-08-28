@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import type { Notifier } from "./notify.js";
+import type { ScanFinding } from "./findings.js";
 import {
   formatRunNotification,
   multiNotifier,
   notifiable,
   runWebhookPayload,
+  scanReport,
   signWebhookBody,
   slackNotifier,
   webhookNotifier,
@@ -59,6 +61,56 @@ test("webhook payload carries what a machine consumer needs to route and act", (
   assert.equal(p.repo, "tyler/akiroo-lite");
   assert.equal(p.task, "fix the 5xx");
   assert.equal(p.url, "http://box:7460/runs/run-9");
+});
+
+test("webhook payload carries origin, mode and findings for a scan run", () => {
+  const findings: ScanFinding[] = [{ title: "secret in script", severity: "high", file: "a.sh", line: 3, detail: "d", fix: "f" }];
+  const p = runWebhookPayload({
+    runId: "run-9",
+    status: "completed",
+    repo: "https://forge/o/r.git",
+    task: "where is the retry?",
+    origin: { source: "akiroo", dedupeKey: "akiroo:room-scan:31", workItemRef: "room-scan:31" },
+    mode: "scan",
+    findings: { found: true, findings, errors: [], summary: "one hardcoded secret" },
+  });
+  assert.deepEqual(p.origin, { source: "akiroo", dedupe_key: "akiroo:room-scan:31", work_item_ref: "room-scan:31" });
+  assert.equal(p.mode, "scan");
+  assert.deepEqual(p.findings, { found: true, findings, errors: [], summary: "one hardcoded secret" });
+  // An ordinary run carries neither: absent, not "fix" or null.
+  const fix = runWebhookPayload({ runId: "run-1", status: "completed", origin: { source: "forgejo", dedupeKey: "forgejo:o/r#1" } });
+  assert.ok(!("mode" in fix) && !("findings" in fix));
+  assert.deepEqual(fix.origin, { source: "forgejo", dedupe_key: "forgejo:o/r#1" });
+});
+
+test("scanReport truncates the summary and passes a small report through untouched", () => {
+  const findings: ScanFinding[] = [{ title: "t", severity: "low", file: "f", detail: "d" }];
+  const r = scanReport({ found: true, findings, errors: ["one dropped"] }, "s".repeat(9000));
+  assert.equal(r.summary.length, 8000);
+  assert.ok(r.summary.endsWith("[truncated by ship]"));
+  assert.deepEqual(r.findings, findings);
+  assert.deepEqual(r.errors, ["one dropped"]);
+  assert.equal(r.found, true);
+  assert.equal(scanReport({ found: true, findings, errors: [] }, "short").summary, "short");
+});
+
+test("scanReport keeps the payload under the wire budget and says what it dropped", () => {
+  const big = "x".repeat(5000);
+  const findings: ScanFinding[] = Array.from({ length: 25 }, (_, i) => ({
+    title: `finding ${i}`,
+    severity: "med",
+    file: `src/${i}.ts`,
+    detail: big,
+    fix: big,
+  }));
+  const r = scanReport({ found: true, findings, errors: [] }, big);
+  const bytes = Buffer.byteLength(JSON.stringify(runWebhookPayload({ runId: "run-1", status: "completed", mode: "scan", findings: r })));
+  assert.ok(bytes < 64 * 1024, `payload is ${bytes} bytes`);
+  assert.ok(r.findings.length > 0, "some findings survive");
+  assert.ok(r.findings.every((f) => f.detail.length <= 2000 && (f.fix ?? "").length <= 2000));
+  assert.equal(r.findings[0]!.title, "finding 0", "order is preserved");
+  assert.ok(r.errors.some((e) => e.includes("truncated")));
+  assert.ok(r.errors.some((e) => /\d+ of 25 finding\(s\) dropped/.test(e)));
 });
 
 test("webhook payload omits absent fields rather than sending empty strings", () => {

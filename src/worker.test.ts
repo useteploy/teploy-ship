@@ -6,7 +6,9 @@ import type { IntakeSweepDeps } from "./worker.js";
 import type { IntakeTask } from "./intake.js";
 import type { RunUsage } from "./durable.js";
 import type { SpendStore } from "./spend.js";
-import { usageFromEvents } from "./worker.js";
+import { usageFromEvents, intakeOrigin, notificationContext, terminalContext } from "./worker.js";
+import type { WorkflowEvent } from "@neutron-build/workflow";
+import { issueBodyFor } from "./akiroo.js";
 import { LocalAdmission } from "./admission.js";
 import type { AdmissionControl } from "./admission.js";
 
@@ -575,4 +577,44 @@ test("B1: the intake sweep defers rather than drops when the derived ceiling fal
   h.terminal.set(h.launched[0]!, { terminal: true });
   await sweepIntake(h.deps);
   assert.equal(h.launched.length, 2, "and goes when the slot frees");
+});
+
+function wev(type: WorkflowEvent["type"], data: unknown, name?: string): WorkflowEvent {
+  return { v: 1, seq: 0, type, at: "2026-08-28T00:00:00Z", ...(name !== undefined ? { name } : {}), data };
+}
+
+test("intakeOrigin carries the task's source and dedupe key, and the Akiroo ref when the body has the footer", () => {
+  const base = { source: "forgejo", dedupeKey: "forgejo:o/r#12" };
+  assert.deepEqual(intakeOrigin({ ...base, detail: "plain issue body" }), base);
+  assert.deepEqual(intakeOrigin(base), base);
+  assert.deepEqual(intakeOrigin({ ...base, detail: `${issueBodyFor("It 500s.", "work-item:7")}\n\nhttp://forge/o/r/issues/12` }), {
+    ...base,
+    workItemRef: "work-item:7",
+  });
+});
+
+test("notificationContext reads repo, task, origin and mode off the recorded input", () => {
+  const origin = { source: "akiroo", dedupeKey: "akiroo:room-scan:3", workItemRef: "room-scan:3" };
+  const events = [wev("run-started", { input: { task: "q", repo: "https://forge/o/r.git", origin, mode: "scan" } })];
+  assert.deepEqual(notificationContext(events), { repo: "https://forge/o/r.git", task: "q", origin, mode: "scan" });
+  // A run enqueued before origin existed still notifies, with neither field.
+  assert.deepEqual(notificationContext([wev("run-started", { input: { task: "t" } })]), { task: "t" });
+  assert.deepEqual(notificationContext([]), {});
+});
+
+test("terminalContext adds the pr for a fix run and the findings block for a scan", () => {
+  assert.deepEqual(terminalContext([wev("run-completed", { output: { status: "finished", summary: "s", pr: "http://f/pulls/1" } })]), {
+    pr: "http://f/pulls/1",
+  });
+  const finding = { title: "t", severity: "high", file: "a.ts", line: 1, detail: "d" };
+  const scan = [
+    wev("run-started", { input: { task: "q", mode: "scan" } }),
+    wev("step-completed", { result: { found: true, findings: [finding], errors: ["extra dropped"] } }, "scan-findings"),
+    wev("run-completed", { output: { status: "finished", summary: "the write-up", findings: [finding] } }),
+  ];
+  assert.deepEqual(terminalContext(scan), {
+    findings: { found: true, findings: [finding], errors: ["extra dropped"], summary: "the write-up" },
+  });
+  // A scan that failed before its findings step carries no block at all.
+  assert.deepEqual(terminalContext([wev("run-started", { input: { task: "q", mode: "scan" } }), wev("run-failed", { error: "x" })]), {});
 });

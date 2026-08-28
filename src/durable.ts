@@ -1,3 +1,4 @@
+import type { RunOrigin } from "./notify.js";
 import { generateText } from "@neutron-build/ai";
 import type { Message, ModelAdapter } from "@neutron-build/ai";
 import { SandboxExecutor } from "@neutron-build/agents";
@@ -96,6 +97,12 @@ export interface DurableAgentInput {
   repo?: string;
   /** Review follow-up: work PR #pr's existing head branch and reply there. */
   pr?: number;
+  /**
+   * Where the task came from (L7), materialised at enqueue. Read by the
+   * worker's notification builder, never by the workflow: it gates no step,
+   * so a run enqueued without it replays unchanged.
+   */
+  origin?: RunOrigin;
   /**
    * Where `repo` came from. "external" (webhook, chat, issue text) may only
    * name an allowlisted origin; "operator" (an authenticated human typed it)

@@ -39,8 +39,9 @@ import type { Capacity, HostHold, HostLimits, HostLoad } from "./host-load.js";
 import { autoAllowedNow, formatWindow, windowFor } from "./governance.js";
 import type { Windows } from "./governance.js";
 import { makeObserveEmitter } from "./observe.js";
-import { multiNotifier, slackNotifier, webhookNotifier } from "./notify.js";
-import type { RunNotification } from "./notify.js";
+import { multiNotifier, scanReport, slackNotifier, webhookNotifier } from "./notify.js";
+import type { RunNotification, RunOrigin } from "./notify.js";
+import type { ParsedFindings } from "./findings.js";
 import { NucleusOutbox, flushOutbox, notificationId } from "./outbox.js";
 import type { Outbox } from "./outbox.js";
 import type { SpendStore } from "./spend.js";
@@ -56,7 +57,7 @@ import {
   detectForgeColocation,
   type SandboxProbe,
 } from "./colocation.js";
-import { akirooTokenPrint, makeAkirooDecider, makeAkirooState, resolveAkirooTarget, sweepAkiroo } from "./akiroo.js";
+import { akirooRefFrom, akirooTokenPrint, makeAkirooDecider, makeAkirooState, resolveAkirooTarget, sweepAkiroo } from "./akiroo.js";
 import type { AkirooSweepDeps } from "./akiroo.js";
 import type { CodeSearch } from "./code-index.js";
 import { costUSD, isPricedModel } from "./pricing.js";
@@ -179,6 +180,56 @@ export function readOutcome(events: WorkflowEvent[]): { terminal: boolean; usage
   // reconstruct from the steps so the spend is not silently written off.
   const reconstructed = usageFromEvents(events);
   return reconstructed !== undefined ? { terminal: true, usage: reconstructed } : { terminal: true };
+}
+
+/**
+ * L7: the origin an intake-launched run records. `source` and `dedupeKey` are
+ * the task's own; `workItemRef` is recovered from the Akiroo footer the issue
+ * body carries (AKIROO_REF_MARKER), which rides into the task's detail.
+ */
+export function intakeOrigin(task: Pick<IntakeTask, "source" | "dedupeKey" | "detail">): RunOrigin {
+  const workItemRef = akirooRefFrom(task.detail);
+  return { source: task.source, dedupeKey: task.dedupeKey, ...(workItemRef !== undefined ? { workItemRef } : {}) };
+}
+
+/**
+ * What every notification about a run carries, read off its `run-started`
+ * input: the repo, the task text, the origin and — for a scan — the mode.
+ * All materialised at enqueue, so this is a read, never a derivation.
+ */
+export function notificationContext(events: WorkflowEvent[]): Pick<RunNotification, "repo" | "task" | "origin" | "mode"> {
+  const started = events.find((e) => e.type === "run-started");
+  const input = (started as { data?: { input?: { repo?: string; task?: string; origin?: RunOrigin; mode?: string } } } | undefined)
+    ?.data?.input;
+  return {
+    ...(input?.repo !== undefined ? { repo: input.repo } : {}),
+    ...(input?.task !== undefined ? { task: input.task } : {}),
+    ...(input?.origin !== undefined ? { origin: input.origin } : {}),
+    ...(input?.mode === "scan" ? { mode: "scan" as const } : {}),
+  };
+}
+
+/**
+ * What a TERMINAL notification adds: the pull request when the run opened one,
+ * and for a scan the findings block (L7) — the recorded `scan-findings` step
+ * plus the run's final write-up, bounded to the webhook payload budget.
+ */
+export function terminalContext(events: WorkflowEvent[]): Pick<RunNotification, "pr" | "findings"> {
+  const done = events.find((e) => e.type === "run-completed");
+  const output = (done?.data as { output?: { pr?: string; summary?: string } } | undefined)?.output;
+  const step = events.find((e) => e.type === "step-completed" && e.name === "scan-findings");
+  const parsed = (step?.data as { result?: ParsedFindings } | undefined)?.result;
+  return {
+    ...(output?.pr !== undefined ? { pr: output.pr } : {}),
+    ...(parsed !== undefined
+      ? {
+          findings: scanReport(
+            { found: parsed.found === true, findings: Array.isArray(parsed.findings) ? parsed.findings : [], errors: Array.isArray(parsed.errors) ? parsed.errors : [] },
+            output?.summary ?? "",
+          ),
+        }
+      : {}),
+  };
 }
 
 export interface IntakeSweepDeps {
@@ -798,12 +849,7 @@ export function startWorker(options: WorkerOptions): {
             });
             return;
           }
-          const started = events.find((e) => e.type === "run-started");
-          const input = (started as { data?: { input?: { repo?: string; task?: string } } } | undefined)?.data?.input;
-          const context = {
-            ...(input?.repo !== undefined ? { repo: input.repo } : {}),
-            ...(input?.task !== undefined ? { task: input.task } : {}),
-          };
+          const context = notificationContext(events);
           if (outcome.status === "waiting") {
             notify.runEvent({
               runId,
@@ -813,10 +859,9 @@ export function startWorker(options: WorkerOptions): {
             });
             return;
           }
-          // Terminal: include the PR link when the run opened one.
-          const done = events.find((e) => e.type === "run-completed");
-          const pr = (done?.data as { output?: { pr?: string } } | undefined)?.output?.pr;
-          notify.runEvent({ runId, status: outcome.status, ...(pr !== undefined ? { pr } : {}), ...context });
+          // Terminal: include the PR link when the run opened one, and the
+          // findings when it was a scan.
+          notify.runEvent({ runId, status: outcome.status, ...context, ...terminalContext(events) });
         })());
       }
       // Dogfood the run into Observe (no-op unless configured).
@@ -1183,6 +1228,10 @@ export function startWorker(options: WorkerOptions): {
           ...(changeClassRequired(task.source) ? { changeClass: true } : {}),
           ...(task.repo !== undefined ? { repo: task.repo } : {}),
           ...(task.pr !== undefined ? { pr: task.pr } : {}),
+          // L7: where the task came from, so the outcome can find its way home.
+          // The Akiroo footer rides the issue body into the task's detail; the
+          // structured ref is recovered from it here, once, at launch.
+          origin: intakeOrigin(task),
         });
       },
       now: () => new Date(),
@@ -1240,6 +1289,23 @@ export function startWorker(options: WorkerOptions): {
         cursor: akirooCursor,
         deliveries: options.runtime.deliveries,
         intake: options.runtime.intake,
+        enqueueScan: async (input) => {
+          const runId = `run-${randomUUID().slice(0, 8)}`;
+          await enqueueRun(options.runtime, {
+            runId,
+            task: input.task,
+            model: input.model ?? modelId,
+            repo: input.repo,
+            mode: "scan",
+            source: "akiroo",
+            // The scan contract names a room, not a person, so the run is
+            // recorded as unattributable rather than as the room's id.
+            actor: intakeActor(undefined, "akiroo"),
+            trust: "external",
+            origin: input.origin,
+          });
+          return { runId };
+        },
         decide: akirooDecide,
         repoPolicy: akirooRepoPolicy,
         log,

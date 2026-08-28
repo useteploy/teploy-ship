@@ -1,3 +1,4 @@
+import type { RunOrigin } from "./notify.js";
 import { resolveTestTarget } from "./test-detect.js";
 import {
   LeaseManager,
@@ -807,6 +808,14 @@ export async function enqueueRun(
     /** Intake source, recorded so completion can settle spend against it. */
     source?: string;
     /**
+     * Where the task came from (L7): the intake source, its dedupe key and,
+     * for work that arrived from a workspace, the originating item ref.
+     * Materialised into the recorded input below and read back when the run's
+     * notification is built, so the outcome can find its way home without
+     * anything re-deriving it at delivery time. Gates no step.
+     */
+    origin?: RunOrigin;
+    /**
      * Who asked for this run. Recorded on the run's META, deliberately NOT in
      * the workflow input below.
      *
@@ -1002,6 +1011,7 @@ export async function enqueueRun(
         ...(options.repo !== undefined ? { repo: options.repo } : {}),
         ...(options.repo !== undefined ? { trust: options.trust ?? "external" } : {}),
         ...(options.pr !== undefined ? { pr: options.pr } : {}),
+        ...(options.origin !== undefined ? { origin: options.origin } : {}),
         // Both suppressed on a scan: the plan park asks an operator to approve
         // work that will not happen, and the critic reviews a diff there is none of.
         ...(options.plan === true && !scan ? { plan: true } : {}),

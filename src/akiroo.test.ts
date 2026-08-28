@@ -7,6 +7,7 @@ import { join } from "node:path";
 import {
   AKIROO_REF_MARKER,
   FileAkirooCursor,
+  akirooRefFrom,
   akirooTargetFromEnv,
   akirooWorkspaceKey,
   createLabelledIssue,
@@ -71,6 +72,7 @@ function baseDeps(overrides: Partial<AkirooSweepDeps> = {}): AkirooSweepDeps {
     cursor: { get: async () => 0, set: async () => {}, reset: async () => {} },
     deliveries: memoryDeliveries(),
     intake: memoryIntake(),
+    enqueueScan: async () => ({ runId: "run-scan" }),
     decide: async () => "delivered",
     repoPolicy: POLICY,
     log: () => {},
@@ -248,6 +250,83 @@ test("a repo outside the allowlist never sees a credential", async () => {
       ),
     /not an origin this deployment allows/,
   );
+});
+
+test("a scan row enqueues a read-only scan run with the ref on its origin and opens no issue", async () => {
+  const enqueued: Array<Parameters<AkirooSweepDeps["enqueueScan"]>[0]> = [];
+  const intake = memoryIntake();
+  const lines: string[] = [];
+  const deps = baseDeps({
+    intake,
+    enqueueScan: async (input) => {
+      enqueued.push(input);
+      return { runId: "run-s1" };
+    },
+    fetchImpl: (async () => {
+      throw new Error("the forge must not be called for a scan");
+    }) as unknown as typeof fetch,
+    log: (line) => lines.push(line),
+  });
+  await handleAkirooRow(
+    { id: 9, kind: "scan", payload: { repo: REPO, question: "Where is the send path retried?", ref: "room-scan:31", model: "glm-5.3" } },
+    deps,
+  );
+  assert.equal(intake.calls.length, 0, "a scan is a question, not a work record");
+  assert.equal(enqueued.length, 1);
+  assert.deepEqual(enqueued[0], {
+    repo: parseRepoUrl(REPO).cloneUrl,
+    task: "Where is the send path retried?",
+    model: "glm-5.3",
+    origin: { source: "akiroo", dedupeKey: "akiroo:room-scan:31", workItemRef: "room-scan:31" },
+  });
+  assert.ok(lines.some((l) => l.includes("room-scan:31") && l.includes("run-s1")));
+});
+
+test("a scan row is validated before anything is enqueued", async () => {
+  const deps = baseDeps({
+    enqueueScan: async () => {
+      throw new Error("must not enqueue");
+    },
+  });
+  const cases: Array<[Record<string, unknown>, RegExp]> = [
+    [{ question: "q", ref: "room-scan:1" }, /no repo or no question/],
+    [{ repo: REPO, ref: "room-scan:1" }, /no repo or no question/],
+    [{ repo: REPO, question: "x".repeat(4001), ref: "room-scan:1" }, /exceeds 4000/],
+    [{ repo: REPO, question: "q", ref: "work-item:1" }, /must start with room-scan:/],
+    [{ repo: REPO, question: "q", ref: "room-scan:" }, /must start with room-scan:/],
+    [{ repo: REPO, question: "q" }, /must start with room-scan:/],
+    [{ repo: "http://evil.test/o/r.git", question: "q", ref: "room-scan:1" }, /not an origin this deployment allows/],
+  ];
+  for (const [payload, expected] of cases) {
+    await assert.rejects(() => handleAkirooRow({ id: 1, kind: "scan", payload }, deps), expected, JSON.stringify(payload));
+  }
+});
+
+test("a refused scan is logged and its row is still acked", async () => {
+  const lines: string[] = [];
+  const akiroo = scriptedAkiroo([
+    { id: 4, kind: "scan", payload: { repo: REPO, question: "q", ref: "room-scan:2" } },
+  ]);
+  const deps = baseDeps({
+    fetchImpl: akiroo.fetchImpl,
+    enqueueScan: async () => {
+      throw new Error("daily budget for source akiroo is spent");
+    },
+    log: (line) => lines.push(line),
+  });
+  const result = await sweepAkiroo(deps);
+  assert.equal(result.handled, 0);
+  assert.deepEqual(akiroo.acked, [[4]]);
+  assert.ok(lines.some((l) => l.includes("row 4 (scan)") && l.includes("daily budget")));
+});
+
+test("akirooRefFrom recovers the footer ref from the text that carries it", () => {
+  assert.equal(akirooRefFrom(issueBodyFor("It 500s.", "work-item:7")), "work-item:7");
+  assert.equal(akirooRefFrom(`Fix it\n\n${issueBodyFor("", "work-item:8")}\n\nhttp://forge/i/1`), "work-item:8");
+  assert.equal(akirooRefFrom("no footer here"), undefined);
+  assert.equal(akirooRefFrom(undefined), undefined);
+  // The marker mid-line is prose, not a footer.
+  assert.equal(akirooRefFrom("see Akiroo: work-item:9 for context"), undefined);
 });
 
 /** A poll/ack pair over a scripted Akiroo. */

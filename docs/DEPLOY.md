@@ -477,11 +477,22 @@ What flows, both ways:
   `ship`-labelled issue on the project's repository, and proposes it —
   under the same dedupe key the forge webhook uses, so the two collapse
   into one task whether or not that repo has a webhook configured.
+- A room agent asks a question of a repository. That is an outbox row of
+  kind `scan` (`{repo, question, ref: "room-scan:<id>", model?}`); Ship
+  enqueues a read-only `mode: "scan"` run for it and opens **no issue** —
+  a scan is a question, not a work record. See `docs/scan.md`, "Scans from
+  Akiroo".
 - The run's outcome goes back as a signed run event (set `SHIP_NOTIFY_URL`
   to Akiroo's `/api/webhooks/teploy_ship/<org>` and `SHIP_NOTIFY_SECRET`
   to that connection's inbound secret). A pull request moves the work item
   to **review** with the link; a failure moves it to **blocked** with the
-  reason.
+  reason. Every run event carries `origin` (`source`, `dedupe_key`, and
+  `work_item_ref` — `work-item:<id>` for an issue that came from a work
+  item, `room-scan:<id>` for a scan), which is what Akiroo routes on. A
+  scan run additionally carries `mode: "scan"` and, once completed,
+  `findings: { found, findings, errors, summary }` with `summary` the run's
+  write-up truncated to 8000 chars; the payload stays under 64 KB, with
+  any shortening noted in `errors`.
 - Approving or denying a **parked run** from Akiroo's queue also travels
   by pull: if Akiroo has no reachable Ship URL configured — the normal
   case — it queues the decision and Ship collects it. A Ship that *does*
