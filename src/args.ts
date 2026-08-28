@@ -40,6 +40,7 @@ export const COMMAND_FLAGS: Record<string, FlagSpec> = {
     value: ["model", "sandbox", "sandbox-token", "sandbox-image", "sandbox-network", "max-steps"],
   },
   runs: {},
+  preflight: { boolean: ["json", "allow-unrecorded"], value: ["limit", "store", "nucleus-url"] },
   explain: { boolean: ["json"], value: ["store", "nucleus-url"] },
   audit: { value: ["format", "since", "until", "store", "nucleus-url"] },
   enqueue: { boolean: ["json", "plan", "critic", "settle"], value: ["repo", "model", "store", "nucleus-url"] },

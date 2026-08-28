@@ -1,8 +1,8 @@
-import { completeSleep, executeRunExclusive } from "@neutron-build/workflow";
-import type { WorkflowEvent } from "@neutron-build/workflow";
+import { NondeterminismError, completeSleep, executeRunExclusive } from "@neutron-build/workflow";
+import type { RunOutcome, WorkflowEvent } from "@neutron-build/workflow";
 import type { ModelAdapter } from "@neutron-build/ai";
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 
 import { durableAgent } from "./durable.js";
@@ -18,6 +18,7 @@ import { parseSandboxUrls } from "./sandbox-pool.js";
 import { attributionsFrom } from "./attributed-spend.js";
 import { intakeActor } from "./actor.js";
 import type { NucleusShipRuntime } from "./runtime.js";
+import type { RunMeta } from "./run-store.js";
 import type { NucleusPgwire } from "./nucleus-pgwire.js";
 import type { IntakeStore, IntakePolicy, IntakeTask } from "./intake.js";
 import type { SourcePolicy } from "./policies.js";
@@ -55,10 +56,11 @@ import {
   detectForgeColocation,
   type SandboxProbe,
 } from "./colocation.js";
-import { NucleusAkirooCursor, akirooTargetFromEnv, makeAkirooDecider, makeAkirooState, sweepAkiroo } from "./akiroo.js";
+import { akirooTokenPrint, makeAkirooDecider, makeAkirooState, resolveAkirooTarget, sweepAkiroo } from "./akiroo.js";
 import type { AkirooSweepDeps } from "./akiroo.js";
 import type { CodeSearch } from "./code-index.js";
 import { costUSD, isPricedModel } from "./pricing.js";
+import { UPGRADE_HOLD_EVENT, replayDrift, upgradeHoldReason } from "./step-fingerprint.js";
 import { makeObserveLogEmitter, selfwatchOnce } from "./selfwatch.js";
 
 export type { IntakePolicy } from "./intake.js";
@@ -439,6 +441,51 @@ export async function launchDueBounded(deps: {
   return launched;
 }
 
+/** What `releaseUpgradeHolds` needs, as data, so a test can drive it without a store. */
+export interface UpgradeHoldDeps {
+  listMeta: () => Promise<RunMeta[]>;
+  loadEvents: (runId: string) => Promise<WorkflowEvent[]>;
+  markWake: (runId: string) => Promise<void>;
+  saveMeta: (meta: RunMeta) => Promise<void>;
+  log: (line: string) => void;
+}
+
+/**
+ * Release the runs the upgrade fence is holding that this build now agrees with.
+ *
+ * A hold is a fact about two BUILDS, not about the run, and the documented fix
+ * is a rollback — so it must not also require someone to remember which runs to
+ * resume afterwards. `replayDrift` is recomputed from the log rather than read
+ * from anywhere, so this can only ever release a run the running code really
+ * can replay; a hold that is still real stays held.
+ *
+ * Bounded by the number of held runs, which is zero on every ordinary tick.
+ */
+export async function releaseUpgradeHolds(deps: UpgradeHoldDeps): Promise<string[]> {
+  const held = (await deps.listMeta()).filter((m) => m.eventName === UPGRADE_HOLD_EVENT && m.status === "waiting");
+  const released: string[] = [];
+  for (const meta of held) {
+    let events: WorkflowEvent[];
+    try {
+      events = await deps.loadEvents(meta.runId);
+    } catch {
+      continue; // an unreadable log is not evidence that the hold is over
+    }
+    if (replayDrift(events) !== null) continue;
+    // Both halves, because they are read by different paths: markWake is what
+    // the Nucleus index answers with (and it is what makes the run due again),
+    // while the raw meta doc is what a file-backed read returns. An empty
+    // eventName rather than an absent one — the Nucleus column map only writes
+    // the keys the object carries, so omitting it would leave the hold's name
+    // sitting in the column.
+    await deps.saveMeta({ ...meta, status: "queued", eventName: "", updatedAt: new Date().toISOString() });
+    await deps.markWake(meta.runId);
+    released.push(meta.runId);
+    deps.log(`[worker] released ${meta.runId} from its upgrade hold: this build replays its recorded step sequence`);
+  }
+  return released;
+}
+
 /**
  * The resident worker: executes due durable runs under leases, bounded by the
  * concurrency ceiling. Safe to run alongside CLI invocations and other workers
@@ -457,8 +504,12 @@ export async function launchDueBounded(deps: {
 export function startWorker(options: WorkerOptions): {
   /** Stop accepting work; resolves once timers are down and the outbox is flushed. */
   stop: () => Promise<void>;
-  /** True while runs are still executing or a sweep is mid-flight. */
+  /** True while runs are still executing, a sweep is mid-pass, or completion work is unlanded. */
   busy: () => boolean;
+  /** The run ids executing on this worker right now. */
+  executing: () => string[];
+  /** Count of detached completion tasks (settlement, notify, meta) still in flight. */
+  unsettled: () => number;
 } {
   const log = options.log ?? ((line: string) => process.stderr.write(line + "\n"));
   const envMaxSteps = Number(process.env.SHIP_MAX_STEPS);
@@ -568,6 +619,31 @@ export function startWorker(options: WorkerOptions): {
   // (nondeterminism/store error) still gets cleaned up, and an error before the
   // lease is won (which never added) is a harmless no-op delete.
   const inflight = new Set<string>();
+  /**
+   * Detached completion work still running: spend settlement, the notification,
+   * the Observe emit, the meta write.
+   *
+   * Counted because `handleComplete` removes the run from `inflight` BEFORE it
+   * starts any of that, so a shutdown that waited only on `inflight` saw
+   * `busy()` go false immediately and closed the connection pool underneath the
+   * settlement — which is precisely the failure the ordered shutdown in cli.ts
+   * was written to stop, still present because the thing it waited on did not
+   * cover the thing it was waiting for. A run's cost reaching the ledger is the
+   * one piece of shutdown work that cannot be redone by the next worker.
+   */
+  let settling = 0;
+  const tracked = (work: Promise<unknown>): void => {
+    settling++;
+    // `.catch` before `.finally`, not after: a rejected completion task would
+    // otherwise make the chain itself reject, and a voided rejected promise is
+    // an unhandled rejection that can take the process down at exactly the
+    // moment it is trying to shut down cleanly.
+    void work
+      .catch((error) => log(`[worker] completion task failed: ${error instanceof Error ? error.message : String(error)}`))
+      .finally(() => {
+        settling--;
+      });
+  };
   const claimTerminalOutcome = makeTerminalClaim(options.runtime, host);
   const handleError = (runId: string, error: unknown): void => {
     inflight.delete(runId);
@@ -602,7 +678,7 @@ export function startWorker(options: WorkerOptions): {
       // cost recorded and never counted against a budget, on a product whose
       // pitch is cost transparency. Completion is the one point every durable
       // run passes through regardless of how it was launched.
-      void (async () => {
+      tracked((async () => {
         if (!(await terminalPass)) return; // a racing tick already processed this outcome
         const onRetry = (attempt: number, error: unknown): void =>
           log(`[worker] ${runId}: settle read/write attempt ${attempt} failed, retrying: ${error instanceof Error ? error.message : String(error)}`);
@@ -700,14 +776,14 @@ export function startWorker(options: WorkerOptions): {
         // than silently recorded as done — see TerminalClaim.release.
         await claimTerminalOutcome.release(runId);
         log(`[worker] ${runId}: terminal claim released — this run's cost is NOT in the ledger`);
-      });
+      }));
       if (notify.enabled) {
         // Both branches read the event log for context. The park branch used to
         // skip that, but a parked run is exactly the one a consumer must be able
         // to route and describe — "run-7f3a is waiting" with no repo and no task
         // is an approval request nobody can act on. One store read per park is
         // cheap; parks are rare by construction.
-        void (async () => {
+        tracked((async () => {
           if (!(await terminalPass)) return;
           let events: Awaited<ReturnType<typeof options.runtime.store.load>>;
           try {
@@ -741,11 +817,11 @@ export function startWorker(options: WorkerOptions): {
           const done = events.find((e) => e.type === "run-completed");
           const pr = (done?.data as { output?: { pr?: string } } | undefined)?.output?.pr;
           notify.runEvent({ runId, status: outcome.status, ...(pr !== undefined ? { pr } : {}), ...context });
-        })();
+        })());
       }
       // Dogfood the run into Observe (no-op unless configured).
       if (observe.enabled) {
-        void (async () => {
+        tracked((async () => {
           if (!(await terminalPass)) return;
           try {
             const [meta, events] = await Promise.all([options.runtime.loadMeta(runId), options.runtime.store.load(runId)]);
@@ -763,7 +839,7 @@ export function startWorker(options: WorkerOptions): {
           } catch {
             // telemetry must never fail a run
           }
-        })();
+        })());
       }
       // The index is status-authoritative, but persist the terminal status
       // onto the raw meta doc too so it's self-consistent (accurate for
@@ -772,15 +848,17 @@ export function startWorker(options: WorkerOptions): {
       // scheduler already recorded as this outcome — a "changed?" guard
       // compares outcome to itself and never writes (the raw doc kept its
       // stale pre-terminal status forever).
-      void options.runtime.placement.set(runId, host).catch(() => {});
-      void options.runtime
-        .loadMeta(runId)
-        .then((meta) => {
-          if (meta !== null) {
-            return options.runtime.saveMeta({ ...meta, status: outcome.status, updatedAt: new Date().toISOString() });
-          }
-        })
-        .catch((error) => log(`[worker] ${runId}: meta update failed: ${error instanceof Error ? error.message : String(error)}`));
+      tracked(options.runtime.placement.set(runId, host).catch(() => {}));
+      tracked(
+        options.runtime
+          .loadMeta(runId)
+          .then((meta) => {
+            if (meta !== null) {
+              return options.runtime.saveMeta({ ...meta, status: outcome.status, updatedAt: new Date().toISOString() });
+            }
+          })
+          .catch((error) => log(`[worker] ${runId}: meta update failed: ${error instanceof Error ? error.message : String(error)}`)),
+      );
     };
 
   const envInt = (name: string): number | undefined => {
@@ -868,6 +946,33 @@ export function startWorker(options: WorkerOptions): {
     return held === null;
   };
   const TERMINAL_EVENTS: ReadonlySet<string> = new Set(["run-completed", "run-failed", "run-cancelled"]);
+  /**
+   * Hold a run this build must not replay (the upgrade fence, step-fingerprint.ts).
+   *
+   * NOTHING IS WRITTEN TO THE EVENT LOG. An `event-waiting` event is a cursor
+   * event, so recording the hold in the log would itself alter the sequence the
+   * hold exists to protect. The state lives in the run index (status `waiting`,
+   * which stops it coming due every tick) and on its meta, both outside the log.
+   *
+   * Nothing here is destructive and nothing is remembered: the fingerprint is
+   * recomputed on every attempt, so rolling the deployment back and running
+   * `teploy-ship resume` releases the run, and `releaseUpgradeHolds` below
+   * releases it without anyone asking.
+   */
+  const holdForUpgrade = async (runId: string, reason: string): Promise<void> => {
+    log(`[worker] HOLDING ${reason}`);
+    await options.runtime.index.record(runId, wf.name, {
+      status: "waiting",
+      eventName: UPGRADE_HOLD_EVENT,
+    } as RunOutcome);
+    const meta = await options.runtime.loadMeta(runId).catch(() => null);
+    if (meta !== null) {
+      await options.runtime
+        .saveMeta({ ...meta, status: "waiting", eventName: UPGRADE_HOLD_EVENT, updatedAt: new Date().toISOString() })
+        .catch((error) => log(`[worker] ${runId}: hold meta write failed: ${error instanceof Error ? error.message : String(error)}`));
+    }
+    handleComplete(runId, { status: "waiting", eventName: UPGRADE_HOLD_EVENT });
+  };
   /** Execute one due run. Returns true when this pass made progress (a slot likely freed). */
   const driveOne = async (runId: string, sleeping: boolean): Promise<boolean> => {
     try {
@@ -883,6 +988,17 @@ export function startWorker(options: WorkerOptions): {
         handleComplete(runId, { status });
         return true;
       }
+      // THE UPGRADE FENCE, before anything is executed or woken. A run whose
+      // recorded step sequence differs from this build's would hit a
+      // NondeterminismError partway through its replay; holding it here keeps
+      // the run exactly as its log left it and turns "unrunnable until someone
+      // notices" into a decision in the inbox. Checked per attempt rather than
+      // once at startup so a rollback releases it on the next tick.
+      const drift = replayDrift(events);
+      if (drift !== null) {
+        await holdForUpgrade(runId, upgradeHoldReason(runId, drift));
+        return false;
+      }
       if (sleeping) await completeSleep(options.runtime.store, runId);
       const outcome = await executeRunExclusive({
         workflow: wf,
@@ -897,13 +1013,36 @@ export function startWorker(options: WorkerOptions): {
       handleComplete(runId, outcome);
       return true;
     } catch (error) {
+      // The backstop the fingerprint cannot be. A fingerprint is computed from
+      // the source ORDER of step calls, so a reordering achieved by swapping
+      // two helper CALL SITES leaves it unchanged (see step-fingerprint.ts);
+      // the engine catches that on replay and every other divergence besides.
+      // Without this branch a diverged run was logged and left due, so the
+      // worker re-attempted it every tick forever and nobody was told.
+      if (error instanceof NondeterminismError) {
+        inflight.delete(runId);
+        await holdForUpgrade(
+          runId,
+          `run ${runId} diverged from its recorded log under this build (${error.message}). ` +
+            `Its log is intact. Roll the deployment back to release it, or cancel the run.`,
+        ).catch((held) => log(`[worker] ${runId}: could not record the upgrade hold: ${held instanceof Error ? held.message : String(held)}`));
+        return false;
+      }
       handleError(runId, error);
       return false;
     }
   };
   let driving = false;
+  /**
+   * Set by `stop()`. Clearing the interval is not enough on its own: a run that
+   * makes progress re-enters `drive()` from its own completion handler (the
+   * fill-a-freed-slot path below), so a worker that had been told to stop could
+   * still pick up a brand-new run afterwards — and then be killed mid-step by
+   * the shutdown that had just asked it to stop.
+   */
+  let stopping = false;
   const drive = async (): Promise<void> => {
-    if (driving) return;
+    if (driving || stopping) return;
     driving = true;
     try {
       await launchDueBounded({
@@ -911,7 +1050,10 @@ export function startWorker(options: WorkerOptions): {
         inflight,
         launching,
         maxConcurrent: capacity.maxConcurrent,
-        hostOk,
+        // A pass already in flight when stop() lands must not launch one more
+        // run on its next loop iteration; the guard at the top of drive() only
+        // covers passes that have not started.
+        hostOk: () => !stopping && hostOk(),
         launch: (runId, sleeping) => {
           launching.add(runId);
           void driveOne(runId, sleeping)
@@ -1050,33 +1192,67 @@ export function startWorker(options: WorkerOptions): {
 
   // L1: the Akiroo hop. Ship PULLS — a worker behind a tailnet needs only
   // outbound HTTPS, and Akiroo never holds a forge token. No-op unless both
-  // AKIROO_URL and AKIROO_PULL_TOKEN are set. See src/akiroo.ts.
-  const akirooTarget = akirooTargetFromEnv();
-  const akirooState = makeAkirooState(akirooTarget);
-  const akirooDeps: AkirooSweepDeps | undefined =
-    akirooTarget === undefined
-      ? undefined
-      : {
-          target: akirooTarget,
-          cursor: new NucleusAkirooCursor(options.runtime.db),
-          deliveries: options.runtime.deliveries,
-          intake: options.runtime.intake,
-          decide: makeAkirooDecider(options.runtime),
-          repoPolicy: options.repoPolicy ?? policyFromEnv(),
-          log,
-        };
-  if (akirooDeps !== undefined) log(`[worker] akiroo: pulling work from ${akirooTarget!.url}`);
+  // AKIROO_URL and AKIROO_PULL_TOKEN resolve. See src/akiroo.ts.
+  //
+  // Resolved EVERY tick rather than once at startup. The connect handshake
+  // writes both values into the runtime config store from the web process while
+  // this worker is already running, and the contract is that the worker picks
+  // them up on its next poll — a target captured at boot would mean a restart
+  // is still required, which is the whole thing the handshake removes.
+  //
+  // This is the worker loop, NOT a durable step: durable.ts never touches the
+  // connector (`grep akiroo src/durable.ts` is empty, and must stay so). A
+  // config read inside a durable step would change the step sequence on replay
+  // and throw a NondeterminismError, leaving in-flight runs permanently
+  // unrunnable. Keep the read here.
+  const akirooCursor = options.runtime.akirooCursor;
+  const akirooDecide = makeAkirooDecider(options.runtime);
+  const akirooRepoPolicy = options.repoPolicy ?? policyFromEnv();
+  const akirooState = makeAkirooState(undefined);
+  // What the connector looked like on the previous tick, so the change is
+  // logged once rather than every five seconds. The token is never part of it:
+  // its identity is carried as a short digest so a rotation is still visible.
+  let akirooPrint = "";
   const akirooSweep = async (): Promise<void> => {
-    if (akirooDeps === undefined) return;
     try {
-      const result = await sweepAkiroo(akirooDeps);
+      const resolution = await resolveAkirooTarget(options.runtime.config);
+      const print =
+        resolution.target === undefined
+          ? `${resolution.status}:${resolution.reason ?? ""}`
+          : `${resolution.status}:${resolution.target.url}:${akirooTokenPrint(resolution.target.token)}`;
+      if (print !== akirooPrint) {
+        akirooPrint = print;
+        akirooState.retarget(resolution);
+        if (resolution.target !== undefined) {
+          log(
+            `[worker] akiroo: pulling work from ${resolution.target.url}` +
+              ` (${resolution.status === "runtime" ? "set by the connect handshake" : "from the environment"})`,
+          );
+        } else if (resolution.status === "misconfigured") {
+          log(`[worker] akiroo: connector not usable — ${resolution.reason ?? "half-configured"}`);
+        } else {
+          log("[worker] akiroo: connector not configured");
+        }
+      }
+      if (resolution.target === undefined) return;
+      const deps: AkirooSweepDeps = {
+        target: resolution.target,
+        cursor: akirooCursor,
+        deliveries: options.runtime.deliveries,
+        intake: options.runtime.intake,
+        decide: akirooDecide,
+        repoPolicy: akirooRepoPolicy,
+        log,
+      };
+      const result = await sweepAkiroo(deps);
       akirooState.recordPull(result);
       if (result.pulled > 0) {
         log(`[worker] akiroo: pulled ${result.pulled}, handled ${result.handled}, acked ${result.acked}`);
       }
     } catch (error) {
-      // Logged, never thrown: Akiroo being unreachable must not stop the intake
-      // sweep that shares this tick.
+      // Logged, never thrown: Akiroo being unreachable — or the config store
+      // being briefly unreadable — must not stop the intake sweep that shares
+      // this tick.
       akirooState.recordError(error);
       log(`[worker] akiroo sweep: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -1103,6 +1279,23 @@ export function startWorker(options: WorkerOptions): {
     }
   };
 
+  // Let go of anything the upgrade fence is holding that this build can now
+  // replay — the rollback half of the fence, so nobody has to remember it.
+  // Errors logged, never thrown, like every other leg on this tick.
+  const holdSweep = async (): Promise<void> => {
+    try {
+      await releaseUpgradeHolds({
+        listMeta: () => options.runtime.listMeta(),
+        loadEvents: (runId) => options.runtime.store.load(runId),
+        markWake: (runId) => options.runtime.index.markWake(runId),
+        saveMeta: (meta) => options.runtime.saveMeta(meta),
+        log,
+      });
+    } catch (error) {
+      log(`[worker] upgrade-hold sweep: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
   // Reentrancy guard: a sweep can outlast intervalMs when Nucleus is slow, and
   // two overlapping sweeps re-launch the same proposed task (duplicate PRs) and
   // double-count its spend. Skip a tick if the previous sweep is still running.
@@ -1115,6 +1308,7 @@ export function startWorker(options: WorkerOptions): {
     void sweep()
       .then(() => akirooSweep())
       .then(() => bulletinSweep())
+      .then(() => holdSweep())
       .then(() => retryNotifications())
       .catch((error) => log(`[worker] intake sweep: ${error instanceof Error ? error.message : String(error)}`))
       .finally(() => {
@@ -1232,6 +1426,7 @@ export function startWorker(options: WorkerOptions): {
      * under it.
      */
     stop: async () => {
+      stopping = true;
       clearInterval(intakeTimer);
       clearInterval(heartbeatTimer);
       clearInterval(reapTimer);
@@ -1242,8 +1437,20 @@ export function startWorker(options: WorkerOptions): {
       // worker to pick it up.
       if (notify.enabled) await flush().catch(() => {});
     },
-    /** True while runs are still executing or a sweep is mid-flight. */
-    busy: () => inflight.size > 0 || launching.size > 0 || sweeping,
+    /**
+     * True while there is work a shutdown would interrupt: a run executing, a
+     * launch in flight, a sweep mid-pass, or detached completion work (spend
+     * settlement, the outbox, the meta write) that has not landed.
+     *
+     * `settling` is the one a caller cannot see any other way, and it is the
+     * one that matters most: a run's cost reaching the ledger is the only piece
+     * of this the next worker cannot redo.
+     */
+    busy: () => inflight.size > 0 || launching.size > 0 || sweeping || settling > 0,
+    /** Runs executing on this worker right now — what a shutdown would interrupt. */
+    executing: () => [...inflight],
+    /** Completion work started but not landed. Zero means nothing is owed to the store. */
+    unsettled: () => settling,
   };
 }
 

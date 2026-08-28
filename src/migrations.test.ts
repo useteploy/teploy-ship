@@ -227,6 +227,8 @@ test("each migrated table's shape matches the store DDL that creates it fresh", 
     { table: "ship_docs", file: "nucleus-pgwire.ts" },
     { table: "ship_steer", file: "steer.ts" },
     { table: "ship_memory", file: "repo-memory.ts" },
+    { table: "ship_runtime_config", file: "runtime-config.ts" },
+    { table: "ship_connect_requests", file: "connect-requests.ts" },
   ];
 
   for (const { table, file } of owners) {
@@ -260,4 +262,79 @@ test("migrations 002 and 003 rebuild aside and copy, never dropping data", async
   assert.match(joined, /INSERT INTO ship_steer \(.*\) SELECT .* FROM ship_steer_002/);
   assert.match(joined, /INSERT INTO ship_memory \(.*\) SELECT .* FROM ship_memory_003/);
   assert.doesNotMatch(joined, /DROP TABLE|TRUNCATE/i);
+});
+
+/**
+ * 006's probe, specifically. The generic hasColumns test above proves the probe
+ * shape; this proves that ship_runtime_config actually goes through it, because
+ * the failure mode is silent: a SELECT-shaped probe on this table would report
+ * every column present forever, migrate() would record 006 as applied, and a
+ * later column would be read back as NULL — which for AKIROO_PULL_TOKEN reads
+ * as "the connector is not configured" rather than as a schema fault.
+ */
+test("006 probes ship_runtime_config write-shaped, and is a no-op on a fresh install", async () => {
+  const fresh = fakeDb();
+  assert.deepEqual(await migrate(fresh), [], "the store DDL creates the table; there is nothing to migrate");
+
+  const stale = fakeDb({
+    existingTables: new Set(["ship_runtime_config"]),
+    columns: { ship_runtime_config: ["config_key", "config_value"] },
+  });
+  assert.deepEqual(await migrate(stale), ["006-ship-runtime-config"]);
+
+  const joined = stale.sql.join("\n");
+  assert.match(
+    joined,
+    /UPDATE ship_runtime_config SET config_key = config_key, config_value = config_value, updated_at = updated_at, updated_by = updated_by WHERE 1 = 0/,
+    "the shape probe must be an UPDATE",
+  );
+  assert.doesNotMatch(
+    joined,
+    /SELECT[^\n]*\bupdated_by\b/,
+    "a SELECT probe cannot see a missing column on Nucleus — that is the bug this rule exists for",
+  );
+  assert.match(joined, /ALTER TABLE ship_runtime_config RENAME TO ship_runtime_config_006/);
+  assert.doesNotMatch(joined, /DROP TABLE|TRUNCATE/i);
+});
+
+/**
+ * 007's probe, the same way and for a sharper reason. ship_connect_requests
+ * holds the local record that makes "this Ship started that connect" a
+ * checkable fact, so a column silently missing from it is not a display fault:
+ * `verifier` read back as NULL is a connect that posts an empty secret and
+ * reports Akiroo's refusal as the operator's mistake, and `used_at` read back
+ * as NULL is a handshake with no single-use left in it.
+ *
+ * A SELECT-shaped probe here would report every column present forever, record
+ * 007 as applied, and leave exactly that.
+ */
+test("007 probes ship_connect_requests write-shaped, and is a no-op on a fresh install", async () => {
+  const fresh = fakeDb();
+  assert.deepEqual(await migrate(fresh), [], "the store DDL creates the table; there is nothing to migrate");
+
+  const stale = fakeDb({
+    existingTables: new Set(["ship_connect_requests"]),
+    // A table from before the verifier was stored — the shape that makes the
+    // lenient read dangerous rather than merely wrong.
+    columns: { ship_connect_requests: ["request_id", "akiroo_url", "expires_at", "used_at"] },
+  });
+  assert.deepEqual(await migrate(stale), ["007-ship-connect-requests"]);
+
+  const joined = stale.sql.join("\n");
+  assert.match(
+    joined,
+    /UPDATE ship_connect_requests SET request_id = request_id, verifier = verifier, akiroo_url = akiroo_url, expires_at = expires_at, used_at = used_at WHERE 1 = 0/,
+    "the shape probe must be an UPDATE",
+  );
+  assert.doesNotMatch(
+    joined,
+    /SELECT[^\n]*\bverifier\b/,
+    "a SELECT probe cannot see a missing column on Nucleus — that is the bug this rule exists for",
+  );
+  assert.match(joined, /ALTER TABLE ship_connect_requests RENAME TO ship_connect_requests_007/);
+  // Nothing is copied across, and nothing is destroyed either: a row here is a
+  // handshake in flight for at most ten minutes, and the recovery for losing
+  // one is to start the connect again.
+  assert.doesNotMatch(joined, /DROP TABLE|TRUNCATE/i);
+  assert.doesNotMatch(joined, /INSERT INTO ship_connect_requests/);
 });

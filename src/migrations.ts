@@ -1,3 +1,5 @@
+import { CONNECT_REQUEST_COLUMNS } from "./connect-requests.js";
+import { RUNTIME_CONFIG_COLUMNS } from "./runtime-config.js";
 import type { NucleusPgwire } from "./nucleus-pgwire.js";
 
 /**
@@ -269,12 +271,100 @@ const tasksRequestedBy: Migration = {
   },
 };
 
+/**
+ * 006 — ship_runtime_config: the small key/value table the browser-mediated
+ * Akiroo connect writes AKIROO_URL and AKIROO_PULL_TOKEN into while Ship is
+ * running. See runtime-config.ts for what it is and why a value there outranks
+ * the environment variable of the same name.
+ *
+ * Like every migration here it is a NO-OP on a fresh install: the store's own
+ * CREATE TABLE IF NOT EXISTS is what brings the table into existence, and this
+ * runner exists only for a table that already holds rows and needs a shape
+ * change. So there is nothing for it to do today — ship_runtime_config has
+ * never been released in any other shape, and the rename-aside limb below is
+ * unreachable.
+ *
+ * It is here anyway because of what happens NEXT. The table will grow a column
+ * eventually, and the two guards that catch that are the write-shaped probe in
+ * `needed()` (Nucleus resolves a missing column in a SELECT to NULL, so only an
+ * UPDATE-shaped probe can see it) and the DDL-parity test in migrations.test.ts,
+ * which compares this CREATE TABLE against the store's. Neither exists for a
+ * table with no migration entry. Nothing is copied into the rebuilt table: the
+ * columns of a shape we have never released are not knowable here, and the
+ * aside table keeps whatever they held.
+ *
+ * The operational consequence of it ever firing, stated so nobody has to derive
+ * it under pressure: the rebuilt table is EMPTY, so the Akiroo connector stops
+ * until an operator re-runs the connect. Nothing is destroyed — the previous
+ * rows are in ship_runtime_config_006 — but the pull token in them is not read
+ * back, by design, because a value copied out of a shape we cannot name is a
+ * guess about which column it lived in.
+ */
+const runtimeConfigTable: Migration = {
+  id: "006-ship-runtime-config",
+  description: "rebuild ship_runtime_config when its shape is behind the store DDL",
+  async needed(db) {
+    if (!(await tableExists(db, "ship_runtime_config"))) return false; // fresh install: the store DDL creates it
+    return !(await hasColumns(db, "ship_runtime_config", RUNTIME_CONFIG_COLUMNS));
+  },
+  async run(db) {
+    await db.query("ALTER TABLE ship_runtime_config RENAME TO ship_runtime_config_006");
+    await db.query(
+      `CREATE TABLE ship_runtime_config (
+        config_key TEXT,
+        config_value TEXT,
+        updated_at TEXT,
+        updated_by TEXT
+      )`,
+    );
+  },
+};
+
+/**
+ * 007 — ship_connect_requests: the handshakes this Ship has STARTED, and the
+ * PKCE verifier for each. See connect-requests.ts for why the flow is this way
+ * round and why this table is the control that closes the phishing path.
+ *
+ * A no-op on a fresh install, exactly like 006: the store's own CREATE TABLE IF
+ * NOT EXISTS brings the table into existence and this runner exists only for a
+ * table that already holds rows and needs a shape change. It is written now for
+ * the same reason 006 was — the write-shaped probe in `needed()` and the
+ * DDL-parity test in migrations.test.ts only exist for a table that has an
+ * entry here, and the day this table grows a column is the day both are needed.
+ *
+ * The rebuilt table is empty. Nothing is copied because nothing should be: a
+ * row here is a handshake in flight for at most ten minutes, and the correct
+ * recovery for losing one is to start the connect again.
+ */
+const connectRequestsTable: Migration = {
+  id: "007-ship-connect-requests",
+  description: "rebuild ship_connect_requests when its shape is behind the store DDL",
+  async needed(db) {
+    if (!(await tableExists(db, "ship_connect_requests"))) return false; // fresh install: the store DDL creates it
+    return !(await hasColumns(db, "ship_connect_requests", CONNECT_REQUEST_COLUMNS));
+  },
+  async run(db) {
+    await db.query("ALTER TABLE ship_connect_requests RENAME TO ship_connect_requests_007");
+    await db.query(
+      `CREATE TABLE ship_connect_requests (
+        request_id TEXT,
+        verifier TEXT,
+        akiroo_url TEXT,
+        expires_at TEXT,
+        used_at TEXT
+      )`,
+    );
+  },
+};
+
 export const MIGRATIONS: Migration[] = [
   docsSourceColumn,
   steerConsumedTurn,
   memoryNoteId,
   docsActorColumns,
   tasksRequestedBy,
+  runtimeConfigTable,
+  connectRequestsTable,
 ];
 
 /**

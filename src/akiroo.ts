@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 
 import { deliverEvent } from "@neutron-build/workflow";
@@ -9,7 +10,9 @@ import type { RepoRef } from "./git.js";
 import type { RepoPolicyConfig } from "./repo-policy.js";
 import type { DeliveryLog } from "./deliveries.js";
 import type { IntakeStore } from "./intake.js";
+import { resolveConfigValue } from "./runtime-config.js";
 import type { NucleusPgwire } from "./nucleus-pgwire.js";
+import type { ConfigSource, ResolvedValue, RuntimeConfigStore } from "./runtime-config.js";
 import type { ShipRuntime } from "./runtime.js";
 
 /**
@@ -64,10 +67,192 @@ export function akirooTargetFromEnv(env: NodeJS.ProcessEnv = process.env): Akiro
   return { url, token };
 }
 
+/** The two config keys, named identically in the store and in the environment. */
+export const AKIROO_URL_KEY = "AKIROO_URL";
+export const AKIROO_TOKEN_KEY = "AKIROO_PULL_TOKEN";
+
+/**
+ * Normalise and VALIDATE an Akiroo base URL, or null if it is not one.
+ *
+ * Two jobs. The trailing-slash strip is cosmetic — every caller builds
+ * `${base}/api/...`. The scheme and userinfo checks are not: this value decides
+ * where a live org pull token is sent on a five-second loop, and it now arrives
+ * from a handshake rather than only from a manifest an operator wrote by hand.
+ * Re-validated on EVERY resolve rather than only at the moment it is stored,
+ * because "it was checked when it was written" stops being true the first time
+ * anything else can write the row.
+ *
+ * Private and CGNAT addresses are deliberately allowed: Ship's supported
+ * topology is a tailnet, a self-hosted Akiroo on 100.64.0.0/10 is a first-class
+ * deployment, and a blocklist here would refuse the main legitimate case.
+ * Mirrors the http/https test in colocation.ts originParts.
+ */
+export function normalizeAkirooBase(raw: string): string | null {
+  const trimmed = raw.trim().replace(/\/+$/, "");
+  if (trimmed === "") return null;
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+  if (url.hostname === "") return null;
+  // user:pass@host — an origin that displays as one host and authenticates as
+  // something else. settings.tsx strips these before display for the same reason.
+  if (url.username !== "" || url.password !== "") return null;
+  return trimmed;
+}
+
+/**
+ * ONE representation of a workspace address, used on every leg.
+ *
+ * Scheme, host, port and path prefix, with trailing slashes gone. This is the
+ * string the approve link is built on, the string the exchange POSTs to, the
+ * string the outbox poll uses, and the string the return leg compares against —
+ * and Akiroo's `akirooHandshakeBase` is the same shape on its side, which is
+ * what makes the comparison meaningful rather than approximate.
+ *
+ * It used to be the ORIGIN here and the full base everywhere else. That was not
+ * merely inconsistent: it meant a path-prefixed install was addressed one way
+ * to get approved and another way to be polled, so the two legs of a single
+ * connect were talking about different URLs while claiming to agree.
+ */
+export function workspaceIdentity(raw: string): string | null {
+  const base = normalizeAkirooBase(raw);
+  if (base === null) return null;
+  try {
+    const url = new URL(base);
+    return `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What the connector resolved to, and why — the Settings page's whole story.
+ *
+ * "misconfigured" is a real outcome and not a variant of "unset": a half-set
+ * connector polls nothing, and an operator who has just completed a handshake
+ * needs to be told that rather than shown "disabled".
+ */
+export type AkirooConfigStatus = "runtime" | "env" | "unset" | "misconfigured";
+
+export interface AkirooResolution {
+  /** Present exactly when status is "runtime" or "env". */
+  target?: AkirooTarget;
+  status: AkirooConfigStatus;
+  /** Per-value provenance, for the Settings rows. Never carries the token itself. */
+  url: ResolvedValue;
+  token: ResolvedValue;
+  /** Operator-facing explanation, set exactly when status is "misconfigured". */
+  reason?: string;
+}
+
+/**
+ * Resolve the Akiroo connector: runtime config first, environment second.
+ *
+ * Resolved as a PAIR, which is the one thing that must not be got wrong here.
+ * Applying the precedence per value independently means a runtime AKIROO_URL
+ * with no runtime token pairs the new host with the OLD environment token — and
+ * Ship then posts one org's live pull token to another org's server every five
+ * seconds. So: both from the store, or both from the environment, or nothing.
+ * A mixed or half-filled pair refuses to poll and says so.
+ *
+ * This is the same both-or-nothing contract akirooTargetFromEnv has always
+ * had, extended to the second source rather than duplicated for it.
+ */
+export async function resolveAkirooTarget(
+  store: Pick<RuntimeConfigStore, "get">,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<AkirooResolution> {
+  const url = await resolveConfigValue(store, AKIROO_URL_KEY, env);
+  const token = await resolveConfigValue(store, AKIROO_TOKEN_KEY, env);
+
+  if (url.source === "unset" && token.source === "unset") {
+    return { status: "unset", url, token };
+  }
+  if (url.source === "unset" || token.source === "unset") {
+    const missing = url.source === "unset" ? AKIROO_URL_KEY : AKIROO_TOKEN_KEY;
+    return {
+      status: "misconfigured",
+      url,
+      token,
+      reason: `${missing} is not set — the Akiroo connector needs both a base URL and a pull token`,
+    };
+  }
+  if (url.source !== token.source) {
+    // The dangerous case, spelled out: never silently pair them.
+    return {
+      status: "misconfigured",
+      url,
+      token,
+      reason:
+        `${AKIROO_URL_KEY} comes from the ${url.source === "runtime" ? "connect handshake" : "environment"} but ` +
+        `${AKIROO_TOKEN_KEY} comes from the ${token.source === "runtime" ? "connect handshake" : "environment"} — ` +
+        "a token minted for one workspace must not be sent to another; re-run the connect, or clear the override",
+    };
+  }
+  const base = normalizeAkirooBase(url.value);
+  if (base === null) {
+    return {
+      status: "misconfigured",
+      url,
+      token,
+      reason: `${AKIROO_URL_KEY} is not a plain http(s) URL (no scheme other than http/https, no user:pass@)`,
+    };
+  }
+  return { status: url.source, target: { url: base, token: token.value }, url, token };
+}
+
+/** Which source won, for a Settings row. Exported so the web half need not re-derive it. */
+export function akirooSourceLabel(source: ConfigSource): string {
+  if (source === "runtime") return "from the Akiroo connect handshake (overrides the environment variable)";
+  if (source === "env") return "from the environment variable";
+  return "not set";
+}
+
 export interface AkirooRow {
   id: number;
   kind: string;
   payload: Record<string, unknown>;
+}
+
+/**
+ * A pull token reduced to something comparable and safe to hold.
+ *
+ * Eight hex characters of sha256 — enough to tell one token from another, not
+ * enough to be worth anything on its own. Every place that needs to answer "is
+ * this still the same credential?" uses this rather than the token, so no
+ * comparison ever puts the token itself in a variable that something might log.
+ */
+export function akirooTokenPrint(token: string): string {
+  return createHash("sha256").update(token).digest("hex").slice(0, 8);
+}
+
+/**
+ * Identity of the workspace a cursor and a delivery claim belong to.
+ *
+ * The full workspace identity, not the base as typed: a workspace reached as
+ * `https://a.example` and as `https://a.example/` is one workspace and must not
+ * get two cursors, while two different installations must never share one.
+ *
+ * This exists because the queue position was previously stored under the
+ * constant "akiroo". Reconnecting a Ship to a DIFFERENT workspace left the old
+ * workspace's high-water mark in place, so Ship polled `?after=<a number from
+ * someone else's queue>`, received nothing forever, and reported itself
+ * connected and healthy. The same constant was used for the at-most-once
+ * delivery claims, so row 1 of the new workspace read as already handled. Both
+ * are keyed by this now.
+ */
+export function akirooWorkspaceKey(url: string): string {
+  // The full identity, path prefix included — the same representation the
+  // approve link, the exchange and the poll all use. Keying on the bare origin
+  // gave two path-prefixed installs on one host a shared cursor and a shared
+  // set of delivery claims, which is the exact confusion this function was
+  // added to prevent, one level down.
+  const identity = workspaceIdentity(url);
+  return identity === null ? "akiroo:invalid" : `akiroo:${identity}`;
 }
 
 /**
@@ -77,11 +262,28 @@ export interface AkirooRow {
  * so a lost cursor costs a wider scan and nothing else, and a batch whose ack
  * never landed comes back regardless of what the cursor says. Advancing it only
  * after a successful ack is what keeps those two facts consistent.
+ *
+ * Keyed by workspace (see akirooWorkspaceKey). No migration was needed to make
+ * it so: the Nucleus column was already TEXT and already called `source`, it
+ * was simply always written with a constant. A row left behind under the old
+ * "akiroo" key stops matching, which costs one wider scan — the exact thing the
+ * paragraph above says is safe.
  */
 export interface AkirooCursorStore {
-  get(): Promise<number>;
-  set(after: number): Promise<void>;
+  get(source: string): Promise<number>;
+  set(source: string, after: number): Promise<void>;
+  /**
+   * Forget a workspace's position, so the next sweep re-scans from the start.
+   *
+   * Called when a connect completes. Re-scanning is cheap and safe (the
+   * delivery claims short-circuit anything already handled), while a stale
+   * position after a reconnect is a Ship that silently collects nothing.
+   */
+  reset(source: string): Promise<void>;
 }
+
+/** source -> highest acked row id. */
+type CursorFile = { sources?: Record<string, number> };
 
 export class FileAkirooCursor implements AkirooCursorStore {
   #path: string;
@@ -90,17 +292,26 @@ export class FileAkirooCursor implements AkirooCursorStore {
     this.#path = join(dir, "akiroo-cursor.json");
   }
 
-  async get(): Promise<number> {
-    const state = await readJsonFile<{ after?: number }>(this.#path, {});
-    return typeof state.after === "number" && state.after > 0 ? state.after : 0;
+  async get(source: string): Promise<number> {
+    const state = await readJsonFile<CursorFile>(this.#path, {});
+    const value = state.sources?.[source];
+    return typeof value === "number" && value > 0 ? value : 0;
   }
 
-  async set(after: number): Promise<void> {
+  async set(source: string, after: number): Promise<void> {
     // Monotonic: an out-of-order write must never move the cursor backwards
     // and re-hand rows to a handler that already ran.
-    await updateJsonFile<{ after?: number }>(this.#path, {}, (state) => ({
-      after: Math.max(state.after ?? 0, after),
+    await updateJsonFile<CursorFile>(this.#path, {}, (state) => ({
+      sources: { ...state.sources, [source]: Math.max(state.sources?.[source] ?? 0, after) },
     }));
+  }
+
+  async reset(source: string): Promise<void> {
+    await updateJsonFile<CursorFile>(this.#path, {}, (state) => {
+      const sources = { ...state.sources };
+      delete sources[source];
+      return { sources };
+    });
   }
 }
 
@@ -125,27 +336,32 @@ export class NucleusAkirooCursor implements AkirooCursorStore {
     return this.#ready;
   }
 
-  async get(): Promise<number> {
+  async get(source: string): Promise<number> {
     await this.#ensure();
-    const rows = await this.#db.query("SELECT after_id FROM ship_akiroo_cursor WHERE source = $1", ["akiroo"]);
+    const rows = await this.#db.query("SELECT after_id FROM ship_akiroo_cursor WHERE source = $1", [source]);
     const value = Number(rows[0]?.after_id ?? 0);
     return Number.isFinite(value) && value > 0 ? value : 0;
   }
 
-  async set(after: number): Promise<void> {
+  async set(source: string, after: number): Promise<void> {
     await this.#ensure();
-    const current = await this.get();
+    const current = await this.get(source);
     if (after <= current) return;
     const updated = await this.#db.exec("UPDATE ship_akiroo_cursor SET after_id = $1 WHERE source = $2", [
       String(after),
-      "akiroo",
+      source,
     ]);
     if (updated === 0) {
       await this.#db.query("INSERT INTO ship_akiroo_cursor (source, after_id) VALUES ($1, $2)", [
-        "akiroo",
+        source,
         String(after),
       ]);
     }
+  }
+
+  async reset(source: string): Promise<void> {
+    await this.#ensure();
+    await this.#db.query("DELETE FROM ship_akiroo_cursor WHERE source = $1", [source]);
   }
 }
 
@@ -357,10 +573,21 @@ export const AKIROO_PULL_LIMIT = 50;
  */
 export async function sweepAkiroo(deps: AkirooSweepDeps): Promise<AkirooSweepResult> {
   const doFetch = deps.fetchImpl ?? fetch;
-  const after = await deps.cursor.get();
+  // Both the queue position and the at-most-once claims below are namespaced by
+  // the workspace, not by the connector as a whole. Reconnecting this Ship to a
+  // different workspace therefore starts from a clean position AND a clean
+  // claim namespace; sharing either across workspaces is what made a reconnect
+  // look healthy while collecting nothing.
+  const source = akirooWorkspaceKey(deps.target.url);
+  const after = await deps.cursor.get(source);
   const response = await doFetch(
     `${deps.target.url}/api/connections/teploy_ship/outbox?after=${after}&limit=${AKIROO_PULL_LIMIT}`,
-    { headers: { authorization: `Bearer ${deps.target.token}` } },
+    // Redirects are refused rather than followed. These requests carry the pull
+    // token, and a base that reads as an ordinary workspace on the approval page
+    // could otherwise bounce them at an internal host. undici already strips
+    // Authorization across a cross-origin redirect, so this is one option that
+    // removes a dependency on that behaviour rather than a live leak.
+    { headers: { authorization: `Bearer ${deps.target.token}` }, redirect: "error" },
   );
   if (!response.ok) {
     // 401 is the one worth naming: it is a token problem, not a queue problem,
@@ -378,7 +605,7 @@ export async function sweepAkiroo(deps: AkirooSweepDeps): Promise<AkirooSweepRes
     ids.push(row.id);
     // Claim before acting. A batch that was handled but not acked comes back;
     // this is what stops the second pass opening a second issue.
-    if (!(await deps.deliveries.claim("akiroo", String(row.id)))) {
+    if (!(await deps.deliveries.claim(source, String(row.id)))) {
       deps.log(`[worker] akiroo: row ${row.id} was already handled; acking again`);
       continue;
     }
@@ -401,6 +628,7 @@ export async function sweepAkiroo(deps: AkirooSweepDeps): Promise<AkirooSweepRes
     method: "POST",
     headers: { authorization: `Bearer ${deps.target.token}`, "content-type": "application/json" },
     body: JSON.stringify({ ids }),
+    redirect: "error",
   });
   if (!ack.ok) {
     // The cursor stays put: the batch will be re-delivered and short-circuit on
@@ -408,7 +636,7 @@ export async function sweepAkiroo(deps: AkirooSweepDeps): Promise<AkirooSweepRes
     throw new Error(`akiroo outbox ack failed (${ack.status}) for ${ids.length} row(s)`);
   }
   const acked = ((await ack.json().catch(() => ({}))) as { acked?: number }).acked ?? ids.length;
-  await deps.cursor.set(Math.max(...ids));
+  await deps.cursor.set(source, Math.max(...ids));
   return { pulled: rows.length, handled, acked };
 }
 
@@ -497,6 +725,8 @@ async function handleAkirooTask(row: AkirooRow, deps: AkirooSweepDeps): Promise<
 export interface AkirooConnectorState {
   configured: boolean;
   url: string;
+  /** Which side of the precedence rule supplied the pair. See AkirooResolution. */
+  status: AkirooConfigStatus;
   lastPullAt?: string;
   lastError?: string;
   lastPulled?: number;
@@ -511,12 +741,42 @@ export interface AkirooConnectorState {
  */
 export function makeAkirooState(target: AkirooTarget | undefined): {
   read: () => AkirooConnectorState;
+  retarget: (resolution: AkirooResolution) => void;
   recordPull: (result: AkirooSweepResult) => void;
   recordError: (error: unknown) => void;
 } {
-  const state: AkirooConnectorState = { configured: target !== undefined, url: target?.url ?? "" };
+  const state: AkirooConnectorState = {
+    configured: target !== undefined,
+    url: target?.url ?? "",
+    status: target === undefined ? "unset" : "env",
+  };
+  // The token's IDENTITY, never the token: a short digest, kept out of
+  // AkirooConnectorState so no Settings row can ever render it.
+  let tokenPrint = target === undefined ? "" : akirooTokenPrint(target.token);
   return {
     read: () => ({ ...state }),
+    // The connector can now change under a running worker (the connect
+    // handshake writes the runtime config while this process polls), so the
+    // last pull of the PREVIOUS target must not be reported as this one's.
+    //
+    // The token is part of "changed". A rotation that keeps the same URL and
+    // the same source is still a different credential, and returning early on
+    // it left the dashboard showing the OLD token's last-pull time as if it
+    // were the new one's — which reads as "the new token is working" before it
+    // has been used once.
+    retarget: (resolution) => {
+      const url = resolution.target?.url ?? "";
+      const print = resolution.target === undefined ? "" : akirooTokenPrint(resolution.target.token);
+      if (state.url === url && state.status === resolution.status && tokenPrint === print) return;
+      tokenPrint = print;
+      state.configured = resolution.target !== undefined;
+      state.url = url;
+      state.status = resolution.status;
+      delete state.lastPullAt;
+      delete state.lastPulled;
+      if (resolution.reason !== undefined) state.lastError = resolution.reason;
+      else delete state.lastError;
+    },
     recordPull: (result) => {
       state.lastPullAt = new Date().toISOString();
       state.lastPulled = result.pulled;

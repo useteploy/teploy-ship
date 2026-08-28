@@ -1,25 +1,40 @@
 import { authenticate, requestIsSecure, sessionSetCookie, currentUser } from "../lib/session.server.js";
 import { oidcEnabled, oidcLabel, trustProxy } from "../lib/oidc.server.js";
 import { checkRateLimit, clearRateLimit, clientKey, delay, loginLimits, withVerifySlot } from "../lib/ratelimit.server.js";
+import { safeNextPath } from "../lib/connect.server.js";
 
 export const config = { mode: "app" };
 
-export async function loader({ request }: { request: Request }): Promise<Response | { sso: { label: string } | null; error: string | null }> {
+interface LoginData {
+  sso: { label: string } | null;
+  error: string | null;
+  /** Validated same-site path to land on after signing in. */
+  next: string;
+}
+
+export async function loader({ request }: { request: Request }): Promise<Response | LoginData> {
+  // Where to land after signing in. Only ever a same-site path — see
+  // safeNextPath. It exists for the Akiroo connect, which sends an operator
+  // here mid-handshake and needs them back on /connect rather than the inbox.
+  const next = safeNextPath(new URL(request.url).searchParams.get("next"));
   // Already signed in: the layout lets /login through unauthenticated, so
   // without this an authenticated visitor is shown a sign-in form while every
   // nav link works — indistinguishable from being signed out.
   if ((await currentUser(request)) !== null) {
-    return new Response(null, { status: 302, headers: { location: "/" } });
+    return new Response(null, { status: 302, headers: { location: next } });
   }
   // The OIDC callback redirects here with ?error=…; read it on the server so
   // the rendered page and the hydrated one agree.
-  return { sso: oidcEnabled() ? { label: oidcLabel() } : null, error: new URL(request.url).searchParams.get("error") };
+  return { sso: oidcEnabled() ? { label: oidcLabel() } : null, error: new URL(request.url).searchParams.get("error"), next };
 }
 
 export async function action({ request }: { request: Request }): Promise<Response | { error: string }> {
   const form = await request.formData();
   const username = String(form.get("username") ?? "");
   const password = String(form.get("password") ?? "");
+  // Re-validated here rather than trusted from the form: the field is client
+  // input on the way back in, exactly as the query parameter was on the way out.
+  const next = safeNextPath(String(form.get("next") ?? ""));
 
   // Three layers, none of which hands an attacker an outage button:
   //   - the client address may be locked out, but only when a declared proxy
@@ -52,12 +67,13 @@ export async function action({ request }: { request: Request }): Promise<Respons
   // unconditionally let a caller choose the scheme and strip Secure from a
   // privileged cookie on an HTTPS deployment.
   const cookie = sessionSetCookie(principal, requestIsSecure(request));
-  return new Response(null, { status: 302, headers: { location: "/", "set-cookie": cookie } });
+  return new Response(null, { status: 302, headers: { location: next, "set-cookie": cookie } });
 }
 
-export default function Login({ data, actionData }: { data?: { sso: { label: string } | null; error?: string | null }; actionData?: { error?: string } }) {
+export default function Login({ data, actionData }: { data?: Partial<LoginData>; actionData?: { error?: string } }) {
   const sso = data?.sso ?? null;
   const error = actionData?.error ?? data?.error ?? undefined;
+  const next = data?.next ?? "/";
   return (
     <div class="login">
       <h1>Teploy Ship</h1>
@@ -69,6 +85,7 @@ export default function Login({ data, actionData }: { data?: { sso: { label: str
         </>
       )}
       <form method="post">
+        <input type="hidden" name="next" value={next} />
         <input type="text" name="username" placeholder="username" autocomplete="username" autofocus />
         <input type="password" name="password" placeholder="password" autocomplete="current-password" />
         {error !== undefined && <p style="color: var(--red)">{error}</p>}

@@ -17,6 +17,10 @@ new code**. Everything below is about making that safe.
 - [ ] **Read the release notes for migrations.** Migrations are forward-only
       (`src/migrations.ts` has no `down` step and none is planned). A rollback
       returns the *code*, never the *schema*.
+- [ ] **Ask whether this build is safe to deploy right now**:
+      `teploy-ship preflight`. It exits non-zero when an in-flight run's
+      recorded step sequence differs from the build you are about to ship, so
+      it belongs in the deploy script, not in your memory. See §3 and §3a.
 - [ ] **Check for in-flight runs**: `teploy-ship runs`. Anything not in a
       terminal state will be resumed by the new worker. See §3.
 - [ ] **Back up the store if it is Nucleus.** Ship's entire history — every
@@ -59,6 +63,22 @@ Setting it to `claude-code` or `opencode` requires the sandbox image that repo
 boots to already carry the binary — build it with
 `images/build.sh --harness <id>`. Nothing installs a harness at run time.
 
+## 1c. Upgrading past the upgrade-fence release
+
+The release that adds §3a changes one thing about the *first* deploy of it and
+nothing about any later one.
+
+`teploy-ship preflight` will refuse, reporting every run in flight as
+`unrecorded`. That is correct: those runs were enqueued before the fence
+existed, so their logs carry no fingerprint and nothing can be said about them.
+Either wait for them to drain, or deploy with `--allow-unrecorded` after reading
+§3's table yourself, as you would have had to before.
+
+The **worker** does not hold those runs. A run with no recorded fingerprint is
+executed exactly as it was before — the fence's own arrival must not be the
+outage. From the next enqueue onward every run carries a fingerprint and
+preflight answers properly.
+
 ## 2. The upgrade
 
 Ship is deployed as one teploy app with two processes:
@@ -77,6 +97,7 @@ them as separate apps in order to create some.
 ```sh
 # from a checkout of the release you want
 pnpm run build && (cd web && pnpm run build)
+teploy-ship preflight || exit 1      # §3a — refuses when a run in flight would be held
 teploy deploy
 ```
 
@@ -110,16 +131,25 @@ does not merely fail — `leftoverCursorEvent()` raises a `NondeterminismError`
 which `executeRun` **throws rather than records**. The run becomes *permanently
 unrunnable* rather than failed.
 
+**§3a is what stops that happening by accident.** A run now records a
+fingerprint of its expected step sequence at enqueue, and a worker that does not
+agree with it HOLDS the run instead of replaying it. The rest of this section is
+still the model you need to reason with — the guard turns "permanently
+unrunnable" into "paused; roll back or drain", which is the difference between
+losing work and waiting.
+
 **Therefore, a change is safe to deploy with runs in flight if and only if it
 does not alter the step sequence of a run already enqueued.** In practice:
 
-| change | safe with runs in flight? |
-|---|---|
-| A new step gated on a **run-input** flag absent from old logs | **Yes** — old runs have no such flag, so the step never appears |
-| A new step added **unconditionally** | **No** — old logs lack it |
-| Renaming an existing step | **No** |
-| Changing a **threshold that decides which turn a run terminates on**, when that threshold is read from config rather than from the recorded input | **No** — a tighter threshold returns early and leaves steps unconsumed |
-| Anything outside the workflow function (web routes, docs, intake) | Yes |
+| change | safe with runs in flight? | what enforces it (§3a) |
+|---|---|---|
+| A new step gated on a **run-input** flag absent from old logs | **Yes** — old runs have no such flag, so the step never appears | The fingerprint's per-step gate. An old run does not admit the new step, so its print does not move and it is not held. |
+| A new step added **unconditionally** | **No** — old logs lack it | **Fingerprint.** Every in-flight run's print moves; `preflight` exits 1 and the worker holds each run instead of breaking it. |
+| Renaming an existing step | **No** | **Fingerprint**, same as above. |
+| Reordering two steps | **No** | **Fingerprint** when the step's call site moves in the source; the **NondeterminismError backstop** when it does not (a swap of two helper invocations). |
+| Changing a **threshold that decides which turn a run terminates on**, when that threshold is read from config rather than from the recorded input | **No** — a tighter threshold returns early and leaves steps unconsumed | Not the fingerprint: the step sequence is unchanged, so nothing static can see it. The **materialise-at-enqueue rule below** is what prevents it, and the **NondeterminismError backstop** is what catches it if the rule is broken. |
+| Anything outside the workflow function (web routes, docs, intake) | Yes | Nothing needs to: the step sequence does not move, so no print changes and no run is held. |
+| Editing a step's BODY, its comments, or its formatting | Yes | Same — the fingerprint is over step names and their order, never over the code inside them. |
 
 This is why every optional feature — `recovery`, `settle`, `requireEdit`,
 `preview`, `telemetry`, `tests`, `critic` — is **materialised into the run
@@ -130,12 +160,124 @@ add a feature, follow the same pattern (`runtime.ts`, `enqueueRun`).
 **If you must ship a step-sequence change**, drain first:
 
 ```sh
+teploy-ship preflight            # says which runs this build cannot replay
 teploy-ship runs                 # wait until nothing is mid-flight
 teploy-ship cancel <run-id>      # or cancel what you are willing to lose
 ```
 
 Cancelling settles a run at its next step; a cancelled run's work is not lost,
 it simply stops.
+
+## 3a. What enforces §3
+
+Until 2026-08-27 §3 was a rule you had to remember. Nothing stopped a deploy
+mid-run, and a run whose sequence had moved simply threw on every tick with
+nobody told. Three things enforce it now.
+
+### The step-sequence fingerprint
+
+At enqueue, a run records a **fingerprint of the step sequence its own input
+admits** (`src/step-fingerprint.ts`). Before executing a run, the worker
+recomputes that fingerprint under the running build. If the two differ the run
+is **held** — parked as waiting, visible in the inbox, its log untouched —
+rather than replayed into a `NondeterminismError`.
+
+The fingerprint is the hash of the workflow's step names, **in source order,
+filtered to the ones the run's recorded input admits**. That last clause is why
+it is usable day to day: this codebase adds input-gated steps constantly, and a
+fingerprint without gates would hold every run in flight on every such deploy,
+which is how a control gets ignored.
+
+Three facts about it worth knowing before you trust it:
+
+- **It is deliberately conservative.** Source order stands in for execution
+  order, so moving a helper function within `durable.ts` moves the print even
+  though replay is unaffected. That is a false hold, and a false hold is
+  cheap — see "clearing a hold" below. A missed break is not cheap.
+- **It has one known blind spot.** A reordering achieved by swapping two
+  helper *call sites* leaves both steps where they were in the source. The
+  backstop below covers that.
+- **It is not stored in the run input.** It rides on the `run-started` event
+  beside the input (`data.stepFingerprint`). The recorded input is what gates
+  step presence, so a fingerprint stored there would change how in-flight runs
+  replay — the fence would have caused the failure it exists to prevent. The
+  engine ignores keys on that event other than `workflow` and `input`.
+
+**The declared step table cannot go stale.** `WORKFLOW_STEPS` is asserted in
+`step-fingerprint.test.ts` against the sequence statically extracted from the
+compiled `durable.js` and `harness-external.js`. Add, rename, reorder or remove
+a step and the test fails until the table is updated — and whoever updates it
+has to answer, per step, which input field admits it.
+
+### The NondeterminismError backstop
+
+Whatever the fingerprint misses, the engine still catches on replay. The worker
+now treats a `NondeterminismError` out of a run the same way it treats a
+fingerprint mismatch: the run is held. It used to be logged and left due, so a
+diverged run was re-attempted every five seconds forever and no surface said so.
+
+### Preflight
+
+```sh
+teploy-ship preflight            # exit 0 = safe, exit 1 = a run would be held
+teploy-ship preflight --json     # the same as an object
+```
+
+Reports every run in flight and whether this build replays it. A run enqueued
+**before the fence existed** records no fingerprint, so nothing can be said
+about it: those count as unsafe, and `--allow-unrecorded` is how you say you
+know. That is awkward exactly once — on the deploy that introduces the fence,
+when every run in flight predates it.
+
+Note the asymmetry, because it is the honest one: a run with no recorded
+fingerprint makes *preflight* refuse, but it does **not** make the worker hold
+the run. Holding them would make the fence's own arrival the outage.
+
+### Clearing a hold
+
+A hold is a fact about two builds, not about the run, and the run is untouched:
+its log is intact and its next execution attempt recomputes the fingerprint
+from scratch.
+
+- **Roll back** (`teploy rollback`) and the worker releases the hold by itself
+  on its next sweep — you do not have to remember which runs to resume.
+- **`teploy-ship resume <run-id>`** re-checks immediately. Under the same build
+  that held it, it will simply be held again; nothing is lost by trying.
+- **`teploy-ship cancel <run-id>`** if you are willing to give the run up.
+
+Nothing about a hold is written to the event log. An `event-waiting` is a cursor
+event, so recording the hold there would itself change the sequence the hold
+exists to protect.
+
+## 3b. Shutdown: what a deploy actually interrupts
+
+`teploy deploy` replaces the containers, so the worker gets a SIGTERM. Two
+separate waits, with two separate reasons:
+
+| phase | env | default | why that number |
+|---|---|---|---|
+| settle | `SHIP_SHUTDOWN_SETTLE_S` | 30 | Completion bookkeeping — spend settlement, the outbox flush, the meta write. Single store round trips behind a 4-attempt/500ms retry, so ~30s covers one store hiccup and there is nothing to gain past it. **This is the wait that matters**: a run's cost reaching the ledger is the only part of a shutdown the next worker cannot redo. |
+| drain | `SHIP_DRAIN_TIMEOUT_S` | 0 | How long to wait for executing RUNS. Zero on purpose. |
+
+The drain default is zero for three reasons, and none of them is "runs are
+unimportant":
+
+1. **A durable run is safe to interrupt.** Its log is on disk, another worker
+   replays it, and at most the step in flight is re-executed.
+2. **The bound is not ours to pick.** The container runtime SIGKILLs the
+   process at its stop grace — docker's default is 10 seconds — so any default
+   larger than that is fiction. The number is only real if the deployment's
+   `stop_grace_period` matches it, which is a per-deployment fact. If you want
+   the worker to actually drain, raise **both**, to the same value.
+3. **Waiting for a natural boundary is not available.** A durable run cannot be
+   suspended cooperatively: suspending means recording an event, and recording
+   one the replay does not expect is precisely the nondeterminism this whole
+   section is about. So "let it finish its current turn and stop" cannot be
+   built without changing the workflow engine's contract.
+
+The way to deploy without interrupting anything is `preflight` and a drain
+*before* the deploy, not a longer wall-clock guess during it. The shutdown names
+every run it interrupts and says what happens to it.
 
 ## 4. Rollback
 
@@ -154,6 +296,12 @@ teploy rollback                  # returns the previous container and image
 - **Runs that have already replayed under the new code.** Their logs contain
   the new code's steps. Rolling the code back can make those logs
   unreplayable in the same way described in §3, with the direction reversed.
+  The fence is symmetric and covers this too — a run whose fingerprint the
+  rolled-back build does not recognise is held rather than broken — but its
+  fingerprint was recorded at ENQUEUE, so it names the build that enqueued the
+  run, not the one that last extended its log. A run enqueued before the
+  upgrade, partly replayed under it, then rolled back, is a case only the
+  `NondeterminismError` backstop catches. It is still held rather than lost.
 
 So the honest rule: **rollback is safe when the version you are leaving added
 only additive migrations and no step-sequence changes.** When it did either,
@@ -197,7 +345,13 @@ preferred over hand-rolled probes.
 curl -fsS localhost:7460/ -o /dev/null && echo "web ok"
 docker logs ship-worker-<sha> --since 60s        # a clean tick, no store errors
 teploy-ship runs                                  # in-flight runs progressing
+teploy-ship preflight                             # nothing got held by the deploy
 ```
+
+A `HOLDING` line in the worker log, or a `would break` row from `preflight`
+after the deploy, means a run was enqueued by a build this one cannot replay —
+see §3a for what to do about it. Nothing is lost either way; the run's log is
+untouched.
 
 A worker that cannot reach its store logs `tick failed (store unreachable?)`
 and **fails closed on policy reads**, so it will not auto-launch anything while

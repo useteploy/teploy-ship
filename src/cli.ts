@@ -19,6 +19,7 @@ import type { RunOutcome } from "@neutron-build/workflow";
 
 import { ArgError, COMMAND_FLAGS, enumFlag, numberFlag, parseArgs } from "./args.js";
 import { explainRun } from "./explain.js";
+import { WORKFLOW_STEPS, preflightReport } from "./step-fingerprint.js";
 import { resolveModelId, usesAnthropicWire } from "./model-id.js";
 import { auditRow, toCsv, withinWindow } from "./audit.js";
 import type { NumberRange } from "./args.js";
@@ -115,6 +116,10 @@ Usage:
   teploy-ship audit                   export the run history (what ran, cost, PRs)
       [--format csv|json] [--since <iso>] [--until <iso>]
   teploy-ship runs                    list durable runs
+  teploy-ship preflight               is it safe to deploy this build right now?
+      [--json] [--allow-unrecorded]   exit 1 when an in-flight run's recorded step
+                                      sequence differs from this build's. Run it in
+                                      the deploy script, before teploy deploy.
   teploy-ship explain <run-id>        why a run ended the way it did, and what to do
       [--json]                        the same, as an object
   teploy-ship resume <run-id>         continue a durable run (after a crash or park;
@@ -1580,6 +1585,90 @@ async function auditCommand(rest: string[]): Promise<void> {
   }
 }
 
+/**
+ * Is it safe to deploy THIS build right now?
+ *
+ * The deploy-script half of the upgrade fence (src/step-fingerprint.ts). A
+ * durable run is replayed, not resumed, so a build whose step sequence differs
+ * from a run's log cannot carry that run forward — the worker holds it instead
+ * of breaking it, but held work is still stopped work. This is how a deploy
+ * asks the question before it is too late to answer differently:
+ *
+ *   teploy-ship preflight || exit 1      # in the deploy script
+ *   teploy-ship preflight --json         # for something that parses it
+ *
+ * Exit 0 = deploying this build interrupts nothing. Exit 1 = at least one
+ * in-flight run would be held; drain, cancel, or ship a different change.
+ *
+ * Deliberately does not exit 0 for runs it cannot compare (`unrecorded` —
+ * enqueued before the fence existed). `--allow-unrecorded` is how an operator
+ * says they know. That is one awkward deploy, once.
+ */
+async function preflightCommand(rest: string[]): Promise<void> {
+  const args = parseArgs(rest, COMMAND_FLAGS.preflight);
+  const json = args.flags.json === true;
+  const allowUnrecorded = args.flags["allow-unrecorded"] === true;
+  const limit = numFlag(args.flags.limit, "limit", 500, { min: 1, max: 10_000, integer: true });
+  const runtime = await makeRuntime(args, loadConfig());
+  let report;
+  try {
+    // Read the log only for runs that might still be live. `RunMeta.status` is
+    // overlaid from the run index, which is written FROM a terminal outcome, so
+    // a meta that says completed/failed/cancelled cannot be hiding a log that
+    // is still replayable. The lag runs the other way — a meta stuck at
+    // "queued" over a log that has already finished — and `preflightReport`
+    // filters that out from the log itself. Without this a deploy script pays
+    // one store read per run in the whole recent history.
+    const settled: ReadonlySet<string> = new Set(["completed", "failed", "cancelled", "canceled"]);
+    const metas = (await runtime.listMeta({ limit })).filter((m) => !settled.has(m.status));
+    const rows = [];
+    for (const meta of metas) {
+      rows.push({ runId: meta.runId, status: meta.status, task: meta.task, events: await runtime.store.load(meta.runId) });
+    }
+    report = preflightReport(rows, { allowUnrecorded });
+  } finally {
+    await runtime.close();
+  }
+
+  if (json) {
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    process.exit(report.safe ? 0 : 1);
+  }
+
+  process.stdout.write(`${bold("build")} ${report.build}  ${dim(`(${WORKFLOW_STEPS.length} recorded operations)`)}\n`);
+  if (report.runs.length === 0) {
+    process.stdout.write(`${green("nothing in flight")} — this build can be deployed\n`);
+    process.exit(0);
+  }
+  for (const run of report.runs) {
+    const mark =
+      run.verdict === "ok" ? green("ok         ") : run.verdict === "would-break" ? red("would break") : yellow("unrecorded ");
+    const prints =
+      run.verdict === "would-break" ? `  ${dim(`${run.recorded} -> ${run.current}`)}` : "";
+    process.stdout.write(`  ${run.runId}  ${mark}  ${dim(run.status.padEnd(9))}${prints}  ${run.task.slice(0, 48)}\n`);
+  }
+  const n = report.runs.length;
+  process.stdout.write(
+    `\n${n} run${n === 1 ? "" : "s"} in flight — ${report.wouldBreak} would break, ${report.unrecorded} not comparable\n`,
+  );
+  if (report.safe) {
+    process.stdout.write(`${green("safe to deploy")}\n`);
+    process.exit(0);
+  }
+  if (report.wouldBreak > 0) {
+    process.stderr.write(
+      `${red("unsafe to deploy")} — ${report.wouldBreak} run(s) would be held until this build is rolled back.\n` +
+        `${dim("Wait for them, or give them up: teploy-ship cancel <run-id>")}\n`,
+    );
+  } else {
+    process.stderr.write(
+      `${yellow("cannot tell")} — ${report.unrecorded} run(s) were enqueued before the upgrade fence existed, so nothing\n` +
+        `${dim("can be said about them. Wait for them to drain, or pass --allow-unrecorded to accept the risk.")}\n`,
+    );
+  }
+  process.exit(1);
+}
+
 async function runsCommand(rest: string[]): Promise<void> {
   const runtime = await makeRuntime(parseArgs(rest), loadConfig());
   const metas = await runtime.listMeta();
@@ -1740,16 +1829,57 @@ async function workerCommand(rest: string[]): Promise<void> {
   const keepAlive = setInterval(() => {}, 60_000);
 
   /**
-   * Ordered shutdown.
+   * Ordered shutdown, in two phases with two separate bounds.
    *
    * The old handler called worker.stop() and then immediately started
    * runtime.close(), so a scheduler callback, heartbeat, usage settlement or
    * notification still in flight found the pool closed underneath it — the
    * failure looks like a store error at exactly the moment nobody is watching.
    * Both signals also registered the same handler with no guard, so a second
-   * Ctrl-C re-entered it. Now: stop accepting work, wait for what is running
-   * (bounded), then close.
+   * Ctrl-C re-entered it.
+   *
+   * The fix after that was a single 30-second wait on `busy()`, and it was
+   * wrong in both directions at once. `busy()` did not cover the detached
+   * completion work it was written to protect (a finished run left `inflight`
+   * BEFORE its settlement started), so it usually waited on nothing; and where
+   * it did wait, it was waiting 30 seconds for durable runs that take minutes
+   * to hours, which is not a drain — it is a pause.
+   *
+   * So the two things are separated, because they have genuinely different
+   * time constants and different consequences:
+   *
+   * SETTLE (default 30s, SHIP_SHUTDOWN_SETTLE_S) — completion bookkeeping:
+   * spend settlement, the outbox flush, the meta write. These are single store
+   * round trips behind a 4-attempt/500ms retry, so ~30s covers one store
+   * hiccup and there is nothing to gain past it. This is the wait that must
+   * not be skipped: a run's cost reaching the ledger is the only part of this
+   * the next worker cannot redo.
+   *
+   * DRAIN (default 0, SHIP_DRAIN_TIMEOUT_S) — waiting for executing runs to
+   * finish. Zero, deliberately, and NOT a bigger magic number:
+   *
+   *   - A durable run is safe to interrupt. Its log is on disk, another worker
+   *     replays it, and at most the step in flight is re-executed. Nothing is
+   *     lost by leaving; something is only lost by leaving mid-settlement.
+   *   - The bound is not ours to choose anyway. The container runtime SIGKILLs
+   *     us at its stop grace (docker's default is 10 seconds), so any default
+   *     larger than that is fiction — the old 30 was already past it. A number
+   *     here is only real if the deployment's `stop_grace_period` matches it,
+   *     which is a per-deployment fact, so it is a knob and not a default.
+   *   - Waiting for a run to reach a natural boundary is not available to us:
+   *     a durable run cannot be suspended cooperatively without recording an
+   *     event, and recording one that the replay does not expect is the exact
+   *     nondeterminism this whole area is about. See docs/UPGRADING.md 3b.
+   *
+   * The way to deploy without interrupting anything is `teploy-ship preflight`
+   * before the deploy, not a longer wall-clock guess during it.
    */
+  const shutdownSeconds = (name: string, fallback: number): number => {
+    const raw = process.env[name];
+    if (raw === undefined || raw.trim() === "") return fallback;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : fallback;
+  };
   let shuttingDown = false;
   const shutdown = (signal: string): void => {
     if (shuttingDown) {
@@ -1760,16 +1890,39 @@ async function workerCommand(rest: string[]): Promise<void> {
     process.stderr.write(`\n${dim(`worker stopping (${signal})…`)}\n`);
     clearInterval(keepAlive);
     void (async () => {
-      const deadline = Date.now() + 30_000;
-      try {
-        await worker.stop();
-        // Give in-flight completion work (spend settlement, the outbox flush,
-        // meta writes) a chance to land before the connection pool goes.
-        while (Date.now() < deadline && worker.busy()) {
+      const drainMs = shutdownSeconds("SHIP_DRAIN_TIMEOUT_S", 0) * 1000;
+      const settleMs = shutdownSeconds("SHIP_SHUTDOWN_SETTLE_S", 30) * 1000;
+      const wait = async (until: number, more: () => boolean): Promise<void> => {
+        while (Date.now() < until && more()) {
           await new Promise((resolve) => setTimeout(resolve, 200));
         }
-        if (worker.busy()) {
-          process.stderr.write(`${yellow("shutdown timed out")} — closing with work still in flight\n`);
+      };
+      try {
+        await worker.stop();
+        if (drainMs > 0 && worker.executing().length > 0) {
+          process.stderr.write(
+            dim(`draining ${worker.executing().length} executing run(s), up to ${drainMs / 1000}s…\n`),
+          );
+          await wait(Date.now() + drainMs, () => worker.executing().length > 0);
+        }
+        // Name what is being interrupted and say what happens to it. "closing
+        // with work still in flight" told an operator that something was wrong
+        // and nothing about whether it mattered.
+        const interrupted = worker.executing();
+        if (interrupted.length > 0) {
+          process.stderr.write(
+            `${yellow("interrupting")} ${interrupted.length} executing run(s): ${interrupted.join(", ")}\n` +
+              `${dim("Their logs are intact — the next worker replays each from its last recorded step.")}\n` +
+              `${dim("To avoid this, drain before deploying: teploy-ship preflight")}\n`,
+          );
+        }
+        // The wait that actually protects something.
+        await wait(Date.now() + settleMs, () => worker.unsettled() > 0);
+        if (worker.unsettled() > 0) {
+          process.stderr.write(
+            `${yellow("shutdown timed out")} — ${worker.unsettled()} completion task(s) did not land; ` +
+              `a run's cost may be missing from the ledger\n`,
+          );
         }
       } finally {
         await runtime.close().catch(() => {});
@@ -1914,6 +2067,8 @@ async function main(): Promise<void> {
       return runCommand(rest);
     case "runs":
       return runsCommand(rest);
+    case "preflight":
+      return preflightCommand(rest);
     case "explain":
       return explainCommand(rest);
     case "enqueue":

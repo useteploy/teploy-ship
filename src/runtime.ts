@@ -17,6 +17,12 @@ import type { SpendStore, UnpricedRunStore } from "./spend.js";
 import { FilePolicyStore, NucleusPolicyStore } from "./policies.js";
 import type { PolicyStore } from "./policies.js";
 import { FileEvidenceStore, NucleusEvidenceStore } from "./evidence.js";
+import { FileRuntimeConfig, NucleusRuntimeConfig } from "./runtime-config.js";
+import type { RuntimeConfigStore } from "./runtime-config.js";
+import { FileConnectRequests, NucleusConnectRequests } from "./connect-requests.js";
+import type { ConnectRequestStore } from "./connect-requests.js";
+import { FileAkirooCursor, NucleusAkirooCursor } from "./akiroo.js";
+import type { AkirooCursorStore } from "./akiroo.js";
 import { harnessAttempts, harnessRef } from "./harness.js";
 import type { HarnessRef } from "./harness.js";
 import type { EvidenceStore } from "./evidence.js";
@@ -43,6 +49,7 @@ import { FileOutbox, NucleusOutbox } from "./outbox.js";
 import type { Outbox } from "./outbox.js";
 import { NucleusPgwire } from "./nucleus-pgwire.js";
 import { migrate } from "./migrations.js";
+import { stepFingerprint } from "./step-fingerprint.js";
 import { assertRepoAllowed, policyFromEnv } from "./repo-policy.js";
 import { withProjects } from "./durable.js";
 import type { RepoTrust } from "./repo-policy.js";
@@ -62,6 +69,51 @@ export type { PolicyStore, SourcePolicy } from "./policies.js";
 export { FilePolicyStore, NucleusPolicyStore } from "./policies.js";
 export type { EvidenceStore, RepoEvidence } from "./evidence.js";
 export { FileEvidenceStore, NucleusEvidenceStore } from "./evidence.js";
+export type { ConfigSource, ResolvedValue, RuntimeConfigEntry, RuntimeConfigStore } from "./runtime-config.js";
+export {
+  FileRuntimeConfig,
+  MemoryRuntimeConfig,
+  NucleusRuntimeConfig,
+  SEALED_KEYS,
+  resolveConfigValue,
+  sealingStatus,
+} from "./runtime-config.js";
+export type { AkirooConfigStatus, AkirooCursorStore, AkirooResolution, AkirooTarget } from "./akiroo.js";
+export {
+  AKIROO_TOKEN_KEY,
+  AKIROO_URL_KEY,
+  FileAkirooCursor,
+  NucleusAkirooCursor,
+  akirooSourceLabel,
+  akirooTokenPrint,
+  akirooWorkspaceKey,
+  normalizeAkirooBase,
+  resolveAkirooTarget,
+} from "./akiroo.js";
+export type { ExchangeFailure, ExchangeOutcome } from "./akiroo-connect.js";
+export {
+  AKIROO_ORG_ID_KEY,
+  AKIROO_ORG_NAME_KEY,
+  exchangeConnectRequest,
+  requestIsSpent,
+} from "./akiroo-connect.js";
+export type { ClaimFailure, ClaimOutcome, ConnectRequest, ConnectRequestStore } from "./connect-requests.js";
+export {
+  CLAIM_MESSAGES,
+  CONNECT_REQUEST_TTL_MS,
+  DELIVERY_CODE_PARAM,
+  FileConnectRequests,
+  MemoryConnectRequests,
+  NucleusConnectRequests,
+  approveUrl,
+  challengeFor,
+  describeWorkspace,
+  newRequestId,
+  newVerifier,
+  sameWorkspace,
+  validDeliveryCode,
+  workspaceIdentity,
+} from "./connect-requests.js";
 export type { Project, ProjectStore } from "./projects.js";
 export type { BulletinBoard, BulletinPost, BulletinStore } from "./bulletin.js";
 export { FileBulletinStore, NucleusBulletinStore, changeClassRequired, sweepBulletin } from "./bulletin.js";
@@ -250,6 +302,24 @@ export interface ShipRuntime {
   bulletin: BulletinStore;
   /** Per-repo evidence config — a view of `projects`, legacy rows read through. See projects.ts. */
   evidence: EvidenceStore;
+  /**
+   * Settings an operator changes while Ship runs — no redeploy, no secret set.
+   * A non-empty value here OUTRANKS the environment variable of the same name.
+   * See runtime-config.ts.
+   */
+  config: RuntimeConfigStore;
+  /**
+   * Handshakes THIS Ship started, with the PKCE verifier for each. The control
+   * that closes the phish: a /connect/return that names no row here is refused.
+   * See connect-requests.ts.
+   */
+  connectRequests: ConnectRequestStore;
+  /**
+   * Per-workspace position in Akiroo's outbox. On the runtime rather than
+   * private to the worker because completing a connect resets it — a reconnect
+   * that inherited the previous position would collect nothing and look fine.
+   */
+  akirooCursor: AkirooCursorStore;
   /** Who may do what, auto windows, required reviewers. See governance.ts. */
   governance: GovernanceStore;
   /** Live registry of workers in the fleet (heartbeat + capacity/load). */
@@ -293,6 +363,9 @@ export function fileRuntime(): ShipRuntime {
     policies: new FilePolicyStore(),
     projects,
     evidence: new ProjectEvidenceStore(projects, new FileEvidenceStore()),
+    config: new FileRuntimeConfig(),
+    connectRequests: new FileConnectRequests(),
+    akirooCursor: new FileAkirooCursor(),
     governance: new FileGovernanceStore(),
     fleet: new FileFleetStore(),
     placement: new FilePlacementStore(),
@@ -414,6 +487,9 @@ export async function nucleusRuntime(
     policies: new NucleusPolicyStore(db),
     projects,
     evidence: new ProjectEvidenceStore(projects, new NucleusEvidenceStore(db)),
+    config: new NucleusRuntimeConfig(db),
+    connectRequests: new NucleusConnectRequests(db),
+    akirooCursor: new NucleusAkirooCursor(db),
     governance: new NucleusGovernanceStore(db),
     fleet: new NucleusFleetStore(db),
     placement: new NucleusPlacementStore(db),
@@ -919,14 +995,9 @@ export async function enqueueRun(
     ...(options.source !== undefined ? { source: options.source } : {}),
     ...(options.repo !== undefined ? { repo: options.repo } : {}),
   });
-  await runtime.store.append(options.runId, {
-    v: WIRE_FORMAT_VERSION,
-    seq: 0,
-    type: "run-started",
-    at: now,
-    data: {
-      workflow: options.workflowName ?? "coding-agent",
-      input: {
+  // Hoisted out of the append below so the upgrade fence can fingerprint the
+  // exact object the log will carry, rather than a reconstruction of it.
+  const input = {
         task: options.task,
         ...(options.repo !== undefined ? { repo: options.repo } : {}),
         ...(options.repo !== undefined ? { trust: options.trust ?? "external" } : {}),
@@ -971,7 +1042,23 @@ export async function enqueueRun(
         guard: true,
         harness,
         ...(attempts.length >= 2 ? { harnessAttempts: attempts } : {}),
-      },
+  };
+  await runtime.store.append(options.runId, {
+    v: WIRE_FORMAT_VERSION,
+    seq: 0,
+    type: "run-started",
+    at: now,
+    data: {
+      workflow: options.workflowName ?? "coding-agent",
+      input,
+      // The upgrade fence (step-fingerprint.ts): what step sequence the build
+      // that enqueued this run would replay it through. A SIBLING of `input`,
+      // never a field inside it — the recorded input is what gates step
+      // presence, so a fingerprint stored there would change how in-flight
+      // runs replay and could cause the exact failure it exists to prevent.
+      // The engine reads `workflow` and `input` and ignores everything else on
+      // this event, so this key is inert to replay.
+      stepFingerprint: stepFingerprint(input),
     },
   });
   await runtime.saveMeta({

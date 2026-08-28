@@ -1,6 +1,7 @@
 import type { WorkflowEvent } from "@neutron-build/workflow";
 
 import type { RunMeta } from "./run-store.js";
+import { UPGRADE_HOLD_EVENT } from "./step-fingerprint.js";
 
 /**
  * Ship's producer for the Teploy inbox contract (`_internal/INBOX_CONTRACT.md`
@@ -173,6 +174,12 @@ export interface ItemOptions {
  * approval" is how someone rubber-stamps a destructive action.
  */
 function promptFor(meta: RunMeta, action?: string): string {
+  if (meta.eventName === UPGRADE_HOLD_EVENT) {
+    return (
+      "This run was enqueued by a build whose workflow step sequence differs from the one now deployed. " +
+      "Replaying it here would break its log, so it is held. Roll the deployment back to release it, or cancel it."
+    );
+  }
   if (meta.eventName === "plan-approval") return "Review the agent's plan before it acts.";
   if (action !== undefined) return `Approve this action? ${action}`;
   return "This run is parked waiting for approval.";
@@ -195,12 +202,21 @@ export function toItem(meta: RunMeta, options: ItemOptions = {}): InboxItem {
     updated_at: meta.updatedAt,
   };
   if (state === "blocked") {
+    // An upgrade hold is not an approval: approving it would be answering a
+    // question nobody asked, and the two things that actually move it are a
+    // rollback (then `resume`) and giving the run up.
+    const held = meta.eventName === UPGRADE_HOLD_EVENT;
     item.needs = {
       prompt: promptFor(meta, options.action),
-      actions: [
-        { label: "approve", run: ["teploy-ship", "approve", meta.runId] },
-        { label: "deny", run: ["teploy-ship", "deny", meta.runId, "{reason}"] },
-      ],
+      actions: held
+        ? [
+            { label: "resume", run: ["teploy-ship", "resume", meta.runId] },
+            { label: "cancel", run: ["teploy-ship", "cancel", meta.runId, "{reason}"] },
+          ]
+        : [
+            { label: "approve", run: ["teploy-ship", "approve", meta.runId] },
+            { label: "deny", run: ["teploy-ship", "deny", meta.runId, "{reason}"] },
+          ],
     };
   }
   if (context !== undefined) item.context = context;

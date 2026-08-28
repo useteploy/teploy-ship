@@ -1,5 +1,14 @@
-import { normalizeRole } from "../lib/ship.server.js";
-import type { Role, UserView, ShipRuntime } from "teploy-ship/runtime";
+import {
+  AKIROO_ORG_ID_KEY,
+  AKIROO_ORG_NAME_KEY,
+  AKIROO_TOKEN_KEY,
+  AKIROO_URL_KEY,
+  akirooSourceLabel,
+  normalizeRole,
+  resolveAkirooTarget,
+  sealingStatus,
+} from "../lib/ship.server.js";
+import type { AkirooResolution, ResolvedValue, Role, UserView, ShipRuntime } from "teploy-ship/runtime";
 
 import { shipRuntime, defaultModel } from "../lib/store.server.js";
 import { SubNav } from "../lib/subnav.js";
@@ -19,6 +28,8 @@ interface Row {
   value: string;
   ok?: boolean; // green when a required/effective thing is present
   hint?: string;
+  /** A same-site page that acts on this row. Rendered as a link after the hint. */
+  action?: { href: string; label: string };
 }
 
 interface Group {
@@ -31,6 +42,8 @@ interface SettingsData {
   groups: Group[];
   users: UserView[];
   me: Principal;
+  /** Set when the operator has just come back from a completed connect. */
+  connected?: string;
 }
 
 /**
@@ -78,20 +91,96 @@ function value(name: string, fallback = "not set"): Row {
  * An unparseable value tells the operator nothing useful anyway; that it is set
  * and malformed is the whole message.
  */
-function safeUrl(name: string): Row {
-  const raw = process.env[name];
-  if (raw === undefined || raw === "") return { label: name, value: "not set" };
+function safeUrlRow(label: string, raw: string | undefined): Row {
+  if (raw === undefined || raw === "") return { label, value: "not set" };
   try {
     const u = new URL(raw);
     if (u.password !== "" || u.username !== "") {
       u.password = "";
       u.username = u.username !== "" ? "***" : "";
-      return { label: name, value: u.toString(), ok: true };
+      return { label, value: u.toString(), ok: true };
     }
-    return { label: name, value: raw, ok: true };
+    return { label, value: raw, ok: true };
   } catch {
-    return { label: name, value: "set, but not a valid URL (hidden — it may contain a credential)", ok: false };
+    return { label, value: "set, but not a valid URL (hidden — it may contain a credential)", ok: false };
   }
+}
+
+function safeUrl(name: string): Row {
+  return safeUrlRow(name, process.env[name]);
+}
+
+/**
+ * A URL row for a value that may have come from the runtime config store
+ * rather than the environment, saying which.
+ *
+ * The source is not decoration. A connect handshake overrides AKIROO_URL, and
+ * an override nobody can see is the thing that costs an hour: the manifest says
+ * one workspace, the worker polls another, and every explanation starts from
+ * the wrong file.
+ */
+function resolvedUrlRow(label: string, resolved: ResolvedValue): Row {
+  const row = safeUrlRow(label, resolved.value === "" ? undefined : resolved.value);
+  return { ...row, hint: akirooSourceLabel(resolved.source) };
+}
+
+/**
+ * A secret row for a value that may have come from the store. Still only ever
+ * set/not set — the source changes where it was written, not whether it may be
+ * printed. Falls back to the env reporter so a worker-scoped secret keeps
+ * saying "scoped to the worker" rather than "not set".
+ */
+function resolvedSecretRow(name: string, resolved: ResolvedValue): Row {
+  if (resolved.source === "runtime") {
+    return { label: name, value: "set", ok: true, hint: akirooSourceLabel("runtime") };
+  }
+  return { ...secret(name), hint: akirooSourceLabel(resolved.source) };
+}
+
+/** The connector line: what it is doing, or why it is not doing it. */
+function akirooConnectorRow(akiroo: AkirooResolution): Row {
+  if (akiroo.status === "misconfigured") {
+    return { label: "connector", value: `misconfigured — ${akiroo.reason ?? "half-set"}`, ok: false };
+  }
+  if (akiroo.status === "unset") {
+    return {
+      label: "connector",
+      value: "disabled — no workspace connected",
+      ok: false,
+      // Ship starts the connect, so the button is here rather than on Akiroo.
+      // A connect that begins anywhere else cannot complete: /connect/return
+      // refuses anything this Ship has no local row for.
+      hint: "Ship starts the connect; a link that arrives by mail cannot",
+      action: { href: "/connect", label: "Connect a workspace" },
+    };
+  }
+  return {
+    label: "connector",
+    value: akiroo.status === "runtime" ? "enabled — connected by handshake" : "enabled — configured by environment",
+    ok: true,
+    hint: "the worker COLLECTS work from Akiroo — outbound HTTPS only, no open port, no tunnel, no public URL",
+    action: { href: "/connect", label: "Connect a different workspace" },
+  };
+}
+
+/**
+ * Whether the stored pull token is encrypted at rest, said out loud.
+ *
+ * It is NOT by default, and cannot be without an operator setting a key: see
+ * the note on sealingKey in runtime-config.ts for why no existing per-install
+ * secret reaches both the dashboard and a joined worker. That makes this a
+ * standing property of most installs rather than a transient state, which is
+ * exactly the kind of thing that must appear on a page someone reads rather
+ * than only in a source comment.
+ */
+function sealingRow(): Row {
+  const sealing = sealingStatus();
+  return {
+    label: "token at rest",
+    value: sealing.sealed ? "encrypted (SHIP_CONFIG_KEY)" : "stored in the clear",
+    ok: sealing.sealed,
+    hint: sealing.detail,
+  };
 }
 
 export async function loader({ request }: { request: Request }): Promise<SettingsData> {
@@ -99,13 +188,25 @@ export async function loader({ request }: { request: Request }): Promise<Setting
   const num = (name: string, def: string): Row => value(name, `default (${def})`);
   const me = (await currentUser(request)) ?? { user: "token", role: "admin" as Role };
   const users = await runtime.users.list();
-  const view = new URL(request.url).searchParams.get("view") === "team" ? "team" : "system";
+  const params = new URL(request.url).searchParams;
+  const view = params.get("view") === "team" ? "team" : "system";
+  const justConnected = params.get("connected") === "1";
 
   const sandboxOn = (process.env.SHIP_SANDBOX_URL ?? "") !== "";
+  // Resolved before the literal below, because the Akiroo rows report a store
+  // value when there is one and the store read is async. Resolved as a PAIR
+  // (resolveAkirooTarget), never per value: a runtime URL beside an environment
+  // token is a refusal, not a merge.
+  const akiroo = await resolveAkirooTarget(runtime.config);
+  const workspace =
+    (await runtime.config.get(AKIROO_ORG_NAME_KEY)) ?? (await runtime.config.get(AKIROO_ORG_ID_KEY)) ?? "";
   return {
     view,
     me,
     users,
+    // Read from the store, never from the redirect: the point of landing here
+    // is to see what this Ship is actually bound to now.
+    ...(justConnected && akiroo.target !== undefined ? { connected: akiroo.target.url } : {}),
     groups: [
       {
         title: "Runtime",
@@ -199,17 +300,11 @@ export async function loader({ request }: { request: Request }): Promise<Setting
       {
         title: "Akiroo (work in, pulled)",
         rows: [
-          {
-            label: "connector",
-            value:
-              (process.env.AKIROO_URL ?? "") !== "" && (process.env.AKIROO_PULL_TOKEN ?? "") !== ""
-                ? "enabled"
-                : "disabled",
-            ok: (process.env.AKIROO_URL ?? "") !== "" && (process.env.AKIROO_PULL_TOKEN ?? "") !== "",
-            hint: "the worker COLLECTS work from Akiroo — outbound HTTPS only, no open port, no tunnel, no public URL",
-          },
-          safeUrl("AKIROO_URL"),
-          { ...secret("AKIROO_PULL_TOKEN"), hint: "minted once on Akiroo's Settings, Connections, Teploy Ship card" },
+          akirooConnectorRow(akiroo),
+          resolvedUrlRow(AKIROO_URL_KEY, akiroo.url),
+          resolvedSecretRow(AKIROO_TOKEN_KEY, akiroo.token),
+          sealingRow(),
+          ...(workspace !== "" ? [{ label: "workspace", value: workspace, ok: true, hint: "recorded by the connect handshake" }] : []),
           {
             label: "last collected",
             value: "shown on Akiroo's Connections card",
@@ -321,6 +416,12 @@ export default function Settings({ data, actionData }: { data: SettingsData; act
     <>
       <h1 class="page">Settings</h1>
       <SubNav items={SETTINGS_VIEWS} current={data.view} />
+      {data.connected !== undefined && (
+        <p style="color:var(--green)">
+          Connected. This Ship now collects queued work from <b>{data.connected}</b> — the worker picks the connector up
+          on its next poll, within a few seconds. No redeploy is needed.
+        </p>
+      )}
       <p class="meta">
         The effective configuration this server is running. Set via environment on deploy (teploy.yml / secrets);
         secrets show only as set/not set. Intake policies are edited on <a href="/projects?view=sources">Sources</a>.
@@ -405,6 +506,9 @@ export default function Settings({ data, actionData }: { data: SettingsData; act
                       {r.value}
                     </span>
                     {r.hint !== undefined && <span class="meta" style="margin-left:10px">· {r.hint}</span>}
+                    {r.action !== undefined && (
+                      <a href={r.action.href} style="margin-left:10px">{r.action.label}</a>
+                    )}
                   </td>
                 </tr>
               ))}

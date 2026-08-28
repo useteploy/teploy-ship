@@ -11,6 +11,8 @@ declare module "@neutron-build/core" {
     | "/api/runs/scan"
     | "/bulletin-admin"
     | `/bulletin/${string}`
+    | "/connect"
+    | "/connect/return"
     | "/events"
     | "/fleet"
     | "/health"

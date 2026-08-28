@@ -73,6 +73,11 @@ export const middleware: MiddlewareFn = async (request, _context, next) => {
   // and prove nothing, which is exactly why what a note can CAUSE is bounded on
   // the other side (src/bulletin.ts). The trailing slash is load-bearing — the
   // operator's page is /bulletin-admin and must stay behind the session.
+  // /connect is NOT listed. It used to be, because the operator arrived on it
+  // from Akiroo carrying a code that a 302 to /login would have thrown away.
+  // Ship starts the handshake now, so the operator is already signed in here
+  // before anything begins and the exemption bought nothing but a route outside
+  // the role gate. Both /connect pages check admin themselves as well.
   if (path === "/login" || path === "/health" || path.startsWith("/hooks/") || path.startsWith("/bulletin/") || path.startsWith("/oidc/") || path.startsWith("/assets/") || path === "/favicon.ico") {
     return withSecurityHeaders(await next(), request);
   }
@@ -89,7 +94,15 @@ export const middleware: MiddlewareFn = async (request, _context, next) => {
         headers: { "content-type": "application/problem+json" },
       });
     }
-    return new Response(null, { status: 302, headers: { location: "/login" } });
+    // Carry where they were going. /connect/return is the case that made this
+    // necessary: the operator leaves Ship to approve on the workspace and comes
+    // back on a URL that identifies a ten-minute handshake, and landing them on
+    // a bare /login would spend the trip for nothing. The value is this
+    // server's own parsed path, so it is a rooted same-site path by
+    // construction; login re-checks it with safeNextPath regardless.
+    const next = `${url.pathname}${url.search}`;
+    const location = next === "/" ? "/login" : `/login?next=${encodeURIComponent(next)}`;
+    return new Response(null, { status: 302, headers: { location } });
   }
 
   // CSRF — reject cross-origin state-changing requests. SameSite=Lax on the

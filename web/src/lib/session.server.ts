@@ -203,8 +203,14 @@ export async function currentUser(request: Request): Promise<Principal | null> {
 
 // ── Route authorization ──────────────────────────────────────────────────
 
-// Admin-only areas: they read/write secrets and accounts.
-const ADMIN_PREFIXES = ["/settings", "/users"];
+// Admin-only areas: they read/write secrets and accounts. /connect and
+// /connect/return run the Akiroo handshake, which ends with a workspace pull
+// token in this Ship's config — the same authority as setting a secret. These
+// used to be exempt from the layout's gate, because the operator arrived on
+// them from another site carrying a code a login bounce would have dropped;
+// Ship starts the handshake now, so the exemption is gone and this entry is the
+// live gate rather than a backstop. Both routes also check admin themselves.
+const ADMIN_PREFIXES = ["/settings", "/users", "/connect"];
 // Governed by the authority grants (governance.ts) INSIDE the route, not by
 // role here: a named user may hold `approve` or `policies` without being an
 // editor or admin, and a viewer may read what the rules are. Every mutation on

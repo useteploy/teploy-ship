@@ -374,7 +374,56 @@ or raise the rule's cooldown.
 Akiroo is a workspace; Ship is the thing that does the work. The hop
 between them runs in **one direction only: Ship pulls.**
 
-Set two variables on the **worker** (both or neither):
+There are two ways to establish it. The browser-mediated connect is the
+normal one; the environment variables remain for installs that prefer
+their configuration in the manifest.
+
+**Connect from the browser (no redeploy).** **Ship starts it.** Sign in
+to Ship's dashboard as an **admin**, open **Settings, System, Akiroo**
+and follow **Connect a workspace** (or go straight to `/connect`). Type
+the workspace address, press **Start connect**, and Ship sends you to
+that workspace's approval page. Approve there as an owner and the browser
+comes back to Ship, which exchanges the approved handshake for a pull
+token **server-side** — the token never travels through the browser. The
+worker picks the connector up on its next poll, within seconds. Nothing
+is redeployed and no secret is set.
+
+**The direction is the security property, and it is worth knowing why.**
+The first version had Akiroo start the handshake and Ship approve it,
+guarded by a pairing phrase. That could not be made safe: whoever starts
+the flow holds the code, so an attacker with any workspace held both the
+code and the phrase derived from it, and a mailed link plus a phrase was
+enough to bind someone else's Ship to their workspace. Reversing it fixes
+that structurally rather than by adding a check — Ship completes only a
+handshake it started and holds local state for, so an unsolicited
+"re-authorize your Ship" link now lands on a Ship with no matching row
+and is refused, with no credential requested and nothing stored.
+
+The browser carries a request id and a **challenge** (the sha256 of a
+verifier Ship keeps); the verifier itself only ever travels in the
+server-to-server exchange. So even a fully observed browser leg — history,
+access log, `Referer`, an extension with tab access — cannot be turned
+into a pull token. Handshakes expire after ten minutes and are single-use.
+
+On the way back the browser also carries a **delivery code**, which Akiroo
+mints when the owner approves and sends only to the Ship address its
+approval page displayed. The exchange requires all three — request id,
+verifier, delivery code. That is what stops the remaining trick: an
+attacker could otherwise start a handshake of their own, get an owner to
+approve a page naming the owner's OWN familiar Ship, and then redeem the
+token from their own server. With the delivery code they must choose
+between naming the real Ship, which then receives the code they need, and
+naming their own address, which is the unfamiliar host the owner is
+looking at. Ship forwards the code to the workspace and stores it nowhere.
+
+One more thing worth knowing if your Akiroo lives under a path prefix:
+Ship addresses the workspace by its **full base**, prefix included, on
+every leg — the approval link, the exchange and the ongoing poll. So the
+address you type here and Akiroo's own `PUBLIC_BASE_URL` have to be the
+same string, and the return leg refuses and names both values when they
+are not.
+
+**Or set two variables on the worker** (both or neither):
 
 ```
 AKIROO_URL=https://lite.akiroo.com
@@ -384,6 +433,35 @@ AKIROO_PULL_TOKEN=ship_pull_…
 Mint the token once, in Akiroo, under **Settings, Connections, Teploy
 Ship, Handing over work**. It is shown exactly once and only ever
 compared thereafter; rotating it stops the old one immediately.
+
+**Precedence, and why it is this way round.** A value stored by the
+connect handshake WINS over the environment variable of the same name.
+The handshake is the more recent deliberate act of an operator who was
+looking at the connector at the time. The two values are resolved as a
+*pair*, never independently — a stored URL is never paired with an
+environment token, because that would send one workspace's live pull
+token to another workspace's server every five seconds; a half-set pair
+refuses to poll and says so. Settings, System, Akiroo names which source
+is in effect for each value.
+
+**Set `SHIP_CONFIG_KEY`** (the same value on the controller and every
+worker; `teploy-ship join` carries it into a joined worker) and the stored
+pull token is encrypted at rest, so a reader who can reach Ship's Nucleus
+but not its environment does not get it. Rotating that key makes the
+stored token unreadable — re-run the connect, which takes twenty seconds.
+
+This is not on by default, and the reason is a real constraint rather than
+an oversight: sealing is only useful if the process that READS the token
+can open it, and that process is the **worker**, while the process that
+completes the handshake is the **web** one. No existing per-install secret
+reaches both — `SHIP_SESSION_SECRET` and `SHIP_WEB_TOKEN` are stripped
+from every joined worker (`NOT_FOR_A_WORKER` in `src/join.ts`), the git
+and model credentials are stripped from web (`WORKER_ONLY_SECRETS` in
+`src/cli.ts`), and `NUCLEUS_URL` is the address of the very store this
+would protect. A key derived from any of them would work on a single box
+and encrypt the token to nobody on a joined fleet. So it stays explicit,
+and **Settings, System, Akiroo** states plainly whether the token is
+sealed on this install.
 
 **Ship needs only outbound HTTPS. No inbound port, no tunnel, no public
 URL, no DNS record.** That is the point of the direction: a worker on a
