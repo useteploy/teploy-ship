@@ -363,6 +363,36 @@ export async function buildStepSequence(): Promise<string[]> {
   return await cachedSequence;
 }
 
+/**
+ * Does the declared table agree with what the compiled modules actually record?
+ *
+ * The comparison `step-fingerprint.test.ts` makes at TEST time, factored out so
+ * `teploy-ship preflight` can make the same one at DEPLOY time — the deploy
+ * recipe runs preflight but not the suite, and a stale table made preflight
+ * vouch for a build whose fence was misdeclared. Returns a human-readable
+ * description of the divergence, or null when the two agree.
+ *
+ * Deploy-time only, deliberately. The running fence reads the declared table,
+ * never this: a runtime extraction feeding live fingerprints would have a
+ * failure mode (a bundler, a rename) that parks the entire queue, whereas a
+ * stale table caught HERE fails one deploy with the reason named.
+ */
+export function tableDrift(extracted: readonly string[]): string | null {
+  const declared = WORKFLOW_STEPS.map((s) => s.key);
+  const n = Math.min(declared.length, extracted.length);
+  for (let i = 0; i < n; i++) {
+    if (declared[i] !== extracted[i]) {
+      return `the table and the compiled workflow diverge at position ${i}: the table declares '${declared[i]}', the code records '${extracted[i]}'`;
+    }
+  }
+  if (declared.length !== extracted.length) {
+    const fromTable = declared.length > extracted.length;
+    const extra = fromTable ? declared[n] : extracted[n];
+    return `the ${fromTable ? "table declares an entry the code does not record" : "code records an entry the table does not declare"}: '${extra}' at position ${n}`;
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // The gate table
 // ---------------------------------------------------------------------------

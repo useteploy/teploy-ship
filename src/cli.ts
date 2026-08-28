@@ -19,7 +19,7 @@ import type { RunOutcome } from "@neutron-build/workflow";
 
 import { ArgError, COMMAND_FLAGS, enumFlag, numberFlag, parseArgs } from "./args.js";
 import { explainRun } from "./explain.js";
-import { WORKFLOW_STEPS, preflightReport } from "./step-fingerprint.js";
+import { WORKFLOW_STEPS, buildStepSequence, preflightReport, tableDrift } from "./step-fingerprint.js";
 import { resolveModelId, usesAnthropicWire } from "./model-id.js";
 import { auditRow, toCsv, withinWindow } from "./audit.js";
 import type { NumberRange } from "./args.js";
@@ -1609,6 +1609,24 @@ async function preflightCommand(rest: string[]): Promise<void> {
   const json = args.flags.json === true;
   const allowUnrecorded = args.flags["allow-unrecorded"] === true;
   const limit = numFlag(args.flags.limit, "limit", 500, { min: 1, max: 10_000, integer: true });
+  // Before anything else: the deploy recipe runs preflight but not the test
+  // suite, and a WORKFLOW_STEPS table that has fallen behind the compiled
+  // workflow would make every verdict below describe a fence this build is
+  // not actually running. Extraction failure counts as stale — a build whose
+  // sequence cannot be read cannot be vouched for.
+  let stale: string | null;
+  try {
+    stale = tableDrift(await buildStepSequence());
+  } catch (error) {
+    stale = `the compiled workflow's step sequence could not be read: ${error instanceof Error ? error.message : String(error)}`;
+  }
+  if (stale !== null) {
+    process.stderr.write(
+      `${red("unsafe to deploy")} — this build's upgrade fence is misdeclared: ${stale}.\n` +
+        `${dim(`Update WORKFLOW_STEPS in src/step-fingerprint.ts (step-fingerprint.test.ts names the same divergence) and rebuild.`)}\n`,
+    );
+    process.exit(1);
+  }
   const runtime = await makeRuntime(args, loadConfig());
   let report;
   try {

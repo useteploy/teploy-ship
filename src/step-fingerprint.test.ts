@@ -20,6 +20,7 @@ import {
   recordedFingerprint,
   replayDrift,
   stepFingerprint,
+  tableDrift,
 } from "./step-fingerprint.js";
 import type { RecordedInput, WorkflowStep } from "./step-fingerprint.js";
 import { enqueueRun } from "./runtime.js";
@@ -51,9 +52,34 @@ test("the declared step table is exactly the sequence the compiled workflow reco
   assert.deepEqual(
     WORKFLOW_STEPS.map((s) => s.key),
     extracted,
-    "WORKFLOW_STEPS has fallen behind durable.ts / harness-external.ts — add, rename or reorder the entry to match, " +
+    "WORKFLOW_STEPS has fallen behind durable.ts / harness-external.js — add, rename or reorder the entry to match, " +
       "and give a new step the input gate that admits it (see the header of step-fingerprint.ts)",
   );
+});
+
+test("tableDrift: an agreeing extraction is not drift", async () => {
+  assert.equal(tableDrift(await buildStepSequence()), null);
+});
+
+test("tableDrift: a stale table is named, in every shape it can be stale in", () => {
+  const table = WORKFLOW_STEPS.map((s) => s.key);
+  const reordered = [...table];
+  const swap = reordered[1]!;
+  reordered[1] = reordered[2]!;
+  reordered[2] = swap;
+  const renamed = table.map((k, i) => (i === 0 ? "step:renamed" : k));
+  const withExtra = ["step:extra", ...table];
+  const withMissing = table.slice(1);
+  for (const [label, extracted] of [
+    ["reordered", reordered],
+    ["renamed", renamed],
+    ["table has an extra entry", withExtra],
+    ["table is missing an entry", withMissing],
+  ] as const) {
+    const drift = tableDrift(extracted);
+    assert.notEqual(drift, null, `${label} must be drift`);
+    assert.match(drift!, /position \d+|has an entry/, `${label} names where it diverges`);
+  }
 });
 
 test("every module that records a step is listed in WORKFLOW_STEP_MODULES", async () => {
