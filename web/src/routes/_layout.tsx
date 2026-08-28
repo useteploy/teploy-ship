@@ -111,6 +111,14 @@ export const middleware: MiddlewareFn = async (request, _context, next) => {
   // nor Sec-Fetch-Site and so pass, which is correct: a bearer token is never
   // attached ambiently, so it cannot be ridden by a third-party page.
   if (isMutating(request.method) && !sameOrigin(request)) {
+    // Diagnostic for the 2026-08-28 blocked-connect investigation: the three
+    // headers sameOrigin reads, on the refusal path only. Remove once the
+    // cause is identified.
+    console.warn(
+      `[layout] csrf refusal: method=${request.method} path=${path} ` +
+        `sec-fetch-site=${JSON.stringify(request.headers.get("sec-fetch-site"))} ` +
+        `origin=${JSON.stringify(request.headers.get("origin"))} host=${JSON.stringify(request.headers.get("host"))}`,
+    );
     if (isData) {
       return new Response(JSON.stringify({ title: "Cross-origin request blocked", status: 403 }), {
         status: 403,
