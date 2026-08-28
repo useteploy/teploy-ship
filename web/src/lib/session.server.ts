@@ -291,6 +291,15 @@ export function sessionSetCookie(p: Principal, secure: boolean, kind: SessionKin
  * request carrying neither header is not a browser form post, so it is not the
  * CSRF case — API callers authenticate with a bearer token, which is never
  * attached ambiently.
+ *
+ * Opaque origins get the standard fallback. Some privacy extensions and
+ * sandboxed page contexts send `Origin: null` on an ordinary same-origin form
+ * post (observed live 2026-08-28: two different browsers, every connect POST
+ * refused). Refusing null outright is the conservative reading — a sandboxed
+ * iframe is a real CSRF vector — but Referer answers the question the nulled
+ * Origin cannot: a mangled-legitimate post still carries a Referer on this
+ * host, and a cross-site attacker cannot forge that (sandboxed frames can
+ * suppress Referer, not choose it).
  */
 export function sameOrigin(request: Request): boolean {
   const site = request.headers.get("sec-fetch-site");
@@ -298,6 +307,7 @@ export function sameOrigin(request: Request): boolean {
 
   const origin = request.headers.get("origin");
   if (origin !== null && origin !== "") {
+    if (origin === "null") return refererIsSameOrigin(request);
     try {
       return new URL(origin).host === (request.headers.get("host") ?? new URL(request.url).host);
     } catch {
@@ -305,6 +315,20 @@ export function sameOrigin(request: Request): boolean {
     }
   }
   return true;
+}
+
+/**
+ * Whether Referer names this host, for the opaque-origin case. Absent or
+ * unparseable means no evidence, which reads as not same-origin.
+ */
+function refererIsSameOrigin(request: Request): boolean {
+  const referer = request.headers.get("referer");
+  if (referer === null || referer === "") return false;
+  try {
+    return new URL(referer).host === (request.headers.get("host") ?? new URL(request.url).host);
+  } catch {
+    return false;
+  }
 }
 
 /** Methods that can change state, and so need the cross-origin check. */
