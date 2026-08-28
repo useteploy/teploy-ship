@@ -35,6 +35,16 @@ function startedEvent(input: RecordedInput, fingerprint: string): WorkflowEvent 
   };
 }
 
+/**
+ * One cursor event. A run the fence should HOLD has executed something —
+ * replayDrift lets a log with no cursor events through (it is a fresh start
+ * under any build), so a held-run fixture without one stopped being held the
+ * day that landed and these helpers make the shape explicit.
+ */
+function cursorEvent(): WorkflowEvent {
+  return { v: WIRE_FORMAT_VERSION, seq: 1, type: "step-completed", name: "sandbox", at: "2026-08-27T00:00:00.500Z", data: { result: null } };
+}
+
 interface Fake {
   runtime: NucleusShipRuntime;
   metas: Map<string, RunMeta>;
@@ -200,7 +210,7 @@ const HELD_INPUT: RecordedInput = { task: "fix the thing", repo: "https://git.ex
 test("the fence holds a run this build cannot replay, without executing or touching its log", async (t) => {
   withoutSelfwatch(t);
 
-  const events = [startedEvent(HELD_INPUT, `${FINGERPRINT_SCHEME}:0000000000000000`)];
+  const events = [startedEvent(HELD_INPUT, `${FINGERPRINT_SCHEME}:0000000000000000`), cursorEvent()];
   const fake = fakeRuntime(new Map([["run-drift", events]]), [{ runId: "run-drift", sleeping: false }]);
   fake.metas.set("run-drift", {
     runId: "run-drift",
@@ -331,7 +341,7 @@ test("a hold that is still real is not released", async () => {
   const woken: string[] = [];
   const released = await releaseUpgradeHolds({
     listMeta: async () => [heldMeta("run-a")],
-    loadEvents: async () => [startedEvent(input, `${FINGERPRINT_SCHEME}:3333333333333333`)],
+    loadEvents: async () => [startedEvent(input, `${FINGERPRINT_SCHEME}:3333333333333333`), cursorEvent()],
     markWake: async (runId) => void woken.push(runId),
     saveMeta: async () => {},
     log: () => {},

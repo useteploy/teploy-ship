@@ -44,6 +44,15 @@ function terminal(type: "run-completed" | "run-failed" | "run-cancelled"): Workf
   return { v: WIRE_FORMAT_VERSION, seq: 9, type, at: "2026-08-27T00:00:01.000Z", data: { output: null } };
 }
 
+/**
+ * One cursor event — the smallest log that has recorded something replayable.
+ * A run that has executed at all has at least one; a run whose log is only
+ * `run-started` has executed nothing, and replay of it is a fresh start.
+ */
+function cursorEvent(): WorkflowEvent {
+  return { v: WIRE_FORMAT_VERSION, seq: 1, type: "step-completed", name: "sandbox", at: "2026-08-27T00:00:00.500Z", data: { result: null } };
+}
+
 // ---------------------------------------------------------------------------
 // The enforcement: the declared table must equal what the code actually does
 // ---------------------------------------------------------------------------
@@ -371,14 +380,32 @@ test("the fingerprint is stable across runs and carries its scheme", () => {
 test("replayDrift: a run recorded by this build replays", () => {
   const input: RecordedInput = { task: "t", repo: "r", tests: true };
   assert.equal(replayDrift([startedEvent(input, stepFingerprint(input))]), null);
+  assert.equal(replayDrift([startedEvent(input, stepFingerprint(input)), cursorEvent()]), null);
 });
 
 test("replayDrift: a run recorded by a different build is drift, and names both prints", () => {
   const input: RecordedInput = { task: "t", repo: "r" };
-  const drift = replayDrift([startedEvent(input, `${FINGERPRINT_SCHEME}:0000000000000000`)]);
+  const drift = replayDrift([startedEvent(input, `${FINGERPRINT_SCHEME}:0000000000000000`), cursorEvent()]);
   assert.notEqual(drift, null);
   assert.equal(drift!.recorded, `${FINGERPRINT_SCHEME}:0000000000000000`);
   assert.equal(drift!.current, stepFingerprint(input));
+});
+
+test("replayDrift: a run that has recorded nothing replayable is not held, whatever its fingerprint says", () => {
+  // A log of run-started alone has ZERO cursor events: replay walks cursor
+  // events one-by-one, so there is nothing to walk — executing this run under
+  // a disagreeing build is a fresh start, not a replay, and no divergence is
+  // possible. Holding it parks a run no deploy can hurt, with a reason that
+  // is untrue for it. The recorded print stays stale in the log; if a later
+  // deploy disagrees with the ORIGINAL build after this one has run, that
+  // later fence read is a false park — the fence's documented conservative
+  // trade, one rollback-or-resume, not a broken run.
+  const input: RecordedInput = { task: "t", repo: "r" };
+  assert.equal(
+    replayDrift([startedEvent(input, `${FINGERPRINT_SCHEME}:0000000000000000`)]),
+    null,
+    "no cursor events means no replay obligation",
+  );
 });
 
 test("replayDrift: a run with no recorded fingerprint is let through, not held", () => {
@@ -441,8 +468,8 @@ function row(runId: string, events: WorkflowEvent[]) {
 test("preflight: an in-flight run this build cannot replay makes the deploy unsafe", () => {
   const input: RecordedInput = { task: "t" };
   const report = preflightReport([
-    row("run-ok", [startedEvent(input, stepFingerprint(input))]),
-    row("run-bad", [startedEvent(input, `${FINGERPRINT_SCHEME}:1111111111111111`)]),
+    row("run-ok", [startedEvent(input, stepFingerprint(input)), cursorEvent()]),
+    row("run-bad", [startedEvent(input, `${FINGERPRINT_SCHEME}:1111111111111111`), cursorEvent()]),
   ]);
   assert.equal(report.wouldBreak, 1);
   assert.equal(report.safe, false);
@@ -476,6 +503,17 @@ test("preflight: a run it cannot compare is unsafe until someone says otherwise"
 test("preflight: nothing in flight is safe", () => {
   assert.equal(preflightReport([]).safe, true);
   assert.equal(preflightReport([]).build, buildFingerprint());
+});
+
+test("preflight: a queued run that has recorded nothing cannot be hurt by a deploy", () => {
+  const input: RecordedInput = { task: "t" };
+  const report = preflightReport([row("run-fresh", [startedEvent(input, `${FINGERPRINT_SCHEME}:3333333333333333`)])]);
+  assert.deepEqual(
+    report.runs.map((r) => [r.runId, r.verdict]),
+    [["run-fresh", "ok"]],
+    "a log with no cursor events is a fresh start under any build, not a replay",
+  );
+  assert.equal(report.safe, true);
 });
 
 // ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 import type { WorkflowEvent } from "@neutron-build/workflow";
+import { isCursorEvent } from "@neutron-build/workflow";
 
 import { NATIVE_HARNESS_ID } from "./harness.js";
 import type { DurableAgentInput } from "./durable.js";
@@ -569,15 +570,24 @@ export interface ReplayDrift {
 /**
  * Would replaying this run under the running build change its step sequence?
  *
- * `null` means "go ahead", and it is the answer in three distinct cases that
+ * `null` means "go ahead", and it is the answer in four distinct cases that
  * all deserve to proceed: the fingerprints agree, the run predates the fence
- * (no recorded fingerprint — see the header), or the run was recorded under a
- * different fingerprint SCHEME, which says nothing about the workflow.
+ * (no recorded fingerprint — see the header), the run was recorded under a
+ * different fingerprint SCHEME, which says nothing about the workflow, or the
+ * run has recorded NOTHING REPLAYABLE — a log with no cursor events is a
+ * fresh start under any build, and holding it parks a run no deploy can hurt
+ * while telling the operator an untruth about why.
  */
 export function replayDrift(events: readonly WorkflowEvent[]): ReplayDrift | null {
   const recorded = recordedFingerprint(events);
   if (recorded === undefined) return null;
   if (!recorded.startsWith(`${FINGERPRINT_SCHEME}:`)) return null;
+  // Replay walks CURSOR events one-by-one; with none there is nothing to
+  // walk and no divergence is possible. The recorded fingerprint stays stale
+  // in the log — a later fence read may false-park against the enqueue-time
+  // build after this one has run — which is the fence's standing conservative
+  // trade (a false park costs a rollback-or-resume), not a broken run.
+  if (!events.some(isCursorEvent)) return null;
   const input = runStarted(events)?.input;
   if (typeof input !== "object" || input === null) return null;
   const current = stepFingerprint(input as RecordedInput);
