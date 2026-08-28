@@ -88,17 +88,7 @@ export async function loader({ request }: { request: Request }): Promise<Connect
 export async function action({ request }: { request: Request }): Promise<ConnectActionData | Response> {
   // Both gates on the action too. An action reachable without the loader's
   // check is a real bypass: nothing makes a browser fetch the loader first.
-  if (!sameOrigin(request)) {
-    // Diagnostic for the 2026-08-28 blocked-connect investigation: the three
-    // headers the check reads, on the refusal path only. Remove once the
-    // browser-side cause is identified.
-    console.warn(
-      `[connect] csrf refusal: sec-fetch-site=${JSON.stringify(request.headers.get("sec-fetch-site"))} ` +
-        `origin=${JSON.stringify(request.headers.get("origin"))} host=${JSON.stringify(request.headers.get("host"))} ` +
-        `url=${request.url}`,
-    );
-    return forbidden("Cross-origin request blocked.");
-  }
+  if (!sameOrigin(request)) return forbidden("Cross-origin request blocked.");
   const me = await currentUser(request);
   if (connectAccess(me) !== "allowed") return forbidden("Forbidden — connecting a workspace requires the admin role.");
 
