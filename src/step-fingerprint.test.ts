@@ -21,6 +21,7 @@ import {
   replayDrift,
   stepFingerprint,
   tableDrift,
+  upgradeHoldRefusal,
 } from "./step-fingerprint.js";
 import type { RecordedInput, WorkflowStep } from "./step-fingerprint.js";
 import { enqueueRun } from "./runtime.js";
@@ -498,4 +499,13 @@ test("a held run asks to be rolled back or cancelled, never approved", () => {
     "approving an upgrade hold would answer a question nobody asked",
   );
   assert.match(item.needs!.prompt, /step sequence differs/);
+});
+
+test("the refusal a decision surface gets names the two honest actions and the danger", () => {
+  const refusal = upgradeHoldRefusal("run-held");
+  assert.match(refusal, /run-held/);
+  assert.match(refusal, /resume run-held/, "the rollback path is the way out");
+  assert.match(refusal, /cancel run-held/, "giving the run up is the alternative");
+  assert.match(refusal, /log the hold protects/, "the operator must be told WHY approving is refused, not just that it is");
+  assert.doesNotMatch(refusal, /approve/i);
 });

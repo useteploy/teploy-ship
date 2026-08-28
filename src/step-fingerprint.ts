@@ -585,7 +585,8 @@ export function replayDrift(events: readonly WorkflowEvent[]): ReplayDrift | nul
 }
 
 /**
- * The event name a run held by the fence waits on.
+ * The event name a run held by the fence waits on (defined in fence.ts so
+ * dashboard routes can import it without the file-reading machinery).
  *
  * Never delivered — nothing signals it, and NOTHING IS APPENDED TO THE EVENT
  * LOG to create the hold. That is not an optimisation: `event-waiting` is a
@@ -604,7 +605,7 @@ export function replayDrift(events: readonly WorkflowEvent[]): ReplayDrift | nul
  * build agrees with the run again (a rollback): the fingerprint is recomputed
  * on every execution attempt and by the worker's sweep, never remembered.
  */
-export const UPGRADE_HOLD_EVENT = "ship-upgrade-hold";
+export { UPGRADE_HOLD_EVENT, upgradeHoldRefusal } from "./fence.js";
 
 /** What an operator is told about a held run, in one line plus the fix. */
 export function upgradeHoldReason(runId: string, drift: ReplayDrift): string {

@@ -3,6 +3,7 @@ import { cancelRun, deliverEvent, costUSD, isPricedModel, actorFromPrincipal } f
 // PLAN_EVENT comes from the dependency-free plan module: it's used in the
 // component (client bundle), where teploy-ship/runtime (node-only) can't go.
 import { PLAN_EVENT } from "teploy-ship/plan";
+import { UPGRADE_HOLD_EVENT } from "teploy-ship/fence";
 
 import type { RunMeta, ScanFinding } from "teploy-ship/runtime";
 
@@ -206,6 +207,12 @@ export async function action({
     return redirectTo(`/runs/${runId}`);
   }
   if (meta?.eventName !== undefined && (intent === "approve" || intent === "deny")) {
+    if (meta.eventName === UPGRADE_HOLD_EVENT) {
+      // The hold reuses the park state, so the stale-check below would MATCH
+      // it and the claim+deliver would erase the marker rollback-release
+      // reads and append into the log the hold protects. Nothing was decided.
+      return redirectTo(`/runs/${runId}?decision=held`);
+    }
     // The decision is bound to the park the operator actually looked at. Without
     // this, a tab left open while the run advanced to a DIFFERENT parked action
     // would approve that one instead: the action re-read meta at submit time and
@@ -284,6 +291,12 @@ export default function RunDetail({ data }: { data: RunData }) {
       {decision === "taken" && (
         <p class="card attn" style="margin:12px 0;color:var(--yellow)">
           Not applied — someone else decided this one first.
+        </p>
+      )}
+      {decision === "held" && (
+        <p class="card attn" style="margin:12px 0;color:var(--yellow)">
+          Not applied — this run is held by the upgrade fence, not waiting for a decision. Roll the deployment back
+          (the hold releases itself) or cancel the run.
         </p>
       )}
       <h1 class="page">
@@ -403,7 +416,17 @@ export default function RunDetail({ data }: { data: RunData }) {
               {data.meta.eventName !== undefined && (
                 <input type="hidden" name="eventName" value={data.meta.eventName} />
               )}
-              {data.meta.eventName !== undefined && data.meta.eventName !== PLAN_EVENT && (
+              {data.meta.eventName === UPGRADE_HOLD_EVENT && (
+                <p class="card attn" style="margin:12px 0;color:var(--yellow)">
+                  Held by the upgrade fence — this run was enqueued by a build whose workflow step sequence differs
+                  from the one now deployed, and replaying it here would break its log. Approving it cannot help: roll
+                  the deployment back (the hold releases itself, then <code>teploy-ship resume {data.runId}</code>) or
+                  cancel the run.
+                </p>
+              )}
+              {data.meta.eventName !== undefined &&
+                data.meta.eventName !== PLAN_EVENT &&
+                data.meta.eventName !== UPGRADE_HOLD_EVENT && (
                 <>
                   <button class="approve" type="submit" name="intent" value="approve">
                     Approve

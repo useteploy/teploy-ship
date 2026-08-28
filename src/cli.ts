@@ -19,7 +19,14 @@ import type { RunOutcome } from "@neutron-build/workflow";
 
 import { ArgError, COMMAND_FLAGS, enumFlag, numberFlag, parseArgs } from "./args.js";
 import { explainRun } from "./explain.js";
-import { WORKFLOW_STEPS, buildStepSequence, preflightReport, tableDrift } from "./step-fingerprint.js";
+import {
+  UPGRADE_HOLD_EVENT,
+  WORKFLOW_STEPS,
+  buildStepSequence,
+  preflightReport,
+  tableDrift,
+  upgradeHoldRefusal,
+} from "./step-fingerprint.js";
 import { resolveModelId, usesAnthropicWire } from "./model-id.js";
 import { auditRow, toCsv, withinWindow } from "./audit.js";
 import type { NumberRange } from "./args.js";
@@ -1054,6 +1061,14 @@ async function decideCommand(rest: string[], approved: boolean): Promise<void> {
   const meta = await runtime.loadMeta(runId);
   if (meta === null) fail(`unknown run: ${runId}`);
   if (meta.eventName === undefined) fail(`run ${runId} is not waiting for approval (status: ${meta.status})`);
+  // An upgrade hold reuses the park state, so it reaches this command. Deciding
+  // it would claim the marker rollback-release needs and deliver an event into
+  // the log the hold exists to protect — the two honest exits are resume-after-
+  // rollback and cancel. Refused BEFORE the claim, so nothing is touched.
+  if (meta.eventName === UPGRADE_HOLD_EVENT) {
+    await runtime.close();
+    fail(upgradeHoldRefusal(runId));
+  }
 
   const reason = args.positional[1];
   // Claim the park before delivering: another operator (or the dashboard) may

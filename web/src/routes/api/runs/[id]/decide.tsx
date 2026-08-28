@@ -3,6 +3,7 @@ import type { ActionArgs } from "@neutron-build/core";
 import { deliverEvent } from "../../../../lib/ship.server.js";
 
 import { PLAN_EVENT } from "teploy-ship/plan";
+import { UPGRADE_HOLD_EVENT, upgradeHoldRefusal } from "teploy-ship/fence";
 
 import { currentUser } from "../../../../lib/session.server.js";
 import { may } from "../../../../lib/authority.server.js";
@@ -96,6 +97,12 @@ export async function action({ request, params }: ActionArgs): Promise<Response>
     // caller that treats this as "done" would show an approval as applied when
     // nothing happened.
     return json(409, { error: `run ${runId} is not waiting for a decision`, status: meta.status });
+  }
+  if (meta.eventName === UPGRADE_HOLD_EVENT) {
+    // The hold reuses the park state, so `event_name` below would MATCH it and
+    // the claim+deliver would erase the marker rollback-release reads and
+    // append into the log the hold protects. Not a decision anyone can make.
+    return json(409, { error: upgradeHoldRefusal(runId), held: true });
   }
   if (typeof body.event_name !== "string" || body.event_name.trim() === "") {
     return json(400, {
