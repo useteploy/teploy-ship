@@ -77,6 +77,12 @@ export const PRICING: Record<string, ModelPricing> = {
   // DeepSeek (cacheRead = cache-hit input rate)
   "deepseek-chat": { inputPer1M: 0.27, outputPer1M: 1.1, cacheReadPer1M: 0.07 },
   "deepseek-reasoner": { inputPer1M: 0.55, outputPer1M: 2.19, cacheReadPer1M: 0.14 },
+
+  // Zhipu — GLM. The 5.3 rate is the one this deployment actually pays (it
+  // lived in an env override for weeks before moving here). A coding-plan
+  // endpoint should NOT be priced per token — give it SHIP_QUOTA_MODEL_PREFIXES
+  // instead; the quota check runs before this table and wins.
+  "glm-5.3": { inputPer1M: 1, outputPer1M: 3.2 },
 };
 
 /** Normalize a model id to a pricing-table key: drop any `provider/` prefix, lowercase. */
