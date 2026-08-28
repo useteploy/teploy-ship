@@ -160,7 +160,7 @@ const noOutbox = {
   fail: async () => {},
 } as unknown as Outbox;
 
-function makeWorker(fake: Fake): ReturnType<typeof startWorker> {
+function makeWorker(fake: Fake, overrides: Partial<Parameters<typeof startWorker>[0]> = {}): ReturnType<typeof startWorker> {
   return startWorker({
     runtime: fake.runtime,
     model: silentModel,
@@ -182,6 +182,7 @@ function makeWorker(fake: Fake): ReturnType<typeof startWorker> {
     admission: noAdmission,
     outbox: noOutbox,
     log: (line) => fake.logs.push(line),
+    ...overrides,
   });
 }
 
@@ -457,4 +458,43 @@ test("a stopping worker does not pick up new work from its own completion chain"
     false,
     "a worker that has been told to stop must not start another run",
   );
+});
+
+test("stop() does not return while an intake sweep is still in flight", async (t) => {
+  withoutSelfwatch(t);
+  // Clearing the timers abandoned a sweep mid-pass: it could hold claimed
+  // intake tasks whose enqueue never landed, or an Akiroo pull between fetch
+  // and ack. busy() knew about `sweeping`, but nothing in the rewritten
+  // shutdown called busy() — the wait was simply dropped. stop() itself has
+  // to hold the door: every caller (the signal handler, embedders, these
+  // tests) gets it for free there and nowhere else.
+  let releasePolicies: () => void = () => {};
+  const policiesGate = new Promise<void>((resolve) => {
+    releasePolicies = resolve;
+  });
+  const fake = fakeRuntime(new Map(), []);
+  (fake.runtime as unknown as { policies: { seed(): Promise<void>; list(): Promise<never[]> } }).policies = {
+    seed: async () => {},
+    list: async () => {
+      await policiesGate;
+      return [];
+    },
+  };
+
+  const worker = makeWorker(fake, { intervalMs: 5 });
+  for (let i = 0; i < 200 && !worker.busy(); i++) await tick();
+  assert.equal(worker.busy(), true, "the gated sweep must be observable as busy before stopping");
+
+  let stopped = false;
+  const stopping = worker.stop().then(() => {
+    stopped = true;
+  });
+  for (let i = 0; i < 40; i++) await tick();
+  assert.equal(stopped, false, "stop() must not return while a sweep is mid-pass");
+  assert.equal(worker.busy(), true, "and the sweep is still the thing shutdown would interrupt");
+
+  releasePolicies();
+  await stopping;
+  assert.equal(stopped, true, "stop() returns once the in-flight sweep settles");
+  assert.equal(worker.busy(), false);
 });

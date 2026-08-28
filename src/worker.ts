@@ -1301,18 +1301,22 @@ export function startWorker(options: WorkerOptions): {
   // double-count its spend. Skip a tick if the previous sweep is still running.
   // The Akiroo pull rides the same guard and the same tick for the same reason:
   // two overlapping pulls would both hand the same row to a handler.
-  let sweeping = false;
+  //
+  // The chain is KEPT, not just flagged, so stop() can await it: an in-flight
+  // sweep may hold claimed intake tasks whose enqueue never landed, or an
+  // Akiroo pull between fetch and ack, and a shutdown that returned while one
+  // was mid-pass abandoned it.
+  let sweepChain: Promise<void> | null = null;
   const intakeTimer = setInterval(() => {
-    if (sweeping) return;
-    sweeping = true;
-    void sweep()
+    if (sweepChain !== null) return;
+    sweepChain = sweep()
       .then(() => akirooSweep())
       .then(() => bulletinSweep())
       .then(() => holdSweep())
       .then(() => retryNotifications())
       .catch((error) => log(`[worker] intake sweep: ${error instanceof Error ? error.message : String(error)}`))
       .finally(() => {
-        sweeping = false;
+        sweepChain = null;
       });
   }, options.intervalMs ?? 5000);
   intakeTimer.unref?.();
@@ -1421,9 +1425,11 @@ export function startWorker(options: WorkerOptions): {
   log(`[worker] watching for due runs as ${options.runtime.owner}`);
   return {
     /**
-     * Stop taking new work. Returns once the timers are down; use {@link busy}
-     * to wait for what is still executing before tearing the runtime down
-     * under it.
+     * Stop taking new work. Returns once the timers are down AND any intake
+     * sweep in flight has settled — the sweep chain can hold claimed tasks or
+     * a mid-ack Akiroo pull, and abandoning one is what this exists to
+     * prevent. Use {@link busy} to wait for what is still executing before
+     * tearing the runtime down under it.
      */
     stop: async () => {
       stopping = true;
@@ -1432,6 +1438,10 @@ export function startWorker(options: WorkerOptions): {
       clearInterval(reapTimer);
       if (selfwatchTimer !== undefined) clearInterval(selfwatchTimer);
       clearInterval(driveTimer);
+      // The wait the rewritten shutdown dropped: a sweep that was mid-pass
+      // when the timers cleared. The chain never rejects (every leg catches),
+      // so awaiting it is safe even against a store that errors late.
+      if (sweepChain !== null) await sweepChain;
       // One last flush so a notification owed by a run that just finished is
       // attempted before the process goes, rather than waiting for the next
       // worker to pick it up.
@@ -1446,7 +1456,7 @@ export function startWorker(options: WorkerOptions): {
      * one that matters most: a run's cost reaching the ledger is the only piece
      * of this the next worker cannot redo.
      */
-    busy: () => inflight.size > 0 || launching.size > 0 || sweeping || settling > 0,
+    busy: () => inflight.size > 0 || launching.size > 0 || sweepChain !== null || settling > 0,
     /** Runs executing on this worker right now — what a shutdown would interrupt. */
     executing: () => [...inflight],
     /** Completion work started but not landed. Zero means nothing is owed to the store. */
