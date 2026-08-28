@@ -482,9 +482,13 @@ What flows, both ways:
   enqueues a read-only `mode: "scan"` run for it and opens **no issue** —
   a scan is a question, not a work record. See `docs/scan.md`, "Scans from
   Akiroo".
-- The run's outcome goes back as a signed run event (set `SHIP_NOTIFY_URL`
-  to Akiroo's `/api/webhooks/teploy_ship/<org>` and `SHIP_NOTIFY_SECRET`
-  to that connection's inbound secret). A pull request moves the work item
+- The run's outcome goes back as a signed run event. **This leg is not
+  optional**: set `SHIP_NOTIFY_URL` to Akiroo's
+  `/api/webhooks/teploy_ship/<org>` and `SHIP_NOTIFY_SECRET` to that
+  connection's inbound secret (Akiroo, Connections, Teploy Ship, rotate
+  secret — shown once). With the URL unset the notifier is disabled and every
+  outcome is dropped silently, so Akiroo never learns a run finished; a
+  deployment ran that way for a day before anyone noticed (2026-08-28). A pull request moves the work item
   to **review** with the link; a failure moves it to **blocked** with the
   reason. Every run event carries `origin` (`source`, `dedupe_key`, and
   `work_item_ref` — `work-item:<id>` for an issue that came from a work
