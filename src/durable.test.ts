@@ -766,6 +766,33 @@ test("plan-preview runs park on the plan and only execute after approval", async
   assert.equal((done.output as { summary: string }).summary, "planned and done");
 });
 
+test("a plan park on a REPO run publishes nothing — the C5 rescue is for failures, not parks", async () => {
+  // Regression: the plan park suspends from inside the session, and the
+  // publish-on-failure catch used to treat that Suspension like a thrown
+  // error — pushing the unapproved tree as an incomplete draft PR before the
+  // operator had answered anything. A suspension means paused, not lost.
+  const fixture = await mergeFixture("plan-repo");
+  try {
+    const { model } = reactiveModel(["1. Append to f.txt", "```bash\necho world >> f.txt\n```", "```finish\nfixed\n```"]);
+    const store = new MemoryEventStore();
+    const input = { task: "fix the greeting", repo: fixture.repo, plan: true, tests: true, testCommand: "true" };
+    const parked = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-plan-repo",
+      store,
+      input,
+    });
+    assert.equal(parked.status, "waiting");
+    assert.equal(parked.eventName, PLAN_EVENT);
+    const names = (await store.load("run-plan-repo")).filter((e) => e.type === "step-completed").map((e) => e.name ?? "");
+    assert.equal(names.includes("repo-push"), false, "the unapproved tree was not pushed");
+    assert.equal(names.includes("publish-on-failure"), false, "a park is not a failure to rescue");
+    assert.equal(names.includes("repo-pr"), false, "and no pull request exists");
+  } finally {
+    fixture.restore();
+  }
+});
+
 test("an edited plan replaces the agent's own; a denied plan ends the run untouched", async () => {
   // edited: the agent must see the operator's version, flagged as edited
   const edited = reactiveModel([
@@ -2979,6 +3006,108 @@ test("C1: approving the boundary on an auto-merge repo merges the pull request",
     const decision = stepResult(await store.load("run-c1-automerge"), "merge-decision");
     assert.equal(decision?.kind, "merged", "the human's approval supplies the authority the class gate withheld");
     assert.equal(fixture.merges().length, 1);
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("C7: an auto-merge rebases onto a base that moved under a park before it merges, and re-verifies", async () => {
+  const fixture = await mergeFixture("c7-auto-rebase");
+  const mover = await mkdtemp(join(tmpdir(), "durable-c7-rebase-mover-"));
+  const moverExec = new LocalExecutor({ root: mover });
+  await moverExec.exec(`git clone -q ${fixture.repo.replace("file://", "")} . && git config user.email t@t && git config user.name t`);
+  try {
+    // The plan park is the seam: the run has cloned and planned, but pushed
+    // nothing, and main is about to move under it.
+    const { model } = reactiveModel([
+      "1. Append a line to f.txt\n2. Verify it",
+      "```bash\necho world >> f.txt\n```",
+      "```finish\nfixed the typo\n```",
+      "```bash\nls\n```",
+      "```finish\nfixed the typo\n```",
+    ]);
+    const store = new MemoryEventStore();
+    const input = {
+      task: "fix the greeting",
+      repo: fixture.repo,
+      plan: true,
+      changeClass: true,
+      autoMerge: true,
+      tests: true,
+      testCommand: "true",
+    };
+    const wf = durableAgent({ model, executor: fixture.provider, workdir: "." });
+    const parked = await executeRun({ workflow: wf, runId: "run-c7-auto-rebase", store, input });
+    assert.equal(parked.eventName, PLAN_EVENT, "the run parks on the plan before any push");
+
+    // main moves on a DIFFERENT file while the run waits.
+    await moverExec.exec("echo moved > other.txt && git add -A && git commit -qm 'move main' && git push -q origin main");
+
+    await deliverEvent(store, "run-c7-auto-rebase", PLAN_EVENT, { approved: true });
+    const done = await executeRun({ workflow: wf, runId: "run-c7-auto-rebase", store, input });
+    assert.equal(done.status, "completed");
+
+    const events = await store.load("run-c7-auto-rebase");
+    const names = events.filter((e) => e.type === "step-completed").map((e) => e.name ?? "");
+    assert.ok(names.includes("auto-rebase"), "the merge is preceded by a recorded rebase");
+    assert.equal(stepResult(events, "auto-rebase")?.kind, "rebased");
+    assert.ok(names.includes("auto-rebase-tests"), "and by a re-run suite over the rebased bytes");
+    const merged = stepResult(events, "auto-merge");
+    assert.equal(merged?.kind, "merged", "the rebase is a gate on the way to the merge, not a park");
+    assert.equal(fixture.merges().length, 1);
+
+    // What was merged sat on the moved base: the branch carries main's commit.
+    const bare = fixture.repo.replace("file://", "");
+    const check = new LocalExecutor({ root: await mkdtemp(join(tmpdir(), "durable-c7-rebase-check-")) });
+    await check.exec(`git clone -q --branch ship/run-c7-auto-rebase ${bare} .`);
+    const other = await check.exec("cat other.txt");
+    assert.equal(other.stdout.trim(), "moved");
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("C7: an auto-merge that CONFLICTS with the moved base holds with the files named", async () => {
+  const fixture = await mergeFixture("c7-auto-conflict");
+  const mover = await mkdtemp(join(tmpdir(), "durable-c7-conflict-mover-"));
+  const moverExec = new LocalExecutor({ root: mover });
+  await moverExec.exec(`git clone -q ${fixture.repo.replace("file://", "")} . && git config user.email t@t && git config user.name t`);
+  try {
+    const { model } = reactiveModel([
+      "1. Append a line to f.txt\n2. Verify it",
+      "```bash\necho world >> f.txt\n```",
+      "```finish\nfixed the typo\n```",
+      "```bash\nls\n```",
+      "```finish\nfixed the typo\n```",
+    ]);
+    const store = new MemoryEventStore();
+    const input = {
+      task: "fix the greeting",
+      repo: fixture.repo,
+      plan: true,
+      changeClass: true,
+      autoMerge: true,
+      tests: true,
+      testCommand: "true",
+    };
+    const wf = durableAgent({ model, executor: fixture.provider, workdir: "." });
+    const parked = await executeRun({ workflow: wf, runId: "run-c7-auto-conflict", store, input });
+    assert.equal(parked.eventName, PLAN_EVENT);
+
+    // main rewrites the SAME line the branch appends to: the rebase stops.
+    await moverExec.exec("echo differently >> f.txt && git add -A && git commit -qm 'move main differently' && git push -q origin main");
+
+    await deliverEvent(store, "run-c7-auto-conflict", PLAN_EVENT, { approved: true });
+    const done = await executeRun({ workflow: wf, runId: "run-c7-auto-conflict", store, input });
+    assert.equal(done.status, "completed", "a held auto-merge is a decision recorded, not a failed run");
+
+    const events = await store.load("run-c7-auto-conflict");
+    assert.equal(stepResult(events, "auto-rebase")?.kind, "conflict");
+    const held = stepResult(events, "auto-merge");
+    assert.equal(held?.kind, "held");
+    assert.match(JSON.stringify(held?.reasons), /conflicts with the current main/);
+    assert.match(JSON.stringify(held?.reasons), /f\.txt/);
+    assert.equal(fixture.merges().length, 0, "nothing merges through a conflict");
   } finally {
     fixture.restore();
   }

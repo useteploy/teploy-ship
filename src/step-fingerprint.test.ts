@@ -255,6 +255,7 @@ const GATE_CASES: Array<{ what: string; input: RecordedInput; admits: string[]; 
       "step:change-class",
       "wait:CHANGE_EVENT",
       "step:change-rejected",
+      "step:auto-rebase",
       "step:auto-merge",
       "step:rollback",
       "step:preview-deploy",

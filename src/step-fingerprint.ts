@@ -493,6 +493,7 @@ export const WORKFLOW_STEPS: readonly WorkflowStep[] = [
   { key: "step:merge-decision", admits: (i) => i.mergeGate === true },
   { key: "step:merge-decision", admits: (i) => i.mergeGate === true },
   { key: "step:rollback", admits: (i) => i.rollback === true },
+  { key: "step:auto-rebase", admits: (i) => i.autoMerge === true },
   { key: "step:auto-merge", admits: (i) => i.autoMerge === true },
   { key: "step:repo-reviewers", admits: (i) => i.reviewers !== undefined },
   { key: "step:preview-deploy", admits: (i) => i.preview === true },

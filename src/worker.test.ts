@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { sweepIntake, makeTerminalClaim, launchDueBounded, retrying } from "./worker.js";
+import { sweepIntake, makeTerminalClaim, launchDueBounded, repoLockKeyOf, retrying } from "./worker.js";
 import type { IntakeSweepDeps } from "./worker.js";
 import type { IntakeTask } from "./intake.js";
 import type { RunUsage } from "./durable.js";
@@ -617,4 +617,35 @@ test("terminalContext adds the pr for a fix run and the findings block for a sca
   });
   // A scan that failed before its findings step carries no block at all.
   assert.deepEqual(terminalContext([wev("run-started", { input: { task: "q", mode: "scan" } }), wev("run-failed", { error: "x" })]), {});
+});
+
+// --- C7: which runs serialise on a repo ---------------------------------------
+
+test("C7: repoLockKeyOf reads the repo off the run's own log, normalised, and exempts scans", () => {
+  const started = (input: unknown): WorkflowEvent[] => [
+    { v: 1, seq: 0, type: "run-started", at: "2026-08-28T00:00:00Z", data: { workflow: "coding-agent", input } },
+  ];
+
+  assert.equal(
+    repoLockKeyOf(started({ task: "t", repo: "https://git.example.com/Tyler/app.git" })),
+    "git.example.com/Tyler/app",
+    "every surface that names the same repo contends on the same key",
+  );
+  assert.equal(
+    repoLockKeyOf(started({ task: "t", repo: "http://git.example.com/Tyler/app" })),
+    "git.example.com/Tyler/app",
+    "scheme and .git suffix do not split one repository into two queues",
+  );
+  assert.equal(repoLockKeyOf(started({ task: "t" })), undefined, "a workspace run contends over nothing");
+  assert.equal(
+    repoLockKeyOf(started({ task: "t", repo: "https://git.example.com/Tyler/app", mode: "scan" })),
+    undefined,
+    "a scan publishes nothing (L2/D3), so it never touches the surface the lock protects",
+  );
+  assert.equal(
+    repoLockKeyOf(started({ task: "t", repo: "just-a-checkout-name" })),
+    "just-a-checkout-name",
+    "an unparseable repo still serialises on its raw form — the key only has to be consistent",
+  );
+  assert.equal(repoLockKeyOf([]), undefined, "an empty log is nobody's to lock");
 });

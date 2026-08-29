@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { LocalAdmission, NucleusAdmission, SLOT_TTL_S } from "./admission.js";
+import { LocalAdmission, NucleusAdmission, REPO_TTL_S, SLOT_TTL_S } from "./admission.js";
 import type { NucleusPgwire } from "./nucleus-pgwire.js";
 
 /** A KV that behaves like Nucleus's setNX/cdel/cexpire, with visible state. */
@@ -101,4 +101,61 @@ test("LocalAdmission enforces the same contract for the single-process file runt
 
   assert.equal(await local.takeDailyLaunch("s", "d", 1), true);
   assert.equal(await local.takeDailyLaunch("s", "d", 1), false);
+});
+
+// --- C7: one active run per repo ---------------------------------------------
+
+test("C7: the repo lock is one-per-repo across workers, and a park-freeing release reuses it", async () => {
+  const { db, keys } = kvDb();
+  const a = new NucleusAdmission(db);
+  const b = new NucleusAdmission(db);
+
+  assert.equal(await a.acquireRepo("run-1", "forge.example/Tyler/app"), true);
+  assert.equal(
+    await b.acquireRepo("run-2", "forge.example/Tyler/app"),
+    false,
+    "a second run on the same repo waits, whatever worker it lands on",
+  );
+  assert.equal(await b.acquireRepo("run-3", "forge.example/Tyler/other"), true, "a different repo is a different lock");
+
+  await a.releaseRepo("run-1");
+  assert.equal(await b.acquireRepo("run-2", "forge.example/Tyler/app"), true, "the end of a pass frees the repo");
+  assert.equal(keys.get("ship:repo:forge.example/Tyler/app"), "run-2");
+});
+
+test("C7: acquireRepo is idempotent per run, and a stale release frees nothing", async () => {
+  const { db, keys } = kvDb();
+  const a = new NucleusAdmission(db);
+  assert.equal(await a.acquireRepo("run-1", "r"), true);
+  assert.equal(await a.acquireRepo("run-1", "r"), true, "a retried pass must not see its own lock as contention");
+  assert.equal(keys.size, 1);
+
+  // A's TTL lapses; run-2 takes the repo; run-1's late release must not evict it.
+  keys.set("ship:repo:r", "run-2");
+  await a.releaseRepo("run-1");
+  assert.equal(keys.get("ship:repo:r"), "run-2");
+});
+
+test("C7: renewRepos keeps only the locks this worker holds alive", async () => {
+  const { db, keys } = kvDb();
+  const a = new NucleusAdmission(db);
+  const b = new NucleusAdmission(db);
+  await a.acquireRepo("run-1", "r1");
+  await b.acquireRepo("run-2", "r2");
+  // Simulate b dying: its lock lapses; a's renewal is what keeps r1 held.
+  keys.delete("ship:repo:r2");
+  await a.renewRepos();
+  assert.equal(keys.get("ship:repo:r1"), "run-1");
+  assert.ok(REPO_TTL_S > 0, "a dead worker's repo lock must free itself, never wedge the queue");
+});
+
+test("C7: LocalAdmission holds the same per-repo contract for the file runtime", async () => {
+  const local = new LocalAdmission();
+  assert.equal(await local.acquireRepo("run-1", "r"), true);
+  assert.equal(await local.acquireRepo("run-2", "r"), false);
+  assert.equal(await local.acquireRepo("run-1", "r"), true, "idempotent for the same run");
+  assert.equal(await local.acquireRepo("run-3", "other"), true);
+  await local.releaseRepo("run-1");
+  assert.equal(await local.acquireRepo("run-2", "r"), true);
+  await local.releaseRepo("run-never"); // no throw, no effect
 });

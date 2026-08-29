@@ -12,6 +12,7 @@ import type { RunMeta } from "./run-store.js";
 import { FINGERPRINT_SCHEME, UPGRADE_HOLD_EVENT, stepFingerprint } from "./step-fingerprint.js";
 import type { RecordedInput } from "./step-fingerprint.js";
 import type { AdmissionControl } from "./admission.js";
+import { LocalAdmission } from "./admission.js";
 import type { Outbox } from "./outbox.js";
 
 /**
@@ -95,7 +96,13 @@ function fakeRuntime(
         await hooks.onLoad?.(runId);
         return runs.get(runId) ?? [];
       },
-      append: async (_runId: string, event: WorkflowEvent) => void appends.push(event),
+      append: async (runId: string, event: WorkflowEvent) => {
+        appends.push(event);
+        // A real store's load sees what was appended: a run that failed in
+        // this worker must read back as terminal, or a re-offering pass would
+        // execute it again.
+        runs.get(runId)?.push(event);
+      },
     },
     leases: new LeaseManager(kv, { prefix: "test:lease" }),
     index: {
@@ -148,7 +155,10 @@ const refusingExecutor: ExecutorProvider = {
 
 const noAdmission = {
   renewSlots: async () => {},
+  renewRepos: async () => {},
   releaseSlot: async () => {},
+  acquireRepo: async () => true,
+  releaseRepo: async () => {},
   tryTake: async () => true,
   active: async () => 0,
 } as unknown as AdmissionControl;
@@ -497,4 +507,64 @@ test("stop() does not return while an intake sweep is still in flight", async (t
   await stopping;
   assert.equal(stopped, true, "stop() returns once the in-flight sweep settles");
   assert.equal(worker.busy(), false);
+});
+
+// --- C7: per-repo serialization, exercised through the same real drive loop ---
+
+test("C7: a second run on a held repo is QUEUED, not executed, and runs when the repo frees", async (t) => {
+  withoutSelfwatch(t);
+
+  // Two fresh runs against the SAME repo, both replayable under this build.
+  const input: RecordedInput = { task: "t", repo: "https://git.example.com/o/r" };
+  const events = (): WorkflowEvent[] => [startedEvent(input, stepFingerprint(input))];
+  const runs = new Map<string, WorkflowEvent[]>([
+    ["run-first", events()],
+    ["run-second", events()],
+  ]);
+  // The due set the way the real index answers it: everything not terminal.
+  const TERMINAL = new Set(["run-completed", "run-failed", "run-cancelled"]);
+  const nextDue = (): Array<{ runId: string; sleeping: boolean }> =>
+    [...runs.entries()]
+      .filter(([, log]) => !log.some((e) => TERMINAL.has(e.type)))
+      .map(([runId]) => ({ runId, sleeping: false }));
+  const fake = fakeRuntime(runs, [], { nextDue });
+
+  // The first run's sandbox hangs until the test opens the gate: while it
+  // executes, the repo is held and the second run must not even be offered a
+  // lease. When the gate opens the first run fails at the sandbox, the lock is
+  // released in the same breath, and the second run's turn comes.
+  let openGate: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    openGate = resolve;
+  });
+  let created = 0;
+  const gatedExecutor: ExecutorProvider = {
+    async create() {
+      created += 1;
+      if (created === 1) await gate;
+      throw new Error("no sandbox in this test");
+    },
+    attach() {
+      throw new Error("unused");
+    },
+  };
+  const worker = makeWorker(fake, { executor: gatedExecutor, admission: new LocalAdmission() });
+  t.after(() => void worker.stop());
+
+  const until = async (predicate: () => boolean): Promise<void> => {
+    for (let i = 0; i < 500 && !predicate(); i++) await tick();
+    assert.ok(predicate(), `timed out waiting: logs=${JSON.stringify(fake.logs)} leases=${JSON.stringify(fake.leaseAttempts)}`);
+  };
+  await until(() => fake.logs.some((l) => l.includes("run-second") && l.includes("queued behind")));
+
+  assert.ok(fake.leaseAttempts.some((k) => k.includes("run-first")), "the holder executed");
+  assert.equal(
+    fake.leaseAttempts.some((k) => k.includes("run-second")),
+    false,
+    "the queued run must not be executed while its repo is held — not even offered a lease",
+  );
+
+  openGate();
+  await until(() => fake.leaseAttempts.some((k) => k.includes("run-second")));
+  await worker.stop();
 });

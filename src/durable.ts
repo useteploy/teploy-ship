@@ -3,7 +3,7 @@ import { generateText } from "@neutron-build/ai";
 import type { Message, ModelAdapter } from "@neutron-build/ai";
 import { SandboxExecutor } from "@neutron-build/agents";
 import type { AgentExecutor } from "@neutron-build/agents";
-import { workflow } from "@neutron-build/workflow";
+import { isSuspension, workflow } from "@neutron-build/workflow";
 import type { WorkflowContext, WorkflowDefinition } from "@neutron-build/workflow";
 
 import { executeAction, workspaceFingerprint } from "./agent.js";
@@ -964,6 +964,14 @@ export function durableAgent(
         try {
           result = await adapter.run(harnessTask, primary, budget, () => {});
         } catch (error) {
+          // A SUSPENSION IS NOT A FAILURE, and rescuing it publishes work the
+          // run is parked asking about. The plan park, a turn approval and the
+          // C1 merge boundary all suspend from inside the session; each of
+          // them means "paused on a human", not "threw", and the tree is not
+          // lost — the next pass resumes exactly here. Found as a live bug: a
+          // plan-preview on a repo run pushed the unapproved tree as an
+          // incomplete draft before the operator had answered anything.
+          if (isSuspension(error)) throw error;
           // C5: DO NOT LOSE THE WORK.
           //
           // publishIfRepoRun used to sit only on the normal return path, so a
@@ -2086,12 +2094,20 @@ async function publishIfRepoRun(
   // the same numbers were a regression.
   const regression = telemetry === undefined ? undefined : telemetryRegression(telemetry);
   await rollbackIfWorse(ctx, config, input, preview, regression);
-  await autoMergeIfAllowed(ctx, ref, token, input, pr.number, {
-    ...(changeVerdict !== undefined ? { verdict: changeVerdict } : {}),
-    ...(tests !== undefined ? { tests } : {}),
-    draft: asDraft,
-    ...(regression !== undefined ? { regression } : {}),
-  });
+  await autoMergeIfAllowed(
+    ctx,
+    ref,
+    token,
+    input,
+    pr.number,
+    {
+      ...(changeVerdict !== undefined ? { verdict: changeVerdict } : {}),
+      ...(tests !== undefined ? { tests } : {}),
+      draft: asDraft,
+      ...(regression !== undefined ? { regression } : {}),
+    },
+    { executor, checkout: co, config },
+  );
   if (boundaryPark && changeVerdict !== undefined) {
     await mergeGateIfSerious(ctx, executor, config, input, { ref, token, checkout: co, pr, handle }, {
       verdict: changeVerdict,
@@ -2367,26 +2383,52 @@ async function autoMergeIfAllowed(
     draft: boolean;
     regression?: { worse: boolean; reasons: string[] };
   },
+  target?: { executor: AgentExecutor; checkout: RepoCheckout; config: DurableAgentConfig },
 ): Promise<void> {
   if (input.autoMerge !== true) return;
+  const held: string[] = [];
+  if (facts.verdict === undefined) {
+    held.push("the change was never classified, so nothing authorises merging it");
+  } else if (facts.verdict.class !== "trivial") {
+    held.push(`the change classified ${facts.verdict.class}, and only trivial merges unattended`);
+  }
+  if (facts.tests === undefined) {
+    held.push("the suite did not run for this run");
+  } else if (facts.tests.kind !== "passed") {
+    held.push(
+      facts.tests.kind === "disabled"
+        ? `no suite is configured for this repo (${facts.tests.reason})`
+        : `the suite did not pass (${facts.tests.kind})`,
+    );
+  }
+  if (facts.draft) held.push("the pull request opened as a draft, so a person is expected to read it");
+  if (facts.regression?.worse === true) held.push(`the service got worse after this change: ${facts.regression.reasons.join("; ")}`);
+
+  // REBASE-BEFORE-MERGE (C7). Only when every gate above said yes: a run that
+  // is holding merges nothing, so it rebases nothing either — and a change
+  // headed for the boundary park (mergeGateIfSerious) rebases at DECISION
+  // time, where a fresh approval deserves a fresh base. The seconds between
+  // the push and this step make the up-to-date case the common one; the rebase
+  // exists for the base that moved under a serialization queue or a human
+  // push, and a re-run suite over the new bytes — never a park, this path has
+  // no human to park for. The hold reasons stay on the recorded step.
+  let tests = facts.tests;
+  if (held.length === 0 && target !== undefined) {
+    const { executor, checkout, config } = target;
+    const rebase = await ctx.step("auto-rebase", () => rebaseOntoBase(executor, { ref, token, checkout }));
+    if (rebase.kind === "conflict") {
+      held.push(`the branch conflicts with the current ${checkout.base}: ${rebase.files.join(", ")}`);
+    } else if (rebase.kind === "failed") {
+      held.push(`the branch could not be rebased onto ${checkout.base}: ${rebase.reason}`);
+    } else if (rebase.kind === "rebased") {
+      tests = await runSuite(ctx, executor, config, input, "auto-rebase-");
+      if (tests !== undefined && tests.kind !== "passed" && tests.kind !== "disabled") {
+        held.push(`the suite did not pass after the rebase (${tests.kind})`);
+      }
+    }
+  }
+
   await ctx.step("auto-merge", async (): Promise<AutoMergeStep> => {
-    const held: string[] = [];
-    if (facts.verdict === undefined) {
-      held.push("the change was never classified, so nothing authorises merging it");
-    } else if (facts.verdict.class !== "trivial") {
-      held.push(`the change classified ${facts.verdict.class}, and only trivial merges unattended`);
-    }
-    if (facts.tests === undefined) {
-      held.push("the suite did not run for this run");
-    } else if (facts.tests.kind !== "passed") {
-      held.push(
-        facts.tests.kind === "disabled"
-          ? `no suite is configured for this repo (${facts.tests.reason})`
-          : `the suite did not pass (${facts.tests.kind})`,
-      );
-    }
-    if (facts.draft) held.push("the pull request opened as a draft, so a person is expected to read it");
-    if (facts.regression?.worse === true) held.push(`the service got worse after this change: ${facts.regression.reasons.join("; ")}`);
     if (held.length > 0) return { kind: "held", reasons: held };
 
     const why = facts.verdict?.reasons ?? [];
@@ -2394,7 +2436,7 @@ async function autoMergeIfAllowed(
       method: "squash",
       message:
         `Merged by Teploy Ship (run ${ctx.runId}) without a human.\n\n` +
-        `Classified trivial: ${why.join("; ")}\nSuite: passed.`,
+        `Classified trivial: ${why.join("; ")}\nSuite: ${tests?.kind ?? "not run"}.`,
     });
     return outcome.kind === "merged"
       ? { kind: "merged", why, ...(outcome.sha !== undefined ? { sha: outcome.sha } : {}) }

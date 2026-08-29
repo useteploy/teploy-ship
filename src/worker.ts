@@ -5,7 +5,7 @@ import type { ModelAdapter } from "@neutron-build/ai";
 import { createHash, randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 
-import { durableAgent } from "./durable.js";
+import { durableAgent, repoKeyOf } from "./durable.js";
 import { resolveApprovalPolicy } from "./approval.js";
 import { externalAdapters } from "./harness-external.js";
 import { previewTargetFromEnv } from "./deploy.js";
@@ -456,11 +456,44 @@ export async function retrying<T>(
 }
 
 /**
+ * The repo a run serialises on (C7), read from its own log: the repo URL in
+ * its recorded input, normalised the way repo memory keys it, so every run
+ * against the same repository contends on the same string whatever surface
+ * enqueued it.
+ *
+ * Undefined for a run with no repo — nothing to contend over — and
+ * deliberately undefined for a SCAN: a scan publishes nothing (L2 / D3), so
+ * it cannot touch the shared mutable surface (the repo's branches) the lock
+ * exists to protect, and holding a read-only audit behind a fix run would
+ * delay it for nothing. A repo URL the parser refuses still serialises on its
+ * raw form; the lock key only has to be consistent, not canonical.
+ */
+export function repoLockKeyOf(events: readonly WorkflowEvent[]): string | undefined {
+  const started = events.find((e) => e.type === "run-started");
+  const input = (started as { data?: { input?: { repo?: string; mode?: string } } } | undefined)?.data?.input;
+  const repo = input?.repo;
+  if (repo === undefined || repo === "") return undefined;
+  if (input?.mode === "scan") return undefined;
+  try {
+    return repoKeyOf(repo);
+  } catch {
+    return repo;
+  }
+}
+
+/**
  * Launch due runs up to the concurrency ceiling, and no further.
  *
  * This is the P3-4 seam: behaviour AT the cap is QUEUE, never drop — the runs
  * not launched are simply still in the due list, and the next pass picks them
  * up when a slot frees. Returned is how many were launched this pass.
+ *
+ * A run is OFFERED at most once per pass: a run this pass launched but could
+ * not run (another worker's lease, the upgrade fence, another run holding its
+ * repo per C7) resolves without ever entering `inflight`, so without this
+ * bound the find below would re-pick it immediately and one pass would spin
+ * on store loads until something outside it changed. The next pass — the
+ * tick, or the progress callback of a run that did run — is soon enough.
  */
 export async function launchDueBounded(deps: {
   due: () => Promise<Array<{ runId: string; sleeping: boolean }>>;
@@ -476,6 +509,7 @@ export async function launchDueBounded(deps: {
   launch: (runId: string, sleeping: boolean) => void;
 }): Promise<number> {
   let launched = 0;
+  const offered = new Set<string>();
   // A run occupies ONE slot however many sets it is in. During execution it is
   // in both: `launching` from launch until driveOne returns, `inflight` from
   // lease-won until completion. Summing the two sizes counted every executing
@@ -484,8 +518,9 @@ export async function launchDueBounded(deps: {
   const occupied = (): number => new Set([...deps.inflight, ...deps.launching]).size;
   while (occupied() < deps.maxConcurrent && (deps.hostOk?.() ?? true)) {
     const due = await deps.due();
-    const next = due.find((d) => !deps.inflight.has(d.runId) && !deps.launching.has(d.runId));
+    const next = due.find((d) => !deps.inflight.has(d.runId) && !deps.launching.has(d.runId) && !offered.has(d.runId));
     if (next === undefined) break;
+    offered.add(next.runId);
     deps.launch(next.runId, next.sleeping);
     launched += 1;
   }
@@ -1035,19 +1070,36 @@ export function startWorker(options: WorkerOptions): {
         await holdForUpgrade(runId, upgradeHoldReason(runId, drift));
         return false;
       }
-      if (sleeping) await completeSleep(options.runtime.store, runId);
-      const outcome = await executeRunExclusive({
-        workflow: wf,
-        runId,
-        store: options.runtime.store,
-        leases: options.runtime.leases,
-        owner: options.runtime.owner,
-        onStart: () => handleStart(runId),
-      });
-      if (outcome === null) return false; // another worker holds the lease; not ours to run
-      await options.runtime.index.record(runId, wf.name, outcome);
-      handleComplete(runId, outcome);
-      return true;
+      // PER-REPO SERIALIZATION (C7): one active run per repository. Two runs
+      // racing on one repo push overlapping branches and force the second PR
+      // to rebase onto bytes its verification never saw — the lock makes that
+      // rare by construction instead of handling it after the fact. A run that
+      // cannot take its repo's lock stays due; the next tick retries it, which
+      // is the queue. Held for the execution pass only and released in the
+      // finally below — a park releases it too, because a run parked on a human
+      // for days is not active and must not wedge its repo behind it.
+      const repoLock = repoLockKeyOf(events);
+      if (repoLock !== undefined && !(await admission.acquireRepo(runId, repoLock))) {
+        log(`[worker] ${runId} queued behind the run holding ${repoLock} (C7: one active run per repo)`);
+        return false; // another run is executing against this repo right now
+      }
+      try {
+        if (sleeping) await completeSleep(options.runtime.store, runId);
+        const outcome = await executeRunExclusive({
+          workflow: wf,
+          runId,
+          store: options.runtime.store,
+          leases: options.runtime.leases,
+          owner: options.runtime.owner,
+          onStart: () => handleStart(runId),
+        });
+        if (outcome === null) return false; // another worker holds the lease; not ours to run
+        await options.runtime.index.record(runId, wf.name, outcome);
+        handleComplete(runId, outcome);
+        return true;
+      } finally {
+        if (repoLock !== undefined) await admission.releaseRepo(runId).catch(() => {});
+      }
     } catch (error) {
       // The backstop the fingerprint cannot be. A fingerprint is computed from
       // the source ORDER of step calls, so a reordering achieved by swapping
@@ -1405,9 +1457,13 @@ export function startWorker(options: WorkerOptions): {
     return (
       // Renewing first: a concurrency slot carries a TTL so a dead worker cannot
       // wedge the fleet, which means a LIVE worker has to keep saying it is alive.
+      // The per-repo locks (C7) carry the same TTL for the same reason — a run
+      // can outlive one 5-minute window, and a repo queue must not stall behind
+      // an expired lock nobody renews.
       admission
         .renewSlots()
         .catch(() => {})
+        .then(() => admission.renewRepos().catch(() => {}))
         .then(() =>
           options.runtime.fleet.heartbeat({
             owner: options.runtime.owner,
