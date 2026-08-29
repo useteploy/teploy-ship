@@ -81,7 +81,8 @@ export const PRICING: Record<string, ModelPricing> = {
   // Zhipu — GLM. The 5.3 rate is the one this deployment actually pays (it
   // lived in an env override for weeks before moving here). A coding-plan
   // endpoint should NOT be priced per token — give it SHIP_QUOTA_MODEL_PREFIXES
-  // instead; the quota check runs before this table and wins.
+  // instead; the quota check runs before this table and wins (only an explicit
+  // SHIP_MODEL_PRICING entry outranks the prefix — see costUSD).
   "glm-5.3": { inputPer1M: 1, outputPer1M: 3.2 },
 };
 
@@ -117,8 +118,18 @@ export function pricingFor(modelId: string, env?: NodeJS.ProcessEnv): ModelPrici
 }
 
 /** Is this model in the table, or are we about to estimate its cost? */
-export function isPricedModel(modelId: string): boolean {
-  return pricingFor(modelId) !== undefined || isLocalModel(modelId) || isQuotaModel(modelId);
+export function isPricedModel(modelId: string, env?: NodeJS.ProcessEnv): boolean {
+  return pricingFor(modelId, env) !== undefined || isLocalModel(modelId, env) || isQuotaModel(modelId, env);
+}
+
+/**
+ * The operator's explicit SHIP_MODEL_PRICING rate for this model, if any.
+ * Full id first, then the bare id — the same order as {@link pricingFor}, but
+ * WITHOUT falling through to the built-in table.
+ */
+function explicitPricingFor(modelId: string, env?: NodeJS.ProcessEnv): ModelPricing | undefined {
+  const overrides = pricingOverrides(env);
+  return overrides[modelId.toLowerCase()] ?? overrides[normalizeModelId(modelId)];
 }
 
 /**
@@ -259,11 +270,21 @@ export function costUSD(modelId: string, usage: UsageLike | undefined, env?: Nod
   // unknown-model ceiling would exhaust a self-hosted user's budget on the
   // first run for spend that never happened.
   if (isLocalModel(modelId, env)) return 0;
+  // Precedence (decided 2026-08-28): an explicit SHIP_MODEL_PRICING entry
+  // beats a SHIP_QUOTA_MODEL_PREFIXES match. A prefix is a claim about a
+  // provider; a per-model rate is a claim about this model, and the more
+  // specific one wins. This is also what keeps `costUSD` and
+  // {@link isPricedModel} agreeing, so a run on such a model lands in the
+  // priced ledger instead of falling between the two settle branches. The
+  // BUILT-IN table does not get this precedence: a quota prefix still beats
+  // a shipped list price, because the operator declared the plan and Ship
+  // only guessed the rate.
+  const explicit = explicitPricingFor(modelId, env);
   // A flat-rate plan (SHIP_QUOTA_MODEL_PREFIXES) spends quota, not dollars.
   // Same reasoning as local inference: pricing it would invent a bill and
   // then enforce a spend cap against it.
-  if (isQuotaModel(modelId, env)) return 0;
-  const price = pricingFor(modelId, env) ?? UNKNOWN_MODEL_PRICING;
+  if (explicit === undefined && isQuotaModel(modelId, env)) return 0;
+  const price = explicit ?? pricingFor(modelId, env) ?? UNKNOWN_MODEL_PRICING;
   const input = usage.inputTokens ?? 0;
   const output = usage.outputTokens ?? 0;
   const cacheRead = usage.cacheReadTokens ?? 0;

@@ -29,7 +29,12 @@ Cost accounting has a matching seam: prefixes that run on your own hardware
 `localai/`, `jan/`, extensible via `SHIP_LOCAL_MODEL_PREFIXES`) are priced at zero, and an
 unrecognised hosted model is priced at the highest known rate so a spend cap
 cannot fail open. Declare a real rate with `SHIP_MODEL_PRICING`
-(`src/pricing.ts`, and the table in `docs/DEPLOY.md`).
+(`src/pricing.ts`, and the table in `docs/DEPLOY.md`). Flat-rate plans go in
+`SHIP_QUOTA_MODEL_PREFIXES` and are counted rather than priced. Precedence when
+both apply to one model: an explicit `SHIP_MODEL_PRICING` entry beats a quota
+prefix (the per-model claim is more specific than the per-provider one, and
+`costUSD`/`isPricedModel` agree, so the run lands in the priced ledger); a quota
+prefix beats the built-in table.
 
 **That is a routing and accounting claim, and it holds. It is not a claim
 about how well any given model does the work.** Those are different questions

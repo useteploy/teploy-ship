@@ -141,42 +141,36 @@ test("a quota model spends no dollars, but only when declared", () => {
   assert.equal(isQuotaModel("zai/glm-5.3", { SHIP_QUOTA_MODEL_PREFIXES: "zai" }), true);
 });
 
-// --- consumption is never counted nowhere -----------------------------------
+// --- ledger precedence -------------------------------------------------------
 //
-// Found by the end-to-end smoke against the deployed build. `costUSD` returns 0
-// for a quota or local model BEFORE consulting an operator's explicit
-// SHIP_MODEL_PRICING entry, while `isPricedModel` sees that entry and answers
-// true. A deployment that sets BOTH — as deploy-test does for zai/glm-5.3 —
-// fell between the two settle branches and the run reached neither ledger,
-// which meant SHIP_DAILY_BUDGET_USD was enforcing nothing for the model the
-// worker actually runs.
+// Found by the end-to-end smoke against the deployed build: `costUSD` used to
+// return 0 for a quota prefix BEFORE consulting an operator's explicit
+// SHIP_MODEL_PRICING entry, while `isPricedModel` saw that entry and answered
+// true, so a deployment setting BOTH for zai/glm-5.3 reached neither ledger.
+// Decided 2026-08-28: the explicit rate wins over the prefix. The two functions
+// now agree and the run lands in the priced ledger.
 
-test("a quota model with an explicit price is the configuration that fell through the gap", () => {
+test("an explicit SHIP_MODEL_PRICING rate beats a SHIP_QUOTA_MODEL_PREFIXES match", () => {
   const env = {
     SHIP_QUOTA_MODEL_PREFIXES: "zai/",
     SHIP_MODEL_PRICING: '{"zai/glm-5.3":{"inputPer1M":1,"outputPer1M":3.2}}',
   };
   const usage = { inputTokens: 4703, outputTokens: 464, totalTokens: 13295 };
+  const cost = costUSD("zai/glm-5.3", usage, env);
+  assert.ok(Math.abs(cost - (4703 * 1 + 464 * 3.2) / 1_000_000) < 1e-12, "priced at the declared rate");
+  assert.equal(isPricedModel("zai/glm-5.3", env), true, "and reported as priced — the two agree");
+  // The bare-id form of the override wins the same way.
+  const bare = { ...env, SHIP_MODEL_PRICING: '{"glm-5.3":{"inputPer1M":1,"outputPer1M":3.2}}' };
+  assert.ok(costUSD("zai/glm-5.3", usage, bare) > 0);
+});
 
-  // The two functions disagree, and that disagreement is the bug's shape.
-  // isPricedModel reads process.env directly, so the override has to be there.
-  const savedPricing = process.env.SHIP_MODEL_PRICING;
-  const savedQuota = process.env.SHIP_QUOTA_MODEL_PREFIXES;
-  process.env.SHIP_MODEL_PRICING = env.SHIP_MODEL_PRICING;
-  process.env.SHIP_QUOTA_MODEL_PREFIXES = env.SHIP_QUOTA_MODEL_PREFIXES;
-  try {
-    assert.equal(costUSD("zai/glm-5.3", usage, env), 0, "priced at zero by the quota prefix");
-    assert.equal(isPricedModel("zai/glm-5.3"), true, "yet reported as a priced model by the override");
-  } finally {
-    if (savedPricing === undefined) delete process.env.SHIP_MODEL_PRICING;
-    else process.env.SHIP_MODEL_PRICING = savedPricing;
-    if (savedQuota === undefined) delete process.env.SHIP_QUOTA_MODEL_PREFIXES;
-    else process.env.SHIP_QUOTA_MODEL_PREFIXES = savedQuota;
-  }
-
-  // Neither settle branch fires on its own: `priced` is undefined, so the
-  // unpriced branch is skipped, and cost is 0, so the priced branch returns.
-  assert.equal(usage.totalTokens > 0, true, "and the run genuinely consumed tokens");
+test("a quota prefix still beats the BUILT-IN table — only an explicit rate outranks it", () => {
+  const env = { SHIP_QUOTA_MODEL_PREFIXES: "zai/" };
+  assert.notEqual(pricingFor("zai/glm-5.3"), undefined, "glm-5.3 is in the shipped table");
+  assert.equal(costUSD("zai/glm-5.3", { inputTokens: 1000, outputTokens: 100, totalTokens: 1100 }, env), 0);
+  // An explicit rate for a DIFFERENT model does not leak precedence onto this one.
+  const other = { ...env, SHIP_MODEL_PRICING: '{"zai/glm-4.6":{"inputPer1M":1,"outputPer1M":2}}' };
+  assert.equal(costUSD("zai/glm-5.3", { inputTokens: 1000, outputTokens: 100, totalTokens: 1100 }, other), 0);
 });
 
 test("costUSD stays zero for a genuinely free model, which is not the bug", () => {

@@ -761,22 +761,13 @@ export function startWorker(options: WorkerOptions): {
         const cost = costUSD(model, settled.usage);
         // A run that burned tokens and priced at zero is COUNTED, not dropped.
         //
-        // Found by the end-to-end smoke against the deployed build, which is
-        // exactly what it exists for. `costUSD` returns 0 for a quota or local
-        // model BEFORE consulting an operator's explicit SHIP_MODEL_PRICING
-        // entry, while `isPricedModel` sees that entry and answers true. A
-        // deployment that sets both — as this one does for zai/glm-5.3 — fell
-        // between the two branches: `usage.priced` was undefined so the block
-        // above did not fire, and `cost <= 0` returned here. The run reached
-        // NEITHER ledger, which is precisely the "never reported as $0" failure
-        // P5-3 exists to prevent, and it meant SHIP_DAILY_BUDGET_USD was
-        // enforcing nothing at all for the model this worker actually runs.
-        //
-        // This closes the hole without deciding the precedence question — an
-        // explicit per-model rate is more specific than a prefix and arguably
-        // should win, but that is the operator's call and either answer leaves
-        // this branch correct: consumption that has no dollar figure is
-        // counted, and only a run that consumed nothing is dropped.
+        // Found by the end-to-end smoke against the deployed build. Before the
+        // precedence rule in pricing.ts (an explicit SHIP_MODEL_PRICING entry
+        // beats a quota prefix), a deployment that set both fell between the
+        // two settle branches and reached NEITHER ledger. That configuration
+        // is priced now; this branch stays as the backstop for any other way
+        // consumption can price at zero — a quota or local model with tokens
+        // — so nothing is ever dropped, only counted.
         if (cost <= 0) {
           if (!((settled.usage?.totalTokens ?? 0) > 0)) return;
           await options.runtime.unpricedRuns.add(source, day, runId);
