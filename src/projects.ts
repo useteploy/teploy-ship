@@ -93,6 +93,80 @@ export interface Project {
   authority?: Authority;
   /** Policy floor (D4): this repo never merges unattended, whatever the metrics say. */
   neverAuto?: boolean;
+  /** Contract 1: Akiroo owns the weekly spend cap for a managed project. */
+  weeklyBudgetUSD?: number;
+  /** Present when Akiroo manages this record (L8, contract 1). See managedDrift. */
+  managedBy?: ManagedBy;
+}
+
+/** The fields Akiroo owns on a managed project, as it last applied them. */
+export interface ManagedFields {
+  url?: string;
+  label?: string;
+  sandboxImage?: string;
+  authority?: Authority;
+  neverAuto?: boolean;
+  weeklyBudgetUSD?: number;
+  verification?: ProjectVerification;
+}
+
+/**
+ * Who manages this record and what they last sent.
+ *
+ * `hash` is Akiroo's `settings_hash`, echoed back on the ack and shown on the
+ * Projects page so both sides can tell whether they agree. `fields` is Ship's
+ * own snapshot of what that hash covered as APPLIED here: Ship cannot recompute
+ * Akiroo's canonical JSON, so drift is detected by comparing the live record
+ * against this snapshot rather than by re-hashing.
+ */
+export interface ManagedBy {
+  source: "akiroo";
+  ref: string;
+  hash: string;
+  appliedAt: string;
+  fields: ManagedFields;
+}
+
+/** The managed fields of a record as they stand now. */
+export function managedFieldsOf(p: Project): ManagedFields {
+  return {
+    ...(p.url !== undefined ? { url: p.url } : {}),
+    ...(p.label !== undefined ? { label: p.label } : {}),
+    ...(p.sandboxImage !== undefined ? { sandboxImage: p.sandboxImage } : {}),
+    ...(p.authority !== undefined ? { authority: p.authority } : {}),
+    ...(p.neverAuto !== undefined ? { neverAuto: p.neverAuto } : {}),
+    ...(p.weeklyBudgetUSD !== undefined ? { weeklyBudgetUSD: p.weeklyBudgetUSD } : {}),
+    ...(p.verification !== undefined ? { verification: p.verification } : {}),
+  };
+}
+
+export interface ManagedDrift {
+  field: keyof ManagedFields;
+  /** What the record holds now (an operator override). */
+  local: string;
+  /** What Akiroo last applied. */
+  managed: string;
+}
+
+/**
+ * Which managed fields an operator has changed since Akiroo last applied them.
+ * Empty for an unmanaged project and for a managed one nobody touched. Drift is
+ * displayed, never silently reconciled: the next `project` row from Akiroo
+ * overwrites these fields again, and the page says so.
+ */
+export function managedDrift(p: Project): ManagedDrift[] {
+  if (p.managedBy === undefined) return [];
+  const show = (v: unknown): string => (v === undefined ? "unset" : typeof v === "string" ? v : JSON.stringify(v));
+  const now = managedFieldsOf(p);
+  const was = p.managedBy.fields;
+  const keys: Array<keyof ManagedFields> = ["url", "label", "sandboxImage", "authority", "neverAuto", "weeklyBudgetUSD", "verification"];
+  const out: ManagedDrift[] = [];
+  for (const field of keys) {
+    if (JSON.stringify(now[field] ?? null) !== JSON.stringify(was[field] ?? null)) {
+      out.push({ field, local: show(now[field]), managed: show(was[field]) });
+    }
+  }
+  return out;
 }
 
 export interface ProjectStore {
@@ -191,6 +265,8 @@ export function normalizeProject(input: Project): Project {
     ...(verification?.tests !== undefined ? { testCommand: verification.tests } : str(input.testCommand) !== undefined ? { testCommand: str(input.testCommand) } : {}),
     ...(isAuthority(input.authority) ? { authority: input.authority } : {}),
     ...(input.neverAuto === true ? { neverAuto: true } : {}),
+    ...(num(input.weeklyBudgetUSD) !== undefined ? { weeklyBudgetUSD: num(input.weeklyBudgetUSD) } : {}),
+    ...(input.managedBy !== undefined ? { managedBy: input.managedBy } : {}),
   };
 }
 

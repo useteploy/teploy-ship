@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import type { Notifier } from "./notify.js";
+import type { Notifier, RevertPayload } from "./notify.js";
 import type { ScanFinding } from "./findings.js";
 import {
   formatRunNotification,
   multiNotifier,
   notifiable,
+  projectNotifier,
   runWebhookPayload,
   scanReport,
   signWebhookBody,
@@ -259,4 +260,46 @@ test("contract 2: change_class, verification rungs and summary ride the payload;
   // Rung details are bounded on the wire so the whole payload stays a record.
   const long = runWebhookPayload({ runId: "r", status: "completed", verification: { rungs: [{ name: "tests", status: "failed", detail: "x".repeat(5000) }], summary: "s" } });
   assert.ok((long.verification!.rungs[0]!.detail?.length ?? 0) <= 600);
+});
+
+test("projectNotifier delivers kind-tagged records signed like run events, or drops them when unset", async () => {
+  const seen: { body: string; headers: Record<string, string> }[] = [];
+  const fetchImpl = (async (_url: string, init: RequestInit) => {
+    seen.push({ body: String(init.body), headers: init.headers as Record<string, string> });
+    return { ok: true, status: 200 } as Response;
+  }) as unknown as typeof fetch;
+
+  const n = projectNotifier({ webhookUrl: "http://sink/hook", secret: "k", fetchImpl, log: () => {} });
+  assert.ok(n.enabled);
+  assert.equal(
+    await n.project({ kind: "project", status: "registered", project_ref: "project:1", settings_hash: "h", webhook: true }),
+    true,
+  );
+  const revert: RevertPayload = { kind: "revert", repo: "http://f.test/a/b.git", pr: "http://f.test/a/b/pulls/3" };
+  assert.equal(await n.revert(revert), true);
+
+  assert.equal(seen.length, 2);
+  assert.deepEqual(JSON.parse(seen[0]!.body), {
+    kind: "project",
+    status: "registered",
+    project_ref: "project:1",
+    settings_hash: "h",
+    webhook: true,
+  });
+  const { createHmac } = await import("node:crypto");
+  const ts = seen[1]!.headers["X-Teploy-Timestamp"]!;
+  const want = createHmac("sha256", "k").update(`${ts}.${seen[1]!.body}`).digest("hex");
+  assert.equal(seen[1]!.headers["X-Teploy-Signature"], `sha256=${want}`);
+  assert.deepEqual(JSON.parse(seen[1]!.body), revert);
+
+  // Unset URL: disabled, and a delivery attempt is a logged drop, not a throw.
+  const off = projectNotifier({ webhookUrl: "", fetchImpl: (() => { throw new Error("must not fetch"); }) as unknown as typeof fetch, log: () => {} });
+  assert.equal(off.enabled, false);
+  assert.equal(await off.project({ kind: "project", status: "failed", project_ref: "p", settings_hash: "h", webhook: false }), false);
+});
+
+test("projectNotifier reports a non-2xx reply as undelivered", async () => {
+  const fetchImpl = (async () => ({ ok: false, status: 500 } as Response)) as unknown as typeof fetch;
+  const n = projectNotifier({ webhookUrl: "http://sink/hook", secret: "k", fetchImpl, log: () => {} });
+  assert.equal(await n.revert({ kind: "revert", repo: "r", pr: "p" }), false);
 });

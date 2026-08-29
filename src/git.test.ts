@@ -24,6 +24,7 @@ import {
   setupRepo,
   SHIP_COMMENT_MARKER,
   truncateMiddle,
+  withTrailers,
   WORKING_DIFF_MAX_CHARS,
 } from "./git.js";
 import { credentialFor } from "./repo-policy.js";
@@ -571,4 +572,14 @@ test("C7: a conflicting rebase is aborted, reported as files, and leaves the tre
   assert.equal(after, before, "the abort put the branch back");
   const status = await work.exec("git status --porcelain");
   assert.equal(status.stdout.trim(), "", "and left no rebase in progress");
+});
+
+test("withTrailers appends a trailer block as the final paragraph, dropping non-trailer lines", () => {
+  assert.equal(withTrailers("Fix the thing", ["Akiroo: work-item:42", "Akiroo-Plan: plan:7"]), "Fix the thing\n\nAkiroo: work-item:42\nAkiroo-Plan: plan:7");
+  // Not trailer-shaped: dropped rather than breaking git's trailer block.
+  assert.equal(withTrailers("Fix", ["a sentence about Akiroo: yes", "not-a-trailer", "Akiroo-X: real"]), "Fix\n\nAkiroo-X: real");
+  // Trailing whitespace on the message is trimmed so the blank line is exactly one.
+  assert.equal(withTrailers("Fix\n\n", ["Akiroo: work-item:1"]), "Fix\n\nAkiroo: work-item:1");
+  assert.equal(withTrailers("Fix", []), "Fix");
+  assert.equal(withTrailers("Fix", undefined), "Fix");
 });

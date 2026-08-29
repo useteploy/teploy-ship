@@ -367,3 +367,80 @@ export function webhookNotifier(options?: {
     },
   };
 }
+
+/**
+ * L8 — the two record-shaped events Ship sends Akiroo that are NOT about a
+ * run, on the same signed URL as the run webhook (contracts 1 and 4).
+ *
+ * `project` acknowledges a `project` outbox row: registered or failed, the
+ * settings hash echoed so Akiroo can show "managed" vs drift, and whether the
+ * forge webhook exists. `revert` says a merged Ship pull request was reverted
+ * on the forge; Akiroo demotes the project's authority and appends its
+ * decision log. Both are `kind`-tagged so a receiver that also takes run
+ * events can route on one field; a run event carries no `kind`.
+ */
+export interface ProjectAckPayload {
+  kind: "project";
+  status: "registered" | "failed";
+  project_ref: string;
+  settings_hash: string;
+  webhook: boolean;
+  error?: string;
+}
+
+export interface RevertPayload {
+  kind: "revert";
+  /** Clone URL of the repository. */
+  repo: string;
+  /** The reverted (Ship) pull request. */
+  pr: string;
+  /** The pull request that carried the revert, when there was one. */
+  revert_pr?: string;
+  origin?: { source: string; dedupe_key: string; work_item_ref?: string };
+}
+
+export interface ProjectNotifier {
+  enabled: boolean;
+  project(ack: ProjectAckPayload): Promise<boolean>;
+  revert(event: RevertPayload): Promise<boolean>;
+}
+
+/**
+ * Delivers kind-tagged records to SHIP_NOTIFY_URL, signed like runWebhook.
+ * Kept beside webhookNotifier rather than folded into it: that one is a
+ * Notifier over RunNotification and flows through the durable outbox; these
+ * are one-shot acks whose retry is the sender's (a project row is re-sent by
+ * Akiroo on the next edit; a revert is re-detected on the next delivery).
+ */
+export function projectNotifier(options?: {
+  webhookUrl?: string;
+  secret?: string;
+  log?: (line: string) => void;
+  fetchImpl?: typeof fetch;
+}): ProjectNotifier {
+  const webhookUrl = options?.webhookUrl ?? process.env.SHIP_NOTIFY_URL ?? "";
+  const secret = options?.secret ?? process.env.SHIP_NOTIFY_SECRET ?? "";
+  const log = options?.log ?? ((line: string) => process.stderr.write(line + "\n"));
+  const fetchImpl = options?.fetchImpl ?? fetch;
+  const deliver = async (payload: ProjectAckPayload | RevertPayload): Promise<boolean> => {
+    if (webhookUrl === "") {
+      log(`[notify] ${payload.kind} event dropped: SHIP_NOTIFY_URL is not set`);
+      return false;
+    }
+    const body = JSON.stringify(payload);
+    try {
+      const headers = await signWebhookBody(secret, body);
+      const response = await fetchImpl(webhookUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...headers },
+        body,
+      });
+      if (!response.ok) log(`[notify] ${payload.kind} webhook ${response.status}`);
+      return response.ok;
+    } catch (error) {
+      log(`[notify] ${payload.kind} webhook failed: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+  };
+  return { enabled: webhookUrl !== "", project: deliver, revert: deliver };
+}

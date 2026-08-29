@@ -169,9 +169,16 @@ export async function commitAndPush(
     limits?: PublishLimits;
     /** Credential for the head repository when it is a fork (see setupRepoForPr). */
     headToken?: string;
+    /**
+     * Git trailers appended as the commit's final paragraph, verbatim — the
+     * `Akiroo-*:` lines from the task footer (L8, contract 3), so the work item
+     * and plan a commit came from survive in git itself.
+     */
+    trailers?: string[];
   },
 ): Promise<PushResult> {
-  const { ref, token, checkout, message } = options;
+  const { ref, token, checkout } = options;
+  const message = withTrailers(options.message, options.trailers);
   let screen: PublishScreen | undefined;
   const status = await git(executor, "git status --porcelain");
   if (status !== "") {
@@ -297,6 +304,18 @@ export interface PullRequest {
 }
 
 /**
+ * Append trailer lines as their own final paragraph. Git recognises a trailer
+ * block only when it is the last paragraph and every line in it is a
+ * `Token: value` line, so the block is separated from the body by a blank line
+ * and lines that are not trailer-shaped are dropped rather than breaking it.
+ */
+export function withTrailers(text: string, trailers: string[] | undefined): string {
+  const lines = (trailers ?? []).map((t) => t.trim()).filter((t) => /^[A-Za-z][A-Za-z0-9-]*: \S/.test(t));
+  if (lines.length === 0) return text;
+  return `${text.replace(/\s+$/, "")}\n\n${lines.join("\n")}`;
+}
+
+/**
  * The human-facing URL for a pull request.
  *
  * GitHub's path is /pull/<n>; Forgejo and Gitea use /pulls/<n>. Ship already
@@ -328,11 +347,14 @@ export async function openPullRequest(options: {
    * their UI and merge button both honour.
    */
   draft?: boolean;
+  /** Footer lines appended to the body verbatim (the `Akiroo-*:` trailers, L8). */
+  trailers?: string[];
   fetchImpl?: typeof fetch;
 }): Promise<PullRequest> {
   const { ref, token } = options;
   const doFetch = options.fetchImpl ?? fetch;
   const draft = options.draft === true;
+  const body = withTrailers(options.body, options.trailers);
   const title = draft && ref.kind !== "github" ? `WIP: ${options.title}` : options.title;
   const endpoint =
     ref.kind === "github"
@@ -347,7 +369,7 @@ export async function openPullRequest(options: {
     },
     body: JSON.stringify({
       title,
-      body: options.body,
+      body,
       head: options.head,
       base: options.base,
       ...(draft && ref.kind === "github" ? { draft: true } : {}),
