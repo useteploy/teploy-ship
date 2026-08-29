@@ -6,6 +6,7 @@ import { upsertByKey } from "./upsert.js";
 import { stateDir } from "./run-store.js";
 import { repoSlug } from "./observe.js";
 import { HARNESS_VERSIONS } from "./harness.js";
+import { AUTHORITIES, isAuthority, normalizeVerification, type Authority, type ProjectVerification } from "./ladder.js";
 import type { EvidenceStore, RepoEvidence } from "./evidence.js";
 import type { IntakePolicy } from "./intake.js";
 
@@ -68,6 +69,30 @@ export interface Project {
   autoDeploy: boolean;
   deployApp?: string;
   workerLabels?: string[];
+  /**
+   * The verification ladder (C4 / contract 1): which rungs this project
+   * declares — build command, tests command, preview app + smoke, visual
+   * diff, observe window. `verification` lives HERE, not in a second store,
+   * and the rungs it declares CAP the authority below (ladder.ts); nothing in
+   * this file interprets it beyond shape validation at save time.
+   *
+   * ONE HOME FOR THE TESTS COMMAND. `verification.tests` and `testCommand`
+   * above are the same fact in two spellings (contract 1's and the evidence
+   * store's); normalizeProject folds them so they can never disagree at rest:
+   * whichever is set wins (testCommand first, so the existing edit surfaces
+   * keep working), and both fields come out of a save holding it.
+   */
+  verification?: ProjectVerification;
+  /**
+   * Contract 1's authority: how far this repo's changes may proceed without a
+   * person. Absent keeps the legacy reading of the two booleans (`autoMerge`
+   * = `auto_trivial`, otherwise `send`); a declared value is still CAPPED by
+   * the ladder (ladder.ts authorityCap) and floored by `neverAuto`, both at
+   * enqueue (runtime.ts), never re-read at execution.
+   */
+  authority?: Authority;
+  /** Policy floor (D4): this repo never merges unattended, whatever the metrics say. */
+  neverAuto?: boolean;
 }
 
 export interface ProjectStore {
@@ -116,6 +141,24 @@ export function normalizeProject(input: Project): Project {
           ...(num(limits.cpus) !== undefined ? { cpus: num(limits.cpus) } : {}),
           ...(num(limits.pids) !== undefined ? { pids: num(limits.pids) } : {}),
         };
+  // The ladder declaration, validated at save (a half-declared preview or a
+  // negative window is a typo, and a typo on an editable record must refuse
+  // the save rather than surface as a skipped rung on the next run).
+  // normalizeVerification throws on those. The tests fold is the single-home
+  // rule from the interface doc, applied ONLY where a ladder is already
+  // declared: a bare testCommand stays what it always was (evidence config),
+  // and the run input's verification is assembled at enqueue (runtime.ts) —
+  // inventing a ladder here would silently move every suite-bearing repo onto
+  // the new gate.
+  const verification = (() => {
+    const declared = normalizeVerification(input.verification);
+    if (declared === undefined) return undefined;
+    const testsCmd = str(input.testCommand) ?? declared.tests;
+    return { ...declared, ...(testsCmd !== undefined ? { tests: testsCmd } : {}) };
+  })();
+  if (input.authority !== undefined && !isAuthority(input.authority)) {
+    throw new Error(`authority must be one of ${AUTHORITIES.join(", ")}, got: ${String(input.authority)}`);
+  }
   const list = (v: string[] | undefined): string[] | undefined => {
     const out = (v ?? []).map((s) => s.trim()).filter((s) => s !== "");
     return out.length > 0 ? out : undefined;
@@ -133,7 +176,6 @@ export function normalizeProject(input: Project): Project {
     ...(sandboxLimits !== undefined && Object.keys(sandboxLimits).length > 0 ? { sandboxLimits } : {}),
     ...(input.sourcePolicy !== undefined ? { sourcePolicy: input.sourcePolicy } : {}),
     ...(num(input.dailyBudgetUSD) !== undefined ? { dailyBudgetUSD: num(input.dailyBudgetUSD) } : {}),
-    ...(str(input.testCommand) !== undefined ? { testCommand: str(input.testCommand) } : {}),
     ...(num(input.testTimeoutMs) !== undefined ? { testTimeoutMs: num(input.testTimeoutMs) } : {}),
     ...(str(input.observeService) !== undefined ? { observeService: str(input.observeService) } : {}),
     ...(list(input.sensitivePaths) !== undefined ? { sensitivePaths: list(input.sensitivePaths) } : {}),
@@ -143,6 +185,12 @@ export function normalizeProject(input: Project): Project {
     autoDeploy: input.autoDeploy === true,
     ...(str(input.deployApp) !== undefined ? { deployApp: str(input.deployApp) } : {}),
     ...(list(input.workerLabels) !== undefined ? { workerLabels: list(input.workerLabels) } : {}),
+    ...(verification !== undefined ? { verification } : {}),
+    // The fold, both directions: a ladder with a tests command answers the
+    // evidence question too, so the existing evidence surfaces read one value.
+    ...(verification?.tests !== undefined ? { testCommand: verification.tests } : str(input.testCommand) !== undefined ? { testCommand: str(input.testCommand) } : {}),
+    ...(isAuthority(input.authority) ? { authority: input.authority } : {}),
+    ...(input.neverAuto === true ? { neverAuto: true } : {}),
   };
 }
 
@@ -256,10 +304,14 @@ export class NucleusProjectStore implements ProjectStore {
 
 /** The three evidence fields of a project, or null when none is set. */
 function evidenceOf(p: Project): RepoEvidence | null {
-  if (p.testCommand === undefined && p.testTimeoutMs === undefined && p.observeService === undefined) return null;
+  // verification.tests is the same fact as testCommand (the fold); read
+  // through so a ladder declared through contract 1 answers the evidence
+  // question without anyone remembering to fill the legacy field too.
+  const testCommand = p.testCommand ?? p.verification?.tests;
+  if (testCommand === undefined && p.testTimeoutMs === undefined && p.observeService === undefined) return null;
   return {
     repo: p.repo,
-    ...(p.testCommand !== undefined ? { testCommand: p.testCommand } : {}),
+    ...(testCommand !== undefined ? { testCommand } : {}),
     ...(p.testTimeoutMs !== undefined ? { testTimeoutMs: p.testTimeoutMs } : {}),
     ...(p.observeService !== undefined ? { observeService: p.observeService } : {}),
   };
@@ -293,9 +345,9 @@ export class ProjectEvidenceStore implements EvidenceStore {
 
   async set(evidence: RepoEvidence): Promise<void> {
     const existing = (await this.#projects.forRepo(evidence.repo)) ?? { repo: evidence.repo, autoMerge: false, autoDeploy: false };
-    const { testCommand: _c, testTimeoutMs: _t, observeService: _s, ...rest } = existing;
+    const stripped = stripEvidence(existing);
     await this.#projects.set({
-      ...rest,
+      ...stripped,
       ...(evidence.testCommand !== undefined ? { testCommand: evidence.testCommand } : {}),
       ...(evidence.testTimeoutMs !== undefined ? { testTimeoutMs: evidence.testTimeoutMs } : {}),
       ...(evidence.observeService !== undefined ? { observeService: evidence.observeService } : {}),
@@ -317,9 +369,16 @@ export class ProjectEvidenceStore implements EvidenceStore {
   async remove(repo: string): Promise<void> {
     const project = await this.#projects.forRepo(repo);
     if (project !== null) {
-      const { testCommand: _c, testTimeoutMs: _t, observeService: _s, ...rest } = project;
-      await this.#projects.set(rest);
+      await this.#projects.set(stripEvidence(project));
     }
     await this.#legacy.remove(repo);
   }
+}
+
+/** A project minus every spelling of its evidence fields: the evidence `remove`. */
+function stripEvidence(p: Project): Project {
+  const { testCommand: _c, testTimeoutMs: _t, observeService: _s, verification, ...rest } = p;
+  if (verification?.tests === undefined) return rest;
+  const { tests: _v, ...rungs } = verification;
+  return { ...rest, verification: rungs };
 }

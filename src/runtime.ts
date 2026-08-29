@@ -29,6 +29,7 @@ import type { HarnessRef } from "./harness.js";
 import type { EvidenceStore } from "./evidence.js";
 import { FileProjectStore, NucleusProjectStore, ProjectEvidenceStore } from "./projects.js";
 import type { ProjectStore } from "./projects.js";
+import { effectiveAuthority } from "./ladder.js";
 import { FileBulletinStore, NucleusBulletinStore } from "./bulletin.js";
 import type { BulletinStore } from "./bulletin.js";
 import { FileGovernanceStore, NucleusGovernanceStore, reviewersFor } from "./governance.js";
@@ -70,6 +71,8 @@ export type { PolicyStore, SourcePolicy } from "./policies.js";
 export { FilePolicyStore, NucleusPolicyStore } from "./policies.js";
 export type { EvidenceStore, RepoEvidence } from "./evidence.js";
 export { FileEvidenceStore, NucleusEvidenceStore } from "./evidence.js";
+export { effectiveAuthority } from "./ladder.js";
+export type { ProjectVerification, Rung } from "./ladder.js";
 export type { ConfigSource, ResolvedValue, RuntimeConfigEntry, RuntimeConfigStore } from "./runtime-config.js";
 export {
   FileRuntimeConfig,
@@ -935,12 +938,6 @@ export async function enqueueRun(
   // ...and OFF for a scan: the hold exists to catch a finish that changed
   // nothing, which is precisely what a correct scan does.
   const requireEdit = scan ? undefined : (options.requireEdit ?? (envFlagOff("SHIP_REQUIRE_EDIT") ? false : true));
-  // Deploy the pushed branch to a preview environment and link it on the PR.
-  // Opt-in for the same reason as the three above: it adds recorded steps, so
-  // turning it on must never change how an already-enqueued run replays. The
-  // executing worker's config decides whether a preview can actually happen —
-  // this only records that the run asked.
-  const preview = scan ? undefined : (options.preview ?? (envFlag("SHIP_PREVIEW") ? true : undefined));
   // Per-repo evidence, resolved HERE so every enqueue surface (CLI, dashboard,
   // webhook, intake sweep) gets the same treatment without each knowing about
   // the store. Materialised into the recorded input below, never re-read at
@@ -956,6 +953,13 @@ export async function enqueueRun(
   // limits are copied into the input so the run boots the image the log was
   // written under, whatever the worker's SHIP_SANDBOX_IMAGE says today.
   const project = options.repo !== undefined ? await runtime.projects.forRepo(options.repo) : null;
+  // Deploy the pushed branch to a preview environment and link it on the PR.
+  // Opt-in for the same reason as the three above: it adds recorded steps, so
+  // turning it on must never change how an already-enqueued run replays. The
+  // executing worker's config decides whether a preview can actually happen —
+  // this only records that the run asked. A project that declares a preview
+  // rung (C4) asks by that declaration.
+  const preview = scan ? undefined : (options.preview ?? (envFlag("SHIP_PREVIEW") || project?.verification?.preview !== undefined ? true : undefined));
   // Read the affected service's telemetry around the change. Same opt-in shape.
   const telemetry = scan ? undefined : (options.telemetry ?? (evidence?.observeService !== undefined || envFlag("SHIP_TELEMETRY") ? true : undefined));
   // Run the project's suite after the agent stops. Same opt-in shape.
@@ -1029,8 +1033,33 @@ export async function enqueueRun(
   //
   // SHIP_AUTO_MERGE=0 is a deployment-wide kill switch — the one knob an
   // operator wants at 3am does not belong behind a per-repo edit.
+  //
+  // THE LADDER CAPS AUTHORITY (C4 / contract 1). Where the record DECLARES
+  // anything authority-shaped — an authority, a ladder, neverAuto — the
+  // EFFECTIVE authority (setting, capped by the declared rungs, floored by
+  // neverAuto; ladder.ts) is what the run carries, and `autoMerge` means that
+  // authority reaches an auto rung: a declared repo with tests but no
+  // preview rung lands on `send` and holds, which is the whole of C4.
+  //
+  // A record with ONLY the legacy autoMerge flag keeps the legacy gate
+  // verbatim (no authority is materialised, so the merge step reads the
+  // historical conditions). Deliberate: this lane lands before contract 1's
+  // ingestion does, and freezing every legacy-flagged repo at `send` —
+  // silently, because the flag still says on — would be a behaviour change
+  // no record edit asked for. Declaring a ladder is the edit that opts a
+  // repo into the capped world. PRE-DECIDED here; the hard line (bare
+  // autoMerge also caps) is the one addition of `|| project.autoMerge ===
+  // true` to the set below, taken the day every repo has had its chance to
+  // declare.
+  const authority =
+    project !== null && (project.authority !== undefined || project.neverAuto === true || project.verification !== undefined)
+      ? effectiveAuthority(project)
+      : undefined;
+  const wantsAuto =
+    options.autoMerge ??
+    (authority !== undefined ? authority === "auto_trivial" || authority === "auto_normal" : project?.autoMerge === true);
   const autoMerge =
-    !scan && changeClass === true && !envFlagOff("SHIP_AUTO_MERGE") && (options.autoMerge ?? project?.autoMerge === true)
+    !scan && changeClass === true && !envFlagOff("SHIP_AUTO_MERGE") && wantsAuto === true
       ? true
       : undefined;
   // AUTO-ROLLBACK WATCH (P1-4 / L4). On wherever both of its inputs are on,
@@ -1102,6 +1131,16 @@ export async function enqueueRun(
         ...(autoMerge === true ? { autoMerge: true } : {}),
         ...(rollback === true ? { rollback: true } : {}),
         ...(autoDeploy === true ? { autoDeploy: true } : {}),
+        // The verification ladder (C4 / contract 1), copied from the project
+        // record at enqueue for the standard replay reason: the ladder steps
+        // (build, preview-smoke, visual-diff, observe-window, ladder) are
+        // gated on it, and the record is editable, so a replay must run the
+        // rungs the log was written under — not whatever the record says
+        // today. `authority` is the EFFECTIVE authority (capped, floored)
+        // for the same reason autoMerge is: the permission to merge has to
+        // live in the log, and the merge gate reads it, never the store.
+        ...(project?.verification !== undefined ? { verification: project.verification } : {}),
+        ...(authority !== undefined ? { authority } : {}),
         // Per-repo evidence values (see the resolution above). Absent on runs
         // enqueued before this existed, which replay and fall back to the
         // worker's env wiring exactly as before.

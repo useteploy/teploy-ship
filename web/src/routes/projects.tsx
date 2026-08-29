@@ -1,6 +1,6 @@
 import type { Project } from "teploy-ship/runtime";
 
-import { shipRuntime } from "../lib/store.server.js";
+import { shipRuntime, effectiveAuthority } from "../lib/store.server.js";
 import { currentUser } from "../lib/session.server.js";
 import { may } from "../lib/authority.server.js";
 import { redirect } from "../lib/http.server.js";
@@ -22,6 +22,11 @@ export const config = { mode: "app" };
 const IMAGES = ["ship-sandbox-go:dev", "ship-sandbox-node:dev", "golang:1.25", "node:22", "python:3.12-slim", "rust:1"];
 const NETWORKS = ["", "none", "egress"] as const;
 const POLICIES = ["", "ignore", "propose", "auto"] as const;
+// The ladder caps authority (C4): the rungs a project declares are the most
+// it may ever do unattended. The select shows the four contract-1 values plus
+// "legacy", which reads the autoMerge checkbox below — the same default
+// effectiveAuthority computes (ladder.ts).
+const AUTHORITIES = ["", "legacy", "propose", "send", "auto_trivial", "auto_normal"] as const;
 // Mirrors HARNESS_VERSIONS (src/harness.ts) the way NETWORKS/POLICIES mirror
 // their unions: this route is SSR'd from source and importing a value out of
 // the runtime package for a four-entry list is not worth the coupling.
@@ -34,6 +39,8 @@ interface ProjectsData {
   projects: Project[];
   /** The record ?repo= names, if any. */
   selected: Project | null;
+  /** repo slug -> its ladder-capped authority (computed server-side, C4). */
+  effective: Record<string, string>;
   hookBase: string;
   envAllowlist: string;
   workerImage: string;
@@ -63,6 +70,16 @@ export async function loader({ request }: { request: Request }): Promise<Project
   return {
     view: "repos",
     projects,
+    effective: Object.fromEntries(
+      projects.map((p) => [
+        p.repo,
+        p.authority !== undefined || p.verification !== undefined || p.neverAuto === true
+          ? effectiveAuthority(p)
+          : p.autoMerge === true
+            ? "legacy"
+            : "send",
+      ]),
+    ),
     selected,
     hookBase: (process.env.SHIP_PUBLIC_URL ?? "").replace(/\/+$/, ""),
     envAllowlist: process.env.SHIP_REPO_ALLOWLIST ?? "",
@@ -122,6 +139,40 @@ export async function action({ request }: { request: Request }): Promise<Respons
   const harness = str("harness");
   const memoryMb = num("memoryMb");
   const cpus = num("cpus");
+  // The verification ladder (C4 / contract 1). Same merge shape as the rest
+  // of this form: an empty field clears, a filled one sets — the inputs are
+  // seeded with the stored values, so an unchanged save preserves them. The
+  // preview rung needs both halves; clearing either drops it, because a smoke
+  // with no app (or the reverse) is a rung that can never run. normalizeProject
+  // refuses anything half-shaped anyway, and the error comes back through the
+  // redirect below.
+  const build = str("build");
+  const previewApp = str("previewApp");
+  const previewSmoke = str("previewSmoke");
+  const observeWindow = num("observeWindow");
+  const { preview: _pv, visual: _vi, ...storedRungs } = existing.verification ?? {};
+  const verification = {
+    ...storedRungs,
+    ...(build !== undefined ? { build } : {}),
+    ...(previewApp !== undefined && previewApp !== "" && previewSmoke !== undefined && previewSmoke !== ""
+      ? { preview: { app: previewApp, smoke: previewSmoke } }
+      : {}),
+    ...(form.get("visual") === "on" ? { visual: true } : {}),
+    ...(observeWindow !== undefined ? { observeWindowMin: observeWindow } : {}),
+  };
+  // The select submits "" (legacy). A DISABLED select submits nothing, and a
+  // user without the grant sees it disabled — reading that as "clear it"
+  // would let an ordinary save by an editor strip an authority an admin set,
+  // the same trap the autoMerge checkboxes below guard against. Their save
+  // preserves what is set.
+  const authority = canAuto ? str("authority") : undefined;
+  if (authority !== undefined && !["", "legacy", "propose", "send", "auto_trivial", "auto_normal"].includes(authority)) {
+    return redirect(`/projects?error=${encodeURIComponent(`authority must be legacy, propose, send, auto_trivial or auto_normal, got: ${authority}`)}`);
+  }
+  // An authority at or above an auto rung is the same grant as the autoMerge
+  // box: unattended action, gated on `auto`.
+  if ((authority === "auto_trivial" || authority === "auto_normal") && !canAuto) return redirect(`/projects?denied=auto`);
+  const neverAuto = form.get("neverAuto") === "on";
   const next: Project = {
     ...existing,
     url: str("url") ?? existing.url,
@@ -150,6 +201,15 @@ export async function action({ request }: { request: Request }): Promise<Respons
     autoMerge: canAuto ? form.get("autoMerge") !== null : existing.autoMerge === true,
     autoDeploy: canAuto ? form.get("autoDeploy") !== null : existing.autoDeploy === true,
     deployApp: str("deployApp"),
+    ...(verification !== undefined && Object.keys(verification).length > 0 ? { verification } : {}),
+    ...(authority !== undefined
+      ? authority !== "" && authority !== "legacy"
+        ? { authority: authority as Project["authority"] }
+        : {}
+      : existing.authority !== undefined
+        ? { authority: existing.authority }
+        : {}),
+    ...(neverAuto ? { neverAuto: true } : {}),
   };
   try {
     await runtime.projects.set(next);
@@ -215,10 +275,32 @@ function ProjectForm({ p, data }: { p: Project | null; data: ProjectsData }) {
         </select>
       </label>
       <Field label="daily budget $" name="budget" value={p?.dailyBudgetUSD !== undefined ? String(p.dailyBudgetUSD) : undefined} placeholder="source default" type="number" />
-      <Field label="test command" name="testCommand" value={p?.testCommand} placeholder="detected from the repo" />
+      <Field label="test command" name="testCommand" value={p?.testCommand ?? p?.verification?.tests} placeholder="detected from the repo" />
       <Field label="test timeout ms" name="testTimeoutMs" value={p?.testTimeoutMs !== undefined ? String(p.testTimeoutMs) : undefined} placeholder="default" type="number" />
       <Field label="Observe service" name="observeService" value={p?.observeService} placeholder="none" />
       <Field label="deploy app" name="deployApp" value={p?.deployApp} placeholder="teploy.yml default" />
+      <Field label="build command (ladder)" name="build" value={p?.verification?.build} placeholder="none declared" />
+      <Field label="preview app (ladder)" name="previewApp" value={p?.verification?.preview?.app} placeholder="none declared" />
+      <Field label="preview smoke command" name="previewSmoke" value={p?.verification?.preview?.smoke} placeholder={`run against PREVIEW_URL`} />
+      <Field label="observe window minutes" name="observeWindow" value={p?.verification?.observeWindowMin !== undefined ? String(p.verification.observeWindowMin) : undefined} placeholder="none" type="number" />
+      <label class="meta" style="display:flex;gap:6px;align-items:center">
+        <input type="hidden" name="visual" value="off" />
+        <input type="checkbox" name="visual" checked={p?.verification?.visual === true} />
+        visual diff rung
+      </label>
+      <label class="meta" style="display:flex;flex-direction:column;gap:4px">
+        authority (ladder caps it)
+        <select name="authority" style={INPUT} disabled={!data.canAuto}>
+          {AUTHORITIES.map((a) => (
+            <option key={a} value={a} selected={(p?.authority ?? "legacy") === a}>{a === "" ? "legacy" : a}</option>
+          ))}
+        </select>
+      </label>
+      <label class="meta" style="display:flex;gap:6px;align-items:center">
+        <input type="hidden" name="neverAuto" value="off" />
+        <input type="checkbox" name="neverAuto" checked={p?.neverAuto === true} />
+        never auto (policy floor)
+      </label>
       <label class="meta" style="display:flex;gap:6px;align-items:center">
         <input type="checkbox" name="autoMerge" checked={p?.autoMerge === true} disabled={!data.canAuto} />
         auto-merge trivial changes
@@ -277,6 +359,14 @@ export default function Projects({ data }: { data: ProjectsData | SourcesData | 
         would have done and why. Turn either on only after the <code>change-class</code> steps for this repo have been read for
         a while — the whole point of the classifier is that its verdict has to earn trust before it is spent.
       </p>
+      <p class="meta">
+        <b>The ladder caps authority</b> (C4): the rungs declared above — build, tests, preview+smoke, visual diff, observe
+        window — set the most this repo may ever do unattended. No tests rung means never past <code>send</code>; preview +
+        visual reaches <code>auto_trivial</code>; every rung reaches <code>auto_normal</code>. The authority select asks for
+        at most that, and the unattended column shows the effective value. Declaring a preview app also means the smoke and
+        visual rungs need sandbox egress to reach the preview URL — set the sandbox network to <code>egress</code> for repos
+        with a ladder.
+      </p>
 
       {p !== null ? (
         <>
@@ -313,9 +403,12 @@ export default function Projects({ data }: { data: ProjectsData | SourcesData | 
                       <td class="meta">{r.sandboxImage ?? "worker default"}{r.sandboxNetwork !== undefined ? ` · ${r.sandboxNetwork}` : ""}</td>
                       <td class="meta">{r.harness ?? "worker default"}</td>
                       <td class="meta">{r.sourcePolicy ?? "inherit"}{r.dailyBudgetUSD !== undefined ? ` · $${r.dailyBudgetUSD}/day` : ""}</td>
-                      <td class="meta">{r.testCommand ?? "detected"}</td>
+                      <td class="meta">{r.testCommand ?? r.verification?.tests ?? "detected"}</td>
                       <td class="meta">{r.observeService ?? "—"}</td>
-                      <td class="meta">{[r.autoMerge ? "merge" : null, r.autoDeploy ? "rollback" : null].filter((x) => x !== null).join(" · ") || "—"}</td>
+                      <td class="meta">
+                        {(data as ProjectsData).effective[r.repo] ?? "send"}
+                        {r.neverAuto === true ? " (never-auto)" : ""}
+                      </td>
                     </tr>
                   ))}
                 </tbody>

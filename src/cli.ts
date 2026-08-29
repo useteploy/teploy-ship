@@ -1311,6 +1311,8 @@ const PROJECT_USAGE =
   "usage: teploy-ship project set <repo> [--url <clone-url>] [--image <img>] [--network none|egress] [--memory-mb N] [--cpus N]\n" +
   "           [--policy inherit|ignore|propose|auto] [--budget <usd>] [--test-command <cmd>] [--test-timeout-ms N]\n" +
   "           [--observe-service <svc>] [--label <text>]\n" +
+  "           [--build <cmd>] [--preview-app <app>] [--preview-smoke <cmd>] [--visual on|off] [--observe-window <min>]\n" +
+  "           [--authority propose|send|auto_trivial|auto_normal|none] [--never-auto on|off]\n" +
   "       teploy-ship project list [--json]\n       teploy-ship project remove <repo>";
 
 /**
@@ -1344,6 +1346,20 @@ async function projectCommand(rest: string[]): Promise<void> {
         if (p.testCommand !== undefined) process.stdout.write(`  tests:    ${p.testCommand}\n`);
         if (p.testTimeoutMs !== undefined) process.stdout.write(`  timeout:  ${p.testTimeoutMs}ms\n`);
         if (p.observeService !== undefined) process.stdout.write(`  observe:  ${p.observeService}\n`);
+        if (p.verification !== undefined) {
+          const v = p.verification;
+          const rungs = [
+            v.build !== undefined ? "build" : null,
+            v.tests !== undefined ? "tests" : null,
+            v.preview !== undefined ? `preview(${v.preview.app})` : null,
+            v.visual === true ? "visual" : null,
+            v.observeWindowMin !== undefined ? `observe(${v.observeWindowMin}m)` : null,
+          ].filter((x): x is string => x !== null);
+          process.stdout.write(`  ladder:  ${rungs.join(" -> ") || "declared empty"}\n`);
+        }
+        if (p.authority !== undefined || p.neverAuto === true) {
+          process.stdout.write(`  authority: ${p.authority ?? "(autoMerge flag)"}${p.neverAuto === true ? " (never-auto)" : ""}\n`);
+        }
       }
     } finally {
       await runtime.close();
@@ -1374,12 +1390,62 @@ async function projectCommand(rest: string[]): Promise<void> {
     if (network !== undefined && network !== "none" && network !== "egress") fail(`--network must be none or egress, got: ${network}`);
     const policy = str("policy");
     if (policy !== undefined && !["inherit", "ignore", "propose", "auto"].includes(policy)) fail(`--policy must be inherit, ignore, propose or auto, got: ${policy}`);
+    // The verification ladder (C4) and contract 1's authority. Merge semantics
+    // like every other flag here: pass to set, omit to keep. An empty string
+    // clears a command field; --preview-app/--preview-smoke must be cleared
+    // together (normalizeProject refuses half a preview); --observe-window 0
+    // clears the window; `none` clears the authority back to the legacy
+    // reading of the autoMerge flag.
+    const boolish = (name: string): boolean | undefined => {
+      const v = args.flags[name];
+      if (v === undefined) return undefined;
+      if (v === true) return true;
+      const t = String(v).trim().toLowerCase();
+      if (t === "on" || t === "true") return true;
+      if (t === "off" || t === "false") return false;
+      fail(`--${name} takes on or off, got: ${String(v)}`);
+    };
+    const authority = str("authority");
+    if (
+      authority !== undefined &&
+      !["propose", "send", "auto_trivial", "auto_normal", "none"].includes(authority)
+    ) {
+      fail(`--authority must be propose, send, auto_trivial, auto_normal or none, got: ${authority}`);
+    }
+    const windowRaw = args.flags["observe-window"];
+    const observeWindow = windowRaw === undefined ? undefined : Number(windowRaw);
+    if (observeWindow !== undefined && (!Number.isFinite(observeWindow) || observeWindow < 0 || !Number.isInteger(observeWindow))) {
+      fail(`--observe-window must be a whole number of minutes (0 clears it), got: ${String(windowRaw)}`);
+    }
     const runtime = await makeRuntime(args, config);
     try {
       // A clone URL as the target sets --url too; a bare slug needs --url to join the allowlist.
       const url = str("url") ?? (/^[a-z]+:\/\//i.test(target) || target.startsWith("git@") ? target : undefined);
       const existing = (await runtime.projects.forRepo(target)) ?? { repo: target, autoMerge: false, autoDeploy: false };
       const { sourcePolicy: _p, ...keep } = existing;
+      const build = str("build");
+      const previewApp = str("preview-app");
+      const previewSmoke = str("preview-smoke");
+      const visual = boolish("visual");
+      const storedVerification = keep.verification;
+      // The tests rung needs no flag of its own: --test-command IS the tests
+      // rung (one home; projects.ts folds the two spellings). The preview rung
+      // survives only while BOTH halves are non-empty after the merge —
+      // clearing either drops it, because a smoke with no app (or the reverse)
+      // is a rung that can never run.
+      const app = previewApp ?? storedVerification?.preview?.app;
+      const smoke = previewSmoke ?? storedVerification?.preview?.smoke;
+      const verification =
+        build === undefined && previewApp === undefined && previewSmoke === undefined && visual === undefined && observeWindow === undefined
+          ? storedVerification
+          : {
+              ...(storedVerification ?? {}),
+              ...(build !== undefined ? (build !== "" ? { build } : {}) : {}),
+              ...(app !== undefined && app !== "" && smoke !== undefined && smoke !== "" ? { preview: { app, smoke } } : {}),
+              ...(visual !== undefined ? (visual ? { visual: true } : {}) : {}),
+              ...(observeWindow !== undefined ? (observeWindow > 0 ? { observeWindowMin: observeWindow } : {}) : {}),
+            };
+      const neverAuto = boolish("never-auto");
       const next: Project = {
         ...keep,
         ...(url !== undefined ? { url } : {}),
@@ -1394,6 +1460,9 @@ async function projectCommand(rest: string[]): Promise<void> {
         ...(str("test-command") !== undefined ? { testCommand: str("test-command") } : {}),
         ...(num("test-timeout-ms") !== undefined ? { testTimeoutMs: num("test-timeout-ms") } : {}),
         ...(str("observe-service") !== undefined ? { observeService: str("observe-service") } : {}),
+        ...(verification !== undefined ? { verification } : {}),
+        ...(authority !== undefined ? (authority === "none" ? {} : { authority: authority as Project["authority"] }) : {}),
+        ...(neverAuto !== undefined ? (neverAuto ? { neverAuto: true } : {}) : {}),
       };
       await runtime.projects.set(next);
     } finally {

@@ -325,3 +325,107 @@ test("P1-4: the rollback WATCH follows preview+telemetry; the authority to ACT i
   assert.equal(inputs[3]!.autoDeploy, undefined, "no watch, no authority — even for a repo that granted it");
   clearAutoEnv();
 });
+
+// --- C4 / contract 1: the verification ladder and authority on the record ----
+
+test("C4: the ladder is stored, validated, and one home with the tests command", async () => {
+  const dir = await tempDir();
+  const store = new FileProjectStore(dir);
+  await store.set({
+    repo: TS_URL,
+    autoMerge: false,
+    autoDeploy: false,
+    verification: { build: " pnpm build ", tests: undefined, preview: { app: "site", smoke: "curl -fsS $PREVIEW_URL/" }, visual: true, observeWindowMin: 5 },
+  });
+  const p = (await store.forRepo("tyler/ship-ts"))!;
+  assert.deepEqual(p.verification, { build: "pnpm build", preview: { app: "site", smoke: "curl -fsS $PREVIEW_URL/" }, visual: true, observeWindowMin: 5 });
+  assert.equal(p.testCommand, undefined, "an undeclared tests rung leaves the legacy field alone");
+
+  // Declaring verification.tests IS the test command: one fact, both spellings.
+  await store.set({ ...p, verification: { ...p.verification!, tests: "pnpm test" } });
+  const folded = (await store.forRepo("tyler/ship-ts"))!;
+  assert.equal(folded.verification?.tests, "pnpm test");
+  assert.equal(folded.testCommand, "pnpm test");
+  // And the evidence view reads through either spelling.
+  const legacy = new FileEvidenceStore(dir);
+  const evidence = new ProjectEvidenceStore(store, legacy);
+  assert.equal((await evidence.forRepo(TS_URL))?.testCommand, "pnpm test");
+
+  // evidence remove strips EVERY spelling of the tests command and keeps the rest of the ladder.
+  await evidence.remove(TS_URL);
+  const stripped = (await store.forRepo("tyler/ship-ts"))!;
+  assert.equal(stripped.testCommand, undefined);
+  assert.equal(stripped.verification?.tests, undefined);
+  assert.equal(stripped.verification?.preview?.app, "site", "the rest of the ladder survives an evidence edit");
+
+  // Half a preview and a bad window refuse the save at the store door.
+  assert.throws(
+    () => normalizeProject({ repo: "a/b", autoMerge: false, autoDeploy: false, verification: { preview: { app: "x", smoke: "" } } }),
+    /both app and smoke/,
+  );
+  assert.throws(
+    () => normalizeProject({ repo: "a/b", autoMerge: false, autoDeploy: false, verification: { observeWindowMin: 1.5 } }),
+    /whole number of minutes/,
+  );
+});
+
+test("C4: authority and neverAuto are validated and stored", async () => {
+  assert.throws(
+    () => normalizeProject({ repo: "a/b", autoMerge: false, autoDeploy: false, authority: "auto" as never }),
+    /one of propose, send, auto_trivial, auto_normal/,
+  );
+  const dir = await tempDir();
+  const store = new FileProjectStore(dir);
+  await store.set({ repo: TS_URL, autoMerge: false, autoDeploy: false, authority: "auto_trivial", neverAuto: true });
+  const p = (await store.forRepo("tyler/ship-ts"))!;
+  assert.equal(p.authority, "auto_trivial");
+  assert.equal(p.neverAuto, true);
+});
+
+test("C4: enqueue materialises the declaration and the ladder-capped authority; a bare autoMerge keeps the legacy gate", async () => {
+  const envKeys = ["SHIP_CHANGE_CLASS", "SHIP_AUTO_MERGE"] as const;
+  const saved: Record<string, string | undefined> = {};
+  for (const k of envKeys) {
+    saved[k] = process.env[k];
+    delete process.env[k];
+  }
+  try {
+    const dir = await tempDir();
+    const projects = new FileProjectStore(dir);
+    await projects.set({
+      repo: "tyler/laddered",
+      url: "https://git.example.com/tyler/laddered",
+      autoMerge: true,
+      autoDeploy: false,
+      verification: { tests: "pnpm test", preview: { app: "site", smoke: "true" }, visual: true, observeWindowMin: 5 },
+      authority: "auto_normal",
+    });
+    await projects.set({
+      repo: "tyler/capped",
+      url: "https://git.example.com/tyler/capped",
+      autoMerge: true,
+      autoDeploy: false,
+      verification: { tests: "pnpm test" },
+      authority: "auto_normal",
+    });
+    await projects.set({ repo: "tyler/legacy", url: "https://git.example.com/tyler/legacy", autoMerge: true, autoDeploy: false });
+    const { runtime, inputs } = captureEnqueue(projects);
+    process.env.SHIP_CHANGE_CLASS = "1";
+
+    await enqueueRun(runtime, { runId: "l1", task: "t", model: "m", repo: "https://git.example.com/tyler/laddered" });
+    assert.deepEqual(inputs[0]!.verification, { tests: "pnpm test", preview: { app: "site", smoke: "true" }, visual: true, observeWindowMin: 5 });
+    assert.equal(inputs[0]!.authority, "auto_normal");
+    assert.equal(inputs[0]!.autoMerge, true);
+    assert.equal(inputs[0]!.preview, true, "a declared preview rung is the ask");
+
+    await enqueueRun(runtime, { runId: "l2", task: "t", model: "m", repo: "https://git.example.com/tyler/capped" });
+    assert.equal(inputs[1]!.authority, "send", "tests without a preview caps the authority at send");
+    assert.equal(inputs[1]!.autoMerge, undefined, "and a capped repo never carries merge authority");
+
+    await enqueueRun(runtime, { runId: "l3", task: "t", model: "m", repo: "https://git.example.com/tyler/legacy" });
+    assert.equal(inputs[2]!.authority, undefined, "nothing declared: no authority is materialised");
+    assert.equal(inputs[2]!.autoMerge, true, "the legacy flag keeps the legacy gate, verbatim");
+  } finally {
+    for (const k of envKeys) process.env[k] = saved[k];
+  }
+});

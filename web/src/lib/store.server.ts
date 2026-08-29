@@ -41,3 +41,12 @@ export function webToken(): string {
 export function defaultModel(): string {
   return process.env.SHIP_MODEL ?? "anthropic/claude-sonnet-5";
 }
+
+/**
+ * The ladder-capped authority of a project (C4). Re-exported HERE, server-side
+ * only: a value import of the runtime package from a route module would drag
+ * the worker's node-dependency graph into the client bundle, which is what
+ * the .server convention exists to prevent. Routes compute it in their loader
+ * and pass the string through as data.
+ */
+export { effectiveAuthority } from "teploy-ship/runtime";
