@@ -121,6 +121,12 @@ export interface HarnessResult {
    * safe default: the publish gate then runs it itself.
    */
   evidence?: TestOutcome;
+  /** Red finishes the loop sent back to work with the failure output (input.fixRetries). */
+  fixAttempts?: number;
+  /** The attempts ran out with the suite still red; the failure is recorded on a step. */
+  fixExhausted?: { attempts: number; exitCode: number };
+  /** The critic's advisory verdict (input.criticAdvisory), for the PR body and the run output. */
+  critic?: { approved: boolean; notes: string };
 }
 
 /**

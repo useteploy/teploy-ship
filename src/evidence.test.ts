@@ -132,6 +132,44 @@ test("enqueueRun: an explicit opt-out beats the evidence config", async () => {
   assert.equal(inputs[0]!.testCommand, "pnpm test");
 });
 
+test("enqueueRun materialises the iterate-until-green bound and the advisory critic (L8 S-B)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ship-evidence-"));
+  const evidence = new FileEvidenceStore(dir);
+  await evidence.set({ repo: "tyler/a", testCommand: "pnpm test" });
+  const { runtime, inputs } = captureRuntime(evidence);
+
+  // The bound rides the finish gate: default 2 where testsFeedback is on,
+  // absent where it is not, and an explicit value or SHIP_FIX_RETRIES wins.
+  delete process.env.SHIP_FIX_RETRIES;
+  delete process.env.SHIP_CRITIC_ADVISORY;
+  await enqueueRun(runtime, { runId: "run-k1", task: "t", model: "m", repo: "tyler/a" });
+  await enqueueRun(runtime, { runId: "run-k2", task: "t", model: "m", repo: "tyler/a", testsFeedback: false });
+  await enqueueRun(runtime, { runId: "run-k3", task: "t", model: "m", repo: "tyler/a", fixRetries: 0 });
+  process.env.SHIP_FIX_RETRIES = "5";
+  await enqueueRun(runtime, { runId: "run-k4", task: "t", model: "m", repo: "tyler/a" });
+  process.env.SHIP_FIX_RETRIES = "garbage";
+  await enqueueRun(runtime, { runId: "run-k5", task: "t", model: "m", repo: "tyler/a" });
+  delete process.env.SHIP_FIX_RETRIES;
+
+  assert.equal(inputs[0]!.fixRetries, 2, "the default bound is the historical two, now explicit in the log");
+  assert.equal(inputs[1]!.fixRetries, undefined, "no bound without the finish gate it bounds");
+  assert.equal(inputs[2]!.fixRetries, 0, "an explicit zero is a real answer: record, never retry");
+  assert.equal(inputs[3]!.fixRetries, 5, "the env knob reaches the log, so a replay keeps the bound it ran under");
+  assert.equal(inputs[4]!.fixRetries, 2, "a misread env never silently becomes zero");
+
+  // The critic advises wherever a suite is recorded; without one the old
+  // bounded retry stands, and SHIP_CRITIC_ADVISORY=0 restores the veto.
+  await enqueueRun(runtime, { runId: "run-c1", task: "t", model: "m", repo: "tyler/a", critic: true });
+  await enqueueRun(runtime, { runId: "run-c2", task: "t", model: "m", critic: true });
+  process.env.SHIP_CRITIC_ADVISORY = "0";
+  await enqueueRun(runtime, { runId: "run-c3", task: "t", model: "m", repo: "tyler/a", critic: true });
+  delete process.env.SHIP_CRITIC_ADVISORY;
+
+  assert.equal(inputs[5]!.criticAdvisory, true, "critic + suite: the review advises, the suite is the boundary");
+  assert.equal(inputs[6]!.criticAdvisory, undefined, "critic without a suite keeps the retry as its only check");
+  assert.equal(inputs[7]!.criticAdvisory, undefined, "the off-switch restores the veto");
+});
+
 test("testTargetFromInput outranks the worker env default, and absent input falls back cleanly", () => {
   assert.deepEqual(testTargetFromInput({ testCommand: "pnpm test", testTimeoutMs: 5000 }), { command: "pnpm test", timeoutMs: 5000 });
   assert.equal(testTargetFromInput({}), undefined);

@@ -166,7 +166,7 @@ test("claude-code adapter: preflight + one recorded run, prompt and credentials 
   assert.equal(outcome.status, "completed", JSON.stringify(outcome));
   const out = outcome.output as DurableAgentOutput;
   assert.equal(out.status, "finished");
-  assert.equal(out.summary, "Appended the fix and ran the tests.");
+  assert.equal(out.agentSummary, "Appended the fix and ran the tests.");
   assert.equal(out.turns, 3);
   assert.equal(out.usage?.priced, false, "an OAuth-token run is a subscription run: unpriced");
   assert.equal(out.usage?.costUSD, undefined);
@@ -279,7 +279,7 @@ test("opencode adapter on a repo run: the tree it leaves goes through Ship's pub
     assert.equal(outcome.status, "completed", JSON.stringify(outcome));
     const out = outcome.output as DurableAgentOutput;
     assert.equal(out.status, "finished");
-    assert.equal(out.summary, "Fixed lib.ts");
+    assert.equal(out.agentSummary, "Fixed lib.ts");
     assert.equal(out.pr, "file:///owner/repo/pulls/3");
     assert.equal(out.usage?.priced, false);
     const steps = (await store.load("run-oc-repo")).filter((e) => e.type === "step-completed").map((e) => e.name);

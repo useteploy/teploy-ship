@@ -86,7 +86,16 @@ async function replayFixture(name: string): Promise<void> {
   const input = (fixture.events.find((e) => e.type === "run-started")?.data as { input: { task: string } }).input;
   const outcome = await executeRun({ workflow: wf, runId: fixture.runId, store, input });
   assert.equal(outcome.status, "completed", `replay of ${name} must complete: ${JSON.stringify(outcome)}`);
-  assert.deepEqual(outcome.output, recordedOutput, "the replayed output must equal the recorded output");
+  // The output is compared field-wise, not byte-for-byte: `summary` is now the
+  // verification paragraph (L8 S-B), which a pre-paragraph log never recorded.
+  // The account the old log carried as `summary` must survive verbatim as
+  // `agentSummary` — that, the status, the turns and the PR are the fence.
+  const out = outcome.output as { status: string; turns: number; pr?: string; agentSummary?: string };
+  const recorded = recordedOutput as { status: string; turns: number; pr?: string; summary: string };
+  assert.equal(out.status, recorded.status);
+  assert.equal(out.turns, recorded.turns, "the replayed turn count must equal the recorded one");
+  assert.equal(out.pr, recorded.pr, "the replayed PR must equal the recorded one");
+  assert.equal(out.agentSummary, recorded.summary, "the agent's account survives verbatim");
   const replayedSteps = (await store.load(fixture.runId)).filter((e) => e.type === "step-completed").map((e) => e.name);
   assert.deepEqual(replayedSteps, recordedSteps, "the step sequence must be unchanged");
 }

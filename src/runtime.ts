@@ -720,6 +720,19 @@ function envFlagOff(name: string, env: NodeJS.ProcessEnv = process.env): boolean
 }
 
 /**
+ * A non-negative integer environment knob. Unset or garbage is undefined —
+ * the caller's default — never a silent 0, because for a bound like
+ * SHIP_FIX_RETRIES a misread 0 would quietly remove the loop it names.
+ */
+function envCount(name: string, env: NodeJS.ProcessEnv = process.env): number | undefined {
+  const raw = env[name];
+  if (raw === undefined || raw === "") return undefined;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0) return undefined;
+  return n;
+}
+
+/**
  * Enqueue a run without executing it: append the run-started event
  * (exactly the shape executeRun writes on an empty log) and flag the run
  * due. A resident worker picks it up on its next tick; with the file
@@ -767,6 +780,23 @@ export async function enqueueRun(
      * DurableAgentInput.testsFeedback in durable.ts.
      */
     testsFeedback?: boolean;
+    /**
+     * Iterate-until-green bound (D3 / Phase 1): how many times a red suite at
+     * the finish gate sends the run back to work before the bound runs out and
+     * the run publishes what it has with the last failure attached. Only
+     * meaningful with `testsFeedback`; absent falls back to SHIP_FIX_RETRIES,
+     * default 2 — the historical bound, now written into the log. See
+     * DurableAgentInput.fixRetries in durable.ts.
+     */
+    fixRetries?: number;
+    /**
+     * The critic advises instead of vetoing wherever a suite is recorded
+     * (D3): its disapproval becomes risk notes on the run and the pull
+     * request, never a second work loop. Absent follows critic+tests, with
+     * SHIP_CRITIC_ADVISORY=0 restoring the old retry. See
+     * DurableAgentInput.criticAdvisory in durable.ts.
+     */
+    criticAdvisory?: boolean;
     /**
      * Classify the change before pushing and park when it is `serious` (L3).
      * Materialised here because it adds a recorded step AND a waitForEvent —
@@ -938,6 +968,22 @@ export async function enqueueRun(
   // expensive to run twice.
   const testsFeedback =
     options.testsFeedback ?? (tests === true && !envFlagOff("SHIP_TESTS_FEEDBACK") ? true : undefined);
+  // Iterate-until-green (D3): the bound rides the finish gate it bounds, and
+  // is materialised for the standard replay reason — the exhausting finish
+  // records a `turn-N-fix-exhausted` step an older log must not be expected
+  // to produce. A run enqueued before this field existed keeps the historical
+  // two-nudge bound and replays through exactly the steps it holds.
+  const fixRetries =
+    testsFeedback === true
+      ? (options.fixRetries ?? envCount("SHIP_FIX_RETRIES") ?? 2)
+      : undefined;
+  // The critic is ADVISORY wherever a suite is recorded (D3): the suite is
+  // the trust boundary, and one model's opinion of a diff is not. Only a run
+  // with NO suite keeps the bounded critic retry, which is then the only
+  // in-loop check it has. Off-switch for deployments that want the veto back.
+  const criticAdvisory =
+    options.criticAdvisory ??
+    (options.critic === true && !scan && tests === true && !envFlagOff("SHIP_CRITIC_ADVISORY") ? true : undefined);
   // WHICH command the suite is (B5), resolved here for the same reason as
   // everything else in this block: evidence is materialised at enqueue so a
   // replay runs the command the log was written under. An explicit per-repo
@@ -1049,6 +1095,8 @@ export async function enqueueRun(
         ...(telemetry === true ? { telemetry: true } : {}),
         ...(tests === true ? { tests: true } : {}),
         ...(testsFeedback === true ? { testsFeedback: true } : {}),
+        ...(fixRetries !== undefined ? { fixRetries } : {}),
+        ...(criticAdvisory === true ? { criticAdvisory: true } : {}),
         ...(changeClass === true ? { changeClass: true } : {}),
         ...(mergeGate === true ? { mergeGate: true } : {}),
         ...(autoMerge === true ? { autoMerge: true } : {}),

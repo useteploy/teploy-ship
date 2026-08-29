@@ -140,8 +140,8 @@ test("multi-harness attempts: each harness works its own checkout, the critic pi
     assert.equal(outcome.status, "completed", JSON.stringify(outcome));
     const out = outcome.output as DurableAgentOutput;
     assert.equal(out.status, "finished");
-    assert.match(out.summary, /^beta wrote beta.txt/);
-    assert.match(out.summary, /Picked from 2 harness attempts: alpha, beta \(published\)/);
+    assert.match(out.agentSummary as string, /^beta wrote beta.txt/);
+    assert.match(out.agentSummary as string, /Picked from 2 harness attempts: alpha, beta \(published\)/);
     assert.equal(out.pr, "file:///owner/repo/pulls/5");
     assert.equal(out.turns, 4, "turns sum across attempts");
     assert.equal(out.usage?.priced, false, "one unpriced attempt makes the run unpriced");

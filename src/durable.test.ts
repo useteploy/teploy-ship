@@ -14,6 +14,21 @@ import { FileRepoMemory } from "./repo-memory.js";
 import type { ExecutorProvider, RecoveryTuning } from "./durable.js";
 import { defaultApprovalPolicy } from "./approval.js";
 import { SETTLE_NUDGE, SETTLE_STOP } from "./recovery.js";
+import { runVerificationSummary } from "./verification-summary.js";
+
+/**
+ * The paragraph a workspace run with no suite renders as its `summary`
+ * (verification-summary.ts): the account as the first clause, no verification
+ * step recorded, no suite configured. Hard-coded, not computed — the wording
+ * is the contract the paragraph exists to pin.
+ */
+function didParagraph(account: string): string {
+  return (
+    `What I did: ${account}. ` +
+    `What I verified: nothing — no verification step recorded a result. ` +
+    `What I could not verify: no test suite was run by Ship.`
+  );
+}
 
 // A model that reacts to the last observation, counting how many times it
 // was actually called (to prove replay never re-invokes it).
@@ -88,7 +103,7 @@ test("durable agent runs a full session as recorded steps and finishes", async (
   assert.equal(outcome.status, "completed");
   const { usage: u1, ...out1 } = outcome.output as Record<string, unknown>;
   assert.ok(u1 !== undefined && (u1 as { totalTokens: number }).totalTokens > 0, "usage is recorded");
-  assert.deepEqual(out1, { status: "finished", summary: "answer.py prints 42.", turns: 5 });
+  assert.deepEqual(out1, { status: "finished", summary: didParagraph("answer.py prints 42"), agentSummary: "answer.py prints 42.", turns: 5 });
 
   // the sandbox + each turn's think/exec are recorded steps
   const steps = (await store.load("run-1")).filter((e) => e.type === "step-completed");
@@ -161,7 +176,7 @@ test("an approval-required action parks the run and resumes on the delivered dec
   const done = await executeRun({ workflow: wf, runId: "run-1", store });
   assert.equal(done.status, "completed");
   const { usage: u2, ...out2 } = done.output as Record<string, unknown>;
-  assert.deepEqual(out2, { status: "finished", summary: "Cleaned the build dir.", turns: 4 });
+  assert.deepEqual(out2, { status: "finished", summary: didParagraph("Cleaned the build dir"), agentSummary: "Cleaned the build dir.", turns: 4 });
   assert.equal(removed, true, "the command runs after approval");
 });
 
@@ -182,7 +197,7 @@ test("a denied action is fed back and the agent adapts", async () => {
   await deliverEvent(store, "run-1", approvalEvent(0), { approved: false, reason: "no egress in this run" });
   const done = await executeRun({ workflow: wf, runId: "run-1", store });
   assert.equal(done.status, "completed");
-  assert.match((done.output as { summary: string }).summary, /skipped/);
+  assert.match((done.output as { agentSummary: string }).agentSummary, /skipped/);
 });
 
 test("snapshot-capable providers snapshot before parking and restore after — surviving a reaped container", async () => {
@@ -254,7 +269,7 @@ test("snapshot-capable providers snapshot before parking and restore after — s
   const done = await executeRun({ workflow: wf, runId: "run-1", store });
   assert.equal(done.status, "completed");
   const { usage: u3, ...out3 } = done.output as Record<string, unknown>;
-  assert.deepEqual(out3, { status: "finished", summary: "Cleaned after restore.", turns: 4 });
+  assert.deepEqual(out3, { status: "finished", summary: didParagraph("Cleaned after restore"), agentSummary: "Cleaned after restore.", turns: 4 });
   assert.equal(removed, true, "the approved action ran in the RESTORED workspace");
 });
 
@@ -545,8 +560,8 @@ test("critic pass (input.critic) sends a claimed-done repo run back once, then h
     });
 
     assert.equal(outcome.status, "completed");
-    const out = outcome.output as { status: string; summary: string; turns: number; pr?: string };
-    assert.equal(out.summary, "third claim");
+    const out = outcome.output as { status: string; agentSummary: string; turns: number; pr?: string };
+    assert.equal(out.agentSummary, "third claim");
     assert.equal(out.pr, "http://example/owner/repo/pulls/1");
 
     // 2 bash + 3 finish attempts + 1 critic review; bounded to a single
@@ -605,8 +620,8 @@ test("critic pass approves and the run finishes without a retry", async () => {
     });
 
     assert.equal(outcome.status, "completed");
-    const out = outcome.output as { summary: string };
-    assert.equal(out.summary, "second claim");
+    const out = outcome.output as { agentSummary: string };
+    assert.equal(out.agentSummary, "second claim");
     assert.equal(callCount(), 5);
   } finally {
     globalThis.fetch = orig;
@@ -653,8 +668,8 @@ test("critic pass is off by default: no extra review call even with a real diff"
     });
 
     assert.equal(outcome.status, "completed");
-    const out = outcome.output as { summary: string };
-    assert.equal(out.summary, "second claim");
+    const out = outcome.output as { agentSummary: string };
+    assert.equal(out.agentSummary, "second claim");
     assert.equal(callCount(), 4, "no critic call without input.critic");
 
     const steps = (await store.load("run-critic-off")).filter((e) => e.type === "step-completed");
@@ -686,8 +701,8 @@ test("pre-telemetry logs (bare-string think steps) still replay", async () => {
 
   const outcome = await executeRun({ workflow: wf, runId: "run-legacy", store });
   assert.equal(outcome.status, "completed");
-  const output = outcome.output as { summary: string; usage: { totalTokens: number } };
-  assert.equal(output.summary, "done after replay");
+  const output = outcome.output as { agentSummary: string; usage: { totalTokens: number } };
+  assert.equal(output.agentSummary, "done after replay");
   // replayed legacy turns contribute no usage; live turns do
   assert.ok(output.usage.totalTokens > 0);
   assert.equal(callCount(), 3, "replayed think turn must not re-call the model");
@@ -763,7 +778,7 @@ test("plan-preview runs park on the plan and only execute after approval", async
   await deliverEvent(store, "run-plan", PLAN_EVENT, { approved: true });
   const done = await executeRun({ workflow: wf, runId: "run-plan", store });
   assert.equal(done.status, "completed");
-  assert.equal((done.output as { summary: string }).summary, "planned and done");
+  assert.equal((done.output as { agentSummary: string }).agentSummary, "planned and done");
 });
 
 test("a plan park on a REPO run publishes nothing — the C5 rescue is for failures, not parks", async () => {
@@ -811,7 +826,7 @@ test("an edited plan replaces the agent's own; a denied plan ends the run untouc
   await deliverEvent(store, "run-edit", PLAN_EVENT, { approved: true, plan: "1. do it the operator's way" });
   const done = await executeRun({ workflow: wf, runId: "run-edit", store });
   assert.equal(done.status, "completed");
-  assert.equal((done.output as { summary: string }).summary, "followed the edit");
+  assert.equal((done.output as { agentSummary: string }).agentSummary, "followed the edit");
 
   // denied: the run finishes with the operator's reason, zero work done
   const denied = reactiveModel(["1. Plan to be denied"]);
@@ -850,7 +865,7 @@ test("steer notes drain into the next turn as a recorded step and never re-drain
 
   const outcome = await executeRun({ workflow: wf, runId: "run-steer", store, input: { task: "t", steer: true } });
   assert.equal(outcome.status, "completed");
-  assert.equal((outcome.output as { summary: string }).summary, "steered");
+  assert.equal((outcome.output as { agentSummary: string }).agentSummary, "steered");
   const events = await store.load("run-steer");
   assert.ok(events.some((e) => e.type === "step-completed" && e.name === "turn-0-steer"));
 
@@ -1014,11 +1029,11 @@ test("durable settle: a run that stops changing an edited tree ends as settled, 
   });
 
   assert.equal(outcome.status, "completed");
-  const out = outcome.output as { status: string; summary: string; turns: number };
+  const out = outcome.output as { status: string; agentSummary: string; turns: number };
   assert.equal(out.status, "settled");
   // The run ends on the agent's HELD finish, not on a harness sentence: that
-  // summary becomes the PR body and the repo-memory note.
-  assert.equal(out.summary, "Fixed the off-by-one in fix.py.");
+  // account is carried as agentSummary into the PR body and the repo-memory note.
+  assert.equal(out.agentSummary, "Fixed the off-by-one in fix.py.");
   assert.ok(seen.includes(SETTLE_NUDGE), "the agent was offered the finish before the run was stopped");
   assert.ok(out.turns < 40, `stopped well short of the turn budget (${out.turns})`);
 
@@ -1121,7 +1136,7 @@ test("durable recovery SEAM: the step is gated on the RUN INPUT, so pre-feature 
   await seed(storeOld, "run-pre-feature", { task: "t" });
   const done = await executeRun({ workflow: wfOld, runId: "run-pre-feature", store: storeOld });
   assert.equal(done.status, "completed");
-  assert.equal((done.output as { summary: string }).summary, "replayed finish");
+  assert.equal((done.output as { agentSummary: string }).agentSummary, "replayed finish");
   assert.deepEqual(fingerprintSteps(await storeOld.load("run-pre-feature")), [], "no fingerprint step on a pre-feature run");
   assert.equal(old.fingerprintCount(), 0);
 
@@ -1260,9 +1275,9 @@ test("durable settle on a repo run publishes the HELD finish as a draft, never a
     });
 
     assert.equal(outcome.status, "completed");
-    const out = outcome.output as { status: string; summary: string; pr?: string };
+    const out = outcome.output as { status: string; agentSummary: string; pr?: string };
     assert.equal(out.status, "settled");
-    assert.equal(out.summary, "Appended the missing line to f.txt.");
+    assert.equal(out.agentSummary, "Appended the missing line to f.txt.");
     assert.equal(out.pr, "http://example/owner/repo/pulls/1");
 
     assert.equal(fixture.posts.length, 1, "exactly one PR was opened");
@@ -1294,10 +1309,11 @@ test("durable stuck on a repo run publishes a draft and does NOT launder the fin
     });
 
     assert.equal(outcome.status, "completed");
-    const out = outcome.output as { status: string; summary: string; pr?: string };
+    const out = outcome.output as { status: string; agentSummary: string; summary: string; pr?: string };
     assert.equal(out.status, "stuck");
-    assert.match(out.summary, /^Aborting: /);
-    assert.ok(!/already fixed/.test(out.summary), "a finish the gate REJECTED must never become the run's account");
+    assert.match(out.agentSummary, /^Aborting: /);
+    assert.ok(!/already fixed/.test(out.agentSummary), "a finish the gate REJECTED must never become the run's account");
+    assert.ok(!/already fixed/.test(out.summary), "nor may it leak into the paragraph");
     assert.equal(out.pr, "http://example/owner/repo/pulls/1", "the work still ships — it just ships as unfinished");
 
     const pr = fixture.posts[0] as { title: string; body: string };
@@ -1334,10 +1350,11 @@ test("durable settle SEAM: a finish the gate REJECTED is never adopted as the se
   });
 
   assert.equal(outcome.status, "completed");
-  const out = outcome.output as { status: string; summary: string };
+  const out = outcome.output as { status: string; agentSummary: string; summary: string };
   assert.equal(out.status, "settled");
-  assert.equal(out.summary, SETTLE_STOP, "a rejected claim must not survive as the run's summary");
-  assert.ok(!/claim/.test(out.summary));
+  assert.equal(out.agentSummary, SETTLE_STOP, "a rejected claim must not survive as the run's account");
+  assert.ok(!/claim/.test(out.agentSummary));
+  assert.ok(!/claim/.test(out.summary), "nor may it leak into the paragraph");
 });
 
 test("requireEdit: the durable path also holds a finish over an unchanged tree", async () => {
@@ -1399,14 +1416,14 @@ test("a held finish that never produces an edit ends the run instead of grinding
     store,
     input: { task: "fix the off-by-one", requireEdit: true },
   });
-  const result = outcome.output as { status: string; summary: string; turns: number };
+  const result = outcome.output as { status: string; agentSummary: string; turns: number };
 
   assert.equal(result.status, "settled", "the run ends on the grace, not on the step cap");
   // NOT the agent's own words: the clean-tree hold is a rejection, and the loop
   // clears the held claim on any rejecting hold so a refused judgement cannot
   // be laundered into the PR body. The harness says what actually happened.
-  assert.match(result.summary, /unchanged tree/, "a refused claim must not become the run's account of itself");
-  assert.doesNotMatch(result.summary, /Already correct/);
+  assert.match(result.agentSummary, /unchanged tree/, "a refused claim must not become the run's account of itself");
+  assert.doesNotMatch(result.agentSummary, /Already correct/);
   assert.ok(result.turns < 40, `the run must stop well short of the cap, ended at turn ${result.turns}`);
   assert.ok(
     JSON.stringify(await store.load("run-hold-grace")).includes("hold-recheck"),
@@ -1437,10 +1454,10 @@ test("a held finish followed by a real edit is not ended early", async () => {
     store,
     input: { task: "fix the off-by-one", requireEdit: true },
   });
-  const result = outcome.output as { status: string; summary: string };
+  const result = outcome.output as { status: string; agentSummary: string };
 
   assert.equal(result.status, "finished", "an agent that did the work still finishes");
-  assert.equal(result.summary, "Fixed it.");
+  assert.equal(result.agentSummary, "Fixed it.");
 });
 
 test("requireEdit absent records NO finish-tree step — old logs replay unchanged", async () => {
@@ -1523,7 +1540,7 @@ test("SEAM: workspaceKey lets the critic review a run that has no repo", async (
     "the critic review must actually run (no -critic step recorded)",
   );
   assert.equal(callCount(), 6, "one critic call on top of the five agent turns");
-  assert.equal((outcome.output as { summary: string }).summary, "third claim", "the run resumed after the critic sent it back");
+  assert.equal((outcome.output as { agentSummary: string }).agentSummary, "third claim", "the run resumed after the critic sent it back");
 });
 
 test("SEAM: without workspaceKey a repo-less run records NO critic step — old logs replay unchanged", async () => {
@@ -2374,6 +2391,240 @@ test("C4: a repo whose suite was ALREADY red is not sent chasing it, and the PR 
     assert.equal((step("baseline-tests") as { kind: string } | undefined)?.kind, "failed", "the base branch was red");
     const published = bodies.join("\n");
     assert.match(published, /pre-existing breakage, not a regression/, "and the pull request says so");
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+// --- L8 S-B: iterate-until-green, the advisory critic, and the paragraph ------
+
+test("S-B: a bound the attempts cannot fix parks the run as an incomplete draft with the last failure", async () => {
+  const { bare, provider } = await suiteRepo("durable-sb-exhaust", "42");
+
+  // The agent breaks the suite, is sent back twice with the real failure
+  // output, cannot fix it, and the bound runs out: the third red finish is
+  // HONOURED as an incomplete draft whose PR carries the last failure.
+  const { model } = reactiveModel([
+    "```bash\necho 41 > answer.txt\n```", // breaks the suite
+    "```finish\nchanged the answer\n```", // held by the verify nudge (once per run)
+    "```bash\ncat answer.txt\n```", // proof, as asked
+    "```finish\nchanged the answer\n```", // RED -> sent back to work (attempt 1)
+    "```bash\necho 40 > answer.txt\n```", // the fix attempt is wrong too
+    "```finish\ntried again\n```", // RED -> sent back to work (attempt 2)
+    "```bash\necho 39 > answer.txt\n```", // and so is this one
+    "```finish\ngave it two shots\n```", // RED, bound spent -> EXHAUSTED, finish honoured
+  ]);
+
+  const orig = globalThis.fetch;
+  const bodies: string[] = [];
+  const titles: string[] = [];
+  (globalThis as unknown as { fetch: unknown }).fetch = (_url: string, init?: { body?: string }) => {
+    if (init?.body !== undefined) {
+      bodies.push(init.body);
+      try {
+        titles.push((JSON.parse(init.body) as { title?: string }).title ?? "");
+      } catch {
+        /* not every call is JSON; the PR one is */
+      }
+    }
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ number: 1, html_url: "http://example/owner/repo/pulls/1" }) });
+  };
+  try {
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: durableAgent({ model, executor: provider, workdir: "." }),
+      runId: "run-sb-exhaust",
+      store,
+      input: {
+        task: "set answer.txt to 42",
+        repo: `file://${bare}/owner/repo.git`,
+        tests: true,
+        testsFeedback: true,
+        fixRetries: 2,
+        testCommand: "sh check.sh",
+      },
+    });
+
+    assert.equal(outcome.status, "completed");
+    const out = outcome.output as { status: string; summary: string; agentSummary: string; pr?: string };
+    assert.equal(out.status, "finished", "the exhausting finish is honoured, not looped");
+    assert.equal(out.agentSummary, "gave it two shots");
+    assert.match(out.summary, /still red \(exit 1\) after 2 of 2 fix attempts/);
+    assert.match(out.summary, /What I did: gave it two shots/);
+
+    const events = await store.load("run-sb-exhaust");
+    const names = events.filter((e) => e.type === "step-completed").map((e) => e.name ?? "");
+    const exhausted = names.filter((n) => n.endsWith("-fix-exhausted"));
+    assert.equal(exhausted.length, 1, `exactly one exhaustion record: ${names.join(",")}`);
+    const record = events.find((e) => e.type === "step-completed" && (e.name ?? "").endsWith("-fix-exhausted"))!.data as {
+      result?: { attempts?: number; bound?: number; exitCode?: number; output?: string; diff?: string };
+    };
+    assert.equal(record.result?.attempts, 2);
+    assert.equal(record.result?.bound, 2);
+    assert.equal(record.result?.exitCode, 1);
+    assert.match(record.result?.output ?? "", /answer\.txt is not 42/, "the LAST failure describes the tree that is published");
+    assert.match(record.result?.diff ?? "", /answer\.txt/, "and the diff is recorded beside it");
+    // Three red finish suites: the two nudges and the exhausting one.
+    assert.equal(names.filter((n) => n.endsWith("-finish-tests")).length, 3);
+
+    const pr = bodies.join("\n");
+    assert.match(pr, /"body":"What I did: /, "the paragraph is the PR's lead");
+    assert.match(pr, /\*\*The suite is still red\*\* after 2 fix attempts/);
+    assert.ok(titles.some((t) => /^\[incomplete\]/.test(t) || /^WIP: \[incomplete\]/.test(t)), `a still-red run ships as an incomplete draft: ${titles.join("|")}`);
+
+    // The two producers agree on a real run: rendering the event log must
+    // produce the exact paragraph the workflow put on its own output.
+    assert.equal(runVerificationSummary(events), out.summary);
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+test("S-B: a green finish inside the bound counts the attempt it cost", async () => {
+  const { bare, provider } = await suiteRepo("durable-sb-green", "42");
+
+  const { model } = reactiveModel([
+    "```bash\necho 41 > answer.txt\n```",
+    "```finish\nchanged the answer\n```", // verify nudge
+    "```bash\ncat answer.txt\n```",
+    "```finish\nchanged the answer\n```", // RED -> sent back once
+    "```bash\necho 42 > answer.txt\n```", // the fix lands
+    "```finish\nfixed it\n```", // green -> honoured
+  ]);
+
+  const orig = globalThis.fetch;
+  (globalThis as unknown as { fetch: unknown }).fetch = () =>
+    Promise.resolve({ ok: true, json: () => Promise.resolve({ number: 1, html_url: "http://example/owner/repo/pulls/1" }) });
+  try {
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: durableAgent({ model, executor: provider, workdir: "." }),
+      runId: "run-sb-green",
+      store,
+      input: {
+        task: "set answer.txt to 42",
+        repo: `file://${bare}/owner/repo.git`,
+        tests: true,
+        testsFeedback: true,
+        fixRetries: 2,
+        testCommand: "sh check.sh",
+      },
+    });
+    assert.equal(outcome.status, "completed");
+    const out = outcome.output as { status: string; summary: string };
+    assert.match(out.summary, /suite passed over the published tree .*after 1 fix attempt on a red suite/);
+    const events = await store.load("run-sb-green");
+    assert.ok(!events.some((e) => (e.name ?? "").endsWith("-fix-exhausted")), "no exhaustion record on a run that fixed itself");
+    assert.equal(runVerificationSummary(events), out.summary, "the two producers agree on a real run");
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+test("S-B: the bound holds even against a critic that wants more work", async () => {
+  // The exhausting finish falls through to the critic (the else-if chain), and
+  // a disapproving verdict must not buy the run another round of attempts:
+  // bounded means bounded. The verdict lands as risk notes instead.
+  const { bare, provider } = await suiteRepo("durable-sb-bound", "42");
+
+  const { model, callCount } = reactiveModel([
+    "```bash\necho 41 > answer.txt\n```",
+    "```finish\nchanged the answer\n```", // verify nudge
+    "```bash\ncat answer.txt\n```",
+    "```finish\nchanged the answer\n```", // RED -> attempt 1
+    "```bash\necho 40 > answer.txt\n```",
+    "```finish\ncannot fix it\n```", // RED, bound (1) spent -> exhausted
+    "Needs more work: a red suite is never shippable.", // the critic's verdict over the red tree
+  ]);
+
+  const orig = globalThis.fetch;
+  (globalThis as unknown as { fetch: unknown }).fetch = () =>
+    Promise.resolve({ ok: true, json: () => Promise.resolve({ number: 1, html_url: "http://example/owner/repo/pulls/1" }) });
+  try {
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: durableAgent({ model, executor: provider, workdir: "." }),
+      runId: "run-sb-bound",
+      store,
+      input: {
+        task: "set answer.txt to 42",
+        repo: `file://${bare}/owner/repo.git`,
+        critic: true,
+        tests: true,
+        testsFeedback: true,
+        fixRetries: 1,
+        testCommand: "sh check.sh",
+      },
+    });
+    assert.equal(outcome.status, "completed");
+    const out = outcome.output as { status: string; summary: string; riskNotes?: string };
+    assert.equal(out.status, "finished", "the run finishes at the bound; the critic cannot extend it");
+    assert.equal(callCount(), 7, "no extra work turn after the exhaustion");
+    assert.equal(out.riskNotes, "Needs more work: a red suite is never shippable.");
+    const events = await store.load("run-sb-bound");
+    assert.equal(events.filter((e) => (e.name ?? "").endsWith("-fix-exhausted")).length, 1, "still exactly one exhaustion record");
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+test("S-B: an advisory critic leaves risk notes and never sends the run back", async () => {
+  // Same script as the veto test above, one flag different: the rejection
+  // becomes a note on the pull request instead of a second work loop.
+  const bareDir = await mkdtemp(join(tmpdir(), "durable-sb-critic-bare-"));
+  const seedDir = await mkdtemp(join(tmpdir(), "durable-sb-critic-seed-"));
+  const seeder = new LocalExecutor({ root: seedDir });
+  await seeder.exec(
+    `git init -q -b main . && git config user.email t@t && git config user.name t && printf 'hello\\n' > f.txt && git add -A && git commit -qm seed && git clone -q --bare . ${bareDir}/owner/repo.git`,
+  );
+
+  const { model, callCount } = reactiveModel([
+    "```bash\necho changed >> f.txt\n```",
+    "```finish\nfirst claim\n```", // verify nudge
+    "```bash\ncat f.txt\n```",
+    "```finish\nsecond claim\n```", // the critic reviews this tree
+    "Needs more work: the change is incomplete.", // its verdict — a rejection
+    "```finish\nthird claim\n```", // advisory: honoured immediately, no retry
+  ]);
+
+  const work = await mkdtemp(join(tmpdir(), "durable-sb-critic-work-"));
+  const provider: ExecutorProvider = {
+    async create() {
+      return { handle: work };
+    },
+    attach(handle: string) {
+      return new LocalExecutor({ root: handle });
+    },
+  };
+
+  const orig = globalThis.fetch;
+  const bodies: string[] = [];
+  (globalThis as unknown as { fetch: unknown }).fetch = (_url: string, init?: { body?: string }) => {
+    if (init?.body !== undefined) bodies.push(init.body);
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ number: 1, html_url: "http://example/owner/repo/pulls/1" }) });
+  };
+  try {
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: durableAgent({ model, executor: provider, workdir: "." }),
+      runId: "run-sb-advisory",
+      store,
+      input: { task: "improve f.txt", repo: `file://${bareDir}/owner/repo.git`, critic: true, criticAdvisory: true },
+    });
+
+    assert.equal(outcome.status, "completed");
+    const out = outcome.output as { status: string; summary: string; agentSummary: string; riskNotes?: string };
+    assert.equal(out.status, "finished");
+    // The run ends on the SAME finish the critic reviewed — the veto test's
+    // twin run goes back to work and ends on "third claim"; this one does not.
+    assert.equal(out.agentSummary, "second claim");
+    // The veto test's callCount for the same script is 6 — the retry turn.
+    assert.equal(callCount(), 5, "a rejection never sends an advisory-critic run back to work");
+    assert.equal(out.riskNotes, "Needs more work: the change is incomplete.");
+    assert.match(out.summary, /critic reviewed the diff and left risk notes \(advisory, on the pull request\)/);
+    const pr = bodies.join("\n");
+    assert.match(pr, /\*\*Risk notes\*\* \(from the critic, after the suite; advisory\):/);
+    assert.match(pr, /Needs more work: the change is incomplete\./, "the verdict itself is quoted on the pull request");
   } finally {
     globalThis.fetch = orig;
   }

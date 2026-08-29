@@ -36,6 +36,7 @@ import {
 import { deployPreview, rollbackDeploy, type PreviewOutcome, type PreviewTarget } from "./deploy.js";
 import { compareAroundNow, effectiveTelemetryTarget, telemetryAppliesTo, telemetryRegression, type TelemetryTarget, type TelemetryVerdict } from "./observe.js";
 import { spliceVerification, verificationSection, type Evidence } from "./verification.js";
+import { mergeFact, verificationSummary, type VerificationFacts } from "./verification-summary.js";
 import { preExisting, runTests, testComment, testTargetFromInput, testsFailedNudge, type TestOutcome, type TestTarget } from "./tests.js";
 import { refusalMessage, warningMessage } from "./publish-policy.js";
 import type { RepoCheckout, RepoRef } from "./git.js";
@@ -249,6 +250,29 @@ export interface DurableAgentInput {
    * caught exactly that during this change.
    */
   testsFeedback?: boolean;
+  /**
+   * Iterate-until-green bound (D3 / Phase 1): how many times a red suite at
+   * the finish gate may send the run back to work with the failure output
+   * before Ship stops trying. Materialised at ENQUEUE from `SHIP_FIX_RETRIES`
+   * (default 2 — the historical bound, now explicit) whenever `testsFeedback`
+   * is on.
+   *
+   * ABSENT keeps the pre-field behaviour exactly: two attempts, and the third
+   * red finish is honoured without another suite run. Present changes the
+   * step sequence on the exhausting finish — the suite runs once more and a
+   * `turn-N-fix-exhausted` step records the last failure with the diff — so
+   * it has to ride on the recorded input, like every other step-adding flag.
+   */
+  fixRetries?: number;
+  /**
+   * The critic is ADVISORY (D3): its verdict becomes risk notes on the run
+   * and the pull request, never a retry or a veto. Materialised at enqueue
+   * whenever both `critic` and `tests` are on — with a suite recorded, the
+   * suite is the trust boundary and one model's opinion of a diff is not.
+   * Absent (no suite, or a run enqueued before this existed) keeps the single
+   * critic-triggered retry, which is then the only check the run has.
+   */
+  criticAdvisory?: boolean;
   /**
    * The change-class gate (L3): before pushing, classify what the run actually
    * touched and PARK when it is `serious` — a migration, an auth file, a
@@ -465,6 +489,15 @@ export interface DurableAgentOutput {
    * API, the CLI and Akiroo read without walking the event log.
    */
   findings?: ScanFinding[];
+  /**
+   * The agent's own finish message. On a fix run `summary` above is the
+   * "what I did / what I verified / what I could not verify" paragraph
+   * rendered from recorded steps (verification-summary.ts); this is what the
+   * model said, kept because the PR body and repo memory quote it.
+   */
+  agentSummary?: string;
+  /** The critic's advisory notes over the verified tree, when it ran. */
+  riskNotes?: string;
 }
 
 /** Model usage summed across a run. `priced`/`costUSD` are the P5-3 honesty fields; see harness.ts. */
@@ -999,6 +1032,7 @@ export function durableAgent(
         // reaches a push. (It cannot throw — parseFindings is total — but the
         // ordering is the guarantee, not the implementation.)
         const scanned = await collectFindings(result.summary);
+        const facts = factsOf(result, baseline);
         const pr =
           result.status === "plan-rejected"
             ? null
@@ -1014,11 +1048,12 @@ export function durableAgent(
                 result.evidence,
                 baseline,
                 primary.handle,
+                facts,
               );
         await dispose(config, primary.handle);
         return {
           status: result.status,
-          summary: result.summary,
+          ...summaryFields(input, result, facts),
           turns: result.turns,
           usage: result.usage,
           ...(pr !== null ? { pr } : {}),
@@ -1108,6 +1143,7 @@ export function durableAgent(
       // is the invariant, and a future enqueue surface that pairs the two
       // should not have to rediscover it.
       const scanned = await collectFindings(winner.result.summary);
+      const facts = factsOf(winner.result, baseline);
       const pr =
         winner.result.status === "plan-rejected"
           ? null
@@ -1125,11 +1161,12 @@ export function durableAgent(
               winner.result.evidence,
               baseline,
               winner.ws.handle,
+              facts,
             );
       await dispose(config, winner.ws.handle);
       return {
         status: winner.result.status,
-        summary,
+        ...summaryFields(input, { ...winner.result, summary }, facts),
         turns,
         usage,
         ...(pr !== null ? { pr } : {}),
@@ -1199,6 +1236,10 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
       let criticEvidenceTurn = -1;
       /** How many times a red suite has sent this run back to work (C4). */
       let testsNudges = 0;
+      /** Set when the attempts ran out with the suite still red (input.fixRetries). */
+      let fixExhausted: { attempts: number; exitCode: number } | undefined;
+      /** The critic's advisory notes (input.criticAdvisory), carried out on the result. */
+      let criticNotes: { approved: boolean; notes: string } | undefined;
       /**
        * The most recent finish the gate HELD, and only when the hold was the
        * benign "prove it" one. A run that ends on a harness sentence while one
@@ -1463,7 +1504,14 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
               // decides. Same shape as the other nudges above.
               input.tests === true &&
               input.testsFeedback === true &&
-              testsNudges < 2 &&
+              // Bounded. Without `fixRetries` on the input the bound is the
+              // historical two and the exhausting finish never runs the suite
+              // (it short-circuits here), so every log written before the
+              // field existed replays through exactly the steps it holds.
+              // With it, the predicate runs on every finish: the exhausting
+              // one runs the suite once more so the LAST failure describes
+              // the tree that is actually published, and records it.
+              (input.fixRetries !== undefined || testsNudges < 2) &&
               (await (async (): Promise<boolean> => {
                 const outcome = await runSuite(ws.ctx, ws.executor, config, input, `${p}turn-${turn}-finish-`);
                 if (outcome === undefined) return false;
@@ -1474,13 +1522,38 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
                 criticEvidenceTurn = turn;
                 if (outcome.kind !== "failed") return false;
                 if (preExisting(task.testsBaseline, outcome)) return false;
-                testsNudges += 1;
-                nudge = testsFailedNudge(outcome);
-                // The agent is going back to work, so this outcome describes a
-                // tree that is about to change.
-                criticEvidence = undefined;
-                criticEvidenceTurn = -1;
-                return true;
+                if (testsNudges < (input.fixRetries ?? 2)) {
+                  testsNudges += 1;
+                  nudge = testsFailedNudge(outcome);
+                  // The agent is going back to work, so this outcome describes a
+                  // tree that is about to change.
+                  criticEvidence = undefined;
+                  criticEvidenceTurn = -1;
+                  return true;
+                }
+                // EXHAUSTED. The finish is honoured — the work is published as
+                // an incomplete draft carrying this failure — and the diff and
+                // the last failure are recorded together so the run page and
+                // the paragraph can show what was left for a human.
+                const recorded = await ws.ctx.step(`${p}turn-${turn}-fix-exhausted`, async () => {
+                  let diff = "";
+                  try {
+                    diff = await workingDiff(ws.executor);
+                  } catch {
+                    diff = "";
+                  }
+                  return {
+                    kind: "failed" as const,
+                    attempts: testsNudges,
+                    bound: input.fixRetries ?? 2,
+                    command: outcome.command,
+                    exitCode: outcome.exitCode,
+                    output: outcome.output,
+                    diff: diff.length > 20_000 ? `${diff.slice(0, 20_000)}\n…(truncated)` : diff,
+                  };
+                });
+                fixExhausted = { attempts: recorded.attempts, exitCode: recorded.exitCode };
+                return false;
               })())
             ) {
               // nudge was set inside the predicate; nothing further to do here.
@@ -1554,7 +1627,16 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
                   }
                 });
                 addUsage(reviewStep.usage);
-                if (reviewStep.reviewed && !isApproved(reviewStep.text)) {
+                if (reviewStep.reviewed && (input.criticAdvisory === true || fixExhausted !== undefined)) {
+                  // ADVISORY (D3). The suite is the trust boundary; the review
+                  // is a note on the verified tree, never a veto. The evidence
+                  // stays cached: the tree is not going anywhere. The same is
+                  // forced on the EXHAUSTING finish even when the run keeps the
+                  // old veto semantics (no suite): the fix bound has run out,
+                  // so no review verdict may buy the run another round of
+                  // attempts — the finish parks with the notes attached.
+                  criticNotes = { approved: isApproved(reviewStep.text), notes: reviewStep.text };
+                } else if (reviewStep.reviewed && !isApproved(reviewStep.text)) {
                   nudge = criticFeedback(reviewStep.text);
                   // The agent is going back to work, so whatever the suite said
                   // describes a tree that is about to change. Drop it; the
@@ -1583,8 +1665,13 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
             summary: action.message,
             turns: turn + 1,
             usage,
-            incomplete: false,
+            // A red suite the attempts could not fix is published as a draft
+            // marked incomplete: the change may be right, but nothing proved it.
+            incomplete: fixExhausted !== undefined,
             ...(criticEvidenceTurn === turn && criticEvidence !== undefined ? { evidence: criticEvidence } : {}),
+            ...(testsNudges > 0 ? { fixAttempts: testsNudges } : {}),
+            ...(fixExhausted !== undefined ? { fixExhausted } : {}),
+            ...(criticNotes !== undefined ? { critic: criticNotes } : {}),
           };
         }
         if (action.kind === "none" || action.kind === "invalid") {
@@ -1818,6 +1905,40 @@ export function repoKeyOf(repoUrl: string): string {
  * can tell the difference.
  */
 /**
+ * The verification facts the loop itself established, before the publish gate
+ * adds its own (verification-summary.ts). The publish gate mutates this object.
+ */
+function factsOf(result: HarnessResult, baseline: TestOutcome | undefined): VerificationFacts {
+  return {
+    agent: result.summary,
+    status: result.status,
+    ...(baseline !== undefined ? { baseline } : {}),
+    ...(result.fixAttempts !== undefined ? { fixAttempts: result.fixAttempts } : {}),
+    ...(result.fixExhausted !== undefined ? { fixExhausted: result.fixExhausted } : {}),
+    ...(result.critic !== undefined ? { critic: result.critic } : {}),
+  };
+}
+
+/**
+ * The output's `summary` and its companions. A scan's summary IS the model's
+ * write-up (the findings parse out of it, and Akiroo reads it as such); every
+ * other run's summary is the paragraph rendered from recorded steps, with the
+ * agent's own account kept beside it.
+ */
+function summaryFields(
+  input: DurableAgentInput,
+  result: Pick<HarnessResult, "summary" | "critic">,
+  facts: VerificationFacts,
+): Pick<DurableAgentOutput, "summary" | "agentSummary" | "riskNotes"> {
+  if (input.mode === "scan") return { summary: result.summary };
+  return {
+    summary: verificationSummary({ ...facts, ...(input.fixRetries !== undefined ? { fixRetries: input.fixRetries } : {}) }),
+    agentSummary: result.summary,
+    ...(result.critic !== undefined ? { riskNotes: result.critic.notes } : {}),
+  };
+}
+
+/**
  * Publish whatever the tree holds after the run threw.
  *
  * Separate from publishIfRepoRun so the failure path can be read on its own,
@@ -1854,6 +1975,11 @@ async function rescuePublish(
       true,
       undefined,
       baseline,
+      undefined,
+      // The rescued pull request carries the paragraph too (D3: every run),
+      // built from what had actually been recorded when the run threw —
+      // usually only the baseline — and the fact that it ended as a failure.
+      { status: "failed", ...(baseline !== undefined ? { baseline } : {}) },
     );
   } catch {
     return null;
@@ -1873,6 +1999,8 @@ async function publishIfRepoRun(
   baseline?: TestOutcome,
   /** The workspace handle, so the boundary park can snapshot it (C1). */
   handle?: string,
+  /** Filled in as the gate goes; rendered into the PR lead and the run output. */
+  facts: VerificationFacts = {},
 ): Promise<string | null> {
   // A SCAN PUBLISHES NOTHING (L2 / D3). First line of the function, before any
   // step, so no call site can forget it — this one guard covers the
@@ -1901,6 +2029,7 @@ async function publishIfRepoRun(
   // is about to become the pull request rather than an earlier state of it.
   // Unless the critic already ran it over this same tree — see testsIfAsked.
   const tests = await testsIfAsked(ctx, executor, config, input, evidence);
+  if (tests !== undefined) facts.tests = tests;
 
   // 0b. Classify the change, and park if it is serious (L3 / D2).
   //
@@ -1932,6 +2061,7 @@ async function publishIfRepoRun(
     });
     changeVerdict = verdict;
     changedList = verdict.files;
+    facts.changeClass = { class: verdict.class, files: verdict.files.length };
     boundaryPark = input.mergeGate === true && verdict.class === "serious" && midRunParkReasons(verdict.files).length === 0;
     if (verdict.class === "serious" && !boundaryPark) {
       const decision = await ctx.waitForEvent<ChangeDecisionPayload>(CHANGE_EVENT);
@@ -1975,6 +2105,7 @@ async function publishIfRepoRun(
     },
     EXTERNAL_EFFECT_RETRY,
   );
+  facts.push = push.kind === "pushed" ? { kind: "pushed", sha: push.sha } : { kind: push.kind };
 
   const remember = async (pr?: string): Promise<void> => {
     if (config.repoMemory === undefined) return;
@@ -2065,9 +2196,21 @@ async function publishIfRepoRun(
       draft: asDraft,
       title: prTitle(input.task, incomplete),
       body:
-        `${summary}\n\n---\nTask: ${input.task}\nRun: ${ctx.runId}\nGenerated by Teploy Ship.` +
+        // The lead is the paragraph a reviewer reads instead of the diff:
+        // what was done, what a recorded step verified, what nothing did.
+        // Rendered from the facts known at this point — the preview and the
+        // telemetry read come after the PR exists and land in the
+        // Verification section below it.
+        `${verificationSummary({ ...facts, ...(input.fixRetries !== undefined ? { fixRetries: input.fixRetries } : {}) })}\n\n` +
+        `${summary}` +
+        (facts.critic !== undefined && !facts.critic.approved
+          ? `\n\n**Risk notes** (from the critic, after the suite; advisory):\n\n${facts.critic.notes.trim().slice(0, 1500)}`
+          : "") +
+        `\n\n---\nTask: ${input.task}\nRun: ${ctx.runId}\nGenerated by Teploy Ship.` +
         (incomplete
-          ? `\n\n**This run did not finish** — it stopped at a limit, so the change may be partial. Review before merging.`
+          ? facts.fixExhausted !== undefined
+            ? `\n\n**The suite is still red** after ${facts.fixExhausted.attempts} fix attempts (exit ${facts.fixExhausted.exitCode}); the last failure is in the Verification section. Review before merging.`
+            : `\n\n**This run did not finish** — it stopped at a limit, so the change may be partial. Review before merging.`
           : "") +
         (push.kind === "pushed" && push.warning !== undefined ? `\n\n${push.warning}` : ""),
     });
@@ -2075,6 +2218,7 @@ async function publishIfRepoRun(
     },
     EXTERNAL_EFFECT_RETRY,
   );
+  facts.pr = pr;
   await requestReviewersIfAsked(ctx, ref, token, pr.number, input);
   // Hoisted into locals rather than left inline in the publishVerification call:
   // the rollback watch (P1-4) and the auto-merge gate (L5) both need to read
@@ -2093,8 +2237,12 @@ async function publishIfRepoRun(
   // deriving it twice would leave two places that could disagree about whether
   // the same numbers were a regression.
   const regression = telemetry === undefined ? undefined : telemetryRegression(telemetry);
+  if (preview !== undefined) facts.preview = preview.kind === "deployed" ? { kind: "deployed", url: preview.url } : { kind: preview.kind, reason: preview.reason };
+  if (telemetry !== undefined) {
+    facts.telemetry = telemetry.kind === "compared" ? { kind: "compared", worse: regression!.worse } : { kind: telemetry.kind, reason: telemetry.reason };
+  }
   await rollbackIfWorse(ctx, config, input, preview, regression);
-  await autoMergeIfAllowed(
+  const merge = await autoMergeIfAllowed(
     ctx,
     ref,
     token,
@@ -2108,13 +2256,25 @@ async function publishIfRepoRun(
     },
     { executor, checkout: co, config },
   );
+  if (merge?.tests !== undefined) facts.tests = merge.tests;
+  if (merge?.outcome.kind === "merged") facts.merge = { kind: "merged", via: "auto" };
+  else if (merge?.outcome.kind === "held") facts.merge = { kind: "held", reasons: merge.outcome.reasons };
+  else if (merge?.outcome.kind === "failed") facts.merge = { kind: "merge-failed", reason: merge.outcome.reason };
   if (boundaryPark && changeVerdict !== undefined) {
-    await mergeGateIfSerious(ctx, executor, config, input, { ref, token, checkout: co, pr, handle }, {
+    const decided = await mergeGateIfSerious(ctx, executor, config, input, { ref, token, checkout: co, pr, handle }, {
       verdict: changeVerdict,
       files: changedList,
       ...(tests !== undefined ? { tests } : {}),
       ...(regression !== undefined ? { regression } : {}),
     });
+    // The boundary decision supersedes whatever the auto-merge gate said about
+    // the same pull request, and a rebase's re-run suite — when it happened —
+    // supersedes the pre-rebase one: the paragraph describes the tree that was
+    // decided on. The mapper is shared with the event-log producer so the two
+    // cannot disagree about what a decision means.
+    if (decided?.tests !== undefined) facts.tests = decided.tests;
+    const fact = decided !== undefined ? mergeFact(decided.decision, "approved") : undefined;
+    if (fact !== undefined) facts.merge = fact;
   }
   await remember(pr.url);
   return pr.url;
@@ -2156,12 +2316,19 @@ async function mergeGateIfSerious(
   input: DurableAgentInput,
   target: { ref: RepoRef; token: string; checkout: RepoCheckout; pr: { url: string; number: number }; handle?: string },
   facts: { verdict: ChangeVerdict; files: ChangedFile[]; tests?: TestOutcome; regression?: { worse: boolean; reasons: string[] } },
-): Promise<void> {
+): Promise<{ decision: MergeDecisionStep | undefined; tests?: TestOutcome }> {
   const { ref, token, checkout, pr } = target;
   let exec = executor;
   let handle = target.handle;
   const canSnapshot = handle !== undefined && config.executor.snapshot !== undefined && config.executor.createFrom !== undefined;
   let conflict: string[] | undefined;
+  // The decision the loop ended on, so the caller's verification paragraph can
+  // say how the merge question resolved, plus the re-run suite when an approval
+  // rebased (the paragraph describes the tree that was decided on). Undefined
+  // decision = still asking (the attempt bound ran out mid-conflict), which the
+  // paragraph reports by omission.
+  let final: MergeDecisionStep | undefined;
+  let retests: TestOutcome | undefined;
   // Bounded: a person can be asked about the same conflict only so many times
   // before the honest outcome is "this branch needs a human at a keyboard".
   for (let attempt = 1; attempt <= 3; attempt++) {
@@ -2191,7 +2358,7 @@ async function mergeGateIfSerious(
 
     if (!decision.approved) {
       const reason = decision.reason ?? "denied without a reason";
-      await ctx.step(
+      final = await ctx.step(
         "merge-decision",
         async (): Promise<MergeDecisionStep> => {
           await commentOnPr(ref, token, pr.number, `Closed by Teploy Ship (run ${ctx.runId}): the merge was denied.
@@ -2211,7 +2378,7 @@ ${reason}`).catch(() => undefined);
       continue;
     }
     if (rebase.kind === "failed") {
-      await ctx.step("merge-decision", async (): Promise<MergeDecisionStep> => {
+      final = await ctx.step("merge-decision", async (): Promise<MergeDecisionStep> => {
         await commentOnPr(ref, token, pr.number, `Teploy Ship (run ${ctx.runId}) could not rebase this branch onto ${checkout.base}: ${rebase.reason}`).catch(() => undefined);
         return { kind: "blocked", reasons: [`rebase failed: ${rebase.reason}`] };
       });
@@ -2221,10 +2388,11 @@ ${reason}`).catch(() => undefined);
     // section describes. Re-run the suite instead of asking; up to date keeps
     // the recorded result.
     const tests = rebase.kind === "rebased" ? await runSuite(ctx, exec, config, input, "rebase-") : facts.tests;
+    if (rebase.kind === "rebased" && tests !== undefined) retests = tests;
     const blocked: string[] = [];
     if (tests !== undefined && tests.kind !== "passed" && tests.kind !== "disabled") blocked.push(`the suite did not pass after the rebase (${tests.kind})`);
     if (facts.regression?.worse === true) blocked.push(`the service got worse after this change: ${facts.regression.reasons.join("; ")}`);
-    await ctx.step(
+    final = await ctx.step(
       "merge-decision",
       async (): Promise<MergeDecisionStep> => {
         if (blocked.length > 0) {
@@ -2258,6 +2426,7 @@ ${note}.`,
   // The restored workspace is this function's own; the caller only knows the
   // handle it passed in, which the restore already released.
   if (handle !== undefined && handle !== target.handle) await dispose(config, handle);
+  return { decision: final, ...(retests !== undefined ? { tests: retests } : {}) };
 }
 
 /** What the `rollback` step recorded. Every branch is an outcome, never a throw. */
@@ -2384,8 +2553,8 @@ async function autoMergeIfAllowed(
     regression?: { worse: boolean; reasons: string[] };
   },
   target?: { executor: AgentExecutor; checkout: RepoCheckout; config: DurableAgentConfig },
-): Promise<void> {
-  if (input.autoMerge !== true) return;
+): Promise<{ outcome: AutoMergeStep; tests?: TestOutcome } | undefined> {
+  if (input.autoMerge !== true) return undefined;
   const held: string[] = [];
   if (facts.verdict === undefined) {
     held.push("the change was never classified, so nothing authorises merging it");
@@ -2428,7 +2597,7 @@ async function autoMergeIfAllowed(
     }
   }
 
-  await ctx.step("auto-merge", async (): Promise<AutoMergeStep> => {
+  const outcome = await ctx.step("auto-merge", async (): Promise<AutoMergeStep> => {
     if (held.length > 0) return { kind: "held", reasons: held };
 
     const why = facts.verdict?.reasons ?? [];
@@ -2442,6 +2611,9 @@ async function autoMergeIfAllowed(
       ? { kind: "merged", why, ...(outcome.sha !== undefined ? { sha: outcome.sha } : {}) }
       : { kind: "failed", status: outcome.status, reason: outcome.reason };
   });
+  // The rebase path's re-run suite, when it happened: the caller's verification
+  // paragraph must describe the tree that was merged, not the pre-rebase one.
+  return { outcome, ...(tests !== facts.tests ? { tests } : {}) };
 }
 
 /**

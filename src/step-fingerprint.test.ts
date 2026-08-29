@@ -335,6 +335,21 @@ const GATE_CASES: Array<{ what: string; input: RecordedInput; admits: string[]; 
     admits: ["step:*sandbox", "step:*repo-setup", "step:*diff", "step:harness-pick", "step:*harness-run"],
     denies: [],
   },
+  {
+    // S-B: only a run given an explicit iterate-until-green bound can record
+    // the exhaustion step — a pre-bound log (testsFeedback alone) must not be
+    // expected to produce one by an upgrade fence.
+    what: "a run given the iterate-until-green bound",
+    input: { task: "t", repo: "r", tests: true, testsFeedback: true, fixRetries: 2 },
+    admits: ["step:*turn-*-fix-exhausted", "step:*tests", "step:tests"],
+    denies: [],
+  },
+  {
+    what: "the finish-gate suite without the bound (a pre-S-B log)",
+    input: { task: "t", repo: "r", tests: true, testsFeedback: true },
+    admits: ["step:*tests", "step:tests"],
+    denies: ["step:*turn-*-fix-exhausted"],
+  },
 ];
 
 for (const gate of GATE_CASES) {

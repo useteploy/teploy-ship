@@ -127,7 +127,15 @@ test("durable park -> approve -> resume works across store instances (separate C
   const second = await executeRun({ workflow: makeWf(), runId: "r1", store: new FileEventStore(dir), input: { task: "clean" } });
   assert.equal(second.status, "completed");
   const { usage: uOut, ...outRest } = second.output as Record<string, unknown>;
-  assert.deepEqual(outRest, { status: "finished", summary: "cleaned.", turns: 6 });
+  assert.deepEqual(outRest, {
+    status: "finished",
+    summary:
+      "What I did: cleaned. " +
+      "What I verified: nothing — no verification step recorded a result. " +
+      "What I could not verify: no test suite was run by Ship.",
+    agentSummary: "cleaned.",
+    turns: 6,
+  });
 });
 
 test("RunMetaStore saves, lists newest-first, and tracks the parked event", async () => {

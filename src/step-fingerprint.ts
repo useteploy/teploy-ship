@@ -458,6 +458,8 @@ export const WORKFLOW_STEPS: readonly WorkflowStep[] = [
   { key: "step:*turn-*-condense", admits: always },
   { key: "step:*turn-*-think", admits: always },
   { key: "step:*turn-*-finish-tree", admits: (i) => i.requireEdit === true },
+  // Iterate-until-green's exhaustion record: only a run given a bound can hit it.
+  { key: "step:*turn-*-fix-exhausted", admits: (i) => i.fixRetries !== undefined },
   { key: "step:*turn-*-critic-diff", admits: (i) => i.critic === true },
   { key: "step:*turn-*-critic", admits: (i) => i.critic === true },
   // The ```search action is offered on any run; deliberately ungated.
