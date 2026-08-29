@@ -8,7 +8,9 @@ import {
   AKIROO_REF_MARKER,
   FileAkirooCursor,
   akirooRefFrom,
+  akirooConnectorRefusal,
   akirooTargetFromEnv,
+  akirooTrailersFrom,
   akirooWorkspaceKey,
   createLabelledIssue,
   handleAkirooRow,
@@ -74,6 +76,7 @@ function baseDeps(overrides: Partial<AkirooSweepDeps> = {}): AkirooSweepDeps {
     intake: memoryIntake(),
     enqueueScan: async () => ({ runId: "run-scan" }),
     decide: async () => "delivered",
+    registerProject: async () => {},
     repoPolicy: POLICY,
     log: () => {},
     ...overrides,
@@ -664,4 +667,40 @@ test("connector state reports the last pull and the last error", () => {
   assert.equal(on.read().lastError, undefined);
   assert.equal(on.read().lastPulled, 2);
   assert.ok(on.read().lastPullAt !== undefined);
+});
+
+test("akirooTrailersFrom takes the Akiroo-*: footer lines verbatim, nothing else", () => {
+  const task = [
+    "Fix the login redirect",
+    "",
+    "The redirect after login drops the return URL.",
+    "",
+    "---",
+    "Akiroo: work-item:42",
+    "Akiroo-Plan: plan:7",
+    "http://forge.test/tyler/site/issues/9",
+  ].join("\n");
+  assert.deepEqual(akirooTrailersFrom(task), ["Akiroo: work-item:42", "Akiroo-Plan: plan:7"]);
+  // Prose that merely mentions Akiroo, and other trailers, are not provenance.
+  assert.deepEqual(akirooTrailersFrom("Ask Akiroo: maybe\nSigned-off-by: someone\nAkiroo-X: real"), ["Akiroo-X: real"]);
+  assert.deepEqual(akirooTrailersFrom("no footers here"), []);
+  assert.deepEqual(akirooTrailersFrom(undefined), []);
+});
+
+test("a project row is handed to registerProject and acked like any other kind", async () => {
+  const handled: Array<Record<string, unknown>> = [];
+  const deps = baseDeps({
+    registerProject: async (payload) => {
+      handled.push(payload);
+    },
+  });
+  const payload = { project_ref: "project:1", repo: REPO, slug: "tyler/ship-demo", authority: "send", settings_hash: "h1" };
+  await handleAkirooRow({ id: 5, kind: "project", payload }, deps);
+  assert.deepEqual(handled, [payload]);
+});
+
+test("the connector refuses to start without the return leg, naming DEPLOY.md", () => {
+  assert.match(akirooConnectorRefusal({} as NodeJS.ProcessEnv) ?? "", /SHIP_NOTIFY_URL is not set/);
+  assert.match(akirooConnectorRefusal({ SHIP_NOTIFY_URL: "  " } as NodeJS.ProcessEnv) ?? "", /DEPLOY.md/);
+  assert.equal(akirooConnectorRefusal({ SHIP_NOTIFY_URL: "http://akiroo.test/hook" } as NodeJS.ProcessEnv), undefined);
 });

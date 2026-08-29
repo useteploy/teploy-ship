@@ -1,4 +1,6 @@
 import type { Project } from "teploy-ship/runtime";
+import type { AuthoritySuggestion, RepoCounts } from "teploy-ship/runtime";
+import { authorityCap, managedDrift, suggestAuthority, summarizeRepoStats, costPerMerge } from "teploy-ship/runtime";
 
 import { shipRuntime, effectiveAuthority } from "../lib/store.server.js";
 import { currentUser } from "../lib/session.server.js";
@@ -41,6 +43,11 @@ interface ProjectsData {
   selected: Project | null;
   /** repo slug -> its ladder-capped authority (computed server-side, C4). */
   effective: Record<string, string>;
+  /** L8 D4: per-repo numbers + $ per merge, from the stats store. */
+  counts: Record<string, RepoCounts>;
+  costPerMerge: Record<string, number | null>;
+  /** L8 D4: what the numbers say next, per repo. Suggestion only. */
+  suggestions: Record<string, AuthoritySuggestion>;
   hookBase: string;
   envAllowlist: string;
   workerImage: string;
@@ -64,7 +71,14 @@ export async function loader({ request }: { request: Request }): Promise<Project
   const runtime = await shipRuntime();
   const me = await currentUser(request);
   const url = new URL(request.url);
-  const [projects, canEdit, canAuto] = await Promise.all([runtime.projects.list(), may("policies", me), may("auto", me)]);
+  const [projects, canEdit, canAuto, statRows, attributed] = await Promise.all([
+    runtime.projects.list(),
+    may("policies", me),
+    may("auto", me),
+    runtime.repoStats.list(),
+    runtime.attributedSpend.list(),
+  ]);
+  const counts = summarizeRepoStats(statRows);
   const repo = url.searchParams.get("repo") ?? "";
   const selected = repo !== "" ? (await runtime.projects.forRepo(repo)) : null;
   return {
@@ -78,6 +92,22 @@ export async function loader({ request }: { request: Request }): Promise<Project
           : p.autoMerge === true
             ? "legacy"
             : "send",
+      ]),
+    ),
+    counts,
+    costPerMerge: Object.fromEntries(
+      projects.map((p) => [p.repo, costPerMerge(p.repo, counts[p.repo] ?? { sent: 0, merged: 0, reverted: 0, parked: 0 }, attributed)]),
+    ),
+    // The ratchet's suggestion (D4): what the measured merge/revert rates say
+    // the NEXT authority should be. Suggestion only — the promote button is
+    // the human click, and neverAuto + the ladder cap bound what it may ask.
+    suggestions: Object.fromEntries(
+      projects.map((p) => [
+        p.repo,
+        suggestAuthority(counts[p.repo] ?? { sent: 0, merged: 0, reverted: 0, parked: 0 }, p.authority ?? "propose", {
+          neverAuto: p.neverAuto === true,
+          cap: authorityCap(p.verification),
+        }),
       ]),
     ),
     selected,
@@ -122,6 +152,33 @@ export async function action({ request }: { request: Request }): Promise<Respons
   if (intent === "remove") {
     await runtime.projects.remove(target);
     return redirect("/projects");
+  }
+
+  // L8 D4: the ratchet's promote — a human click on the Projects page that
+  // applies the suggested authority. Gated on `auto` like the select (raising
+  // authority IS unattended action), clamped to the ladder cap and never past
+  // `send` for a never-auto repo, whatever the form says.
+  if (intent === "promote") {
+    if (!(await may("auto", me))) return redirect("/projects?denied=auto");
+    const asked = str("to");
+    if (asked === undefined || !["propose", "send", "auto_trivial", "auto_normal"].includes(asked)) {
+      return redirect(`/projects?error=${encodeURIComponent(`promote target must be an authority, got: ${asked ?? "nothing"}`)}`);
+    }
+    const existingPromote = await runtime.projects.forRepo(target);
+    if (existingPromote === null) return redirect("/projects?error=" + encodeURIComponent("no such project"));
+    const cap = existingPromote.neverAuto === true ? "send" : authorityCap(existingPromote.verification);
+    const order = ["propose", "send", "auto_trivial", "auto_normal"];
+    const to = order.indexOf(asked) > order.indexOf(cap) ? cap : asked;
+    try {
+      // An operator-set authority on a managed repo is an OVERRIDE: the next
+      // `project` row from Akiroo overwrites it, and until then the managed
+      // panel below shows it as drift, labelled. Deliberately not recorded
+      // anywhere else — managedBy.fields IS the drift baseline.
+      await runtime.projects.set({ ...existingPromote, authority: to as Project["authority"] });
+    } catch (e) {
+      return redirect(`/projects?error=${encodeURIComponent(e instanceof Error ? e.message : String(e))}`);
+    }
+    return redirect(`/projects?repo=${encodeURIComponent(existingPromote.repo)}`);
   }
 
   const policy = str("policy");
@@ -223,6 +280,52 @@ export async function action({ request }: { request: Request }): Promise<Respons
 function deniedText(denied: string): string {
   if (denied === "auto") return "your account may not set a project to auto. An admin can grant it on Policies.";
   return "your account may not change projects. An admin can grant it on Policies.";
+}
+
+/**
+ * The managed panel (C2): who owns this record's settings and whether the two
+ * sides agree. Drift is DISPLAYED, never silently reconciled — an operator
+ * override is listed field by field beside what Akiroo last applied, and the
+ * next `project` row overwrites the fields again (which this panel will then
+ * stop showing, because the snapshot moves with it).
+ */
+function ManagedPanel({ p }: { p: Project }) {
+  const m = p.managedBy;
+  if (m === undefined) return null;
+  const drift = managedDrift(p);
+  return (
+    <div class="card" style="margin:12px 0">
+      <p class="meta" style="margin:0 0 6px">
+        <b>managed by Akiroo</b> · {m.ref} · settings hash <code>{m.hash.slice(0, 12)}</code> · applied{" "}
+        {m.appliedAt.slice(0, 10)}
+      </p>
+      {drift.length === 0 ? (
+        <p class="meta" style="margin:0;color:var(--dim)">
+          No drift — the record holds exactly what Akiroo last sent.
+        </p>
+      ) : (
+        <>
+          <p class="meta" style="margin:0 0 6px;color:var(--red)">
+            Operator overrides — these fields differ from what Akiroo last applied. The next project row from Akiroo overwrites them.
+          </p>
+          <table class="runs">
+            <thead>
+              <tr><th>field</th><th>here (operator)</th><th>Akiroo last applied</th></tr>
+            </thead>
+            <tbody>
+              {drift.map((d) => (
+                <tr key={d.field}>
+                  <td class="meta">{d.field}</td>
+                  <td class="meta">{d.local}</td>
+                  <td class="meta">{d.managed}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+    </div>
+  );
 }
 
 const INPUT = "background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 8px";
@@ -371,6 +474,7 @@ export default function Projects({ data }: { data: ProjectsData | SourcesData | 
       {p !== null ? (
         <>
           <p class="meta"><a href="/projects">projects</a> / {p.repo}{p.label !== undefined ? ` · ${p.label}` : ""}</p>
+          {p.managedBy !== undefined && <ManagedPanel p={p} />}
           <div class="card">
             <ProjectForm p={p} data={data} />
           </div>
@@ -390,27 +494,59 @@ export default function Projects({ data }: { data: ProjectsData | SourcesData | 
             <div class="table-wrap">
               <table class="runs">
                 <thead>
-                  <tr><th>repo</th><th>image</th><th>harness</th><th>policy</th><th>tests</th><th>observe</th><th>unattended</th></tr>
+                  <tr><th>repo</th><th>image</th><th>harness</th><th>policy</th><th>tests</th><th>observe</th><th>unattended</th><th>runs</th><th>next (suggested)</th></tr>
                 </thead>
                 <tbody>
-                  {data.projects.map((r) => (
+                  {data.projects.map((r) => {
+                    const c = (data as ProjectsData).counts[r.repo];
+                    const cost = (data as ProjectsData).costPerMerge[r.repo];
+                    const suggestion = (data as ProjectsData).suggestions[r.repo];
+                    return (
                     <tr key={r.repo}>
                       <td>
                         <a href={`/projects?repo=${encodeURIComponent(r.repo)}`}>{r.repo}</a>
+                        {r.managedBy !== undefined && (
+                          <span class="meta"> · <b>managed by Akiroo</b>{managedDrift(r).length > 0 ? " (drift)" : ""}</span>
+                        )}
                         {r.label !== undefined && <span class="meta"> · {r.label}</span>}
                         {r.url === undefined && <span class="meta"> · no clone URL — not allowlisted</span>}
                       </td>
                       <td class="meta">{r.sandboxImage ?? "worker default"}{r.sandboxNetwork !== undefined ? ` · ${r.sandboxNetwork}` : ""}</td>
                       <td class="meta">{r.harness ?? "worker default"}</td>
-                      <td class="meta">{r.sourcePolicy ?? "inherit"}{r.dailyBudgetUSD !== undefined ? ` · $${r.dailyBudgetUSD}/day` : ""}</td>
+                      <td class="meta">{r.sourcePolicy ?? "inherit"}{r.dailyBudgetUSD !== undefined ? ` · $${r.dailyBudgetUSD}/day` : ""}{r.weeklyBudgetUSD !== undefined ? ` · $${r.weeklyBudgetUSD}/wk` : ""}</td>
                       <td class="meta">{r.testCommand ?? r.verification?.tests ?? "detected"}</td>
                       <td class="meta">{r.observeService ?? "—"}</td>
                       <td class="meta">
                         {(data as ProjectsData).effective[r.repo] ?? "send"}
                         {r.neverAuto === true ? " (never-auto)" : ""}
                       </td>
+                      <td class="meta">
+                        {c === undefined
+                          ? "—"
+                          : `${c.sent} sent · ${c.merged} merged · ${c.reverted} reverted · ${c.parked} parked` +
+                            (cost !== null && cost !== undefined ? ` · $${cost.toFixed(2)}/merge` : "")}
+                      </td>
+                      <td class="meta">
+                        {suggestion === undefined ? "—" : (
+                          <>
+                            {suggestion.move === "promote" ? (
+                              <form method="post" style="display:inline">
+                                <input type="hidden" name="intent" value="promote" />
+                                <input type="hidden" name="repo" value={r.repo} />
+                                <input type="hidden" name="to" value={suggestion.authority} />
+                                <button class="approve sm" type="submit" disabled={!(data as ProjectsData).canAuto} title={suggestion.why}>
+                                  promote to {suggestion.authority}
+                                </button>
+                              </form>
+                            ) : (
+                              <span title={suggestion.why}>{suggestion.why}</span>
+                            )}
+                          </>
+                        )}
+                      </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

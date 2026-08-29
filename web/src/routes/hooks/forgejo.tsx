@@ -7,6 +7,7 @@ import {
 } from "../../lib/ship.server.js";
 
 import { BodyTooLarge, claimDelivery, firstHeader, json, parseJson, proposeFromWebhook, readCappedBody } from "../../lib/webhook.server.js";
+import { applyPullRequestEvent, applyPushEvent } from "../../lib/revert.server.js";
 
 export const config = { mode: "app" };
 
@@ -71,6 +72,20 @@ export async function action({ request }: { request: Request }): Promise<Respons
     return proposeFromWebhook(input);
   }
   if (event === "issue_comment") return handleComment(body);
+  // L8 contracts 4 + D4: merged-PR and push events feed the per-repo numbers
+  // and revert detection. Handled before the issues fallthrough so they are
+  // reached at all; everything not a revert or a Ship merge is filtered
+  // inside (revert.server.ts) and answered 200 without touching the store.
+  if (event === "pull_request") {
+    const payload = parseJson<Record<string, unknown>>(body);
+    if (payload === null) return json(400, { title: "malformed JSON body" });
+    return json(200, await applyPullRequestEvent(payload));
+  }
+  if (event === "push") {
+    const payload = parseJson<Record<string, unknown>>(body);
+    if (payload === null) return json(400, { title: "malformed JSON body" });
+    return json(200, await applyPushEvent(payload));
+  }
   // C3: review events. Gitea/Forgejo splits by outcome in the event NAME
   // (pull_request_review_approved / _rejected / _comment) where GitHub sends
   // one pull_request_review and puts the outcome in review.state; both

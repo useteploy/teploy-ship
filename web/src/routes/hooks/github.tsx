@@ -7,6 +7,7 @@ import {
 } from "../../lib/ship.server.js";
 
 import { BodyTooLarge, claimDelivery, firstHeader, json, parseJson, proposeFromWebhook, readCappedBody } from "../../lib/webhook.server.js";
+import { applyPullRequestEvent, applyPushEvent } from "../../lib/revert.server.js";
 
 export const config = { mode: "app" };
 
@@ -59,6 +60,13 @@ export async function action({ request }: { request: Request }): Promise<Respons
   // handled before the issue-shaped parse below.
   if (event === "pull_request_review" || event === "pull_request_review_comment") {
     return handleReview(body, "github");
+  }
+  // L8 contracts 4 + D4: merged-PR and push events feed the per-repo numbers
+  // and revert detection (same shapes as the Forgejo receiver).
+  if (event === "pull_request" || event === "push") {
+    const payload = parseJson<Record<string, unknown>>(body);
+    if (payload === null) return json(400, { title: "malformed JSON body" });
+    return json(200, event === "pull_request" ? await applyPullRequestEvent(payload) : await applyPushEvent(payload));
   }
   const payload = parseJson<{
     action?: string;

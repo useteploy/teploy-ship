@@ -24,6 +24,8 @@ import { FileConnectRequests, NucleusConnectRequests } from "./connect-requests.
 import type { ConnectRequestStore } from "./connect-requests.js";
 import { FileAkirooCursor, NucleusAkirooCursor } from "./akiroo.js";
 import type { AkirooCursorStore } from "./akiroo.js";
+import { FileRepoStatsStore, NucleusRepoStatsStore } from "./repo-stats.js";
+import type { RepoStatsStore } from "./repo-stats.js";
 import { harnessAttempts, harnessRef } from "./harness.js";
 import type { HarnessRef } from "./harness.js";
 import type { EvidenceStore } from "./evidence.js";
@@ -90,10 +92,41 @@ export {
   NucleusAkirooCursor,
   akirooSourceLabel,
   akirooTokenPrint,
+  akirooTrailersFrom,
   akirooWorkspaceKey,
   normalizeAkirooBase,
   resolveAkirooTarget,
 } from "./akiroo.js";
+export type { ProjectRow, RegisterProjectResult } from "./akiroo-project.js";
+export {
+  PROJECT_WEBHOOK_EVENTS,
+  ensureProjectWebhook,
+  parseProjectRow,
+  projectHookUrl,
+  registerProject,
+} from "./akiroo-project.js";
+export type { RevertSignal, ForgeMerge, RevertWatchDeps } from "./revert-watch.js";
+export {
+  mergeFromPullRequestEvent,
+  recordForgeMerge,
+  recordRevert,
+  revertsFromPushEvent,
+} from "./revert-watch.js";
+export type { ProjectAckPayload, ProjectNotifier, RevertPayload } from "./notify.js";
+export { projectNotifier } from "./notify.js";
+export type { AuthoritySuggestion, RepoCounts, RepoStatEntry, RepoStatKind, RepoStatsStore } from "./repo-stats.js";
+export {
+  FileRepoStatsStore,
+  NucleusRepoStatsStore,
+  SUGGEST_MIN_SENT,
+  costPerMerge,
+  emptyCounts,
+  suggestAuthority,
+  summarizeRepoStats,
+} from "./repo-stats.js";
+export type { ManagedBy, ManagedDrift, ManagedFields } from "./projects.js";
+export { managedDrift, managedFieldsOf } from "./projects.js";
+export { authorityCap, minAuthority } from "./ladder.js";
 export type { ExchangeFailure, ExchangeOutcome } from "./akiroo-connect.js";
 export {
   AKIROO_ORG_ID_KEY,
@@ -339,6 +372,14 @@ export interface ShipRuntime {
   users: UserStore;
   /** Seen webhook deliveries — replay protection for the public hook routes. */
   deliveries: DeliveryLog;
+  /**
+   * The four per-repo numbers (sent/merged/reverted/parked), L8 D4 — one row
+   * per (repo, kind, run), idempotent under every at-least-once path that
+   * feeds it. Written by the worker (sent/parked/merged) and by the web
+   * process (merged/reverted off forge webhooks); read by the Projects page,
+   * which turns them into the suggested authority. See repo-stats.ts.
+   */
+  repoStats: RepoStatsStore;
   /** Durable notification outbox (see outbox.ts). */
   outbox: Outbox;
   /**
@@ -379,6 +420,7 @@ export function fileRuntime(): ShipRuntime {
     users: new FileUserStore(),
     deliveries: new FileDeliveryLog(),
     outbox: new FileOutbox(),
+    repoStats: new FileRepoStatsStore(),
     // File mode is single-process by construction, so read-check-write is the
     // honest implementation; the Nucleus path below is the real atomic one.
     claimDecision: async (runId, eventName) => {
@@ -503,6 +545,7 @@ export async function nucleusRuntime(
     users: new NucleusUserStore(db),
     deliveries: new NucleusDeliveryLog(db),
     outbox: new NucleusOutbox(db),
+    repoStats: new NucleusRepoStatsStore(db),
     /**
      * One conditional UPDATE decides the winner: the filter includes the
      * eventName the caller believes is parked, so a stale tab (or a second

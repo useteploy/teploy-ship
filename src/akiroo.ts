@@ -48,6 +48,13 @@ import type { RunOrigin } from "./notify.js";
  *       origin so the findings webhook finds its way back. No issue is opened:
  *       a scan is a question, not a durable work record.
  *
+ *   project (contract 1) {project_ref, repo, slug, verification, authority, ...}
+ *     — Akiroo's copy of the project record (C2: one place to configure).
+ *     Ship upserts its Project by slug, snapshots what it applied into
+ *     managedBy, creates the forge webhook if missing, and acks on the return
+ *       leg. Handled by akiroo-project.ts registerProject, injected here so
+ *       the sweep stays a pure dispatcher.
+ *
  * Every row is claimed in the delivery log before it is handled and acked
  * afterwards, whatever happened. The claim is what makes a re-delivered batch
  * safe (opening an issue is not naturally idempotent); the unconditional ack is
@@ -74,9 +81,28 @@ export function akirooTargetFromEnv(env: NodeJS.ProcessEnv = process.env): Akiro
   return { url, token };
 }
 
-/** The two config keys, named identically in the store and in the environment. */
+/**
+ * The two config keys, named identically in the store and in the environment. */
 export const AKIROO_URL_KEY = "AKIROO_URL";
 export const AKIROO_TOKEN_KEY = "AKIROO_PULL_TOKEN";
+
+/**
+ * Why the connector may not start even with a resolved target, or undefined
+ * when it may (L8 / Phase 0: DEPLOY.md documents the return leg as required,
+ * and this is the code that enforces it).
+ *
+ * Every row kind reports back on SHIP_NOTIFY_URL — runs, project acks
+ * (contract 1), reverts (contract 4) — so a connector started without it is a
+ * queue draining into silence: work executes, and the side that sent it never
+ * hears an outcome. That was the 2026-08-28 lost run. Refusing the whole
+ * connector rather than one row kind is the point.
+ */
+export function akirooConnectorRefusal(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  if ((env.SHIP_NOTIFY_URL ?? "").trim() === "") {
+    return "SHIP_NOTIFY_URL is not set — the Akiroo connector refuses to start without the return leg (see DEPLOY.md)";
+  }
+  return undefined;
+}
 
 /**
  * Normalise and VALIDATE an Akiroo base URL, or null if it is not one.
@@ -559,6 +585,12 @@ export interface AkirooSweepDeps {
    */
   enqueueScan: (input: { repo: string; task: string; model?: string; origin: RunOrigin }) => Promise<{ runId: string }>;
   decide: (row: { runId: string; eventName: string; approved: boolean; reason?: string }) => Promise<DecisionOutcome>;
+  /**
+   * Contract 1's row handler (akiroo-project.ts registerProject). Injected
+   * rather than imported so the sweep stays a dispatcher over injected
+   * effects, like every other row kind here.
+   */
+  registerProject: (payload: Record<string, unknown>) => Promise<void>;
   repoPolicy: RepoPolicyConfig;
   fetchImpl?: typeof fetch;
   log: (line: string) => void;
@@ -680,6 +712,13 @@ export async function handleAkirooRow(row: AkirooRow, deps: AkirooSweepDeps): Pr
     await handleAkirooScan(row, deps);
     return;
   }
+  if (row.kind === "project") {
+    // registerProject never throws — it acks its own failure on the return
+    // leg — so a refused row is handled, not dropped: Akiroo's project page
+    // shows "failed" with the error rather than an outbox that never drains.
+    await deps.registerProject(row.payload);
+    return;
+  }
   // Not an error worth throwing over: a newer Akiroo may emit a kind this build
   // does not know, and the correct answer is to ack it and carry on rather than
   // to stop collecting everything behind it.
@@ -774,6 +813,31 @@ export function akirooRefFrom(text: string | undefined): string | undefined {
   if (text === undefined) return undefined;
   const match = new RegExp(`^${AKIROO_REF_MARKER}(\\S+)\\s*$`, "m").exec(text);
   return match?.[1];
+}
+
+/**
+ * Contract 3: every `Akiroo-*:` footer line in the task text, verbatim —
+ * `Akiroo: work-item:<id>`, `Akiroo-Plan: plan:<id>`, whatever tomorrow's
+ * prefix is. These are copied into the pull request body and as commit
+ * trailers, so which item and which plan a change came from survive in git
+ * itself (C8's accountability, minus the log).
+ *
+ * Line-scoped and prefix-scoped on purpose: a sentence in prose that merely
+ * contains "Akiroo:" is not a footer line, and only `Akiroo`/`Akiroo-X`
+ * tokens count — an arbitrary `Token: value` line in a task body is the
+ * task's own formatting, not provenance. Anywhere in the text is accepted
+ * rather than only the last paragraph, because the footer rides the END of
+ * the issue body while the run's task text is `<title>\n\n<body>` and the
+ * body may grow a URL suffix after it (handleAkirooTask appends one).
+ */
+export function akirooTrailersFrom(text: string | undefined): string[] {
+  if (text === undefined) return [];
+  const out: string[] = [];
+  for (const line of text.split("\n")) {
+    const t = line.trim();
+    if (/^Akiroo(-[A-Za-z0-9]+)*: \S/.test(t) && !out.includes(t)) out.push(t);
+  }
+  return out;
 }
 
 /** What the Settings page shows about the connector. */

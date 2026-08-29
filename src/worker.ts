@@ -39,7 +39,7 @@ import type { Capacity, HostHold, HostLimits, HostLoad } from "./host-load.js";
 import { autoAllowedNow, formatWindow, windowFor } from "./governance.js";
 import type { Windows } from "./governance.js";
 import { makeObserveEmitter } from "./observe.js";
-import { multiNotifier, scanReport, slackNotifier, webhookNotifier } from "./notify.js";
+import { multiNotifier, projectNotifier, scanReport, slackNotifier, webhookNotifier } from "./notify.js";
 import type { RunNotification, RunOrigin } from "./notify.js";
 import { ladderRungsFromEvents, type Rung } from "./ladder.js";
 import { runVerificationSummary, verificationFactsFromEvents } from "./verification-summary.js";
@@ -59,8 +59,17 @@ import {
   detectForgeColocation,
   type SandboxProbe,
 } from "./colocation.js";
-import { akirooRefFrom, akirooTokenPrint, makeAkirooDecider, makeAkirooState, resolveAkirooTarget, sweepAkiroo } from "./akiroo.js";
+import {
+  akirooConnectorRefusal,
+  akirooRefFrom,
+  akirooTokenPrint,
+  makeAkirooDecider,
+  makeAkirooState,
+  resolveAkirooTarget,
+  sweepAkiroo,
+} from "./akiroo.js";
 import type { AkirooSweepDeps } from "./akiroo.js";
+import { registerProject } from "./akiroo-project.js";
 import type { CodeSearch } from "./code-index.js";
 import { costUSD, isPricedModel } from "./pricing.js";
 import { UPGRADE_HOLD_EVENT, replayDrift, upgradeHoldReason } from "./step-fingerprint.js";
@@ -721,6 +730,10 @@ export function startWorker(options: WorkerOptions): {
   // program (SHIP_NOTIFY_URL + SHIP_NOTIFY_SECRET) — that is the one a
   // workspace consumes to offer an approve button. Either, both, or neither.
   const notify = multiNotifier([slackNotifier({ log }), webhookNotifier({ log })]);
+  // L8 contracts 1 and 4: the kind-tagged records (project acks, reverts) on
+  // the same signed URL as the run webhook. One-shot by design — see
+  // projectNotifier's doc in notify.ts.
+  const projectNotify = projectNotifier({ log });
   const outbox = options.outbox ?? new NucleusOutbox(options.runtime.db);
   /** Record that a notification is owed. */
   const owe = (event: RunNotification): Promise<void> =>
@@ -928,6 +941,39 @@ export function startWorker(options: WorkerOptions): {
           notify.runEvent({ runId, status: outcome.status, ...context, ...terminalContext(events), ...verification });
         })());
       }
+      // L8 D4: the per-repo numbers. One row per (repo, kind, runId) — the
+      // store's key makes this idempotent, so the worker recording `merged`
+      // and the forge's own pull_request webhook recording it again is one
+      // row, not two. Sent is every repo run that reached an outcome (a
+      // refused or empty run counts as sent: it was work Akiroo paid for);
+      // parked is a waiting outcome; merged rides the contract-2 fact. The
+      // web process adds reverted (revert-watch) and the forge-merged rows.
+      // Fire-and-forget in the style of attribution: reporting must never
+      // break a settle.
+      tracked((async () => {
+        if (!(await terminalPass)) return;
+        let events: WorkflowEvent[];
+        try {
+          events = await options.runtime.store.load(runId);
+        } catch {
+          return;
+        }
+        const context = notificationContext(events);
+        if (context.repo === undefined || context.mode === "scan") return;
+        const verification = verificationContext(events);
+        const pr = terminalContext(events).pr;
+        try {
+          await options.runtime.repoStats.record({ repo: context.repo, kind: "sent", runId, ...(pr !== undefined ? { pr } : {}), at: new Date().toISOString() });
+          if (outcome.status === "waiting") {
+            await options.runtime.repoStats.record({ repo: context.repo, kind: "parked", runId, at: new Date().toISOString() });
+          }
+          if (verification.merged === true) {
+            await options.runtime.repoStats.record({ repo: context.repo, kind: "merged", runId, ...(pr !== undefined ? { pr } : {}), at: new Date().toISOString() });
+          }
+        } catch (error) {
+          log(`[worker] ${runId}: repo stats failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      })());
       // Dogfood the run into Observe (no-op unless configured).
       if (observe.enabled) {
         tracked((async () => {
@@ -1365,11 +1411,35 @@ export function startWorker(options: WorkerOptions): {
         }
       }
       if (resolution.target === undefined) return;
+      // DEPLOY.md documents the return leg as required; this enforces it at
+      // connector start. See akirooConnectorRefusal for why the WHOLE
+      // connector refuses rather than only the project rows.
+      const refusal = akirooConnectorRefusal();
+      if (refusal !== undefined) {
+        akirooState.recordError(new Error(refusal));
+        if (akirooPrint !== `no-notify:${refusal}`) {
+          akirooPrint = `no-notify:${refusal}`;
+          log(`[worker] akiroo: ${refusal}`);
+        }
+        return;
+      }
       const deps: AkirooSweepDeps = {
         target: resolution.target,
         cursor: akirooCursor,
         deliveries: options.runtime.deliveries,
         intake: options.runtime.intake,
+        registerProject: (payload) =>
+          registerProject(
+            {
+              projects: options.runtime.projects,
+              repoPolicy: akirooRepoPolicy,
+              hookBase: (process.env.SHIP_PUBLIC_URL ?? "").replace(/\/+$/, ""),
+              hookSecret: process.env.SHIP_WEBHOOK_SECRET ?? "",
+              notify: projectNotify,
+              log,
+            },
+            payload,
+          ).then(() => {}),
         enqueueScan: async (input) => {
           const runId = `run-${randomUUID().slice(0, 8)}`;
           await enqueueRun(options.runtime, {

@@ -1,4 +1,5 @@
 import type { RunOrigin } from "./notify.js";
+import { akirooTrailersFrom } from "./akiroo.js";
 import { generateText } from "@neutron-build/ai";
 import type { Message, ModelAdapter } from "@neutron-build/ai";
 import { SandboxExecutor } from "@neutron-build/agents";
@@ -2069,6 +2070,12 @@ async function publishIfRepoRun(
   const ref = assertRepoAllowed(repoUrl, { trust: input.trust ?? "operator", config: policy });
   const token = credentialFor(ref, policy);
   const headToken = co.headRepo !== undefined ? credentialFor(parseRepoUrl(co.headRepo), policy) : "";
+  // Contract 3: the `Akiroo-*:` footer lines ride the task text (the issue
+  // body is the intake detail, which is the run's task). They are appended to
+  // the commit message and the pull request body below, verbatim, so the item
+  // and plan a change came from are readable off the forge and off `git log`
+  // long after this run's page is gone.
+  const trailers = akirooTrailersFrom(input.task);
 
   // 0. Run the suite BEFORE the push, so "tests passed" describes the code that
   // is about to become the pull request rather than an earlier state of it.
@@ -2140,6 +2147,7 @@ async function publishIfRepoRun(
       checkout: co,
       message: `${input.task.slice(0, 68)}\n\nTeploy Ship ${ctx.runId}`,
       ...(headToken !== "" ? { headToken } : {}),
+      ...(trailers.length > 0 ? { trailers } : {}),
     });
     return result.kind === "refused"
       ? { kind: "refused" as const, message: refusalMessage(result.screen) }
@@ -2249,6 +2257,7 @@ async function publishIfRepoRun(
       base: co.base,
       draft: asDraft,
       title: prTitle(input.task, incomplete),
+      ...(trailers.length > 0 ? { trailers } : {}),
       body:
         // The lead is the paragraph a reviewer reads instead of the diff:
         // what was done, what a recorded step verified, what nothing did.
