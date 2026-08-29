@@ -261,7 +261,25 @@ const GATE_CASES: Array<{ what: string; input: RecordedInput; admits: string[]; 
       "step:telemetry-check",
       "step:repo-reviewers",
     ],
-    denies: ["step:tests"],
+    denies: ["step:tests", "step:merge-park", "wait:MERGE_EVENT"],
+  },
+  {
+    // C1: the same run one deploy later, enqueued with the boundary park on.
+    // Only the merge-gate steps and wait are new to it; everything the older
+    // input admitted still holds, which is what lets both routes coexist.
+    what: "a serious run whose park moved to the merge boundary (C1)",
+    input: { task: "t", repo: "r", changeClass: true, mergeGate: true, tests: true },
+    admits: [
+      "step:change-class",
+      "step:merge-park",
+      "step:merge-snapshot",
+      "wait:MERGE_EVENT",
+      "step:merge-restore",
+      "step:merge-rebase",
+      "step:merge-decision",
+      "step:tests",
+    ],
+    denies: ["step:auto-merge"],
   },
   {
     what: "a plan-preview run with steering, the critic and the edit hold",
@@ -354,6 +372,21 @@ test("a step added GATED on a run-input flag moves only the runs that carry the 
   const after: WorkflowStep[] = [...base, { key: "step:three", admits: (i) => i.rollback === true }];
   assert.equal(fingerprintOf(after, OLD), fingerprintOf(base, OLD), "a run without the flag is untouched");
   assert.notEqual(fingerprintOf(after, NEW), fingerprintOf(base, NEW), "a run with the flag sees the new step");
+});
+
+test("the boundary park (C1) moves only the fingerprints of runs that carry mergeGate", () => {
+  // The live instance of the row above: an in-flight `serious` run enqueued
+  // under the mid-run park must replay under it after this deploy, while a
+  // run enqueued by the new build takes the moved park.
+  const preChange: RecordedInput = { task: "t", repo: "r", changeClass: true };
+  const postChange: RecordedInput = { task: "t", repo: "r", changeClass: true, mergeGate: true };
+  assert.notEqual(stepFingerprint(preChange), stepFingerprint(postChange), "the two routes are distinct sequences");
+  const beforeTable = WORKFLOW_STEPS.filter((s) => !s.key.startsWith("step:merge-") && s.key !== "wait:MERGE_EVENT");
+  assert.equal(
+    fingerprintOf(beforeTable, preChange),
+    stepFingerprint(preChange),
+    "and the pre-change run's fingerprint is exactly the table without the merge-gate rows",
+  );
 });
 
 test("renaming a step moves the fingerprint", () => {

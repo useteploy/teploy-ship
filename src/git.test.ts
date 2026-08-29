@@ -9,7 +9,9 @@ import { LocalExecutor } from "@neutron-build/agents";
 import {
   assertGitSafe,
   authenticatedUrl,
+  closePullRequest,
   commitAndPush,
+  markPullRequestReady,
   mergePullRequest,
   findOpenPullRequest,
   formatReviewComments,
@@ -17,6 +19,7 @@ import {
   openPullRequest,
   parseRepoUrl,
   pullRequestUrl,
+  rebaseOntoBase,
   resolvePr,
   setupRepo,
   SHIP_COMMENT_MARKER,
@@ -425,4 +428,147 @@ test("D5: a refused merge is DATA — never a throw, so the PR stays open and th
   const thrown = (async () => { throw new Error("ECONNRESET"); }) as unknown as typeof fetch;
   // status 0 distinguishes "never reached the forge" from "the forge said no".
   assert.deepEqual(await mergePullRequest(GITHUB_REF, "tok", 9, {}, thrown), { kind: "failed", status: 0, reason: "ECONNRESET" });
+});
+
+// --- C1 / C7: the merge boundary's forge calls and the rebase ----------------
+
+test("C1: markPullRequestReady strips the WIP prefix on Forgejo and only then", async () => {
+  const calls: { url: string; method: string; body: unknown }[] = [];
+  let title = "WIP: fix the thing";
+  const fetchImpl = (async (url: string, init?: { method?: string; body?: string }) => {
+    calls.push({ url: String(url), method: init?.method ?? "GET", body: init?.body !== undefined ? JSON.parse(init.body) : undefined });
+    if (init?.method === "PATCH" && init.body !== undefined) title = String((JSON.parse(init.body) as { title: string }).title);
+    return { ok: true, json: async () => ({ title }) };
+  }) as unknown as typeof fetch;
+
+  const ready = await markPullRequestReady(FORGEJO_REF, "tok", 7, fetchImpl);
+  assert.deepEqual(ready, { ok: true });
+  assert.equal(calls[1]?.method, "PATCH", "the WIP prefix leaves by a title update");
+  assert.equal((calls[1]?.body as { title?: string }).title, "fix the thing");
+  assert.equal(calls[1]?.url, "https://forge.example/api/v1/repos/tyler/ship/pulls/7");
+
+  // A title with no prefix is already ready: one GET, no PATCH.
+  calls.length = 0;
+  title = "fix the thing";
+  assert.deepEqual(await markPullRequestReady(FORGEJO_REF, "tok", 7, fetchImpl), { ok: true });
+  assert.equal(calls.length, 1, "nothing to change, nothing sent");
+});
+
+test("C1: markPullRequestReady uses the GraphQL mutation on GitHub, and says why when it cannot", async () => {
+  const calls: { url: string; body: unknown }[] = [];
+  let draft = true;
+  const fetchImpl = (async (url: string, init?: { method?: string; body?: string }) => {
+    calls.push({ url: String(url), body: init?.body !== undefined ? JSON.parse(init.body) : undefined });
+    if (String(url).endsWith("/graphql")) draft = false;
+    return { ok: true, json: async () => (draft ? { draft: true, node_id: "PR_node1" } : { errors: [] }) };
+  }) as unknown as typeof fetch;
+
+  assert.deepEqual(await markPullRequestReady(GITHUB_REF, "tok", 7, fetchImpl), { ok: true });
+  assert.equal(calls[1]?.url, "https://api.github.com/graphql");
+  assert.match(String((calls[1]?.body as { query?: string }).query), /markPullRequestReadyForReview/);
+  assert.equal((calls[1]?.body as { variables?: { id?: string } }).variables?.id, "PR_node1");
+
+  // Already ready: the GET answers draft:false and no mutation is sent.
+  calls.length = 0;
+  draft = false;
+  const json = async () => ({ draft: false });
+  const noop = (async (_u: string, init?: { body?: string }) => {
+    calls.push({ url: "get", body: init?.body });
+    return { ok: true, json };
+  }) as unknown as typeof fetch;
+  assert.deepEqual(await markPullRequestReady(GITHUB_REF, "tok", 7, noop), { ok: true });
+  assert.equal(calls.length, 1);
+
+  // A GraphQL error list is a refusal with the messages, never a throw.
+  const failing = (async () => ({
+    ok: true,
+    json: async () => ({ draft: true, node_id: "PR_node1", errors: [{ message: "not yours" }] }),
+  })) as unknown as typeof fetch;
+  // two calls on one impl: the GET also returns errors, which is fine — the
+  // mutation is still attempted and its answer is what is asserted.
+  const refused = await markPullRequestReady(GITHUB_REF, "tok", 7, failing);
+  assert.equal(refused.ok, false);
+  assert.match(String(refused.reason), /not yours/);
+});
+
+test("C1: closePullRequest PATCHes state=closed on both forges and never throws", async () => {
+  const fj = captureFetch({ ok: true, body: {} });
+  assert.deepEqual(await closePullRequest(FORGEJO_REF, "tok", 7, fj.impl), { ok: true });
+  assert.equal(fj.seen[0]!.url, "https://forge.example/api/v1/repos/tyler/ship/pulls/7");
+  assert.equal(fj.seen[0]!.init.method, "PATCH");
+  assert.deepEqual(JSON.parse(String(fj.seen[0]!.init.body)), { state: "closed" });
+
+  const refused = captureFetch({ ok: false, status: 403, text: "forbidden" });
+  const failed = await closePullRequest(GITHUB_REF, "tok", 7, refused.impl);
+  assert.equal(failed.ok, false);
+  assert.match(String(failed.reason), /403/);
+
+  const thrown = (async () => { throw new Error("ECONNRESET"); }) as unknown as typeof fetch;
+  const dead = await closePullRequest(GITHUB_REF, "tok", 7, thrown);
+  assert.equal(dead.ok, false);
+  assert.equal(dead.reason, "ECONNRESET");
+});
+
+/** A local bare remote with one commit on main, plus a Ship-style branch workspace. */
+async function rebaseFixture(name: string): Promise<{
+  bare: string;
+  ref: ReturnType<typeof parseRepoUrl>;
+  checkout: Awaited<ReturnType<typeof setupRepo>>;
+  work: LocalExecutor;
+  seed: LocalExecutor;
+}> {
+  const bare = await mkdtemp(join(tmpdir(), `${name}-bare-`));
+  const seedDir = await mkdtemp(join(tmpdir(), `${name}-seed-`));
+  const seed = new LocalExecutor({ root: seedDir });
+  await seed.exec(
+    `git init -q -b main . && git config user.email t@t && git config user.name t && echo hello > f.txt && git add -A && git commit -qm seed && git clone -q --bare . ${bare}/repo.git`,
+  );
+  const ref = { kind: "forgejo" as const, base: "file://", owner: "local", repo: "repo", cloneUrl: `${bare}/repo.git` };
+  const workDir = await mkdtemp(join(tmpdir(), `${name}-work-`));
+  const work = new LocalExecutor({ root: workDir });
+  const checkout = await setupRepo(work, { ref, token: "", runId: "run-rebase1" });
+  return { bare, ref, checkout, work, seed };
+}
+
+test("C7: rebaseOntoBase says up-to-date when the default branch has not moved", async () => {
+  const { ref, checkout, work } = await rebaseFixture("git-rebase-uptodate");
+  await work.exec("echo mine >> f.txt && git add -A && git commit -qm change");
+  const outcome = await rebaseOntoBase(work, { ref, token: "", checkout });
+  assert.equal(outcome.kind, "up-to-date");
+  assert.match(String((outcome as { sha: string }).sha), /^[0-9a-f]{40}$/);
+});
+
+test("C7: a moved base rebases cleanly, force-pushes with lease, and reports the new sha", async () => {
+  const { bare, ref, checkout, work, seed } = await rebaseFixture("git-rebase-clean");
+  await work.exec("echo mine >> f.txt && git add -A && git commit -qm change && git push -q origin ship/run-rebase1");
+  // main moves elsewhere while the branch is parked.
+  await seed.exec(`echo moved > other.txt && git add -A && git commit -qm 'move main' && git push -q ${bare}/repo.git main`);
+
+  const outcome = await rebaseOntoBase(work, { ref, token: "", checkout });
+  assert.equal(outcome.kind, "rebased");
+  const rebased = outcome as { base: string };
+  assert.match(rebased.base, /^[0-9a-f]{40}$/);
+
+  // The remote branch is the rebased bytes: main's other.txt is on it.
+  const check = new LocalExecutor({ root: await mkdtemp(join(tmpdir(), "git-rebase-check-")) });
+  await check.exec(`git clone -q --branch ship/run-rebase1 ${bare}/repo.git .`);
+  const other = await check.exec("cat other.txt");
+  assert.equal(other.stdout.trim(), "moved");
+});
+
+test("C7: a conflicting rebase is aborted, reported as files, and leaves the tree where it was", async () => {
+  const { bare, ref, checkout, work, seed } = await rebaseFixture("git-rebase-conflict");
+  await work.exec("echo mine > f.txt && git add -A && git commit -qm change && git push -q origin ship/run-rebase1");
+  // The sha a parked run would return to: its own change, pushed.
+  const before = (await work.exec("git rev-parse HEAD")).stdout.trim();
+  // main rewrites the SAME file, differently.
+  await seed.exec(`echo theirs > f.txt && git add -A && git commit -qm 'move main differently' && git push -q ${bare}/repo.git main`);
+
+  const outcome = await rebaseOntoBase(work, { ref, token: "", checkout });
+  assert.equal(outcome.kind, "conflict");
+  assert.deepEqual((outcome as { files: string[] }).files, ["f.txt"]);
+  const after = (await work.exec("git rev-parse HEAD")).stdout.trim();
+  assert.equal(after, before, "the abort put the branch back");
+  const status = await work.exec("git status --porcelain");
+  assert.equal(status.stdout.trim(), "", "and left no rebase in progress");
 });

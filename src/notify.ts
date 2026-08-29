@@ -152,7 +152,12 @@ export function formatRunNotification(event: RunNotification, publicUrl?: string
       ? `${publicUrl.replace(/\/+$/, "")}/runs/${event.runId}`
       : event.runId;
   if (event.status === "waiting") {
-    const what = event.eventName === "plan-approval" ? "a plan review" : "an approval";
+    const what =
+      event.eventName === "plan-approval"
+        ? "a plan review"
+        : event.eventName === "approve-merge"
+          ? "a merge decision"
+          : "an approval";
     return `Ship run ${event.runId} is parked on ${what} — ${link}`;
   }
   if (event.status === "failed") {

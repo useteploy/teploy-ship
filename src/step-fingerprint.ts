@@ -479,6 +479,19 @@ export const WORKFLOW_STEPS: readonly WorkflowStep[] = [
   { key: "step:repo-memory", admits: repoRun },
   { key: "step:repo-comment", admits: prRun },
   { key: "step:repo-pr", admits: repoRun },
+  // The boundary park (C1), in the source order of mergeGateIfSerious. Its
+  // steps and its wait are admitted by mergeGate alone — NOT by changeClass —
+  // so a run enqueued under the old routing (no mergeGate in its input) keeps
+  // the fingerprint it recorded and replays under the mid-run park it parked
+  // at, while a run with both flags gets the moved park.
+  { key: "step:merge-park", admits: (i) => i.mergeGate === true },
+  { key: "step:merge-snapshot", admits: (i) => i.mergeGate === true },
+  { key: "wait:MERGE_EVENT", admits: (i) => i.mergeGate === true },
+  { key: "step:merge-restore", admits: (i) => i.mergeGate === true },
+  { key: "step:merge-decision", admits: (i) => i.mergeGate === true },
+  { key: "step:merge-rebase", admits: (i) => i.mergeGate === true },
+  { key: "step:merge-decision", admits: (i) => i.mergeGate === true },
+  { key: "step:merge-decision", admits: (i) => i.mergeGate === true },
   { key: "step:rollback", admits: (i) => i.rollback === true },
   { key: "step:auto-merge", admits: (i) => i.autoMerge === true },
   { key: "step:repo-reviewers", admits: (i) => i.reviewers !== undefined },

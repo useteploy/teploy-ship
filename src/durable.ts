@@ -19,6 +19,9 @@ import {
   listPrReviewComments,
   openPullRequest,
   mergePullRequest,
+  markPullRequestReady,
+  closePullRequest,
+  rebaseOntoBase,
   requestReviewers,
   parseRepoUrl,
   pullRequestUrl,
@@ -49,9 +52,9 @@ import type { SteerStore } from "./steer.js";
 import { formatSearchHits } from "./code-index.js";
 import { frameUntrusted, screenUntrusted } from "./guard.js";
 import type { CodeSearch } from "./code-index.js";
-import { CHANGE_EVENT, PLAN_EVENT } from "./plan.js";
-import type { ChangeDecisionPayload } from "./plan.js";
-import { classifyChange, parseNumstat } from "./change-class.js";
+import { CHANGE_EVENT, MERGE_EVENT, PLAN_EVENT } from "./plan.js";
+import type { ChangeDecisionPayload, MergeDecisionPayload } from "./plan.js";
+import { classifyChange, mergeParkSummary, midRunParkReasons, parseNumstat } from "./change-class.js";
 import type { ChangedFile, ChangeVerdict } from "./change-class.js";
 import type { PlanDecisionPayload } from "./plan.js";
 import type { ApprovalPolicy } from "./approval.js";
@@ -275,6 +278,25 @@ export interface DurableAgentInput {
    * the gate there is no verdict to read. See enqueueRun in runtime.ts.
    */
   autoMerge?: boolean;
+  /**
+   * Boundary-only parks (C1). With this on, a change classified `serious`
+   * no longer parks before the push: the run pushes, opens a DRAFT pull
+   * request, runs every verification leg it was given, and parks on
+   * `MERGE_EVENT` ("approve-merge") with the evidence attached. Approve
+   * rebases the branch onto the default branch, re-runs the suite when the
+   * rebase changed the bytes, marks the pull request ready and merges it
+   * where `autoMerge` says the repo wants Ship merging; deny closes it.
+   *
+   * The mid-run park (CHANGE_EVENT, before the push) survives ONLY for a
+   * change that deletes files or touches a schema/migration path — see
+   * midRunParkReasons in change-class.ts.
+   *
+   * A separate flag from `changeClass`, materialised at enqueue, so a run
+   * enqueued under the old routing replays under it: the new steps and the
+   * new wait are admitted by THIS field, and the upgrade fence sees the old
+   * runs' sequence unchanged.
+   */
+  mergeGate?: boolean;
   /**
    * Auto-rollback OBSERVATION (P1-4 / L4): after `preview-deploy` and
    * `telemetry-check`, judge the measured before/after and record a `rollback`
@@ -610,7 +632,7 @@ export interface DurableAgentConfig {
   harnesses?: HarnessAdapter[];
 }
 
-export { CHANGE_EVENT, PLAN_EVENT } from "./plan.js";
+export { CHANGE_EVENT, MERGE_EVENT, PLAN_EVENT } from "./plan.js";
 export type { PlanDecisionPayload } from "./plan.js";
 
 const PLAN_REQUEST =
@@ -983,6 +1005,7 @@ export function durableAgent(
                 result.incomplete,
                 result.evidence,
                 baseline,
+                primary.handle,
               );
         await dispose(config, primary.handle);
         return {
@@ -1093,6 +1116,7 @@ export function durableAgent(
               // runs against that same workspace — see the executor above.
               winner.result.evidence,
               baseline,
+              winner.ws.handle,
             );
       await dispose(config, winner.ws.handle);
       return {
@@ -1839,6 +1863,8 @@ async function publishIfRepoRun(
   incomplete = false,
   evidence?: TestOutcome,
   baseline?: TestOutcome,
+  /** The workspace handle, so the boundary park can snapshot it (C1). */
+  handle?: string,
 ): Promise<string | null> {
   // A SCAN PUBLISHES NOTHING (L2 / D3). First line of the function, before any
   // step, so no call site can forget it — this one guard covers the
@@ -1886,13 +1912,20 @@ async function publishIfRepoRun(
   // the verdict of a RECORDED step, so a replay sees the same class it saw the
   // first time — which is what makes "trivial" usable as merge authority.
   let changeVerdict: ChangeVerdict | undefined;
+  let changedList: ChangedFile[] = [];
+  // C1: a serious change that neither deletes nor migrates is published as a
+  // draft and asked about at the merge boundary (mergeGateIfSerious below)
+  // instead of here. The mid-run park below is kept for the rest.
+  let boundaryPark = false;
   if (input.changeClass === true) {
     const verdict = await ctx.step("change-class", async () => {
       const files = await changedFiles(executor);
       return { ...classifyChange({ files, testsPassed: tests?.kind === "passed" }), files };
     });
     changeVerdict = verdict;
-    if (verdict.class === "serious") {
+    changedList = verdict.files;
+    boundaryPark = input.mergeGate === true && verdict.class === "serious" && midRunParkReasons(verdict.files).length === 0;
+    if (verdict.class === "serious" && !boundaryPark) {
       const decision = await ctx.waitForEvent<ChangeDecisionPayload>(CHANGE_EVENT);
       if (!decision.approved) {
         // The work is NOT discarded: the tree is still in the workspace and the
@@ -2007,7 +2040,10 @@ async function publishIfRepoRun(
   // A diff that tripped a size or shape limit ships as a draft even when the
   // agent finished cleanly.
   const flagged = push.kind === "pushed" && push.warning !== undefined;
-  const asDraft = incomplete || flagged;
+  // A serious change headed for the boundary park opens as a DRAFT: nobody
+  // may merge it before the decision, and the forge's own merge button is the
+  // one path this workflow cannot see.
+  const asDraft = incomplete || flagged || boundaryPark;
   const pr = await ctx.step(
     "repo-pr",
     async () => {
@@ -2056,8 +2092,156 @@ async function publishIfRepoRun(
     draft: asDraft,
     ...(regression !== undefined ? { regression } : {}),
   });
+  if (boundaryPark && changeVerdict !== undefined) {
+    await mergeGateIfSerious(ctx, executor, config, input, { ref, token, checkout: co, pr, handle }, {
+      verdict: changeVerdict,
+      files: changedList,
+      ...(tests !== undefined ? { tests } : {}),
+      ...(regression !== undefined ? { regression } : {}),
+    });
+  }
   await remember(pr.url);
   return pr.url;
+}
+
+/** What the boundary decision produced, as recorded on the `merge-decision` step. */
+type MergeDecisionStep =
+  | { kind: "closed"; reason: string; ok: boolean; detail?: string }
+  | { kind: "ready"; rebase: "up-to-date" | "rebased"; sha: string; ok: boolean; detail?: string }
+  | { kind: "merged"; rebase: "up-to-date" | "rebased"; sha?: string }
+  | { kind: "merge-failed"; rebase: "up-to-date" | "rebased"; status: number; reason: string }
+  | { kind: "blocked"; reasons: string[] };
+
+/**
+ * The boundary park (C1) and what follows it (C7).
+ *
+ * The run has done the work, pushed, opened a DRAFT pull request and recorded
+ * every verification leg it was given. Only now is a person asked, and the
+ * question is the one a person can actually answer with the evidence in front
+ * of them: merge this, or not. Nothing about the run's workspace is needed to
+ * decide, which is what makes a park here survivable for days — the snapshot
+ * exists so the rebase below has a checkout to run in.
+ *
+ * Approve: rebase `ship/<runId>` onto the current default branch. Up to date
+ * means the verification on the pull request still describes these bytes, so
+ * the pull request is marked ready at once. Rebased means it does not, so the
+ * suite is re-run — the run re-verifies rather than asking again — and a
+ * failure leaves the pull request a draft with the failure on it. A conflict
+ * parks again with the files listed. When the repo has opted into unattended
+ * merging (`autoMerge`), the approved and re-verified change is merged; the
+ * human's decision supplies the authority the class gate withheld.
+ *
+ * Deny: the pull request is closed with the reason. The branch stays.
+ */
+async function mergeGateIfSerious(
+  ctx: WorkflowContext,
+  executor: AgentExecutor,
+  config: DurableAgentConfig,
+  input: DurableAgentInput,
+  target: { ref: RepoRef; token: string; checkout: RepoCheckout; pr: { url: string; number: number }; handle?: string },
+  facts: { verdict: ChangeVerdict; files: ChangedFile[]; tests?: TestOutcome; regression?: { worse: boolean; reasons: string[] } },
+): Promise<void> {
+  const { ref, token, checkout, pr } = target;
+  let exec = executor;
+  let handle = target.handle;
+  const canSnapshot = handle !== undefined && config.executor.snapshot !== undefined && config.executor.createFrom !== undefined;
+  let conflict: string[] | undefined;
+  // Bounded: a person can be asked about the same conflict only so many times
+  // before the honest outcome is "this branch needs a human at a keyboard".
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    // The park's own record — what is being asked, and why. This is what the
+    // run page, the approval row and the Akiroo card read.
+    await ctx.step("merge-park", () => ({
+      attempt,
+      class: facts.verdict.class,
+      reasons: facts.verdict.reasons,
+      pr: pr.url,
+      summary: mergeParkSummary(facts.verdict, facts.files, pr.url, conflict),
+      ...(conflict !== undefined ? { conflict } : {}),
+    }));
+    let parkImage: string | undefined;
+    if (canSnapshot && handle !== undefined) {
+      const h = handle;
+      parkImage = await ctx.step("merge-snapshot", () => config.executor.snapshot!(h));
+    }
+    const decision = await ctx.waitForEvent<MergeDecisionPayload>(MERGE_EVENT);
+    if (parkImage !== undefined) {
+      const image = parkImage;
+      const superseded = handle;
+      handle = (await ctx.step("merge-restore", async () => config.executor.createFrom!(image, sandboxOverridesOf(input)))).handle;
+      exec = config.executor.attach(handle);
+      if (superseded !== undefined && superseded !== handle) await dispose(config, superseded);
+    }
+
+    if (!decision.approved) {
+      const reason = decision.reason ?? "denied without a reason";
+      await ctx.step(
+        "merge-decision",
+        async (): Promise<MergeDecisionStep> => {
+          await commentOnPr(ref, token, pr.number, `Closed by Teploy Ship (run ${ctx.runId}): the merge was denied.
+
+${reason}`).catch(() => undefined);
+          const closed = await closePullRequest(ref, token, pr.number);
+          return { kind: "closed", reason, ok: closed.ok, ...(closed.reason !== undefined ? { detail: closed.reason } : {}) };
+        },
+        EXTERNAL_EFFECT_RETRY,
+      );
+      break;
+    }
+
+    const rebase = await ctx.step("merge-rebase", () => rebaseOntoBase(exec, { ref, token, checkout }));
+    if (rebase.kind === "conflict") {
+      conflict = rebase.files;
+      continue;
+    }
+    if (rebase.kind === "failed") {
+      await ctx.step("merge-decision", async (): Promise<MergeDecisionStep> => {
+        await commentOnPr(ref, token, pr.number, `Teploy Ship (run ${ctx.runId}) could not rebase this branch onto ${checkout.base}: ${rebase.reason}`).catch(() => undefined);
+        return { kind: "blocked", reasons: [`rebase failed: ${rebase.reason}`] };
+      });
+      break;
+    }
+    // Rebased = different bytes from the ones the pull request's Verification
+    // section describes. Re-run the suite instead of asking; up to date keeps
+    // the recorded result.
+    const tests = rebase.kind === "rebased" ? await runSuite(ctx, exec, config, input, "rebase-") : facts.tests;
+    const blocked: string[] = [];
+    if (tests !== undefined && tests.kind !== "passed" && tests.kind !== "disabled") blocked.push(`the suite did not pass after the rebase (${tests.kind})`);
+    if (facts.regression?.worse === true) blocked.push(`the service got worse after this change: ${facts.regression.reasons.join("; ")}`);
+    await ctx.step(
+      "merge-decision",
+      async (): Promise<MergeDecisionStep> => {
+        if (blocked.length > 0) {
+          await commentOnPr(ref, token, pr.number, `Approved, but not marked ready by Teploy Ship (run ${ctx.runId}):\n${blocked.map((b) => `- ${b}`).join("\n")}`).catch(() => undefined);
+          return { kind: "blocked", reasons: blocked };
+        }
+        const ready = await markPullRequestReady(ref, token, pr.number);
+        const note =
+          rebase.kind === "rebased"
+            ? `rebased onto ${checkout.base} (${rebase.base.slice(0, 10)}) and re-verified: suite ${tests?.kind ?? "not run"}`
+            : `already on the tip of ${checkout.base}; the recorded verification stands`;
+        if (input.autoMerge !== true) {
+          await commentOnPr(ref, token, pr.number, `Approved for merge (run ${ctx.runId}); ${note}. Marked ready for review.`).catch(() => undefined);
+          return { kind: "ready", rebase: rebase.kind, sha: rebase.sha, ok: ready.ok, ...(ready.reason !== undefined ? { detail: ready.reason } : {}) };
+        }
+        const outcome = await mergePullRequest(ref, token, pr.number, {
+          method: "squash",
+          message: `Merged by Teploy Ship (run ${ctx.runId}) on an approved merge decision.
+
+Classified ${facts.verdict.class}: ${facts.verdict.reasons.join("; ")}
+${note}.`,
+        });
+        return outcome.kind === "merged"
+          ? { kind: "merged", rebase: rebase.kind, ...(outcome.sha !== undefined ? { sha: outcome.sha } : {}) }
+          : { kind: "merge-failed", rebase: rebase.kind, status: outcome.status, reason: outcome.reason };
+      },
+      EXTERNAL_EFFECT_RETRY,
+    );
+    break;
+  }
+  // The restored workspace is this function's own; the caller only knows the
+  // handle it passed in, which the restore already released.
+  if (handle !== undefined && handle !== target.handle) await dispose(config, handle);
 }
 
 /** What the `rollback` step recorded. Every branch is an outcome, never a throw. */

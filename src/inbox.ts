@@ -181,6 +181,8 @@ function promptFor(meta: RunMeta, action?: string): string {
     );
   }
   if (meta.eventName === "plan-approval") return "Review the agent's plan before it acts.";
+  if (meta.eventName === "approve-merge")
+    return "The work is done and published as a draft pull request. Decide the merge.";
   if (action !== undefined) return `Approve this action? ${action}`;
   return "This run is parked waiting for approval.";
 }

@@ -850,3 +850,146 @@ export async function mergePullRequest(
     return { kind: "failed", status: 0, reason: error instanceof Error ? error.message : String(error) };
   }
 }
+
+/** What a rebase of the work branch onto the default branch produced. Never a throw. */
+export type RebaseOutcome =
+  /** The base had not moved; nothing to redo. */
+  | { kind: "up-to-date"; sha: string }
+  /** Rebased cleanly and force-pushed (with lease) — the branch is new bytes and must be re-verified. */
+  | { kind: "rebased"; sha: string; base: string }
+  /** The rebase stopped on these files; the tree is back where it was. */
+  | { kind: "conflict"; files: string[] }
+  /** Something other than a conflict went wrong (fetch, push). The tree is back where it was. */
+  | { kind: "failed"; reason: string };
+
+/**
+ * Rebase the work branch onto the CURRENT default branch before it is marked
+ * ready or merged (C7). Serialising runs per repo makes this rare, but a park
+ * can outlive any amount of other activity on the base, and a pull request that
+ * was verified against last week's main is not the thing being merged.
+ *
+ * A clean rebase is force-pushed WITH LEASE against the sha we last pushed, so
+ * a human commit on the branch during the park refuses rather than vanishes.
+ * A conflict is aborted and reported as files; the caller asks a person with
+ * the list. Nothing here throws: every outcome is a value the caller records.
+ */
+export async function rebaseOntoBase(
+  executor: AgentExecutor,
+  options: { ref: RepoRef; token: string; checkout: RepoCheckout },
+): Promise<RebaseOutcome> {
+  const { ref, token, checkout } = options;
+  let before: string;
+  try {
+    before = await git(executor, "git rev-parse HEAD");
+    await git(executor, `git fetch ${authenticatedUrl(ref, token)} ${checkout.base} 2>&1`, 300_000);
+  } catch (error) {
+    return { kind: "failed", reason: error instanceof Error ? error.message : String(error) };
+  }
+  const base = await git(executor, "git rev-parse FETCH_HEAD").catch(() => "");
+  const ancestor = await executor.exec("git merge-base --is-ancestor FETCH_HEAD HEAD", { timeoutMs: 60_000 });
+  if (ancestor.exitCode === 0) return { kind: "up-to-date", sha: before };
+  const rebase = await executor.exec("git rebase FETCH_HEAD 2>&1", { timeoutMs: 300_000 });
+  if (rebase.exitCode !== 0) {
+    const unmerged = await executor.exec("git diff --name-only --diff-filter=U", { timeoutMs: 60_000 });
+    const files = unmerged.exitCode === 0 ? unmerged.stdout.split("\n").map((l) => l.trim()).filter((l) => l !== "") : [];
+    await executor.exec("git rebase --abort", { timeoutMs: 60_000 }).catch(() => undefined);
+    if (files.length > 0) return { kind: "conflict", files };
+    return { kind: "failed", reason: `rebase failed: ${(rebase.stdout + rebase.stderr).slice(0, 500)}` };
+  }
+  try {
+    const sha = await git(executor, "git rev-parse HEAD");
+    await git(
+      executor,
+      `git push --force-with-lease=refs/heads/${checkout.branch}:${before} ${authenticatedUrl(ref, token)} HEAD:refs/heads/${checkout.branch} 2>&1`,
+      300_000,
+    );
+    return { kind: "rebased", sha, base };
+  } catch (error) {
+    // Put the branch back so a retry starts from the recorded state.
+    await executor.exec(`git reset --hard ${before}`, { timeoutMs: 60_000 }).catch(() => undefined);
+    return { kind: "failed", reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function forgeHeaders(ref: RepoRef, token: string): Record<string, string> {
+  return {
+    "content-type": "application/json",
+    authorization: ref.kind === "github" ? `Bearer ${token}` : `token ${token}`,
+    ...(ref.kind === "github" ? { accept: "application/vnd.github+json" } : {}),
+  };
+}
+
+function pullEndpoint(ref: RepoRef, pr: number): string {
+  return ref.kind === "github"
+    ? `https://api.github.com/repos/${ref.owner}/${ref.repo}/pulls/${pr}`
+    : `${ref.base}/api/v1/repos/${ref.owner}/${ref.repo}/pulls/${pr}`;
+}
+
+/**
+ * Take a pull request out of draft. Forgejo/Gitea encode draft as the "WIP:"
+ * title prefix openPullRequest wrote, so ready is a title PATCH; GitHub's REST
+ * API has no draft field on update, so it is the GraphQL mutation, keyed by
+ * the node id a GET returns. Returns false rather than throwing: the caller
+ * records the outcome and the pull request is no less real for still being a
+ * draft.
+ */
+export async function markPullRequestReady(
+  ref: RepoRef,
+  token: string,
+  pr: number,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ ok: boolean; reason?: string }> {
+  try {
+    const current = await fetchImpl(pullEndpoint(ref, pr), { headers: forgeHeaders(ref, token) });
+    if (!current.ok) return { ok: false, reason: `read failed (${current.status})` };
+    const body = (await current.json()) as { title?: string; node_id?: string; draft?: boolean };
+    if (ref.kind === "github") {
+      if (body.draft === false) return { ok: true };
+      if (typeof body.node_id !== "string") return { ok: false, reason: "the pull request has no node id" };
+      const response = await fetchImpl("https://api.github.com/graphql", {
+        method: "POST",
+        headers: forgeHeaders(ref, token),
+        body: JSON.stringify({
+          query: "mutation($id: ID!) { markPullRequestReadyForReview(input: {pullRequestId: $id}) { pullRequest { isDraft } } }",
+          variables: { id: body.node_id },
+        }),
+      });
+      if (!response.ok) return { ok: false, reason: `graphql failed (${response.status})` };
+      const result = (await response.json().catch(() => ({}))) as { errors?: Array<{ message?: string }> };
+      if (Array.isArray(result.errors) && result.errors.length > 0) {
+        return { ok: false, reason: result.errors.map((e) => e.message ?? "error").join("; ").slice(0, 300) };
+      }
+      return { ok: true };
+    }
+    const title = body.title ?? "";
+    const stripped = title.replace(/^\s*(WIP|\[WIP\]):?\s*/i, "");
+    if (stripped === title) return { ok: true };
+    const response = await fetchImpl(pullEndpoint(ref, pr), {
+      method: "PATCH",
+      headers: forgeHeaders(ref, token),
+      body: JSON.stringify({ title: stripped }),
+    });
+    return response.ok ? { ok: true } : { ok: false, reason: `title update failed (${response.status})` };
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/** Close a pull request without merging. Same PATCH on both forges. Never throws. */
+export async function closePullRequest(
+  ref: RepoRef,
+  token: string,
+  pr: number,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ ok: boolean; reason?: string }> {
+  try {
+    const response = await fetchImpl(pullEndpoint(ref, pr), {
+      method: "PATCH",
+      headers: forgeHeaders(ref, token),
+      body: JSON.stringify({ state: "closed" }),
+    });
+    return response.ok ? { ok: true } : { ok: false, reason: `close failed (${response.status})` };
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+  }
+}

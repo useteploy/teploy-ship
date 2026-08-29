@@ -3,11 +3,14 @@ import { test } from "node:test";
 
 import {
   DECISION_MARKER,
+  MIGRATION_PATHS,
   changeClassConfigFromEnv,
   changeClassSummary,
   classifyChange,
   defaultChangeClassConfig,
   matchesGlob,
+  mergeParkSummary,
+  midRunParkReasons,
   parseNumstat,
 } from "./change-class.js";
 import type { ChangedFile } from "./change-class.js";
@@ -195,4 +198,64 @@ test("the park's summary tells a human what they are deciding", () => {
   const trivial = changeClassSummary(classifyChange({ files: [file("README.md", 1, 0)], testsPassed: true }), [file("README.md", 1, 0)]);
   assert.match(trivial, /classified \*\*trivial\*\*/);
   assert.doesNotMatch(trivial, /held for a decision/, "nothing to decide");
+});
+
+// --- C1: which serious changes still park mid-run ----------------------------
+
+test("midRunParkReasons: only deletions and schema paths hold the work before the push", () => {
+  // The C1 rule, stated as data: a serious change whose reasons are empty is
+  // published as a draft and asked about at the merge boundary instead.
+  assert.deepEqual(midRunParkReasons([file("src/a.ts", 500, 0)]), [], "a big change is undraftable-safe: the draft contains it");
+
+  const deletes = midRunParkReasons([file("src/gone.ts", 0, 5, true), file("src/also-gone.ts", 0, 5, true)]);
+  assert.equal(deletes.length, 1);
+  assert.match(deletes[0]!, /deletes src\/gone\.ts, src\/also-gone\.ts/);
+
+  const migrates = midRunParkReasons([file("db/migrations/0007.sql", 2, 0)]);
+  assert.match(migrates[0]!, /db\/migrations\/0007\.sql is a schema or migration path/);
+
+  const both = midRunParkReasons([file("db/migrate/x.sql", 2, 0), file("src/gone.ts", 0, 5, true)]);
+  assert.equal(both.length, 2, "every reason is collected, like classifyChange");
+});
+
+test("midRunParkReasons: five deletions are named, more are summarised, and the migration globs match their dialect", () => {
+  const six = midRunParkReasons(Array.from({ length: 6 }, (_, i) => file(`src/g${i}.ts`, 0, 5, true)));
+  assert.match(six[0]!, /, …$/, "the tail is elided, not truncated silently");
+
+  for (const [path, glob] of [
+    ["db/migrations/1.sql", "**/migrations/**"],
+    ["db/migrate/1.go", "**/migrate/**"],
+    ["schema.sql", "**/schema.sql"],
+  ] as const) {
+    assert.equal(midRunParkReasons([file(path, 1, 0)]).length, 1, `${path} parks mid-run`);
+    assert.ok(MIGRATION_PATHS.includes(glob), `${glob} is a declared migration path`);
+  }
+  assert.deepEqual(midRunParkReasons([file("src/migrations-not/x.ts", 1, 0)]), [], "a lookalike directory does not");
+});
+
+test("every migration path is also sensitive, so a migrate-only change actually classifies serious", () => {
+  // midRunParkReasons is only consulted for a serious verdict; a path that
+  // parks mid-run but never classifies serious is dead config.
+  for (const glob of MIGRATION_PATHS) {
+    assert.ok(
+      defaultChangeClassConfig.sensitivePaths.includes(glob),
+      `${glob} must appear in sensitivePaths or the mid-run park can never fire`,
+    );
+  }
+});
+
+test("the boundary park's summary tells a human what they are deciding, conflicts included", () => {
+  const files = [file("src/big.ts", 401, 0)];
+  const verdict = classifyChange({ files, testsPassed: true });
+  const text = mergeParkSummary(verdict, files, "http://forge/o/r/pulls/9");
+  assert.match(text, /classified \*\*serious\*\*/);
+  assert.match(text, /draft pull request: http:\/\/forge\/o\/r\/pulls\/9/);
+  assert.match(text, /held at the merge boundary/);
+  assert.match(text, /deny to close the pull request/);
+  assert.doesNotMatch(text, /conflict/);
+
+  const conflicted = mergeParkSummary(verdict, files, "http://forge/o/r/pulls/9", ["src/big.ts"]);
+  assert.match(conflicted, /could not be rebased/);
+  assert.match(conflicted, /- src\/big\.ts/);
+  assert.match(conflicted, /approve again/);
 });

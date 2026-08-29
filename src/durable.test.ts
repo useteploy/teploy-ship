@@ -9,7 +9,7 @@ import { LocalExecutor } from "@neutron-build/agents";
 import type { AgentExecutor } from "@neutron-build/agents";
 import { MemoryEventStore, cancelRun, deliverEvent, executeRun } from "@neutron-build/workflow";
 
-import { CHANGE_EVENT, PLAN_EVENT, approvalEvent, durableAgent } from "./durable.js";
+import { CHANGE_EVENT, MERGE_EVENT, PLAN_EVENT, approvalEvent, durableAgent } from "./durable.js";
 import { FileRepoMemory } from "./repo-memory.js";
 import type { ExecutorProvider, RecoveryTuning } from "./durable.js";
 import { defaultApprovalPolicy } from "./approval.js";
@@ -2692,6 +2692,295 @@ test("D2: the gate is OFF unless the run's input says so — an old run replays 
     assert.equal(names.includes("change-class"), false, "and no new step in the log");
   } finally {
     globalThis.fetch = orig;
+  }
+});
+
+// --- C1: the boundary park — serious work runs to a draft PR, then asks -------
+
+test("C1: a serious change that deletes nothing runs to a DRAFT PR and parks on approve-merge", async () => {
+  assert.equal(MERGE_EVENT, "approve-merge", "the wire contract Akiroo's decision queue answers");
+  const fixture = await mergeFixture("c1-park");
+  try {
+    // 501 lines in one file: over the serious threshold, and neither a
+    // deletion nor a migration path — exactly the change C1 says may be asked
+    // about at the merge boundary instead of before the work.
+    const { model } = reactiveModel([
+      "```bash\n(yes x | head -501) > big.txt\n```",
+      "```finish\nadded the big file\n```",
+      "```bash\nwc -l big.txt\n```",
+      "```finish\nadded the big file\n```",
+    ]);
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-c1-park",
+      store,
+      input: { task: "add the big file", repo: fixture.repo, changeClass: true, mergeGate: true },
+    });
+
+    assert.equal(outcome.status, "waiting", "the run parks — but at the boundary");
+    assert.equal(outcome.eventName, MERGE_EVENT, "and the question is the merge");
+
+    const events = await store.load("run-c1-park");
+    const names = events.filter((e) => e.type === "step-completed").map((e) => e.name ?? "");
+    assert.ok(names.includes("repo-push"), "the work is published before the ask");
+    assert.ok(names.includes("repo-pr"));
+    assert.ok(names.includes("merge-park"));
+    assert.equal(names.includes("change-rejected"), false);
+
+    const created = fixture.calls.find((c) => c.method === "POST" && c.url.endsWith("/pulls"));
+    assert.ok(created !== undefined, "a pull request was opened");
+    assert.match(String((created!.body as { title?: string }).title), /^WIP: /, "as a DRAFT nobody may merge yet");
+    assert.equal(fixture.merges().length, 0, "and nothing merged it");
+
+    const park = stepResult(events, "merge-park");
+    assert.match(String(park?.summary), /merge boundary/);
+    assert.match(String(park?.summary), /draft pull request/);
+
+    // Approving marks the pull request ready; without autoMerge on the run's
+    // input, a human's merge button is still the last step.
+    await deliverEvent(store, "run-c1-park", MERGE_EVENT, { approved: true });
+    const resumed = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-c1-park",
+      store,
+      input: { task: "add the big file", repo: fixture.repo, changeClass: true, mergeGate: true },
+    });
+    assert.equal(resumed.status, "completed");
+    const decision = stepResult(await store.load("run-c1-park"), "merge-decision");
+    assert.equal(decision?.kind, "ready");
+    assert.equal(decision?.rebase, "up-to-date", "the bare had not moved, so the recorded verification stands");
+    assert.equal(fixture.merges().length, 0, "a repo that never opted into autoMerge still gets a human merge");
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("C1: denying the boundary closes the pull request and keeps the branch", async () => {
+  const fixture = await mergeFixture("c1-deny");
+  try {
+    const { model } = reactiveModel([
+      "```bash\n(yes x | head -501) > big.txt\n```",
+      "```finish\nadded the big file\n```",
+      "```bash\nwc -l big.txt\n```",
+      "```finish\nadded the big file\n```",
+    ]);
+    const store = new MemoryEventStore();
+    const input = { task: "add the big file", repo: fixture.repo, changeClass: true, mergeGate: true };
+    const parked = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-c1-deny",
+      store,
+      input,
+    });
+    assert.equal(parked.eventName, MERGE_EVENT);
+
+    await deliverEvent(store, "run-c1-deny", MERGE_EVENT, { approved: false, reason: "wrong direction" });
+    const done = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-c1-deny",
+      store,
+      input,
+    });
+    assert.equal(done.status, "completed", "a denial is a decision, not a failure");
+    const decision = stepResult(await store.load("run-c1-deny"), "merge-decision");
+    assert.equal(decision?.kind, "closed");
+    assert.equal(decision?.reason, "wrong direction");
+
+    const close = fixture.calls.find((c) => c.method === "PATCH" && (c.body as { state?: string } | undefined)?.state === "closed");
+    assert.ok(close !== undefined, "the pull request was closed on the forge");
+    assert.equal(fixture.merges().length, 0, "and never merged");
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("C1: an approved rebase onto a MOVED base re-runs the suite before the PR is marked ready", async () => {
+  const fixture = await mergeFixture("c1-rebase");
+  // A second checkout of the same bare, used to move main while the run parks.
+  const mover = await mkdtemp(join(tmpdir(), "durable-c1-rebase-mover-"));
+  const moverExec = new LocalExecutor({ root: mover });
+  await moverExec.exec(`git clone -q ${fixture.repo.replace("file://", "")} . && git config user.email t@t && git config user.name t`);
+  try {
+    const { model } = reactiveModel([
+      "```bash\n(yes x | head -501) > big.txt\n```",
+      "```finish\nadded the big file\n```",
+      "```bash\nwc -l big.txt\n```",
+      "```finish\nadded the big file\n```",
+    ]);
+    const store = new MemoryEventStore();
+    const input = {
+      task: "add the big file",
+      repo: fixture.repo,
+      changeClass: true,
+      mergeGate: true,
+      tests: true,
+      testCommand: "true",
+    };
+    const parked = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-c1-rebase",
+      store,
+      input,
+    });
+    assert.equal(parked.eventName, MERGE_EVENT);
+
+    // The base moves under the park: main now carries a change to ANOTHER
+    // file, so the rebase is clean and the re-verify decides the merge.
+    await moverExec.exec("echo moved > other.txt && git add -A && git commit -qm 'move main' && git push -q origin main");
+
+    await deliverEvent(store, "run-c1-rebase", MERGE_EVENT, { approved: true });
+    const resumed = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-c1-rebase",
+      store,
+      input,
+    });
+    assert.equal(resumed.status, "completed");
+    const names = (await store.load("run-c1-rebase")).filter((e) => e.type === "step-completed").map((e) => e.name ?? "");
+    assert.ok(names.includes("merge-rebase"));
+    assert.ok(names.includes("rebase-tests"), "the suite ran again over the rebased bytes");
+    const decision = stepResult(await store.load("run-c1-rebase"), "merge-decision");
+    assert.equal(decision?.kind, "ready");
+    assert.equal(decision?.rebase, "rebased", "and the step says the bytes changed");
+
+    // The force-pushed branch is the rebased one: main's other.txt is on it.
+    const bare = fixture.repo.replace("file://", "");
+    const check = new LocalExecutor({ root: await mkdtemp(join(tmpdir(), "durable-c1-rebase-check-")) });
+    await check.exec(`git clone -q --branch ship/run-c1-rebase ${bare} .`);
+    const other = await check.exec("cat other.txt");
+    assert.equal(other.stdout.trim(), "moved");
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("C1: a rebase conflict re-parks with the files listed, and the asking is bounded", async () => {
+  const fixture = await mergeFixture("c1-conflict");
+  const mover = await mkdtemp(join(tmpdir(), "durable-c1-conflict-mover-"));
+  const moverExec = new LocalExecutor({ root: mover });
+  await moverExec.exec(`git clone -q ${fixture.repo.replace("file://", "")} . && git config user.email t@t && git config user.name t`);
+  try {
+    const { model } = reactiveModel([
+      "```bash\n(yes x | head -501) > big.txt\n```",
+      "```finish\nadded the big file\n```",
+      "```bash\nwc -l big.txt\n```",
+      "```finish\nadded the big file\n```",
+    ]);
+    const store = new MemoryEventStore();
+    const input = {
+      task: "add the big file",
+      repo: fixture.repo,
+      changeClass: true,
+      mergeGate: true,
+      tests: true,
+      testCommand: "true",
+    };
+    const wf = durableAgent({ model, executor: fixture.provider, workdir: "." });
+    const parked = await executeRun({ workflow: wf, runId: "run-c1-conflict", store, input });
+    assert.equal(parked.eventName, MERGE_EVENT);
+
+    // main now edits the SAME file the branch touched: the rebase must stop.
+    await moverExec.exec("(yes y | head -501) > big.txt && git add -A && git commit -qm 'move main differently' && git push -q origin main");
+
+    await deliverEvent(store, "run-c1-conflict", MERGE_EVENT, { approved: true });
+    const reparked = await executeRun({ workflow: wf, runId: "run-c1-conflict", store, input });
+    assert.equal(reparked.status, "waiting", "a conflict asks a person again, with the list");
+    assert.equal(reparked.eventName, MERGE_EVENT);
+    const park = stepResult(await store.load("run-c1-conflict"), "merge-park");
+    assert.deepEqual(park?.conflict, ["big.txt"]);
+    assert.match(String(park?.summary), /could not be rebased/);
+    assert.match(String(park?.summary), /- big\.txt/);
+    assert.equal(fixture.merges().length, 0, "nothing merged through a conflict");
+
+    // The same conflict is asked about at most three times; the third
+    // unanswered-by-resolution approve ends the run with the draft PR as it
+    // stands — a person finishes it at a keyboard, which is what it needed.
+    await deliverEvent(store, "run-c1-conflict", MERGE_EVENT, { approved: true });
+    const again = await executeRun({ workflow: wf, runId: "run-c1-conflict", store, input });
+    assert.equal(again.status, "waiting", "the second conflict asks once more");
+    await deliverEvent(store, "run-c1-conflict", MERGE_EVENT, { approved: true });
+    const done = await executeRun({ workflow: wf, runId: "run-c1-conflict", store, input });
+    assert.equal(done.status, "completed", "and the third conflict does not ask a fourth time");
+    const events = await store.load("run-c1-conflict");
+    const lastPark = stepResult(events, "merge-park");
+    assert.equal(lastPark?.attempt, 3);
+    assert.equal(stepResult(events, "merge-decision"), undefined, "nothing was decided by the machine");
+    assert.equal(fixture.merges().length, 0);
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("C1: a deletion still parks MID-RUN with the merge gate on — the draft is not a safe place to ask", async () => {
+  const fixture = await mergeFixture("c1-delete");
+  try {
+    const { model } = reactiveModel([
+      "```bash\nrm f.txt\n```",
+      "```finish\nremoved the seed file\n```",
+      "```bash\nls\n```",
+      "```finish\nremoved the seed file\n```",
+    ]);
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-c1-delete",
+      store,
+      input: { task: "remove the seed file", repo: fixture.repo, changeClass: true, mergeGate: true },
+    });
+
+    assert.equal(outcome.status, "waiting");
+    assert.equal(outcome.eventName, CHANGE_EVENT, "a deletion parks BEFORE the push, boundary park or not");
+    const names = (await store.load("run-c1-delete")).filter((e) => e.type === "step-completed").map((e) => e.name ?? "");
+    assert.equal(names.includes("repo-push"), false);
+    assert.equal(names.includes("merge-park"), false);
+    assert.equal(fixture.calls.filter((c) => c.method !== "GET").length, 0, "nothing reached the forge");
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("C1: approving the boundary on an auto-merge repo merges the pull request", async () => {
+  const fixture = await mergeFixture("c1-automerge");
+  try {
+    const { model } = reactiveModel([
+      "```bash\n(yes x | head -501) > big.txt\n```",
+      "```finish\nadded the big file\n```",
+      "```bash\nwc -l big.txt\n```",
+      "```finish\nadded the big file\n```",
+    ]);
+    const store = new MemoryEventStore();
+    const input = {
+      task: "add the big file",
+      repo: fixture.repo,
+      changeClass: true,
+      mergeGate: true,
+      autoMerge: true,
+      tests: true,
+      testCommand: "true",
+    };
+    const parked = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-c1-automerge",
+      store,
+      input,
+    });
+    assert.equal(parked.eventName, MERGE_EVENT);
+    assert.equal(fixture.merges().length, 0, "autoMerge does not merge a serious change before the decision");
+
+    await deliverEvent(store, "run-c1-automerge", MERGE_EVENT, { approved: true });
+    const done = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-c1-automerge",
+      store,
+      input,
+    });
+    assert.equal(done.status, "completed");
+    const decision = stepResult(await store.load("run-c1-automerge"), "merge-decision");
+    assert.equal(decision?.kind, "merged", "the human's approval supplies the authority the class gate withheld");
+    assert.equal(fixture.merges().length, 1);
+  } finally {
+    fixture.restore();
   }
 });
 

@@ -213,7 +213,7 @@ export {
 } from "./repo-policy.js";
 export type { Notifier, RunNotification } from "./notify.js";
 export { formatRunNotification, notifiable, slackNotifier } from "./notify.js";
-export { PLAN_EVENT } from "./plan.js";
+export { PLAN_EVENT, MERGE_EVENT } from "./plan.js";
 export type { PlanDecisionPayload } from "./plan.js";
 export type { ModelPricing, UsageLike } from "./pricing.js";
 export { costUSD, pricingFor, isPricedModel, UNKNOWN_MODEL_PRICING } from "./pricing.js";
@@ -259,6 +259,7 @@ export interface ShipRuntime {
       observeRepo?: string;
       harness?: HarnessRef;
       harnessAttempts?: HarnessRef[];
+      mergeGate?: boolean;
     },
   ): Promise<RunOutcome | null>;
   saveMeta(meta: RunMeta): Promise<void>;
@@ -773,6 +774,22 @@ export async function enqueueRun(
      */
     changeClass?: boolean;
     /**
+     * Move the `serious` park to the merge boundary (C1): the run publishes a
+     * draft pull request with all its verification, then parks once on
+     * "approve-merge". Materialised HERE, like changeClass, because it adds
+     * steps and a waitForEvent the log must carry from the start — a run
+     * enqueued before this field exists replays under the old mid-run park,
+     * which is exactly what the separate flag (rather than keying the new
+     * steps on changeClass) preserves.
+     *
+     * Follows changeClass wherever it is on, with SHIP_MERGE_GATE=0 as the
+     * routing kill switch: moving the park strictly REDUCES mid-run human
+     * blocking, so there is no opt-in condition to wait for. Without the
+     * class gate the flag means nothing (no verdict, no park), and it is
+     * never set then. See DurableAgentInput.mergeGate in durable.ts.
+     */
+    mergeGate?: boolean;
+    /**
      * Merge a `trivial` change without a human (L5). Absent falls back to the
      * repo's project record; there is no env default, because "which repos may
      * merge themselves" is a per-repo decision by construction.
@@ -949,6 +966,10 @@ export async function enqueueRun(
   // per deployment once someone is watching the inbox, which is exactly the
   // condition L5 and L6 also depend on.
   const changeClass = scan ? undefined : (options.changeClass ?? (options.repo !== undefined && envFlag("SHIP_CHANGE_CLASS") ? true : undefined));
+  // The boundary park (C1). On wherever the class gate is (see the option
+  // comment above), off for scans, and SHIP_MERGE_GATE=0 restores the old
+  // mid-run routing without disturbing anything else about the run.
+  const mergeGate = scan ? undefined : (options.mergeGate ?? (changeClass === true && !envFlagOff("SHIP_MERGE_GATE") ? true : undefined));
   // AUTO-MERGE (L5 / D5). Per repo, off unless the project record says on, and
   // additionally requires the change-class gate: `trivial` is the entire
   // authority for merging without a human (see change-class.ts), and with the
@@ -1029,6 +1050,7 @@ export async function enqueueRun(
         ...(tests === true ? { tests: true } : {}),
         ...(testsFeedback === true ? { testsFeedback: true } : {}),
         ...(changeClass === true ? { changeClass: true } : {}),
+        ...(mergeGate === true ? { mergeGate: true } : {}),
         ...(autoMerge === true ? { autoMerge: true } : {}),
         ...(rollback === true ? { rollback: true } : {}),
         ...(autoDeploy === true ? { autoDeploy: true } : {}),

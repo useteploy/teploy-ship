@@ -33,3 +33,20 @@ export interface ChangeDecisionPayload {
   approved: boolean;
   reason?: string;
 }
+
+/**
+ * The boundary park (C1): a `serious` change no longer waits before the work.
+ * The run finishes, verifies, opens a DRAFT pull request, and parks HERE with
+ * the evidence attached. Deliver a MergeDecisionPayload: approve marks the
+ * pull request ready (and merges it where the repo's policy allows), deny
+ * closes it with the reason.
+ *
+ * The name is the wire contract Akiroo's decision queue answers
+ * (`event_name: "approve-merge"`); it is not free to change.
+ */
+export const MERGE_EVENT = "approve-merge";
+
+export interface MergeDecisionPayload {
+  approved: boolean;
+  reason?: string;
+}
