@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { deployPreview, destroyPreview, previewComment, previewTargetFromEnv, rollbackDeploy, type CommandResult, type CommandRunner } from "./deploy.js";
+import { mkdir, mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { deployPreview, destroyPreview, previewComment, previewTargetFromEnv, resolvePreviewTarget, rollbackDeploy, type CommandResult, type CommandRunner, type PreviewOutcome } from "./deploy.js";
 
 /** A runner that plays scripted results and records every argv it saw. */
 function scriptedRunner(results: Record<string, CommandResult>): {
@@ -43,8 +46,10 @@ const OK_LIST: CommandResult = {
 test("a preview is built, deployed and reported — and the tag is passed, never re-derived", async () => {
   const { run, calls, cwds } = scriptedRunner({ build: OK_BUILD, "preview deploy": OK_DEPLOY, "preview list": OK_LIST });
   const outcome = await deployPreview({ dir: "/srv/app", run }, "fix/login");
-
-  assert.deepEqual(outcome, {
+  assert.equal(outcome?.kind, "deployed");
+  const { deployedAt, ...rest } = outcome as Extract<PreviewOutcome, { kind: "deployed" }>;
+  assert.ok(typeof deployedAt === "string" && !Number.isNaN(Date.parse(deployedAt)), "the outcome stamps when the deploy returned, for the observe window to anchor on");
+  assert.deepEqual({ ...rest, kind: "deployed" }, {
     kind: "deployed",
     url: "https://preview-fix-login.example.com",
     image: "api-build-abc1234",
@@ -228,4 +233,23 @@ test("P1-4: a failed rollback is reported, not thrown — the run still ends wit
   const outcome = await rollbackDeploy({ dir: "/srv/app", run });
   assert.equal(outcome.kind, "failed");
   assert.match(outcome.kind === "failed" ? outcome.reason : "", /exit 1.*no previous version/s);
+});
+
+// --- C4: the per-app preview target ------------------------------------------
+
+test("C4: a declared preview app resolves to its own clone under the preview root", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ship-preview-root-"));
+  const app = join(root, "site");
+  await mkdir(app, { recursive: true });
+  const base = { dir: root, bin: "/usr/local/bin/teploy", ttl: "24h" };
+  assert.deepEqual(resolvePreviewTarget(base, "site"), { ...base, dir: app });
+  // No app named, or the subdirectory does not exist: the directory itself,
+  // exactly as a single-app worker always worked.
+  assert.deepEqual(resolvePreviewTarget(base, undefined), base);
+  assert.deepEqual(resolvePreviewTarget(base, "not-there"), base);
+  // The app name is only ever a path segment: a traversal or a flag carrier
+  // is refused before it can become one.
+  for (const bad of ["../evil", "..", ".", "-x", "a/b", ""]) {
+    assert.deepEqual(resolvePreviewTarget(base, bad), base, `app ${JSON.stringify(bad)} must not become a path`);
+  }
 });

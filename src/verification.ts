@@ -23,6 +23,7 @@ import type { TelemetryVerdict } from "./observe.js";
 import { telemetryComment } from "./observe.js";
 import type { TestOutcome } from "./tests.js";
 import { testComment } from "./tests.js";
+import type { Rung } from "./ladder.js";
 
 export const VERIFICATION_START = "<!-- teploy-ship:verification -->";
 export const VERIFICATION_END = "<!-- /teploy-ship:verification -->";
@@ -37,6 +38,12 @@ export interface Evidence {
   testsBaseline?: TestOutcome;
   preview?: PreviewOutcome;
   telemetry?: TelemetryVerdict;
+  /**
+   * The recorded rung list (`ladder` step, C4) — every rung with its status,
+   * the one list the webhook and the run page also carry. Present only on a
+   * run that declared a ladder.
+   */
+  rungs?: Rung[];
 }
 
 /**
@@ -61,6 +68,17 @@ export function verificationSection(evidence: Evidence, runId: string): string |
   const telemetry = evidence.telemetry;
   if (telemetry !== undefined && telemetry.kind !== "disabled") {
     parts.push(telemetryComment(telemetry, runId));
+  }
+  // The ladder (C4): every rung, in ladder order, with its status — the same
+  // list the webhook's `verification.rungs` carries. Rendered as a list
+  // because it IS a list; a sentence would rank the rungs the reader should
+  // rank for themselves.
+  if (evidence.rungs !== undefined && evidence.rungs.length > 0) {
+    parts.push(
+      `**Verification ladder**\n\n${evidence.rungs
+        .map((r) => `- ${r.name}: ${r.status}${r.detail !== undefined && r.detail !== "" ? ` — ${r.detail}` : ""}`)
+        .join("\n")}`,
+    );
   }
   if (parts.length === 0) return null;
   return `${VERIFICATION_START}\n## Verification\n\n${parts.join("\n\n---\n\n")}\n${VERIFICATION_END}`;

@@ -10,6 +10,9 @@ import type { AgentExecutor } from "@neutron-build/agents";
 import { MemoryEventStore, cancelRun, deliverEvent, executeRun } from "@neutron-build/workflow";
 
 import { CHANGE_EVENT, MERGE_EVENT, PLAN_EVENT, approvalEvent, durableAgent } from "./durable.js";
+import type { CommandRunner, PreviewTarget } from "./deploy.js";
+import type { TelemetryTarget } from "./observe.js";
+import { ladderRungsFromEvents } from "./ladder.js";
 import { FileRepoMemory } from "./repo-memory.js";
 import type { ExecutorProvider, RecoveryTuning } from "./durable.js";
 import { defaultApprovalPolicy } from "./approval.js";
@@ -3707,5 +3710,268 @@ test("P1-4: a healthy service, and a run that deployed nothing, both record a no
     assert.equal(result?.kind, "not-deployed");
   } finally {
     noDeploy.restore();
+  }
+});
+
+// --- C4 / L4: the verification ladder through the publish gate -----------------
+
+/** A preview runner that "builds" and "deploys" without touching a filesystem. */
+function fakePreviewRunner(branchToUrl: (branch: string) => string): { run: CommandRunner; calls: string[][] } {
+  const calls: string[][] = [];
+  const run: CommandRunner = async (argv, opts) => {
+    calls.push(argv);
+    if (argv[0] === "git") return { code: 0, stdout: "", stderr: "" };
+    if (argv[1] === "build") return { code: 0, stdout: `{"image":"img-ladder-1"}\n`, stderr: "" };
+    if (argv[1] === "preview" && argv[2] === "deploy") {
+      return { code: 0, stdout: `Preview deployed: ${branchToUrl(argv[3] ?? "")}\n`, stderr: "" };
+    }
+    if (argv[1] === "preview" && argv[2] === "list") return { code: 1, stdout: "", stderr: "list unavailable" };
+    if (argv[1] === "preview" && argv[2] === "destroy") return { code: 0, stdout: "", stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  return { run, calls };
+}
+
+/** Telemetry answering one row per read, in call order: [before, after]. */
+function queueTelemetry(rows: Array<Partial<{ requests: number; errors: number; p95: number }> | "reject">): TelemetryTarget {
+  let read = 0;
+  return {
+    url: "https://observe.example.com",
+    token: "t",
+    service: "svc",
+    repo: "owner/repo",
+    minRequests: 10,
+    fetch: (async () => {
+      const row = rows[Math.min(read++, rows.length - 1)];
+      if (row === "reject") return { ok: false, status: 401 } as Response;
+      return {
+        ok: true,
+        json: async () => [{ service_name: "svc", request_count: row?.requests ?? 100, error_count: row?.errors ?? 1, p95_ms: row?.p95 ?? 40 }],
+      } as unknown as Response;
+    }) as unknown as typeof fetch,
+  };
+}
+
+/** A fake chromium on PATH that writes identical bytes for any --screenshot. */
+async function fakeBrowserOnPath(): Promise<string> {
+  const binDir = await mkdtemp(join(tmpdir(), "durable-c4-bin-"));
+  const shell = new LocalExecutor({ root: await mkdtemp(join(tmpdir(), "durable-c4-shell-")) });
+  await shell.exec(
+    `printf '#!/bin/sh\\nfor a in "$@"; do case "$a" in --screenshot=*) out="${'$'}{a#--screenshot=}";; esac; done\\nprintf fake-png > "$out"\\n' > '${binDir}/chromium' && chmod +x '${binDir}/chromium'`,
+  );
+  return binDir;
+}
+
+/** The input of a fully-declared ladder run at auto_trivial. */
+function ladderInput(repo: string, authority: "auto_trivial" | "auto_normal" = "auto_trivial") {
+  return {
+    task: "fix the greeting",
+    repo,
+    changeClass: true,
+    tests: true,
+    testCommand: "true",
+    autoMerge: true,
+    authority,
+    verification: {
+      tests: "true",
+      preview: { app: "site", smoke: 'test -n "$PREVIEW_URL"' },
+      visual: true,
+      observeWindowMin: 1,
+    },
+  } as const;
+}
+
+test("C4: a fully-verified trivial change merges under the ladder, and every rung is on the timeline", async () => {
+  const fixture = await mergeFixture("c4-ladder-merge");
+  const path = process.env.PATH;
+  const binDir = await fakeBrowserOnPath();
+  process.env.PATH = `${binDir}:${path ?? ""}`;
+  try {
+    const { model } = reactiveModel(TRIVIAL_SCRIPT);
+    const store = new MemoryEventStore();
+    const input = ladderInput(fixture.repo);
+    const outcome = await executeRun({
+      workflow: durableAgent({
+        model,
+        executor: fixture.provider,
+        workdir: ".",
+        preview: { dir: "/srv/preview", run: fakePreviewRunner((b) => `https://preview-${b.replace(/\//g, "-")}.site.example.com`).run },
+        telemetry: queueTelemetry([{ requests: 100, errors: 1, p95: 40 }, { requests: 100, errors: 1, p95: 40 }]),
+        ladder: { sleep: async () => {} },
+      }),
+      runId: "run-c4-merge",
+      store,
+      input,
+    });
+    assert.equal(outcome.status, "completed");
+    assert.equal(fixture.merges().length, 1, "a green ladder at auto_trivial merges a trivial change with no human");
+
+    const events = await store.load("run-c4-merge");
+    const names = events.filter((e) => e.type === "step-completed").map((e) => e.name ?? "");
+    for (const step of ["preview-smoke", "visual-diff", "observe-window", "ladder", "auto-merge"]) {
+      assert.ok(names.includes(step), `the ${step} step is on the timeline`);
+    }
+    const rungs = stepResult(events, "ladder") as unknown as Array<{ name: string; status: string }>;
+    assert.deepEqual(
+      rungs.map((r) => `${r.name}:${r.status}`),
+      ["baseline:skipped", "build:skipped", "tests:passed", "preview:passed", "visual:passed", "observe:passed"],
+      "the smoke, the diff and the window all ran and all passed",
+    );
+    // One list, two producers: the recorded ladder step and the event-log
+    // derivation agree — and so do the PARAGRAPH's two producers, now that
+    // the facts carry the ladder's own outcomes (smoke, visual, observe).
+    assert.deepEqual(ladderRungsFromEvents(events), rungs);
+    const summary = (outcome as { output?: { summary?: string } }).output?.summary ?? "";
+    assert.equal(runVerificationSummary(events), summary);
+    assert.match(summary, /smoke passed/);
+    // The squash message states the authority it acted under, not a claim of triviality.
+    assert.match(String((fixture.merges()[0]!.body as { MERGE_MESSAGE_FIELD?: string }).MERGE_MESSAGE_FIELD), /Authority auto_trivial/);
+  } finally {
+    process.env.PATH = path;
+    fixture.restore();
+  }
+});
+
+test("C4: a declared rung that cannot run holds the merge — a skipped rung is not evidence", async () => {
+  const fixture = await mergeFixture("c4-ladder-hold");
+  const path = process.env.PATH;
+  const binDir = await fakeBrowserOnPath();
+  process.env.PATH = `${binDir}:${path ?? ""}`;
+  try {
+    const { model } = reactiveModel(TRIVIAL_SCRIPT);
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      // No `preview` on this worker: the preview rung records itself skipped.
+      workflow: durableAgent({
+        model,
+        executor: fixture.provider,
+        workdir: ".",
+        telemetry: queueTelemetry([{ requests: 100, errors: 1, p95: 40 }, { requests: 100, errors: 1, p95: 40 }]),
+        ladder: { sleep: async () => {} },
+      }),
+      runId: "run-c4-hold",
+      store,
+      input: ladderInput(fixture.repo),
+    });
+    assert.equal(outcome.status, "completed", "a held merge is not a failed run");
+    assert.equal(fixture.merges().length, 0);
+    const held = stepResult(await store.load("run-c4-hold"), "auto-merge");
+    assert.equal(held?.kind, "held");
+    assert.match(JSON.stringify(held?.reasons), /preview did not run: no preview target configured/);
+  } finally {
+    process.env.PATH = path;
+    fixture.restore();
+  }
+});
+
+test("L4: a worse observe window tears the preview down and holds the merge", async () => {
+  const fixture = await mergeFixture("c4-ladder-worse");
+  const path = process.env.PATH;
+  const binDir = await fakeBrowserOnPath();
+  process.env.PATH = `${binDir}:${path ?? ""}`;
+  try {
+    const { model } = reactiveModel(TRIVIAL_SCRIPT);
+    const store = new MemoryEventStore();
+    const preview = fakePreviewRunner((b) => `https://preview-${b.replace(/\//g, "-")}.site.example.com`);
+    const outcome = await executeRun({
+      workflow: durableAgent({
+        model,
+        executor: fixture.provider,
+        workdir: ".",
+        preview: { dir: "/srv/preview", run: preview.run },
+        // Error rate 1% -> 8%: far past the one-point threshold.
+        telemetry: queueTelemetry([{ requests: 100, errors: 1, p95: 40 }, { requests: 100, errors: 8, p95: 40 }]),
+        ladder: { sleep: async () => {} },
+      }),
+      runId: "run-c4-worse",
+      store,
+      input: ladderInput(fixture.repo),
+    });
+    assert.equal(outcome.status, "completed");
+    assert.equal(fixture.merges().length, 0, "a worse window is a failed rung, and a failed rung holds");
+    const events = await store.load("run-c4-worse");
+    const rungs = stepResult(events, "ladder") as unknown as Array<{ name: string; status: string; detail?: string }>;
+    const observe = rungs.find((r) => r.name === "observe")!;
+    assert.equal(observe.status, "failed");
+    assert.match(observe.detail ?? "", /error rate up/);
+    assert.match(observe.detail ?? "", /rolled-back/);
+    const held = stepResult(events, "auto-merge");
+    assert.equal(held?.kind, "held");
+    assert.match(JSON.stringify(held?.reasons), /observe failed/);
+    // The rollback was the PREVIEW's teardown — production is never touched here.
+    assert.ok(preview.calls.some((c) => c[1] === "preview" && c[2] === "destroy"), "the preview is destroyed on the spot");
+    assert.ok(!preview.calls.some((c) => c[1] === "rollback"), "no production rollback from the observe rung");
+  } finally {
+    process.env.PATH = path;
+    fixture.restore();
+  }
+});
+
+test("C4: a normal change merges only at auto_normal — the class is read, not assumed", async () => {
+  const fixture = await mergeFixture("c4-ladder-normal");
+  const path = process.env.PATH;
+  const binDir = await fakeBrowserOnPath();
+  process.env.PATH = `${binDir}:${path ?? ""}`;
+  try {
+    const { model } = reactiveModel(TRIVIAL_SCRIPT);
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: durableAgent({
+        model,
+        executor: fixture.provider,
+        workdir: ".",
+        preview: { dir: "/srv/preview", run: fakePreviewRunner((b) => `https://preview-${b.replace(/\//g, "-")}.site.example.com`).run },
+        telemetry: queueTelemetry([{ requests: 100, errors: 1, p95: 40 }, { requests: 100, errors: 1, p95: 40 }]),
+        ladder: { sleep: async () => {} },
+      }),
+      runId: "run-c4-normal",
+      store,
+      input: { ...ladderInput(fixture.repo), authority: "auto_normal" as const },
+    });
+    assert.equal(outcome.status, "completed");
+    // The change classified trivial, so auto_normal's own bar is met too; the
+    // interesting half is the class gate, pinned by the held case below.
+    assert.equal(fixture.merges().length, 1);
+    const rungs = stepResult(await store.load("run-c4-normal"), "ladder");
+    assert.equal(rungs?.length, 6);
+  } finally {
+    process.env.PATH = path;
+    fixture.restore();
+  }
+});
+
+test("C4: auto_trivial holds a normal change — authority semantics, not a bigger trivial", async () => {
+  const fixture = await mergeFixture("c4-ladder-class");
+  const path = process.env.PATH;
+  const binDir = await fakeBrowserOnPath();
+  process.env.PATH = `${binDir}:${path ?? ""}`;
+  try {
+    // A "normal" change: one file, over the 40-line trivial bar, far under serious.
+    const { model } = reactiveModel([
+      "```bash\nseq 1 60 >> f.txt\n```",
+      "```finish\nrewrote the tail of the greeting\n```",
+      ...PROBES,
+    ]);
+    const store = new MemoryEventStore();
+    await executeRun({
+      workflow: durableAgent({
+        model,
+        executor: fixture.provider,
+        workdir: ".",
+        preview: { dir: "/srv/preview", run: fakePreviewRunner((b) => `https://preview-${b.replace(/\//g, "-")}.site.example.com`).run },
+        telemetry: queueTelemetry([{ requests: 100, errors: 1, p95: 40 }, { requests: 100, errors: 1, p95: 40 }]),
+        ladder: { sleep: async () => {} },
+      }),
+      runId: "run-c4-class",
+      store,
+      input: ladderInput(fixture.repo),
+    });
+    assert.equal(fixture.merges().length, 0, "auto_trivial merges trivial changes and nothing else");
+    const held = stepResult(await store.load("run-c4-class"), "auto-merge");
+    assert.equal(held?.kind, "held");
+    assert.match(JSON.stringify(held?.reasons), /classified normal, and auto_trivial merges only trivial/);
+  } finally {
+    process.env.PATH = path;
+    fixture.restore();
   }
 });

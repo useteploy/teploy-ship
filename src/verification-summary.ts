@@ -21,6 +21,7 @@
 import type { WorkflowEvent } from "@neutron-build/workflow";
 
 import { isApproved } from "./critic.js";
+import type { ObserveOutcome, SmokeOutcome, VisualOutcome } from "./ladder.js";
 import { telemetryRegression, type TelemetryVerdict } from "./observe.js";
 import type { TestOutcome } from "./tests.js";
 import { preExisting } from "./tests.js";
@@ -34,6 +35,8 @@ export interface VerificationFacts {
   /** How the run ended, when it did not end at a finish. */
   status?: string;
   baseline?: TestOutcome;
+  /** The project's build command (the ladder's `build` rung), when it ran. */
+  build?: TestOutcome;
   /** The suite over the tree that was published. */
   tests?: TestOutcome;
   /** Red finishes that were sent back to work with the failure output. */
@@ -48,6 +51,12 @@ export interface VerificationFacts {
   push?: { kind: "pushed"; sha: string } | { kind: "refused" } | { kind: "empty" };
   pr?: { url: string; number: number };
   preview?: { kind: "deployed"; url: string } | { kind: "skipped" | "failed"; reason: string };
+  /** The smoke command against the deployed preview (the ladder's preview rung's second half). */
+  smoke?: SmokeOutcome;
+  /** The screenshot pair the visual rung captured, or why it could not. */
+  visual?: VisualOutcome;
+  /** The observe window after the preview (the ladder's `observe` rung). */
+  observeWindow?: ObserveOutcome;
   telemetry?: { kind: "compared"; worse: boolean } | { kind: "disabled" | "insufficient" | "unavailable"; reason: string };
   rollback?: { kind: string };
   merge?: MergeFact;
@@ -141,6 +150,11 @@ export function verificationSummary(facts: VerificationFacts): string {
   else if (b?.kind === "failed") verified.push(`the suite was already failing on the base branch (exit ${b.exitCode}) before any edit`);
   else if (b?.kind === "errored") not.push(`the baseline suite could not run (${b.reason})`);
 
+  const bd = facts.build;
+  if (bd?.kind === "passed") verified.push(`the build passed (\`${bd.command}\`)`);
+  else if (bd?.kind === "failed") not.push(`the build FAILED (exit ${bd.exitCode})`);
+  else if (bd?.kind === "errored") not.push(`the build could not run (${bd.reason})`);
+
   const t = facts.tests;
   const attempts = facts.fixAttempts ?? 0;
   const after = attempts > 0 ? ` after ${attempts} fix attempt${attempts === 1 ? "" : "s"} on a red suite` : "";
@@ -174,11 +188,27 @@ export function verificationSummary(facts: VerificationFacts): string {
   else if (p?.kind === "failed") not.push(`the preview deploy failed (${p.reason})`);
   else if (p?.kind === "skipped") not.push(`no preview (${p.reason})`);
 
+  const s = facts.smoke;
+  if (s?.kind === "passed") verified.push(`the preview's smoke passed (\`${s.command}\`)`);
+  else if (s?.kind === "failed") not.push(`the preview's smoke FAILED (exit ${s.exitCode})`);
+  else if (s?.kind === "errored") not.push(`the preview's smoke could not run (${s.reason})`);
+
+  const v = facts.visual;
+  if (v?.kind === "captured") {
+    verified.push(`screenshots captured of the preview and main, ${v.differs ? "and they DIFFER" : "and they are identical"}`);
+  } else if (v?.kind === "failed") not.push(`the visual diff failed (${v.reason})`);
+  else if (v?.kind === "skipped") not.push(`no visual diff (${v.reason})`);
+
   const m = facts.telemetry;
   if (m?.kind === "compared") {
     if (m.worse) not.push("telemetry got WORSE after the change");
     else verified.push("telemetry before and after showed no regression");
   } else if (m !== undefined) not.push(`telemetry (${m.reason})`);
+
+  const ow = facts.observeWindow;
+  if (ow?.kind === "healthy") verified.push(`the observe window (${ow.windowMin}m) saw no error-rate rise after the preview`);
+  else if (ow?.kind === "worse") not.push(`the observe window (${ow.windowMin}m) judged the preview WORSE and it was torn down: ${ow.reasons.join("; ")}`);
+  else if (ow?.kind === "insufficient" || ow?.kind === "unavailable" || ow?.kind === "disabled") not.push(`no observe window (${ow.reason})`);
 
   if (facts.rollback?.kind === "rolled-back") not.push("the service got worse and was rolled back");
   const mg = facts.merge;
@@ -234,6 +264,70 @@ function testOutcome(v: unknown): TestOutcome | undefined {
   }
 }
 
+/**
+ * The ladder steps' outcomes, tolerated field by field like testOutcome:
+ * JSON out of a store, where a missing field is a fact about the step's shape
+ * and never a reason to drop the whole outcome.
+ */
+function smokeOutcome(v: unknown): SmokeOutcome | undefined {
+  const r = obj(v);
+  if (r === undefined || typeof r.kind !== "string") return undefined;
+  switch (r.kind) {
+    case "passed":
+      return { kind: "passed", command: String(r.command ?? ""), durationMs: Number(r.durationMs ?? 0) };
+    case "failed":
+      return { kind: "failed", command: String(r.command ?? ""), exitCode: Number(r.exitCode ?? 1), output: String(r.output ?? "") };
+    case "errored":
+      return { kind: "errored", command: String(r.command ?? ""), reason: String(r.reason ?? "") };
+    case "skipped":
+      return { kind: "skipped", reason: String(r.reason ?? "") };
+    default:
+      return undefined;
+  }
+}
+
+function visualOutcome(v: unknown): VisualOutcome | undefined {
+  const r = obj(v);
+  if (r === undefined || typeof r.kind !== "string") return undefined;
+  if (r.kind === "skipped" || r.kind === "failed") return { kind: r.kind, reason: String(r.reason ?? "") };
+  if (r.kind !== "captured") return undefined;
+  const side = (name: "preview" | "main"): { url: string; sha256: string; bytes: number } => {
+    const s = obj(r[name]) ?? {};
+    return { url: String(s.url ?? ""), sha256: String(s.sha256 ?? ""), bytes: Number(s.bytes ?? 0) };
+  };
+  return { kind: "captured", preview: side("preview"), main: side("main"), differs: r.differs === true };
+}
+
+function observeOutcome(v: unknown): ObserveOutcome | undefined {
+  const r = obj(v);
+  if (r === undefined || typeof r.kind !== "string") return undefined;
+  const windowMin = Number(r.windowMin ?? 0);
+  const reasons = Array.isArray(r.reasons) ? r.reasons.map(String) : [];
+  switch (r.kind) {
+    case "healthy":
+      return { kind: "healthy", windowMin, reasons };
+    case "worse":
+      return {
+        kind: "worse",
+        windowMin,
+        reasons,
+        rollback: {
+          kind: (() => {
+            const k = obj(r.rollback)?.kind;
+            return k === "failed" || k === "skipped" ? k : "rolled-back";
+          })(),
+          detail: String(obj(r.rollback)?.detail ?? ""),
+        },
+      };
+    case "insufficient":
+    case "unavailable":
+    case "disabled":
+      return { kind: r.kind, windowMin, reason: String(r.reason ?? "") };
+    default:
+      return undefined;
+  }
+}
+
 /** The agent's finish message, from the last recorded think step that carried one. */
 function agentAccount(all: Step[], output: Record<string, unknown> | undefined): string | undefined {
   if (typeof output?.agentSummary === "string") return output.agentSummary;
@@ -268,6 +362,18 @@ export function verificationFactsFromEvents(events: WorkflowEvent[]): Verificati
     if (s.name === "baseline-tests") {
       const o = testOutcome(s.result);
       if (o !== undefined) facts.baseline = o;
+    } else if (s.name === "build") {
+      const o = testOutcome(s.result);
+      if (o !== undefined) facts.build = o;
+    } else if (s.name === "preview-smoke") {
+      const o = smokeOutcome(s.result);
+      if (o !== undefined) facts.smoke = o;
+    } else if (s.name === "visual-diff") {
+      const o = visualOutcome(s.result);
+      if (o !== undefined) facts.visual = o;
+    } else if (s.name === "observe-window") {
+      const o = observeOutcome(s.result);
+      if (o !== undefined) facts.observeWindow = o;
     } else if (s.name === "tests" || /-tests$/.test(s.name)) {
       const o = testOutcome(s.result);
       if (o === undefined) continue;

@@ -338,7 +338,7 @@ export function extractStepSequence(source: string): string[] {
  * steps must be added here, and step-fingerprint.test.ts fails if one exists
  * and is missing — the list cannot quietly fall behind the code.
  */
-export const WORKFLOW_STEP_MODULES = ["durable.js", "harness-external.js"] as const;
+export const WORKFLOW_STEP_MODULES = ["durable.js", "harness-external.js", "ladder-steps.js"] as const;
 
 let cachedSequence: Promise<string[]> | null = null;
 
@@ -498,7 +498,9 @@ export const WORKFLOW_STEPS: readonly WorkflowStep[] = [
   { key: "step:auto-rebase", admits: (i) => i.autoMerge === true },
   { key: "step:auto-merge", admits: (i) => i.autoMerge === true },
   { key: "step:repo-reviewers", admits: (i) => i.reviewers !== undefined },
-  { key: "step:preview-deploy", admits: (i) => i.preview === true },
+  // The preview-deploy gate mirrors previewIfAsked exactly: the run asked via
+  // `preview`, or its declared ladder carries a preview rung (C4).
+  { key: "step:preview-deploy", admits: (i) => i.preview === true || i.verification?.preview !== undefined },
   { key: "step:telemetry-check", admits: (i) => i.telemetry === true },
   { key: "step:verification", admits: repoRun },
   { key: "step:tests", admits: (i) => i.tests === true },
@@ -506,6 +508,15 @@ export const WORKFLOW_STEPS: readonly WorkflowStep[] = [
   { key: "step:*tests", admits: (i) => i.tests === true },
   { key: "step:*harness-preflight", admits: externalHarness },
   { key: "step:*harness-run", admits: externalHarness },
+  // The ladder's own steps (ladder-steps.js, third module above), in that
+  // file's source order. Each is admitted by the rung it records, all off
+  // `verification` — a field no pre-ladder log carries, so those runs'
+  // fingerprints are untouched.
+  { key: "step:build", admits: (i) => i.verification?.build !== undefined },
+  { key: "step:preview-smoke", admits: (i) => i.verification?.preview !== undefined },
+  { key: "step:visual-diff", admits: (i) => i.verification?.visual === true },
+  { key: "step:observe-window", admits: (i) => i.verification?.observeWindowMin !== undefined },
+  { key: "step:ladder", admits: (i) => i.verification !== undefined },
 ];
 
 // ---------------------------------------------------------------------------

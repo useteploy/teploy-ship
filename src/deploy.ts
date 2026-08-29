@@ -22,6 +22,8 @@
  * is correct but could not be previewed is still a fix.
  */
 import { execFile } from "node:child_process";
+import { existsSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { assertGitSafe } from "./git.js";
 
 /** One command's result. Non-zero exit is data here, not an exception. */
@@ -36,7 +38,7 @@ export type CommandRunner = (argv: string[], opts: { cwd: string; timeoutMs: num
 
 /** What a preview attempt produced. */
 export type PreviewOutcome =
-  | { kind: "deployed"; url: string; image: string; expiresAt?: string }
+  | { kind: "deployed"; url: string; image: string; expiresAt?: string; deployedAt?: string }
   | { kind: "skipped"; reason: string }
   | { kind: "failed"; reason: string };
 
@@ -193,6 +195,9 @@ async function buildAndDeploy(opts: {
     [bin, "preview", "deploy", branch, "--ttl", target.ttl ?? "24h", "--image", image, ...dest],
     { cwd, timeoutMs },
   );
+  // Stamped once the CLI returned: the observe window (ladder-steps.ts) is
+  // anchored here, not at the run's start.
+  const deployedAt = new Date().toISOString();
   if (deployed.code !== 0) {
     return { kind: "failed", reason: `teploy preview deploy failed (exit ${deployed.code}): ${tail(deployed.stderr || deployed.stdout)}` };
   }
@@ -208,6 +213,7 @@ async function buildAndDeploy(opts: {
           url: `https://${row.domain}`,
           image,
           ...(typeof row.expires_at === "string" ? { expiresAt: row.expires_at } : {}),
+          deployedAt,
         };
       }
     } catch {
@@ -219,8 +225,24 @@ async function buildAndDeploy(opts: {
   // `preview list` is unavailable or does not carry this branch — the preview
   // itself succeeded, so reporting no URL would be worse than reporting this.
   const printed = /Preview deployed:\s*(https?:\/\/\S+)/.exec(deployed.stdout);
-  if (printed !== null) return { kind: "deployed", url: printed[1]!, image };
+  if (printed !== null) return { kind: "deployed", url: printed[1]!, image, deployedAt };
   return { kind: "failed", reason: `preview deployed but no URL could be established: ${tail(deployed.stdout)}` };
+}
+
+/**
+ * The preview target for one project's declared preview app (C4).
+ *
+ * `SHIP_PREVIEW_DIR` was one clone per worker. With the ladder a worker serves
+ * many projects, so the directory may instead be a ROOT holding one clone per
+ * app: `<dir>/<app>/teploy.yml`. When the project names an app and that
+ * subdirectory exists, it is the working copy; otherwise the directory itself
+ * is, exactly as before. The app name is used only as a path segment and is
+ * refused when it is not a plain name.
+ */
+export function resolvePreviewTarget(target: PreviewTarget, app: string | undefined): PreviewTarget {
+  if (app === undefined || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(app)) return target;
+  const dir = join(target.dir, app);
+  return existsSync(dir) && statSync(dir).isDirectory() ? { ...target, dir } : target;
 }
 
 /** What a rollback attempt produced. Non-zero exit is data, like everywhere else here. */

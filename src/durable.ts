@@ -33,7 +33,18 @@ import {
   updatePullRequestBody,
   workingDiff,
 } from "./git.js";
-import { deployPreview, rollbackDeploy, type PreviewOutcome, type PreviewTarget } from "./deploy.js";
+import { deployPreview, resolvePreviewTarget, rollbackDeploy, type PreviewOutcome, type PreviewTarget } from "./deploy.js";
+import {
+  effectiveAuthority,
+  ladderGate,
+  type Authority,
+  type ObserveOutcome,
+  type ProjectVerification,
+  type Rung,
+  type SmokeOutcome,
+  type VisualOutcome,
+} from "./ladder.js";
+import { buildIfDeclared, observeIfDeclared, recordLadder, smokeIfDeclared, visualIfDeclared, type LadderHooks } from "./ladder-steps.js";
 import { compareAroundNow, effectiveTelemetryTarget, telemetryAppliesTo, telemetryRegression, type TelemetryTarget, type TelemetryVerdict } from "./observe.js";
 import { spliceVerification, verificationSection, type Evidence } from "./verification.js";
 import { mergeFact, verificationSummary, type VerificationFacts } from "./verification-summary.js";
@@ -346,6 +357,33 @@ export interface DurableAgentInput {
    */
   autoDeploy?: boolean;
   /**
+   * The verification ladder this run owes (C4 / contract 1): which rungs were
+   * declared on the project — build command, tests command, preview app +
+   * smoke, visual diff, observe window. Materialised at ENQUEUE from the
+   * project record and never re-read at execution, like every capability
+   * here, because the ladder ADDS RECORDED STEPS (`build`, `preview-smoke`,
+   * `visual-diff`, `observe-window`, `ladder`) and the record is editable: a
+   * replay must run the rungs the log was written under.
+   *
+   * The declaration is also the CAP on `authority` below (ladder.ts): the
+   * rungs a project declares are the most it may ever do unattended.
+   */
+  verification?: ProjectVerification;
+  /**
+   * The EFFECTIVE authority this run acts under (C4 / contract 1):
+   * the project's setting, capped by its declared ladder, floored by
+   * neverAuto — computed at enqueue, carried on the log. The auto-merge gate
+   * reads THIS, never the store, for the same reason it reads `autoMerge`
+   * from the input: the permission to merge has to be a fact of the record,
+   * not of a dashboard edit that landed mid-replay.
+   *
+   * ABSENT keeps the legacy merge gate exactly (a run enqueued before the
+   * ladder existed, or a project with nothing authority-shaped on it): the
+   * gate is then the historical conditions over verdict/suite/draft/
+   * regression, and a replay of an old log computes what it computed.
+   */
+  authority?: Authority;
+  /**
    * What this run is FOR (L2 / D3). Absent — the only value any existing log
    * carries — is the ordinary fix run. `"scan"` is a read-only audit: the agent
    * reads the repository and reports findings, and Ship publishes nothing.
@@ -636,6 +674,13 @@ export interface DurableAgentConfig {
    * wiring: the command depends on the checkout this host has, not on the run.
    */
   tests?: TestTarget;
+  /**
+   * Hooks the ladder steps use (ladder-steps.ts): the clock the observe
+   * window anchors to and the sleep it waits with. Injectable so tests need
+   * neither a real minute nor a fake timer; absent means real time, which is
+   * what production wants — the window is the point, not an inconvenience.
+   */
+  ladder?: LadderHooks;
   /**
    * Context condensation (default on, same budgets as the live loop):
    * when the history outgrows the budget, the middle turns are replaced
@@ -2028,6 +2073,11 @@ async function publishIfRepoRun(
   // 0. Run the suite BEFORE the push, so "tests passed" describes the code that
   // is about to become the pull request rather than an earlier state of it.
   // Unless the critic already ran it over this same tree — see testsIfAsked.
+  // The ladder's `build` rung (C4) runs before the suite, for the same reason
+  // a person types it first: a suite over a tree that cannot build is a
+  // slower way of learning the build is broken.
+  const build = await buildIfDeclared(ctx, executor, input);
+  if (build !== undefined) facts.build = build;
   const tests = await testsIfAsked(ctx, executor, config, input, evidence);
   if (tests !== undefined) facts.tests = tests;
 
@@ -2146,12 +2196,16 @@ async function publishIfRepoRun(
     // A review follow-up pushed new commits to the same branch, so the preview
     // that branch is on is now stale. Refresh it, unless nothing was pushed.
     // A review follow-up pushed new commits, so any preview is stale and the
-    // numbers moved. Refresh both, then amend the same Verification section.
+    // numbers moved. Refresh both, run the ladder legs over the fresh preview,
+    // then amend the same Verification section.
+    const followUpPreview = push.kind === "pushed" ? await previewIfAsked(ctx, config, input, co.branch) : undefined;
+    const legs = await runLadderLegs(ctx, executor, config, input, followUpPreview, co.branch, { baseline, build, tests });
     const followUp: Evidence = {
       ...(tests !== undefined ? { tests } : {}),
       ...(baseline !== undefined ? { testsBaseline: baseline } : {}),
-      ...(push.kind === "pushed" ? { preview: await previewIfAsked(ctx, config, input, co.branch) } : {}),
-      telemetry: await telemetryIfAsked(ctx, config, input),
+      ...(followUpPreview !== undefined ? { preview: followUpPreview } : {}),
+      ...(input.telemetry === true ? { telemetry: await telemetryIfAsked(ctx, config, input) } : {}),
+      ...(legs.rungs !== undefined ? { rungs: legs.rungs } : {}),
     };
     await publishVerification(ctx, ref, token, input.pr, followUp);
     // NO auto-merge and NO rollback watch on this path, deliberately. A review
@@ -2221,15 +2275,24 @@ async function publishIfRepoRun(
   facts.pr = pr;
   await requestReviewersIfAsked(ctx, ref, token, pr.number, input);
   // Hoisted into locals rather than left inline in the publishVerification call:
-  // the rollback watch (P1-4) and the auto-merge gate (L5) both need to read
-  // what these two steps produced, and neither may re-run them.
+  // the rollback watch (P1-4), the ladder legs and the auto-merge gate (L5)
+  // all need to read what these steps produced, and none may re-run them.
   const preview = await previewIfAsked(ctx, config, input, co.branch);
   const telemetry = await telemetryIfAsked(ctx, config, input);
+  // The ladder legs (C4 / L4): the smoke against the preview, the visual diff
+  // against main, the observe window after it — then the rung list, recorded
+  // as its own step so the webhook and the run page read ONE list instead of
+  // each re-deriving it from six steps and disagreeing.
+  const legs = await runLadderLegs(ctx, executor, config, input, preview, co.branch, { baseline, build, tests });
+  if (legs.smoke !== undefined) facts.smoke = legs.smoke;
+  if (legs.visual !== undefined) facts.visual = legs.visual;
+  if (legs.observe !== undefined) facts.observeWindow = legs.observe;
   await publishVerification(ctx, ref, token, pr.number, {
     ...(tests !== undefined ? { tests } : {}),
     ...(baseline !== undefined ? { testsBaseline: baseline } : {}),
     preview,
     telemetry,
+    ...(legs.rungs !== undefined ? { rungs: legs.rungs } : {}),
   });
   // Computed ONCE, outside any step, and fed to both gates below. It is a pure
   // function of the `telemetry-check` step's recorded verdict (see
@@ -2255,6 +2318,7 @@ async function publishIfRepoRun(
       ...(regression !== undefined ? { regression } : {}),
     },
     { executor, checkout: co, config },
+    legs.rungs,
   );
   if (merge?.tests !== undefined) facts.tests = merge.tests;
   if (merge?.outcome.kind === "merged") facts.merge = { kind: "merged", via: "auto" };
@@ -2511,24 +2575,26 @@ type AutoMergeStep =
   | { kind: "failed"; status: number; reason: string };
 
 /**
- * Merge a `trivial` change without a human (L5 / D5).
+ * Merge without a human (L5 / D5, recut by C4 / D3).
  *
- * EVERY condition below has to hold, and the run input carrying `autoMerge` is
- * already three of them — it is only materialised at enqueue for a repo whose
- * project record says `autoMerge`, on a run that is not a scan, and on a run
- * whose change-class gate is on (runtime.ts). What is left to check here are
- * the four facts that only exist once the work is done:
+ * TWO GATES, ONE RULE: which one runs is a fact of the recorded input, never
+ * of this build, so a replay computes what it computed.
  *
- *   1. the change classified `trivial` — small, contained, and green;
- *   2. the suite PASSED. Not "ran", not "disabled", not "errored": a
- *      `disabled` outcome means nobody configured a suite, and merging on the
- *      strength of a test run that did not happen is the exact shape of the
- *      one rejected run in the 2026-08-26 round-2 sweep — confident,
- *      sourced-looking and false;
- *   3. the pull request opened NON-DRAFT. Draft here means the run stopped at
- *      a limit or the diff tripped a shape screen, and both say "a person
- *      should look";
- *   4. telemetry did not get worse (P1-4's judgement, reused).
+ * LEGACY (no `authority` on the input — every run enqueued before the ladder,
+ * and every project with nothing authority-shaped on its record): the four
+ * historical conditions — class `trivial`, suite `passed`, non-draft PR,
+ * telemetry not worse. Unchanged, byte for byte, because these runs' logs
+ * already hold their verdicts.
+ *
+ * LADDER (the input carries `authority`): the gate reads ONLY the recorded
+ * rungs (ladder.ts ladderGate) — baseline, build, tests, preview smoke,
+ * visual diff, observe window — plus the effective authority and the recorded
+ * change class. The critic is nowhere in it: D3's whole bet is that the trust
+ * boundary is what a step RECORDED, not what a model opined. The ladder also
+ * caps the authority a project can hold (no tests rung declared -> never past
+ * `send`; preview+visual -> `auto_trivial`; every rung -> `auto_normal`), and
+ * the cap was applied at ENQUEUE, so the authority on the input is already
+ * the effective one — this gate only re-reads it, never re-derives it.
  *
  * A FAILED MERGE IS NOT A FAILED RUN. mergePullRequest never throws and this
  * step never retries: the pull request is the deliverable and the merge is a
@@ -2553,25 +2619,41 @@ async function autoMergeIfAllowed(
     regression?: { worse: boolean; reasons: string[] };
   },
   target?: { executor: AgentExecutor; checkout: RepoCheckout; config: DurableAgentConfig },
+  /** The recorded rung list (`ladder` step), when the run declared a ladder. */
+  rungs?: Rung[],
 ): Promise<{ outcome: AutoMergeStep; tests?: TestOutcome } | undefined> {
   if (input.autoMerge !== true) return undefined;
   const held: string[] = [];
-  if (facts.verdict === undefined) {
-    held.push("the change was never classified, so nothing authorises merging it");
-  } else if (facts.verdict.class !== "trivial") {
-    held.push(`the change classified ${facts.verdict.class}, and only trivial merges unattended`);
+  if (input.authority === undefined) {
+    // LEGACY gate, verbatim (see the doc comment above).
+    if (facts.verdict === undefined) {
+      held.push("the change was never classified, so nothing authorises merging it");
+    } else if (facts.verdict.class !== "trivial") {
+      held.push(`the change classified ${facts.verdict.class}, and only trivial merges unattended`);
+    }
+    if (facts.tests === undefined) {
+      held.push("the suite did not run for this run");
+    } else if (facts.tests.kind !== "passed") {
+      held.push(
+        facts.tests.kind === "disabled"
+          ? `no suite is configured for this repo (${facts.tests.reason})`
+          : `the suite did not pass (${facts.tests.kind})`,
+      );
+    }
+    if (facts.draft) held.push("the pull request opened as a draft, so a person is expected to read it");
+    if (facts.regression?.worse === true) held.push(`the service got worse after this change: ${facts.regression.reasons.join("; ")}`);
+  } else {
+    // LADDER gate (C4 / D3): recorded rungs only. The rung list comes from
+    // the `ladder` step; its absence on an authority-carrying input means
+    // no rung was recorded at all, which the gate says and holds on.
+    const gate = ladderGate({
+      rungs: rungs ?? [],
+      authority: input.authority,
+      ...(facts.verdict !== undefined ? { changeClass: facts.verdict.class } : {}),
+      draft: facts.draft,
+    });
+    held.push(...gate.reasons);
   }
-  if (facts.tests === undefined) {
-    held.push("the suite did not run for this run");
-  } else if (facts.tests.kind !== "passed") {
-    held.push(
-      facts.tests.kind === "disabled"
-        ? `no suite is configured for this repo (${facts.tests.reason})`
-        : `the suite did not pass (${facts.tests.kind})`,
-    );
-  }
-  if (facts.draft) held.push("the pull request opened as a draft, so a person is expected to read it");
-  if (facts.regression?.worse === true) held.push(`the service got worse after this change: ${facts.regression.reasons.join("; ")}`);
 
   // REBASE-BEFORE-MERGE (C7). Only when every gate above said yes: a run that
   // is holding merges nothing, so it rebases nothing either — and a change
@@ -2605,7 +2687,10 @@ async function autoMergeIfAllowed(
       method: "squash",
       message:
         `Merged by Teploy Ship (run ${ctx.runId}) without a human.\n\n` +
-        `Classified trivial: ${why.join("; ")}\nSuite: ${tests?.kind ?? "not run"}.`,
+        (input.authority !== undefined
+          ? `Authority ${input.authority}, classified ${facts.verdict?.class ?? "unclassified"}: ${why.join("; ")}\n` +
+            `Rungs: ${(rungs ?? []).map((r) => `${r.name} ${r.status}`).join(", ") || "none recorded"}.`
+          : `Classified trivial: ${why.join("; ")}\nSuite: ${tests?.kind ?? "not run"}.`),
     });
     return outcome.kind === "merged"
       ? { kind: "merged", why, ...(outcome.sha !== undefined ? { sha: outcome.sha } : {}) }
@@ -2643,9 +2728,17 @@ async function requestReviewersIfAsked(
 /**
  * Deploy a preview of the pushed branch and say so on the pull request.
  *
- * Both steps are recorded whenever `input.preview` is set, including when this
- * worker has no preview target — a disabled note keeps the step sequence a
+ * Both steps are recorded whenever the run asked for a preview — `input.preview`
+ * or a declared preview rung (input.verification.preview) — including when this
+ * worker has no preview target: a disabled note keeps the step sequence a
  * function of the recorded input rather than of which host picked the run up.
+ *
+ * A run with a declared preview APP (contract 1's `preview.app`) deploys that
+ * app: the worker's preview directory may be a ROOT holding one clone per app
+ * (`<dir>/<app>/teploy.yml`), so the app resolves to its own working copy —
+ * resolvePreviewTarget, deploy.ts. The app's preview env (prod secrets
+ * scrubbed, teploy injecting what the profile allows) is teploy's side of the
+ * wire: Ship names the app and never sees an env value.
  *
  * Nothing here can fail the run. The deploy shells out to the `teploy` CLI on
  * the WORKER host (never in the agent's sandbox, which must not hold deploy
@@ -2657,14 +2750,15 @@ async function previewIfAsked(
   input: DurableAgentInput,
   branch: string,
 ): Promise<PreviewOutcome | undefined> {
-  if (input.preview !== true) return undefined;
+  if (input.preview !== true && input.verification?.preview === undefined) return undefined;
 
   const outcome = await ctx.step("preview-deploy", async (): Promise<PreviewOutcome> => {
     if (config.preview === undefined) {
       return { kind: "skipped", reason: "no preview target configured on this worker" };
     }
+    const target = resolvePreviewTarget(config.preview, input.verification?.preview?.app);
     try {
-      return await deployPreview(config.preview, branch);
+      return await deployPreview(target, branch);
     } catch (error) {
       // deployPreview is written not to throw; if it ever does, the run must
       // still end with its pull request.
@@ -2676,6 +2770,35 @@ async function previewIfAsked(
   // Verification section — see publishVerification. Reporting it here as its
   // own comment made a reviewer hunt for two footnotes under the body.
   return outcome;
+}
+
+/**
+ * The ladder legs that follow a preview (ladder-steps.ts): the smoke against
+ * it, the visual diff of it vs main, the observe window after it, and the
+ * rung list all of them reduce to — recorded as the `ladder` step so the
+ * webhook and the run page read ONE list.
+ *
+ * A helper, not inline code, because BOTH publish paths must run the same
+ * legs in the same order: the review follow-up path and the main gate carry
+ * the same recorded input, and the standing rule (see
+ * DurableAgentInput.verification) is that step presence and order are a
+ * function of that input alone.
+ */
+async function runLadderLegs(
+  ctx: WorkflowContext,
+  executor: AgentExecutor,
+  config: DurableAgentConfig,
+  input: DurableAgentInput,
+  preview: PreviewOutcome | undefined,
+  branch: string,
+  suite: { baseline?: TestOutcome; build?: TestOutcome; tests?: TestOutcome },
+): Promise<{ smoke?: SmokeOutcome; visual?: VisualOutcome; observe?: ObserveOutcome; rungs?: Rung[] }> {
+  if (input.verification === undefined) return {};
+  const smoke = await smokeIfDeclared(ctx, executor, input, preview);
+  const visual = await visualIfDeclared(ctx, executor, input, preview);
+  const observe = await observeIfDeclared(ctx, config, input, preview, branch);
+  const rungs = await recordLadder(ctx, input, { ...suite, preview, ...(smoke !== undefined ? { smoke } : {}), ...(visual !== undefined ? { visual } : {}), ...(observe !== undefined ? { observe } : {}) });
+  return { ...(smoke !== undefined ? { smoke } : {}), ...(visual !== undefined ? { visual } : {}), ...(observe !== undefined ? { observe } : {}), ...(rungs !== undefined ? { rungs } : {}) };
 }
 
 /**
