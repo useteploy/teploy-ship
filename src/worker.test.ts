@@ -6,7 +6,7 @@ import type { IntakeSweepDeps } from "./worker.js";
 import type { IntakeTask } from "./intake.js";
 import type { RunUsage } from "./durable.js";
 import type { SpendStore } from "./spend.js";
-import { usageFromEvents, intakeOrigin, notificationContext, terminalContext } from "./worker.js";
+import { usageFromEvents, intakeOrigin, notificationContext, terminalContext, verificationContext } from "./worker.js";
 import type { WorkflowEvent } from "@neutron-build/workflow";
 import { issueBodyFor } from "./akiroo.js";
 import { LocalAdmission } from "./admission.js";
@@ -648,4 +648,53 @@ test("C7: repoLockKeyOf reads the repo off the run's own log, normalised, and ex
     "an unparseable repo still serialises on its raw form — the key only has to be consistent",
   );
   assert.equal(repoLockKeyOf([]), undefined, "an empty log is nobody's to lock");
+});
+
+// --- contract 2: the verification block off the event log ---------------------
+
+test("contract 2: verificationContext reads the class, the recorded rungs and the paragraph off the log", () => {
+  const rungs = [
+    { name: "baseline", status: "passed", detail: "baseline suite passed before the agent edited" },
+    { name: "tests", status: "passed", detail: "pnpm test passed in 9s" },
+  ];
+  const log = [
+    wev("run-started", { input: { task: "fix the 5xx", repo: "https://forge/o/r.git", verification: { tests: "pnpm test" } } }),
+    wev("step-completed", { result: { kind: "passed", command: "pnpm test", durationMs: 9000 } }, "baseline-tests"),
+    wev("step-completed", { result: { class: "serious", files: [{ path: "a.ts" }], reasons: ["touches an auth path"] } }, "change-class"),
+    wev("step-completed", { result: { kind: "passed", command: "pnpm test", durationMs: 9000 } }, "tests"),
+    wev("step-completed", { result: rungs }, "ladder"),
+    wev("run-completed", { output: { status: "finished", summary: "What I did: fixed it.", agentSummary: "fixed it" } }),
+  ];
+  const ctx = verificationContext(log);
+  assert.equal(ctx.changeClass, "serious");
+  assert.deepEqual(ctx.verification?.rungs, rungs, "the recorded ladder step IS the list — one list, not two derivations");
+  assert.match(ctx.verification!.summary, /^What I did:/);
+  assert.equal(ctx.merged, undefined);
+
+  // An auto-merged run says so: the approve-merge park and the merge fact ride
+  // the same block, so a consumer can key a Today card on either.
+  const merged = verificationContext([
+    wev("run-started", { input: { task: "t" } }),
+    wev("step-completed", { result: { class: "trivial", files: [], reasons: [] } }, "change-class"),
+    wev("step-completed", { result: { kind: "passed", command: "t", durationMs: 1 } }, "tests"),
+    wev("step-completed", { result: { kind: "merged", why: ["suite green"] } }, "auto-merge"),
+    wev("run-completed", { output: { status: "finished" } }),
+  ]);
+  assert.equal(merged.merged, true);
+  assert.equal(merged.changeClass, "trivial");
+});
+
+test("contract 2: a pre-ladder run still reports its verification, derived from its steps", () => {
+  const ctx = verificationContext([
+    wev("run-started", { input: { task: "t", testCommand: "pnpm test" } }),
+    wev("step-completed", { result: { kind: "passed", command: "pnpm test", durationMs: 1 } }, "tests"),
+    wev("step-completed", { result: { class: "trivial", files: [], reasons: [] } }, "change-class"),
+    wev("run-completed", { output: { status: "finished" } }),
+  ]);
+  assert.equal(ctx.changeClass, "trivial");
+  const names = ctx.verification?.rungs.map((r) => `${r.name}:${r.status}`);
+  assert.deepEqual(names, ["baseline:skipped", "build:skipped", "tests:passed", "preview:skipped", "visual:skipped", "observe:skipped"]);
+
+  // And a run with nothing recorded carries no block: absent is a fact too.
+  assert.deepEqual(verificationContext([wev("run-started", { input: { task: "t" } }), wev("run-failed", { error: "x" })]), {});
 });

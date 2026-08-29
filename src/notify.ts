@@ -1,4 +1,6 @@
 import type { ScanFinding } from "./findings.js";
+import type { ChangeClass } from "./change-class.js";
+import { rungsForWire, type Rung } from "./ladder.js";
 
 /**
  * A4 — outbound notifications: one short Slack message when a run needs
@@ -51,6 +53,21 @@ export interface RunNotification {
   mode?: "scan";
   /** What a completed scan found. Absent unless the run recorded its findings step. */
   findings?: ScanReport;
+  /**
+   * What the change-class step recorded (contract 2). Absent on runs without
+   * the gate — a consumer treats absent as "not classified", the same fact
+   * the merge gate reads.
+   */
+  changeClass?: ChangeClass;
+  /**
+   * The verification block (contract 2): the recorded rungs and the
+   * "what I did / verified / could not verify" paragraph. Present on runs
+   * that recorded a class or a ladder; the rungs are the SAME list the run's
+   * `ladder` step and the pull request carry.
+   */
+  verification?: { rungs: Rung[]; summary: string };
+  /** How the merge question resolved, when it did (contract 2's `merged`). */
+  merged?: boolean;
 }
 
 /**
@@ -253,6 +270,16 @@ export interface RunWebhookPayload {
   mode?: "scan";
   /** Present on a scan run that recorded its findings step (L7). */
   findings?: ScanReport;
+  /**
+   * Contract 2 (additive): the change's class and the verification block.
+   * FIELD NAMES ARE LOAD-BEARING across repos — Akiroo's Today card keys its
+   * producer on exactly `change_class` and `verification.rungs` — so they
+   * extend additively and never rename.
+   */
+  change_class?: ChangeClass;
+  verification?: { rungs: Rung[]; summary: string };
+  /** True when the pull request ended up merged, by the gate or by an approval. */
+  merged?: boolean;
 }
 
 export function runWebhookPayload(event: RunNotification, publicUrl?: string): RunWebhookPayload {
@@ -276,6 +303,14 @@ export function runWebhookPayload(event: RunNotification, publicUrl?: string): R
       : {}),
     ...(event.mode !== undefined ? { mode: event.mode } : {}),
     ...(event.findings !== undefined ? { findings: event.findings } : {}),
+    ...(event.changeClass !== undefined ? { change_class: event.changeClass } : {}),
+    // rungsForWire bounds each rung's detail so the whole payload stays a
+    // record, not a log; the summary is already ≤2000 by its own budget
+    // (verification-summary.ts SUMMARY_LIMIT).
+    ...(event.verification !== undefined
+      ? { verification: { rungs: rungsForWire(event.verification.rungs), summary: event.verification.summary } }
+      : {}),
+    ...(event.merged !== undefined ? { merged: event.merged } : {}),
   };
 }
 

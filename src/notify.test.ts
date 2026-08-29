@@ -223,3 +223,40 @@ test("outbound notify secret is separate from the inbound forge webhook secret",
     else process.env.SHIP_NOTIFY_URL = prevUrl;
   }
 });
+
+// --- contract 2: change_class + the verification block ------------------------
+
+test("contract 2: change_class, verification rungs and summary ride the payload; merged says how it ended", () => {
+  const p = runWebhookPayload({
+    runId: "run-c2",
+    status: "waiting",
+    eventName: "approve-merge",
+    repo: "tyler/teploy-site",
+    changeClass: "serious",
+    verification: {
+      rungs: [
+        { name: "baseline", status: "passed", detail: "baseline suite passed before the agent edited" },
+        { name: "build", status: "skipped", detail: "no build command declared on the project" },
+        { name: "tests", status: "passed", detail: "pnpm test passed in 9s" },
+        { name: "preview", status: "passed", detail: "deployed https://preview-ship-x.example.com; smoke passed in 1s" },
+        { name: "visual", status: "skipped", detail: "the sandbox image has no headless browser" },
+        { name: "observe", status: "passed", detail: "5m window: error rate +0.00%, p95 +0ms" },
+      ],
+      summary: "What I did: fixed the 5xx. What I verified: the suite passed over the published tree. What I could not verify: nothing outstanding.",
+    },
+  });
+  // These field names are load-bearing across repos (Akiroo's Today card keys
+  // its producer on exactly these): extend additively, never rename.
+  assert.equal(p.change_class, "serious");
+  assert.equal(p.verification?.rungs.length, 6);
+  assert.deepEqual(p.verification?.rungs[2], { name: "tests", status: "passed", detail: "pnpm test passed in 9s" });
+  assert.ok((p.verification?.summary.length ?? 0) > 0 && p.verification!.summary.startsWith("What I did:"));
+  assert.equal(p.merged, undefined, "a park is not merged");
+
+  const done = runWebhookPayload({ runId: "run-c2", status: "completed", changeClass: "trivial", merged: true, verification: { rungs: [], summary: "s" } });
+  assert.equal(done.change_class, "trivial");
+  assert.equal(done.merged, true);
+  // Rung details are bounded on the wire so the whole payload stays a record.
+  const long = runWebhookPayload({ runId: "r", status: "completed", verification: { rungs: [{ name: "tests", status: "failed", detail: "x".repeat(5000) }], summary: "s" } });
+  assert.ok((long.verification!.rungs[0]!.detail?.length ?? 0) <= 600);
+});

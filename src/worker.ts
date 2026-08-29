@@ -41,6 +41,8 @@ import type { Windows } from "./governance.js";
 import { makeObserveEmitter } from "./observe.js";
 import { multiNotifier, scanReport, slackNotifier, webhookNotifier } from "./notify.js";
 import type { RunNotification, RunOrigin } from "./notify.js";
+import { ladderRungsFromEvents, type Rung } from "./ladder.js";
+import { runVerificationSummary, verificationFactsFromEvents } from "./verification-summary.js";
 import type { ParsedFindings } from "./findings.js";
 import { NucleusOutbox, flushOutbox, notificationId } from "./outbox.js";
 import type { Outbox } from "./outbox.js";
@@ -229,6 +231,36 @@ export function terminalContext(events: WorkflowEvent[]): Pick<RunNotification, 
           ),
         }
       : {}),
+  };
+}
+
+/**
+ * The contract-2 block (change_class, verification, merged), read off the
+ * event log. Shared by the park branch and the terminal branch deliberately:
+ * an `approve-merge` park is exactly the message whose evidence a decision
+ * needs — the rungs and the paragraph ARE the case for merging — and building
+ * them twice would be two places to disagree about the same run.
+ *
+ * The rungs prefer the recorded `ladder` step; a run without one gets the
+ * list derived from its steps (ladder.ts ladderRungsFromEvents), so a
+ * pre-ladder run still reports the verification it did record rather than
+ * nothing. The summary is S-B's paragraph (verification-summary.ts), rendered
+ * from the same log.
+ */
+export function verificationContext(events: WorkflowEvent[]): Pick<RunNotification, "changeClass" | "verification" | "merged"> {
+  const facts = verificationFactsFromEvents(events);
+  const changeClass = facts.changeClass?.class;
+  const ladderStep = events.find((e) => e.type === "step-completed" && e.name === "ladder");
+  const recorded = (ladderStep?.data as { result?: unknown } | undefined)?.result;
+  const rungs = Array.isArray(recorded) ? (recorded as Rung[]) : ladderRungsFromEvents(events);
+  return {
+    ...(facts.changeClass !== undefined && (changeClass === "trivial" || changeClass === "normal" || changeClass === "serious")
+      ? { changeClass }
+      : {}),
+    ...(facts.changeClass !== undefined || ladderStep !== undefined || facts.tests !== undefined || facts.preview !== undefined
+      ? { verification: { rungs, summary: runVerificationSummary(events) } }
+      : {}),
+    ...(facts.merge?.kind === "merged" ? { merged: true } : {}),
   };
 }
 
@@ -876,18 +908,24 @@ export function startWorker(options: WorkerOptions): {
             return;
           }
           const context = notificationContext(events);
+          // The contract-2 block rides BOTH branches: a park is the message a
+          // decision is made from (the rungs and the paragraph are the case
+          // for or against), and a terminal event is the record of what the
+          // verification added up to.
+          const verification = verificationContext(events);
           if (outcome.status === "waiting") {
             notify.runEvent({
               runId,
               status: outcome.status,
               ...(outcome.eventName !== undefined ? { eventName: outcome.eventName } : {}),
               ...context,
+              ...verification,
             });
             return;
           }
           // Terminal: include the PR link when the run opened one, and the
           // findings when it was a scan.
-          notify.runEvent({ runId, status: outcome.status, ...context, ...terminalContext(events) });
+          notify.runEvent({ runId, status: outcome.status, ...context, ...terminalContext(events), ...verification });
         })());
       }
       // Dogfood the run into Observe (no-op unless configured).
