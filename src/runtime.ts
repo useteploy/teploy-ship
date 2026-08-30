@@ -54,6 +54,7 @@ import type { Outbox } from "./outbox.js";
 import { NucleusPgwire } from "./nucleus-pgwire.js";
 import { migrate } from "./migrations.js";
 import { stepFingerprint } from "./step-fingerprint.js";
+import { warmCacheEnabled, warmSlugOf } from "./warm.js";
 import { assertRepoAllowed, policyFromEnv } from "./repo-policy.js";
 import { withProjects } from "./durable.js";
 import type { RepoTrust } from "./repo-policy.js";
@@ -1134,6 +1135,11 @@ export async function enqueueRun(
   // editable, so a replay must request the reviewers the log was written
   // under. Absent on runs enqueued before the rule existed.
   const reviewers = options.repo !== undefined ? reviewersFor((await runtime.governance.get()).reviewers, options.repo) : null;
+  // Warm cache eligibility: a repo run with a cacheable origin, never a PR
+  // run (its checkout resolves a head branch that may live in a fork, so the
+  // volume would not be the repository's steady state).
+  const warmRun =
+    options.repo !== undefined && options.pr === undefined && warmCacheEnabled() && warmSlugOf(options.repo) !== null;
   // The spend cap, checked BEFORE the run exists. Order matters: a refusal
   // after `store.append` would leave a `run-started` event for a run no worker
   // is allowed to execute — a ghost in the runs list that no surface can
@@ -1202,6 +1208,12 @@ export async function enqueueRun(
         steer: true,
         index: true,
         guard: true,
+        // The warm repo cache (SB-A). Repo runs that are not PR runs, on
+        // unless SHIP_WARM_CACHE says otherwise, and materialised HERE for
+        // the usual reason — it adds a recorded step and asks the daemon for
+        // a volume, so the log has to say the run wanted one. A worker whose
+        // daemon has no cache store degrades to the cold path.
+        ...(warmRun ? { warm: true } : {}),
         harness,
         ...(attempts.length >= 2 ? { harnessAttempts: attempts } : {}),
   };

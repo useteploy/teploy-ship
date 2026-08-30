@@ -33,6 +33,7 @@
 import type { AgentExecutor } from "@neutron-build/agents";
 
 import type { ExecutorProvider, SandboxOverrides } from "./durable.js";
+import type { WarmState } from "./warm.js";
 
 /** Separator between the host tag and the daemon's own run id. */
 const HANDLE_SEP = "@";
@@ -238,6 +239,24 @@ export class SandboxPool implements ExecutorProvider {
     if (host?.provider.destroy === undefined) return;
     await host.provider.destroy(inner);
     this.#live[index] = Math.max(0, this.#live[index]! - 1);
+  }
+
+  /**
+   * The warm cache is per HOST — a template on one daemon means nothing on
+   * another — so both calls route by the handle's tag, like snapshot does.
+   * A host without the capability answers null rather than throwing: the
+   * caller's fallback is the cold path, which every host has.
+   */
+  async warmInfo(handle: string): Promise<WarmState | null> {
+    const { index, handle: inner } = parsePoolHandle(handle);
+    const host = this.#hosts[index];
+    return host?.provider.warmInfo === undefined ? null : await host.provider.warmInfo(inner);
+  }
+
+  async warmCommit(handle: string): Promise<WarmState | null> {
+    const { index, handle: inner } = parsePoolHandle(handle);
+    const host = this.#hosts[index];
+    return host?.provider.warmCommit === undefined ? null : await host.provider.warmCommit(inner);
   }
 
   /**

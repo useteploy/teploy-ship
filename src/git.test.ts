@@ -21,6 +21,9 @@ import {
   pullRequestUrl,
   rebaseOntoBase,
   resolvePr,
+  checkoutRepo,
+  hasClone,
+  reuseRepo,
   setupRepo,
   SHIP_COMMENT_MARKER,
   truncateMiddle,
@@ -582,4 +585,86 @@ test("withTrailers appends a trailer block as the final paragraph, dropping non-
   assert.equal(withTrailers("Fix\n\n", ["Akiroo: work-item:1"]), "Fix\n\nAkiroo: work-item:1");
   assert.equal(withTrailers("Fix", []), "Fix");
   assert.equal(withTrailers("Fix", undefined), "Fix");
+});
+
+// ---------------------------------------------------------------------------
+// SB-A: the warm volume's reuse path
+// ---------------------------------------------------------------------------
+
+/** A bare remote plus a workspace that has already been through one run. */
+async function warmFixture(name: string): Promise<{
+  bare: string;
+  ref: ReturnType<typeof parseRepoUrl>;
+  work: LocalExecutor;
+  seed: LocalExecutor;
+}> {
+  const bare = await mkdtemp(join(tmpdir(), `${name}-bare-`));
+  const seedDir = await mkdtemp(join(tmpdir(), `${name}-seed-`));
+  const seed = new LocalExecutor({ root: seedDir });
+  await seed.exec(
+    "git init -q -b main . && git config user.email t@t && git config user.name t && " +
+      "printf 'node_modules/\n' > .gitignore && echo hello > f.txt && " +
+      `git add -A && git commit -qm seed && git clone -q --bare . ${bare}/repo.git`,
+  );
+  const ref = { kind: "forgejo" as const, base: "file://", owner: "local", repo: "repo", cloneUrl: `${bare}/repo.git` };
+  const workDir = await mkdtemp(join(tmpdir(), `${name}-work-`));
+  const work = new LocalExecutor({ root: workDir });
+  // Run one: the cold clone that seeds the template.
+  await setupRepo(work, { ref, token: "", runId: "run-first" });
+  // What makes the volume worth keeping, and what a `git clean -fdx` would eat.
+  await work.exec("mkdir -p node_modules/left-pad && echo dep > node_modules/left-pad/index.js");
+  return { bare, ref, work, seed };
+}
+
+test("SB-A: reuseRepo stands on a fresh branch off the remote's default, keeping the dependency tree", async () => {
+  const { bare, ref, work, seed } = await warmFixture("git-warm-reuse");
+  // The previous run left edits and untracked scratch behind, and the remote
+  // has moved on since the template was made.
+  await work.exec("echo stale >> f.txt && echo junk > scratch.txt && mkdir -p .teploy-agent && echo x > .teploy-agent/state.json");
+  await seed.exec(`echo second >> f.txt && git commit -qam second && git push -q ${bare}/repo.git main`);
+
+  assert.equal(await hasClone(work), true);
+  const checkout = await reuseRepo(work, { ref, token: "", runId: "run-second" });
+  assert.equal(checkout.base, "main", "the default branch comes from the remote, not from the stale template");
+  assert.equal(checkout.branch, "ship/run-second");
+
+  assert.equal((await work.exec("git status --porcelain")).stdout.trim(), "", "the previous run's tree is gone");
+  assert.match((await work.exec("cat f.txt")).stdout, /second/, "the branch is cut at the remote's current tip");
+  assert.equal((await work.exec("test -f scratch.txt")).exitCode, 1, "untracked leftovers do not become this run's work");
+  assert.equal((await work.exec("test -d .teploy-agent")).exitCode, 1, "and neither does the previous run's harness scratch");
+  assert.equal(
+    (await work.exec("cat node_modules/left-pad/index.js")).stdout.trim(),
+    "dep",
+    "the ignored dependency tree survives — it is the entire point of the cache",
+  );
+  assert.equal(
+    (await work.exec("git remote get-url origin")).stdout.trim(),
+    ref.cloneUrl,
+    "the remote is credential-free when the agent gets the workspace",
+  );
+  assert.equal(
+    (await work.exec("grep -c '.teploy-agent/' .git/info/exclude")).stdout.trim(),
+    "1",
+    "the exclude entry is added once, not once per run",
+  );
+});
+
+test("SB-A: checkoutRepo clones cold on an empty volume and reuses a warm one", async () => {
+  const cold = new LocalExecutor({ root: await mkdtemp(join(tmpdir(), "git-warm-cold-")) });
+  const { ref, work } = await warmFixture("git-warm-pick");
+
+  assert.equal(await hasClone(cold), false);
+  const fresh = await checkoutRepo(cold, { ref, token: "", runId: "run-cold", warm: true });
+  assert.equal(fresh.branch, "ship/run-cold", "warm asked for, nothing cached: the cold clone still happens");
+
+  const reused = await checkoutRepo(work, { ref, token: "", runId: "run-warm", warm: true });
+  assert.equal(reused.branch, "ship/run-warm");
+  assert.equal((await work.exec("test -d node_modules/left-pad")).exitCode, 0);
+});
+
+test("SB-A: a run that did not ask for the warm path never takes it", async () => {
+  const { ref, work } = await warmFixture("git-warm-optout");
+  // A cold clone into a volume that already holds one fails outright, which is
+  // exactly the signal that the opt-out is honoured rather than quietly ignored.
+  await assert.rejects(checkoutRepo(work, { ref, token: "", runId: "run-nowarm" }), /git step failed/);
 });

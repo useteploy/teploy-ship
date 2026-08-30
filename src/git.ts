@@ -146,6 +146,83 @@ export async function setupRepo(
 }
 
 /**
+ * Does this workspace already hold a clone? The warm volume's whole point
+ * (warm.ts) is that it might — and `git clone .` into a non-empty directory
+ * fails, so the answer decides which of the two paths below runs.
+ */
+export async function hasClone(executor: AgentExecutor): Promise<boolean> {
+  const result = await executor.exec("test -d .git", { timeoutMs: 30_000 });
+  return result.exitCode === 0;
+}
+
+/**
+ * Bring a warm volume's existing clone up to date and stand on a fresh work
+ * branch — the reuse half of the warm cache (warm.ts).
+ *
+ * The end state is deliberately indistinguishable from `setupRepo`'s: the
+ * work branch is cut from the remote's default branch at its current tip,
+ * the remote is credential-free, and the tree is clean. What survives is
+ * exactly what makes the cache worth having — the object store and the
+ * IGNORED files, which is where `node_modules`, `target/` and every other
+ * dependency tree lives.
+ *
+ * `git clean -fd` and not `-fdx`: `-x` would delete the ignored files, i.e.
+ * the entire point. Untracked-but-not-ignored leftovers DO go, because they
+ * are the previous run's work and would otherwise be committed as this one's.
+ */
+export async function reuseRepo(
+  executor: AgentExecutor,
+  options: { ref: RepoRef; token: string; runId: string },
+): Promise<RepoCheckout> {
+  const { ref, token, runId } = options;
+  // Fetch under the credential, then scrub it back off the remote whatever
+  // happened — an error on the way out must not leave a token in a config
+  // file the agent can read.
+  await git(executor, `git remote set-url origin ${authenticatedUrl(ref, token)}`);
+  let failure: unknown = null;
+  try {
+    await git(executor, "git fetch --depth 50 --prune origin 2>&1", 300_000);
+    // The template was cloned by an earlier run, so refs/remotes/origin/HEAD
+    // may be stale or absent; asking the remote is the only honest answer to
+    // "what is the default branch".
+    await git(executor, "git remote set-head origin -a 2>&1");
+  } catch (error) {
+    failure = error;
+  }
+  await git(executor, `git remote set-url origin ${ref.cloneUrl}`);
+  if (failure !== null) throw failure;
+
+  const base = assertGitSafe("branch", (await git(executor, "git symbolic-ref --short refs/remotes/origin/HEAD")).replace(/^origin\//, ""));
+  // Drop the previous run's tree before switching: an unmergeable local
+  // change makes `checkout -B` fail, and nothing in this volume is worth
+  // keeping except what git ignores.
+  await git(executor, "git reset --hard");
+  await git(executor, "git clean -fd");
+  // Harness scratch is EXCLUDED, so `git clean` leaves it — and a previous
+  // run's kernel state in this run's workspace is a correctness problem.
+  await git(executor, "rm -rf .teploy-agent");
+  const branch = `ship/${runId}`;
+  await git(executor, `git checkout -B ${branch} origin/${base}`);
+  await git(executor, 'git config user.name "Teploy Ship" && git config user.email "ship@teploy.dev"');
+  await git(executor, `grep -qxF '.teploy-agent/' .git/info/exclude || echo ".teploy-agent/" >> .git/info/exclude`);
+  return { branch, base };
+}
+
+/**
+ * Clone or reuse, whichever this workspace calls for. The ONE entry point
+ * for standing a repo run up, so the warm path can never be reached by one
+ * caller and missed by another (the multi-attempt checkouts boot warm
+ * volumes too).
+ */
+export async function checkoutRepo(
+  executor: AgentExecutor,
+  options: { ref: RepoRef; token: string; runId: string; warm?: boolean },
+): Promise<RepoCheckout> {
+  if (options.warm === true && (await hasClone(executor))) return reuseRepo(executor, options);
+  return setupRepo(executor, options);
+}
+
+/**
  * Commit whatever the agent left in the tree and push the work branch.
  * Returns null when there is nothing to push (empty diff = no PR). The
  * commit happens harness-side so the agent never needs git etiquette —

@@ -650,6 +650,32 @@ Each daemon has its own token in `/var/lib/teploy-sandbox/token`, so a pool
 either shares one token or is joined a host at a time; `join` checks every URL
 in the list and names the one that rejected it.
 
+<a id="warm-cache"></a>
+#### The warm repo cache
+
+Clone + install is the fixed cost of every run, and the daemon can keep a
+per-repo template — a ready clone with its dependencies installed — that each
+run boots a private COPY of. Start the daemon with a cache root to enable it:
+
+```sh
+# unit: serve --addr 0.0.0.0:7439 --cache-root /var/lib/teploy-sandbox/cache --cache-max-gb 20
+systemctl edit teploy-sandbox    # add the flags, then: systemctl restart teploy-sandbox
+df -h /var/lib/teploy-sandbox    # the cap is LRU across templates, not a reservation
+```
+
+Ship uses it automatically: a repo run (not a PR run) asks for its repo's
+volume, reuses the clone and dependency tree if one is there, and publishes the
+volume back as the template when the repo is new or its lockfiles have moved.
+The run timeline carries a `warm-cache` step saying which of those happened.
+
+**Nothing about it can fail a run.** A daemon started without `--cache-root`
+refuses the option, and the create is retried cold; a missing template is an
+ordinary cold clone; a cache that cannot be written is reported on the timeline
+and ignored. `SHIP_WARM_CACHE=0` on the dashboard and workers turns the whole
+thing off — set it if a repo's cached tree is ever suspected of poisoning runs,
+and drop that repo's template with
+`curl -X DELETE -H "authorization: Bearer $TOKEN" $SHIP_SANDBOX_URL/v1/warmcache/<slug>`.
+
 <a id="sandbox-images"></a>
 ### Sandbox images
 

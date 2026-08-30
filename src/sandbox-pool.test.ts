@@ -209,3 +209,43 @@ test("snapshot support is all-or-nothing, because the durable loop treats it tha
 test("a pool needs a host", () => {
   assert.throws(() => new SandboxPool({ hosts: [] }), /needs at least one host/);
 });
+
+test("SB-A: warm calls route to the host the handle names, and a host without a cache answers null", async () => {
+  const asked: string[] = [];
+  const warmed = (name: string): ExecutorProvider => ({
+    isolated: true,
+    async create() {
+      return { handle: `${name}-run` };
+    },
+    attach(handle: string) {
+      return { handle } as unknown as AgentExecutor;
+    },
+    async warmInfo(handle: string) {
+      asked.push(`${name}:${handle}`);
+      return { repo: name, booted: true, lockHash: "a", repoDir: ".", templateHash: "a" };
+    },
+    async warmCommit(handle: string) {
+      asked.push(`${name}:commit:${handle}`);
+      return { repo: name, booted: true, lockHash: "b", repoDir: ".", templateHash: "b" };
+    },
+  });
+  const plain: ExecutorProvider = {
+    isolated: true,
+    async create() {
+      return { handle: "plain-run" };
+    },
+    attach(handle: string) {
+      return { handle } as unknown as AgentExecutor;
+    },
+  };
+  const pool = new SandboxPool({ hosts: [{ url: "http://a", provider: warmed("a") }, { url: "http://b", provider: plain }] });
+
+  const onA = await pool.create();
+  const onB = await pool.create();
+  assert.equal((await pool.warmInfo(onA.handle))?.repo, "a");
+  assert.equal((await pool.warmCommit(onA.handle))?.lockHash, "b");
+  // A template on one daemon means nothing on another; the handle's tag is
+  // what decides, exactly as it does for snapshots.
+  assert.deepEqual(asked, ["a:a-run", "a:commit:a-run"]);
+  assert.equal(await pool.warmInfo(onB.handle), null, "a host with no cache is a cold path, not an error");
+});

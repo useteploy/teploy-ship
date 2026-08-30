@@ -18,6 +18,7 @@ import type { ExecutorProvider, RecoveryTuning } from "./durable.js";
 import { defaultApprovalPolicy } from "./approval.js";
 import { SETTLE_NUDGE, SETTLE_STOP } from "./recovery.js";
 import { runVerificationSummary } from "./verification-summary.js";
+import type { WarmState } from "./warm.js";
 
 /**
  * The paragraph a workspace run with no suite renders as its `summary`
@@ -3974,4 +3975,94 @@ test("C4: auto_trivial holds a normal change — authority semantics, not a bigg
     process.env.PATH = path;
     fixture.restore();
   }
+});
+
+// ---------------------------------------------------------------------------
+// SB-A: the warm repo cache, ship half
+// ---------------------------------------------------------------------------
+
+/** A repo run whose executor speaks the daemon's warm surface. */
+async function warmRun(
+  name: string,
+  warm: { info: WarmState | null; commit?: WarmState | null } | "unwired",
+  input: Record<string, unknown> = {},
+): Promise<{ step: string | undefined; committed: number }> {
+  const bareDir = await mkdtemp(join(tmpdir(), `durable-${name}-bare-`));
+  const seedDir = await mkdtemp(join(tmpdir(), `durable-${name}-seed-`));
+  const seeder = new LocalExecutor({ root: seedDir });
+  await seeder.exec(
+    `git init -q -b main . && git config user.email t@t && git config user.name t && echo x > f.txt && git add -A && git commit -qm seed && git clone -q --bare . ${bareDir}/owner/repo.git`,
+  );
+  const work = await mkdtemp(join(tmpdir(), `durable-${name}-work-`));
+  let committed = 0;
+  const provider: ExecutorProvider = {
+    async create() {
+      return { handle: work };
+    },
+    attach(handle: string) {
+      return new LocalExecutor({ root: handle });
+    },
+    ...(warm === "unwired"
+      ? {}
+      : {
+          warmInfo: async () => warm.info,
+          warmCommit: async () => {
+            committed += 1;
+            return warm.commit ?? null;
+          },
+        }),
+  };
+  const { model } = reactiveModel(["```finish\nnothing to do\n```", "```finish\nnothing to do\n```", "```finish\nnothing to do\n```"]);
+  const store = new MemoryEventStore();
+  const outcome = await executeRun({
+    workflow: durableAgent({ model, executor: provider, workdir: "." }),
+    runId: `run-${name}`,
+    store,
+    input: { task: "look around", repo: `file://${bareDir}/owner/repo.git`, ...input },
+  });
+  assert.equal(outcome.status, "completed", `${name} should complete`);
+  const event = (await store.load(`run-${name}`)).find((e) => e.type === "step-completed" && e.name === "warm-cache");
+  return { step: event === undefined ? undefined : String((event.data as { result?: unknown }).result), committed };
+}
+
+const TEMPLATE: WarmState = { repo: "forge/owner/repo", booted: true, lockHash: "aaaa1111", repoDir: ".", templateHash: "aaaa1111" };
+
+test("SB-A: a warm run whose template still matches reuses it and publishes nothing", async () => {
+  const { step, committed } = await warmRun("warm-reuse", { info: TEMPLATE }, { warm: true });
+  assert.match(String(step), /^reused forge\/owner\/repo \(lockfiles aaaa1111, unchanged\)$/);
+  assert.equal(committed, 0, "re-publishing an unchanged template is pure copying");
+});
+
+test("SB-A: a repo with no template seeds one; moved lockfiles refresh it", async () => {
+  const seeded = await warmRun(
+    "warm-seed",
+    { info: { ...TEMPLATE, booted: false, templateHash: null }, commit: { ...TEMPLATE, booted: false } },
+    { warm: true },
+  );
+  assert.match(String(seeded.step), /^seeded forge\/owner\/repo \(lockfiles aaaa1111\)$/);
+  assert.equal(seeded.committed, 1);
+
+  const refreshed = await warmRun(
+    "warm-refresh",
+    { info: { ...TEMPLATE, lockHash: "bbbb2222" }, commit: { ...TEMPLATE, lockHash: "bbbb2222", templateHash: "bbbb2222" } },
+    { warm: true },
+  );
+  assert.match(String(refreshed.step), /^refreshed forge\/owner\/repo \(lockfiles aaaa1111 -> bbbb2222\)$/);
+  assert.equal(refreshed.committed, 1);
+});
+
+test("SB-A: the step is present but honest when the worker or the daemon has no cache", async () => {
+  const unwired = await warmRun("warm-unwired", "unwired", { warm: true });
+  assert.match(String(unwired.step), /disabled \(this worker's executor has no warm cache\)/);
+
+  // The daemon answers null for a run with no warm volume — an ordinary
+  // state on a daemon started without --cache-root, and never a run failure.
+  const noVolume = await warmRun("warm-novolume", { info: null }, { warm: true });
+  assert.match(String(noVolume.step), /disabled \(this run has no warm volume\)/);
+});
+
+test("SB-A: a run that recorded no `warm` records no step — pre-cache logs replay unchanged", async () => {
+  const { step, committed } = await warmRun("warm-absent", { info: TEMPLATE });
+  assert.equal(step, undefined);
+  assert.equal(committed, 0);
 });

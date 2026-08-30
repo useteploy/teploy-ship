@@ -28,6 +28,7 @@ import {
   pullRequestUrl,
   readPullRequestBody,
   reviewPrompt,
+  checkoutRepo,
   setupRepo,
   setupRepoForPr,
   resolvePr,
@@ -48,6 +49,7 @@ import {
 import { buildIfDeclared, observeIfDeclared, recordLadder, smokeIfDeclared, visualIfDeclared, type LadderHooks } from "./ladder-steps.js";
 import { compareAroundNow, effectiveTelemetryTarget, telemetryAppliesTo, telemetryRegression, type TelemetryTarget, type TelemetryVerdict } from "./observe.js";
 import { spliceVerification, verificationSection, type Evidence } from "./verification.js";
+import { shortHash, warmClient, warmSlugOf, type WarmState } from "./warm.js";
 import { mergeFact, verificationSummary, type VerificationFacts } from "./verification-summary.js";
 import { preExisting, runTests, testComment, testTargetFromInput, testsFailedNudge, type TestOutcome, type TestTarget } from "./tests.js";
 import { refusalMessage, warningMessage } from "./publish-policy.js";
@@ -155,6 +157,21 @@ export interface DurableAgentInput {
    * so pre-feature runs replay unchanged.
    */
   guard?: boolean;
+  /**
+   * Warm repo cache (SB-A): ask the sandbox daemon for this repo's warm
+   * volume, reuse the clone and dependency tree it holds instead of
+   * cloning cold, and publish the volume back as the template when it is
+   * new or its lockfiles have moved (a recorded `warm-cache` step).
+   *
+   * Input-gated like steer/index/guard, and for a sharper reason than
+   * theirs: the cache is LIVE HOST STATE. A run whose template was
+   * evicted between execution and replay must walk the same step
+   * sequence, so nothing about the cache may decide step presence — only
+   * this field, written at enqueue, does. Repo runs that are not PR runs
+   * (a PR checkout resolves a head from another repository, and its
+   * volume is not the repo's steady state).
+   */
+  warm?: boolean;
   /**
    * Post-finish critic pass: before a finish that survives the verify
    * nudge is honored, an independent reviewer (Team/TeamPolicy over a
@@ -580,6 +597,12 @@ export interface SandboxOverrides {
   image?: string;
   network?: "none" | "egress";
   limits?: { memoryMb?: number; cpus?: number; pids?: number };
+  /**
+   * Boot this run on the repo's warm volume (warm.ts). Derived from the
+   * recorded input, never from live cache state, so a replay asks for
+   * exactly what the original run asked for.
+   */
+  warm?: { repo: string; path?: string };
 }
 
 export interface ExecutorProvider {
@@ -611,6 +634,17 @@ export interface ExecutorProvider {
    * capacity.
    */
   destroy?: (handle: string) => Promise<void>;
+  /**
+   * The warm repo cache (SB-A), present only on a provider that can talk
+   * to a daemon holding one. `warmInfo` reports the run volume's current
+   * lockfile hash beside its repo's published template hash; `warmCommit`
+   * publishes the volume as that template. Both answer null for the
+   * ordinary states — no cache store on the daemon, no warm volume on
+   * this run, no template for this repo yet — so the caller degrades to
+   * the cold path instead of failing a run over a cache.
+   */
+  warmInfo?: (handle: string) => Promise<WarmState | null>;
+  warmCommit?: (handle: string) => Promise<WarmState | null>;
 }
 
 export interface DurableAgentConfig {
@@ -858,7 +892,11 @@ export function durableAgent(
           if (token === "" && ref.base !== "file://") {
             throw new Error("repo run needs a git credential on the executing worker (SHIP_GIT_TOKEN or SHIP_GIT_TOKENS)");
           }
-          if (input.pr === undefined) return setupRepo(executor, { ref, token, runId: ctx.runId });
+          // Warm reuse (SB-A) when this run booted a warm volume that already
+          // holds a clone; a cold clone otherwise. Both end in the same
+          // checkout, so the step's OUTPUT — the only thing a replay reads —
+          // does not depend on which path ran.
+          if (input.pr === undefined) return checkoutRepo(executor, { ref, token, runId: ctx.runId, warm: input.warm === true });
           // A fork PR's head branch lives in another repository, which the
           // allowlist has to cover too — resolve its credential the same way.
           const resolved = await resolvePr(ref, token, input.pr);
@@ -941,6 +979,43 @@ export function durableAgent(
         checkout !== null && input.testsFeedback === true
           ? await runSuite(ctx, executor, config, input, "baseline-")
           : undefined;
+
+      // WARM CACHE (SB-A), the publish half. Here rather than straight after
+      // the checkout on purpose: the baseline suite has just installed the
+      // repo's dependencies, and a template WITHOUT them saves a clone while
+      // a template with them saves the install too — which is the larger
+      // half of a run's fixed cost. The agent has not touched anything yet,
+      // so what gets published is the repo's clean steady state.
+      //
+      // A recorded step, and input-gated on `warm`: a log written before this
+      // existed carries no such field and replays through the same sequence.
+      // Everything the body depends on — the worker's wiring, the daemon's
+      // answer, the cache's contents — is handled INSIDE it and reported as
+      // text, exactly as repo-index does, because none of it is knowable from
+      // a log and all of it can change between an execution and its replay.
+      if (input.warm === true && checkout !== null) {
+        await ctx.step("warm-cache", async () => {
+          if (config.executor.warmInfo === undefined || config.executor.warmCommit === undefined) {
+            return "disabled (this worker's executor has no warm cache)";
+          }
+          try {
+            const state = await config.executor.warmInfo(handle);
+            if (state === null) return "disabled (this run has no warm volume)";
+            if (state.booted && state.templateHash === state.lockHash) {
+              return `reused ${state.repo} (lockfiles ${shortHash(state.lockHash)}, unchanged)`;
+            }
+            const published = await config.executor.warmCommit(handle);
+            if (published === null) return `could not publish the ${state.repo} template (the daemon declined)`;
+            return state.booted
+              ? `refreshed ${published.repo} (lockfiles ${shortHash(state.templateHash ?? "")} -> ${shortHash(published.lockHash)})`
+              : `seeded ${published.repo} (lockfiles ${shortHash(published.lockHash)})`;
+          } catch (error) {
+            // Never fatal. A cache that cannot be written costs time, not
+            // correctness — the run already has its checkout.
+            return `warm cache skipped: ${error instanceof Error ? error.message : String(error)}`;
+          }
+        });
+      }
 
       // Surface injection attempts in the external task text on the run
       // timeline. screenUntrusted is a pure function of the recorded
@@ -1123,7 +1198,10 @@ export function durableAgent(
           const attemptExecutor = config.executor.attach(attemptHandle);
           const attemptCheckout = await ctx.step(`${p}repo-setup`, async () => {
             const ref = assertRepoAllowed(input.repo!, { trust: input.trust ?? "operator", config: repoPolicy });
-            return setupRepo(attemptExecutor, { ref, token: credentialFor(ref, repoPolicy), runId: ctx.runId });
+            // checkoutRepo, not setupRepo: every attempt boots its own warm
+            // volume (the daemon copies the template per run), and a cold
+            // clone into one that already holds the repo fails outright.
+            return checkoutRepo(attemptExecutor, { ref, token: credentialFor(ref, repoPolicy), runId: ctx.runId, warm: input.warm === true });
           });
           ws = { ctx, handle: attemptHandle, executor: attemptExecutor, workdir, checkout: attemptCheckout, scopeKey, stepPrefix: p };
         }
@@ -3031,11 +3109,33 @@ export function sandboxProvider(options: {
     ...(options.ttlSec !== undefined ? { ttlSec: options.ttlSec } : {}),
     ...(options.network !== undefined ? { network: options.network } : {}),
   };
+  const warm = warmClient(base);
   return {
     isolated: true,
     async create(overrides?: SandboxOverrides) {
-      const sandbox = await SandboxExecutor.start({ ...base, create: { ...create, ...definedOverrides(overrides) } });
-      return { handle: sandbox.runId };
+      const wanted = definedOverrides(overrides);
+      try {
+        // `warm` is not in @neutron-build/agents' SandboxCreateOptions — the
+        // client posts `create` verbatim, so the field reaches the daemon and
+        // the cast is the whole of the coupling.
+        const sandbox = await SandboxExecutor.start({ ...base, create: { ...create, ...wanted } as typeof create });
+        return { handle: sandbox.runId };
+      } catch (error) {
+        // A daemon with no cache store answers the warm option with a 400.
+        // Losing the run to that would make the cache a liability, so the
+        // create is retried WITHOUT it — the cold path is the fallback the
+        // whole feature is allowed to degrade to.
+        if (wanted.warm === undefined) throw error;
+        const { warm: _unavailable, ...cold } = wanted;
+        const sandbox = await SandboxExecutor.start({ ...base, create: { ...create, ...cold } });
+        return { handle: sandbox.runId };
+      }
+    },
+    async warmInfo(handle: string) {
+      return await warm.info(handle);
+    },
+    async warmCommit(handle: string) {
+      return await warm.commit(handle);
     },
     attach(handle: string) {
       return SandboxExecutor.attach(handle, base);
@@ -3044,7 +3144,9 @@ export function sandboxProvider(options: {
       return SandboxExecutor.attach(handle, base).snapshot();
     },
     async createFrom(image: string, overrides?: SandboxOverrides) {
-      const { image: _snapshotted, ...rest } = definedOverrides(overrides);
+      // No warm volume on a restore: the snapshot IS the workspace, and a
+      // volume mounted at the same path would hide it completely.
+      const { image: _snapshotted, warm: _volume, ...rest } = definedOverrides(overrides);
       const sandbox = await SandboxExecutor.start({ ...base, create: { ...create, ...rest, image } });
       return { handle: sandbox.runId };
     },
@@ -3059,16 +3161,23 @@ function definedOverrides(o?: SandboxOverrides): SandboxOverrides {
     ...(o?.image !== undefined ? { image: o.image } : {}),
     ...(o?.network !== undefined ? { network: o.network } : {}),
     ...(o?.limits !== undefined ? { limits: o.limits } : {}),
+    ...(o?.warm !== undefined ? { warm: o.warm } : {}),
   };
 }
 
 /** The run's recorded sandbox overrides, if any. */
 export function sandboxOverridesOf(input: DurableAgentInput): SandboxOverrides | undefined {
-  if (input.sandboxImage === undefined && input.sandboxNetwork === undefined && input.sandboxLimits === undefined) return undefined;
+  // The warm slug is a pure function of the recorded repo URL, so it is the
+  // same on every replay even after the template it names has been evicted.
+  const warm = input.warm === true && input.repo !== undefined ? warmSlugOf(input.repo) : null;
+  if (input.sandboxImage === undefined && input.sandboxNetwork === undefined && input.sandboxLimits === undefined && warm === null) {
+    return undefined;
+  }
   return {
     ...(input.sandboxImage !== undefined ? { image: input.sandboxImage } : {}),
     ...(input.sandboxNetwork !== undefined ? { network: input.sandboxNetwork } : {}),
     ...(input.sandboxLimits !== undefined ? { limits: input.sandboxLimits } : {}),
+    ...(warm !== null ? { warm: { repo: warm } } : {}),
   };
 }
 

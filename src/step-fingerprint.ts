@@ -439,6 +439,9 @@ export const WORKFLOW_STEPS: readonly WorkflowStep[] = [
   { key: "step:repo-setup", admits: repoRun },
   { key: "step:repo-context", admits: repoRun },
   { key: "step:repo-index", admits: (i) => i.index === true && scoped(i) },
+  // The warm cache's publish step (SB-A). Gated on `warm`, a field no
+  // pre-cache log carries, so those runs' fingerprints are untouched.
+  { key: "step:warm-cache", admits: (i) => i.warm === true && repoRun(i) },
   { key: "step:injection-guard", admits: (i) => i.guard === true && repoRun(i) },
   { key: "step:pr-review-comments", admits: prRun },
   { key: "step:scan-findings", admits: (i) => i.mode === "scan" },

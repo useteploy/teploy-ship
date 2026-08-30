@@ -684,6 +684,8 @@ export function startWorker(options: WorkerOptions): {
       ? { createFrom: (image: string, o?: SandboxOverrides) => src.createFrom!(image, hostSizedOverrides(o)) }
       : {}),
     ...(src.destroy !== undefined ? { destroy: (handle: string) => src.destroy!(handle) } : {}),
+    ...(src.warmInfo !== undefined ? { warmInfo: (handle: string) => src.warmInfo!(handle) } : {}),
+    ...(src.warmCommit !== undefined ? { warmCommit: (handle: string) => src.warmCommit!(handle) } : {}),
   };
   const wf = durableAgent({
     ...(maxSteps !== undefined ? { maxSteps } : {}),
