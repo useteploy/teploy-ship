@@ -24,6 +24,14 @@
     "./plan": {
       "types": "./dist/plan.d.ts",
       "import": "./dist/plan.js"
+    },
+    "./fence": {
+      "types": "./dist/fence.d.ts",
+      "import": "./dist/fence.js"
+    },
+    "./bulletin": {
+      "types": "./dist/bulletin.d.ts",
+      "import": "./dist/bulletin.js"
     }
   }
 }
