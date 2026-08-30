@@ -28,6 +28,16 @@ export interface PoolClientLike {
   release(destroy?: boolean): void;
 }
 
+/**
+ * One connection of its own, used and closed — the retry path's transport.
+ * Narrow for the same reason PoolLike is.
+ */
+export interface SoloClientLike {
+  connect(): Promise<unknown>;
+  query(sql: string, params?: unknown[]): Promise<QueryResultLike>;
+  end(): Promise<void>;
+}
+
 /** The slice of pg.Pool Ship uses — narrow so a test can stand in a fake. */
 export interface PoolLike {
   query(sql: string, params?: unknown[]): Promise<QueryResultLike>;
@@ -60,6 +70,8 @@ export class NucleusPgwire {
   #pool: PoolLike;
   #owner: string;
   #docsReady: Promise<void> | null = null;
+  /** How the retry path opens a connection that shares nothing with the pool. */
+  #solo: (() => SoloClientLike) | null;
 
   /**
    * @param owner Same identifier callers already pass to `nucleusRuntime`
@@ -67,8 +79,9 @@ export class NucleusPgwire {
    *   here as the correlation tag on pool-level log lines, since a pool
    *   'error' isn't tied to any single in-flight query/run.
    */
-  constructor(url: string, owner = "unknown", deps: { pool?: PoolLike } = {}) {
+  constructor(url: string, owner = "unknown", deps: { pool?: PoolLike; solo?: () => SoloClientLike } = {}) {
     this.#owner = owner;
+    this.#solo = deps.solo ?? (url === "" ? null : () => new pg.Client({ connectionString: url }) as unknown as SoloClientLike);
     this.#pool = deps.pool ?? new pg.Pool({
       connectionString: url,
       max: 4,
@@ -104,19 +117,31 @@ export class NucleusPgwire {
   }
 
   /**
-   * Every statement goes through here. Under load on 2026-08-24/25 the pool
-   * rejected with `TypeError: Cannot read properties of undefined (reading
-   * 'name')` from pg-pool@3.14.0 index.js:45 — its `promisify` catch calls
-   * `Error.captureStackTrace(err)` on whatever the connect path rejected
-   * with, and that value was not an Error. The real reason is masked by the
-   * TypeError (seen only with four sandboxes plus CLI traffic on a
-   * 4-connection pool with a 5 s acquire timeout, alongside Nucleus catalog
-   * write failures). It broke settle, meta updates and `approve` on live
-   * runs. Bounded fix: a rejection that is not a real database error is
-   * retried ONCE on a freshly checked-out client, which is destroyed if it
-   * fails again, so a poisoned pooled connection cannot be handed back out.
-   * A rejection that is a genuine database error (bad SQL, constraint) is
-   * thrown as-is — those are not transient.
+   * Every statement goes through here. Under load the pool rejects with
+   * `TypeError: Cannot read properties of undefined (reading 'name')` — pg
+   * replaces the stack on its way out (client.js `Error.captureStackTrace`),
+   * so the message names nothing and the real reason is lost. It broke
+   * settle, meta updates and `approve` on live runs in August, and on
+   * 2026-08-30 it hit the deployed worker roughly every sweep: twelve in
+   * thirty minutes on `document.find`, and when it landed on the scheduler's
+   * `due` query the worker launched nothing at all until it was restarted.
+   *
+   * What that day's measurements RULED OUT, against the live store from
+   * inside the worker's own container: the SQL (a standalone client runs both
+   * failing queries fine), the startup parameters (same with
+   * statement_timeout and connectionTimeoutMillis set), and concurrency alone
+   * (a fresh 4-connection pool took 48 concurrent copies of the same queries
+   * without a single failure). What is left is state that accumulates on a
+   * LONG-LIVED pool — so the retry must not go back to it.
+   *
+   * That is the change here. `pool.connect()` hands back a POOLED client,
+   * very often the same one that just failed, which is why the old retry
+   * failed as reliably as the attempt it was retrying. The retry now opens a
+   * connection of its own, uses it for exactly this statement, and closes it
+   * — the shape that was measured to work. It costs one connection on a path
+   * that is already the exceptional one, and it is bounded to a single
+   * attempt. A rejection that is a genuine database error (bad SQL,
+   * constraint) is still thrown as-is; those are not transient.
    */
   async #run(sql: string, params: unknown[] = []): Promise<QueryResultLike> {
     try {
@@ -124,16 +149,31 @@ export class NucleusPgwire {
     } catch (error) {
       if (!isTransientPoolFailure(error)) throw error;
       console.error(
-        `[nucleus-pgwire] pool query failed (${this.#owner}), retrying on a fresh connection: ${describe(error)}`,
+        `[nucleus-pgwire] pool query failed (${this.#owner}), retrying on a connection of its own: ${describe(error)}`,
       );
-      const client = await this.#pool.connect();
+      if (this.#solo === null) {
+        // No way to open one (an injected pool with no solo seam): fall back
+        // to the pooled checkout rather than failing the caller outright.
+        const client = await this.#pool.connect();
+        try {
+          const result = await client.query(sql, params);
+          client.release();
+          return result;
+        } catch (again) {
+          client.release(true);
+          throw again instanceof Error ? again : new Error(`nucleus query rejected with a non-error value: ${describe(again)}`);
+        }
+      }
+      const solo = this.#solo();
       try {
-        const result = await client.query(sql, params);
-        client.release();
-        return result;
+        await solo.connect();
+        return await solo.query(sql, params);
       } catch (again) {
-        client.release(true);
         throw again instanceof Error ? again : new Error(`nucleus query rejected with a non-error value: ${describe(again)}`);
+      } finally {
+        // Never let closing the throwaway connection mask the result or the
+        // error above it.
+        await solo.end().catch(() => {});
       }
     }
   }
