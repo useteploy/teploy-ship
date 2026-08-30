@@ -1,7 +1,7 @@
 import type { Project } from "teploy-ship/runtime";
-import type { AuthoritySuggestion, RepoCounts } from "teploy-ship/runtime";
-import { authorityCap, managedDrift, suggestAuthority, summarizeRepoStats, costPerMerge } from "teploy-ship/runtime";
+import type { AuthoritySuggestion, ManagedDrift, RepoCounts } from "teploy-ship/runtime";
 
+import { authorityCap, costPerMerge, managedDrift, suggestAuthority, summarizeRepoStats } from "../lib/ship.server.js";
 import { shipRuntime, effectiveAuthority } from "../lib/store.server.js";
 import { currentUser } from "../lib/session.server.js";
 import { may } from "../lib/authority.server.js";
@@ -48,6 +48,15 @@ interface ProjectsData {
   costPerMerge: Record<string, number | null>;
   /** L8 D4: what the numbers say next, per repo. Suggestion only. */
   suggestions: Record<string, AuthoritySuggestion>;
+  /**
+   * C2 drift, per repo, computed HERE rather than in the view.
+   *
+   * managedDrift is a pure function, but it lives in `teploy-ship/runtime`,
+   * whose module graph reaches node:fs and pg — and a value imported from
+   * there in a route module survives Neutron's client strip and breaks the
+   * browser bundle. The server computes it; the client renders it.
+   */
+  drift: Record<string, ManagedDrift[]>;
   hookBase: string;
   envAllowlist: string;
   workerImage: string;
@@ -110,6 +119,8 @@ export async function loader({ request }: { request: Request }): Promise<Project
         }),
       ]),
     ),
+    // C2 drift per repo (see the field's comment): server-side, once.
+    drift: Object.fromEntries(projects.map((p) => [p.repo, managedDrift(p)])),
     selected,
     hookBase: (process.env.SHIP_PUBLIC_URL ?? "").replace(/\/+$/, ""),
     envAllowlist: process.env.SHIP_REPO_ALLOWLIST ?? "",
@@ -289,10 +300,9 @@ function deniedText(denied: string): string {
  * next `project` row overwrites the fields again (which this panel will then
  * stop showing, because the snapshot moves with it).
  */
-function ManagedPanel({ p }: { p: Project }) {
+function ManagedPanel({ p, drift }: { p: Project; drift: ManagedDrift[] }) {
   const m = p.managedBy;
   if (m === undefined) return null;
-  const drift = managedDrift(p);
   return (
     <div class="card" style="margin:12px 0">
       <p class="meta" style="margin:0 0 6px">
@@ -474,7 +484,7 @@ export default function Projects({ data }: { data: ProjectsData | SourcesData | 
       {p !== null ? (
         <>
           <p class="meta"><a href="/projects">projects</a> / {p.repo}{p.label !== undefined ? ` · ${p.label}` : ""}</p>
-          {p.managedBy !== undefined && <ManagedPanel p={p} />}
+          {p.managedBy !== undefined && <ManagedPanel p={p} drift={(data as ProjectsData).drift[p.repo] ?? []} />}
           <div class="card">
             <ProjectForm p={p} data={data} />
           </div>
@@ -506,7 +516,7 @@ export default function Projects({ data }: { data: ProjectsData | SourcesData | 
                       <td>
                         <a href={`/projects?repo=${encodeURIComponent(r.repo)}`}>{r.repo}</a>
                         {r.managedBy !== undefined && (
-                          <span class="meta"> · <b>managed by Akiroo</b>{managedDrift(r).length > 0 ? " (drift)" : ""}</span>
+                          <span class="meta"> · <b>managed by Akiroo</b>{((data as ProjectsData).drift[r.repo] ?? []).length > 0 ? " (drift)" : ""}</span>
                         )}
                         {r.label !== undefined && <span class="meta"> · {r.label}</span>}
                         {r.url === undefined && <span class="meta"> · no clone URL — not allowlisted</span>}
