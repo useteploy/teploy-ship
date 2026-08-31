@@ -466,9 +466,12 @@ export interface NucleusShipRuntime extends ShipRuntime {
 export async function nucleusRuntime(
   url: string,
   owner: string,
-  options?: { log?: (line: string) => void },
+  options?: { log?: (line: string) => void; db?: NucleusPgwire },
 ): Promise<NucleusShipRuntime> {
-  const db = new NucleusPgwire(url, owner);
+  // `db` is a seam, not a feature: NucleusPgwire already takes a PoolLike so a
+  // test can watch the statements it emits, and the reads this runtime issues
+  // (listMeta above all) are worth asserting on rather than trusting.
+  const db = options?.db ?? new NucleusPgwire(url, owner);
   // Bring the shared schema to the shape this binary expects BEFORE handing
   // back a runtime. A rolling deploy runs old and new processes against one
   // Nucleus, so this must be safe to call concurrently (it takes a KV lock)
@@ -583,10 +586,42 @@ export async function nucleusRuntime(
       const records = await db.document.find("ship_runs", { runId });
       return toMeta(docs[0]!, records[0]);
     },
+    /**
+     * The two reads behind this used to be `SELECT * FROM ship_docs WHERE
+     * collection = …` with no bound at all, once for the metas and once for the
+     * run index, sorted and cut in JavaScript afterwards. That is a cost that
+     * grows with every run Ship has ever done — 213 rows per collection on the
+     * deployed worker on 2026-08-30 — for a page that shows two hundred. The
+     * upgrade-hold sweep calls this on a timer, so the whole history crossed
+     * the wire twice a sweep, forever.
+     *
+     * Both sides are bounded now, and neither bound changes the answer:
+     *
+     *   - The METAS are ranked in SQL on the same key this function sorts on:
+     *     the later of the meta doc's `updatedAt` and its `ship_runs` record's.
+     *     Ranking on the meta stamp alone would NOT have been the same query —
+     *     see FindOptions.newest, where the measurement is written down.
+     *   - The RUN RECORDS are then fetched by `run_id IN (…)` over exactly the
+     *     metas we are about to return. `byRun` was only ever read with keys
+     *     taken from `docs`, so every record this drops is one no lookup could
+     *     have reached.
+     *
+     * The JavaScript sort and slice below stay, deliberately. SQL is being used
+     * to choose the candidate SET; the ordering the caller sees is still decided
+     * here, by the comparator that has always decided it. (One residual, and it
+     * predates this change: `ship_docs` has no unique index, so if a runId ever
+     * has two `ship_runs` rows, which one wins `byRun` is whichever Nucleus
+     * returns last — unspecified before and unspecified now.)
+     */
     async listMeta(options) {
       const limit = Math.max(1, Math.trunc(options?.limit ?? DEFAULT_LIST_LIMIT));
-      const docs = await db.document.find(META_COLLECTION, {});
-      const records = await db.document.find("ship_runs", {});
+      const docs = await db.document.find(
+        META_COLLECTION,
+        {},
+        { newest: { limit, freshenedBy: "ship_runs" } },
+      );
+      const runIds = docs.map((doc) => (doc as { runId?: string }).runId ?? "");
+      const records = await db.document.find("ship_runs", {}, { runIds });
       const byRun = new Map(records.map((r) => [r.runId as string, r]));
       return docs
         .map((doc) => toMeta(doc, byRun.get((doc as { runId?: string }).runId ?? "")))

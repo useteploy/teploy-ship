@@ -22,6 +22,49 @@ export interface QueryResultLike {
   rowCount: number | null;
 }
 
+/**
+ * Optional bounds on a `document.find`.
+ *
+ * Both are OPT-IN, and a `find` called without them emits exactly the statement
+ * it always did — `SELECT * FROM ship_docs WHERE …`, no ORDER BY, no LIMIT.
+ * That matters more than it looks: the Workflow SDK's `RunIndex.due` calls this
+ * same primitive three times a tick (`status = 'sleeping' | 'retrying' |
+ * 'wake'`) and MUST see every due run. A default limit there would silently
+ * strand whichever runs fell off the end, which is the failure mode this file
+ * already exists to argue against. So the caller that can prove a bound is safe
+ * asks for one; nobody gets one imposed.
+ */
+export interface FindOptions {
+  /**
+   * `AND run_id IN (…)`. An empty list matches nothing, and short-circuits
+   * without a round trip rather than emitting `IN ()` for Nucleus to parse.
+   *
+   * This is how a caller that has ALREADY chosen its rows fetches the second
+   * collection it joins against: instead of dragging a whole collection back to
+   * join in JavaScript, it names the handful of ids the join can possibly touch.
+   */
+  runIds?: readonly string[];
+  /**
+   * Return only the newest `limit` docs, ranked and cut in SQL.
+   *
+   * "Newest" is the doc's own `updated_at`, unless `freshenedBy` names another
+   * collection in the same table — then it is the LATER of this doc's stamp and
+   * that collection's stamp for the same `runId`. That second form exists for
+   * `listMeta`, which overlays a run's `ship_runs` record onto its `ship_meta`
+   * doc and takes the newer of the two `updatedAt`s. Rank on the meta stamp
+   * alone and the bound is not a bound on the same ordering: a long-lived run
+   * whose meta row is old but whose index row was touched a minute ago drops
+   * out of the page it belongs at the top of.
+   *
+   * That is not a theoretical worry. Measured against a live Nucleus v0.1.8
+   * (2026-08-30) over 400 metas where two thirds carried a run record with an
+   * independent stamp, a naive `ORDER BY updated_at DESC LIMIT 50` on the meta
+   * collection alone returned 45 of 50 rows that do not belong in the answer.
+   * The joined rank returned the exact set, over six trials at 500–1500 docs.
+   */
+  newest?: { limit: number; freshenedBy?: string };
+}
+
 export interface PoolClientLike {
   query(sql: string, params?: unknown[]): Promise<QueryResultLike>;
   /** `release(true)` destroys the client instead of returning it to the pool. */
@@ -133,6 +176,36 @@ export class NucleusPgwire {
    * (a fresh 4-connection pool took 48 concurrent copies of the same queries
    * without a single failure). What is left is state that accumulates on a
    * LONG-LIVED pool — so the retry must not go back to it.
+   *
+   * THE CAUSE IS NOW KNOWN, and it is not in this file. Reproduced 2026-08-30
+   * against `ghcr.io/neutron-build/nucleus:v0.1.8` — the deployed image — on a
+   * laptop: Nucleus answers a query with ANOTHER STATEMENT'S RowDescription
+   * while sending this statement's own DataRows. pg builds its row objects from
+   * `fields[i].name` (result.js), so when the borrowed description is NARROWER
+   * than the row it throws exactly this TypeError — and when it is WIDER it
+   * throws nothing at all and silently labels every column with the other
+   * statement's names. In one two-minute read-only run over 24 tables, 6,838
+   * queries threw and 7,799 were relabelled in silence.
+   *
+   * The silent half is the dangerous half, because `rowToDoc` below reads by
+   * column NAME: a relabelled ship_docs row yields an EMPTY doc rather than an
+   * error. That is a listMeta page of blanks, and a `RunIndex.due` that finds
+   * nothing due and launches nothing — with no exception anywhere to notice.
+   *
+   * It is a collision, not a race. Over 24 tables and 552 possible (asked-for,
+   * got) pairings, just TWO pairings accounted for all 6,052 faults in one run,
+   * and in 90% of them the stray description belonged to a statement no other
+   * connection was running at the time. It follows the SQL TEXT, not the table:
+   * one table read three different ways collided on two of the three texts, with
+   * a different neighbour each time. Two tables never reproduced it at any load;
+   * six, twelve and twenty-four did, non-monotonically. That is why the
+   * container measurements above came back clean — two `document.find` texts on
+   * their own are not enough distinct statements to collide.
+   *
+   * Ship cannot fix this from here; it needs a Nucleus fix. Note meanwhile that
+   * changing a statement's text (as the bounded reads below do) moves it to a
+   * different slot, which shuffles which statements collide rather than
+   * removing the collision.
    *
    * That is the change here. `pool.connect()` hands back a POOLED client,
    * very often the same one that just failed, which is why the old retry
@@ -257,13 +330,51 @@ export class NucleusPgwire {
       );
       return 1;
     },
+    /**
+     * Every doc in `collection` matching `filter`, optionally bounded.
+     *
+     * Unbounded this is `SELECT *` over a table that only ever grows — 213 rows
+     * per collection on the deployed worker as of 2026-08-30, dragged through
+     * the wire layer twice on every upgrade-hold sweep and three more times on
+     * every scheduler tick. See FindOptions for why the bound is opt-in.
+     */
     find: async (
       collection: string,
       filter: Record<string, unknown>,
+      options?: FindOptions,
     ): Promise<Record<string, unknown>[]> => {
       await this.#ensureDocs();
+      // `IN ()` is not valid SQL and "one of nothing" has one answer anyway.
+      if (options?.runIds !== undefined && options.runIds.length === 0) return [];
       const { where, params } = whereClause(collection, filter);
-      const result = await this.#run(`SELECT * FROM ship_docs WHERE ${where}`, params);
+      const clauses = [where];
+      const args: string[] = [...params];
+      if (options?.runIds !== undefined) {
+        const placeholders = options.runIds.map((_, i) => `$${args.length + i + 1}`).join(", ");
+        clauses.push(`run_id IN (${placeholders})`);
+        args.push(...options.runIds);
+      }
+      let sql = `SELECT * FROM ship_docs WHERE ${clauses.join(" AND ")}`;
+      if (options?.newest !== undefined) {
+        const { limit, freshenedBy } = options.newest;
+        let rank = "ship_docs.updated_at";
+        if (freshenedBy !== undefined) {
+          // Qualified by table name rather than an alias: `SELECT m.*` also
+          // works against Nucleus, but the unaliased form keeps the projection
+          // and the WHERE clause byte-identical to the unbounded statement, so
+          // the only thing the option changes is the ordering and the cut.
+          rank =
+            `GREATEST(ship_docs.updated_at, COALESCE((SELECT MAX(r.updated_at) FROM ship_docs r ` +
+            `WHERE r.collection = $${args.length + 1} AND r.run_id = ship_docs.run_id), ship_docs.updated_at))`;
+          args.push(freshenedBy);
+        }
+        // The limit is inlined for the same reason every other number in this
+        // file is: node-postgres ships parameters as text and Nucleus's
+        // planner wants a literal here. int() is the guard that keeps that
+        // safe — and the value is always internally derived, never user input.
+        sql += ` ORDER BY ${rank} DESC LIMIT ${int(Math.max(1, Math.trunc(limit)))}`;
+      }
+      const result = await this.#run(sql, args);
       return (result.rows as Record<string, unknown>[]).map(rowToDoc);
     },
     update: async (
