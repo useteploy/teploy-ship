@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import type { WorkflowEvent } from "@neutron-build/workflow";
 
-import { recordedSteps } from "./timeline.js";
+import { recordedSteps, toTimeline } from "./timeline.js";
 
 const T0 = "2026-08-24T12:00:00.000Z";
 const T1 = "2026-08-24T12:01:00.000Z";
@@ -90,4 +90,52 @@ test("recordedSteps: order follows the log, non-step events are skipped, run-lev
     ],
   );
   assert.equal(steps[0]!.at, T0, "rows keep the event's own timestamp for ordering");
+});
+
+test("a turn the sandbox blocked says so on its collapsed row, once, with the remedy beside it", () => {
+  const events: WorkflowEvent[] = [
+    { v: 1, seq: 0, type: "run-started", at: T0, data: { input: { task: "add a gem" } } },
+    done("turn-1-think", { text: "```bash\nbundle install\n```" }, 1),
+    done("turn-1-exec", { exitCode: 1, stdout: "", stderr: "Net::HTTPForbidden: egress denied by the sandbox allowlist: rubygems.org" }, 2),
+    done("turn-2-think", { text: "```bash\nbundle install --retry 3\n```" }, 3),
+    done("turn-2-exec", { exitCode: 1, stdout: "", stderr: "egress denied by the sandbox allowlist: rubygems.org" }, 4, T1),
+  ];
+  const items = toTimeline(events);
+  const turns = items.filter((i) => i.kind === "turn");
+  assert.equal(turns[0]!.blockedHost, "rubygems.org", "a blocked host is not just 'exit 1'");
+  assert.equal(turns[1]!.blockedHost, "rubygems.org");
+  const notes = items.filter((i) => i.title.startsWith("sandbox blocked"));
+  assert.equal(notes.length, 1, "the remedy once, not per turn — five identical notes teach a reader to scroll");
+  assert.match(notes[0]!.body, /egress allowlist/);
+  assert.match(notes[0]!.body, /project set/);
+  assert.equal(items.indexOf(notes[0]!), items.indexOf(turns[0]!) + 1, "it reads in the order it happened");
+});
+
+test("an ordinary failure is never called a network block", () => {
+  const items = toTimeline([
+    { v: 1, seq: 0, type: "run-started", at: T0, data: { input: { task: "t" } } },
+    done("turn-1-exec", { exitCode: 1, stdout: "", stderr: "curl: (6) Could not resolve host: rubygems.org" }, 1),
+    done("turn-2-exec", { exitCode: 0, stdout: "egress denied by the sandbox allowlist: x.com", stderr: "" }, 2),
+  ] as WorkflowEvent[]);
+  assert.equal(items.filter((i) => i.blockedHost !== undefined).length, 0);
+  assert.equal(items.filter((i) => i.title.startsWith("sandbox blocked")).length, 0);
+});
+
+test("a run downgraded off the open network says so at the top, derived from the recorded input alone", () => {
+  const external = toTimeline([
+    { v: 1, seq: 0, type: "run-started", at: T0, data: { input: { task: "t", trust: "external", sandboxNetwork: "open" } } },
+  ] as WorkflowEvent[]);
+  assert.equal(external[1]!.title, "sandbox network downgraded to allowlist");
+  assert.match(external[1]!.body, /came from outside/);
+
+  const operator = toTimeline([
+    { v: 1, seq: 0, type: "run-started", at: T0, data: { input: { task: "t", trust: "operator", sandboxNetwork: "open" } } },
+  ] as WorkflowEvent[]);
+  assert.equal(operator.length, 1, "the operator's own run is not downgraded and gets no note");
+
+  // A log written before three tiers existed: `egress` is the alias, not `open`.
+  const legacy = toTimeline([
+    { v: 1, seq: 0, type: "run-started", at: T0, data: { input: { task: "t", trust: "external", sandboxNetwork: "egress" } } },
+  ] as WorkflowEvent[]);
+  assert.equal(legacy.length, 1);
 });

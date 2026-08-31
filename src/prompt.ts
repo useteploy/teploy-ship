@@ -1,6 +1,7 @@
 import { FINDINGS_MARKER, MAX_FINDINGS } from "./findings.js";
 import { UNTRUSTED_RULE, frameUntrusted } from "./guard.js";
 import { scrub } from "./redact.js";
+import { detectEgressRefusal, egressRefusalHint } from "./egress.js";
 
 /**
  * The CodeAct system prompt. Establishes the action protocol: think,
@@ -211,6 +212,14 @@ export const SCAN_EDIT_REFUSED =
  * observation is what reaches the model, the event log, the dashboard timeline
  * and Observe, so redacting once here covers all of them rather than four
  * partial passes at the far end.
+ *
+ * It is also where a sandbox egress refusal is NAMED. An agent cannot tell a
+ * blocked host from a broken build by reading exit codes and stderr, so it
+ * treats a wall as flakiness: it retries, switches mirror, retries again, and
+ * spends its turn budget on something that will never succeed. Appended rather
+ * than substituted — the real output is still the evidence — and derived from
+ * the recorded result, so a replay produces the identical observation and no
+ * step changes.
  */
 export function formatObservation(result: {
   exitCode: number;
@@ -224,5 +233,12 @@ export function formatObservation(result: {
   if (result.stderr !== "") parts.push(`stderr:\n${scrub(result.stderr)}`);
   if (result.stdout === "" && result.stderr === "") parts.push("(no output)");
   if (result.truncated) parts.push("(output truncated)");
+  // Only on a FAILED command: an allowlist refusal that did not change the
+  // exit code did not stop anything, and telling the agent to abandon a
+  // command that succeeded would be worse than saying nothing.
+  if (result.exitCode !== 0) {
+    const refusal = detectEgressRefusal(`${result.stdout}\n${result.stderr}`);
+    if (refusal !== null) parts.push(egressRefusalHint(refusal));
+  }
   return parts.join("\n");
 }

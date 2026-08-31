@@ -136,8 +136,8 @@ test("a daemon with no cache store gets the run anyway: create retries cold", as
 test("a restore never mounts a warm volume over the snapshot it just restored", async () => {
   const { fetch, bodies } = createDaemon({});
   const provider = sandboxProvider({ baseURL: "http://sbx", token: "t", image: "python:3.12-slim", fetch });
-  await provider.createFrom!("snap:run-1", { warm: { repo: "forge/tyler/akiroo" }, network: "egress" });
+  await provider.createFrom!("snap:run-1", { warm: { repo: "forge/tyler/akiroo" }, network: "allowlist" });
   assert.equal(bodies[0]!.image, "snap:run-1");
-  assert.equal(bodies[0]!.network, "egress", "the other overrides still apply");
+  assert.equal(bodies[0]!.network, "egress", "the other overrides still apply, in the wire spelling");
   assert.equal(bodies[0]!.warm, undefined, "the snapshot IS the workspace; a volume at /work would hide it");
 });

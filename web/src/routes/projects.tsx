@@ -1,7 +1,22 @@
 import type { Project } from "teploy-ship/runtime";
 import type { AuthoritySuggestion, ManagedDrift, RepoCounts } from "teploy-ship/runtime";
+import type { NetworkTier } from "teploy-ship/runtime";
 
-import { authorityCap, costPerMerge, managedDrift, suggestAuthority, summarizeRepoStats } from "../lib/ship.server.js";
+// VALUES go through ship.server.js. `NETWORK_TIERS`, `parseNetworkTier` and
+// `splitEgressAllow` are pure, but they are re-exported from
+// `teploy-ship/runtime` — whose module graph reaches node:fs — and a value
+// imported from there in a route module survives Neutron's client strip and
+// breaks the browser bundle. Read ship.server.ts's header before touching this.
+import {
+  NETWORK_TIERS,
+  authorityCap,
+  costPerMerge,
+  managedDrift,
+  parseNetworkTier,
+  splitEgressAllow,
+  suggestAuthority,
+  summarizeRepoStats,
+} from "../lib/ship.server.js";
 import { shipRuntime, effectiveAuthority } from "../lib/store.server.js";
 import { currentUser } from "../lib/session.server.js";
 import { may } from "../lib/authority.server.js";
@@ -22,7 +37,9 @@ export const config = { mode: "app" };
 // The two ship-sandbox-* tags are what `images/build.sh` produces (B5) — the
 // only images in this list that carry a harness binary.
 const IMAGES = ["ship-sandbox-go:dev", "ship-sandbox-node:dev", "golang:1.25", "node:22", "python:3.12-slim", "rust:1"];
-const NETWORKS = ["", "none", "egress"] as const;
+// "" is "inherit the worker's SHIP_SANDBOX_NETWORK", which itself defaults to
+// the allowlist tier — a repo that names nothing can still clone.
+const NETWORKS = ["", ...NETWORK_TIERS] as const;
 const POLICIES = ["", "ignore", "propose", "auto"] as const;
 // The ladder caps authority (C4): the rungs a project declares are the most
 // it may ever do unattended. The select shows the four contract-1 values plus
@@ -60,6 +77,8 @@ interface ProjectsData {
   hookBase: string;
   envAllowlist: string;
   workerImage: string;
+  /** The worker's SHIP_SANDBOX_NETWORK, so "worker default" in the select is not a mystery. */
+  workerNetwork: string;
   workerHarness: string;
   workerTestCommand: string;
   canEdit: boolean;
@@ -125,6 +144,7 @@ export async function loader({ request }: { request: Request }): Promise<Project
     hookBase: (process.env.SHIP_PUBLIC_URL ?? "").replace(/\/+$/, ""),
     envAllowlist: process.env.SHIP_REPO_ALLOWLIST ?? "",
     workerImage: process.env.SHIP_SANDBOX_IMAGE ?? "",
+    workerNetwork: parseNetworkTier(process.env.SHIP_SANDBOX_NETWORK) ?? "allowlist",
     workerHarness: (process.env.SHIP_HARNESS ?? "").trim(),
     workerTestCommand: (process.env.SHIP_TEST_COMMAND ?? "").trim(),
     canEdit,
@@ -203,7 +223,13 @@ export async function action({ request }: { request: Request }): Promise<Respons
   // record with it clear would reasonably believe auto-merge was on.
   const wantsAuto = form.get("autoMerge") !== null || form.get("autoDeploy") !== null;
   if (wantsAuto && !canAuto) return redirect(`/projects?denied=auto`);
-  const network = str("network");
+  const networkRaw = str("network");
+  const network = parseNetworkTier(networkRaw);
+  if (network === null) return redirect(`/projects?error=${encodeURIComponent(`sandbox network must be none, allowlist or open, got: ${String(networkRaw)}`)}`);
+  // The textarea is the whole list: what is in it after the save is what this
+  // repo's runs get. Empty clears it. normalizeProject validates each entry
+  // and the message comes back through the redirect below.
+  const egressAllow = splitEgressAllow(form.get("egressAllow") === null ? undefined : String(form.get("egressAllow")));
   const harness = str("harness");
   const memoryMb = num("memoryMb");
   const cpus = num("cpus");
@@ -246,7 +272,8 @@ export async function action({ request }: { request: Request }): Promise<Respons
     url: str("url") ?? existing.url,
     label: str("label"),
     sandboxImage: str("image"),
-    sandboxNetwork: network === "none" || network === "egress" ? network : undefined,
+    sandboxNetwork: network,
+    sandboxEgressAllow: egressAllow.length > 0 ? egressAllow : undefined,
     sandboxLimits: memoryMb !== undefined || cpus !== undefined ? { ...(memoryMb !== undefined ? { memoryMb } : {}), ...(cpus !== undefined ? { cpus } : {}) } : undefined,
     sourcePolicy: policy === "ignore" || policy === "propose" || policy === "auto" ? policy : undefined,
     // Declare-then-bake: this says WHICH program edits the tree. The binary has
@@ -365,9 +392,33 @@ function ProjectForm({ p, data }: { p: Project | null; data: ProjectsData }) {
         sandbox network
         <select name="network" style={INPUT}>
           {NETWORKS.map((n) => (
-            <option key={n} value={n} selected={(p?.sandboxNetwork ?? "") === n}>{n === "" ? "worker default" : n}</option>
+            <option key={n} value={n} selected={(p?.sandboxNetwork ?? "") === n}>
+              {n === "" ? `worker default (${data.workerNetwork})` : n}
+            </option>
           ))}
         </select>
+        <span style="color:var(--dim)">
+          none = no network at all (cannot clone) · allowlist = registries, Debian and GitHub, plus the hosts below ·
+          open = everything. A task that came from a webhook, an issue or chat is always downgraded from open to
+          allowlist — full network access is for work you started.
+        </span>
+      </label>
+      <label class="meta" style="display:flex;flex-direction:column;gap:4px;grid-column:1/-1">
+        extra egress hosts (allowlist tier only)
+        <textarea
+          name="egressAllow"
+          rows={2}
+          placeholder="rubygems.org, .hex.pm, repo.maven.apache.org, git.internal:3000"
+          style={`${INPUT};width:100%;font-family:inherit`}
+        >
+          {(p?.sandboxEgressAllow ?? []).join(", ")}
+        </textarea>
+        <span style="color:var(--dim)">
+          Comma or space separated. <code>host</code>, <code>.suffix</code> for subdomains, or <code>host:port</code> —
+          an entry with no port opens only 80 and 443. Added to the daemon's built-in registries for THIS repo's runs
+          only; nothing else on the sandbox host is widened. SSH and <code>git://</code> remotes cannot work on the
+          allowlist tier at all — the boundary is an HTTP proxy.
+        </span>
       </label>
       <Field label="memory MB" name="memoryMb" value={p?.sandboxLimits?.memoryMb !== undefined ? String(p.sandboxLimits.memoryMb) : undefined} placeholder="1024" type="number" />
       <Field label="cpus" name="cpus" value={p?.sandboxLimits?.cpus !== undefined ? String(p.sandboxLimits.cpus) : undefined} placeholder="1" type="number" />
@@ -521,7 +572,11 @@ export default function Projects({ data }: { data: ProjectsData | SourcesData | 
                         {r.label !== undefined && <span class="meta"> · {r.label}</span>}
                         {r.url === undefined && <span class="meta"> · no clone URL — not allowlisted</span>}
                       </td>
-                      <td class="meta">{r.sandboxImage ?? "worker default"}{r.sandboxNetwork !== undefined ? ` · ${r.sandboxNetwork}` : ""}</td>
+                      <td class="meta">
+                        {r.sandboxImage ?? "worker default"}
+                        {` · ${r.sandboxNetwork ?? (data as ProjectsData).workerNetwork}`}
+                        {r.sandboxEgressAllow !== undefined ? ` +${r.sandboxEgressAllow.length} host${r.sandboxEgressAllow.length === 1 ? "" : "s"}` : ""}
+                      </td>
                       <td class="meta">{r.harness ?? "worker default"}</td>
                       <td class="meta">{r.sourcePolicy ?? "inherit"}{r.dailyBudgetUSD !== undefined ? ` · $${r.dailyBudgetUSD}/day` : ""}{r.weeklyBudgetUSD !== undefined ? ` · $${r.weeklyBudgetUSD}/wk` : ""}</td>
                       <td class="meta">{r.testCommand ?? r.verification?.tests ?? "detected"}</td>

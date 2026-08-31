@@ -38,11 +38,13 @@ completed with a turn count. A whole-attempt deadline bounds it
 (`SHIP_HARNESS_TIMEOUT_MS`, default 30 minutes); a timeout is a recorded
 error, and whatever tree exists goes through the publish gate as incomplete.
 
-The external harness must reach its model vendor, so the sandbox needs
-`SHIP_SANDBOX_NETWORK=egress` AND the daemon's egress allowlist
-(`SBX_EGRESS_ALLOW` on teploy-sandbox) must name the vendor host — e.g.
+The external harness must reach its model vendor, so the run needs the
+`allowlist` tier (the default) or `open`, and the vendor host has to be on the
+allowlist — either on the repo's own list (Projects page, or `teploy-ship
+project set <repo> --egress-allow api.z.ai:443`), which widens nothing else on
+the box, or host-wide via `SBX_EGRESS_ALLOW` on teploy-sandbox. E.g.
 `api.z.ai:443,models.opencode.ai:443` for opencode on z.ai, `api.anthropic.com:443`
-for claude — and the binary has to be in `SHIP_SANDBOX_IMAGE`. Neither is checked at enqueue — a run asking for a
+for claude. The binary has to be in `SHIP_SANDBOX_IMAGE`. Neither is checked at enqueue — a run asking for a
 harness the image lacks fails at preflight, on the run's own timeline, with the
 build command in the message.
 

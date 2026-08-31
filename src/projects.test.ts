@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -31,7 +31,7 @@ test("project store: keyed by slug, url kept, enums validated, empty fields drop
   assert.deepEqual(p, { repo: "tyler/ship-go", url: GO_URL, sandboxImage: "golang:1.24", autoMerge: false, autoDeploy: false });
   assert.deepEqual(await store.forRepo("git@100.108.123.49:Tyler/ship-go"), p, "any URL form finds the record");
 
-  assert.throws(() => normalizeProject({ repo: "a/b", sandboxNetwork: "bridge" as never, autoMerge: false, autoDeploy: false }), /none or egress/);
+  assert.throws(() => normalizeProject({ repo: "a/b", sandboxNetwork: "bridge" as never, autoMerge: false, autoDeploy: false }), /none, allowlist \(alias: egress\) or open/);
   assert.throws(() => normalizeProject({ repo: "a/b", sourcePolicy: "yes" as never, autoMerge: false, autoDeploy: false }), /ignore, propose or auto/);
   assert.throws(() => normalizeProject({ repo: "a/b", url: "not-a-repo", autoMerge: false, autoDeploy: false }), /not a repository URL/);
 
@@ -122,14 +122,39 @@ test("proposeExternal accepts a webhook repo that only a project allows", async 
   }
 });
 
-test("enqueueRun materialises the project's sandbox image, network and limits; the provider honours them", async () => {
+test("a record written before three tiers reads back as allowlist, and the alias is accepted on the way in", async () => {
+  const dir = await tempDir();
+  const store = new FileProjectStore(dir);
+  // The legacy spelling on the way IN.
+  await store.set({ repo: TS_URL, url: TS_URL, sandboxNetwork: "egress" as never, autoMerge: false, autoDeploy: false });
+  assert.equal((await store.forRepo(TS_URL))!.sandboxNetwork, "allowlist");
+  // ...and a legacy row already on disk, which no save has rewritten.
+  await writeFile(join(dir, "projects.json"), JSON.stringify({ "tyler/ship-go": { url: GO_URL, sandboxNetwork: "egress", autoMerge: false, autoDeploy: false } }));
+  assert.equal((await store.forRepo(GO_URL))!.sandboxNetwork, "allowlist", "read through, not migrated");
+  assert.equal((await store.list())[0]!.sandboxNetwork, "allowlist");
+
+  assert.throws(
+    () => normalizeProject({ repo: "a/b", sandboxEgressAllow: ["https://rubygems.org"], autoMerge: false, autoDeploy: false }),
+    /entry is a host, not a URL/,
+    "a typed-in URL is refused at the SAVE, not days later as a blocked host",
+  );
+  assert.throws(() => normalizeProject({ repo: "a/b", sandboxEgressAllow: ["*.hex.pm"], autoMerge: false, autoDeploy: false }), /no wildcards/);
+  assert.deepEqual(
+    normalizeProject({ repo: "a/b", sandboxEgressAllow: [" RubyGems.org ", "", ".hex.pm", "rubygems.org", "git.internal:3000"], autoMerge: false, autoDeploy: false }).sandboxEgressAllow,
+    ["rubygems.org", ".hex.pm", "git.internal:3000"],
+    "trimmed, lowercased, de-duplicated, order preserved",
+  );
+});
+
+test("enqueueRun materialises the project's sandbox image, network, egress allowlist and limits; the provider honours them", async () => {
   const dir = await tempDir();
   const projects = new FileProjectStore(dir);
   await projects.set({
     repo: TS_URL,
     url: TS_URL,
     sandboxImage: "node:22",
-    sandboxNetwork: "egress",
+    sandboxNetwork: "allowlist",
+    sandboxEgressAllow: ["rubygems.org", ".hex.pm"],
     sandboxLimits: { memoryMb: 2048, cpus: 2 },
     testCommand: "pnpm test",
     autoMerge: false,
@@ -151,7 +176,8 @@ test("enqueueRun materialises the project's sandbox image, network and limits; t
   await enqueueRun(runtime, { runId: "r1", task: "t", model: "m", repo: TS_URL });
   await enqueueRun(runtime, { runId: "r2", task: "t", model: "m", repo: GO_URL });
   assert.equal(inputs[0]!.sandboxImage, "node:22");
-  assert.equal(inputs[0]!.sandboxNetwork, "egress");
+  assert.equal(inputs[0]!.sandboxNetwork, "allowlist");
+  assert.deepEqual(inputs[0]!.sandboxEgressAllow, ["rubygems.org", ".hex.pm"]);
   assert.deepEqual(inputs[0]!.sandboxLimits, { memoryMb: 2048, cpus: 2 });
   assert.equal(inputs[0]!.testCommand, "pnpm test", "evidence came from the project record");
   assert.equal(inputs[0]!.tests, true);
@@ -167,7 +193,8 @@ test("enqueueRun materialises the project's sandbox image, network and limits; t
   await provider.create(sandboxOverridesOf(inputs[0] as never));
   await provider.create(sandboxOverridesOf(inputs[1] as never));
   assert.equal(bodies[0]!.image, "node:22");
-  assert.equal(bodies[0]!.network, "egress");
+  assert.equal(bodies[0]!.network, "egress", "the allowlist tier travels under its wire alias");
+  assert.deepEqual(bodies[0]!.egressAllow, ["rubygems.org", ".hex.pm"], "the repo's extra hosts reach the daemon");
   assert.deepEqual(bodies[0]!.limits, { memoryMb: 2048, cpus: 2 });
   assert.equal(bodies[1]!.image, "golang:1.24", "worker default when the run recorded nothing");
   assert.equal(bodies[1]!.network, "none");

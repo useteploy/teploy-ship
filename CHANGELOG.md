@@ -5,6 +5,56 @@ All notable changes to Teploy Ship are recorded here.
 ## [Unreleased]
 
 ### Added
+- **Three sandbox network tiers, a per-repo egress allowlist, and a default that
+  is not "broken".** `sandboxNetwork` carried `none | egress`; it now carries
+  `none | allowlist | open` (`egress` is still accepted everywhere and is still
+  what goes on the wire for the middle tier, so a daemon that has not been
+  upgraded keeps working), and a project record carries `sandboxEgressAllow` —
+  extra `host` / `.suffix` / `host:port` entries unioned with the daemon's
+  built-in registries. Both are materialised into the run input at enqueue, like
+  every other per-repo setting, so a replay boots the container the log was
+  written under.
+  - **Unset now means `allowlist`, not the daemon's `none`.** A sandbox with no
+    network cannot `git clone`, and the clone happens *inside* the container, so
+    a fresh install where nobody set `SHIP_SANDBOX_NETWORK` could run no repo
+    task at all — it looked broken rather than closed, and the remedy an
+    operator reaches for in that state is the largest one in range. `open` was
+    the other candidate and is the wrong one: it would widen a security boundary
+    by omission on a box whose operator never decided anything.
+  - **A project in Ruby, Java, PHP, .NET or Elixir no longer needs a systemd
+    edit.** `teploy-ship project set <repo> --egress-allow rubygems.org,.hex.pm`
+    (or the Projects page) opens those hosts for that repo's runs only;
+    `SBX_EGRESS_ALLOW` on the daemon still exists and still widens the boundary
+    for every project sharing the host.
+  - **An externally-sourced task is never run on `open`.** A task that arrived
+    through a webhook, an issue body or a chat message is downgraded to
+    `allowlist` whatever the project record says — enforced in
+    `sandboxOverridesOf`, the single funnel every workspace creation goes
+    through, so it also covers a run enqueued by an older binary and a run that
+    parks and restores. The declared tier stays in the log, and the run page and
+    `teploy-ship explain` both report that the downgrade happened. This is the
+    isolated-executor rule applied to the network: the agent writes the
+    commands, a stranger wrote the prompt.
+  - **An egress refusal is legible.** The turn's row on the run timeline reads
+    `network blocked: <host>` with the remedy beside it, `explain` leads with it
+    instead of with "ran out of turns", and the agent's own observation is
+    annotated so it stops retrying a wall — a blocked host and a broken build
+    were previously indistinguishable in raw output, so the loop treated a
+    policy decision as flakiness and paid for it in turns. Detection is
+    deliberately narrow: `Could not resolve host`, `Network is unreachable` and
+    a bare 403 do NOT match, because a false positive tells the agent to abandon
+    a command that would have worked.
+  - `docs/DEPLOY.md` now states what the allowlist tier genuinely **cannot** do
+    rather than what is merely unconfigured: the boundary is injected as
+    `HTTP_PROXY`/`HTTPS_PROXY` over a bridge with no default route, so SSH git
+    remotes and `git://` have nothing to dial and no allowlist entry can fix
+    them, and only ports 80/443 are admitted unless an entry names a port.
+  - `trust` is now recorded on the run input whenever the caller states it, not
+    only on repo runs. An issue or chat task with no repository recorded none,
+    which left both this rule and the existing isolated-executor refusal blind
+    to exactly the tasks they exist for.
+
+### Added
 - **`teploy-ship join <controller-url>` — one command that ends with a box
   taking work, or with a sentence saying why it cannot (B3).** Adding a second
   worker meant reproducing a configuration by hand and finding out whether it

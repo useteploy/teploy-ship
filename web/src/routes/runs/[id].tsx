@@ -470,6 +470,10 @@ export default function RunDetail({ data }: { data: RunData }) {
                         <span class="turn-name">{item.title}</span>
                         <code class="turn-action">{item.summary !== undefined && item.summary !== "" ? item.summary : "(no action)"}</code>
                         <span class="turn-meta">
+                          {/* A blocked host is not "exit 128": the operator
+                              needs to see WHY on the collapsed row, because
+                              this is the run they are scanning for a reason. */}
+                          {item.blockedHost !== undefined && <span class="bad">network blocked: {item.blockedHost}</span>}
                           {item.exitCode !== undefined && (
                             <span class={item.exitCode === 0 ? "ok" : "bad"}>exit {item.exitCode}</span>
                           )}

@@ -9,6 +9,8 @@ import { HARNESS_VERSIONS } from "./harness.js";
 import { AUTHORITIES, isAuthority, normalizeVerification, type Authority, type ProjectVerification } from "./ladder.js";
 import type { EvidenceStore, RepoEvidence } from "./evidence.js";
 import type { IntakePolicy } from "./intake.js";
+import { NETWORK_TIER_HELP, normalizeEgressAllow, parseNetworkTier } from "./egress.js";
+import type { NetworkTier } from "./egress.js";
 
 /**
  * One record per repository: everything Ship needs to know about a repo, in
@@ -36,7 +38,29 @@ export interface Project {
   url?: string;
   label?: string;
   sandboxImage?: string;
-  sandboxNetwork?: "none" | "egress";
+  /**
+   * Which network tier this repo's runs get (egress.ts): `none`, `allowlist`
+   * or `open`. Absent = the worker's SHIP_SANDBOX_NETWORK, which itself
+   * defaults to `allowlist`.
+   *
+   * Records written before three tiers existed hold the old `egress` spelling;
+   * every read path runs the stored value through `parseNetworkTier`, so one
+   * arrives here as `allowlist` and the next `set` rewrites it. Nothing
+   * migrates.
+   */
+  sandboxNetwork?: NetworkTier;
+  /**
+   * EXTRA allowlist entries for this repo's runs — `host`, `.suffix` or
+   * `host:port`, unioned with the daemon's built-in registries, never
+   * replacing them. This is the answer to a Ruby, Java, PHP, .NET or Elixir
+   * project failing its first dependency install: the remedy used to be
+   * hand-editing a systemd unit on the sandbox host, which widened the
+   * allowlist for every project sharing that host.
+   *
+   * Only meaningful on the `allowlist` tier: `none` has no proxy to consult
+   * and `open` needs no permission.
+   */
+  sandboxEgressAllow?: string[];
   sandboxLimits?: { memoryMb?: number; cpus?: number; pids?: number };
   /**
    * Which program edits this repo's tree: `native` (Ship's own loop) or an
@@ -178,7 +202,6 @@ export interface ProjectStore {
   remove(repo: string): Promise<void>;
 }
 
-const SANDBOX_NETWORKS: ReadonlySet<string> = new Set(["none", "egress"]);
 const POLICIES: ReadonlySet<string> = new Set(["ignore", "propose", "auto"]);
 
 /** Normalise a record before storage: key by slug, drop empty strings, validate enums. */
@@ -191,9 +214,14 @@ export function normalizeProject(input: Project): Project {
   const num = (v: number | undefined): number | undefined => (v !== undefined && Number.isFinite(v) && v > 0 ? v : undefined);
   const url = str(input.url);
   if (url !== undefined && repoSlug(url) === null) throw new Error(`not a repository URL: ${url}`);
-  if (input.sandboxNetwork !== undefined && !SANDBOX_NETWORKS.has(input.sandboxNetwork)) {
-    throw new Error(`sandboxNetwork must be none or egress, got: ${String(input.sandboxNetwork)}`);
+  const sandboxNetwork = parseNetworkTier(input.sandboxNetwork);
+  if (sandboxNetwork === null) {
+    throw new Error(`sandboxNetwork must be ${NETWORK_TIER_HELP}, got: ${String(input.sandboxNetwork)}`);
   }
+  // Throws on an entry the daemon could not act on. Refusing the SAVE is the
+  // point: the alternative is a typo that surfaces days later as a blocked
+  // host on a run that has already been paid for.
+  const sandboxEgressAllow = normalizeEgressAllow(input.sandboxEgressAllow);
   if (input.sourcePolicy !== undefined && !POLICIES.has(input.sourcePolicy)) {
     throw new Error(`sourcePolicy must be ignore, propose or auto, got: ${String(input.sourcePolicy)}`);
   }
@@ -242,7 +270,8 @@ export function normalizeProject(input: Project): Project {
     ...(url !== undefined ? { url } : {}),
     ...(str(input.label) !== undefined ? { label: str(input.label) } : {}),
     ...(str(input.sandboxImage) !== undefined ? { sandboxImage: str(input.sandboxImage) } : {}),
-    ...(input.sandboxNetwork !== undefined ? { sandboxNetwork: input.sandboxNetwork } : {}),
+    ...(sandboxNetwork !== undefined ? { sandboxNetwork } : {}),
+    ...(sandboxEgressAllow !== undefined ? { sandboxEgressAllow } : {}),
     // "native" is KEPT rather than folded into absent: it is the operator
     // saying this repo runs Ship's own loop even on a worker whose
     // SHIP_HARNESS names a vendor agent. Absent means "inherit".
@@ -272,6 +301,24 @@ export function normalizeProject(input: Project): Project {
 
 type Stored = Omit<Project, "repo">;
 
+/**
+ * A stored row as a Project.
+ *
+ * The one thing it changes is the network tier: a record written before three
+ * tiers existed holds `"egress"`, which is the alias for `allowlist`, and every
+ * consumer of a Project would otherwise have to know that. Upgraded HERE, on
+ * the read, rather than by a migration — there is nothing to migrate, the two
+ * spellings mean the same thing, and the next `set` writes the new one.
+ *
+ * Anything else stored under an unreadable value is left exactly as it is:
+ * `normalizeProject` refuses those at the save, so a value that got past it
+ * came from somewhere this function cannot fix.
+ */
+function fromStored(repo: string, stored: Stored): Project {
+  const tier = parseNetworkTier(stored.sandboxNetwork);
+  return { repo, ...stored, ...(tier !== undefined && tier !== null ? { sandboxNetwork: tier } : {}) };
+}
+
 /** File-backed: one JSON mapping repo slug -> project. */
 export class FileProjectStore implements ProjectStore {
   #path: string;
@@ -290,7 +337,7 @@ export class FileProjectStore implements ProjectStore {
     const key = repoSlug(repo);
     if (key === null) return null;
     const entry = (await this.#read())[key];
-    return entry === undefined ? null : { repo: key, ...entry };
+    return entry === undefined ? null : fromStored(key, entry);
   }
 
   async set(project: Project): Promise<void> {
@@ -301,7 +348,7 @@ export class FileProjectStore implements ProjectStore {
   async list(): Promise<Project[]> {
     const all = await this.#read();
     return Object.entries(all)
-      .map(([repo, v]) => ({ repo, ...v }))
+      .map(([repo, v]) => fromStored(repo, v))
       .sort((a, b) => (a.repo < b.repo ? -1 : 1));
   }
 
@@ -341,7 +388,7 @@ export class NucleusProjectStore implements ProjectStore {
 
   #parse(row: Record<string, unknown>): Project {
     const doc = JSON.parse(String(row.doc ?? "{}")) as Stored;
-    return { repo: String(row.repo), ...doc };
+    return fromStored(String(row.repo), doc);
   }
 
   async forRepo(repo: string): Promise<Project | null> {

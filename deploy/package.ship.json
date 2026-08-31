@@ -25,6 +25,10 @@
       "types": "./dist/plan.d.ts",
       "import": "./dist/plan.js"
     },
+    "./egress": {
+      "types": "./dist/egress.d.ts",
+      "import": "./dist/egress.js"
+    },
     "./fence": {
       "types": "./dist/fence.d.ts",
       "import": "./dist/fence.js"
