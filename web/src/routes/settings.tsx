@@ -265,7 +265,9 @@ export async function loader({ request }: { request: Request }): Promise<Setting
           { label: "sandbox", value: sandboxOn ? "enabled" : "disabled (runs on host)", ok: sandboxOn },
           safeUrl("SHIP_SANDBOX_URL"),
           value("SHIP_SANDBOX_IMAGE", "not set"),
-          value("SHIP_SANDBOX_NETWORK", "not set"),
+          // "not set" would read as "no network", which is what it used to
+          // mean and no longer does.
+          value("SHIP_SANDBOX_NETWORK", "allowlist (default)"),
           secret("SHIP_SANDBOX_TOKEN"),
         ],
       },

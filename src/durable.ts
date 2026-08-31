@@ -66,6 +66,8 @@ import type { RepoMemoryStore } from "./repo-memory.js";
 import type { SteerStore } from "./steer.js";
 import { formatSearchHits } from "./code-index.js";
 import { frameUntrusted, screenUntrusted } from "./guard.js";
+import { networkForTrust, parseNetworkTier, wireNetwork } from "./egress.js";
+import type { NetworkTier } from "./egress.js";
 import type { CodeSearch } from "./code-index.js";
 import { CHANGE_EVENT, MERGE_EVENT, PLAN_EVENT } from "./plan.js";
 import type { ChangeDecisionPayload, MergeDecisionPayload } from "./plan.js";
@@ -457,9 +459,18 @@ export interface DurableAgentInput {
    * from the project record at enqueue so a replay boots the image the log
    * was written under. Absent = the worker's defaults. No recorded step
    * depends on these, so adding them changed no in-flight run's replay.
+   *
+   * `sandboxNetwork` records the tier the PROJECT RECORD asked for, not
+   * necessarily the one the run executed on: `sandboxOverridesOf` downgrades
+   * `open` to `allowlist` for an externally-sourced task, and recording the
+   * declared value keeps that fact derivable from the log alone (the run page
+   * and `explainRun` both read it back out). A log written before three tiers
+   * existed carries the old `egress` spelling, which parses as `allowlist`.
    */
   sandboxImage?: string;
-  sandboxNetwork?: "none" | "egress";
+  sandboxNetwork?: NetworkTier;
+  /** Extra egress allowlist entries for this run (projects.ts sandboxEgressAllow). */
+  sandboxEgressAllow?: string[];
   sandboxLimits?: { memoryMb?: number; cpus?: number; pids?: number };
   /**
    * "This run has no `repo`, but its workspace is already a git tree — scope
@@ -595,7 +606,10 @@ export function durableRecoveryInput(
  */
 export interface SandboxOverrides {
   image?: string;
-  network?: "none" | "egress";
+  /** The EFFECTIVE tier, after the external-task downgrade. See sandboxOverridesOf. */
+  network?: NetworkTier;
+  /** Extra allowlist entries, unioned with the daemon's built-in registries. */
+  egressAllow?: string[];
   limits?: { memoryMb?: number; cpus?: number; pids?: number };
   /**
    * Boot this run on the repo's warm volume (warm.ts). Derived from the
@@ -3099,15 +3113,21 @@ export function sandboxProvider(options: {
   token: string;
   image: string;
   ttlSec?: number;
-  /** Sandbox network mode for the run (default "none" — the daemon's safe default). */
-  network?: "none" | "egress";
+  /**
+   * The worker-wide network tier a run gets when its project record names
+   * none. Left unset here this provider names no network at all and the
+   * DAEMON's default applies, which is `none` — a sandbox that cannot clone.
+   * `resolveSandbox` in cli.ts is what stops that being the lived default;
+   * see DEFAULT_NETWORK_TIER in egress.ts for why it is `allowlist`.
+   */
+  network?: NetworkTier;
   fetch?: typeof globalThis.fetch;
 }): ExecutorProvider {
   const base = { baseURL: options.baseURL, token: options.token, ...(options.fetch !== undefined ? { fetch: options.fetch } : {}) };
   const create = {
     image: options.image,
     ...(options.ttlSec !== undefined ? { ttlSec: options.ttlSec } : {}),
-    ...(options.network !== undefined ? { network: options.network } : {}),
+    ...(options.network !== undefined ? { network: wireNetwork(options.network) } : {}),
   };
   const warm = warmClient(base);
   return {
@@ -3115,10 +3135,13 @@ export function sandboxProvider(options: {
     async create(overrides?: SandboxOverrides) {
       const wanted = definedOverrides(overrides);
       try {
-        // `warm` is not in @neutron-build/agents' SandboxCreateOptions — the
-        // client posts `create` verbatim, so the field reaches the daemon and
-        // the cast is the whole of the coupling.
-        const sandbox = await SandboxExecutor.start({ ...base, create: { ...create, ...wanted } as typeof create });
+        // Neither `warm` nor `egressAllow` is in @neutron-build/agents'
+        // SandboxCreateOptions — the client posts `create` verbatim, so the
+        // fields reach the daemon and the cast is the whole of the coupling.
+        // A daemon that predates `egressAllow` ignores it (its decoder does not
+        // reject unknown fields), which degrades to "those hosts stay blocked"
+        // — visible now, as a named refusal, rather than as a mystery.
+        const sandbox = await SandboxExecutor.start({ ...base, create: { ...create, ...wireOverrides(wanted) } as CreateSpec });
         return { handle: sandbox.runId };
       } catch (error) {
         // A daemon with no cache store answers the warm option with a 400.
@@ -3127,7 +3150,7 @@ export function sandboxProvider(options: {
         // whole feature is allowed to degrade to.
         if (wanted.warm === undefined) throw error;
         const { warm: _unavailable, ...cold } = wanted;
-        const sandbox = await SandboxExecutor.start({ ...base, create: { ...create, ...cold } });
+        const sandbox = await SandboxExecutor.start({ ...base, create: { ...create, ...wireOverrides(cold) } as CreateSpec });
         return { handle: sandbox.runId };
       }
     },
@@ -3147,7 +3170,7 @@ export function sandboxProvider(options: {
       // No warm volume on a restore: the snapshot IS the workspace, and a
       // volume mounted at the same path would hide it completely.
       const { image: _snapshotted, warm: _volume, ...rest } = definedOverrides(overrides);
-      const sandbox = await SandboxExecutor.start({ ...base, create: { ...create, ...rest, image } });
+      const sandbox = await SandboxExecutor.start({ ...base, create: { ...create, ...wireOverrides(rest), image } as CreateSpec });
       return { handle: sandbox.runId };
     },
     async destroy(handle: string) {
@@ -3160,22 +3183,71 @@ function definedOverrides(o?: SandboxOverrides): SandboxOverrides {
   return {
     ...(o?.image !== undefined ? { image: o.image } : {}),
     ...(o?.network !== undefined ? { network: o.network } : {}),
+    ...(o?.egressAllow !== undefined ? { egressAllow: o.egressAllow } : {}),
     ...(o?.limits !== undefined ? { limits: o.limits } : {}),
     ...(o?.warm !== undefined ? { warm: o.warm } : {}),
   };
 }
 
-/** The run's recorded sandbox overrides, if any. */
+/**
+ * Overrides as the daemon wants them: the tier spelled the way the wire
+ * contract spells it (egress.ts wireNetwork explains why `allowlist` travels
+ * as `egress`). Applied at the last possible moment so everything inside Ship
+ * reasons in tiers and only this function knows the wire.
+ */
+/**
+ * The SDK's create shape. Ship posts fields it does not declare (`warm`,
+ * `egressAllow`) and a `network` value it predates (`open`); the client posts
+ * `create` verbatim, so this cast IS the coupling to the daemon's wire
+ * contract and is the only place it is stated.
+ */
+type CreateSpec = Parameters<typeof SandboxExecutor.start>[0]["create"];
+
+function wireOverrides(o: SandboxOverrides): Omit<SandboxOverrides, "network"> & { network?: string } {
+  const { network, ...rest } = o;
+  return { ...rest, ...(network !== undefined ? { network: wireNetwork(network) } : {}) };
+}
+
+/**
+ * The run's recorded sandbox overrides, if any — AND the point where the
+ * network tier is decided.
+ *
+ * This is the single funnel every workspace creation goes through (`sandbox`,
+ * `plan-restore`, `turn-N-restore`, `merge-restore`), which is why the
+ * external-task downgrade lives here rather than at enqueue. Two reasons it
+ * has to be here and not there:
+ *
+ *  - a run enqueued by an older binary, or by a surface that forgot, still
+ *    executes under this rule; and
+ *  - the log keeps the operator's DECLARED tier, so the downgrade stays
+ *    visible after the fact instead of being erased at the door.
+ *
+ * Pure, derived from the recorded input alone, and it records nothing — so it
+ * adds no step and a replay reaches the identical answer.
+ */
 export function sandboxOverridesOf(input: DurableAgentInput): SandboxOverrides | undefined {
   // The warm slug is a pure function of the recorded repo URL, so it is the
   // same on every replay even after the template it names has been evicted.
   const warm = input.warm === true && input.repo !== undefined ? warmSlugOf(input.repo) : null;
-  if (input.sandboxImage === undefined && input.sandboxNetwork === undefined && input.sandboxLimits === undefined && warm === null) {
+  // A log written before three tiers existed says "egress"; that is the alias.
+  const declared = parseNetworkTier(input.sandboxNetwork) ?? undefined;
+  // THE SAFETY COUPLING. A task a stranger wrote into an issue does not get
+  // the open network, whatever the project record says. See networkForTrust.
+  const { network } = networkForTrust(declared, input.trust);
+  const egressAllow = input.sandboxEgressAllow;
+  if (
+    input.sandboxImage === undefined &&
+    network === undefined &&
+    egressAllow === undefined &&
+    input.sandboxLimits === undefined &&
+    warm === null
+  ) {
     return undefined;
   }
   return {
     ...(input.sandboxImage !== undefined ? { image: input.sandboxImage } : {}),
-    ...(input.sandboxNetwork !== undefined ? { network: input.sandboxNetwork } : {}),
+    ...(network !== undefined ? { network } : {}),
+    ...(egressAllow !== undefined ? { egressAllow } : {}),
     ...(input.sandboxLimits !== undefined ? { limits: input.sandboxLimits } : {}),
     ...(warm !== null ? { warm: { repo: warm } } : {}),
   };

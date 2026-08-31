@@ -153,6 +153,16 @@ export {
   workspaceIdentity,
 } from "./connect-requests.js";
 export type { Project, ProjectStore } from "./projects.js";
+export type { EgressRefusal, NetworkTier } from "./egress.js";
+export {
+  DEFAULT_NETWORK_TIER,
+  NETWORK_TIERS,
+  NETWORK_TIER_HELP,
+  egressEntryError,
+  networkForTrust,
+  parseNetworkTier,
+  splitEgressAllow,
+} from "./egress.js";
 export type { BulletinBoard, BulletinPost, BulletinStore } from "./bulletin.js";
 export { FileBulletinStore, NucleusBulletinStore, changeClassRequired, sweepBulletin } from "./bulletin.js";
 export { FileProjectStore, NucleusProjectStore, ProjectEvidenceStore, normalizeProject } from "./projects.js";
@@ -1189,7 +1199,15 @@ export async function enqueueRun(
   const input = {
         task: options.task,
         ...(options.repo !== undefined ? { repo: options.repo } : {}),
-        ...(options.repo !== undefined ? { trust: options.trust ?? "external" } : {}),
+        // Provenance, recorded whenever the caller stated it — not only on
+        // repo runs. A chat message or an issue comment with no repository
+        // still came from outside, and two rules read this field: the
+        // isolated-executor refusal and the network downgrade below. Recording
+        // it only for repo runs left both blind to exactly the tasks they
+        // exist for. Absent still means operator-launched (an eval, a CLI
+        // invocation, a workspace run), so nothing that used to run starts
+        // being refused.
+        ...(options.trust !== undefined ? { trust: options.trust } : options.repo !== undefined ? { trust: "external" as const } : {}),
         ...(options.pr !== undefined ? { pr: options.pr } : {}),
         ...(options.origin !== undefined ? { origin: options.origin } : {}),
         // Both suppressed on a scan: the plan park asks an operator to approve
@@ -1234,7 +1252,15 @@ export async function enqueueRun(
         ...(evidence?.observeService !== undefined ? { observeRepo: evidence.repo } : {}),
         ...(reviewers !== null ? { reviewers: { users: reviewers.users, teams: reviewers.teams } } : {}),
         ...(project?.sandboxImage !== undefined ? { sandboxImage: project.sandboxImage } : {}),
+        // The network tier and this repo's extra allowlist entries, copied
+        // from the record for the same reason as everything else here: the
+        // record is editable and a replay must boot the container the log was
+        // written under, not the one the record describes today. What the log
+        // records is the DECLARED tier; `sandboxOverridesOf` applies the
+        // external-task downgrade at execution, so the declaration and the
+        // downgrade both stay readable.
         ...(project?.sandboxNetwork !== undefined ? { sandboxNetwork: project.sandboxNetwork } : {}),
+        ...(project?.sandboxEgressAllow !== undefined ? { sandboxEgressAllow: project.sandboxEgressAllow } : {}),
         ...(project?.sandboxLimits !== undefined ? { sandboxLimits: project.sandboxLimits } : {}),
         // Every newly-enqueued run is steerable and index-eligible; runs
         // enqueued before these flags existed replay without the extra

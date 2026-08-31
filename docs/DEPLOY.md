@@ -615,6 +615,68 @@ The sandbox daemon gives every run its own container with **default-deny
 egress** — an internal bridge with no route out, plus an allowlist proxy
 (package registries + GitHub built in) on the bridge gateway.
 
+<a id="network-tiers"></a>
+#### Three network tiers, and what each one genuinely cannot do
+
+| tier | what the container joins | use it for |
+| --- | --- | --- |
+| `none` | no network at all | a run that must not reach anything. **It cannot `git clone`** — the clone happens inside the container — so no repo task can run on it. |
+| `allowlist` | the internal bridge + the daemon's proxy | **the default.** Registries, Debian, GitHub, plus this repo's own entries. |
+| `open` | ordinary egress | anything the box can reach. Operator-started work only — see the downgrade below. |
+
+`egress` is the old spelling of `allowlist`; it is still accepted everywhere and
+is still what Ship puts on the wire for that tier, so a daemon that has not been
+upgraded keeps working.
+
+**Unset means `allowlist`.** It used to mean the daemon's own default, `none`,
+which is a sandbox that cannot clone — an install where nobody set
+`SHIP_SANDBOX_NETWORK` could run no repo task at all and looked broken rather
+than closed. `none` is still available; it is now a choice rather than an
+accident.
+
+**An externally-sourced task is never run on `open`.** A task that arrived
+through a webhook, an issue body or a chat message is downgraded to `allowlist`
+whatever the project record says, and the run page and `teploy-ship explain`
+both say that it was. This is the same rule as the isolated-executor refusal:
+the agent writes the commands, a stranger wrote the prompt, and unrestricted
+egress out of a container holding a git credential is an exfiltration channel.
+Full network access is for work an operator started.
+
+**What is genuinely impossible on `allowlist`, not merely unconfigured:**
+
+- **SSH remotes and `git://` cannot work.** The boundary is injected as
+  `HTTP_PROXY`/`HTTPS_PROXY`, so only proxy-aware tooling is *filtered*;
+  everything else has no route out at all, because the bridge is created
+  `--internal` and has no default route. `git@forge:owner/repo` and
+  `git://…` have nothing to dial. Use an HTTPS clone URL on the project record.
+  No allowlist entry fixes this — there is no entry to add.
+- **Only ports 80 and 443**, unless an entry names a port. `git.internal:3000`
+  opens 3000 for that host; `git.internal` does not.
+- A tool that ignores the proxy environment (a hand-rolled socket, some JVM
+  defaults, `nc`) is not filtered — it is simply unreachable.
+
+Per-repo entries live on the project record, so widening one repo widens nothing
+else on the box:
+
+```sh
+teploy-ship project set tyler/my-gem --network allowlist \
+  --egress-allow "rubygems.org,index.rubygems.org,.hex.pm,git.internal:3000"
+```
+
+Entries are `host`, `.suffix` or `host:port`, and they are UNIONED with the
+daemon's built-ins, never replacing them. This is the answer to a Ruby, Java,
+PHP, .NET or Elixir project failing its first dependency install; the remedy
+used to be editing a systemd unit on the sandbox host, which widened the
+allowlist for every project sharing it.
+
+A run that is refused says so: the turn's row on the run timeline reads
+`network blocked: <host>` with the remedy beside it, `teploy-ship explain`
+leads with it, and the agent's own observation is annotated so it stops
+retrying a wall and hands the host back instead of burning its turn budget.
+
+A daemon that predates per-run entries ignores `egressAllow` rather than
+rejecting the create — those hosts stay blocked, and now say so by name.
+
 ```sh
 # on the server
 install -m 0755 teploy-sandbox /usr/local/bin/
@@ -623,17 +685,22 @@ ufw allow from 172.18.0.0/16 to any port 7439 proto tcp   # teploy app net → d
 ufw allow from 172.31.99.0/24 to any port 7443 proto tcp  # sandbox net → egress proxy
 ```
 
-Extend the egress allowlist per host (your git server!) via the unit env:
+Extend the allowlist for EVERY project on this host via the unit env:
 `SBX_EGRESS_ALLOW=git.internal:3000,.mycorp.dev` — entries are `host`,
-`.suffix`, or `host:port`; portless entries open only 80/443.
+`.suffix`, or `host:port`; portless entries open only 80/443. Prefer the
+per-repo list on the project record (above) when only one repo needs a host:
+this env widens the boundary for every project sharing the daemon, and it takes
+a restart.
 
 Point ship at it (in `teploy.yml` env or secrets):
 `SHIP_SANDBOX_URL=http://172.18.0.1:7439`, `SHIP_SANDBOX_TOKEN=<token
 from /var/lib/teploy-sandbox/token>`, `SHIP_SANDBOX_IMAGE=ship-sandbox-go:dev`
-(pick your stack), `SHIP_SANDBOX_NETWORK=egress`. That image is the
-worker-wide default: a repo's project record (dashboard Projects page, or
-`teploy-ship project set <repo> --image ship-sandbox-node:dev --network egress`)
-overrides the image, network and limits for that repo's runs.
+(pick your stack). `SHIP_SANDBOX_NETWORK` is optional and defaults to
+`allowlist`. Those are the worker-wide defaults: a repo's project record
+(dashboard Projects page, or `teploy-ship project set <repo> --image
+ship-sandbox-node:dev --network allowlist --egress-allow rubygems.org`)
+overrides the image, network tier, egress entries and limits for that repo's
+runs.
 
 `SHIP_SANDBOX_URL` is a **list**. Comma-separated, it names several daemons;
 each run is placed on the least-loaded healthy one, a host that refuses work is
@@ -880,6 +947,7 @@ which executes model-authored commands.
 | `SHIP_MIN_FREE_DISK_MB` | `2048` | Same, for free bytes on the docker root. Checked **ahead of** memory: running out of memory delays work and the kernel resolves it, while running out of disk breaks the docker daemon for every tenant on the box and needs a human. Sized as one run's clone + module/build cache plus the same again as headroom; the sandbox image is not in it (pulled once, already on disk). `0` disables. |
 | `SHIP_MAX_INODE_USED_PCT` | `95` | Same, for inodes. Its own knob because it fails independently: a module cache is millions of tiny files, so a box can exhaust inodes with tens of GB of bytes still free and every write still fails. A filesystem with no inode accounting (btrfs) reads as no pressure. `0` disables. |
 | `SHIP_DISK_PATH` | unset — `/var/lib/docker`, then `/` | Which mount to measure, when docker's data root is on neither. A worker in a container has no `/var/lib/docker`; its own `/` is an overlayfs whose `statfs` reports the underlying filesystem, which is the host's docker root anyway — so the fallback is usually right and this is rarely needed. |
+| `SHIP_SANDBOX_NETWORK` | `allowlist` | `none`, `allowlist` or `open` (`egress` is accepted as the old spelling of `allowlist`). See [Three network tiers](#network-tiers) — including what `allowlist` genuinely cannot do (SSH remotes, `git://`, any port but 80/443 unless an entry names one). Unset used to inherit the daemon's `none`, which is a sandbox that cannot clone. A project record overrides it per repo, and an externally-sourced task is downgraded from `open` to `allowlist` whatever the record says. |
 | `SHIP_SANDBOX_TTL_SEC` | `7200` | Container TTL Ship requests from the sandbox daemon for each run (floor 600). The daemon's own default is 30 minutes, which is shorter than a real run on a large repository — that is how four runs were reaped before their first command on 2026-08-25. The run's own caps end it; this is the backstop for a worker that dies mid-run. |
 | `SHIP_INDEX_TIMEOUT_MS` | `120000` | Time budget for the `repo-index` step. Past it the refresh stops between files, keeps what it embedded, and the step records `stopped at the 120s index cap`; ```search still works over whatever is indexed. |
 | `SHIP_TESTS` | unset | Ask every newly-enqueued run to execute its test suite after the agent stops, and put the result on the pull request. Ship runs it — the agent's own account of its testing is not used. Which command, in order: the repo's explicit entry, else what Ship detected from the repo's tree, else `SHIP_TEST_COMMAND`. |

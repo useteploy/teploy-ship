@@ -1,5 +1,8 @@
 import type { WorkflowEvent } from "@neutron-build/workflow";
 
+import { NETWORK_DOWNGRADE_NOTE, detectEgressRefusal, egressRefusalNote, networkForTrust, parseNetworkTier } from "./egress.js";
+import type { EgressRefusal } from "./egress.js";
+
 /**
  * Turn a run's event log into something a human can act on.
  *
@@ -39,6 +42,12 @@ interface Digest {
   cancelled: boolean;
   failedOutright?: string;
   testOutcome?: string;
+  /** The sandbox refused a host during this run — the FIRST one it refused. */
+  blocked?: EgressRefusal;
+  /** The run asked for the open network and was downgraded because its task came from outside. */
+  networkDowngraded: boolean;
+  /** How many events the log holds — "none at all" is its own explanation. */
+  events: number;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -46,17 +55,34 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 }
 
 function digest(events: WorkflowEvent[]): Digest {
-  const d: Digest = { turns: 0, cancelled: false };
+  const d: Digest = { turns: 0, cancelled: false, networkDowngraded: false, events: events.length };
   for (const e of events) {
     const data = asRecord(e.data);
     switch (e.type) {
       case "run-started": {
         const input = asRecord(data?.input);
         if (typeof input?.task === "string") d.task = input.task;
+        // Derived from the recorded input, not from a step: the downgrade is a
+        // pure function of the declared tier and the task's provenance, both
+        // of which are in the log (see sandboxOverridesOf). Nothing extra is
+        // written to make this readable.
+        const declared = parseNetworkTier(input?.sandboxNetwork);
+        if (declared !== null && networkForTrust(declared ?? undefined, input?.trust as string | undefined).downgradedFrom !== undefined) {
+          d.networkDowngraded = true;
+        }
         break;
       }
       case "step-completed": {
         const name = e.name ?? "";
+        // A blocked host is the most actionable thing a failed run can carry
+        // and it is buried in a turn's raw stdout, which is exactly where
+        // nobody looks. Hoisted to the explanation.
+        if (d.blocked === undefined && /^turn-\d+-exec$/.test(name)) {
+          const r = asRecord(data?.result);
+          if (r !== undefined && r.exitCode !== 0) {
+            d.blocked = detectEgressRefusal(`${String(r.stdout ?? "")}\n${String(r.stderr ?? "")}`) ?? undefined;
+          }
+        }
         // turn-N-exec is the marker of an executing turn; counting think steps
         // would double-count a turn that was nudged and re-thought.
         const m = /^turn-(\d+)-exec$/.exec(name);
@@ -111,6 +137,38 @@ function brief(text: string, max = 140): string {
  */
 export function explainRun(events: WorkflowEvent[]): RunExplanation {
   const d = digest(events);
+  return withNetwork(d, explainDigest(d));
+}
+
+/**
+ * The network overlay, applied to whatever the run's own ending was.
+ *
+ * Kept separate rather than folded into the ladder above because it is
+ * orthogonal to it: a blocked host explains a max-steps run, a stuck run, a
+ * failed step and a finished-but-empty run equally well, and it is the single
+ * most actionable thing any of them can carry — an operator adds one entry to
+ * one project record and the next run works. Written LAST so it leads the
+ * "next step", because it is the step that is actually next.
+ */
+function withNetwork(d: Digest, e: RunExplanation): RunExplanation {
+  if (d.blocked === undefined && !d.networkDowngraded) return e;
+  const evidence = [...e.evidence];
+  if (d.blocked !== undefined) evidence.push(`sandbox blocked ${d.blocked.host ?? "a host"}`);
+  if (d.networkDowngraded) evidence.push("network downgraded to allowlist (external task)");
+  const notes = [
+    ...(d.blocked !== undefined ? [egressRefusalNote(d.blocked)] : []),
+    ...(d.networkDowngraded ? [NETWORK_DOWNGRADE_NOTE] : []),
+  ];
+  return {
+    ...e,
+    ...(d.blocked !== undefined ? { headline: `Blocked by the sandbox's egress allowlist. ${e.headline}` } : {}),
+    nextStep: [...notes, e.nextStep].join(" "),
+    evidence,
+    needsAttention: e.needsAttention || d.blocked !== undefined,
+  };
+}
+
+function explainDigest(d: Digest): RunExplanation {
   const tried = d.task !== undefined ? brief(d.task) : "(the log records no task)";
   const evidence: string[] = [];
   if (d.turns > 0) evidence.push(`${d.turns} turn${d.turns === 1 ? "" : "s"}`);
@@ -118,7 +176,7 @@ export function explainRun(events: WorkflowEvent[]): RunExplanation {
   if (d.testOutcome !== undefined) evidence.push(`tests: ${d.testOutcome}`);
 
   // 1. It never started.
-  if (events.length === 0) {
+  if (d.events === 0) {
     return {
       headline: "This run has no events at all.",
       tried,

@@ -1,4 +1,10 @@
 import type { WorkflowEvent } from "@neutron-build/workflow";
+// `teploy-ship/egress` and NOT `teploy-ship/runtime`: this module is bundled
+// into the CLIENT half of the run page, and ship.server.ts's header explains
+// what a bare runtime import does to that build. egress.ts is a leaf with no
+// imports at all — nothing for the bundler to follow — which is why the rule
+// can live in one place instead of being copied into the web tree.
+import { NETWORK_DOWNGRADE_NOTE, detectEgressRefusal, egressRefusalNote, networkForTrust, parseNetworkTier } from "teploy-ship/egress";
 
 export interface TimelineItem {
   kind: "task" | "turn" | "approval" | "decision" | "done" | "error" | "note";
@@ -13,6 +19,13 @@ export interface TimelineItem {
   exitCode?: number;
   /** Turn items: think -> result wall time. */
   durationMs?: number;
+  /**
+   * Turn items: the sandbox refused a host during this turn. The operator half
+   * of the same signal the agent gets in its observation (egress.ts) — a
+   * blocked host and a broken build are identical in raw output, and this is
+   * the row where somebody is looking.
+   */
+  blockedHost?: string;
 }
 
 /** A turn under construction, before its think/exec halves are joined. */
@@ -24,6 +37,7 @@ interface TurnAcc {
   output: string;
   exitCode?: number;
   endedAt?: string;
+  blockedHost?: string;
 }
 
 /**
@@ -101,6 +115,7 @@ function flushTurn(items: TimelineItem[], turn: TurnAcc | null): void {
     thought: turn.thought,
     ...(turn.exitCode !== undefined ? { exitCode: turn.exitCode } : {}),
     ...(durationMs !== undefined ? { durationMs } : {}),
+    ...(turn.blockedHost !== undefined ? { blockedHost: turn.blockedHost } : {}),
   });
 }
 
@@ -131,8 +146,16 @@ export function toTimeline(events: WorkflowEvent[]): TimelineItem[] {
 
     switch (event.type) {
       case "run-started": {
-        const input = (event.data as { input?: { task?: string } } | undefined)?.input;
+        const input = (event.data as { input?: { task?: string; trust?: string; sandboxNetwork?: string } } | undefined)?.input;
         items.push({ kind: "task", title: "task", body: input?.task ?? "", at });
+        // Derived from the recorded input, never from an event of its own: the
+        // downgrade is a pure function of the declared tier and the task's
+        // provenance, both of which the log already holds (see
+        // sandboxOverridesOf). Nothing extra is written to make it visible.
+        const declared = parseNetworkTier(input?.sandboxNetwork);
+        if (declared !== null && networkForTrust(declared ?? undefined, input?.trust).downgradedFrom !== undefined) {
+          items.push({ kind: "note", title: "sandbox network downgraded to allowlist", body: NETWORK_DOWNGRADE_NOTE, at });
+        }
         break;
       }
       case "step-completed": {
@@ -155,6 +178,10 @@ export function toTimeline(events: WorkflowEvent[]): TimelineItem[] {
             turn.output = body;
             if (exitCode !== undefined) turn.exitCode = exitCode;
             turn.endedAt = at;
+            if (exitCode !== undefined && exitCode !== 0) {
+              const refusal = detectEgressRefusal(body);
+              if (refusal !== null) turn.blockedHost = refusal.host ?? "a host";
+            }
           } else if (!isEmptyResult(result)) {
             // A steer note that actually landed, or search hits — worth showing.
             const extra = asText(result);
@@ -223,7 +250,29 @@ export function toTimeline(events: WorkflowEvent[]): TimelineItem[] {
     }
   }
   flushTurn(items, turn);
-  return items;
+  return withBlockedNote(items);
+}
+
+/**
+ * The remedy, once, immediately after the first turn the sandbox blocked.
+ *
+ * Once and not per turn: an agent that hits a wall hits it several times, and
+ * five identical notes teach a reader to scroll past all of them. Placed after
+ * the turn rather than at the top so it reads in the order it happened, and
+ * carries the actual command — an operator reading "check the logs" is an
+ * operator who has already read the logs.
+ */
+function withBlockedNote(items: TimelineItem[]): TimelineItem[] {
+  const at = items.findIndex((i) => i.blockedHost !== undefined);
+  if (at < 0) return items;
+  const host = items[at]!.blockedHost!;
+  const note: TimelineItem = {
+    kind: "error",
+    title: `sandbox blocked ${host}`,
+    body: egressRefusalNote(host === "a host" ? { evidence: "" } : { host, evidence: "" }),
+    at: items[at]!.at,
+  };
+  return [...items.slice(0, at + 1), note, ...items.slice(at + 1)];
 }
 
 /** One row in the run page's "Recorded steps" section. */

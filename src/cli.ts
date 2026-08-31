@@ -18,6 +18,8 @@ import { cancelRun, deliverEvent } from "@neutron-build/workflow";
 import type { RunOutcome } from "@neutron-build/workflow";
 
 import { ArgError, COMMAND_FLAGS, enumFlag, numberFlag, parseArgs } from "./args.js";
+import { DEFAULT_NETWORK_TIER, NETWORK_TIER_HELP, parseNetworkTier, resolveNetworkTier, splitEgressAllow, wireNetwork } from "./egress.js";
+import type { NetworkTier } from "./egress.js";
 import { explainRun } from "./explain.js";
 import {
   UPGRADE_HOLD_EVENT,
@@ -146,9 +148,9 @@ Usage:
                                       preview of the branch (SHIP_PREVIEW_DIR).
                                       --preview deploys to a real server.
       (accepts run flags: --model, --sandbox…, --max-steps, --yes, --json, --critic, --settle)
-      NOTE: fix always needs network to clone/push — pass
-      --sandbox-network egress (or sandboxNetwork:"egress" in config)
-      whenever --sandbox is used; plain --sandbox defaults to "none".
+      NOTE: fix always needs network to clone/push. --sandbox now defaults to
+      the "allowlist" tier (registries + GitHub + this repo's own entries);
+      --sandbox-network none|allowlist|open overrides it per invocation.
   teploy-ship join <controller-url>   stand a NEW box up as a worker in an existing fleet
       --secrets <file>                the bundle from \`install.sh --export-secrets\`.
                                       join never fetches credentials over the network;
@@ -176,7 +178,7 @@ Usage:
       [--daily-budget USD]            per-source daily spend cap (default 10, SHIP_DAILY_BUDGET_USD; <=0 off)
       run in a sandbox (needed for repo tasks whose tests want tools the
       worker image lacks): SHIP_SANDBOX_URL + SHIP_SANDBOX_TOKEN
-      [+ SHIP_SANDBOX_IMAGE, SHIP_SANDBOX_NETWORK=egress]
+      [+ SHIP_SANDBOX_IMAGE, SHIP_SANDBOX_NETWORK=none|allowlist|open]
   teploy-ship web                     serve the runs dashboard (browser approve/deny)
       [--port N] [--token <t>]        token also via SHIP_WEB_TOKEN (required)
       [--dev]                         vite dev server instead of the built app
@@ -195,8 +197,8 @@ interface Config {
   sandboxUrl?: string;
   sandboxToken?: string;
   sandboxImage?: string;
-  /** Sandbox network mode for spawned runs (default "none"; "egress" for git/network-needing tasks). */
-  sandboxNetwork?: "none" | "egress";
+  /** Sandbox network tier for spawned runs (egress.ts). Unset = `allowlist`. */
+  sandboxNetwork?: NetworkTier;
   store?: string;
   nucleusUrl?: string;
   gitToken?: string;
@@ -271,10 +273,9 @@ function validateConfig(raw: Record<string, unknown>, path: string): Config {
     str(key);
   }
   if (raw.sandboxNetwork !== undefined) {
-    if (raw.sandboxNetwork !== "none" && raw.sandboxNetwork !== "egress") {
-      fail(`${path}: "sandboxNetwork" must be "none" or "egress"`);
-    }
-    config.sandboxNetwork = raw.sandboxNetwork;
+    const tier = parseNetworkTier(raw.sandboxNetwork);
+    if (tier === null || tier === undefined) fail(`${path}: "sandboxNetwork" must be ${NETWORK_TIER_HELP}`);
+    config.sandboxNetwork = tier;
   }
   if (raw.store !== undefined && raw.store !== "file" && raw.store !== "nucleus") {
     fail(`${path}: "store" must be "file" or "nucleus"`);
@@ -453,7 +454,7 @@ async function joinCommand(rest: string[]): Promise<void> {
       baseURL: probeUrl,
       token: plan.env.SHIP_SANDBOX_TOKEN!,
       image: plan.env.SHIP_SANDBOX_IMAGE ?? "python:3.12-slim",
-      network: plan.env.SHIP_SANDBOX_NETWORK === "egress" ? "egress" : "none",
+      network: parseNetworkTier(plan.env.SHIP_SANDBOX_NETWORK) ?? DEFAULT_NETWORK_TIER,
       ttlSec: 600,
     });
     sandboxProbe = async (command: string) => {
@@ -607,7 +608,7 @@ interface SandboxSettings {
   url: string;
   token: string;
   image: string;
-  network: "none" | "egress";
+  network: NetworkTier;
   /** Container TTL requested from the daemon, seconds. */
   ttlSec: number;
 }
@@ -644,17 +645,16 @@ function resolveSandbox(args: ReturnType<typeof parseArgs>, config: Config): San
   const image = (args.flags["sandbox-image"] as string) ?? process.env.SHIP_SANDBOX_IMAGE ?? config.sandboxImage ?? "python:3.12-slim";
   // Validated, not cast: an unrecognised value used to reach the sandbox
   // daemon as-is and be interpreted by it however it saw fit.
-  let network: "none" | "egress";
-  try {
-    network = enumFlag(
-      (args.flags["sandbox-network"] as string) ?? process.env.SHIP_SANDBOX_NETWORK ?? config.sandboxNetwork,
-      "sandbox-network",
-      ["none", "egress"] as const,
-      "none",
-    );
-  } catch (error) {
-    fail(error instanceof Error ? error.message : String(error));
-  }
+  //
+  // Unset falls to DEFAULT_NETWORK_TIER (`allowlist`), NOT to the daemon's
+  // `none`. Inheriting `none` is the first-run cliff this replaced: a sandbox
+  // with no network cannot `git clone`, `setupRepo` clones inside the
+  // container, so an install where nobody set SHIP_SANDBOX_NETWORK could run
+  // no repo task at all and looked broken rather than closed. egress.ts states
+  // the whole argument, including why the answer is not `open`.
+  const raw = (args.flags["sandbox-network"] as string) ?? process.env.SHIP_SANDBOX_NETWORK ?? config.sandboxNetwork;
+  const network = resolveNetworkTier(args.flags["sandbox-network"] as string, process.env.SHIP_SANDBOX_NETWORK, config.sandboxNetwork);
+  if (network === null) fail(`--sandbox-network must be ${NETWORK_TIER_HELP}, got: ${String(raw)}`);
   return { url, token, image, network, ttlSec: resolveSandboxTtlSec() };
 }
 
@@ -696,7 +696,9 @@ async function makeExecutor(
     const executor = await SandboxExecutor.start({
       baseURL: sandbox.url,
       token: sandbox.token,
-      create: { image: sandbox.image, network: sandbox.network },
+      // `network` is a tier here and the wire spelling there (egress.ts), and
+      // the SDK's type predates `open` — the cast is exactly that gap.
+      create: { image: sandbox.image, network: wireNetwork(sandbox.network) } as { image: string; network: "none" | "egress" },
     });
     return { executor, workdir: "/work" };
   }
@@ -1308,7 +1310,8 @@ async function evidenceCommand(rest: string[]): Promise<void> {
 }
 
 const PROJECT_USAGE =
-  "usage: teploy-ship project set <repo> [--url <clone-url>] [--image <img>] [--network none|egress] [--memory-mb N] [--cpus N]\n" +
+  "usage: teploy-ship project set <repo> [--url <clone-url>] [--image <img>] [--network none|allowlist|open] [--memory-mb N] [--cpus N]\n" +
+  "           [--egress-allow <host,.suffix,host:port>]  extra allowlist entries for this repo's runs\n" +
   "           [--policy inherit|ignore|propose|auto] [--budget <usd>] [--test-command <cmd>] [--test-timeout-ms N]\n" +
   "           [--observe-service <svc>] [--label <text>]\n" +
   "           [--build <cmd>] [--preview-app <app>] [--preview-smoke <cmd>] [--visual on|off] [--observe-window <min>]\n" +
@@ -1340,6 +1343,8 @@ async function projectCommand(rest: string[]): Promise<void> {
         process.stdout.write(`${bold(p.repo)}${p.label !== undefined ? `  ${dim(p.label)}` : ""}\n`);
         if (p.url !== undefined) process.stdout.write(`  url:      ${p.url}\n`);
         if (p.sandboxImage !== undefined) process.stdout.write(`  image:    ${p.sandboxImage}${p.sandboxNetwork !== undefined ? ` (${p.sandboxNetwork})` : ""}\n`);
+        if (p.sandboxImage === undefined && p.sandboxNetwork !== undefined) process.stdout.write(`  network:  ${p.sandboxNetwork}\n`);
+        if (p.sandboxEgressAllow !== undefined) process.stdout.write(`  egress:   ${p.sandboxEgressAllow.join(", ")}\n`);
         if (p.sandboxLimits !== undefined) process.stdout.write(`  limits:   ${JSON.stringify(p.sandboxLimits)}\n`);
         if (p.sourcePolicy !== undefined) process.stdout.write(`  policy:   ${p.sourcePolicy}\n`);
         if (p.dailyBudgetUSD !== undefined) process.stdout.write(`  budget:   $${p.dailyBudgetUSD}/day\n`);
@@ -1386,8 +1391,14 @@ async function projectCommand(rest: string[]): Promise<void> {
       if (!Number.isFinite(n) || n <= 0) fail(`--${name} must be a positive number, got: ${String(args.flags[name])}`);
       return n;
     };
-    const network = str("network");
-    if (network !== undefined && network !== "none" && network !== "egress") fail(`--network must be none or egress, got: ${network}`);
+    const networkRaw = str("network");
+    const network = parseNetworkTier(networkRaw);
+    if (network === null) fail(`--network must be ${NETWORK_TIER_HELP}, got: ${String(networkRaw)}`);
+    // `--egress-allow ""` clears the list; omitting the flag keeps it, like
+    // every other field on this merging `set`. normalizeProject validates the
+    // entries and refuses the save on a typo.
+    const egressAllowRaw = str("egress-allow");
+    const egressAllow = egressAllowRaw === undefined ? undefined : splitEgressAllow(egressAllowRaw);
     const policy = str("policy");
     if (policy !== undefined && !["inherit", "ignore", "propose", "auto"].includes(policy)) fail(`--policy must be inherit, ignore, propose or auto, got: ${policy}`);
     // The verification ladder (C4) and contract 1's authority. Merge semantics
@@ -1451,7 +1462,8 @@ async function projectCommand(rest: string[]): Promise<void> {
         ...(url !== undefined ? { url } : {}),
         ...(str("label") !== undefined ? { label: str("label") } : {}),
         ...(str("image") !== undefined ? { sandboxImage: str("image") } : {}),
-        ...(network !== undefined ? { sandboxNetwork: network as "none" | "egress" } : {}),
+        ...(network !== undefined ? { sandboxNetwork: network } : {}),
+        ...(egressAllow !== undefined ? (egressAllow.length > 0 ? { sandboxEgressAllow: egressAllow } : {}) : {}),
         ...(num("memory-mb") !== undefined || num("cpus") !== undefined
           ? { sandboxLimits: { ...existing.sandboxLimits, ...(num("memory-mb") !== undefined ? { memoryMb: num("memory-mb") } : {}), ...(num("cpus") !== undefined ? { cpus: num("cpus") } : {}) } }
           : {}),

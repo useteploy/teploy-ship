@@ -37,6 +37,23 @@ export type {
 } from "./durable.js";
 
 export { formatObservation, systemPrompt } from "./prompt.js";
+export {
+  DEFAULT_NETWORK_TIER,
+  NETWORK_DOWNGRADE_NOTE,
+  NETWORK_TIERS,
+  NETWORK_TIER_HELP,
+  detectEgressRefusal,
+  egressEntryError,
+  egressRefusalHint,
+  egressRefusalNote,
+  networkForTrust,
+  normalizeEgressAllow,
+  parseNetworkTier,
+  resolveNetworkTier,
+  splitEgressAllow,
+  wireNetwork,
+} from "./egress.js";
+export type { EgressRefusal, NetworkTier } from "./egress.js";
 
 export { checkCommand, formatReport, localEvalExecutor, runEval } from "./eval.js";
 export type {
