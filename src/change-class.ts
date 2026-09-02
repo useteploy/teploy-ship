@@ -109,11 +109,13 @@ export const DECISION_MARKER = "DECISION:";
 /**
  * The paths whose change still parks MID-RUN, before anything is pushed (C1).
  *
- * Every other `serious` change now runs to a verified draft pull request and
- * parks at the merge boundary, because a person can undo a pull request. A
- * deletion or a schema migration is the exception: its blast radius is the
- * one thing a draft does not contain, and the plan's own rule is that the
- * mid-run park survives only for a run that would delete or migrate.
+ * Every other change the run may not merge on its own authority — a `serious`
+ * one always, a `trivial` or `normal` one wherever the authority stops short
+ * — runs to a verified draft pull request and parks at the merge boundary,
+ * because a person can undo a pull request. A deletion or a schema migration
+ * is the exception: its blast radius is the one thing a draft does not
+ * contain, and the plan's own rule is that the mid-run park survives only for
+ * a run that would delete or migrate.
  */
 export const MIGRATION_PATHS: readonly string[] = ["**/migrations/**", "**/migration/**", "**/migrate/**", "**/schema.sql"];
 
@@ -302,14 +304,17 @@ export function mergeParkSummary(verdict: ChangeVerdict, files: ChangedFile[], p
   const head =
     `This change is classified **${verdict.class}** — ${files.length} file${files.length === 1 ? "" : "s"}, ` +
     `${total} changed line${total === 1 ? "" : "s"}. It is published as a draft pull request: ${pr}`;
-  const why = `\n\nIt is held at the merge boundary because:\n${verdict.reasons.map((r) => `- ${r}`).join("\n")}`;
+  const why =
+    verdict.class === "serious"
+      ? `\n\nIt is held at the merge boundary because:\n${verdict.reasons.map((r) => `- ${r}`).join("\n")}`
+      : `\n\nIt is held at the merge boundary because this repository does not merge a ${verdict.class} change unattended; the classifier said:\n${verdict.reasons.map((r) => `- ${r}`).join("\n")}`;
   const conflicts =
     conflict !== undefined && conflict.length > 0
       ? `\n\nThe branch could not be rebased onto the default branch; these files conflict:\n${conflict.map((f) => `- ${f}`).join("\n")}\n\nResolve the conflict on the branch (or on the default branch) and approve again.`
       : "";
   return (
     `${head}${why}${conflicts}\n\n` +
-    "Approve to rebase it, re-run its verification and mark the pull request ready (merged where the repo's policy allows); " +
+    "Approve to rebase it, re-run its verification and merge it; " +
     "deny to close the pull request with your reason. The branch is kept either way."
   );
 }

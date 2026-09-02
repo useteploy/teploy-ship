@@ -3019,8 +3019,8 @@ test("C1: a serious change that deletes nothing runs to a DRAFT PR and parks on 
     assert.match(String(park?.summary), /merge boundary/);
     assert.match(String(park?.summary), /draft pull request/);
 
-    // Approving marks the pull request ready; without autoMerge on the run's
-    // input, a human's merge button is still the last step.
+    // Approving rebases, re-verifies and MERGES: the person's decision is the
+    // authority, whatever the repo's unattended setting says.
     await deliverEvent(store, "run-c1-park", MERGE_EVENT, { approved: true });
     const resumed = await executeRun({
       workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
@@ -3030,9 +3030,81 @@ test("C1: a serious change that deletes nothing runs to a DRAFT PR and parks on 
     });
     assert.equal(resumed.status, "completed");
     const decision = stepResult(await store.load("run-c1-park"), "merge-decision");
-    assert.equal(decision?.kind, "ready");
+    assert.equal(decision?.kind, "merged");
     assert.equal(decision?.rebase, "up-to-date", "the bare had not moved, so the recorded verification stands");
-    assert.equal(fixture.merges().length, 0, "a repo that never opted into autoMerge still gets a human merge");
+    assert.equal(fixture.merges().length, 1, "the approval merged it — no second click in the forge");
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("C1: a trivial change the repo may not merge itself ALSO parks at the boundary, and the approval merges it", async () => {
+  const fixture = await mergeFixture("c1-send-trivial");
+  try {
+    // One appended line in one file: trivial by every threshold. The run
+    // carries no authority to merge, so the question is a person's — and a
+    // pull request nobody is asked about is a pull request nobody merges.
+    const { model } = reactiveModel([
+      "```bash\necho world >> f.txt\n```",
+      "```finish\nfixed the greeting\n```",
+      "```bash\ncat f.txt\n```",
+      "```finish\nfixed the greeting\n```",
+    ]);
+    const store = new MemoryEventStore();
+    const input = { task: "fix the greeting", repo: fixture.repo, changeClass: true, mergeGate: true, tests: true, testCommand: "true" };
+    const parked = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-c1-send-trivial",
+      store,
+      input,
+    });
+    assert.equal(parked.status, "waiting", "no authority to merge, so the boundary asks");
+    assert.equal(parked.eventName, MERGE_EVENT);
+
+    const events = await store.load("run-c1-send-trivial");
+    const verdict = [...events].reverse().find((e) => e.name === "change-class")?.data as { result?: { class?: string } } | undefined;
+    assert.equal(verdict?.result?.class, "trivial");
+    const created = fixture.calls.find((c) => c.method === "POST" && c.url.endsWith("/pulls"));
+    assert.match(String((created!.body as { title?: string }).title), /^WIP: /, "published as a draft until someone answers");
+    assert.match(String(stepResult(events, "merge-park")?.summary), /does not merge a trivial change unattended/);
+    assert.equal(fixture.merges().length, 0);
+
+    await deliverEvent(store, "run-c1-send-trivial", MERGE_EVENT, { approved: true });
+    const done = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-c1-send-trivial",
+      store,
+      input,
+    });
+    assert.equal(done.status, "completed");
+    assert.equal(stepResult(await store.load("run-c1-send-trivial"), "merge-decision")?.kind, "merged");
+    assert.equal(fixture.merges().length, 1, "the person's approval is the authority");
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("C1: a trivial change on a repo that merges trivial itself does NOT park with the gate on", async () => {
+  const fixture = await mergeFixture("c1-auto-trivial-nopark");
+  try {
+    const { model } = reactiveModel([
+      "```bash\necho world >> f.txt\n```",
+      "```finish\nfixed the greeting\n```",
+      "```bash\ncat f.txt\n```",
+      "```finish\nfixed the greeting\n```",
+    ]);
+    const store = new MemoryEventStore();
+    const done = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-c1-auto-trivial-nopark",
+      store,
+      input: { task: "fix the greeting", repo: fixture.repo, changeClass: true, mergeGate: true, autoMerge: true, tests: true, testCommand: "true" },
+    });
+    assert.equal(done.status, "completed", "the boundary asks only where Ship may not act on its own");
+    const names = (await store.load("run-c1-auto-trivial-nopark")).filter((e) => e.type === "step-completed").map((e) => e.name ?? "");
+    assert.equal(names.includes("merge-park"), false);
+    assert.ok(names.includes("auto-merge"));
+    assert.equal(fixture.merges().length, 1, "the repo's own authority merged it");
   } finally {
     fixture.restore();
   }
@@ -3123,7 +3195,7 @@ test("C1: an approved rebase onto a MOVED base re-runs the suite before the PR i
     assert.ok(names.includes("merge-rebase"));
     assert.ok(names.includes("rebase-tests"), "the suite ran again over the rebased bytes");
     const decision = stepResult(await store.load("run-c1-rebase"), "merge-decision");
-    assert.equal(decision?.kind, "ready");
+    assert.equal(decision?.kind, "merged");
     assert.equal(decision?.rebase, "rebased", "and the step says the bytes changed");
 
     // The force-pushed branch is the rebased one: main's other.txt is on it.

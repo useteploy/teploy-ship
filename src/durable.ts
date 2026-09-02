@@ -334,13 +334,17 @@ export interface DurableAgentInput {
    */
   autoMerge?: boolean;
   /**
-   * Boundary-only parks (C1). With this on, a change classified `serious`
-   * no longer parks before the push: the run pushes, opens a DRAFT pull
-   * request, runs every verification leg it was given, and parks on
-   * `MERGE_EVENT` ("approve-merge") with the evidence attached. Approve
+   * Boundary-only parks (C1). With this on, a change parks AFTER the push,
+   * not before: the run pushes, opens a DRAFT pull request, runs every
+   * verification leg it was given, and parks on `MERGE_EVENT`
+   * ("approve-merge") with the evidence attached. Every change the run may
+   * not merge unattended parks here — a `serious` one always, and a
+   * `trivial` or `normal` one whenever the authority it carries stops short
+   * of merging that class (mergesUnattended). A pull request Ship may not
+   * merge and nobody is asked about is a pull request nobody merges. Approve
    * rebases the branch onto the default branch, re-runs the suite when the
-   * rebase changed the bytes, marks the pull request ready and merges it
-   * where `autoMerge` says the repo wants Ship merging; deny closes it.
+   * rebase changed the bytes, marks the pull request ready and MERGES it —
+   * the person's decision is the authority; deny closes it.
    *
    * The mid-run park (CHANGE_EVENT, before the push) survives ONLY for a
    * change that deletes files or touches a schema/migration path — see
@@ -2199,9 +2203,10 @@ async function publishIfRepoRun(
   // first time — which is what makes "trivial" usable as merge authority.
   let changeVerdict: ChangeVerdict | undefined;
   let changedList: ChangedFile[] = [];
-  // C1: a serious change that neither deletes nor migrates is published as a
-  // draft and asked about at the merge boundary (mergeGateIfSerious below)
-  // instead of here. The mid-run park below is kept for the rest.
+  // C1: a change that neither deletes nor migrates, and that this run may not
+  // merge on its own authority, is published as a draft and asked about at
+  // the merge boundary (mergeBoundaryGate below) instead of here. The mid-run
+  // park below is kept for a serious change that deletes or migrates.
   let boundaryPark = false;
   if (input.changeClass === true) {
     const verdict = await ctx.step("change-class", async () => {
@@ -2211,7 +2216,7 @@ async function publishIfRepoRun(
     changeVerdict = verdict;
     changedList = verdict.files;
     facts.changeClass = { class: verdict.class, files: verdict.files.length };
-    boundaryPark = input.mergeGate === true && verdict.class === "serious" && midRunParkReasons(verdict.files).length === 0;
+    boundaryPark = input.mergeGate === true && midRunParkReasons(verdict.files).length === 0 && !mergesUnattended(input, verdict.class);
     if (verdict.class === "serious" && !boundaryPark) {
       const decision = await ctx.waitForEvent<ChangeDecisionPayload>(CHANGE_EVENT);
       if (!decision.approved) {
@@ -2426,7 +2431,7 @@ async function publishIfRepoRun(
   else if (merge?.outcome.kind === "held") facts.merge = { kind: "held", reasons: merge.outcome.reasons };
   else if (merge?.outcome.kind === "failed") facts.merge = { kind: "merge-failed", reason: merge.outcome.reason };
   if (boundaryPark && changeVerdict !== undefined) {
-    const decided = await mergeGateIfSerious(ctx, executor, config, input, { ref, token, checkout: co, pr, handle }, {
+    const decided = await mergeBoundaryGate(ctx, executor, config, input, { ref, token, checkout: co, pr, handle }, {
       verdict: changeVerdict,
       files: changedList,
       ...(tests !== undefined ? { tests } : {}),
@@ -2468,13 +2473,16 @@ type MergeDecisionStep =
  * the pull request is marked ready at once. Rebased means it does not, so the
  * suite is re-run — the run re-verifies rather than asking again — and a
  * failure leaves the pull request a draft with the failure on it. A conflict
- * parks again with the files listed. When the repo has opted into unattended
- * merging (`autoMerge`), the approved and re-verified change is merged; the
- * human's decision supplies the authority the class gate withheld.
+ * parks again with the files listed. An approved and re-verified change is
+ * MERGED: the person's decision supplies the authority the run's own setting
+ * withheld, and `autoMerge` governs only merges nobody was asked about. (It
+ * used to merge only where `autoMerge` was on and otherwise mark the pull
+ * request ready; "Approve merge" then left a person a second click in the
+ * forge that nothing pointed at.)
  *
  * Deny: the pull request is closed with the reason. The branch stays.
  */
-async function mergeGateIfSerious(
+async function mergeBoundaryGate(
   ctx: WorkflowContext,
   executor: AgentExecutor,
   config: DurableAgentConfig,
@@ -2569,10 +2577,8 @@ ${reason}`).catch(() => undefined);
           rebase.kind === "rebased"
             ? `rebased onto ${checkout.base} (${rebase.base.slice(0, 10)}) and re-verified: suite ${tests?.kind ?? "not run"}`
             : `already on the tip of ${checkout.base}; the recorded verification stands`;
-        if (input.autoMerge !== true) {
-          await commentOnPr(ref, token, pr.number, `Approved for merge (run ${ctx.runId}); ${note}. Marked ready for review.`).catch(() => undefined);
-          return { kind: "ready", rebase: rebase.kind, sha: rebase.sha, ok: ready.ok, ...(ready.reason !== undefined ? { detail: ready.reason } : {}) };
-        }
+        // Marked ready first because a forge refuses to merge a draft; if that
+        // refusal stands, the merge outcome below says so.
         const outcome = await mergePullRequest(ref, token, pr.number, {
           method: "squash",
           message: `Merged by Teploy Ship (run ${ctx.runId}) on an approved merge decision.
@@ -2582,7 +2588,12 @@ ${note}.`,
         });
         return outcome.kind === "merged"
           ? { kind: "merged", rebase: rebase.kind, ...(outcome.sha !== undefined ? { sha: outcome.sha } : {}) }
-          : { kind: "merge-failed", rebase: rebase.kind, status: outcome.status, reason: outcome.reason };
+          : {
+              kind: "merge-failed",
+              rebase: rebase.kind,
+              status: outcome.status,
+              reason: ready.ok ? outcome.reason : `${outcome.reason} (the pull request could not be marked ready first: ${ready.reason ?? "refused"})`,
+            };
       },
       EXTERNAL_EFFECT_RETRY,
     );
@@ -2707,6 +2718,23 @@ type AutoMergeStep =
  * makes the timeline answer the question a reader of an unattended merge
  * actually has, which is not "did it merge" but "why was it allowed to".
  */
+/**
+ * Whether a change of this class merges with no person involved under the
+ * authority this run carries. The boundary park (C1) asks a person about every
+ * change this says no to. It mirrors the CLASS question of the two gates in
+ * autoMergeIfAllowed — legacy `autoMerge` merges trivial only; the ladder
+ * merges what its rung names — and nothing else: suite, draft and rung
+ * evidence are that function's to check, and a merge it then holds is on the
+ * timeline as `held`.
+ */
+function mergesUnattended(input: DurableAgentInput, cls: ChangeVerdict["class"]): boolean {
+  if (input.autoMerge !== true) return false;
+  if (input.authority === undefined) return cls === "trivial";
+  if (input.authority === "auto_normal") return cls === "trivial" || cls === "normal";
+  if (input.authority === "auto_trivial") return cls === "trivial";
+  return false;
+}
+
 async function autoMergeIfAllowed(
   ctx: WorkflowContext,
   ref: RepoRef,
@@ -2758,7 +2786,7 @@ async function autoMergeIfAllowed(
 
   // REBASE-BEFORE-MERGE (C7). Only when every gate above said yes: a run that
   // is holding merges nothing, so it rebases nothing either — and a change
-  // headed for the boundary park (mergeGateIfSerious) rebases at DECISION
+  // headed for the boundary park (mergeBoundaryGate) rebases at DECISION
   // time, where a fresh approval deserves a fresh base. The seconds between
   // the push and this step make the up-to-date case the common one; the rebase
   // exists for the base that moved under a serialization queue or a human
