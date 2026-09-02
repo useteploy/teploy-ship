@@ -1,5 +1,15 @@
 # The Bulletin — a public board whose notes Ship picks up
 
+> **Where the public face actually lives (2026-09-02).** Ship runs behind the
+> tailnet, so no member of the public can reach `/bulletin/<slug>` here. The
+> board strangers use is Akiroo's (`lite.akiroo.com/board/<slug>`), which
+> carries this document's trust model — kinds, vote threshold, daily cap,
+> pin-time screening, declined-twin suppression, the four-word public
+> vocabulary — and turns a qualifying note into a Today card whose approve
+> files a work item and sends it to Ship through the ordinary work-item path.
+> Everything below still describes what Ship's own Bulletin does; it is kept
+> as built, not removed, and nothing points the public at it.
+
 A bulletin is a page anyone can reach and anyone can write to: `/bulletin/<slug>`.
 Someone pins a note about something broken, other people vote for it, and — if
 you have turned the switches on — Ship promotes it into an intake proposal, a
