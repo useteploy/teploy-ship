@@ -13,6 +13,7 @@ import { anthropic, createAnthropic } from "@neutron-build/ai/anthropic";
 import { openai, createOpenAI } from "@neutron-build/ai/openai";
 import type { ModelAdapter } from "@neutron-build/ai";
 import { LocalExecutor, SandboxExecutor } from "@neutron-build/agents";
+import { longRequestFetch } from "./http-dispatcher.js";
 import type { AgentExecutor } from "@neutron-build/agents";
 import { cancelRun, deliverEvent } from "@neutron-build/workflow";
 import type { RunOutcome } from "@neutron-build/workflow";
@@ -873,6 +874,9 @@ function durableProvider(args: ReturnType<typeof parseArgs>, config: Config): Ex
         image: sandbox.image,
         network: sandbox.network,
         ttlSec: sandbox.ttlSec,
+        // A streamed exec can be silent for longer than Node's fetch will
+        // wait (http-dispatcher.ts); the daemon and client deadlines bind.
+        fetch: longRequestFetch,
       });
     if (urls.length <= 1) return build(urls[0] ?? sandbox.url);
     return new SandboxPool({

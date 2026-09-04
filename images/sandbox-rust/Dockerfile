@@ -47,6 +47,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # never ran the third leg.
 RUN set -eux; rustup component add rustfmt clippy; cargo --version; rustc --version; cargo clippy --version
 
+# A login shell (`bash -l`, `sh -l`) re-reads /etc/profile and replaces PATH
+# with the Debian default, which drops /usr/local/cargo/bin: cargo vanishes
+# for exactly the invocation a harness or a person is most likely to use
+# when "the plain one" fails. Put the toolchain on PATH for login shells too.
+RUN printf 'export PATH=/usr/local/cargo/bin:$PATH\n' > /etc/profile.d/cargo.sh
+
 # Pre-warming the registry is deliberately NOT done here. A cold `cargo test`
 # over ~650 crates spends its first minutes on the index and downloads, but a
 # baked registry is a snapshot of one repo's Cargo.lock inside an image every

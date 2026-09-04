@@ -2,7 +2,7 @@
   "name": "teploy-ship",
   "version": "0.2.1",
   "private": true,
-  "description": "Teploy Ship \u2014 Teploy's coding agent: a CodeAct brain on the Neutron primitives. Issues in, PRs out, self-hosted.",
+  "description": "Teploy Ship — Teploy's coding agent: a CodeAct brain on the Neutron primitives. Issues in, PRs out, self-hosted.",
   "author": "Tyler",
   "license": "MIT",
   "type": "module",
@@ -48,7 +48,8 @@
     "@neutron-build/agents": "^0.1.0",
     "@neutron-build/ai": "^0.1.0",
     "@neutron-build/workflow": "^0.1.0",
-    "pg": "^8.16.0"
+    "pg": "^8.16.0",
+    "undici": "^8.10.2"
   },
   "devDependencies": {
     "@types/node": "^22.10.7",
