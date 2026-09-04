@@ -39,7 +39,7 @@ export function webToken(): string {
 }
 
 export function defaultModel(): string {
-  return process.env.SHIP_MODEL ?? "anthropic/claude-sonnet-5";
+  return process.env.SHIP_MODEL ?? "zai/glm-5.3";
 }
 
 /**

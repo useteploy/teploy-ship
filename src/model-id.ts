@@ -10,7 +10,7 @@
  * eleven runs recorded `anthropic/claude-sonnet-5` under
  * `SHIP_MODEL=zai/glm-5.3`.
  */
-export const DEFAULT_MODEL_ID = "anthropic/claude-sonnet-5";
+export const DEFAULT_MODEL_ID = "zai/glm-5.3";
 
 export function resolveModelId(
   flag: unknown,

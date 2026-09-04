@@ -83,7 +83,7 @@ const USAGE = `teploy-ship — coding agent on your own stack
 
 Usage:
   teploy-ship run "<task>"            live run in the terminal (streamed, interactive approvals)
-      [--model provider/model]        default SHIP_MODEL, else anthropic/claude-sonnet-5
+      [--model provider/model]        default SHIP_MODEL, else zai/glm-5.3
       [--sandbox <url> --sandbox-token <t> [--sandbox-image <img>] [--sandbox-network none|egress]]
       [--max-steps N] [--yes] [--json] [--critic] [--settle]
                      --critic adds an independent review pass before finishing
