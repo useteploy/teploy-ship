@@ -9,6 +9,7 @@ import {
   diskPathCandidates,
   hostHold,
   hostLoad,
+  sandboxHostFromEnv,
   sandboxLimitsFor,
 } from "./host-load.js";
 import type { HostLimits, HostLoad } from "./host-load.js";
@@ -201,6 +202,27 @@ test("sandboxLimitsFor splits the box across the slots it planned for", () => {
   assert.equal(tiny.memoryMb, 512, "floored: below 512 MB nothing builds");
   const builder = sandboxLimitsFor(load({ totalMemMB: 131_072, cpus: 32 }), 2);
   assert.equal(builder.memoryMb, 4096, "capped: a 64 GB default is not a default");
+});
+
+test("sandboxLimitsFor sizes from the sandbox host when the operator names one", () => {
+  // The worker on a 29 GB box, the daemon on a 7.8 GB one: without the
+  // override every run gets the 4096 cap (four of them on a box that cannot
+  // back two). With it, the cap is the daemon box's share.
+  const worker = load({ totalMemMB: 29_000, cpus: 8 });
+  assert.equal(sandboxLimitsFor(worker, 4).memoryMb, 4096, "worker-sized: capped at the 4 GB default");
+  const sized = sandboxLimitsFor(worker, 4, { totalMemMB: 7800, cpus: 4 });
+  assert.equal(sized.memoryMb, Math.floor((7800 - BASE_RESERVE_MB) / 4 / 64) * 64, "the daemon box's usable memory split across the slots");
+  assert.equal(sized.memoryMb, 1536);
+  assert.equal(sized.cpus, 1, "cpus follow the sandbox host too");
+  const memOnly = sandboxLimitsFor(worker, 4, { totalMemMB: 7800 });
+  assert.equal(memOnly.cpus, 2, "an unset field falls back to the worker host's value");
+});
+
+test("sandboxHostFromEnv reads only positive numbers and leaves the rest to the worker host", () => {
+  assert.deepEqual(sandboxHostFromEnv({}), {});
+  assert.deepEqual(sandboxHostFromEnv({ SHIP_SANDBOX_HOST_MEMORY_MB: "7800" }), { totalMemMB: 7800 });
+  assert.deepEqual(sandboxHostFromEnv({ SHIP_SANDBOX_HOST_MEMORY_MB: "7800", SHIP_SANDBOX_HOST_CPUS: "4" }), { totalMemMB: 7800, cpus: 4 });
+  assert.deepEqual(sandboxHostFromEnv({ SHIP_SANDBOX_HOST_MEMORY_MB: "lots", SHIP_SANDBOX_HOST_CPUS: "0" }), {}, "garbage and zero are not a box");
 });
 
 test("describeCapacity says the ceiling, the binding and the numbers behind it", () => {

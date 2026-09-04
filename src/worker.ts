@@ -33,6 +33,7 @@ import {
   describeCapacity,
   hostHold,
   hostLoad,
+  sandboxHostFromEnv,
   sandboxLimitsFor,
 } from "./host-load.js";
 import type { Capacity, HostHold, HostLimits, HostLoad } from "./host-load.js";
@@ -661,7 +662,7 @@ export function startWorker(options: WorkerOptions): {
    * changes nothing about a replay's step sequence.
    */
   function hostSizedOverrides(o?: SandboxOverrides): SandboxOverrides {
-    const derived = sandboxLimitsFor(lastLoad, capacity.maxConcurrent);
+    const derived = sandboxLimitsFor(lastLoad, capacity.maxConcurrent, sandboxHost);
     return {
       ...(o ?? {}),
       limits: {
@@ -1056,6 +1057,15 @@ export function startWorker(options: WorkerOptions): {
     maxInodeUsedPct: options.maxInodeUsedPct ?? envNum("SHIP_MAX_INODE_USED_PCT") ?? DEFAULT_MAX_INODE_USED_PCT,
   };
   let lastLoad: HostLoad = hostLoad();
+  // The sandbox daemon's box, when the operator says it differs from this one
+  // (host-load.ts:sandboxHostFromEnv). Read once: it is a statement about a
+  // machine, not a measurement of one.
+  const sandboxHost = sandboxHostFromEnv();
+  log(
+    sandboxHost.totalMemMB !== undefined || sandboxHost.cpus !== undefined
+      ? `[worker] sandbox limits sized from SHIP_SANDBOX_HOST_*: ${sandboxHost.totalMemMB ?? lastLoad.totalMemMB} MB, ${sandboxHost.cpus ?? lastLoad.cpus} cpu`
+      : `[worker] sandbox limits sized from this host (${lastLoad.totalMemMB} MB, ${lastLoad.cpus} cpu); set SHIP_SANDBOX_HOST_MEMORY_MB if the daemon runs elsewhere`,
+  );
   let held: HostHold | null = null;
   let heldLoggedAt = 0;
   // The ceiling, derived from the box (host-load.ts capacityPlan) and re-derived

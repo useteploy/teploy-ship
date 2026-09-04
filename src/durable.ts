@@ -2399,6 +2399,9 @@ async function publishIfRepoRun(
     preview,
     telemetry,
     ...(legs.rungs !== undefined ? { rungs: legs.rungs } : {}),
+    // So a root-level suite over a change confined to one subtree is called
+    // out on the pull request rather than read as a green gate (tests.ts).
+    ...(changedList.length > 0 ? { changedPaths: changedList.map((f) => f.path) } : {}),
   });
   // Computed ONCE, outside any step, and fed to both gates below. It is a pure
   // function of the `telemetry-check` step's recorded verdict (see

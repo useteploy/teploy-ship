@@ -22,7 +22,7 @@ import { previewComment } from "./deploy.js";
 import type { TelemetryVerdict } from "./observe.js";
 import { telemetryComment } from "./observe.js";
 import type { TestOutcome } from "./tests.js";
-import { testComment } from "./tests.js";
+import { testComment, testScopeNote } from "./tests.js";
 import type { Rung } from "./ladder.js";
 
 export const VERIFICATION_START = "<!-- teploy-ship:verification -->";
@@ -44,6 +44,13 @@ export interface Evidence {
    * run that declared a ladder.
    */
   rungs?: Rung[];
+  /**
+   * Repository-relative paths the run changed (the change-class step's list).
+   * Only read to warn when a root-level suite cannot have covered a change
+   * confined to one subtree (tests.ts:testScopeNote). Absent on runs that
+   * did not classify their change.
+   */
+  changedPaths?: string[];
 }
 
 /**
@@ -60,6 +67,8 @@ export function verificationSection(evidence: Evidence, runId: string): string |
   const tests = evidence.tests;
   if (tests !== undefined && tests.kind !== "disabled") {
     parts.push(testComment(tests, evidence.testsBaseline));
+    const scope = testScopeNote(tests.command, evidence.changedPaths ?? []);
+    if (scope !== undefined) parts.push(`**Scope:** ${scope}`);
   }
   const preview = evidence.preview;
   if (preview !== undefined && preview.kind !== "skipped") {

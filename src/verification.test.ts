@@ -93,3 +93,16 @@ test("a body with a start marker but no end is appended to, never cut at a guess
   assert.match(updated, /\(cut off/, "content below a broken marker is not deleted");
   assert.match(updated, /https:\/\/preview-fix\.example\.com/);
 });
+
+test("a root suite over a change confined to one subtree gets a scope warning, and a scoped command does not", () => {
+  const passed = { kind: "passed" as const, command: "go test ./...", durationMs: 12_000 };
+  const warned = verificationSection({ tests: passed, changedPaths: ["nucleus/src/a.rs", "nucleus/Cargo.toml"] }, "run-1");
+  assert.ok(warned !== null && warned.includes("**Scope:**") && warned.includes("`nucleus/`"), warned ?? "null");
+  const scoped = verificationSection(
+    { tests: { ...passed, command: "cd nucleus && cargo test --lib -q" }, changedPaths: ["nucleus/src/a.rs"] },
+    "run-1",
+  );
+  assert.ok(scoped !== null && !scoped.includes("**Scope:**"), scoped ?? "null");
+  const unknown = verificationSection({ tests: passed }, "run-1");
+  assert.ok(unknown !== null && !unknown.includes("**Scope:**"), "no change list, no claim");
+});

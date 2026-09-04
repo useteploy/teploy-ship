@@ -702,6 +702,34 @@ ship-sandbox-node:dev --network allowlist --egress-allow rubygems.org`)
 overrides the image, network tier, egress entries and limits for that repo's
 runs.
 
+**A Rust project (Nucleus in Neutron) is the worked example of why those
+overrides exist.** The default images carry no `cargo`, so a run on a Rust tree
+cannot build or test, and detection would pick the repo root's `go test ./...`
+and report a green suite that never touched the crate. Build the Rust image on
+the sandbox host (`images/build.sh rust` → `ship-sandbox-rust:dev`; rust
+stable, node, python3, gcc, rustfmt, clippy; never the worker default) and put
+everything Nucleus needs on its project record, sized for a 347k-line cold
+build rather than for a small Go module:
+
+```sh
+teploy-ship project set http://100.108.123.49:49152/tyler/neutron.git \
+  --image ship-sandbox-rust:dev --memory-mb 6144 --cpus 3 \
+  --test-command "cd nucleus && cargo test --lib -q" --test-timeout-ms 3600000 \
+  --egress-allow crates.io,static.crates.io,index.crates.io
+```
+
+`--lib` on purpose: Nucleus's integration tests are `--test-threads=1` and run
+for hours; the pull request gate is the unit suite, the rest is CI's. On a
+7.8 GB sandbox host a 6 GB cap means one such run at a time — set
+`SHIP_MAX_CONCURRENT_RUNS=1` fleet-wide while Nucleus work is flowing, or give
+the box memory, because there is no per-project slot count. Turn the
+[warm cache](#warm-cache) on for it: a cold `target/` every run is the
+difference between ten minutes and an hour. And if the daemon runs on a
+different box than the worker, tell the worker so
+(`SHIP_SANDBOX_HOST_MEMORY_MB`, `SHIP_SANDBOX_HOST_CPUS`, below): derived
+limits are otherwise sized from the worker's own `/proc/meminfo`, which on a
+29 GB worker and a 7.8 GB daemon host hands every run a 4 GB cap.
+
 `SHIP_SANDBOX_URL` is a **list**. Comma-separated, it names several daemons;
 each run is placed on the least-loaded healthy one, a host that refuses work is
 skipped until it recovers, and a run already placed on a host that dies fails
@@ -948,6 +976,7 @@ which executes model-authored commands.
 | `SHIP_MAX_INODE_USED_PCT` | `95` | Same, for inodes. Its own knob because it fails independently: a module cache is millions of tiny files, so a box can exhaust inodes with tens of GB of bytes still free and every write still fails. A filesystem with no inode accounting (btrfs) reads as no pressure. `0` disables. |
 | `SHIP_DISK_PATH` | unset — `/var/lib/docker`, then `/` | Which mount to measure, when docker's data root is on neither. A worker in a container has no `/var/lib/docker`; its own `/` is an overlayfs whose `statfs` reports the underlying filesystem, which is the host's docker root anyway — so the fallback is usually right and this is rarely needed. |
 | `SHIP_SANDBOX_NETWORK` | `allowlist` | `none`, `allowlist` or `open` (`egress` is accepted as the old spelling of `allowlist`). See [Three network tiers](#network-tiers) — including what `allowlist` genuinely cannot do (SSH remotes, `git://`, any port but 80/443 unless an entry names one). Unset used to inherit the daemon's `none`, which is a sandbox that cannot clone. A project record overrides it per repo, and an externally-sourced task is downgraded from `open` to `allowlist` whatever the record says. |
+| `SHIP_SANDBOX_HOST_MEMORY_MB`, `SHIP_SANDBOX_HOST_CPUS` | unset — the worker's own box | The sandbox daemon's machine, when it is not the worker's. Derived per-run limits (`sandboxLimitsFor`, `docs/capacity.md`) split the box's usable memory across the planned slots; sized from the wrong box they over-commit the right one. The daemon's `/health` reports no capacity, so the operator states it. Logged once at worker start with the source used. |
 | `SHIP_SANDBOX_TTL_SEC` | `7200` | Container TTL Ship requests from the sandbox daemon for each run (floor 600). The daemon's own default is 30 minutes, which is shorter than a real run on a large repository — that is how four runs were reaped before their first command on 2026-08-25. The run's own caps end it; this is the backstop for a worker that dies mid-run. |
 | `SHIP_INDEX_TIMEOUT_MS` | `120000` | Time budget for the `repo-index` step. Past it the refresh stops between files, keeps what it embedded, and the step records `stopped at the 120s index cap`; ```search still works over whatever is indexed. |
 | `SHIP_TESTS` | unset | Ask every newly-enqueued run to execute its test suite after the agent stops, and put the result on the pull request. Ship runs it — the agent's own account of its testing is not used. Which command, in order: the repo's explicit entry, else what Ship detected from the repo's tree, else `SHIP_TEST_COMMAND`. |

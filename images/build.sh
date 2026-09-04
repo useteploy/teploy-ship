@@ -7,12 +7,14 @@
 #
 #   images/build.sh                       # go + node, every harness baked, :dev
 #   images/build.sh go                    # just the Go image
+#   images/build.sh rust                  # the Rust image (never the default; per project)
 #   images/build.sh --harness none node   # a plain pnpm sandbox, native runs only
 #   images/build.sh --tag v3 --harness claude-code go
 #
 # Produces:
 #   ship-sandbox-go:<tag>       Go 1.25 + node/npm (+ declared harnesses)
 #   ship-sandbox-node:<tag>     node 22 + pnpm     (+ declared harnesses)
+#   ship-sandbox-rust:<tag>     rust stable + node/npm (+ declared harnesses), on request only
 #   ship-sandbox-harness:<tag>  alias of ship-sandbox-go when harnesses are baked
 #
 # The alias is not decoration: the deployed worker on deploy-test has carried
@@ -48,8 +50,8 @@ while [ $# -gt 0 ]; do
     --harness) harness_arg="${2:?--harness needs a value}"; shift 2 ;;
     --no-alias) no_alias=1; shift ;;
     -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    go|node) stacks+=("$1"); shift ;;
-    all) stacks+=(go node); shift ;;
+    go|node|rust) stacks+=("$1"); shift ;;
+    all) stacks+=(go node rust); shift ;;
     *) die "unknown argument: $1" ;;
   esac
 done
@@ -60,6 +62,7 @@ command -v docker >/dev/null 2>&1 || die "docker is not on PATH — run this on 
 
 go_base="$(json 'd["bases"]["go"]')"
 node_base="$(json 'd["bases"]["node"]')"
+rust_base="$(json 'd["bases"]["rust"]')"
 pnpm_version="$(json 'd["pnpm"]')"
 
 # Which harnesses to bake. Default: every one versions.json knows about, which
@@ -93,6 +96,8 @@ assert_pin "${here}/sandbox-go/Dockerfile"   GO_BASE      "${go_base}"
 assert_pin "${here}/sandbox-go/Dockerfile"   NODE_BASE    "${node_base}"
 assert_pin "${here}/sandbox-node/Dockerfile" NODE_BASE    "${node_base}"
 assert_pin "${here}/sandbox-node/Dockerfile" PNPM_VERSION "${pnpm_version}"
+assert_pin "${here}/sandbox-rust/Dockerfile" RUST_BASE     "${rust_base}"
+assert_pin "${here}/sandbox-rust/Dockerfile" NODE_BASE     "${node_base}"
 
 echo "==> harnesses: ${label:-none}"
 
@@ -103,6 +108,7 @@ build() {
   set -- --tag "${image}" --build-arg "NODE_BASE=${node_base}"
   if [ "${stack}" = go ]; then set -- "$@" --build-arg "GO_BASE=${go_base}"; fi
   if [ "${stack}" = node ]; then set -- "$@" --build-arg "PNPM_VERSION=${pnpm_version}"; fi
+  if [ "${stack}" = rust ]; then set -- "$@" --build-arg "RUST_BASE=${rust_base}"; fi
   set -- "$@" \
     --build-arg "HARNESS_SPECS=${specs}" \
     --build-arg "HARNESS_BINARIES=${binaries}" \

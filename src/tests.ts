@@ -288,6 +288,43 @@ export function testComment(outcome: TestOutcome, baseline?: TestOutcome): strin
 }
 
 /**
+ * The one-line warning for a suite that may not have covered the change.
+ *
+ * Detection reads the REPOSITORY ROOT (`testTargetFromTree`) and the worker's
+ * SHIP_TEST_COMMAND is a root command too. A monorepo whose crate lives in a
+ * subdirectory — Neutron's `nucleus/` is 347k lines of Rust under a root with
+ * a go.mod — then runs `go test ./...` at the root, which never compiles the
+ * crate, and reports a green suite for a change it did not test. That false
+ * green is worse than "not run", because it reads as evidence.
+ *
+ * This does not re-detect: at baseline time nothing has changed yet, so a
+ * subtree-derived command would differ between the baseline and the after
+ * run and `preExisting` would read every failure as a regression. It REPORTS:
+ * when every changed file lives under one top-level directory and the command
+ * does not name that directory, say so next to the tests line so the reviewer
+ * — and the operator setting `--test-command` on the project — can see the
+ * mismatch. Undefined when the change touches the root or several trees, or
+ * when the command already points into the directory.
+ */
+export function testScopeNote(command: string, changedPaths: readonly string[]): string | undefined {
+  const tops = new Set<string>();
+  for (const raw of changedPaths) {
+    const path = raw.replace(/^\.\//, "");
+    const slash = path.indexOf("/");
+    if (slash <= 0) return undefined; // a root-level file: the root command is the right scope
+    tops.add(path.slice(0, slash));
+  }
+  if (tops.size !== 1) return undefined;
+  const [dir] = [...tops];
+  if (dir === undefined || command.includes(dir)) return undefined;
+  return (
+    `Every changed file lives under \`${dir}/\`, but the suite ran from the repository root ` +
+    `(\`${command}\`). If \`${dir}/\` has its own suite, this run did not execute it: set ` +
+    `\`--test-command\` on the project so the gate covers the tree the change is in.`
+  );
+}
+
+/**
  * The nudge that sends a run back to work over a red suite.
  *
  * Ship used to report a failing suite on the pull request and end the run —

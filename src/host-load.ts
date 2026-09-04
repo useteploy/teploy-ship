@@ -281,15 +281,51 @@ export const SANDBOX_MAX_MEMORY_MB = 4096;
  * the sum of the caps is what the host can actually back. It is a CAP, not a
  * reservation: a run that needs less takes less.
  */
-export function sandboxLimitsFor(load: HostLoad, maxConcurrent: number): { memoryMb: number; cpus: number } {
+export function sandboxLimitsFor(
+  load: HostLoad,
+  maxConcurrent: number,
+  sandboxHost: SandboxHost = {},
+): { memoryMb: number; cpus: number } {
   const slots = Math.max(1, Math.floor(maxConcurrent));
-  const usable = Math.max(0, load.totalMemMB - BASE_RESERVE_MB);
+  const totalMemMB = sandboxHost.totalMemMB ?? load.totalMemMB;
+  const hostCpus = sandboxHost.cpus ?? load.cpus;
+  const usable = Math.max(0, totalMemMB - BASE_RESERVE_MB);
   // Rounded down to 64 MB so the number reads as a limit someone chose.
   const share = Math.floor(usable / slots / 64) * 64;
   return {
     memoryMb: Math.max(SANDBOX_MIN_MEMORY_MB, Math.min(SANDBOX_MAX_MEMORY_MB, share)),
     // Fractional shares are honest on a small box (2 cpu, 4 slots -> 0.5 each);
     // below half a core the container spends its life throttled, so that is the floor.
-    cpus: Math.max(0.5, Math.round((load.cpus / slots) * 10) / 10),
+    cpus: Math.max(0.5, Math.round((hostCpus / slots) * 10) / 10),
   };
+}
+
+/**
+ * The box the SANDBOXES run on, when it is not the box the worker runs on.
+ *
+ * `load` above is the worker host's /proc/meminfo. That is the right box for
+ * admission (the worker's own footprint) and the wrong one for sizing a
+ * container the teploy-sandbox daemon creates somewhere else: with the worker
+ * on a 29 GB host and the daemon on a 7.8 GB one, four un-configured runs each
+ * got the 4096 MB cap — 16 GB of caps on a box that backs about 6 GB
+ * (docs/capacity.md, the 0.4 GB-per-run term with a Rust build in it). The
+ * daemon's /health says only {status, version}, so there is nothing to read
+ * remotely; the operator states it.
+ */
+export interface SandboxHost {
+  totalMemMB?: number;
+  cpus?: number;
+}
+
+/** SHIP_SANDBOX_HOST_MEMORY_MB / SHIP_SANDBOX_HOST_CPUS; absent or invalid = fall back to the worker host. */
+export function sandboxHostFromEnv(env: NodeJS.ProcessEnv = process.env): SandboxHost {
+  const num = (name: string): number | undefined => {
+    const raw = (env[name] ?? "").trim();
+    if (raw === "") return undefined;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : undefined;
+  };
+  const totalMemMB = num("SHIP_SANDBOX_HOST_MEMORY_MB");
+  const cpus = num("SHIP_SANDBOX_HOST_CPUS");
+  return { ...(totalMemMB !== undefined ? { totalMemMB } : {}), ...(cpus !== undefined ? { cpus } : {}) };
 }

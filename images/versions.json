@@ -27,8 +27,15 @@
       "the same date in src/tests.ts:preExisting). Do NOT pin this back to 1.24."
     ],
     "go": "golang:1.25.14-trixie@sha256:2c4c60ef415fbfa5e90300722293bef36c5e63fae17570ce18f580af933dbd73",
-    "node": "node:22-trixie@sha256:2082d2bf902c8835655c6bcfee3594c00ea900498a9f6e2b96d3352536f9e8d8"
+    "node": "node:22-trixie@sha256:2082d2bf902c8835655c6bcfee3594c00ea900498a9f6e2b96d3352536f9e8d8",
+    "rust": "rust:1-trixie"
   },
+  "$comment_rust": [
+    "rust is a moving 1.x tag, not a digest, on purpose: Nucleus tracks stable",
+    "Rust and a digest would need bumping every six weeks to keep its MSRV.",
+    "Not the worker default — a Rust project names ship-sandbox-rust on its",
+    "project record (images/sandbox-rust/Dockerfile, docs/DEPLOY.md)."
+  ],
   "pnpm": "10.26.1",
   "harnesses": {
     "$comment": [

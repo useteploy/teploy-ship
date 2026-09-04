@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { preExisting, runTests, testComment, testTargetFromEnv, testTargetFromTree, testsFailedNudge } from "./tests.js";
+import { preExisting, runTests, testComment, testScopeNote, testTargetFromEnv, testTargetFromTree, testsFailedNudge } from "./tests.js";
 import type { TestOutcome } from "./tests.js";
 import type { AgentExecutor } from "@neutron-build/agents";
 
@@ -221,4 +221,17 @@ test("testTargetFromTree: go, cargo, and pytest only on a real signal", () => {
 
 test("testTargetFromTree: malformed package.json falls through instead of throwing", () => {
   assert.deepEqual(testTargetFromTree({ names: ["package.json", "go.mod"], packageJson: "{not json" }), { command: "go test ./..." });
+});
+
+test("testScopeNote: a root command over a change confined to one subtree is called out", () => {
+  const note = testScopeNote("go test ./...", ["nucleus/src/executor/ddl.rs", "nucleus/tests/alter.rs"]);
+  assert.ok(note !== undefined && note.includes("`nucleus/`") && note.includes("go test ./..."), note);
+  assert.ok(note.includes("--test-command"), "tells the operator where the fix lives");
+});
+
+test("testScopeNote: silent when the root is touched, several trees are, or the command already points there", () => {
+  assert.equal(testScopeNote("go test ./...", ["nucleus/src/a.rs", "go.mod"]), undefined, "a root file: the root command is right");
+  assert.equal(testScopeNote("go test ./...", ["nucleus/src/a.rs", "go/pkg/b.go"]), undefined, "two trees: no single scope to name");
+  assert.equal(testScopeNote("cd nucleus && cargo test --lib -q", ["nucleus/src/a.rs"]), undefined, "the command names the tree");
+  assert.equal(testScopeNote("go test ./...", []), undefined, "no changes, nothing to say");
 });
