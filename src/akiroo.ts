@@ -538,14 +538,20 @@ export async function createLabelledIssue(options: {
     const detail = await response.text().catch(() => "");
     throw new Error(`issue creation failed (${response.status}): ${detail.slice(0, 500)}`);
   }
-  const created = (await response.json()) as { number?: number; html_url?: string; url?: string };
+  const created = (await response.json()) as {
+    number?: number;
+    html_url?: string;
+    url?: string;
+    repository?: { full_name?: string };
+  };
   if (typeof created.number !== "number") {
     throw new Error("the forge accepted the issue but returned no number");
   }
   return {
     number: created.number,
     url: created.html_url ?? created.url ?? "",
-    fullName: `${ref.owner}/${ref.repo}`,
+    // The forge's own spelling when it gives one; the typed clone URL otherwise.
+    fullName: created.repository?.full_name ?? `${ref.owner}/${ref.repo}`,
   };
 }
 
@@ -761,7 +767,10 @@ async function handleAkirooTask(row: AkirooRow, deps: AkirooSweepDeps): Promise<
   // would be an extra forge call whose answer can be stale by the time it is
   // used. Reverses if the dedupe key on the forge path ever stops being
   // `forgejo:<owner/repo>#<n>`, at which point this would create a duplicate
-  // task rather than collapse.
+  // task rather than collapse. The owner/repo segment is case-normalized in
+  // intake.propose (normalizeDedupeKey), because the two paths spelled the
+  // owner differently once (`Tyler/` from the webhook, `tyler/` from the clone
+  // URL) and that produced two runs and two pull requests for one issue.
   const dedupeKey = `${ref.kind}:${issue.fullName}#${issue.number}`;
   const detail = body === "" ? `${issue.url}` : `${body}\n\n${issue.url}`;
   const { created, task } = await deps.intake.propose({

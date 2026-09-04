@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { FileIntakeStore } from "./intake.js";
+import { FileIntakeStore, normalizeDedupeKey } from "./intake.js";
 
 test("intake: propose dedupes on key, dismiss frees the key, launch links the run", async () => {
   const store = new FileIntakeStore(await mkdtemp(join(tmpdir(), "intake-")));
@@ -84,4 +84,21 @@ test("a claim still collapses two racing launchers to one", async () => {
   assert.equal(await store.claim(task.taskId, "run-a"), true);
   assert.equal(await store.claim(task.taskId, "run-b"), false, "the second launcher loses");
   assert.equal((await store.get(task.taskId))?.runId, "run-a");
+});
+
+test("intake: the owner/repo segment of a forge key is case-insensitive", async () => {
+  const store = new FileIntakeStore(await mkdtemp(join(tmpdir(), "intake-")));
+
+  const webhook = await store.propose({ source: "forgejo", kind: "issue", title: "one issue", dedupeKey: "forgejo:Tyler/x#1" });
+  const akiroo = await store.propose({ source: "forgejo", kind: "issue", title: "one issue", dedupeKey: "forgejo:tyler/x#1" });
+  assert.equal(webhook.created, true);
+  assert.equal(akiroo.created, false);
+  assert.equal(akiroo.task.taskId, webhook.task.taskId);
+  assert.equal(webhook.task.dedupeKey, "forgejo:tyler/x#1");
+
+  assert.equal(normalizeDedupeKey("forgejo:Tyler/Repo#comment-42"), "forgejo:tyler/repo#comment-42");
+  assert.equal(normalizeDedupeKey("ci:Org/Repo#7:ABCDEF"), "ci:org/repo#7:ABCDEF");
+  assert.equal(normalizeDedupeKey("slack:C0AB12:1712.5"), "slack:C0AB12:1712.5");
+  assert.equal(normalizeDedupeKey("linear:Abc-123"), "linear:Abc-123");
+  assert.equal(normalizeDedupeKey("akiroo:room-scan:9"), "akiroo:room-scan:9");
 });

@@ -92,6 +92,23 @@ export interface IntakeStore {
   reconcile(exists: (runId: string) => Promise<boolean>): Promise<string[]>;
 }
 
+/**
+ * Forge-shaped keys carry `<owner>/<repo>` between the source and the `#`, and
+ * the two paths that build them do not agree on its case: the webhook copies
+ * the forge's canonical `full_name` (`Tyler/teploy-cli`), the Akiroo path
+ * parses a clone URL a person typed (`tyler/teploy-cli`). Forgejo and GitHub
+ * both treat owner and repo names case-insensitively, so one issue produced
+ * two keys, two tasks, two runs and two pull requests. Lowercase that segment
+ * here, at the one point every proposal passes through. Keys without the
+ * `source:owner/repo#…` shape (slack, linear, observe, akiroo scans) are left
+ * untouched, since their ids are not known to be case-insensitive.
+ */
+export function normalizeDedupeKey(key: string): string {
+  return key.replace(/^([^:#]+):([^:#]+\/[^:#]+)(#.*)$/, (_m, source: string, fullName: string, rest: string) =>
+    `${source}:${fullName.toLowerCase()}${rest}`,
+  );
+}
+
 function newTask(input: ProposeInput): IntakeTask {
   const now = new Date().toISOString();
   return {
@@ -102,7 +119,7 @@ function newTask(input: ProposeInput): IntakeTask {
     ...(input.pr !== undefined ? { pr: input.pr } : {}),
     title: input.title,
     ...(input.detail !== undefined ? { detail: input.detail } : {}),
-    dedupeKey: input.dedupeKey,
+    dedupeKey: normalizeDedupeKey(input.dedupeKey),
     ...(input.requestedBy !== undefined ? { requestedBy: input.requestedBy } : {}),
     state: "proposed",
     createdAt: now,
@@ -138,8 +155,9 @@ export class FileIntakeStore implements IntakeStore {
   }
 
   async propose(input: ProposeInput): Promise<{ created: boolean; task: IntakeTask }> {
+    const key = normalizeDedupeKey(input.dedupeKey);
     const existing = (await this.#all()).find(
-      (t) => t.dedupeKey === input.dedupeKey && t.state !== "dismissed",
+      (t) => normalizeDedupeKey(t.dedupeKey) === key && t.state !== "dismissed",
     );
     if (existing !== undefined) return { created: false, task: existing };
     const task = newTask(input);
@@ -252,9 +270,14 @@ export class NucleusIntakeStore implements IntakeStore {
 
   async propose(input: ProposeInput): Promise<{ created: boolean; task: IntakeTask }> {
     await this.#ensure();
+    // Normalized on write (newTask) and on read, so the comparison is exact
+    // and needs no lower() in the query. Rows written before this existed
+    // keep their case; a re-proposal of one of those under the other case
+    // behaves as it always did.
+    const key = normalizeDedupeKey(input.dedupeKey);
     const rows = await this.#db.query(
       "SELECT * FROM ship_tasks WHERE dedupe_key = $1 AND state <> 'dismissed'",
-      [input.dedupeKey],
+      [key],
     );
     if (rows.length > 0) return { created: false, task: this.#toTask(rows[0]!) };
 
@@ -263,7 +286,7 @@ export class NucleusIntakeStore implements IntakeStore {
     // task ids — so the later conditional claim cannot collapse them and the
     // same issue becomes two runs and two PRs. The table has no unique index
     // to lean on (Nucleus), so the KV's atomic setNX decides the winner.
-    const guard = `ship:dedupe:${input.dedupeKey}`;
+    const guard = `ship:dedupe:${key}`;
     const holder = `${process.pid}:${randomUUID()}`;
     if (!(await this.#db.kv.setNX(guard, holder, { ttl: DEDUPE_TTL_S }))) {
       // Someone else is inserting this key right now. Re-read: their row is
@@ -271,7 +294,7 @@ export class NucleusIntakeStore implements IntakeStore {
       // their task is exactly what a duplicate delivery should get.
       const again = await this.#db.query(
         "SELECT * FROM ship_tasks WHERE dedupe_key = $1 AND state <> 'dismissed'",
-        [input.dedupeKey],
+        [key],
       );
       if (again.length > 0) return { created: false, task: this.#toTask(again[0]!) };
     }
