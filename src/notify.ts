@@ -68,6 +68,8 @@ export interface RunNotification {
   verification?: { rungs: Rung[]; summary: string };
   /** How the merge question resolved, when it did (contract 2's `merged`). */
   merged?: boolean;
+  /** The agent's own result status on a terminal run (see RunWebhookPayload.outcome). */
+  outcome?: string;
 }
 
 /**
@@ -280,6 +282,14 @@ export interface RunWebhookPayload {
   verification?: { rungs: Rung[]; summary: string };
   /** True when the pull request ended up merged, by the gate or by an approval. */
   merged?: boolean;
+  /**
+   * The agent's own result status on a terminal run — "finished",
+   * "max-steps", "budget-exhausted", "plan-rejected" — as distinct from
+   * `status`, which says only whether the workflow ended ("completed") or
+   * threw ("failed"). A run that hit its turn limit is "completed" on the
+   * wire; this is what says it did not finish. Additive: absent on parks.
+   */
+  outcome?: string;
 }
 
 export function runWebhookPayload(event: RunNotification, publicUrl?: string): RunWebhookPayload {
@@ -292,6 +302,7 @@ export function runWebhookPayload(event: RunNotification, publicUrl?: string): R
     ...(event.repo !== undefined ? { repo: event.repo } : {}),
     ...(event.task !== undefined ? { task: event.task } : {}),
     ...(base !== "" ? { url: `${base}/runs/${event.runId}` } : {}),
+    ...(event.outcome !== undefined ? { outcome: event.outcome } : {}),
     ...(event.origin !== undefined
       ? {
           origin: {

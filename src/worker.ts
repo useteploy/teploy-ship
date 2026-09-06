@@ -226,13 +226,18 @@ export function notificationContext(events: WorkflowEvent[]): Pick<RunNotificati
  * and for a scan the findings block (L7) — the recorded `scan-findings` step
  * plus the run's final write-up, bounded to the webhook payload budget.
  */
-export function terminalContext(events: WorkflowEvent[]): Pick<RunNotification, "pr" | "findings"> {
+export function terminalContext(events: WorkflowEvent[]): Pick<RunNotification, "pr" | "findings" | "outcome"> {
   const done = events.find((e) => e.type === "run-completed");
-  const output = (done?.data as { output?: { pr?: string; summary?: string } } | undefined)?.output;
+  const output = (done?.data as { output?: { pr?: string; summary?: string; status?: string } } | undefined)?.output;
   const step = events.find((e) => e.type === "step-completed" && e.name === "scan-findings");
   const parsed = (step?.data as { result?: ParsedFindings } | undefined)?.result;
   return {
     ...(output?.pr !== undefined ? { pr: output.pr } : {}),
+    // The agent's own result status. A max-steps run completes the workflow
+    // and, with a diff, publishes a DRAFT — to a consumer reading only
+    // `status: "completed"` that looked identical to a finished run, and with
+    // no diff it looked like nothing at all (Akiroo, 2026-09-05).
+    ...(typeof output?.status === "string" && output.status !== "" ? { outcome: output.status } : {}),
     ...(parsed !== undefined
       ? {
           findings: scanReport(

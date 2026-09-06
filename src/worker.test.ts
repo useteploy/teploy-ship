@@ -605,6 +605,11 @@ test("notificationContext reads repo, task, origin and mode off the recorded inp
 test("terminalContext adds the pr for a fix run and the findings block for a scan", () => {
   assert.deepEqual(terminalContext([wev("run-completed", { output: { status: "finished", summary: "s", pr: "http://f/pulls/1" } })]), {
     pr: "http://f/pulls/1",
+    outcome: "finished",
+  });
+  // A max-steps run completes the workflow; the outcome is what says it stopped short.
+  assert.deepEqual(terminalContext([wev("run-completed", { output: { status: "max-steps", summary: "Reached the 40-turn limit." } })]), {
+    outcome: "max-steps",
   });
   const finding = { title: "t", severity: "high", file: "a.ts", line: 1, detail: "d" };
   const scan = [
@@ -613,6 +618,7 @@ test("terminalContext adds the pr for a fix run and the findings block for a sca
     wev("run-completed", { output: { status: "finished", summary: "the write-up", findings: [finding] } }),
   ];
   assert.deepEqual(terminalContext(scan), {
+    outcome: "finished",
     findings: { found: true, findings: [finding], errors: ["extra dropped"], summary: "the write-up" },
   });
   // A scan that failed before its findings step carries no block at all.

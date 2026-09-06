@@ -81,6 +81,11 @@ test("webhook payload carries origin, mode and findings for a scan run", () => {
   // An ordinary run carries neither: absent, not "fix" or null.
   const fix = runWebhookPayload({ runId: "run-1", status: "completed", origin: { source: "forgejo", dedupeKey: "forgejo:o/r#1" } });
   assert.ok(!("mode" in fix) && !("findings" in fix));
+  // The agent's own outcome rides beside the workflow status; absent when unknown.
+  assert.ok(!("outcome" in fix));
+  const short = runWebhookPayload({ runId: "run-2", status: "completed", outcome: "max-steps" });
+  assert.equal(short.status, "completed");
+  assert.equal(short.outcome, "max-steps");
   assert.deepEqual(fix.origin, { source: "forgejo", dedupe_key: "forgejo:o/r#1" });
 });
 
