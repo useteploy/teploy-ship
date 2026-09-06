@@ -33,20 +33,23 @@ import {
   setupRepoForPr,
   resolvePr,
   updatePullRequestBody,
+  uploadPrAsset,
   workingDiff,
 } from "./git.js";
 import { deployPreview, resolvePreviewTarget, rollbackDeploy, type PreviewOutcome, type PreviewTarget } from "./deploy.js";
 import {
   effectiveAuthority,
   ladderGate,
+  proofLinks,
   type Authority,
+  type FlowOutcome,
   type ObserveOutcome,
   type ProjectVerification,
   type Rung,
   type SmokeOutcome,
   type VisualOutcome,
 } from "./ladder.js";
-import { buildIfDeclared, observeIfDeclared, recordLadder, smokeIfDeclared, visualIfDeclared, type LadderHooks } from "./ladder-steps.js";
+import { buildIfDeclared, flowIfPresent, observeIfDeclared, recordLadder, smokeIfDeclared, visualIfDeclared, type AssetSink, type LadderHooks } from "./ladder-steps.js";
 import { compareAroundNow, effectiveTelemetryTarget, telemetryAppliesTo, telemetryRegression, type TelemetryTarget, type TelemetryVerdict } from "./observe.js";
 import { spliceVerification, verificationSection, type Evidence } from "./verification.js";
 import { shortHash, warmClient, warmSlugOf, type WarmState } from "./warm.js";
@@ -1344,7 +1347,12 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
       const maxSteps = budget.maxSteps;
       const searchable = input.index === true && ws.scopeKey !== null && config.codeSearch !== undefined;
       onEvent({ kind: "started", harness: NATIVE_HARNESS_ID });
-      let messages: Message[] = [{ role: "system", content: systemPrompt({ workdir: ws.workdir, task: task.prompt, search: searchable }) }];
+      let messages: Message[] = [
+        {
+          role: "system",
+          content: systemPrompt({ workdir: ws.workdir, task: task.prompt, search: searchable, browser: input.verification?.preview !== undefined }),
+        },
+      ];
       let anySuccessfulAction = false;
       /** Bounded holds for a finish over an unchanged tree. See FINISH_NUDGE_CLEAN_TREE. */
       let cleanTreeNudges = 0;
@@ -2304,13 +2312,15 @@ async function publishIfRepoRun(
     // numbers moved. Refresh both, run the ladder legs over the fresh preview,
     // then amend the same Verification section.
     const followUpPreview = push.kind === "pushed" ? await previewIfAsked(ctx, config, input, co.branch) : undefined;
-    const legs = await runLadderLegs(ctx, executor, config, input, followUpPreview, co.branch, { baseline, build, tests });
+    const legs = await runLadderLegs(ctx, executor, config, input, followUpPreview, co.branch, { baseline, build, tests }, assetSink(ref, token, input.pr));
+    const followUpProof = proofLinks(legs);
     const followUp: Evidence = {
       ...(tests !== undefined ? { tests } : {}),
       ...(baseline !== undefined ? { testsBaseline: baseline } : {}),
       ...(followUpPreview !== undefined ? { preview: followUpPreview } : {}),
       ...(input.telemetry === true ? { telemetry: await telemetryIfAsked(ctx, config, input) } : {}),
       ...(legs.rungs !== undefined ? { rungs: legs.rungs } : {}),
+      ...(followUpProof.length > 0 ? { proof: followUpProof } : {}),
     };
     await publishVerification(ctx, ref, token, input.pr, followUp);
     // NO auto-merge and NO rollback watch on this path, deliberately. A review
@@ -2389,16 +2399,19 @@ async function publishIfRepoRun(
   // against main, the observe window after it — then the rung list, recorded
   // as its own step so the webhook and the run page read ONE list instead of
   // each re-deriving it from six steps and disagreeing.
-  const legs = await runLadderLegs(ctx, executor, config, input, preview, co.branch, { baseline, build, tests });
+  const legs = await runLadderLegs(ctx, executor, config, input, preview, co.branch, { baseline, build, tests }, assetSink(ref, token, pr.number));
   if (legs.smoke !== undefined) facts.smoke = legs.smoke;
   if (legs.visual !== undefined) facts.visual = legs.visual;
+  if (legs.flow !== undefined) facts.flow = legs.flow;
   if (legs.observe !== undefined) facts.observeWindow = legs.observe;
+  const proof = proofLinks(legs);
   await publishVerification(ctx, ref, token, pr.number, {
     ...(tests !== undefined ? { tests } : {}),
     ...(baseline !== undefined ? { testsBaseline: baseline } : {}),
     preview,
     telemetry,
     ...(legs.rungs !== undefined ? { rungs: legs.rungs } : {}),
+    ...(proof.length > 0 ? { proof } : {}),
     // So a root-level suite over a change confined to one subtree is called
     // out on the pull request rather than read as a green gate (tests.ts).
     ...(changedList.length > 0 ? { changedPaths: changedList.map((f) => f.path) } : {}),
@@ -2906,7 +2919,8 @@ async function previewIfAsked(
 
 /**
  * The ladder legs that follow a preview (ladder-steps.ts): the smoke against
- * it, the visual diff of it vs main, the observe window after it, and the
+ * it, the visual diff of it vs main, the agent's flow against it, the observe
+ * window after it, and the
  * rung list all of them reduce to — recorded as the `ladder` step so the
  * webhook and the run page read ONE list.
  *
@@ -2924,13 +2938,39 @@ async function runLadderLegs(
   preview: PreviewOutcome | undefined,
   branch: string,
   suite: { baseline?: TestOutcome; build?: TestOutcome; tests?: TestOutcome },
-): Promise<{ smoke?: SmokeOutcome; visual?: VisualOutcome; observe?: ObserveOutcome; rungs?: Rung[] }> {
+  sink: AssetSink | undefined,
+): Promise<{ smoke?: SmokeOutcome; visual?: VisualOutcome; flow?: FlowOutcome; observe?: ObserveOutcome; rungs?: Rung[] }> {
   if (input.verification === undefined) return {};
   const smoke = await smokeIfDeclared(ctx, executor, input, preview);
-  const visual = await visualIfDeclared(ctx, executor, input, preview);
+  const visual = await visualIfDeclared(ctx, executor, input, preview, sink);
+  const flow = await flowIfPresent(ctx, executor, input, preview, sink);
   const observe = await observeIfDeclared(ctx, config, input, preview, branch);
-  const rungs = await recordLadder(ctx, input, { ...suite, preview, ...(smoke !== undefined ? { smoke } : {}), ...(visual !== undefined ? { visual } : {}), ...(observe !== undefined ? { observe } : {}) });
-  return { ...(smoke !== undefined ? { smoke } : {}), ...(visual !== undefined ? { visual } : {}), ...(observe !== undefined ? { observe } : {}), ...(rungs !== undefined ? { rungs } : {}) };
+  const rungs = await recordLadder(ctx, input, {
+    ...suite,
+    preview,
+    ...(smoke !== undefined ? { smoke } : {}),
+    ...(visual !== undefined ? { visual } : {}),
+    ...(flow !== undefined ? { flow } : {}),
+    ...(observe !== undefined ? { observe } : {}),
+  });
+  return {
+    ...(smoke !== undefined ? { smoke } : {}),
+    ...(visual !== undefined ? { visual } : {}),
+    ...(flow !== undefined ? { flow } : {}),
+    ...(observe !== undefined ? { observe } : {}),
+    ...(rungs !== undefined ? { rungs } : {}),
+  };
+}
+
+/**
+ * Where the ladder's screenshots go: the pull request's assets, when there is
+ * a pull request and the forge takes them. The upload runs inside the step
+ * that captured the picture, so its URL is recorded once and never re-sent
+ * on replay.
+ */
+function assetSink(ref: RepoRef, token: string, pr: number | undefined): AssetSink | undefined {
+  if (pr === undefined || ref.kind !== "forgejo") return undefined;
+  return { upload: (name, bytes) => uploadPrAsset({ ref, token, pr, name, bytes }) };
 }
 
 /**

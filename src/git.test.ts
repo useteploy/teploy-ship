@@ -29,6 +29,7 @@ import {
   truncateMiddle,
   withTrailers,
   WORKING_DIFF_MAX_CHARS,
+  uploadPrAsset,
 } from "./git.js";
 import { credentialFor } from "./repo-policy.js";
 
@@ -667,4 +668,28 @@ test("SB-A: a run that did not ask for the warm path never takes it", async () =
   // A cold clone into a volume that already holds one fails outright, which is
   // exactly the signal that the opt-out is honoured rather than quietly ignored.
   await assert.rejects(checkoutRepo(work, { ref, token: "", runId: "run-nowarm" }), /git step failed/);
+});
+
+test("uploadPrAsset posts multipart to Forgejo's issue assets and returns the download URL; GitHub has no such route", async () => {
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+    calls.push({ url: String(url), init: init ?? {} });
+    return new Response(JSON.stringify({ id: 3, name: "shot.png", browser_download_url: "http://forge.example:3000/attachments/uuid-1" }), { status: 201 });
+  }) as typeof fetch;
+  const forgejo = parseRepoUrl("http://forge.example:3000/Tyler/app");
+  const url = await uploadPrAsset({ ref: forgejo, token: "tok", pr: 7, name: "shot.png", bytes: new Uint8Array([137, 80, 78, 71]), fetchImpl });
+  assert.equal(url, "http://forge.example:3000/attachments/uuid-1");
+  assert.equal(calls[0]?.url, "http://forge.example:3000/api/v1/repos/Tyler/app/issues/7/assets?name=shot.png");
+  assert.equal((calls[0]?.init.headers as Record<string, string>).authorization, "token tok");
+  const form = calls[0]?.init.body;
+  assert.ok(form instanceof FormData, "the body is multipart form data");
+  const file = form.get("attachment");
+  assert.ok(file instanceof Blob && file.size === 4, "the PNG bytes travel as the attachment field");
+
+  await assert.rejects(
+    () => uploadPrAsset({ ref: parseRepoUrl("https://github.com/o/r"), token: "t", pr: 1, name: "x.png", bytes: new Uint8Array([1]), fetchImpl }),
+    /GitHub has no API/,
+  );
+  const failImpl = (async () => new Response("quota", { status: 413 })) as typeof fetch;
+  await assert.rejects(() => uploadPrAsset({ ref: forgejo, token: "t", pr: 1, name: "x.png", bytes: new Uint8Array([1]), fetchImpl: failImpl }), /413/);
 });

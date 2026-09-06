@@ -49,11 +49,14 @@
     "@neutron-build/ai": "^0.1.0",
     "@neutron-build/workflow": "^0.1.0",
     "pg": "^8.16.0",
+    "pixelmatch": "^7.2.0",
+    "pngjs": "^7.0.0",
     "undici": "^8.10.2"
   },
   "devDependencies": {
     "@types/node": "^22.10.7",
     "@types/pg": "^8.15.0",
+    "@types/pngjs": "^6.0.5",
     "dockerode": "^5.0.1",
     "tar-stream": "^3.2.0",
     "typescript": "^5.7.2"

@@ -12,6 +12,7 @@ import {
   ladderRungsFromEvents,
   minAuthority,
   normalizeVerification,
+  proofLinks,
   rungsForWire,
   type LadderFacts,
   type ProjectVerification,
@@ -91,23 +92,72 @@ function greenFacts(verification: ProjectVerification = ALL_RUNGS): LadderFacts 
     preview: { kind: "deployed", url: "https://preview-ship-abc.site.example.com" },
     smoke: { kind: "passed", command: "curl -fsS $PREVIEW_URL/", durationMs: 300 },
     visual: { kind: "captured", preview: { url: "https://p", sha256: "a", bytes: 1 }, main: { url: "https://m", sha256: "b", bytes: 1 }, differs: true },
+    flow: { kind: "passed", script: ".ship/flow.mjs", durationMs: 4000, shots: [{ name: "01-settings.png", sha256: "c", bytes: 10 }] },
     observe: { kind: "healthy", windowMin: 5, reasons: ["error rate +0.00%, p95 +0ms — inside the thresholds"] },
   };
 }
 
-test("ladderRungs: six rungs, in ladder order, every one accounted for", () => {
+test("ladderRungs: seven rungs, in ladder order, every one accounted for", () => {
   const rungs = ladderRungs(greenFacts());
   assert.deepEqual(
     rungs.map((r) => r.name),
-    ["baseline", "build", "tests", "preview", "visual", "observe"],
+    ["baseline", "build", "tests", "preview", "visual", "flow", "observe"],
   );
   assert.deepEqual(
     rungs.map((r) => r.status),
-    ["passed", "passed", "passed", "passed", "passed", "passed"],
+    ["passed", "passed", "passed", "passed", "passed", "passed", "passed"],
   );
   // A rung that ran reports WHAT it saw, not just that it ran.
   assert.match(rungs[3]!.detail!, /smoke passed/);
   assert.match(rungs[4]!.detail!, /they differ/);
+  assert.match(rungs[5]!.detail!, /flow\.mjs passed in 4s with 1 screenshot$/);
+});
+
+test("ladderRungs: the flow rung is the agent's, so its absence never holds and its failure always does", () => {
+  const none = ladderRungs({ ...greenFacts(), flow: { kind: "skipped", reason: "no .ship/flow.mjs in the tree: the agent wrote no browser flow for this change" } });
+  assert.equal(none.find((r) => r.name === "flow")!.status, "skipped");
+  assert.equal(ladderGate({ rungs: none, authority: "auto_normal", changeClass: "normal", draft: false }).allowed, true, "a skipped flow is not a hold at any authority");
+
+  const red = ladderRungs({ ...greenFacts(), flow: { kind: "failed", script: ".ship/flow.mjs", exitCode: 1, output: "Error: heading not found", shots: [] } });
+  const gate = ladderGate({ rungs: red, authority: "auto_trivial", changeClass: "trivial", draft: false });
+  assert.equal(gate.allowed, false);
+  assert.match(gate.reasons.join("\n"), /flow failed: \.ship\/flow\.mjs exited 1: Error: heading not found/);
+
+  const errored = ladderRungs({ ...greenFacts(), flow: { kind: "errored", script: ".ship/flow.mjs", reason: "timed out after 300s" } });
+  assert.equal(errored.find((r) => r.name === "flow")!.status, "failed");
+
+  const noPreview = ladderRungs({ ...greenFacts({ tests: "pnpm test" }), flow: undefined });
+  assert.match(noPreview.find((r) => r.name === "flow")!.detail!, /no preview app declared/);
+
+  // A pixel comparison, when it happened, is what the visual detail quotes.
+  const px = ladderRungs({
+    ...greenFacts(),
+    visual: { kind: "captured", preview: { url: "https://p", sha256: "a", bytes: 1, asset: "http://f/1" }, main: { url: "https://m", sha256: "b", bytes: 1 }, differs: true, pixels: { differing: 12, total: 1_024_000 } },
+  });
+  assert.match(px.find((r) => r.name === "visual")!.detail!, /12 of 1024000 pixels differ; attached to the pull request/);
+});
+
+test("proofLinks: the attached pictures, visual pair first, then the flow's shots in the script's order", () => {
+  assert.deepEqual(proofLinks({}), []);
+  assert.deepEqual(proofLinks(greenFacts()), [], "hashes without an attachment are not links");
+  const links = proofLinks({
+    visual: { kind: "captured", preview: { url: "https://p", sha256: "a", bytes: 1, asset: "http://f/p.png" }, main: { url: "https://m", sha256: "b", bytes: 1, asset: "http://f/m.png" }, differs: true },
+    flow: {
+      kind: "failed",
+      script: ".ship/flow.mjs",
+      exitCode: 1,
+      output: "x",
+      shots: [
+        { name: "01-home.png", sha256: "c", bytes: 1, asset: "http://f/1.png" },
+        { name: "02-form.png", sha256: "d", bytes: 1 },
+      ],
+    },
+  });
+  assert.deepEqual(links, [
+    { name: "preview", url: "http://f/p.png" },
+    { name: "main", url: "http://f/m.png" },
+    { name: "01-home.png", url: "http://f/1.png" },
+  ]);
 });
 
 test("ladderRungs: a red baseline is recorded evidence, not a failed rung; a red suite is a failed one", () => {
@@ -134,7 +184,7 @@ test("ladderRungs: a declared rung that did not run is skipped WITH a reason, ne
   });
   assert.deepEqual(
     rungs.map((r) => r.status),
-    ["skipped", "skipped", "skipped", "skipped", "skipped", "skipped"],
+    ["skipped", "skipped", "skipped", "skipped", "skipped", "skipped", "skipped"],
   );
   assert.match(rungs[2]!.detail!, /the suite did not run/);
   // The preview rung fuses deploy and smoke: a deployed preview whose smoke
@@ -215,6 +265,7 @@ test("ladderRungsFromEvents agrees with the recorded ladder step over the same r
       { name: "preview-deploy", result: { kind: "deployed", url: "https://preview-ship-abc.site.example.com", image: "img" } },
       { name: "preview-smoke", result: facts.smoke },
       { name: "visual-diff", result: facts.visual },
+      { name: "flow", result: facts.flow },
       { name: "observe-window", result: facts.observe },
       { name: "ladder", result: ladderRungs(facts) },
     ],
@@ -234,12 +285,12 @@ test("ladderRungsFromEvents: a pre-ladder run still reports the verification it 
   const rungs = ladderRungsFromEvents(log);
   assert.deepEqual(
     rungs.map((r) => `${r.name}:${r.status}`),
-    ["baseline:skipped", "build:skipped", "tests:passed", "preview:skipped", "visual:skipped", "observe:skipped"],
+    ["baseline:skipped", "build:skipped", "tests:passed", "preview:skipped", "visual:skipped", "flow:skipped", "observe:skipped"],
   );
   // The observe rung is honest about the DECLARATION: a run with no window
   // declared has no observe rung, whatever its one-off telemetry read said —
   // that comparison lives in the paragraph, not on the ladder.
-  assert.match(rungs[5]!.detail!, /no observe window declared/);
+  assert.match(rungs[6]!.detail!, /no observe window declared/);
 });
 
 test("ladderRungsFromEvents: a declared window whose step did not run falls back to the recorded telemetry", () => {

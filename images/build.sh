@@ -64,6 +64,7 @@ go_base="$(json 'd["bases"]["go"]')"
 node_base="$(json 'd["bases"]["node"]')"
 rust_base="$(json 'd["bases"]["rust"]')"
 pnpm_version="$(json 'd["pnpm"]')"
+playwright_version="$(json "d['playwright']")"
 
 # Which harnesses to bake. Default: every one versions.json knows about, which
 # is also every one src/harness.ts has an adapter for.
@@ -96,6 +97,8 @@ assert_pin "${here}/sandbox-go/Dockerfile"   GO_BASE      "${go_base}"
 assert_pin "${here}/sandbox-go/Dockerfile"   NODE_BASE    "${node_base}"
 assert_pin "${here}/sandbox-node/Dockerfile" NODE_BASE    "${node_base}"
 assert_pin "${here}/sandbox-node/Dockerfile" PNPM_VERSION "${pnpm_version}"
+assert_pin "${here}/sandbox-go/Dockerfile"   PLAYWRIGHT_VERSION "${playwright_version}"
+assert_pin "${here}/sandbox-node/Dockerfile" PLAYWRIGHT_VERSION "${playwright_version}"
 assert_pin "${here}/sandbox-rust/Dockerfile" RUST_BASE     "${rust_base}"
 assert_pin "${here}/sandbox-rust/Dockerfile" NODE_BASE     "${node_base}"
 
@@ -108,6 +111,7 @@ build() {
   set -- --tag "${image}" --build-arg "NODE_BASE=${node_base}"
   if [ "${stack}" = go ]; then set -- "$@" --build-arg "GO_BASE=${go_base}"; fi
   if [ "${stack}" = node ]; then set -- "$@" --build-arg "PNPM_VERSION=${pnpm_version}"; fi
+  if [ "${stack}" = node ] || [ "${stack}" = go ]; then set -- "$@" --build-arg "PLAYWRIGHT_VERSION=${playwright_version}"; fi
   if [ "${stack}" = rust ]; then set -- "$@" --build-arg "RUST_BASE=${rust_base}"; fi
   set -- "$@" \
     --build-arg "HARNESS_SPECS=${specs}" \

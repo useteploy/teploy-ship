@@ -153,3 +153,32 @@ test("the extractor reads the same facts the workflow held, and renders the same
   assert.match(fromLog, /still red \(exit 1\) after 2 of 2 fix attempts/);
   assert.match(fromLog, /merged it on the approved merge decision/);
 });
+
+test("the browser flow is reported from its recorded outcome, never from the agent's account", () => {
+  const passed = verificationSummary({
+    agent: "Added the settings link and the flow proves it.",
+    flow: { kind: "passed", script: ".ship/flow.mjs", durationMs: 3000, shots: [{ name: "01.png", sha256: "a", bytes: 1, asset: "http://f/1.png" }, { name: "02.png", sha256: "b", bytes: 1 }] },
+  });
+  assert.match(passed, /What I verified: the browser flow passed \(`\.ship\/flow\.mjs`, 2 screenshots on the pull request\)/);
+  const failed = verificationSummary({ flow: { kind: "failed", script: ".ship/flow.mjs", exitCode: 1, output: "boom", shots: [] } });
+  assert.match(failed, /could not verify: .*the browser flow FAILED \(`\.ship\/flow\.mjs`, exit 1\)/);
+  const none = verificationSummary({ flow: { kind: "skipped", reason: "no .ship/flow.mjs in the tree: the agent wrote no browser flow for this change" } });
+  assert.match(none, /no browser flow \(no \.ship\/flow\.mjs/);
+
+  // The extractor reads the recorded `flow` step, shots and attachments included.
+  const events: WorkflowEvent[] = [
+    ev("run-started", undefined, { workflow: "coding-agent", input: { task: "t" } }, 0),
+    step("flow", { kind: "passed", script: ".ship/flow.mjs", durationMs: 3000, shots: [{ name: "01.png", sha256: "a", bytes: 1, asset: "http://f/1.png" }] }, 1),
+    step("visual-diff", { kind: "captured", preview: { url: "p", sha256: "a", bytes: 1, asset: "http://f/p.png" }, main: { url: "m", sha256: "b", bytes: 1 }, differs: true, pixels: { differing: 3, total: 9 } }, 2),
+    ev("run-completed", undefined, { output: { status: "finished" } }, 3),
+  ];
+  const facts = verificationFactsFromEvents(events);
+  assert.deepEqual(facts.flow, { kind: "passed", script: ".ship/flow.mjs", durationMs: 3000, shots: [{ name: "01.png", sha256: "a", bytes: 1, asset: "http://f/1.png" }] });
+  assert.equal(facts.visual?.kind, "captured");
+  if (facts.visual?.kind === "captured") {
+    assert.deepEqual(facts.visual.pixels, { differing: 3, total: 9 });
+    assert.equal(facts.visual.preview.asset, "http://f/p.png");
+    assert.equal(facts.visual.main.asset, undefined);
+  }
+  assert.match(runVerificationSummary(events), /attached to the pull request/);
+});

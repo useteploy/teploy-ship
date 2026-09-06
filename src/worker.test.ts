@@ -699,7 +699,7 @@ test("contract 2: a pre-ladder run still reports its verification, derived from 
   ]);
   assert.equal(ctx.changeClass, "trivial");
   const names = ctx.verification?.rungs.map((r) => `${r.name}:${r.status}`);
-  assert.deepEqual(names, ["baseline:skipped", "build:skipped", "tests:passed", "preview:skipped", "visual:skipped", "observe:skipped"]);
+  assert.deepEqual(names, ["baseline:skipped", "build:skipped", "tests:passed", "preview:skipped", "visual:skipped", "flow:skipped", "observe:skipped"]);
 
   // And a run with nothing recorded carries no block: absent is a fact too.
   assert.deepEqual(verificationContext([wev("run-started", { input: { task: "t" } }), wev("run-failed", { error: "x" })]), {});

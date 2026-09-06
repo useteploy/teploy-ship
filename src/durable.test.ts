@@ -3887,7 +3887,7 @@ test("C4: a fully-verified trivial change merges under the ladder, and every run
     const rungs = stepResult(events, "ladder") as unknown as Array<{ name: string; status: string }>;
     assert.deepEqual(
       rungs.map((r) => `${r.name}:${r.status}`),
-      ["baseline:skipped", "build:skipped", "tests:passed", "preview:passed", "visual:passed", "observe:passed"],
+      ["baseline:skipped", "build:skipped", "tests:passed", "preview:passed", "visual:passed", "flow:skipped", "observe:passed"],
       "the smoke, the diff and the window all ran and all passed",
     );
     // One list, two producers: the recorded ladder step and the event-log
@@ -4006,7 +4006,7 @@ test("C4: a normal change merges only at auto_normal — the class is read, not 
     // interesting half is the class gate, pinned by the held case below.
     assert.equal(fixture.merges().length, 1);
     const rungs = stepResult(await store.load("run-c4-normal"), "ladder");
-    assert.equal(rungs?.length, 6);
+    assert.equal(rungs?.length, 7);
   } finally {
     process.env.PATH = path;
     fixture.restore();

@@ -10,7 +10,8 @@ import type { WorkflowContext, WorkflowEvent } from "@neutron-build/workflow";
 
 import type { DurableAgentConfig, DurableAgentInput } from "./durable.js";
 import type { CommandRunner, PreviewTarget } from "./deploy.js";
-import { buildIfDeclared, mainUrlOf, observeIfDeclared, recordLadder, smokeIfDeclared, visualIfDeclared } from "./ladder-steps.js";
+import { buildIfDeclared, comparePngs, flowIfPresent, mainUrlOf, observeIfDeclared, recordLadder, smokeIfDeclared, visualIfDeclared } from "./ladder-steps.js";
+import { PNG } from "pngjs";
 import type { ServiceHealth } from "./observe.js";
 
 /**
@@ -171,6 +172,121 @@ test("visual: no preview or an underivable main URL skips with the reason", asyn
   if (odd?.kind === "skipped") assert.match(odd.reason, /could not derive main/);
 });
 
+test("comparePngs: counts differing pixels, ignores anti-aliasing, and declines on size or decode mismatch", () => {
+  const png = (w: number, h: number, paint: (x: number, y: number) => number): Uint8Array => {
+    const img = new PNG({ width: w, height: h });
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      const v = paint(x, y);
+      img.data[i] = v; img.data[i + 1] = v; img.data[i + 2] = v; img.data[i + 3] = 255;
+    }
+    return new Uint8Array(PNG.sync.write(img));
+  };
+  const white = png(20, 20, () => 255);
+  const same = png(20, 20, () => 255);
+  assert.deepEqual(comparePngs(white, same), { differing: 0, total: 400 });
+  const spot = png(20, 20, (x, y) => (x >= 5 && x < 10 && y >= 5 && y < 10 ? 0 : 255));
+  assert.deepEqual(comparePngs(white, spot), { differing: 25, total: 400 });
+  assert.equal(comparePngs(white, png(10, 20, () => 255)), undefined, "different sizes: no pixel verdict, the caller falls back to bytes");
+  assert.equal(comparePngs(white, new Uint8Array([1, 2, 3])), undefined, "not a PNG: same");
+});
+
+// --- flow --------------------------------------------------------------------
+
+const PREVIEW = { kind: "deployed", url: "https://preview-ship-x.site.example.com", image: "img" } as const;
+const WITH_PREVIEW: DurableAgentInput = { ...BASE_INPUT, verification: { preview: { app: "site", smoke: "true" } } };
+
+test("flow: no step without a preview declaration; skipped with the reason when the tree has no script", async () => {
+  const { ctx, steps } = fakeCtx();
+  const { exec } = await localExecutor();
+  assert.equal(await flowIfPresent(ctx, exec, BASE_INPUT, PREVIEW), undefined, "no preview declared, no step — the replay rule");
+  assert.equal(steps.length, 0);
+  const none = await flowIfPresent(ctx, exec, WITH_PREVIEW, undefined);
+  assert.equal(none?.kind, "skipped");
+  const noScript = await flowIfPresent(ctx, exec, WITH_PREVIEW, PREVIEW);
+  assert.equal(noScript?.kind, "skipped");
+  if (noScript?.kind === "skipped") assert.match(noScript.reason, /no \.ship\/flow\.mjs in the tree/);
+  assert.equal(steps[1]?.name, "flow");
+});
+
+/** A fake global `npm` whose `root -g` holds a playwright directory, so the probe passes without the real package. */
+async function fakePlaywrightOnPath(): Promise<{ binDir: string; restore: () => void }> {
+  const root = await mkdtemp(join(tmpdir(), "ladder-steps-npmroot-"));
+  const binDir = await mkdtemp(join(tmpdir(), "ladder-steps-npm-"));
+  const local = new LocalExecutor({ root: binDir });
+  await local.exec(`mkdir -p '${root}/playwright' && printf '#!/bin/sh\nprintf %s "${root}"\n' > npm && chmod +x npm`);
+  const path = process.env.PATH;
+  process.env.PATH = `${binDir}:${path ?? ""}`;
+  return { binDir, restore: () => { process.env.PATH = path; } };
+}
+
+test("flow: the script runs against the preview URL, its PNGs are hashed and attached in name order, and its output is cleaned up", async () => {
+  const { ctx } = fakeCtx();
+  const { exec } = await localExecutor();
+  const fake = await fakePlaywrightOnPath();
+  try {
+    // A flow that needs no browser: it proves the contract (argv, output dir,
+    // the playwright link) rather than Chromium.
+    await exec.exec(`mkdir -p .ship && cat > .ship/flow.mjs <<'EOF'
+import { writeFileSync, existsSync } from "node:fs";
+const [url, out] = process.argv.slice(2);
+if (url !== "https://preview-ship-x.site.example.com") throw new Error("wrong url " + url);
+if (process.env.PREVIEW_URL !== url) throw new Error("PREVIEW_URL not set");
+if (!existsSync(".ship/node_modules/playwright")) throw new Error("playwright not linked");
+writeFileSync(out + "/02-after.png", "b");
+writeFileSync(out + "/01-before.png", "a");
+writeFileSync(out + "/notes.txt", "ignored");
+console.log("drove the page");
+EOF`);
+    const uploads: string[] = [];
+    const sink = { upload: async (name: string, bytes: Uint8Array) => { uploads.push(`${name}:${bytes.byteLength}`); return `http://f/${name}`; } };
+    const outcome = await flowIfPresent(ctx, exec, WITH_PREVIEW, PREVIEW, sink);
+    assert.equal(outcome?.kind, "passed");
+    if (outcome?.kind === "passed") {
+      assert.deepEqual(outcome.shots.map((s) => s.name), ["01-before.png", "02-after.png"], "sorted by name, PNGs only");
+      assert.equal(outcome.shots[0]?.asset, "http://f/ship-run-ladder-test-flow-01-before.png");
+      assert.equal(outcome.script, ".ship/flow.mjs");
+    }
+    assert.deepEqual(uploads, ["ship-run-ladder-test-flow-01-before.png:1", "ship-run-ladder-test-flow-02-after.png:1"]);
+    const left = await exec.exec("ls -d .ship/flow-out .ship/node_modules 2>/dev/null | wc -l");
+    assert.equal(left.stdout.trim(), "0", "output and the link are removed; the script stays");
+    assert.equal((await exec.exec("test -f .ship/flow.mjs")).exitCode, 0);
+
+    // A failing flow keeps whatever it managed to screenshot — the picture of
+    // where it stopped is the useful one — and never throws.
+    await exec.exec(`cat > .ship/flow.mjs <<'EOF'
+import { writeFileSync } from "node:fs";
+writeFileSync(process.argv[3] + "/01-stuck.png", "x");
+console.error("Error: heading not found");
+process.exit(1);
+EOF`);
+    const failed = await flowIfPresent(ctx, exec, WITH_PREVIEW, PREVIEW);
+    assert.equal(failed?.kind, "failed");
+    if (failed?.kind === "failed") {
+      assert.equal(failed.exitCode, 1);
+      assert.match(failed.output, /heading not found/);
+      assert.deepEqual(failed.shots.map((s) => s.name), ["01-stuck.png"]);
+      assert.equal(failed.shots[0]?.asset, undefined, "no sink, no attachment — the hash still stands");
+    }
+  } finally {
+    fake.restore();
+  }
+});
+
+test("flow: an upload that fails leaves the shot recorded without an attachment", async () => {
+  const { ctx } = fakeCtx();
+  const { exec } = await localExecutor();
+  const fake = await fakePlaywrightOnPath();
+  try {
+    await exec.exec(`mkdir -p .ship && printf 'import { writeFileSync } from "node:fs";\nwriteFileSync(process.argv[3] + "/01.png", "x");\n' > .ship/flow.mjs`);
+    const outcome = await flowIfPresent(ctx, exec, WITH_PREVIEW, PREVIEW, { upload: async () => { throw new Error("413"); } });
+    assert.equal(outcome?.kind, "passed");
+    if (outcome?.kind === "passed") assert.deepEqual(outcome.shots.map((s) => [s.name, s.asset]), [["01.png", undefined]]);
+  } finally {
+    fake.restore();
+  }
+});
+
 // --- observe -----------------------------------------------------------------
 
 const HEALTHY: ServiceHealth = { service: "site", requests: 100, errors: 1, errorRate: 0.01, p50: 5, p95: 40, p99: 80, apdex: 0.95 };
@@ -329,7 +445,7 @@ test("recordLadder: one step, the rung list, absent when nothing was declared", 
   assert.equal(steps[0]?.name, "ladder");
   assert.deepEqual(
     (rungs ?? []).map((r) => `${r.name}:${r.status}`),
-    ["baseline:skipped", "build:skipped", "tests:passed", "preview:skipped", "visual:skipped", "observe:skipped"],
+    ["baseline:skipped", "build:skipped", "tests:passed", "preview:skipped", "visual:skipped", "flow:skipped", "observe:skipped"],
   );
   assert.equal(await recordLadder(ctx, BASE_INPUT, {}), undefined);
   assert.equal(steps.length, 1);

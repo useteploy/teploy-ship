@@ -21,7 +21,7 @@
 import type { WorkflowEvent } from "@neutron-build/workflow";
 
 import { isApproved } from "./critic.js";
-import type { ObserveOutcome, SmokeOutcome, VisualOutcome } from "./ladder.js";
+import type { FlowOutcome, FlowShot, ObserveOutcome, SmokeOutcome, VisualOutcome } from "./ladder.js";
 import { telemetryRegression, type TelemetryVerdict } from "./observe.js";
 import type { TestOutcome } from "./tests.js";
 import { preExisting } from "./tests.js";
@@ -55,6 +55,8 @@ export interface VerificationFacts {
   smoke?: SmokeOutcome;
   /** The screenshot pair the visual rung captured, or why it could not. */
   visual?: VisualOutcome;
+  /** The agent's browser flow against the preview (the ladder's `flow` rung). */
+  flow?: FlowOutcome;
   /** The observe window after the preview (the ladder's `observe` rung). */
   observeWindow?: ObserveOutcome;
   telemetry?: { kind: "compared"; worse: boolean } | { kind: "disabled" | "insufficient" | "unavailable"; reason: string };
@@ -195,9 +197,18 @@ export function verificationSummary(facts: VerificationFacts): string {
 
   const v = facts.visual;
   if (v?.kind === "captured") {
-    verified.push(`screenshots captured of the preview and main, ${v.differs ? "and they DIFFER" : "and they are identical"}`);
+    const attached = v.preview.asset !== undefined ? " (attached to the pull request)" : "";
+    verified.push(`screenshots captured of the preview and main${attached}, ${v.differs ? "and they DIFFER" : "and they are identical"}`);
   } else if (v?.kind === "failed") not.push(`the visual diff failed (${v.reason})`);
   else if (v?.kind === "skipped") not.push(`no visual diff (${v.reason})`);
+
+  const f = facts.flow;
+  if (f?.kind === "passed") {
+    const n = f.shots.length;
+    verified.push(`the browser flow passed (\`${f.script}\`, ${n} screenshot${n === 1 ? "" : "s"}${f.shots.some((s) => s.asset !== undefined) ? " on the pull request" : ""})`);
+  } else if (f?.kind === "failed") not.push(`the browser flow FAILED (\`${f.script}\`, exit ${f.exitCode})`);
+  else if (f?.kind === "errored") not.push(`the browser flow could not run (${f.reason})`);
+  else if (f?.kind === "skipped") not.push(`no browser flow (${f.reason})`);
 
   const m = facts.telemetry;
   if (m?.kind === "compared") {
@@ -291,11 +302,57 @@ function visualOutcome(v: unknown): VisualOutcome | undefined {
   if (r === undefined || typeof r.kind !== "string") return undefined;
   if (r.kind === "skipped" || r.kind === "failed") return { kind: r.kind, reason: String(r.reason ?? "") };
   if (r.kind !== "captured") return undefined;
-  const side = (name: "preview" | "main"): { url: string; sha256: string; bytes: number } => {
+  const side = (name: "preview" | "main"): { url: string; sha256: string; bytes: number; asset?: string } => {
     const s = obj(r[name]) ?? {};
-    return { url: String(s.url ?? ""), sha256: String(s.sha256 ?? ""), bytes: Number(s.bytes ?? 0) };
+    return {
+      url: String(s.url ?? ""),
+      sha256: String(s.sha256 ?? ""),
+      bytes: Number(s.bytes ?? 0),
+      ...(typeof s.asset === "string" && s.asset !== "" ? { asset: s.asset } : {}),
+    };
   };
-  return { kind: "captured", preview: side("preview"), main: side("main"), differs: r.differs === true };
+  const px = obj(r.pixels);
+  return {
+    kind: "captured",
+    preview: side("preview"),
+    main: side("main"),
+    differs: r.differs === true,
+    ...(px !== undefined ? { pixels: { differing: Number(px.differing ?? 0), total: Number(px.total ?? 0) } } : {}),
+  };
+}
+
+function flowShots(v: unknown): FlowShot[] {
+  if (!Array.isArray(v)) return [];
+  const out: FlowShot[] = [];
+  for (const item of v) {
+    const s = obj(item);
+    if (s === undefined) continue;
+    out.push({
+      name: String(s.name ?? ""),
+      sha256: String(s.sha256 ?? ""),
+      bytes: Number(s.bytes ?? 0),
+      ...(typeof s.asset === "string" && s.asset !== "" ? { asset: s.asset } : {}),
+    });
+  }
+  return out;
+}
+
+function flowOutcome(v: unknown): FlowOutcome | undefined {
+  const r = obj(v);
+  if (r === undefined || typeof r.kind !== "string") return undefined;
+  const script = String(r.script ?? ".ship/flow.mjs");
+  switch (r.kind) {
+    case "passed":
+      return { kind: "passed", script, durationMs: Number(r.durationMs ?? 0), shots: flowShots(r.shots) };
+    case "failed":
+      return { kind: "failed", script, exitCode: Number(r.exitCode ?? 1), output: String(r.output ?? ""), shots: flowShots(r.shots) };
+    case "errored":
+      return { kind: "errored", script, reason: String(r.reason ?? "") };
+    case "skipped":
+      return { kind: "skipped", reason: String(r.reason ?? "") };
+    default:
+      return undefined;
+  }
 }
 
 function observeOutcome(v: unknown): ObserveOutcome | undefined {
@@ -371,6 +428,9 @@ export function verificationFactsFromEvents(events: WorkflowEvent[]): Verificati
     } else if (s.name === "visual-diff") {
       const o = visualOutcome(s.result);
       if (o !== undefined) facts.visual = o;
+    } else if (s.name === "flow") {
+      const o = flowOutcome(s.result);
+      if (o !== undefined) facts.flow = o;
     } else if (s.name === "observe-window") {
       const o = observeOutcome(s.result);
       if (o !== undefined) facts.observeWindow = o;

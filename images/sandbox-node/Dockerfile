@@ -31,6 +31,23 @@ RUN corepack enable && corepack prepare "pnpm@${PNPM_VERSION}" --activate && pnp
 # images/sandbox-go/Dockerfile: run-time installation needs sandbox egress, and
 # a binary that drifts under a running worker breaks replay
 # (selectAdapter, src/harness.ts).
+# A headless browser, for two things: the visual rung (a screenshot of the
+# preview and of main) and the agent's own proof — a `.ship/flow.mjs`
+# Playwright script that drives the changed page and writes PNGs the run
+# attaches to the pull request. Debian's chromium plus a pinned Playwright
+# that does NOT download its own browser: one Chromium, on PATH, is what
+# every screenshot in this image comes from.
+ARG PLAYWRIGHT_VERSION=1.63.0
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      chromium fonts-liberation fonts-noto-color-emoji \
+    && rm -rf /var/lib/apt/lists/* \
+    && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g "playwright@${PLAYWRIGHT_VERSION}" \
+    && npm cache clean --force \
+    && chromium --headless=new --no-sandbox --disable-gpu --version
+ENV CHROMIUM_BIN=/usr/bin/chromium \
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
+    NODE_PATH=/usr/local/lib/node_modules
+
 ARG HARNESS_SPECS=""
 ARG HARNESS_BINARIES=""
 RUN set -eux; \

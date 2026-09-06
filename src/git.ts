@@ -13,6 +13,19 @@ import type { PublishLimits, PublishScreen } from "./publish-policy.js";
  * the process list — acceptable for the trusted-local path.)
  */
 
+/**
+ * Paths a run writes into the workspace that must never reach a pull request:
+ * harness scratch, and the flow step's playwright link and screenshot output
+ * (ladder-steps.ts). Repo-local exclude keeps them out of `git add -A` and
+ * out of the status the agent reads.
+ */
+export const WORKSPACE_EXCLUDES = [".teploy-agent/", ".ship/flow-out/", ".ship/node_modules/"] as const;
+
+/** Shell that appends each exclude once, idempotent on a warm clone. */
+export function excludeCommand(): string {
+  return WORKSPACE_EXCLUDES.map((e) => `grep -qxF '${e}' .git/info/exclude 2>/dev/null || echo "${e}" >> .git/info/exclude`).join(" && ");
+}
+
 export interface RepoRef {
   kind: "forgejo" | "github";
   /** Origin without credentials, e.g. http://host:3000 or https://github.com */
@@ -135,10 +148,7 @@ export async function setupRepo(
   await git(executor, `git clone --depth 50 ${authenticatedUrl(ref, token)} . 2>&1`, 300_000);
   await git(executor, `git remote set-url origin ${ref.cloneUrl}`);
   await git(executor, 'git config user.name "Teploy Ship" && git config user.email "ship@teploy.dev"');
-  // Harness scratch (the python kernel writes .teploy-agent/ into the
-  // workspace) must never reach a PR; repo-local exclude keeps it out of
-  // git add -A and out of the status the agent reads.
-  await git(executor, 'echo ".teploy-agent/" >> .git/info/exclude');
+  await git(executor, excludeCommand());
   const base = await git(executor, "git rev-parse --abbrev-ref HEAD");
   const branch = `ship/${runId}`;
   await git(executor, `git checkout -b ${branch}`);
@@ -204,7 +214,7 @@ export async function reuseRepo(
   const branch = `ship/${runId}`;
   await git(executor, `git checkout -B ${branch} origin/${base}`);
   await git(executor, 'git config user.name "Teploy Ship" && git config user.email "ship@teploy.dev"');
-  await git(executor, `grep -qxF '.teploy-agent/' .git/info/exclude || echo ".teploy-agent/" >> .git/info/exclude`);
+  await git(executor, excludeCommand());
   return { branch, base };
 }
 
@@ -652,7 +662,7 @@ export async function setupRepoForPr(
   await git(executor, `git clone --depth 50 ${authenticatedUrl(ref, token)} . 2>&1`, 300_000);
   await git(executor, `git remote set-url origin ${ref.cloneUrl}`);
   await git(executor, 'git config user.name "Teploy Ship" && git config user.email "ship@teploy.dev"');
-  await git(executor, 'echo ".teploy-agent/" >> .git/info/exclude');
+  await git(executor, excludeCommand());
   // A shallow clone only has the default branch; fetch the PR head into a
   // real local ref (plain \`fetch origin <branch>\` stops at FETCH_HEAD).
   //
@@ -694,6 +704,38 @@ export async function commentOnPr(
     body: JSON.stringify({ body: `${SHIP_COMMENT_MARKER} ${body}` }),
   });
   if (!response.ok) throw new Error(`PR comment failed (${response.status})`);
+}
+
+/**
+ * Attach a file to a pull request (PRs are issues on Forgejo, and issues take
+ * assets). Returns the URL a body can embed. GitHub has no API for this —
+ * its web uploads go through an undocumented endpoint — so a GitHub run
+ * records its screenshots' hashes and says they were not attached.
+ */
+export async function uploadPrAsset(options: {
+  ref: RepoRef;
+  token: string;
+  pr: number;
+  name: string;
+  bytes: Uint8Array;
+  fetchImpl?: typeof fetch;
+}): Promise<string> {
+  const { ref, token, pr, name, bytes } = options;
+  const fetchImpl = options.fetchImpl ?? fetch;
+  if (ref.kind === "github") throw new Error("GitHub has no API for attaching a file to a pull request");
+  const form = new FormData();
+  form.append("attachment", new Blob([Buffer.from(bytes)], { type: "image/png" }), name);
+  const response = await fetchImpl(`${ref.base}/api/v1/repos/${ref.owner}/${ref.repo}/issues/${pr}/assets?name=${encodeURIComponent(name)}`, {
+    method: "POST",
+    headers: { authorization: `token ${token}` },
+    body: form,
+  });
+  if (!response.ok) throw new Error(`asset upload failed (${response.status})`);
+  const json = (await response.json()) as { browser_download_url?: unknown };
+  if (typeof json.browser_download_url !== "string" || json.browser_download_url === "") {
+    throw new Error("asset upload returned no download URL");
+  }
+  return json.browser_download_url;
 }
 
 /** Task prompt for review follow-ups — the branch state is the context. */

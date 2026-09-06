@@ -106,3 +106,14 @@ test("a root suite over a change confined to one subtree gets a scope warning, a
   const unknown = verificationSection({ tests: passed }, "run-1");
   assert.ok(unknown !== null && !unknown.includes("**Scope:**"), "no change list, no claim");
 });
+
+test("the proof pictures are embedded inline, named, in the order they were attached", () => {
+  const section = verificationSection(
+    { preview: DEPLOYED, proof: [{ name: "preview", url: "http://f/p.png" }, { name: "01-settings.png", url: "http://f/1.png" }] },
+    "run-9",
+  )!;
+  assert.match(section, /\*\*Proof\*\*/);
+  assert.match(section, /preview\n\n!\[preview\]\(http:\/\/f\/p\.png\)/);
+  assert.ok(section.indexOf("p.png") < section.indexOf("1.png"), "reading order is attachment order");
+  assert.equal(verificationSection({ proof: [] }, "run-9"), null, "an empty proof list says nothing");
+});

@@ -37,6 +37,14 @@
     "project record (images/sandbox-rust/Dockerfile, docs/DEPLOY.md)."
   ],
   "pnpm": "10.26.1",
+  "$comment_browser": [
+    "Chromium comes from Debian's package (it floats with the base image's",
+    "apt snapshot; the run records the image digest). Playwright is pinned",
+    "and installed WITHOUT its own browser download: it drives the system",
+    "Chromium through CHROMIUM_BIN / PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH, which",
+    "is what a .ship/flow.mjs proof script and the visual rung both use."
+  ],
+  "playwright": "1.63.0",
   "harnesses": {
     "$comment": [
       "The vendor coding agents an external harness adapter drives",

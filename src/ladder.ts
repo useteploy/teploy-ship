@@ -4,8 +4,8 @@
  * unattended merge is judged on.
  *
  * Rungs, in order: baseline -> build -> tests -> preview (deploy + smoke) ->
- * visual (screenshot diff vs main) -> observe (error-rate window after the
- * preview). A project declares which of them it HAS; the run records which of
+ * visual (screenshot diff vs main) -> flow (the agent's own browser flow
+ * against the preview) -> observe (error-rate window after the preview). A project declares which of them it HAS; the run records which of
  * them RAN and how each ended. Two different facts, and both are kept:
  *
  *   - The declaration caps authority (`authorityCap`). No tests means Ship
@@ -105,7 +105,7 @@ export function effectiveAuthority(project: {
   return project.neverAuto === true ? minAuthority(capped, "send") : capped;
 }
 
-export type RungName = "baseline" | "build" | "tests" | "preview" | "visual" | "observe";
+export type RungName = "baseline" | "build" | "tests" | "preview" | "visual" | "flow" | "observe";
 export type RungStatus = "passed" | "failed" | "skipped";
 
 /** Contract 2's rung: what ran, how it ended, and why in one line. */
@@ -115,7 +115,7 @@ export interface Rung {
   detail?: string;
 }
 
-export const RUNG_ORDER: readonly RungName[] = ["baseline", "build", "tests", "preview", "visual", "observe"];
+export const RUNG_ORDER: readonly RungName[] = ["baseline", "build", "tests", "preview", "visual", "flow", "observe"];
 
 /** What the smoke step recorded. */
 export type SmokeOutcome =
@@ -124,11 +124,48 @@ export type SmokeOutcome =
   | { kind: "errored"; command: string; reason: string }
   | { kind: "skipped"; reason: string };
 
-/** What the visual step recorded. */
+/**
+ * One screenshot the run captured. `url` is the page it shows; `asset`, when
+ * present, is where the PNG itself was attached on the pull request, so a
+ * reader opens the picture rather than trusting a hash.
+ */
+export interface Screenshot {
+  url: string;
+  sha256: string;
+  bytes: number;
+  asset?: string;
+}
+
+/**
+ * What the visual step recorded. `pixels` is present when both PNGs decoded
+ * at the same size and were compared pixel by pixel (ladder-steps.ts); then
+ * `differs` means "more than an anti-aliasing flicker moved". Without it,
+ * `differs` is the byte comparison.
+ */
 export type VisualOutcome =
-  | { kind: "captured"; preview: { url: string; sha256: string; bytes: number }; main: { url: string; sha256: string; bytes: number }; differs: boolean }
+  | { kind: "captured"; preview: Screenshot; main: Screenshot; differs: boolean; pixels?: { differing: number; total: number } }
   | { kind: "skipped"; reason: string }
   | { kind: "failed"; reason: string };
+
+/** One PNG a flow script wrote, named as the script named it (read in order). */
+export interface FlowShot {
+  name: string;
+  sha256: string;
+  bytes: number;
+  asset?: string;
+}
+
+/**
+ * What the flow step recorded: the agent-written `.ship/flow.mjs` run
+ * against the preview (ladder-steps.ts flowIfPresent). The script is the
+ * agent's own claim about the change turned into something a machine ran
+ * and a person can look at.
+ */
+export type FlowOutcome =
+  | { kind: "passed"; script: string; durationMs: number; shots: FlowShot[] }
+  | { kind: "failed"; script: string; exitCode: number; output: string; shots: FlowShot[] }
+  | { kind: "errored"; script: string; reason: string }
+  | { kind: "skipped"; reason: string };
 
 /** What the observe window recorded. `rollback` is present whenever the window judged the preview worse. */
 export type ObserveOutcome =
@@ -150,6 +187,7 @@ export interface LadderFacts {
   preview?: { kind: "deployed"; url: string } | { kind: "skipped"; reason: string } | { kind: "failed"; reason: string };
   smoke?: SmokeOutcome;
   visual?: VisualOutcome;
+  flow?: FlowOutcome;
   observe?: ObserveOutcome;
 }
 
@@ -236,16 +274,51 @@ export function ladderRungs(facts: LadderFacts): Rung[] {
     rungs.push({ name: "visual", status: "skipped", detail: "the visual step did not run for this run" });
   } else if (facts.visual.kind === "captured") {
     const c = facts.visual;
+    const verdict =
+      c.pixels !== undefined
+        ? c.differs
+          ? `${c.pixels.differing} of ${c.pixels.total} pixels differ`
+          : "no pixel differs beyond anti-aliasing"
+        : c.differs
+          ? "they differ"
+          : "identical";
     rungs.push({
       name: "visual",
       status: "passed",
       detail: clip(
-        `screenshots captured: preview ${c.preview.url} (${c.preview.bytes} bytes) vs main ${c.main.url} (${c.main.bytes} bytes), ` +
-          (c.differs ? "they differ" : "identical"),
+        `screenshots captured: preview ${c.preview.url} (${c.preview.bytes} bytes) vs main ${c.main.url} (${c.main.bytes} bytes), ${verdict}` +
+          (c.preview.asset !== undefined ? "; attached to the pull request" : ""),
       ),
     });
   } else {
     rungs.push({ name: "visual", status: facts.visual.kind === "failed" ? "failed" : "skipped", detail: clip(facts.visual.reason) });
+  }
+
+  // Flow: the agent-written browser flow against the preview. Not declared on
+  // the project — the agent writes one when the change has a face — so it
+  // never holds a merge by its absence, only by failing.
+  if (v?.preview === undefined) {
+    rungs.push({ name: "flow", status: "skipped", detail: "no preview app declared on the project, so a flow has nowhere to run" });
+  } else if (facts.flow === undefined) {
+    rungs.push({ name: "flow", status: "skipped", detail: "the flow step did not run for this run" });
+  } else {
+    const f = facts.flow;
+    rungs.push(
+      f.kind === "passed"
+        ? {
+            name: "flow",
+            status: "passed",
+            detail: clip(
+              `${f.script} passed in ${Math.round(f.durationMs / 1000)}s with ${f.shots.length} screenshot${f.shots.length === 1 ? "" : "s"}` +
+                (f.shots.some((sh) => sh.asset !== undefined) ? " attached to the pull request" : ""),
+            ),
+          }
+        : f.kind === "failed"
+          ? { name: "flow", status: "failed", detail: clip(`${f.script} exited ${f.exitCode}: ${f.output}`) }
+          : f.kind === "errored"
+            ? { name: "flow", status: "failed", detail: clip(`${f.script} could not run: ${f.reason}`) }
+            : { name: "flow", status: "skipped", detail: clip(f.reason) },
+    );
   }
 
   if (v?.observeWindowMin === undefined || v.observeWindowMin <= 0) {
@@ -269,6 +342,23 @@ export function ladderRungs(facts: LadderFacts): Rung[] {
     );
   }
   return rungs;
+}
+
+/**
+ * The pictures a run attached to its pull request, in reading order: the
+ * visual pair first, then the flow's screenshots as the script named them.
+ * Pure, so the pull request body and the run page list the same links.
+ */
+export function proofLinks(facts: { visual?: VisualOutcome; flow?: FlowOutcome }): Array<{ name: string; url: string }> {
+  const out: Array<{ name: string; url: string }> = [];
+  if (facts.visual?.kind === "captured") {
+    if (facts.visual.preview.asset !== undefined) out.push({ name: "preview", url: facts.visual.preview.asset });
+    if (facts.visual.main.asset !== undefined) out.push({ name: "main", url: facts.visual.main.asset });
+  }
+  if (facts.flow?.kind === "passed" || facts.flow?.kind === "failed") {
+    for (const s of facts.flow.shots) if (s.asset !== undefined) out.push({ name: s.name, url: s.asset });
+  }
+  return out;
 }
 
 /** The rungs a given authority needs to see `passed` before it merges. */
@@ -354,6 +444,7 @@ export function ladderRungsFromEvents(events: WorkflowEvent[]): Rung[] {
     ...(facts.preview !== undefined ? { preview: facts.preview } : {}),
     ...(facts.smoke !== undefined ? { smoke: facts.smoke } : {}),
     ...(facts.visual !== undefined ? { visual: facts.visual } : {}),
+    ...(facts.flow !== undefined ? { flow: facts.flow } : {}),
     ...(facts.observeWindow !== undefined
       ? { observe: facts.observeWindow }
       : facts.telemetry !== undefined
