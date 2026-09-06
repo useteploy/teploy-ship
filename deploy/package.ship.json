@@ -11,8 +11,8 @@
     "@neutron-build/ai": "0.1.0",
     "@neutron-build/workflow": "0.1.0",
     "pg": "8.16.0",
-    "pixelmatch": "^7.2.0",
-    "pngjs": "^7.0.0",
+    "pixelmatch": "7.2.0",
+    "pngjs": "7.0.0",
     "undici": "8.10.2"
   },
   "exports": {
