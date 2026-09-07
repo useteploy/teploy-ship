@@ -518,6 +518,10 @@ export const WORKFLOW_STEPS: readonly WorkflowStep[] = [
   { key: "step:build", admits: (i) => i.verification?.build !== undefined },
   { key: "step:preview-smoke", admits: (i) => i.verification?.preview !== undefined },
   { key: "step:visual-diff", admits: (i) => i.verification?.visual === true },
+  // The agent's own browser flow (ladder-steps.ts flowIfPresent): gated on the
+  // preview declaration, not on `.ship/flow.mjs`'s presence — the file is a
+  // fact the step records, and step presence stays a function of the input.
+  { key: "step:flow", admits: (i) => i.verification?.preview !== undefined },
   { key: "step:observe-window", admits: (i) => i.verification?.observeWindowMin !== undefined },
   { key: "step:ladder", admits: (i) => i.verification !== undefined },
 ];
