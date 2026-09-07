@@ -15,11 +15,15 @@ import type { PublishLimits, PublishScreen } from "./publish-policy.js";
 
 /**
  * Paths a run writes into the workspace that must never reach a pull request:
- * harness scratch, and the flow step's playwright link and screenshot output
- * (ladder-steps.ts). Repo-local exclude keeps them out of `git add -A` and
- * out of the status the agent reads.
+ * harness scratch, the flow step's playwright link and screenshot output
+ * (ladder-steps.ts), and pnpm's content store — in the sandbox HOME is not
+ * writable, so pnpm 10 puts the store in the worktree root, and without this
+ * every install reads as thousands of changed files in change-class and lands
+ * in the pushed commit (run-cf972afc: 2627 files, 834k lines, "serious").
+ * Repo-local exclude keeps them out of `git add -A` and out of the status the
+ * agent reads.
  */
-export const WORKSPACE_EXCLUDES = [".teploy-agent/", ".ship/flow-out/", ".ship/node_modules/"] as const;
+export const WORKSPACE_EXCLUDES = [".teploy-agent/", ".ship/flow-out/", ".ship/node_modules/", ".pnpm-store/"] as const;
 
 /** Shell that appends each exclude once, idempotent on a warm clone. */
 export function excludeCommand(): string {
