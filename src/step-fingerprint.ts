@@ -421,7 +421,7 @@ const repoRun = (i: RecordedInput): boolean => i.repo !== undefined;
 const prRun = (i: RecordedInput): boolean => i.repo !== undefined && i.pr !== undefined;
 /** The code index is keyed on a repo OR an explicit workspace key (durable.ts scopeKey). */
 const scoped = (i: RecordedInput): boolean => i.repo !== undefined || i.workspaceKey !== undefined;
-const multiAttempt = (i: RecordedInput): boolean => (i.harnessAttempts?.length ?? 0) >= 2;
+const multiAttempt = (i: RecordedInput): boolean => (i.harnessAttempts?.length ?? 0) >= 2 || (i.attempts ?? 0) > 1;
 /** Absent `harness` means native; only an external adapter records its own steps. */
 const externalHarness = (i: RecordedInput): boolean =>
   (i.harness !== undefined && i.harness.id !== NATIVE_HARNESS_ID) ||
@@ -448,9 +448,20 @@ export const WORKFLOW_STEPS: readonly WorkflowStep[] = [
   // Only reachable when the harness threw AND the tree was publishable, both
   // facts about the run rather than the input; gated on the input it needs.
   { key: "step:publish-on-failure", admits: repoRun },
+  // P6-1: the cost ceiling refusing a further attempt. Admitted by the same
+  // inputs that launch more than one, so a single-attempt run's fingerprint is
+  // untouched.
+  { key: "step:attempt-*-skipped", admits: multiAttempt },
   { key: "step:*sandbox", admits: multiAttempt },
   { key: "step:*repo-setup", admits: multiAttempt },
   { key: "step:*diff", admits: multiAttempt },
+  // The per-attempt verification and the one-step-per-attempt timeline record
+  // (P6-1): what the ranking is computed from, and what the Verification
+  // section quotes. The suite itself is `runSuite`, already in this table with
+  // its own gate; the build is `buildIfDeclared`'s literal `build` step, also
+  // already here.
+  { key: "step:*files", admits: multiAttempt },
+  { key: "step:attempt-*", admits: multiAttempt },
   { key: "step:harness-pick", admits: multiAttempt },
   { key: "step:*plan-think", admits: (i) => i.plan === true },
   { key: "step:*plan-snapshot", admits: (i) => i.plan === true },

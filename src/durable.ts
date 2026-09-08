@@ -84,6 +84,8 @@ import type { ParsedFindings, ScanFinding } from "./findings.js";
 import { costUSD } from "./pricing.js";
 import { HARNESS_VERSIONS, NATIVE_HARNESS_ID, selectAdapter } from "./harness.js";
 import type { HarnessAdapter, HarnessBudget, HarnessRef, HarnessResult, HarnessTask, HarnessUsage, HarnessWorkspace } from "./harness.js";
+import { attemptOutcomeLine, rankAttempts } from "./attempt-rank.js";
+import type { AttemptOutcome } from "./attempt-rank.js";
 
 /**
  * Retry policy for steps whose failure loses real work.
@@ -523,6 +525,24 @@ export interface DurableAgentInput {
    * default — the measurements argue for diverse harnesses, not more loops.
    */
   harnessAttempts?: HarnessRef[];
+  /**
+   * How many independent attempts this run makes of the same task (P6-1),
+   * materialised at ENQUEUE from `SHIP_ATTEMPTS` (default 3, max 5) on repo
+   * runs whose change-class is normal or serious — never trivial, where the
+   * change is small enough that one loop plus the suite is the whole answer.
+   *
+   * Selection is by the project's own executable verification, not by the
+   * critic: the attempt whose declared test command passes, then whose build
+   * passes, then with the fewest changed files, and only then the critic's
+   * pick (attempt-rank.ts). An attempt that failed the suite is never
+   * published over one that passed it.
+   *
+   * Input-gated for the standing reason (see `harnessAttempts` above and
+   * `changeClass` further up): K decides how many `attempt-N-*` step groups a
+   * run records, so it must be a fact of the log read at admission, never a
+   * mid-run read of the executing worker's env.
+   */
+  attempts?: number;
 }
 
 /**
@@ -846,7 +866,27 @@ export function durableAgent(
       // Multi-attempt is a repo-run capability (each extra attempt clones its
       // own checkout); a recorded list on a workspace run is a single attempt.
       const attemptRefs = input.repo !== undefined && (input.harnessAttempts?.length ?? 0) >= 2 ? input.harnessAttempts! : null;
-      const attemptAdapters = attemptRefs !== null ? attemptRefs.map((ref) => selectAdapter(registry, ref)) : [adapter];
+      // Independent attempts of ONE task (P6-1), K from the recorded input —
+      // never the worker's env, for the standing reason: K decides how many
+      // `attempt-N-*` groups the log carries. The same adapter K times, which
+      // is deliberately NOT what SHIP_HARNESS_ATTEMPTS buys (that one wants
+      // diverse harnesses); here the diversity is the seed, and the selection
+      // is the project's own verification rather than a reviewer's opinion.
+      //
+      // Gated on the change-class capability rather than on a class: `trivial`
+      // is a verdict about a diff, and no diff exists when this runs. The
+      // never-trivial half of the rule therefore lives where the class is
+      // actually known — the publish gate's own classification of the winner,
+      // which is unchanged — and gains nothing from K attempts either way,
+      // because selection is by suite, build and file count, never by opinion.
+      const independentK =
+        attemptRefs === null && input.repo !== undefined && input.attempts !== undefined && input.attempts > 1 ? input.attempts : 0;
+      const attemptAdapters =
+        attemptRefs !== null
+          ? attemptRefs.map((ref) => selectAdapter(registry, ref))
+          : independentK > 1
+            ? Array.from({ length: independentK }, () => adapter)
+            : [adapter];
       if (
         input.trust === "external" &&
         (config.executor.isolated !== true || attemptAdapters.some((a) => !a.isolated)) &&
@@ -1134,7 +1174,11 @@ export function durableAgent(
       const collectFindings = async (summary: string): Promise<ParsedFindings | null> =>
         input.mode === "scan" ? await ctx.step("scan-findings", () => parseFindings(summary)) : null;
 
-      if (attemptRefs === null) {
+      // Single attempt when there IS a single adapter: never-declared
+      // harnessAttempts, or independent K of 1 (P6-1's off switch). The
+      // multi-attempt path below is keyed on the adapter count, not on
+      // attemptRefs — independent attempts of one harness reach it too.
+      if (attemptAdapters.length <= 1) {
         let result: HarnessResult;
         try {
           result = await adapter.run(harnessTask, primary, budget, () => {});
@@ -1203,12 +1247,40 @@ export function durableAgent(
         };
       }
 
-      // Multi-harness attempts (P5-4). Attempt 0 runs in the primary workspace
-      // already set up above; every further attempt gets its own sandbox and
-      // checkout as recorded steps. Each attempt's diff is recorded, the
-      // critic picks once, and only the winner reaches the publish gate.
-      const attempts: Array<{ ws: HarnessWorkspace; adapter: HarnessAdapter; result: HarnessResult; diff: string }> = [];
+      // Multi-harness attempts (P5-4), and independent attempts of one task
+      // (P6-1). Attempt 0 runs in the primary workspace already set up above;
+      // every further attempt gets its own sandbox and checkout as recorded
+      // steps. Each attempt's diff is recorded, one `attempt-N` step puts its
+      // suite outcome and diff stat on the timeline, and only the winner
+      // reaches the publish gate.
+      //
+      // WHO THE WINNER IS. Ranked by the project's own executable verification
+      // (attempt-rank.ts): suite passed, then build passed, then fewest changed
+      // files, and only then the critic's pick. The critic is the last
+      // tie-break, not the judge — an attempt that failed the suite is never
+      // published over one that passed it.
+      const attempts: Array<{
+        ws: HarnessWorkspace;
+        adapter: HarnessAdapter;
+        result: HarnessResult;
+        diff: string;
+        tests?: TestOutcome;
+        build?: TestOutcome;
+        changedFiles: number;
+      }> = [];
       for (let i = 0; i < attemptAdapters.length; i++) {
+        // SPEND (P6-1): every attempt is metered under the run's existing
+        // budget. Checked BEFORE launching, not after — a run at its ceiling
+        // selects among the attempts that already finished rather than
+        // spending the ceiling again on one more. Derived purely from the
+        // usage already recorded, so a replay stops at the same attempt.
+        if (i > 0 && budget.maxRunCostUSD > 0 && costUSD(config.modelId ?? "", attemptsSpent(attempts)) >= budget.maxRunCostUSD) {
+          await ctx.step(`attempt-${i}-skipped`, () => ({
+            reason: `the run's ${budget.maxRunCostUSD.toFixed(2)} cost ceiling was reached after ${attempts.length} attempt${attempts.length === 1 ? "" : "s"}; selecting among the attempts that finished`,
+            spent: costUSD(config.modelId ?? "", attemptsSpent(attempts)),
+          }));
+          break;
+        }
         const attemptAdapter = attemptAdapters[i]!;
         const p = `attempt-${i}-`;
         let ws: HarnessWorkspace;
@@ -1234,7 +1306,34 @@ export function durableAgent(
             return "";
           }
         });
-        attempts.push({ ws, adapter: attemptAdapter, result, diff });
+        // The project's own verification, run by the harness over exactly the
+        // tree the attempt is handing back. Recorded as the attempt's own
+        // prefixed steps so the timeline shows what each candidate was judged
+        // on — the same commands the publish gate would run, over bytes the
+        // attempt cannot influence after the fact. An attempt the project
+        // cannot verify (no suite, no build declared) records nothing here and
+        // ranks on the remaining rungs.
+        const build = await buildIfDeclared(ctx, ws.executor, input);
+        const tests = await runSuite(ctx, ws.executor, config, input, p);
+        const changedFiles = await ctx.step(`${p}files`, async () => {
+          try {
+            return (await changedFilesIn(ws.executor)).length;
+          } catch {
+            return 0;
+          }
+        });
+        attempts.push({ ws, adapter: attemptAdapter, result, diff, ...(build !== undefined ? { build } : {}), ...(tests !== undefined ? { tests } : {}), changedFiles });
+        // ONE STEP PER ATTEMPT on the timeline: the suite outcome and the diff
+        // stat a person needs to read "attempt 2 passed, attempts 1 and 3 did
+        // not" without opening three diffs. The Verification section on the
+        // pull request quotes this.
+        await ctx.step(`attempt-${i}`, () => ({
+          attempt: i + 1,
+          harness: attemptAdapter.id,
+          suite: attemptOutcomeLine({ attempt: i + 1, harness: attemptAdapter.id, ...(build !== undefined ? { build } : {}), ...(tests !== undefined ? { tests } : {}), changedFiles }),
+          diffStat: `${changedFiles} file${changedFiles === 1 ? "" : "s"} changed`,
+          status: result.status,
+        }));
       }
 
       const pick = await ctx.step("harness-pick", async () => {
@@ -1247,18 +1346,49 @@ export function durableAgent(
         if (candidates.length === 1) {
           return { winner: candidates[0]!.attempt - 1, reason: "only one attempt produced a diff", candidates: [candidates[0]!.attempt], usage: undefined };
         }
-        try {
-          const verdict = await pickAttempt(config.model, { task: input.task, candidates });
-          const chosen = parsePick(verdict.text, candidates.map((c) => c.attempt));
-          return chosen === null
-            ? { winner: candidates[0]!.attempt - 1, reason: `critic verdict did not name an attempt (${verdict.text.trim().slice(0, 200)}); first candidate published`, candidates: candidates.map((c) => c.attempt), usage: verdict.usage }
-            : { winner: chosen - 1, reason: verdict.text.trim().slice(0, 400), candidates: candidates.map((c) => c.attempt), usage: verdict.usage };
-        } catch (error) {
-          // Fail open to the first candidate, recorded as such: a broken picker
-          // must not throw away every attempt's work, and must not throw from
-          // a step (it would re-run on replay).
-          return { winner: candidates[0]!.attempt - 1, reason: `critic unavailable (${error instanceof Error ? error.message : String(error)}); first candidate published`, candidates: candidates.map((c) => c.attempt), usage: undefined };
+        // THE RANKING (P6-1). The project's own verification decides unless it
+        // cannot separate the candidates at all, in which case the critic is
+        // asked for the tie-break — its verdict is the last rung, not the
+        // first. An attempt that failed the suite is never selected over one
+        // that passed it, whatever the critic prefers.
+        const ranked = rankAttempts(
+          attempts.map((a, i) => ({ attempt: i + 1, harness: a.adapter.id, ...(a.tests !== undefined ? { tests: a.tests } : {}), ...(a.build !== undefined ? { build: a.build } : {}), changedFiles: a.changedFiles })),
+          null,
+        );
+        const tied = ranked.tied;
+        if (tied.length > 1 && candidates.some((c) => tied.includes(c.attempt))) {
+          try {
+            const verdict = await pickAttempt(config.model, { task: input.task, candidates: candidates.filter((c) => tied.includes(c.attempt)) });
+            const chosen = parsePick(verdict.text, tied);
+            const winner = chosen === null ? tied[0]! : chosen;
+            const how =
+              chosen === null
+                ? `the critic verdict did not name an attempt (${verdict.text.trim().slice(0, 200)}); the first tied attempt published`
+                : `the critic chose attempt ${winner} — ${verdict.text.trim().slice(0, 300)}`;
+            return {
+              winner: winner - 1,
+              reason: `attempts ${tied.join(", ")} tied on the project's own verification (suite, build, changed files); ${how}`,
+              candidates: candidates.map((c) => c.attempt),
+              usage: verdict.usage,
+            };
+          } catch (error) {
+            // Fail open to the ranking's first, recorded as such: a broken
+            // picker must not throw away every attempt's work, and must not
+            // throw from a step (it would re-run on replay).
+            return {
+              winner: tied[0]! - 1,
+              reason: `critic unavailable (${error instanceof Error ? error.message : String(error)}); the ranking's first tied attempt published`,
+              candidates: candidates.map((c) => c.attempt),
+              usage: undefined,
+            };
+          }
         }
+        return {
+          winner: ranked.winner!.attempt - 1,
+          reason: ranked.reason,
+          candidates: candidates.map((c) => c.attempt),
+          usage: undefined,
+        };
       });
 
       const usage: HarnessUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
@@ -1281,7 +1411,7 @@ export function durableAgent(
       const losers = attempts.filter((a) => a !== winner);
       for (const loser of losers) await dispose(config, loser.ws.handle);
       const names = attempts.map((a, i) => `${a.adapter.id}${i === pick.winner ? " (published)" : ""}`).join(", ");
-      const summary = `${winner.result.summary}\n\nPicked from ${attempts.length} harness attempts: ${names}.`;
+      const summary = `${winner.result.summary}\n\nSelected from ${attempts.length} attempt${attempts.length === 1 ? "" : "s"} (${names}) by the project's own verification: ${pick.reason}`;
       // Unreachable today — enqueueRun does not materialise `harnessAttempts`
       // on a scan (runtime.ts), so a scan always takes the single-attempt path
       // above. Kept because "the findings step is next to every publish call"
@@ -3115,6 +3245,38 @@ async function runSuite(
     }
     return await runTests(executor, target);
   });
+}
+
+/**
+ * The usage a set of finished attempts has already spent (P6-1), so the next
+ * launch can be refused against the run's cost ceiling. Sums the recorded
+ * attempt usage only — the pick call and the publish gate come after, and a
+ * ceiling that counted spend it had not yet made would stop a run at K=1.
+ */
+function attemptsSpent(attempts: ReadonlyArray<{ result: HarnessResult }>): HarnessUsage {
+  const spent: HarnessUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+  for (const a of attempts) {
+    spent.inputTokens += a.result.usage.inputTokens ?? 0;
+    spent.outputTokens += a.result.usage.outputTokens ?? 0;
+    spent.totalTokens += a.result.usage.totalTokens ?? 0;
+    if (a.result.usage.cacheReadTokens !== undefined) spent.cacheReadTokens = (spent.cacheReadTokens ?? 0) + a.result.usage.cacheReadTokens;
+    if (a.result.usage.cacheWriteTokens !== undefined) spent.cacheWriteTokens = (spent.cacheWriteTokens ?? 0) + a.result.usage.cacheWriteTokens;
+    if (typeof a.result.usage.costUSD === "number") spent.costUSD = (spent.costUSD ?? 0) + a.result.usage.costUSD;
+  }
+  return spent;
+}
+
+/**
+ * The files an attempt changed, without the side effects of the publish gate's
+ * own classifier call: the ranking only needs the COUNT (attempt-rank.ts rung
+ * 3), and `git add -A` + numstat is already what changedFiles() does. Named
+ * differently so the two are not mistaken for one another.
+ */
+async function changedFilesIn(executor: AgentExecutor): Promise<ChangedFile[]> {
+  await executor.exec("git add -A", { timeoutMs: 60_000 });
+  const numstat = await executor.exec("git diff --cached --numstat", { timeoutMs: 60_000 });
+  if (numstat.exitCode !== 0) return [];
+  return parseNumstat(numstat.stdout);
 }
 
 /**

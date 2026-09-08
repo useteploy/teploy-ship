@@ -141,7 +141,7 @@ test("multi-harness attempts: each harness works its own checkout, the critic pi
     const out = outcome.output as DurableAgentOutput;
     assert.equal(out.status, "finished");
     assert.match(out.agentSummary as string, /^beta wrote beta.txt/);
-    assert.match(out.agentSummary as string, /Picked from 2 harness attempts: alpha, beta \(published\)/);
+    assert.match(out.agentSummary as string, /Selected from 2 attempts \(alpha, beta \(published\)\) by the project's own verification: attempts 1, 2 tied on the project's own verification/);
     assert.equal(out.pr, "file:///owner/repo/pulls/5");
     assert.equal(out.turns, 4, "turns sum across attempts");
     assert.equal(out.usage?.priced, false, "one unpriced attempt makes the run unpriced");
@@ -159,10 +159,14 @@ test("multi-harness attempts: each harness works its own checkout, the critic pi
       "repo-context",
       "attempt-0-alpha-edit",
       "attempt-0-diff",
+      "attempt-0-files",
+      "attempt-0",
       "attempt-1-sandbox",
       "attempt-1-repo-setup",
       "attempt-1-beta-edit",
       "attempt-1-diff",
+      "attempt-1-files",
+      "attempt-1",
       "harness-pick",
       "repo-push",
       "repo-pr",
