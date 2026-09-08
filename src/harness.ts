@@ -263,6 +263,24 @@ export function harnessAttempts(raw: string | undefined): HarnessRef[] {
   return ids.map((id) => harnessRef(id));
 }
 
+/** The default and the ceiling for `SHIP_ATTEMPTS` (P6-1). */
+export const ATTEMPTS_DEFAULT = 3;
+export const ATTEMPTS_MAX = 5;
+
+/**
+ * Parse `SHIP_ATTEMPTS` — how many independent attempts a run makes of its
+ * task, ranked by the project's own verification rather than by the critic
+ * (P6-1). Unset or garbage is the default 3; anything over the ceiling is
+ * clamped to it rather than refused, because the number is a spend knob and a
+ * fat-fingered 50 must not fail a run that has not started. 1 is honoured: it
+ * is how an operator turns the feature off per deployment.
+ */
+export function attemptsCount(raw: string | undefined): number {
+  const n = Number((raw ?? "").trim());
+  if (!Number.isFinite(n)) return ATTEMPTS_DEFAULT;
+  return Math.max(1, Math.min(ATTEMPTS_MAX, Math.trunc(n)));
+}
+
 /**
  * Pick the adapter a recorded input asks for. Absent = native. Unknown or a
  * version other than the one the log recorded is refused, never substituted:

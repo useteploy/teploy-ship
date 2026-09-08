@@ -26,7 +26,7 @@ import { FileAkirooCursor, NucleusAkirooCursor } from "./akiroo.js";
 import type { AkirooCursorStore } from "./akiroo.js";
 import { FileRepoStatsStore, NucleusRepoStatsStore } from "./repo-stats.js";
 import type { RepoStatsStore } from "./repo-stats.js";
-import { harnessAttempts, harnessRef } from "./harness.js";
+import { attemptsCount, harnessAttempts, harnessRef } from "./harness.js";
 import type { HarnessRef } from "./harness.js";
 import type { EvidenceStore } from "./evidence.js";
 import { FileProjectStore, NucleusProjectStore, ProjectEvidenceStore } from "./projects.js";
@@ -943,6 +943,14 @@ export async function enqueueRun(
      * that wrote its log, never under whatever the worker's env says today.
      */
     harness?: string;
+    /**
+     * How many independent attempts to make of the task (P6-1), ranked by the
+     * project's own executable verification. Absent falls back to
+     * `SHIP_ATTEMPTS` (default 3, max 5) on repo runs that classify normal or
+     * serious; a run with no such field — every log written before this
+     * existed — makes one attempt and replays exactly as before.
+     */
+    attempts?: number;
     workflowName?: string;
     /** Intake source, recorded so completion can settle spend against it. */
     source?: string;
@@ -1174,6 +1182,21 @@ export async function enqueueRun(
   // cost for an answer the critic picks between on the strength of a DIFF,
   // which a scan does not have.
   const attempts = options.repo !== undefined && !scan ? harnessAttempts(process.env.SHIP_HARNESS_ATTEMPTS) : [];
+  // Independent attempts of one task, ranked by the project's own verification
+  // (P6-1). Repo runs only — a second attempt is a second checkout — and never
+  // on a scan, which produces findings rather than a tree to rank. Only where
+  // the change-class gate is on, which is the never-trivial half of the rule:
+  // `trivial` is a verdict about a diff that does not exist yet, and a run that
+  // can classify is the one whose class will be recorded. Recorded HERE like
+  // every other capability: K decides how many `attempt-N-*` groups the log
+  // carries, so it is a fact of the admission, not of the worker that happens
+  // to pick the run up.
+  const attemptsK =
+    options.attempts !== undefined
+      ? options.attempts
+      : options.repo !== undefined && !scan && changeClass === true
+        ? attemptsCount(process.env.SHIP_ATTEMPTS)
+        : undefined;
   // Required reviewers for this repo (governance.ts), resolved HERE for the
   // same reason as evidence: it adds a recorded step (`repo-reviewers`), so
   // its presence must be a function of the recorded input, and the rule is
@@ -1277,6 +1300,11 @@ export async function enqueueRun(
         ...(warmRun ? { warm: true } : {}),
         harness,
         ...(attempts.length >= 2 ? { harnessAttempts: attempts } : {}),
+        // K, clamped and defaulted at enqueue so a replay launches exactly the
+        // attempts the log was written under. Never recorded on a scan or a
+        // workspace run (see attemptsK above), which keeps those runs' step
+        // sequences — and therefore their fingerprints — untouched.
+        ...(attemptsK !== undefined && attemptsK > 1 ? { attempts: attemptsK } : {}),
   };
   await runtime.store.append(options.runId, {
     v: WIRE_FORMAT_VERSION,
