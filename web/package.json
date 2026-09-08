@@ -10,8 +10,8 @@
     "test": "node --import tsx --test \"src/**/*.test.ts\""
   },
   "dependencies": {
-    "@neutron-build/cli": "^0.1.4",
-    "@neutron-build/core": "^0.1.8",
+    "@neutron-build/cli": "^0.2.3",
+    "@neutron-build/core": "^0.2.2",
     "openid-client": "^6.8.4",
     "preact": "10.25.4",
     "teploy-ship": "link:.."
