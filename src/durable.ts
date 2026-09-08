@@ -1174,7 +1174,11 @@ export function durableAgent(
       const collectFindings = async (summary: string): Promise<ParsedFindings | null> =>
         input.mode === "scan" ? await ctx.step("scan-findings", () => parseFindings(summary)) : null;
 
-      if (attemptRefs === null) {
+      // Single attempt when there IS a single adapter: never-declared
+      // harnessAttempts, or independent K of 1 (P6-1's off switch). The
+      // multi-attempt path below is keyed on the adapter count, not on
+      // attemptRefs — independent attempts of one harness reach it too.
+      if (attemptAdapters.length <= 1) {
         let result: HarnessResult;
         try {
           result = await adapter.run(harnessTask, primary, budget, () => {});
