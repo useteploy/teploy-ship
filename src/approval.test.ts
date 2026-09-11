@@ -83,6 +83,25 @@ test("resolveApprovalPolicy honours SHIP_SANDBOX_APPROVAL", () => {
   assert.equal(bogus({ kind: "bash", code: "curl https://example.com" }), "required");
 });
 
+// Regression: `auto` used to be returned unconditionally, so an operator
+// setting SHIP_SANDBOX_APPROVAL=auto on the host handed every unsandboxed
+// (LocalExecutor) run a free pass on rm -rf, curl and friends. "No sandbox
+// means no boundary to lean on" has to hold for every mode, not just the
+// unset one — auto without a sandbox falls back to strict.
+test("resolveApprovalPolicy: auto does not bypass strict without a sandbox", () => {
+  const unsandboxed = resolveApprovalPolicy({ sandboxed: false }, { SHIP_SANDBOX_APPROVAL: "auto" });
+  assert.equal(unsandboxed({ kind: "bash", code: "rm -rf /" }), "required");
+  assert.equal(unsandboxed({ kind: "bash", code: "curl https://example.com" }), "required");
+  assert.equal(unsandboxed({ kind: "bash", code: "git push" }), "required");
+  assert.equal(unsandboxed({ kind: "bash", code: "ls -la" }), "auto");
+  // The override still means something inside a sandbox, and boundary's
+  // unsandboxed behaviour is unchanged by this rule.
+  const sandboxed = resolveApprovalPolicy({ sandboxed: true }, { SHIP_SANDBOX_APPROVAL: "auto" });
+  assert.equal(sandboxed({ kind: "bash", code: "rm -rf /tmp/vfy" }), "auto");
+  const boundary = resolveApprovalPolicy({ sandboxed: false }, { SHIP_SANDBOX_APPROVAL: "boundary" });
+  assert.equal(boundary({ kind: "bash", code: "curl https://example.com" }), "required");
+});
+
 // Regression: the policy is chosen from the executor provider's own isolation
 // flag. The first cut of this change wired it at the CLI's enqueue path only,
 // so the worker — the thing that actually executes a durable run — kept the

@@ -87,7 +87,8 @@ export function sandboxApprovalPolicy(action: Action): ApprovalDecision {
  * Pick the policy for a run. `SHIP_SANDBOX_APPROVAL` overrides:
  *   boundary  (default when sandboxed) gate only what escapes the sandbox
  *   strict    the LocalExecutor list, even inside a sandbox
- *   auto      never gate — for a fully trusted, isolated batch
+ *   auto      never gate — sandboxed runs only; without a sandbox there is
+ *             no isolation to trust, so the run stays strict
  * A run with no sandbox is always `strict`: there is no boundary to lean on.
  */
 export function resolveApprovalPolicy(
@@ -96,7 +97,7 @@ export function resolveApprovalPolicy(
 ): ApprovalPolicy {
   const mode = (env.SHIP_SANDBOX_APPROVAL ?? "").trim().toLowerCase();
   if (mode === "strict") return defaultApprovalPolicy;
-  if (mode === "auto") return autoApprove;
+  if (mode === "auto") return options.sandboxed ? autoApprove : defaultApprovalPolicy;
   if (mode === "boundary") return options.sandboxed ? sandboxApprovalPolicy : defaultApprovalPolicy;
   return options.sandboxed ? sandboxApprovalPolicy : defaultApprovalPolicy;
 }
