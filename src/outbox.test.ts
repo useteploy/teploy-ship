@@ -52,7 +52,7 @@ test("enqueue is idempotent, so a handoff does not owe the same notification twi
   assert.equal((await box.due(0)).length, 1);
 });
 
-test("an entry is abandoned rather than retried forever", async () => {
+test("an outage never discards the durable notification", async () => {
   const box = await outbox();
   await box.enqueue({ id: "y", event: parked });
   let now = 0;
@@ -60,7 +60,7 @@ test("an entry is abandoned rather than retried forever", async () => {
     await flushOutbox(box, async () => false, now);
     now += backoffMs(i + 1);
   }
-  assert.equal((await box.due(Number.MAX_SAFE_INTEGER)).length, 0, "gives up after the attempt cap");
+  assert.equal((await box.due(Number.MAX_SAFE_INTEGER)).length, 1, "still owed after the old attempt cap");
 });
 
 test("the delivery id is stable per run+status so a receiver can dedupe", () => {
@@ -72,4 +72,15 @@ test("the delivery id is stable per run+status so a receiver can dedupe", () => 
 test("backoff grows and is capped", () => {
   assert.ok(backoffMs(1) < backoffMs(3));
   assert.equal(backoffMs(99), 15 * 60_000);
+});
+
+test("retry carries the same event time and sequence on the signed wire", async () => {
+  const box = await outbox();
+  const event = { ...parked, eventAt: "2026-09-12T12:00:00Z", eventSeq: 9 };
+  await box.enqueue({ id: notificationId(event), event });
+  const seen: RunNotification[] = [];
+  await flushOutbox(box, async (e) => { seen.push(e); return false; }, 0);
+  await flushOutbox(box, async (e) => { seen.push(e); return true; }, backoffMs(1));
+  assert.deepEqual(seen, [event, event]);
+  assert.notEqual(notificationId(event), notificationId({ ...event, eventSeq: 10 }));
 });

@@ -9,6 +9,7 @@ import { assertRepoAllowed, credentialFor } from "./repo-policy.js";
 import type { RepoRef } from "./git.js";
 import type { RepoPolicyConfig } from "./repo-policy.js";
 import type { DeliveryLog } from "./deliveries.js";
+import type { AkirooReceipts } from "./akiroo-receipts.js";
 import type { IntakeStore } from "./intake.js";
 import { resolveConfigValue } from "./runtime-config.js";
 import type { NucleusPgwire } from "./nucleus-pgwire.js";
@@ -582,6 +583,7 @@ export interface AkirooSweepDeps {
    * cannot provide it, because the crash window is between handling and acking.
    */
   deliveries: DeliveryLog;
+  receipts: AkirooReceipts;
   intake: Pick<IntakeStore, "propose">;
   /**
    * Enqueue a read-only scan (L7). Injected rather than reaching for the
@@ -596,7 +598,7 @@ export interface AkirooSweepDeps {
    * rather than imported so the sweep stays a dispatcher over injected
    * effects, like every other row kind here.
    */
-  registerProject: (payload: Record<string, unknown>) => Promise<void>;
+  registerProject: (payload: Record<string, unknown>) => Promise<void | { status: string; error?: string }>;
   repoPolicy: RepoPolicyConfig;
   fetchImpl?: typeof fetch;
   log: (line: string) => void;
@@ -614,14 +616,10 @@ export const AKIROO_PULL_LIMIT = 50;
 /**
  * One Akiroo sweep: pull, handle each row, ack the batch, advance the cursor.
  *
- * The ordering is the whole design. Rows are acked whatever their handler did,
- * including throwing — a row Ship cannot process (a repo it is not allowed to
- * clone, a run that no longer exists) must not be re-delivered every five
- * seconds for the rest of the deployment's life. The at-most-once claim above
- * is what makes acking-regardless safe.
- *
- * The cursor advances only after the ack succeeds, so a failed ack re-delivers
- * the batch and the claim short-circuits the handlers.
+ * A persisted processing outcome accompanies every acknowledgement. Claims
+ * alone never prove success. Rejected and uncertain actions remain visible in
+ * Akiroo, and an uncertain external effect is not automatically repeated.
+ * Failed acknowledgements resend the saved receipt without acting again.
  */
 export async function sweepAkiroo(deps: AkirooSweepDeps): Promise<AkirooSweepResult> {
   const doFetch = deps.fetchImpl ?? fetch;
@@ -653,33 +651,49 @@ export async function sweepAkiroo(deps: AkirooSweepDeps): Promise<AkirooSweepRes
 
   let handled = 0;
   const ids: number[] = [];
+  const receipts: { id: number; status: string; detail: string }[] = [];
   for (const row of rows) {
+    const key = `${source}:${row.id}`;
+    let receipt = await deps.receipts.get(key);
+    if (receipt?.status === "processing") {
+      // A concurrent worker may still own this action. After a crash, never
+      // repeat an issue creation whose response may simply have been lost.
+      if (Date.now() - receipt.startedAt < 10 * 60_000) continue;
+      receipt = { ...receipt, status: "unknown", detail: "Worker stopped before recording an outcome; reconcile before retrying." };
+      await deps.receipts.put(key, receipt);
+    }
+    if (receipt === undefined) {
+      // Fence receipt initialization too: a second worker must not interpret
+      // the first worker's claim-before-receipt window as a legacy failure.
+      if (!(await deps.deliveries.claim(`${source}:receipts`, String(row.id)))) continue;
+      if (!(await deps.deliveries.claim(source, String(row.id)))) {
+        // Legacy claims did not record outcomes. They are not success evidence.
+        receipt = { status: "unknown", detail: "Previously claimed without an outcome receipt; reconcile before retrying.", startedAt: Date.now() };
+      } else {
+        receipt = { status: "processing", detail: "", startedAt: Date.now() };
+        await deps.receipts.put(key, receipt);
+        try {
+          await handleAkirooRow(row, deps);
+          receipt = { ...receipt, status: "succeeded" };
+          handled += 1;
+        } catch (error) {
+          receipt = { ...receipt, status: error instanceof AkirooRejected ? "rejected" : "unknown",
+            detail: (error instanceof Error ? error.message : String(error)).slice(0, 500) };
+          deps.log(`[worker] akiroo: row ${row.id} (${row.kind}) ${receipt.status}: ${receipt.detail}; retained for reconciliation`);
+        }
+      }
+      await deps.receipts.put(key, receipt);
+    }
     ids.push(row.id);
-    // Claim before acting. A batch that was handled but not acked comes back;
-    // this is what stops the second pass opening a second issue.
-    if (!(await deps.deliveries.claim(source, String(row.id)))) {
-      deps.log(`[worker] akiroo: row ${row.id} was already handled; acking again`);
-      continue;
-    }
-    try {
-      await handleAkirooRow(row, deps);
-      handled += 1;
-    } catch (error) {
-      // Logged with the row id so the operator can find it in Akiroo's outbox,
-      // then acked with everything else. Wedging the queue on one bad row is
-      // the failure mode this connector must not have.
-      deps.log(
-        `[worker] akiroo: row ${row.id} (${row.kind}) failed and is being dropped: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-    }
+    receipts.push({ id: row.id, status: receipt.status, detail: receipt.detail });
   }
+
+  if (ids.length === 0) return { pulled: rows.length, handled, acked: 0 };
 
   const ack = await doFetch(`${deps.target.url}/api/connections/teploy_ship/outbox/ack`, {
     method: "POST",
     headers: { authorization: `Bearer ${deps.target.token}`, "content-type": "application/json" },
-    body: JSON.stringify({ ids }),
+    body: JSON.stringify({ ids, receipts }),
     redirect: "error",
   });
   if (!ack.ok) {
@@ -696,11 +710,13 @@ function str(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+class AkirooRejected extends Error {}
+
 export async function handleAkirooRow(row: AkirooRow, deps: AkirooSweepDeps): Promise<void> {
   if (row.kind === "decision") {
     const runId = str(row.payload.run_id);
     const eventName = str(row.payload.event_name);
-    if (runId === "" || eventName === "") throw new Error("decision row names no run or no event");
+    if (runId === "" || eventName === "") throw new AkirooRejected("decision row names no run or no event");
     const outcome = await deps.decide({
       runId,
       eventName,
@@ -708,6 +724,7 @@ export async function handleAkirooRow(row: AkirooRow, deps: AkirooSweepDeps): Pr
       reason: str(row.payload.reason),
     });
     deps.log(`[worker] akiroo: decision for ${runId} (${eventName}): ${outcome}`);
+    if (outcome === "unknown-run" || outcome === "event-mismatch") throw new AkirooRejected(`Decision refused: ${outcome}`);
     return;
   }
   if (row.kind === "task") {
@@ -722,20 +739,21 @@ export async function handleAkirooRow(row: AkirooRow, deps: AkirooSweepDeps): Pr
     // registerProject never throws — it acks its own failure on the return
     // leg — so a refused row is handled, not dropped: Akiroo's project page
     // shows "failed" with the error rather than an outbox that never drains.
-    await deps.registerProject(row.payload);
+    const result = await deps.registerProject(row.payload);
+    if (result?.status === "failed") throw new AkirooRejected(result.error ?? "Project registration refused");
     return;
   }
   // Not an error worth throwing over: a newer Akiroo may emit a kind this build
   // does not know, and the correct answer is to ack it and carry on rather than
   // to stop collecting everything behind it.
-  deps.log(`[worker] akiroo: row ${row.id} has unknown kind ${JSON.stringify(row.kind)}; ignored`);
+  throw new AkirooRejected(`Unsupported outbox kind: ${row.kind}`);
 }
 
 async function handleAkirooTask(row: AkirooRow, deps: AkirooSweepDeps): Promise<void> {
   const repo = str(row.payload.repo);
   const title = str(row.payload.title);
   const workItemRef = str(row.payload.work_item_ref);
-  if (repo === "" || title === "") throw new Error("task row names no repo or no title");
+  if (repo === "" || title === "") throw new AkirooRejected("task row names no repo or no title");
 
   // The allowlist is re-checked here, before a credential is chosen, because a
   // task row is externally authored: it arrives from a workspace product, and

@@ -259,7 +259,18 @@ export async function registerProject(deps: RegisterProjectDeps, payload: Record
   }
 
   try {
+    const allowed = assertRepoAllowed(row.repo, { trust: "external", config: deps.repoPolicy });
     const existing = await deps.projects.forRepo(row.repo);
+    if (existing !== null && existing.managedBy === undefined) {
+      const dropsVerification = Object.keys(existing.verification ?? {}).some((key) =>
+        row.verification?.[key as keyof ProjectVerification] === undefined);
+      if (dropsVerification || (existing.testCommand !== undefined && row.verification?.tests === undefined)
+        || (existing.sandboxImage !== undefined && row.sandbox_image == null)
+        || (existing.weeklyBudgetUSD !== undefined && row.weekly_budget_usd == null)
+        || (existing.neverAuto === true && row.never_auto !== true)) {
+        throw new Error("First Akiroo sync would remove existing verification, sandbox or safety settings; reconcile them in Akiroo before syncing.");
+      }
+    }
     const sandboxImage = row.sandbox_image ?? undefined;
     const weeklyBudgetUSD = typeof row.weekly_budget_usd === "number" ? row.weekly_budget_usd : undefined;
     const applied: ManagedFields = {
@@ -276,7 +287,7 @@ export async function registerProject(deps: RegisterProjectDeps, payload: Record
     // operator edits here (which is the drift the page then shows). Spreading
     // `existing` under the overrides instead would leave a stale label or
     // budget reading as permanent drift.
-    const { label: _l, sandboxImage: _si, authority: _a, neverAuto: _na, weeklyBudgetUSD: _wb, verification: _v, managedBy: _m, ...rest } =
+    const { label: _l, sandboxImage: _si, authority: _a, neverAuto: _na, weeklyBudgetUSD: _wb, verification: _v, testCommand: _tc, managedBy: _m, ...rest } =
       existing ?? { repo: row.slug, autoMerge: false, autoDeploy: false };
     const next: Project = {
       ...rest,
@@ -297,7 +308,6 @@ export async function registerProject(deps: RegisterProjectDeps, payload: Record
     // The forge half. The repo was validated against the same policy a task
     // row is (external trust) inside the try, so the credential lookup below
     // cannot hand a token for a repo the allowlist refuses.
-    const allowed = assertRepoAllowed(row.repo, { trust: "external", config: deps.repoPolicy });
     let webhook = false;
     if (deps.hookBase === "" || deps.hookSecret === "") {
       deps.log(`[worker] akiroo: ${row.slug} registered without a forge webhook — SHIP_PUBLIC_URL/SHIP_WEBHOOK_SECRET unset`);

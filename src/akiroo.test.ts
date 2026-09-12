@@ -22,6 +22,8 @@ import {
 import type { AkirooResolution, AkirooRow, AkirooSweepDeps, DecisionOutcome } from "./akiroo.js";
 import { parseRepoUrl } from "./git.js";
 import type { DeliveryLog } from "./deliveries.js";
+import type { AkirooReceipt } from "./akiroo-receipts.js";
+import { FileAkirooReceipts } from "./akiroo-receipts.js";
 import type { IntakeTask, ProposeInput } from "./intake.js";
 import type { RepoPolicyConfig } from "./repo-policy.js";
 
@@ -69,10 +71,12 @@ const REPO = "http://forge.test/tyler/ship-demo.git";
 const POLICY: RepoPolicyConfig = { allowlist: "http://forge.test", gitToken: "tok-abc" };
 
 function baseDeps(overrides: Partial<AkirooSweepDeps> = {}): AkirooSweepDeps {
+  const receipts = new Map<string, AkirooReceipt>();
   return {
     target: { url: "http://akiroo.test", token: "ship_pull_xyz" },
     cursor: { get: async () => 0, set: async () => {}, reset: async () => {} },
     deliveries: memoryDeliveries(),
+    receipts: { get: async (key) => receipts.get(key), put: async (key, receipt) => { receipts.set(key, receipt); } },
     intake: memoryIntake(),
     enqueueScan: async () => ({ runId: "run-scan" }),
     decide: async () => "delivered",
@@ -389,7 +393,7 @@ test("an unknown kind is acked rather than left to block the queue", async () =>
   const script = scriptedAkiroo([{ id: 1, kind: "something-newer", payload: {} }]);
   const result = await sweepAkiroo(baseDeps({ fetchImpl: script.fetchImpl }));
   assert.deepEqual(script.acked, [[1]]);
-  assert.equal(result.handled, 1);
+  assert.equal(result.handled, 0);
 });
 
 test("a row whose handler throws is still acked", async () => {
@@ -402,6 +406,41 @@ test("a row whose handler throws is still acked", async () => {
   // every five seconds for the life of the deployment.
   assert.deepEqual(script.acked, [[1, 2]]);
   assert.equal(result.handled, 1);
+});
+
+test("a failed action has an unknown receipt across restart, never a success or automatic duplicate", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ship-receipts-"));
+  const script = scriptedAkiroo([{ id: 17, kind: "decision", payload: { run_id: "r", event_name: "e" } }]);
+  const acks: Array<{ receipts: Array<{ status: string }> }> = [];
+  let attempts = 0;
+  const deps = baseDeps({
+    receipts: new FileAkirooReceipts(dir),
+    decide: async () => { attempts++; throw new Error("lost response after dispatch"); },
+    fetchImpl: (async (url, init) => {
+      if (String(url).endsWith("/outbox/ack")) acks.push(JSON.parse(String(init?.body)));
+      return script.fetchImpl(url, init);
+    }) as typeof fetch,
+  });
+  assert.equal((await sweepAkiroo(deps)).handled, 0);
+  deps.receipts = new FileAkirooReceipts(dir);
+  deps.decide = async () => { attempts++; return "delivered"; };
+  await sweepAkiroo(deps);
+  assert.equal(attempts, 1);
+  assert.deepEqual(acks.map((a) => a.receipts[0]?.status), ["unknown", "unknown"]);
+});
+
+test("a concurrent poll cannot acknowledge an in-progress action", async () => {
+  let started!: () => void;
+  let finish!: () => void;
+  const running = new Promise<void>((resolve) => { started = resolve; });
+  const done = new Promise<void>((resolve) => { finish = resolve; });
+  const script = scriptedAkiroo([{ id: 18, kind: "decision", payload: { run_id: "r", event_name: "e" } }]);
+  const deps = baseDeps({ fetchImpl: script.fetchImpl, decide: async () => { started(); await done; return "delivered"; } });
+  const first = sweepAkiroo(deps);
+  await running;
+  assert.equal((await sweepAkiroo(deps)).acked, 0);
+  finish();
+  assert.equal((await first).handled, 1);
 });
 
 test("a re-delivered batch does not handle a row twice", async () => {
@@ -431,13 +470,14 @@ test("a re-delivered batch does not handle a row twice", async () => {
     },
     reset: async () => {},
   };
-  await assert.rejects(() => sweepAkiroo(baseDeps({ fetchImpl: fetchFailingAck, deliveries, decide, cursor })));
+  const receipts = baseDeps().receipts;
+  await assert.rejects(() => sweepAkiroo(baseDeps({ fetchImpl: fetchFailingAck, deliveries, receipts, decide, cursor })));
   assert.equal(decides, 1);
   // The cursor did NOT advance, so the same batch comes back...
   assert.equal(stored, 0);
 
   const script = scriptedAkiroo(rows);
-  const result = await sweepAkiroo(baseDeps({ fetchImpl: script.fetchImpl, deliveries, decide, cursor }));
+  const result = await sweepAkiroo(baseDeps({ fetchImpl: script.fetchImpl, deliveries, receipts, decide, cursor }));
   // ...and the claim short-circuits the handler rather than deciding twice.
   assert.equal(decides, 1);
   assert.equal(result.handled, 0);
@@ -567,7 +607,7 @@ test("a sweep namespaces its cursor and its delivery claims by workspace", async
   assert.ok(second.polls[0]!.includes("after=0"), `the new workspace starts from the beginning: ${second.polls[0]}`);
   assert.equal(result.pulled, 1);
   assert.equal(result.handled, 1, "the second workspace's row 7 is a different row and must be handled");
-  assert.deepEqual(claimed, [`${keyA}/7`, `${keyB}/7`]);
+  assert.deepEqual(claimed, [`${keyA}:receipts/7`, `${keyA}/7`, `${keyB}:receipts/7`, `${keyB}/7`]);
   assert.equal(positions.get(keyA), 7, "the first workspace's position is kept, not reused and not clobbered");
   assert.equal(positions.get(keyB), 7);
 });

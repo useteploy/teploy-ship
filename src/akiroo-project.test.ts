@@ -111,6 +111,34 @@ test("parseProjectRow accepts the contract-1 shape and camelCases the ladder", (
   assert.deepEqual(parsed.verification, { build: "pnpm build", tests: "pnpm test", observeWindowMin: 10 });
 });
 
+test("first ownership sync cannot silently erase manual verification or safety settings", async () => {
+  const s = sink();
+  const original: Project = { repo: "tyler/site", url: REPO, autoMerge: false, autoDeploy: false,
+    testCommand: "go test ./...", weeklyBudgetUSD: 5, verification: { build: "go build ./...", tests: "go test ./..." } };
+  await s.deps().projects.set(original);
+  const result = await registerProject(s.deps(),row({ verification: {}, weekly_budget_usd: null }));
+  assert.equal(result.status,"failed");
+  assert.match(result.error ?? "",/reconcile/);
+  assert.deepEqual(await s.deps().projects.forRepo(REPO),original);
+  assert.equal(s.forge.calls.length,0);
+});
+
+test("a refused repo cannot be persisted before the allowlist check", async () => {
+  const s = sink();
+  const result = await registerProject(s.deps({ repoPolicy: { allowlist: "https://elsewhere.example.com" } }),row());
+  assert.equal(result.status,"failed");
+  assert.equal(await s.deps().projects.forRepo(REPO),null);
+});
+
+test("managed tests replace and clear the legacy command alias too", async () => {
+  const s = sink();
+  await registerProject(s.deps(),row());
+  await registerProject(s.deps(),row({ verification: { tests: "pnpm test:new" }, settings_hash: "new" }));
+  assert.equal((await s.deps().projects.forRepo(REPO))?.testCommand,"pnpm test:new");
+  await registerProject(s.deps(),row({ verification: {}, settings_hash: "cleared" }));
+  assert.equal((await s.deps().projects.forRepo(REPO))?.testCommand,undefined);
+});
+
 test("parseProjectRow refuses a slug that disagrees with the repo url", () => {
   assert.throws(() => parseProjectRow(row({ slug: "someone/else" })), /does not match its repo url/);
 });

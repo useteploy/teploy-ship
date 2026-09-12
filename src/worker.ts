@@ -42,6 +42,7 @@ import type { Windows } from "./governance.js";
 import { makeObserveEmitter } from "./observe.js";
 import { multiNotifier, projectNotifier, scanReport, slackNotifier, webhookNotifier } from "./notify.js";
 import type { RunNotification, RunOrigin } from "./notify.js";
+import { NucleusAkirooReceipts } from "./akiroo-receipts.js";
 import { ladderRungsFromEvents, type Rung } from "./ladder.js";
 import { runVerificationSummary, verificationFactsFromEvents } from "./verification-summary.js";
 import type { ParsedFindings } from "./findings.js";
@@ -921,32 +922,36 @@ export function startWorker(options: WorkerOptions): {
           } catch {
             // A store read failure must not lose the notification entirely — a
             // bare status still tells a consumer the run needs attention.
-            notify.runEvent({
+            await owe({
               runId,
               status: outcome.status,
               ...(outcome.status === "waiting" && outcome.eventName !== undefined ? { eventName: outcome.eventName } : {}),
             });
+            await flush();
             return;
           }
-          const context = notificationContext(events);
+          const last = events.at(-1);
+          const context = { ...notificationContext(events), ...(last !== undefined ? { eventAt: last.at, eventSeq: last.seq } : {}) };
           // The contract-2 block rides BOTH branches: a park is the message a
           // decision is made from (the rungs and the paragraph are the case
           // for or against), and a terminal event is the record of what the
           // verification added up to.
           const verification = verificationContext(events);
           if (outcome.status === "waiting") {
-            notify.runEvent({
+            await owe({
               runId,
               status: outcome.status,
               ...(outcome.eventName !== undefined ? { eventName: outcome.eventName } : {}),
               ...context,
               ...verification,
             });
+            await flush();
             return;
           }
           // Terminal: include the PR link when the run opened one, and the
           // findings when it was a scan.
-          notify.runEvent({ runId, status: outcome.status, ...context, ...terminalContext(events), ...verification });
+          await owe({ runId, status: outcome.status, ...context, ...terminalContext(events), ...verification });
+          await flush();
         })());
       }
       // L8 D4: the per-repo numbers. One row per (repo, kind, runId) — the
@@ -1444,6 +1449,7 @@ export function startWorker(options: WorkerOptions): {
         target: resolution.target,
         cursor: akirooCursor,
         deliveries: options.runtime.deliveries,
+        receipts: new NucleusAkirooReceipts(options.runtime.db),
         intake: options.runtime.intake,
         registerProject: (payload) =>
           registerProject(
@@ -1456,7 +1462,7 @@ export function startWorker(options: WorkerOptions): {
               log,
             },
             payload,
-          ).then(() => {}),
+          ),
         enqueueScan: async (input) => {
           const runId = `run-${randomUUID().slice(0, 8)}`;
           await enqueueRun(options.runtime, {

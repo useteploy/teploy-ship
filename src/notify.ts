@@ -38,6 +38,8 @@ export interface RunOrigin {
 }
 
 export interface RunNotification {
+  eventAt?: string;
+  eventSeq?: number;
   runId: string;
   status: string;
   /** Set when parked: which decision the run waits on. */
@@ -257,6 +259,8 @@ export function slackNotifier(options?: {
  * the run. A run must not fail because something downstream was unreachable.
  */
 export interface RunWebhookPayload {
+  event_at?: string;
+  event_seq?: number;
   run_id: string;
   status: string;
   /** The event name to deliver a decision to, when parked. */
@@ -297,6 +301,8 @@ export function runWebhookPayload(event: RunNotification, publicUrl?: string): R
   return {
     run_id: event.runId,
     status: event.status,
+    ...(event.eventAt !== undefined ? { event_at: event.eventAt } : {}),
+    ...(event.eventSeq !== undefined ? { event_seq: event.eventSeq } : {}),
     ...(event.eventName !== undefined ? { event_name: event.eventName } : {}),
     ...(event.pr !== undefined ? { pr: event.pr } : {}),
     ...(event.repo !== undefined ? { repo: event.repo } : {}),
