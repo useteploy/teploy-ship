@@ -9,12 +9,22 @@ retain owed events, and chronology is carried on the wire. First project sync
 protects existing settings; allowlist checks precede storage; managed test
 commands update/clear their legacy alias too. No workflow steps changed.
 
+`e7f889a` is committed, pushed and deployed on both Ship processes, after
+Akiroo's receiver upgrade (`5038c7f`, then compatibility follow-up `88ab576`).
+Verified lint/build, 1,137 main + 40 script tests, 67 web tests/build, and the
+isolated Nucleus receipt probe. Live preflight reports one waiting run, zero
+incompatible/unrecorded runs; deployed worker/outbox/connector hashes match the
+tested build, login is reachable and collection resumed. No run was approved.
+A coordinated Nucleus snapshot (LSN 1650451) is retained privately and restored
+successfully into a disposable container. This is not the full end-to-end proof.
+
 SKIPPED (separate design/operational proof): automatic reconciliation of unknown
 forge/run outcomes; crash recovery before a notification intent is enqueued;
 one-shot project/revert notifier recovery; commit-bound verification and
 independent forge merge synchronization; warm-volume approval restoration;
 settled multi-attempt cost propagation (upstream event support); historical
-repair. Acceptance: fault-inject each boundary, restart the actual worker,
+repair; retention/capacity policy for durable receipts and overdue retries.
+Acceptance: fault-inject each boundary, restart the actual worker,
 prove one approved standalone and milestone loop, and reconcile the same tested,
 merged and deployed revision without duplicate external effects. These are not
 cosmetic tasks to delegate without the integration context.
