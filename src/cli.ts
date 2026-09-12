@@ -1651,6 +1651,11 @@ async function auditCommand(rest: string[]): Promise<void> {
   const format = enumFlag(args.flags.format, "format", ["csv", "json"] as const, "csv");
   const since = args.flags.since as string | undefined;
   const until = args.flags.until as string | undefined;
+  // Spreadsheet-safe CSV: free-text cells that begin with a formula marker
+  // (=, +, -, @, tab, CR) are prefixed with a single quote so they open as
+  // literal text instead of live formulas. Raw output stays the default for
+  // machine consumers; the escape is reversible (strip one leading ').
+  const safeCsv = args.flags["safe-csv"] !== undefined;
   for (const [name, value] of [["since", since], ["until", until]] as const) {
     if (value !== undefined && Number.isNaN(Date.parse(value))) fail(`--${name} must be an ISO-8601 timestamp, got: ${value}`);
   }
@@ -1663,7 +1668,7 @@ async function auditCommand(rest: string[]): Promise<void> {
       rows.push(auditRow(meta, await runtime.store.load(meta.runId)));
     }
     const windowed = withinWindow(rows, since, until);
-    process.stdout.write(format === "json" ? `${JSON.stringify(windowed, null, 2)}\n` : toCsv(windowed));
+    process.stdout.write(format === "json" ? `${JSON.stringify(windowed, null, 2)}\n` : toCsv(windowed, { spreadsheetSafe: safeCsv }));
     if (windowed.length === 0) process.stderr.write(dim("no runs in that window\n"));
     else {
       // Report the gap by counting it, not with a blanket caveat. The old line

@@ -40,6 +40,11 @@ export const DELIVERY_TTL_S = 7 * 24 * 60 * 60;
  */
 export class FileDeliveryLog implements DeliveryLog {
   #dir: string;
+  // Serializes read-and-claim within this process: without it, two concurrent
+  // claims for the same key can both pass #seen before either appends, and
+  // both return true (duplicate delivery past the replay ledger). The
+  // cross-process restriction below still applies — this lock is per process.
+  #claimLock: Promise<unknown> = Promise.resolve();
 
   constructor(dir = join(stateDir(), "deliveries")) {
     this.#dir = dir;
@@ -51,7 +56,17 @@ export class FileDeliveryLog implements DeliveryLog {
 
   async #seen(key: string, days: string[]): Promise<boolean> {
     for (const day of days) {
-      const raw = await readFile(this.#path(day), "utf8").catch(() => "");
+      let raw: string;
+      try {
+        raw = await readFile(this.#path(day), "utf8");
+      } catch (err) {
+        // An absent day file is an empty ledger. Any other read failure
+        // (permissions, I/O) must not fail replay protection open: treating
+        // it as unseen would let the claim record and accept a delivery
+        // whose history could not be inspected.
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+        raw = "";
+      }
       if (raw.split("\n").includes(key)) return true;
     }
     return false;
@@ -59,13 +74,23 @@ export class FileDeliveryLog implements DeliveryLog {
 
   async claim(source: string, deliveryId: string): Promise<boolean> {
     const key = `${source}:${deliveryId}`;
-    const now = new Date();
-    const today = now.toISOString().slice(0, 10);
-    const yesterday = new Date(now.getTime() - 86_400_000).toISOString().slice(0, 10);
-    if (await this.#seen(key, [today, yesterday])) return false;
-    await mkdir(this.#dir, { recursive: true });
-    await appendFile(this.#path(today), key + "\n");
-    return true;
+    // Chain onto the previous claim so reads and appends never interleave
+    // within this process, whatever caller concurrency looks like.
+    const release = this.#claimLock;
+    let settle: () => void = () => {};
+    this.#claimLock = new Promise<void>((resolve) => (settle = resolve));
+    await release;
+    try {
+      const now = new Date();
+      const today = now.toISOString().slice(0, 10);
+      const yesterday = new Date(now.getTime() - 86_400_000).toISOString().slice(0, 10);
+      if (await this.#seen(key, [today, yesterday])) return false;
+      await mkdir(this.#dir, { recursive: true });
+      await appendFile(this.#path(today), key + "\n");
+      return true;
+    } finally {
+      settle();
+    }
   }
 }
 

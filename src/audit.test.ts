@@ -118,6 +118,22 @@ test("approvals are counted, because 'a person unblocked this' is the closest th
 test("an unpriced or usage-less run reports zero rather than guessing", () => {
   const row = auditRow(meta(), [ev("run-started", undefined, { input: { task: "t" } }), ev("run-completed", undefined, { output: { status: "finished" } })]);
   assert.equal(row.costUSD, 0);
+  assert.equal(row.costEstimated, false);
+});
+
+test("a settled cost recorded at completion is exported as-is; a recomputed one is labeled an estimate", () => {
+  const settled = auditRow(meta(), [
+    ev("run-started", undefined, { input: { task: "t" } }),
+    ev("run-completed", undefined, { output: { status: "finished", usage: { inputTokens: 1 }, costUSD: 0.25 } }),
+  ]);
+  assert.equal(settled.costUSD, 0.25);
+  assert.equal(settled.costEstimated, false, "settled history must not be repriced at export");
+
+  const legacy = auditRow(meta(), [
+    ev("run-started", undefined, { input: { task: "t" } }),
+    ev("run-completed", undefined, { output: { status: "finished", usage: { inputTokens: 1 } } }),
+  ]);
+  assert.equal(legacy.costEstimated, true, "recomputation applies current pricing to old usage");
 });
 
 test("CSV quoting survives a task written by a human", () => {
@@ -126,7 +142,7 @@ test("CSV quoting survives a task written by a human", () => {
   const row = auditRow(meta({ task: 'fix "quoting", then\nnewlines, too' }), [ev("run-started", undefined, { input: { task: "x" } })]);
   const csv = toCsv([row]);
   const header = csv.split("\n")[0]!;
-  assert.equal(header.split(",").length, 17, "the header must not itself be ambiguous");
+  assert.equal(header.split(",").length, 18, "the header must not itself be ambiguous");
   assert.match(csv, /"fix ""quoting"", then\nnewlines, too"/, "quotes doubled, whole field wrapped");
 
   // And the row must still be one record: a bare newline inside an unquoted
@@ -152,6 +168,12 @@ test("column order is fixed, because a moving header breaks every downstream con
   assert.equal(a, b);
   assert.equal(
     a,
-    "runId,createdAt,updatedAt,status,source,actor,actorKind,approvedBy,model,ranOn,repo,task,pr,turns,costUSD,approvals,attributable",
+    "runId,createdAt,updatedAt,status,source,actor,actorKind,approvedBy,model,ranOn,repo,task,pr,turns,costUSD,costEstimated,approvals,attributable",
   );
+});
+
+test("spreadsheet-safe mode neutralizes formula-shaped task text; raw mode is unchanged", () => {
+  const row = auditRow(meta({ task: "=1+1" }), [ev("run-started", undefined, { input: { task: "=1+1" } })]);
+  assert.equal(toCsv([row]).split("\n")[1].split(",")[11], "=1+1", "raw mode preserves the literal text");
+  assert.equal(toCsv([row], { spreadsheetSafe: true }).split("\n")[1].split(",")[11], "'=1+1", "safe mode escapes formula markers");
 });

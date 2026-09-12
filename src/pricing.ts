@@ -212,16 +212,25 @@ export function pricingOverrides(env: NodeJS.ProcessEnv = process.env): Record<s
     return {};
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+  // A rate must be a finite nonnegative number. JSON numeric overflow
+  // (1e309) parses to Infinity and passes a bare typeof check; negatives
+  // pass it too. Either would flow into every cost computation on the
+  // enforcement path as NaN/Infinity/negative accounting, so a malformed
+  // entry is a configuration error and is refused, not silently used.
+  // Zero is allowed: an explicitly free model (local, quota-billed) is a
+  // legitimate operator declaration.
+  const validRate = (v: unknown): v is number =>
+    typeof v === "number" && Number.isFinite(v) && v >= 0;
   const out: Record<string, ModelPricing> = {};
   for (const [id, value] of Object.entries(parsed as Record<string, unknown>)) {
     if (typeof value !== "object" || value === null) continue;
     const v = value as Record<string, unknown>;
-    if (typeof v.inputPer1M !== "number" || typeof v.outputPer1M !== "number") continue;
+    if (!validRate(v.inputPer1M) || !validRate(v.outputPer1M)) continue;
     out[id.toLowerCase()] = {
       inputPer1M: v.inputPer1M,
       outputPer1M: v.outputPer1M,
-      ...(typeof v.cacheReadPer1M === "number" ? { cacheReadPer1M: v.cacheReadPer1M } : {}),
-      ...(typeof v.cacheWritePer1M === "number" ? { cacheWritePer1M: v.cacheWritePer1M } : {}),
+      ...(validRate(v.cacheReadPer1M) ? { cacheReadPer1M: v.cacheReadPer1M } : {}),
+      ...(validRate(v.cacheWritePer1M) ? { cacheWritePer1M: v.cacheWritePer1M } : {}),
     };
   }
   return out;

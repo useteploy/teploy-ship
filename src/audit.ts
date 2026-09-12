@@ -57,6 +57,9 @@ export interface AuditRow {
   pr: string;
   turns: number;
   costUSD: number;
+  /** True when costUSD was recomputed at export time from current pricing
+   * rather than read from a settled value recorded at completion. */
+  costEstimated: boolean;
   /** Did a person have to unblock this run at some point? */
   approvals: number;
   /**
@@ -78,6 +81,7 @@ export function auditRow(meta: RunMeta, events: WorkflowEvent[]): AuditRow {
   let turns = 0;
   let approvals = 0;
   let cost = 0;
+  let costEstimated = false;
   const approvedBy: string[] = [];
 
   for (const e of events) {
@@ -101,10 +105,20 @@ export function auditRow(meta: RunMeta, events: WorkflowEvent[]): AuditRow {
       const out = asRecord(data?.output);
       if (typeof out?.pr === "string") pr = out.pr;
       if (typeof out?.turns === "number") turns = Math.max(turns, out.turns);
-      // Priced from the recorded usage rather than from a running total, so an
-      // export of an old run reports what that run actually cost even if the
-      // price table has moved since.
-      if (out?.usage !== undefined) cost = costUSD(meta.model, out.usage as never);
+      // A settled cost recorded at completion time is immutable history:
+      // export it as-is. Only when the event carries none (runs recorded
+      // before settled costs existed) is the cost recomputed from usage —
+      // and then it is labeled an estimate, because today's price table
+      // (including operator overrides) is being applied to old usage. The
+      // settled value is written by the run-completed emitter upstream;
+      // this export prefers it whenever present.
+      if (typeof out?.costUSD === "number" && Number.isFinite(out.costUSD)) {
+        cost = out.costUSD;
+        costEstimated = false;
+      } else if (out?.usage !== undefined) {
+        cost = costUSD(meta.model, out.usage as never);
+        costEstimated = true;
+      }
     }
   }
 
@@ -124,6 +138,7 @@ export function auditRow(meta: RunMeta, events: WorkflowEvent[]): AuditRow {
     pr,
     turns,
     costUSD: Number(cost.toFixed(4)),
+    costEstimated,
     approvals,
     attributable: isAttributable(actorFromMeta(meta)),
   };
@@ -145,6 +160,7 @@ const COLUMNS: (keyof AuditRow)[] = [
   "pr",
   "turns",
   "costUSD",
+  "costEstimated",
   "approvals",
   "attributable",
 ];
@@ -155,14 +171,22 @@ const COLUMNS: (keyof AuditRow)[] = [
  * that opens in a spreadsheet and is silently wrong, which is worse than one
  * that fails to open.
  */
-function csvCell(value: string | number | boolean): string {
-  const s = String(value);
+function csvCell(value: string | number | boolean, spreadsheetSafe = false): string {
+  let s = String(value);
+  // RFC-style quoting protects column structure, not formula interpretation:
+  // a task beginning with =, +, - or @ opens as a live formula in common
+  // spreadsheet applications. Safe mode prefixes a single quote (the standard
+  // reversible escape — strip one leading ' to recover the original) so the
+  // cell displays as literal text. Raw mode is unchanged for machine consumers.
+  if (spreadsheetSafe && /^[=+\-@\t\r]/.test(s)) s = `'${s}`;
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-export function toCsv(rows: AuditRow[]): string {
+export function toCsv(rows: AuditRow[], opts?: { spreadsheetSafe?: boolean }): string {
   const lines = [COLUMNS.join(",")];
-  for (const row of rows) lines.push(COLUMNS.map((c) => csvCell(row[c])).join(","));
+  for (const row of rows) {
+    lines.push(COLUMNS.map((c) => csvCell(row[c], opts?.spreadsheetSafe)).join(","));
+  }
   return `${lines.join("\n")}\n`;
 }
 
