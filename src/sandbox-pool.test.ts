@@ -249,3 +249,46 @@ test("SB-A: warm calls route to the host the handle names, and a host without a 
   assert.deepEqual(asked, ["a:a-run", "a:commit:a-run"]);
   assert.equal(await pool.warmInfo(onB.handle), null, "a host with no cache is a cold path, not an error");
 });
+
+test("execStream routes by the handle's tag and falls back to a host's plain exec", async () => {
+  const seen: string[] = [];
+  const streaming: ExecutorProvider = {
+    isolated: true,
+    async create() {
+      return { handle: "s-run" };
+    },
+    attach(handle: string) {
+      return { handle } as unknown as AgentExecutor;
+    },
+    async execStream(handle, command, _o, onChunk) {
+      seen.push(`stream:${handle}:${command}`);
+      onChunk("stdout", "hello\n");
+      return { exitCode: 0, stdout: "hello\n", stderr: "", timedOut: false, truncated: false };
+    },
+  };
+  const plain: ExecutorProvider = {
+    isolated: true,
+    async create() {
+      return { handle: "p-run" };
+    },
+    attach(handle: string) {
+      return {
+        async exec(command: string) {
+          seen.push(`exec:${handle}:${command}`);
+          return { exitCode: 0, stdout: "late\n", stderr: "", timedOut: false, truncated: false };
+        },
+      } as unknown as AgentExecutor;
+    },
+  };
+  const pool = new SandboxPool({ hosts: [{ url: "http://s", provider: streaming }, { url: "http://p", provider: plain }] });
+  const onS = await pool.create();
+  const onP = await pool.create();
+  const chunks: string[] = [];
+  const a = await pool.execStream(onS.handle, "ls", {}, (_s, c) => chunks.push(c));
+  assert.equal(a.stdout, "hello\n");
+  assert.deepEqual(chunks, ["hello\n"]);
+  const b = await pool.execStream(onP.handle, "ls", {}, (_s, c) => chunks.push(c));
+  assert.equal(b.stdout, "late\n");
+  assert.deepEqual(chunks, ["hello\n"], "a host that cannot stream delivers at exit, through its plain exec");
+  assert.deepEqual(seen, ["stream:s-run:ls", "exec:p-run:ls"]);
+});

@@ -30,7 +30,7 @@
  * still resolves — to host 0, which is the only host a single-URL deployment
  * ever had.
  */
-import type { AgentExecutor } from "@neutron-build/agents";
+import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 
 import type { ExecutorProvider, SandboxOverrides } from "./durable.js";
 import type { WarmState } from "./warm.js";
@@ -257,6 +257,25 @@ export class SandboxPool implements ExecutorProvider {
     const { index, handle: inner } = parsePoolHandle(handle);
     const host = this.#hosts[index];
     return host?.provider.warmCommit === undefined ? null : await host.provider.warmCommit(inner);
+  }
+
+  /**
+   * The streamed exec (live.ts), routed by the handle's tag. A host whose
+   * provider cannot stream answers with its plain exec — same result, the
+   * chunks just arrive at exit — so the caller never has to know which host
+   * it landed on.
+   */
+  async execStream(
+    handle: string,
+    command: string,
+    options: { timeoutMs?: number; maxOutputBytes?: number },
+    onChunk: (stream: "stdout" | "stderr", chunk: string) => void,
+  ): Promise<ExecResult> {
+    const { index, handle: inner } = parsePoolHandle(handle);
+    const host = this.#hosts[index];
+    if (host === undefined) throw new Error(`no sandbox host for handle ${handle}`);
+    if (host.provider.execStream !== undefined) return host.provider.execStream(inner, command, options, onChunk);
+    return host.provider.attach(inner).exec(command, options);
   }
 
   /**

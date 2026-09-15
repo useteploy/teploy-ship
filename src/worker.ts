@@ -697,6 +697,11 @@ export function startWorker(options: WorkerOptions): {
     ...(src.destroy !== undefined ? { destroy: (handle: string) => src.destroy!(handle) } : {}),
     ...(src.warmInfo !== undefined ? { warmInfo: (handle: string) => src.warmInfo!(handle) } : {}),
     ...(src.warmCommit !== undefined ? { warmCommit: (handle: string) => src.warmCommit!(handle) } : {}),
+    // The streamed exec behind the live "now" line (live.ts). Forwarded like
+    // the rest: dropping it here silently degrades every harness run to
+    // "claude starting" for its whole duration — which is exactly what the
+    // first live proof showed (run-da2d9b19, 2026-09-15).
+    ...(src.execStream !== undefined ? { execStream: (handle, command, o, onChunk) => src.execStream!(handle, command, o, onChunk) } : {}),
   };
   const wf = durableAgent({
     ...(maxSteps !== undefined ? { maxSteps } : {}),
