@@ -28,3 +28,9 @@ test("roughDuration is coarse", () => {
   assert.equal(roughDuration(80 * 60_000), "1 h 20 min");
   assert.equal(roughDuration(27 * 3_600_000), "1 d 3 h");
 });
+
+test("typicalDuration: a run parked at the merge boundary counts as finished work; other parks do not", () => {
+  const parked = { ...run("p", "waiting", 20), eventName: "approve-merge" };
+  const asking = { ...run("q", "waiting", 5), eventName: "turn-2-ask" };
+  assert.deepEqual(typicalDuration([run("a", "completed", 10), parked, asking], new Set(["a", "p", "q"])), { medianMs: 15 * 60_000, n: 2 });
+});

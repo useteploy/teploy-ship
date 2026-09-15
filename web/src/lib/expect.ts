@@ -17,13 +17,25 @@ export interface Typical {
 export interface TypicalSample {
   runId: string;
   status: string;
+  /** The park a waiting run is on; a run held at the merge boundary has finished its work. */
+  eventName?: string;
   createdAt: string;
   updatedAt: string;
 }
 
+/**
+ * Done, for the purpose of "how long does a run take": completed, or parked
+ * at the merge boundary — the work is finished and the wait is a person's.
+ * Without the second case a repo whose runs all sit as draft PRs awaiting a
+ * merge call would never have an expectation at all.
+ */
+function finishedWork(r: TypicalSample): boolean {
+  return r.status === "completed" || (r.status === "waiting" && r.eventName === "approve-merge");
+}
+
 export function typicalDuration(runs: TypicalSample[], sameRepo: ReadonlySet<string>, exclude?: string): Typical | null {
   const durations = runs
-    .filter((r) => r.status === "completed" && r.runId !== exclude && sameRepo.has(r.runId))
+    .filter((r) => finishedWork(r) && r.runId !== exclude && sameRepo.has(r.runId))
     .map((r) => new Date(r.updatedAt).getTime() - new Date(r.createdAt).getTime())
     .filter((ms) => Number.isFinite(ms) && ms > 0)
     .sort((a, b) => a - b);
