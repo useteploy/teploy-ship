@@ -52,6 +52,19 @@ All notable changes to Teploy Ship are recorded here.
   counts against it on z.ai's Anthropic route — and a cap hit cuts the action
   block. Both loops read it; no recorded step changes.
 
+### Fixed
+- **A warm-volume run no longer loses its workspace at a park.** Every park
+  (plan, ask, approval, merge) snapshotted the container and restored from
+  the snapshot after the decision; the daemon's snapshot is a `docker
+  commit`, which skips volumes, so on a warm run the restored container's
+  /work was empty — the agent then worked in a tree with no repository and
+  the publish gate failed with `not a git repository` (run-2aab445b,
+  2026-09-15; teploy-sandbox #1, filed 2026-09-07 off the same fault at a
+  merge park). Until the daemon snapshots the volume, a warm run parks by
+  keeping its container and re-attaching after the decision — survivable now
+  that the deployment asks for a 24-hour TTL. Decided off the recorded input
+  (`warm`), so replay agrees.
+
 ### Changed
 - `docs/DEPLOY.md`: `SHIP_SANDBOX_TTL_SEC` must be sized for the longest run
   allowed, not the typical one. Three of the six most recent runs on the

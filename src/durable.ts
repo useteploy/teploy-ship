@@ -1625,7 +1625,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
         });
         addUsage(planStep.usage);
 
-        const canSnapshot = config.executor.snapshot !== undefined && config.executor.createFrom !== undefined;
+        const canSnapshot = parkCanSnapshot(config, input);
         let parkImage: string | undefined;
         if (canSnapshot) {
           parkImage = await ws.ctx.step(`${p}plan-snapshot`, () => config.executor.snapshot!(ws.handle));
@@ -2064,7 +2064,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
             messages.push({ role: "user", content: ASK_UNAVAILABLE });
             continue;
           }
-          const canSnapshot = config.executor.snapshot !== undefined && config.executor.createFrom !== undefined;
+          const canSnapshot = parkCanSnapshot(config, input);
           let askImage: string | undefined;
           if (canSnapshot) {
             askImage = await ws.ctx.step(`${p}turn-${turn}-snapshot`, () => config.executor.snapshot!(ws.handle));
@@ -2090,7 +2090,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
           // With snapshot support, persist the workspace BEFORE parking:
           // the park can outlive the container's TTL. The snapshot ref is
           // a recorded step result, so replay reconstructs it for free.
-          const canSnapshot = config.executor.snapshot !== undefined && config.executor.createFrom !== undefined;
+          const canSnapshot = parkCanSnapshot(config, input);
           let parkImage: string | undefined;
           if (canSnapshot) {
             parkImage = await ws.ctx.step(`${p}turn-${turn}-snapshot`, () => config.executor.snapshot!(ws.handle));
@@ -2712,7 +2712,7 @@ async function mergeBoundaryGate(
   const { ref, token, checkout, pr } = target;
   let exec = executor;
   let handle = target.handle;
-  const canSnapshot = handle !== undefined && config.executor.snapshot !== undefined && config.executor.createFrom !== undefined;
+  const canSnapshot = handle !== undefined && parkCanSnapshot(config, input);
   let conflict: string[] | undefined;
   // The decision the loop ended on, so the caller's verification paragraph can
   // say how the merge question resolved, plus the re-run suite when an approval
@@ -3407,6 +3407,22 @@ function prTitle(task: string, incomplete: boolean): string {
   const prefix = incomplete ? "[incomplete] " : "";
   const room = 72 - prefix.length;
   return `${prefix}${task.length > room ? `${task.slice(0, room)}…` : task}`;
+}
+
+/**
+ * May a park snapshot the workspace and restore it after the decision?
+ *
+ * Only when the provider can, AND the run is not on a warm volume: the
+ * daemon's snapshot is a `docker commit`, which skips volumes, so a restore
+ * of a warm run boots a container whose /work is empty — the agent then
+ * works in a tree with no repository and the publish gate fails with `not a
+ * git repository` (run-2aab445b, 2026-09-15; teploy-sandbox #1). Until the
+ * daemon snapshots the volume too, a warm run parks by keeping its
+ * container and re-attaching to it after the decision, which the 24-hour
+ * TTL now makes survivable. A fact of the recorded input, so replay agrees.
+ */
+function parkCanSnapshot(config: Pick<DurableAgentConfig, "executor">, input: Pick<DurableAgentInput, "warm">): boolean {
+  return config.executor.snapshot !== undefined && config.executor.createFrom !== undefined && input.warm !== true;
 }
 
 /**

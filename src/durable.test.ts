@@ -4191,3 +4191,37 @@ test("```ask on a run whose input does not admit it is refused in-transcript, wi
   assert.equal((done.output as { agentSummary: string }).agentSummary, "decided");
   assert.ok(!(await store.load("run-noask")).some((e) => e.type === "event-waiting"));
 });
+
+test("a warm-volume run parks on ```ask WITHOUT a snapshot: the container is kept and re-attached (teploy-sandbox #1)", async () => {
+  const { model } = reactiveModel([
+    "```ask\nA or B?\n```",
+    (obs) => (obs.includes("Operator's answer: B") ? "```bash\necho B > pick.txt\n```" : "```bash\necho wrong\n```"),
+    "```finish\npicked B\n```",
+    "```bash\ncat pick.txt\n```",
+    "```finish\npicked B\n```",
+  ]);
+  const { provider } = await localProvider();
+  let snapshots = 0;
+  const snapshotting: ExecutorProvider = {
+    ...provider,
+    async snapshot() {
+      snapshots++;
+      return "img";
+    },
+    async createFrom() {
+      throw new Error("a warm run must never restore from a snapshot: the volume is not in it");
+    },
+  };
+  const wf = durableAgent({ model, executor: snapshotting });
+  const store = new MemoryEventStore();
+  const parked = await executeRun({ workflow: wf, runId: "run-ask-warm", store, input: { task: "pick", ask: true, warm: true } });
+  assert.equal(parked.status, "waiting");
+  assert.equal(parked.eventName, askEvent(0));
+  assert.equal(snapshots, 0, "no snapshot on a warm run");
+  assert.ok(!(await store.load("run-ask-warm")).some((e) => e.type === "step-completed" && /snapshot$/.test(e.name ?? "")));
+  await deliverEvent(store, "run-ask-warm", askEvent(0), { approved: true, answer: "B" });
+  const done = await executeRun({ workflow: wf, runId: "run-ask-warm", store });
+  assert.equal(done.status, "completed");
+  assert.equal((done.output as { agentSummary: string }).agentSummary, "picked B");
+  assert.ok(!(await store.load("run-ask-warm")).some((e) => e.type === "step-completed" && /restore$/.test(e.name ?? "")));
+});
