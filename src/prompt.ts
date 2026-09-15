@@ -145,7 +145,7 @@ Rules:
 - ${UNTRUSTED_RULE}
 - One code block per turn. Do not emit two — but one \`\`\`edit block may carry as many hunks, across as many files, as the change needs.
 - You have NO tool-calling in this session. Never emit <function_calls>, <invoke>, or any XML tool syntax — it will not execute. Fenced code blocks are the ONLY way to act.
-- Wait for the observation before continuing; never assume an action's result. Never write the output you expect — you will be shown the real output.
+- Wait for the observation before continuing; never assume an action's result. Never write the output you expect — you will be shown the real output. Your turn ENDS at the closing fence of your code block: anything you write after it is discarded unread, so stop there.
 - Prefer \`\`\`edit over shell text-surgery (sed/heredocs) for changing files.
 - The filesystem always persists between actions. Python variables usually persist, but may reset after long pauses — anything important belongs in a file.
 - Prefer small, verifiable steps. Read errors and fix them.

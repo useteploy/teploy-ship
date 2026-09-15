@@ -8,7 +8,7 @@ import { isSuspension, workflow } from "@neutron-build/workflow";
 import type { WorkflowContext, WorkflowDefinition } from "@neutron-build/workflow";
 
 import { DEFAULT_MAX_OUTPUT_TOKENS, executeAction, workspaceFingerprint } from "./agent.js";
-import { FINISH_NUDGE_CLEAN_TREE, FINISH_NUDGE_FAILED, FINISH_NUDGE_NO_EVIDENCE, FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, describeAction, parseAction } from "./actions.js";
+import { FINISH_NUDGE_CLEAN_TREE, FINISH_NUDGE_FAILED, FINISH_NUDGE_NO_EVIDENCE, FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, describeAction, parseAction, transcriptTurn } from "./actions.js";
 import { ASK_UNAVAILABLE, askAnswerMessage, askEvent } from "./ask.js";
 import type { AskDecisionPayload } from "./ask.js";
 import { clipDetail, liveSink } from "./live.js";
@@ -1732,7 +1732,10 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
         // An empty model response serializes to an empty text content block,
         // which Anthropic rejects on the next call — never store it empty
         // (parseAction on "" gives a "none" action → nudged below).
-        messages.push({ role: "assistant", content: thought.trim() === "" ? "(no response)" : thought });
+        // Trimmed at the first action block (actions.ts transcriptTurn): what
+        // the model wrote after it is at best ignored and at worst its own
+        // invented observation, which the next turn then reasons about.
+        messages.push({ role: "assistant", content: thought.trim() === "" ? "(no response)" : transcriptTurn(thought) });
 
         const action = parseAction(thought);
         // A SCAN'S FINISH GATE, and it replaces the fix-run chain below rather

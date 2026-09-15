@@ -175,7 +175,7 @@ test("runAgent aggregates usage across calls, cache fields included", async () =
 });
 
 
-test("enqueueRun bakes stuck detection into the run INPUT — absent by default, env-settable", async () => {
+test("enqueueRun bakes stuck detection into the run INPUT — on by default with its thresholds, SHIP_RECOVERY=0 turns it off", async () => {
   // The knob has to be decided at enqueue, not at execution: the thresholds
   // choose which turn a run terminates on, so a worker that disagreed with the
   // log would trip NondeterminismError. This pins where the decision lands.
@@ -200,8 +200,15 @@ test("enqueueRun bakes stuck detection into the run INPUT — absent by default,
 
   const base = { runId: "r-enq", task: "t", model: "m" };
   const plain = await inputOf(base);
-  assert.equal("recovery" in plain, false, "off unless asked for — nothing changes for existing deployments");
+  // On by default since 2026-09-15 (run-a3d15f43: thirty-plus turns with no
+  // progress and nothing to stop it), and materialised as the thresholds,
+  // never a bare `true` — see the env branch below for why.
+  assert.deepEqual(plain.recovery, { ...defaultRecoveryConfig }, "on by default, thresholds in the log");
   assert.equal("settle" in plain, false);
+  const off = await inputOf(base, { SHIP_RECOVERY: "0" });
+  assert.equal("recovery" in off, false, "SHIP_RECOVERY=0 is the deployment-wide off switch");
+  const offForOne = await inputOf({ ...base, recovery: false });
+  assert.equal(offForOne.recovery, false, "recovery: false for one run is recorded as such");
 
   const asked = await inputOf({ ...base, recovery: { maxNudges: 1 }, settle: true });
   assert.deepEqual(asked.recovery, { maxNudges: 1 }, "the THRESHOLDS ride in the input too, not just the switch");

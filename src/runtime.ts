@@ -1021,7 +1021,14 @@ export async function enqueueRun(
   // presence, so "off for a scan" has to be a fact in the log, not a decision a
   // worker makes while replaying one.
   const scan = options.mode === "scan";
-  const recoveryFlag = options.recovery ?? (envFlag("SHIP_RECOVERY") ? true : undefined);
+  // Stuck detection (recovery.ts) is ON by default since 2026-09-15. It had
+  // been opt-in (`SHIP_RECOVERY=1`) on the product path while the live loop
+  // had it on unconditionally, and run-a3d15f43 showed the cost of the gap:
+  // thirty-plus turns re-verifying a finished change with nothing to stop
+  // it. `SHIP_RECOVERY=0` turns it off for a deployment; `recovery: false`
+  // for one run. Materialised as the full tuning so a later change to the
+  // defaults cannot alter a replay.
+  const recoveryFlag = options.recovery ?? (envFlagOff("SHIP_RECOVERY") ? undefined : true);
   const recovery =
     recoveryFlag === true ? { ...defaultRecoveryConfig } : recoveryFlag;
   const settle = scan ? undefined : (options.settle ?? (envFlag("SHIP_SETTLE") ? true : undefined));

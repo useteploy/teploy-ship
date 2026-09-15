@@ -164,6 +164,38 @@ function splitByFileHeader(code: string): Array<{ file: string; all: boolean; bo
  * comes first in the text wins, so a hallucinated trailing ```finish
  * never outranks the action the model actually attempted.
  */
+/**
+ * The model's turn, cut at the end of its first action block.
+ *
+ * What goes into the transcript as the assistant's message. Everything after
+ * the first fenced action is discarded — the protocol is one block per turn
+ * and the parser only ever reads the first — and the reason is not tidiness:
+ * a model that keeps writing after its block writes the observation it
+ * EXPECTS, in the exact `[exit 0] stdout:` shape the real one arrives in.
+ * Left in the transcript, that fiction sits beside the real observation and
+ * the model then reasons about which of the two to believe. Measured live
+ * 2026-09-15 (run-a3d15f43, GLM 5.3): thirty-plus turns re-verifying a
+ * finished change against "resets" that were its own invented output. A
+ * turn with no action block is kept whole — there is nothing to cut at.
+ *
+ * Pure, so a replay trims the recorded text identically.
+ */
+export function transcriptTurn(text: string): string {
+  const fenced = firstFencedAction(text);
+  if (fenced === null) return text;
+  return text.slice(0, fenced.end).trimEnd();
+}
+
+function firstFencedAction(text: string): { end: number } | null {
+  for (const match of text.matchAll(FENCE)) {
+    const lang = (match[1]!.trim().split(/\s+/)[0] ?? "").toLowerCase();
+    if (ACTION_LANGS.has(lang)) return { end: match.index + match[0].length };
+  }
+  return null;
+}
+
+const ACTION_LANGS: ReadonlySet<string> = new Set(["finish", "edit", "create", "search", "ask", ...PYTHON_LANGS, ...BASH_LANGS]);
+
 export function parseAction(text: string): Action {
   const fenced = parseFencedAction(text);
   const xml = parseToolXmlAction(text);

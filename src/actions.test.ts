@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { describeAction, parseAction } from "./actions.js";
+import { transcriptTurn } from "./actions.js";
 
 test("parses a bash action", () => {
   assert.deepEqual(parseAction("Let me list files.\n```bash\nls -la\n```"), { kind: "bash", code: "ls -la\n" });
@@ -227,4 +228,12 @@ test("describeAction summarises a multi-file edit without dumping it", () => {
     ],
   });
   assert.equal(many, "edit: 2 files (3 hunks)");
+});
+
+test("transcriptTurn cuts the turn at the first action block; a turn with no block is kept whole", () => {
+  const fake = "Let me check.\n```bash\nls\n```\n\n[exit 0]\nstdout:\nfile.txt\n```\nIt exists, so now:\n```bash\nrm file.txt\n```";
+  assert.equal(transcriptTurn(fake), "Let me check.\n```bash\nls\n```");
+  assert.equal(transcriptTurn("```json\n{\"a\":1}\n```\nthen\n```edit a.py\n<<<<<<< SEARCH\nx\n=======\ny\n>>>>>>> REPLACE\n```\nfake output"), "```json\n{\"a\":1}\n```\nthen\n```edit a.py\n<<<<<<< SEARCH\nx\n=======\ny\n>>>>>>> REPLACE\n```");
+  assert.equal(transcriptTurn("no block here"), "no block here");
+  assert.equal(transcriptTurn("```finish\ndone\n```\ntrailing"), "```finish\ndone\n```");
 });

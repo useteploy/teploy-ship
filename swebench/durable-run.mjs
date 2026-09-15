@@ -130,7 +130,9 @@ export function durableInput({ task, arm, settle = false, critic = false, index 
   // thresholds decide which turn a run terminates on — a bare `true` resolves
   // them from a code constant at execution time, so editing the constant bricks
   // in-flight runs with a NondeterminismError that executeRun throws.
-  const recoveryOn = arm === "parity" || settleBits.recovery === true;
+  // The product arm has it on too since 2026-09-15: enqueueRun turned stuck
+  // detection on by default (runtime.ts), and this arm is the product.
+  const recoveryOn = arm === "parity" || arm === "product" || settleBits.recovery === true;
   return {
     task,
     ...(recoveryOn ? { recovery: { ...defaultRecoveryConfig } } : {}),

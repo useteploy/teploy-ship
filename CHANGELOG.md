@@ -32,6 +32,21 @@ All notable changes to Teploy Ship are recorded here.
   agent to decide for itself. The prompt sets the bar deliberately high. The
   live loop (`teploy-ship run`) has no park and feeds the block back as
   unavailable. Fence: three new entries admitted by `ask`.
+- **The transcript is cut at the first action block** (`transcriptTurn`,
+  actions.ts), in both loops. GLM 5.3 keeps writing after its block — the
+  observation it EXPECTS, in the exact `[exit 0] stdout:` shape the real one
+  arrives in — and with that fiction left in the transcript beside the real
+  observation the next turn reasons about which to believe. Live on
+  2026-09-15 (run-a3d15f43): thirty-plus turns re-verifying a finished change
+  against "resets" that were its own invented output, until a steer note
+  ended it. Pure, so replay trims identically; the prompt now also says the
+  turn ends at the closing fence.
+- **Stuck detection is on by default for enqueued runs** (`recovery`
+  materialised with its thresholds at enqueue; `SHIP_RECOVERY=0` turns it off
+  for a deployment, `recovery: false` for one run). It had been opt-in on the
+  product path while the live loop had it unconditionally — the same run
+  above had nothing to stop it at turn 10, 20 or 30. The benchmark's product
+  arm follows.
 - **`SHIP_MAX_OUTPUT_TOKENS`, default 16384.** The adapter's 4096 was hit on
   every long deployed run measured on 2026-09-15 — GLM 5.3's always-on thinking
   counts against it on z.ai's Anthropic route — and a cap hit cuts the action

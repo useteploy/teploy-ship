@@ -47,6 +47,7 @@ import {
 
 const here = dirname(fileURLToPath(import.meta.url));
 const { LocalExecutor } = await import(join(here, "..", "node_modules", "@neutron-build", "agents", "dist", "index.js"));
+const { defaultRecoveryConfig } = await import(join(here, "..", "dist", "recovery.js"));
 const { MemoryEventStore } = await import(join(here, "..", "node_modules", "@neutron-build", "workflow", "dist", "index.js"));
 const { enqueueRun } = await import(join(here, "..", "dist", "runtime.js"));
 
@@ -200,7 +201,10 @@ test("the parity arm materializes recovery thresholds and holds a clean-tree fin
 
 test("the product arm carries the product's enqueue defaults and neither parity forcing", () => {
   const input = durableInput({ task: "t", arm: "product" });
-  assert.equal(input.recovery, undefined, "the product does not enable stuck detection by default");
+  // Flipped 2026-09-15: enqueueRun turned stuck detection on by default, with
+  // the thresholds materialised (run-a3d15f43 looped thirty-plus turns with
+  // nothing to stop it). The arm follows the product.
+  assert.deepEqual(input.recovery, { ...defaultRecoveryConfig }, "the product enables stuck detection by default, thresholds in the input");
   // Flipped when enqueueRun made the hold the default: a run that finishes
   // "fixed" over an unchanged tree opens a PR making a false claim, so the
   // product carries it and this arm has to as well or it stops being the
@@ -216,7 +220,7 @@ test("the product arm carries the product's enqueue defaults and neither parity 
 test("SHIP_FINISH_WHEN_SETTLED reaches the input through the CLI's own mapping", () => {
   const off = durableInput({ task: "t", arm: "product" });
   assert.equal(off.settle, undefined);
-  assert.equal(off.recovery, undefined);
+  assert.equal(typeof off.recovery, "object", "stuck detection is on by default; settle is the extra branch");
 
   const on = durableInput({ task: "t", arm: "product", settle: true });
   assert.equal(on.settle, true);

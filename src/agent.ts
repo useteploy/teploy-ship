@@ -7,7 +7,7 @@ import type { Message, ModelAdapter, Usage } from "@neutron-build/ai";
 import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 
 import type { Action } from "./actions.js";
-import { FINISH_NUDGE_CLEAN_TREE, FINISH_NUDGE_FAILED, FINISH_NUDGE_NO_EVIDENCE, FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, describeAction, parseAction } from "./actions.js";
+import { FINISH_NUDGE_CLEAN_TREE, FINISH_NUDGE_FAILED, FINISH_NUDGE_NO_EVIDENCE, FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, describeAction, parseAction, transcriptTurn } from "./actions.js";
 import type { EditHunk } from "./actions.js";
 import type { ApprovalPolicy } from "./approval.js";
 import { formatSearchHits } from "./code-index.js";
@@ -306,7 +306,7 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
     // must be non-empty") — killing the whole run. Keep the stored turn
     // non-empty; parseAction on the empty thought yields a "none" action, so
     // the loop nudges for a real action below.
-    messages.push({ role: "assistant", content: thought.trim() === "" ? "(no response)" : thought });
+    messages.push({ role: "assistant", content: thought.trim() === "" ? "(no response)" : transcriptTurn(thought) });
     const action = parseAction(thought);
     emit({ type: "thought", step: index, text: thought });
     emit({ type: "action", step: index, text: describeAction(action) });
