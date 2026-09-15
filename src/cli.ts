@@ -46,6 +46,7 @@ import { refusalMessage } from "./publish-policy.js";
 import { defaultApprovalPolicy, resolveApprovalPolicy } from "./approval.js";
 import { secretEnvNames } from "./guard.js";
 import { durableAgent, durableRecoveryInput, repoKeyOf, sandboxProvider } from "./durable.js";
+import { isAskEvent } from "./ask.js";
 import { SandboxPool, parseSandboxUrls } from "./sandbox-pool.js";
 import {
   formatChecks,
@@ -137,6 +138,7 @@ Usage:
   teploy-ship approve <run-id>        approve a parked action and continue
       [--handoff]                     deliver the decision, let a worker finish the run
   teploy-ship deny <run-id> [reason]  deny a parked action and continue
+  teploy-ship answer <run-id> "<text>"  answer a question the agent asked (an ask park)
   teploy-ship cancel <run-id> [reason]  stop a durable run (parked or mid-flight)
   teploy-ship inbox                   what needs a decision, newest state first
       [--json]                        teploy.inbox/v1 feed (for the inbox TUI)
@@ -846,6 +848,12 @@ async function fixCommand(rest: string[]): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /** flags > env > config: pick where durable runs live. */
+/** A positive finite number from the environment, else undefined. */
+function envNum(name: string): number | undefined {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
 async function makeRuntime(args: ReturnType<typeof parseArgs>, config: Config): Promise<ShipRuntime> {
   const storeKind = (args.flags.store as string) ?? config.store ?? "file";
   if (storeKind === "file") return fileRuntime();
@@ -945,6 +953,8 @@ async function executePass(
     // the honest working directory to show the agent.
     workdir: usingSandbox ? "/work" : ".",
     steer: runtime.steer,
+    live: runtime.live,
+    ...(envNum("SHIP_MAX_OUTPUT_TOKENS") !== undefined ? { maxOutputTokens: envNum("SHIP_MAX_OUTPUT_TOKENS")! } : {}),
     harnesses: externalAdapters(),
     ...((): { codeSearch?: CodeSearch } => {
       const codeSearch = resolveCodeSearch(runtime);
@@ -955,6 +965,7 @@ async function executePass(
   const outcome = await runtime.execute(wf, runId, {
     task,
     steer: true,
+    ask: true,
     index: true,
     guard: true,
     ...(opts?.plan === true ? { plan: true } : {}),
@@ -1056,6 +1067,41 @@ async function resumeCommand(rest: string[]): Promise<void> {
   reportOutcome(runId, outcome);
   await runtime.close();
   process.exit(outcome?.status === "failed" ? 1 : 0);
+}
+
+/**
+ * Answer an ```ask park. The same claim-then-deliver path as approve/deny
+ * — a question is a park like any other — with the text delivered as the
+ * answer rather than as a reason.
+ */
+async function answerCommand(rest: string[]): Promise<void> {
+  const args = parseArgs(rest);
+  const config = loadConfig();
+  const runId = args.positional[0];
+  const answer = args.positional.slice(1).join(" ").trim();
+  if (runId === undefined || answer === "") fail('usage: teploy-ship answer <run-id> "<text>"');
+  const runtime = await makeRuntime(args, config);
+  const meta = await runtime.loadMeta(runId);
+  if (meta === null) fail(`unknown run: ${runId}`);
+  if (meta.eventName === undefined) fail(`run ${runId} is not waiting (status: ${meta.status})`);
+  if (!isAskEvent(meta.eventName)) {
+    await runtime.close();
+    fail(`run ${runId} is parked on ${meta.eventName}, which is a decision, not a question — use approve or deny`);
+  }
+  const eventName = meta.eventName;
+  if (!(await runtime.claimDecision(runId, eventName))) {
+    await runtime.close();
+    fail(`run ${runId} is no longer waiting on ${eventName} — someone answered first. Check: teploy-ship runs`);
+  }
+  try {
+    await deliverEvent(runtime.store, runId, eventName, { approved: true, answer, by: cliActor().id });
+  } catch (error) {
+    await runtime.releaseDecision(runId, eventName).catch(() => {});
+    throw error;
+  }
+  await runtime.markWake?.(runId);
+  await runtime.close();
+  process.stdout.write(`${green("answered")} ${runId} — the run continues on its next tick.\n`);
 }
 
 async function decideCommand(rest: string[], approved: boolean): Promise<void> {
@@ -2210,6 +2256,8 @@ async function main(): Promise<void> {
       return decideCommand(rest, true);
     case "deny":
       return decideCommand(rest, false);
+    case "answer":
+      return answerCommand(rest);
     case "cancel":
       return cancelCommand(rest);
     case "inbox":

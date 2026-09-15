@@ -78,6 +78,21 @@ Read the caveats with the numbers, not after them:
   embeddings. So the OpenAI routing path in the product has never been
   exercised by any published number, and nobody should read one into it.
 
+## 2a. Thinking on GLM 5.3, checked 2026-09-15
+
+GLM 5.3 reasons on every call and cannot be told not to: `thinking.type:
+"disabled"` is rejected, and the effort defaults to **max** with `low` /
+`high` / `max` selectable via `reasoning_effort`. Ship sends no thinking block
+on the product path, so a deployed run already reasons at max effort — there
+is no "turn thinking on" left to do. What was wrong was the other end: on
+z.ai's Anthropic route the thinking tokens count against `max_tokens`, Ship's
+adapter defaulted that to 4096, and all three long runs measured that day had
+turns that hit it (recorded `outputTokens` = 4096 exactly). The ceiling is
+now `SHIP_MAX_OUTPUT_TOKENS`, default 16384, in both loops. The SWE-bench
+figures above were taken with `thinking 32768` on the benchmark harness,
+which the product path never sent — another way the 70% describes a
+configuration the product did not run.
+
 ## 3. The known limitation, named plainly
 
 Ship's prompt and nudges were written and tuned while only ever being observed

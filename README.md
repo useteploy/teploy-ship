@@ -23,6 +23,7 @@ teploy-ship run --durable "big refactor"    # parks on approvals, survives exits
 teploy-ship runs                            # list durable runs
 teploy-ship approve run-1a2b3c4d            # approve a parked action — the run continues
 teploy-ship deny run-1a2b3c4d "not in prod" # deny with a reason — the agent adapts
+teploy-ship answer run-1a2b3c4d "archive them, do not delete"  # reply to a question the agent asked
 teploy-ship eval --suite hard --repeats 2   # the benchmark harness
 ```
 
@@ -223,6 +224,30 @@ it.
 
 Filesystem state persists between actions; process/Python-variable state
 does not (a persistent kernel is a later milestone).
+
+## Watching a run, and being asked
+
+A run page follows the event log, and the log records a step when it ends —
+so between steps it used to show nothing. A model turn under extended
+thinking is minutes of that, and an external harness is one exec of up to
+thirty minutes. The **Now** card closes the gap: `turn 12 · running bash:
+pnpm test`, `external harness · turn 7 · Edit src/parser.ts`, with elapsed
+time since the phase began and since the run started, and `typically 40 min
+on this repo (6 runs)` beside the status so a person knows whether to wait.
+The hint is written from inside the executing step and never replayed
+(`src/live.ts`); it is not evidence and it is not in the log.
+
+The agent can also stop and ask. When the run input admits it (every run
+enqueued since this landed), the loop offers an `ask` action for the decision
+only the operator can make — two designs with different consequences, a
+destructive step the task did not clearly authorise. The run parks on
+`turn-N-ask` exactly as it parks on an approval (snapshot, wait, restore), the
+question is on the run page with an answer box, on the webhook as `question`,
+and in Akiroo's approvals queue where approving with a reason IS the reply.
+An empty answer or a denial tells the agent to decide for itself and say what
+it assumed. The prompt sets the bar high on purpose: an agent that asks about
+every fork is one a person has to babysit, which is the failure this product
+exists to remove.
 
 ## Durable runs and approval gating
 

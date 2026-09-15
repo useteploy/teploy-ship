@@ -44,6 +44,8 @@ import { FileRepoMemory, NucleusRepoMemory } from "./repo-memory.js";
 import type { RepoMemoryStore } from "./repo-memory.js";
 import { FileSteerStore, NucleusSteerStore } from "./steer.js";
 import type { SteerStore } from "./steer.js";
+import { FileLiveStore, NucleusLiveStore } from "./live.js";
+import type { LiveStore } from "./live.js";
 import { FileUserStore, NucleusUserStore } from "./users.js";
 import type { UserStore } from "./users.js";
 import { FileDeliveryLog, NucleusDeliveryLog } from "./deliveries.js";
@@ -209,6 +211,10 @@ export type { RepoMemoryStore, RepoNote } from "./repo-memory.js";
 export { FileRepoMemory, NucleusRepoMemory, loadRepoContext, runNote } from "./repo-memory.js";
 export type { SteerStore, SteerNote } from "./steer.js";
 export { FileSteerStore, NucleusSteerStore } from "./steer.js";
+export type { LiveStore, LiveState, LivePhase } from "./live.js";
+export { askAnswerMessage, askEvent, isAskEvent, pendingQuestion } from "./ask.js";
+export type { AskDecisionPayload } from "./ask.js";
+export { FileLiveStore, NucleusLiveStore } from "./live.js";
 export type { DeliveryLog } from "./deliveries.js";
 export type { Outbox, OutboxEntry } from "./outbox.js";
 export { FileOutbox, NucleusOutbox, flushOutbox, notificationId } from "./outbox.js";
@@ -289,6 +295,7 @@ export interface ShipRuntime {
       pr?: number;
       plan?: boolean;
       steer?: boolean;
+      ask?: boolean;
       index?: boolean;
       guard?: boolean;
       critic?: boolean;
@@ -379,6 +386,8 @@ export interface ShipRuntime {
   memory: RepoMemoryStore;
   /** Mid-run steering notes the dashboard sends into running runs. */
   steer: SteerStore;
+  /** What each executing run is doing right now (live.ts) — the dashboard's "Now" line. */
+  live: LiveStore;
   /** Local dashboard accounts + roles (Teploy RBAC contract). */
   users: UserStore;
   /** Seen webhook deliveries — replay protection for the public hook routes. */
@@ -428,6 +437,7 @@ export function fileRuntime(): ShipRuntime {
     placement: new FilePlacementStore(),
     memory: new FileRepoMemory(),
     steer: new FileSteerStore(),
+    live: new FileLiveStore(),
     users: new FileUserStore(),
     deliveries: new FileDeliveryLog(),
     outbox: new FileOutbox(),
@@ -556,6 +566,7 @@ export async function nucleusRuntime(
     placement: new NucleusPlacementStore(db),
     memory: new NucleusRepoMemory(db),
     steer: new NucleusSteerStore(db),
+    live: new NucleusLiveStore(db),
     users: new NucleusUserStore(db),
     deliveries: new NucleusDeliveryLog(db),
     outbox: new NucleusOutbox(db),
@@ -1290,6 +1301,11 @@ export async function enqueueRun(
         // steps (input-gated in durable). The executing worker's config
         // decides whether indexing actually happens.
         steer: true,
+        // Every newly-enqueued run may ask the operator a question (```ask,
+        // durable.ts). Materialised like steer so the log says the run was
+        // offered the action; a worker that predates it feeds the block back
+        // as unknown, which is the pre-feature behaviour exactly.
+        ask: true,
         index: true,
         guard: true,
         // The warm repo cache (SB-A). Repo runs that are not PR runs, on

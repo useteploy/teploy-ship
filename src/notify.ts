@@ -44,6 +44,8 @@ export interface RunNotification {
   status: string;
   /** Set when parked: which decision the run waits on. */
   eventName?: string;
+  /** Set when parked on an ```ask: the agent's question. The decision's reason (or `answer`) is the reply. */
+  question?: string;
   pr?: string;
   /** Repository the run is working in, when known. Machine consumers route on it. */
   repo?: string;
@@ -176,6 +178,8 @@ export function formatRunNotification(event: RunNotification, publicUrl?: string
     const what =
       event.eventName === "plan-approval"
         ? "a plan review"
+        : event.question !== undefined
+          ? `a question: ${event.question}`
         : event.eventName === "approve-merge"
           ? "a merge decision"
           : "an approval";
@@ -265,6 +269,8 @@ export interface RunWebhookPayload {
   status: string;
   /** The event name to deliver a decision to, when parked. */
   event_name?: string;
+  /** The agent's question when the park is an ```ask (additive). Reply through the same decision endpoint: `reason` or `answer` carries the text. */
+  question?: string;
   pr?: string;
   repo?: string;
   task?: string;
@@ -304,6 +310,7 @@ export function runWebhookPayload(event: RunNotification, publicUrl?: string): R
     ...(event.eventAt !== undefined ? { event_at: event.eventAt } : {}),
     ...(event.eventSeq !== undefined ? { event_seq: event.eventSeq } : {}),
     ...(event.eventName !== undefined ? { event_name: event.eventName } : {}),
+    ...(event.question !== undefined ? { question: event.question } : {}),
     ...(event.pr !== undefined ? { pr: event.pr } : {}),
     ...(event.repo !== undefined ? { repo: event.repo } : {}),
     ...(event.task !== undefined ? { task: event.task } : {}),

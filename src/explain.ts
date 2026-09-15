@@ -99,7 +99,7 @@ function digest(events: WorkflowEvent[]): Digest {
         break;
       }
       case "event-waiting":
-        d.waitingOn = e.name ?? "an approval";
+        d.waitingOn = /-ask$/.test(e.name ?? "") ? `a question from the agent (${e.name})` : (e.name ?? "an approval");
         break;
       case "run-cancelled":
         d.cancelled = true;

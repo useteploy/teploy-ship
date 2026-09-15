@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import { generateText } from "@neutron-build/ai";
+
+import { ASK_UNAVAILABLE } from "./ask.js";
 import type { Message, ModelAdapter, Usage } from "@neutron-build/ai";
 import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 
@@ -49,7 +51,18 @@ export interface AgentEvent {
  */
 export type AgentCodeSearch = (query: string) => Promise<CodeSearchHit[]>;
 
+/**
+ * Ceiling on one model turn's output (SHIP_MAX_OUTPUT_TOKENS). The adapter's
+ * own default is 4096, and on z.ai's Anthropic route GLM 5.3's always-on
+ * thinking counts against it: all three long deployed runs measured on
+ * 2026-09-15 hit that cap, and a cap hit cuts the action block and costs the
+ * turn. Shared by the live loop and durable.ts so both loops agree.
+ */
+export const DEFAULT_MAX_OUTPUT_TOKENS = 16384;
+
 export interface RunAgentOptions {
+  /** See DEFAULT_MAX_OUTPUT_TOKENS. */
+  maxOutputTokens?: number;
   model: ModelAdapter;
   executor: AgentExecutor;
   task: string;
@@ -273,7 +286,11 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
 
     let thought: string;
     try {
-      const generateOptions: Parameters<typeof generateText>[0] = { model: options.model, messages };
+      const generateOptions: Parameters<typeof generateText>[0] = {
+        model: options.model,
+        messages,
+        maxOutputTokens: options.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+      };
       if (options.abortSignal !== undefined) generateOptions.abortSignal = options.abortSignal;
       const generated = await generateText(generateOptions);
       addTo(generated.usage);
@@ -424,6 +441,15 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
       messages.push({ role: "user", content: nudge });
       steps.push({ index, thought, action });
       emit({ type: "observation", step: index, text: nudge });
+      continue;
+    }
+
+    // The live loop has no park to hold a question on: the terminal IS the
+    // operator, and the durable loop is where ```ask waits (durable.ts).
+    if (action.kind === "ask") {
+      messages.push({ role: "user", content: ASK_UNAVAILABLE });
+      steps.push({ index, thought, action });
+      emit({ type: "observation", step: index, text: ASK_UNAVAILABLE });
       continue;
     }
 

@@ -478,6 +478,11 @@ export const WORKFLOW_STEPS: readonly WorkflowStep[] = [
   { key: "step:*turn-*-critic", admits: (i) => i.critic === true },
   // The ```search action is offered on any run; deliberately ungated.
   { key: "step:*turn-*-search", admits: always },
+  // The ```ask park (input.ask): snapshot, wait for the answer, restore. Its
+  // steps share names with the approval park below; the wait is its own.
+  { key: "step:*turn-*-snapshot", admits: (i) => i.ask === true },
+  { key: "wait:askEvent(turn)", admits: (i) => i.ask === true },
+  { key: "step:*turn-*-restore", admits: (i) => i.ask === true },
   { key: "step:*turn-*-snapshot", admits: always },
   { key: "wait:approvalEvent(turn)", admits: always },
   { key: "step:*turn-*-restore", admits: always },

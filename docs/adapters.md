@@ -33,8 +33,14 @@ Two recorded steps, both of which always record a value:
    The recorded step carries exit code, status, summary, turn count, usage,
    the NAMES of the forwarded variables (never values) and a stderr tail.
 
-The sandbox API is request/response, so progress is coarse: started, then
-completed with a turn count. A whole-attempt deadline bounds it
+The recorded step is the exit — one step, one result — but the run is not a
+blank while it executes: on a sandbox executor the exec is streamed
+(`execStream`, durable.ts, over the daemon's SSE), the harness's event stream
+is read line by line as it arrives, and the run page's **Now** card shows the
+turn count and the last tool call (`Edit src/parser.ts`, `bash pnpm test`)
+as they happen (`src/live.ts`). None of that is evidence and none of it is
+recorded: a replay returns the step's result without re-running the binary
+and writes no live row. A whole-attempt deadline bounds the exec
 (`SHIP_HARNESS_TIMEOUT_MS`, default 30 minutes); a timeout is a recorded
 error, and whatever tree exists goes through the publish gate as incomplete.
 

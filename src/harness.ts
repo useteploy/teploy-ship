@@ -1,8 +1,9 @@
-import type { AgentExecutor } from "@neutron-build/agents";
+import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 import type { WorkflowContext } from "@neutron-build/workflow";
 
 import type { DurableAgentInput } from "./durable.js";
 import type { RepoCheckout } from "./git.js";
+import type { LiveSink } from "./live.js";
 import type { TestOutcome } from "./tests.js";
 
 /**
@@ -150,7 +151,24 @@ export interface HarnessWorkspace {
    * get `attempt-N-`.
    */
   stepPrefix: string;
+  /**
+   * Where a live "what is it doing now" hint goes (live.ts). Advisory and
+   * optional: absent on executors with no store, and never awaited.
+   */
+  live?: LiveSink;
+  /**
+   * An exec whose output arrives as it is produced, when the executor can
+   * stream (the sandbox daemon's exec is SSE). Same result as `executor.exec`;
+   * the chunks are the only addition. Absent means output arrives at exit.
+   */
+  execStream?: StreamExec;
 }
+
+export type StreamExec = (
+  command: string,
+  options: { timeoutMs?: number; maxOutputBytes?: number },
+  onChunk: (stream: "stdout" | "stderr", chunk: string) => void,
+) => Promise<ExecResult>;
 
 export interface HarnessAdapter {
   readonly id: string;

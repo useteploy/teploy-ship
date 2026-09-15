@@ -1,6 +1,6 @@
 import type { ActionArgs } from "@neutron-build/core";
 
-import { deliverEvent } from "../../../../lib/ship.server.js";
+import { actorFromPrincipal, deliverEvent } from "../../../../lib/ship.server.js";
 
 import { PLAN_EVENT } from "teploy-ship/plan";
 import { UPGRADE_HOLD_EVENT, upgradeHoldRefusal } from "teploy-ship/fence";
@@ -46,6 +46,12 @@ export const config = { mode: "app" };
 interface DecideBody {
   approved?: boolean;
   reason?: string;
+  /**
+   * The reply to an ```ask park (event names ending in `-ask`). Optional even
+   * there: a consumer that only knows approve/deny answers with `reason`, and
+   * an approval with no text tells the agent to decide for itself.
+   */
+  answer?: string;
   /** Optional operator-edited plan, honoured only on a plan approval. */
   plan?: string;
   /**
@@ -119,6 +125,7 @@ export async function action({ request, params }: ActionArgs): Promise<Response>
   }
 
   const reason = (body.reason ?? "").trim();
+  const answer = (body.answer ?? "").trim();
   // A plan may be redirected by editing it; honoured only on a plan approval,
   // matching the form's behaviour exactly.
   const plan = meta.eventName === PLAN_EVENT ? (body.plan ?? "").trim() : "";
@@ -133,7 +140,9 @@ export async function action({ request, params }: ActionArgs): Promise<Response>
     await deliverEvent(runtime.store, runId, body.event_name, {
       approved: body.approved,
       ...(reason !== "" ? { reason } : {}),
+      ...(answer !== "" ? { answer } : {}),
       ...(plan !== "" ? { plan } : {}),
+      by: actorFromPrincipal(principal).id,
     });
   } catch (error) {
     await runtime.releaseDecision(runId, body.event_name).catch(() => {});

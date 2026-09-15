@@ -139,3 +139,15 @@ test("a run downgraded off the open network says so at the top, derived from the
   ] as WorkflowEvent[]);
   assert.equal(legacy.length, 1);
 });
+
+test("an ask park reads as a question, and its decision as the answer", () => {
+  const items = toTimeline([
+    { v: 1, seq: 1, type: "event-waiting", at: T0, name: "turn-2-ask" },
+    { v: 1, seq: 2, type: "event-received", at: T1, name: "turn-2-ask", data: { payload: { approved: true, answer: "Archive them" } } },
+    { v: 1, seq: 3, type: "event-waiting", at: T1, name: "turn-3-approval" },
+  ] as WorkflowEvent[]);
+  assert.equal(items[0]?.title, "waiting for an answer");
+  assert.equal(items[1]?.title, "answered");
+  assert.equal(items[1]?.body, "Archive them");
+  assert.equal(items[2]?.title, "waiting for approval");
+});

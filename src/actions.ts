@@ -35,6 +35,7 @@ export type Action =
   | { kind: "create"; file: string; content: string }
   | { kind: "search"; query: string } // semantic code retrieval (repo runs with an index)
   | { kind: "finish"; message: string }
+  | { kind: "ask"; question: string } // a question for the operator; the run parks on the answer (durable, input.ask)
   | { kind: "invalid"; message: string } // recognized but malformed — feed the error back
   | { kind: "none" }; // no actionable block found — the model must retry
 
@@ -184,6 +185,11 @@ function parseFencedAction(text: string): { index: number; action: Action } | nu
     if (lang === "finish") {
       return { index, action: { kind: "finish", message: code.trim() } };
     }
+    if (lang === "ask") {
+      const question = code.trim();
+      if (question === "") return { index, action: { kind: "invalid", message: "```ask block needs the question in its body, e.g.\n```ask\nShould the new endpoint require auth, or stay public like /health?\n```" } };
+      return { index, action: { kind: "ask", question } };
+    }
     if (lang === "edit") {
       return { index, action: parseEditBlock(arg, code) };
     }
@@ -274,6 +280,8 @@ export function describeAction(action: Action): string {
       return `search: ${firstLine(action.query)}`;
     case "finish":
       return "finish";
+    case "ask":
+      return `ask: ${firstLine(action.question)}`;
     case "invalid":
       return "invalid-action";
     case "none":

@@ -1,8 +1,13 @@
-import { cancelRun, deliverEvent, costUSD, isPricedModel, actorFromPrincipal } from "../../lib/ship.server.js";
+import { cancelRun, deliverEvent, costUSD, isPricedModel, actorFromPrincipal, pendingQuestion } from "../../lib/ship.server.js";
+import { roughDuration, typicalDuration } from "../../lib/expect.js";
+import type { Typical } from "../../lib/expect.js";
 
 // PLAN_EVENT comes from the dependency-free plan module: it's used in the
 // component (client bundle), where teploy-ship/runtime (node-only) can't go.
 import { PLAN_EVENT } from "teploy-ship/plan";
+// Same reason: the ask module is dependency-free, so the component may test
+// the park's event name without reaching runtime.ts.
+import { isAskEvent } from "teploy-ship/ask";
 import { UPGRADE_HOLD_EVENT } from "teploy-ship/fence";
 
 import type { RunMeta, ScanFinding } from "teploy-ship/runtime";
@@ -53,6 +58,14 @@ interface RunData {
   cancelFailed: boolean;
   /** ?denied=approve|steer — the authority grant this account lacks. */
   denied: string | null;
+  /** The agent's question, when this run is parked on an ```ask. */
+  question?: string;
+  /** What the run is doing right now (live.ts), while it executes. */
+  live: { phase: string; turn?: number; detail?: string; updatedAt: string } | null;
+  /** Median duration of earlier completed runs on the same repo, when there are enough. */
+  typical: Typical | null;
+  /** When this run was enqueued, for the elapsed line. */
+  createdAt?: string;
 }
 
 /**
@@ -110,6 +123,21 @@ export async function loader({ params, request }: { params: { id: string }; requ
       (started?.data as { input?: { steer?: boolean } } | undefined)?.input?.steer === true;
     const plan = planFrom(events);
     const scanned = findingsFrom(events);
+    const executing = meta !== null && !["completed", "failed", "cancelled", "cancelling"].includes(meta.status);
+    const question = meta?.eventName !== undefined && isAskEvent(meta.eventName) ? pendingQuestion(events) : undefined;
+    // Advisory reads, never allowed to fail the page: a missing live row is
+    // "nothing to show", and the expectation is a courtesy.
+    const live = executing ? await runtime.live.get(runId).catch(() => null) : null;
+    const repo = (started?.data as { input?: { repo?: string } } | undefined)?.input?.repo;
+    let typical: Typical | null = null;
+    if (repo !== undefined) {
+      try {
+        const [stats, runs] = await Promise.all([runtime.repoStats.list(repo), runtime.listMeta({ limit: 300 })]);
+        typical = typicalDuration(runs, new Set(stats.map((s) => s.runId)), runId);
+      } catch {
+        typical = null;
+      }
+    }
     const data: RunData = {
       meta,
       items: toTimeline(events),
@@ -130,6 +158,10 @@ export async function loader({ params, request }: { params: { id: string }; requ
       decision: query.get("decision"),
       cancelFailed: query.get("cancel") === "failed",
       denied: query.get("denied"),
+      ...(question !== undefined ? { question } : {}),
+      live: live === null ? null : { phase: live.phase, ...(live.turn !== undefined ? { turn: live.turn } : {}), ...(live.detail !== undefined ? { detail: live.detail } : {}), updatedAt: live.updatedAt },
+      typical,
+      ...(meta?.createdAt !== undefined ? { createdAt: meta.createdAt } : {}),
     };
     span.end("ok", { "run.status": meta?.status ?? "unknown", "run.event_count": events.length });
     return data;
@@ -182,7 +214,7 @@ export async function action({
   // Authority (governance.ts) on top of the layout's role gate: steer/cancel
   // and approve/deny are separate grants an admin can narrow or widen per
   // role or per named user.
-  if ((intent === "cancel" || intent === "steer") && !(await may("steer", me))) return redirectTo(`/runs/${runId}?denied=steer`);
+  if ((intent === "cancel" || intent === "steer" || intent === "answer") && !(await may("steer", me))) return redirectTo(`/runs/${runId}?denied=steer`);
   if ((intent === "approve" || intent === "deny") && !(await may("approve", me))) return redirectTo(`/runs/${runId}?denied=approve`);
   if (active && intent === "cancel") {
     // Only claim what actually happened. The old code swallowed a failed
@@ -204,6 +236,28 @@ export async function action({
   if (active && intent === "steer") {
     const text = String(form.get("steer") ?? "").trim();
     if (text !== "") await runtime.steer.add(runId, text);
+    return redirectTo(`/runs/${runId}`);
+  }
+  // The agent's question (an ```ask park). Answering is steering, not
+  // approving: the text becomes the agent's next observation and authorises
+  // nothing, so it takes the steer grant. An empty answer is "decide for
+  // yourself", delivered as a denial so the transcript says so.
+  if (meta?.eventName !== undefined && intent === "answer" && isAskEvent(meta.eventName)) {
+    const reviewed = String(form.get("eventName") ?? "");
+    if (reviewed === "" || reviewed !== meta.eventName) return redirectTo(`/runs/${runId}?decision=stale`);
+    if (!(await runtime.claimDecision(runId, reviewed))) return redirectTo(`/runs/${runId}?decision=taken`);
+    const answer = String(form.get("answer") ?? "").trim();
+    try {
+      await deliverEvent(runtime.store, runId, reviewed, {
+        approved: answer !== "",
+        ...(answer !== "" ? { answer } : {}),
+        ...(me !== null ? { by: actorFromPrincipal(me).id } : {}),
+      });
+    } catch (error) {
+      await runtime.releaseDecision(runId, reviewed).catch(() => {});
+      throw error;
+    }
+    await runtime.markWake?.(runId);
     return redirectTo(`/runs/${runId}`);
   }
   if (meta?.eventName !== undefined && (intent === "approve" || intent === "deny")) {
@@ -260,6 +314,37 @@ export async function action({
 // an active run — a terminal run's timeline no longer changes.
 const POLL = `__shipLive("route:runs/[id].tsx");`;
 
+/** The "Now" line: phase and detail as one sentence a person can scan. */
+function nowLine(live: { phase: string; turn?: number; detail?: string }): string {
+  const turn = live.turn !== undefined ? `turn ${live.turn}` : "";
+  const detail = live.detail ?? "";
+  switch (live.phase) {
+    case "thinking":
+      return `${turn} · the model is deciding the next action`;
+    case "running":
+      return `${turn} · running ${detail}`.trim();
+    case "harness":
+      return `external harness · ${turn}${detail !== "" ? ` · ${detail}` : ""}`;
+    case "asking":
+      return `${turn} · waiting for your answer`;
+    case "verifying":
+      return `verifying · ${detail}`;
+    default:
+      return `${live.phase} ${detail}`.trim();
+  }
+}
+
+// Elapsed counters for the Now card: "for 1m20s" since the phase started and
+// the run's total elapsed. Client-side so the loader data — which the live
+// reload diffs — does not change every second.
+const NOW_TICK = `(function(){
+  var el=document.getElementById('now'), out=document.getElementById('now-elapsed'); if(!el||!out) return;
+  var since=Date.parse(el.getAttribute('data-updated-at')||''), from=Date.parse(el.getAttribute('data-created-at')||'');
+  function fmt(ms){ var s=Math.max(0,Math.floor(ms/1000)); var m=Math.floor(s/60), h=Math.floor(m/60); return h>0 ? h+'h '+(m%60)+'m' : m>0 ? m+'m '+(s%60)+'s' : s+'s'; }
+  function tick(){ var now=Date.now(); var a=isNaN(since)?'':'for '+fmt(now-since); var b=isNaN(from)?'':'run elapsed '+fmt(now-from); out.textContent=[a,b].filter(Boolean).join(' · '); }
+  tick(); var t=setInterval(tick,1000); if(t.unref) t.unref();
+})();`;
+
 /** Severity -> the palette variable already used elsewhere in the dashboard. */
 const SEVERITY_COLOR: Record<string, string> = { high: "var(--red)", med: "var(--yellow)", low: "var(--fg-dim, inherit)" };
 
@@ -310,7 +395,38 @@ export default function RunDetail({ data }: { data: RunData }) {
             <span class={`status ${data.meta.status}`}>{data.meta.status}</span> · {data.meta.model}
             {data.meta.ranOn !== undefined && <> · ran on {data.meta.ranOn}</>} · updated{" "}
             {data.meta.updatedAt}
+            {data.typical !== null && (
+              <>
+                {" "}· typically {roughDuration(data.typical.medianMs)} on this repo
+                <span title={`median of ${data.typical.n} completed runs`}> ({data.typical.n} runs)</span>
+              </>
+            )}
           </p>
+          {active && data.live !== null && (
+            <div class="card" style="margin:12px 0" id="now" data-updated-at={data.live.updatedAt} data-created-at={data.createdAt ?? ""}>
+              <div class="kind" style="margin-bottom:6px">
+                Now <span class="meta" id="now-elapsed"></span>
+              </div>
+              <div>{nowLine(data.live)}</div>
+              <script dangerouslySetInnerHTML={{ __html: NOW_TICK }} />
+            </div>
+          )}
+          {data.question !== undefined && data.meta.eventName !== undefined && isAskEvent(data.meta.eventName) && (
+            <div class="card attn" style="margin:12px 0">
+              <div class="kind" style="margin-bottom:8px">The agent has a question — the run is parked until you answer</div>
+              <pre style="white-space:pre-wrap;margin:0 0 8px">{data.question}</pre>
+              <form method="post">
+                <input type="hidden" name="eventName" value={data.meta.eventName} />
+                <textarea name="answer" rows={3} style="width:100%;box-sizing:border-box;font:inherit" placeholder="your answer becomes the agent's next observation"></textarea>
+                <div class="row-actions" style="margin-top:8px">
+                  <button class="approve" type="submit" name="intent" value="answer">
+                    Answer
+                  </button>
+                  <span class="meta">leave it empty and submit to tell the agent to decide for itself</span>
+                </div>
+              </form>
+            </div>
+          )}
           {(data.outcome.pr !== undefined || data.outcome.usage !== undefined || data.outcome.repo !== undefined) && (
             <div class="card" style="margin:12px 0">
               <div class="row-actions" style="flex-wrap:wrap;gap:14px">
@@ -426,7 +542,8 @@ export default function RunDetail({ data }: { data: RunData }) {
               )}
               {data.meta.eventName !== undefined &&
                 data.meta.eventName !== PLAN_EVENT &&
-                data.meta.eventName !== UPGRADE_HOLD_EVENT && (
+                data.meta.eventName !== UPGRADE_HOLD_EVENT &&
+                !isAskEvent(data.meta.eventName) && (
                 <>
                   <button class="approve" type="submit" name="intent" value="approve">
                     Approve

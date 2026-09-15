@@ -292,3 +292,57 @@ test("opencode adapter on a repo run: the tree it leaves goes through Ship's pub
     globalThis.fetch = realFetch;
   }
 });
+
+test("claudeLiveTracker: turns and the last tool call, across torn chunks; only changes are reported", async () => {
+  const { claudeLiveTracker, opencodeLiveTracker } = await import("./harness-external.js");
+  const t = claudeLiveTracker();
+  const line1 = JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "Looking at the parser." }] } });
+  const line2 = JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Edit", input: { file_path: "src/parser.ts", old_string: "a" } }] } });
+  assert.equal(t.feed(`${JSON.stringify({ type: "system", subtype: "init" })}\n`), null, "init is not progress");
+  const half = line1.slice(0, 20);
+  assert.equal(t.feed(half), null, "a torn line is held");
+  assert.deepEqual(t.feed(`${line1.slice(20)}\n${line2}\n`), { phase: "harness", turn: 2, detail: "Edit src/parser.ts" });
+  assert.equal(t.feed("garbage not json\n"), null);
+
+  const o = opencodeLiveTracker();
+  assert.deepEqual(o.feed(`${JSON.stringify({ type: "tool", part: { tool: "bash", state: { input: { command: "pnpm test" } } } })}\n`), { phase: "harness", turn: 0, detail: "bash pnpm test" });
+  assert.deepEqual(o.feed(`${JSON.stringify({ type: "step_finish", part: { tokens: {} } })}\n`), { phase: "harness", turn: 1 });
+});
+
+test("claude-code adapter streams through execStream when the workspace has one, and the live store sees the harness's turns", async () => {
+  const recordTo = await mkdtemp(join(tmpdir(), "fake-harness-rec-"));
+  const stream = [
+    JSON.stringify({ type: "system", subtype: "init" }),
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "go test ./..." } }] } }),
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "Done." }] } }),
+    JSON.stringify(CLAUDE_RESULT),
+  ].join("\n");
+  const { provider } = await workspaceWithFakeClaude({ recordTo, stream });
+  const chunks: string[] = [];
+  const streaming: ExecutorProvider = {
+    ...provider,
+    // A streamed exec over the same local executor: the output is handed to
+    // onChunk as it would arrive from the daemon's SSE, then returned whole.
+    async execStream(handle, command, options, onChunk) {
+      const result = await provider.attach(handle).exec(command, options);
+      for (let i = 0; i < result.stdout.length; i += 37) {
+        const piece = result.stdout.slice(i, i + 37);
+        chunks.push(piece);
+        onChunk("stdout", piece);
+      }
+      return result;
+    },
+  };
+  const phases: Array<{ phase: string; turn?: number; detail?: string }> = [];
+  const live = { set: async (_runId: string, u: { phase: string; turn?: number; detail?: string }) => { phases.push(u); } };
+  const env = { CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat-fake" };
+  const wf = durableAgent({ model: neverModel, executor: streaming, workdir: ".", harnesses: externalAdapters({ env }), maxSteps: 7, live });
+  const store = new MemoryEventStore();
+  const outcome = await executeRun({ workflow: wf, runId: "run-claude-stream", store, input: { task: "Fix the thing", harness: { id: "claude-code", version: "1" } } });
+  assert.equal(outcome.status, "completed", JSON.stringify(outcome));
+  assert.equal((outcome.output as DurableAgentOutput).status, "finished");
+  assert.ok(chunks.length > 1, "the exec was streamed in pieces");
+  assert.deepEqual(phases[0], { phase: "harness", turn: 0, detail: "claude starting" });
+  assert.ok(phases.some((p) => p.phase === "harness" && p.turn === 1 && p.detail === "Bash go test ./..."), JSON.stringify(phases));
+  assert.ok(phases.some((p) => p.phase === "harness" && p.turn === 2 && p.detail === "Done."), JSON.stringify(phases));
+});

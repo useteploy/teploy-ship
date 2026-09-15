@@ -8,6 +8,7 @@ import { hostname } from "node:os";
 import { durableAgent, repoKeyOf } from "./durable.js";
 import { resolveApprovalPolicy } from "./approval.js";
 import { externalAdapters } from "./harness-external.js";
+import { isAskEvent, pendingQuestion } from "./ask.js";
 import { previewTargetFromEnv } from "./deploy.js";
 import { telemetryTargetFromEnv } from "./observe.js";
 import { testTargetFromEnv } from "./tests.js";
@@ -210,17 +211,20 @@ export function intakeOrigin(task: Pick<IntakeTask, "source" | "dedupeKey" | "de
  * input: the repo, the task text, the origin and — for a scan — the mode.
  * All materialised at enqueue, so this is a read, never a derivation.
  */
-export function notificationContext(events: WorkflowEvent[]): Pick<RunNotification, "repo" | "task" | "origin" | "mode"> {
+export function notificationContext(events: WorkflowEvent[]): Pick<RunNotification, "repo" | "task" | "origin" | "mode" | "question"> {
   const started = events.find((e) => e.type === "run-started");
   const input = (started as { data?: { input?: { repo?: string; task?: string; origin?: RunOrigin; mode?: string } } } | undefined)
     ?.data?.input;
+  const question = pendingQuestion(events);
   return {
     ...(input?.repo !== undefined ? { repo: input.repo } : {}),
     ...(input?.task !== undefined ? { task: input.task } : {}),
     ...(input?.origin !== undefined ? { origin: input.origin } : {}),
     ...(input?.mode === "scan" ? { mode: "scan" as const } : {}),
+    ...(question !== undefined ? { question } : {}),
   };
 }
+
 
 /**
  * What a TERMINAL notification adds: the pull request when the run opened one,
@@ -715,6 +719,8 @@ export function startWorker(options: WorkerOptions): {
     repoMemory: options.runtime.memory,
     projects: options.runtime.projects,
     steer: options.runtime.steer,
+    ...((options.runtime as Partial<Pick<NucleusShipRuntime, "live">>).live !== undefined ? { live: options.runtime.live } : {}),
+    ...(envNum("SHIP_MAX_OUTPUT_TOKENS") !== undefined ? { maxOutputTokens: envNum("SHIP_MAX_OUTPUT_TOKENS")! } : {}),
     ...(options.codeSearch !== undefined ? { codeSearch: options.codeSearch } : {}),
     // External harnesses (claude-code, opencode). Always carried; whether the
     // binary is in the sandbox image is a recorded preflight step per run.
@@ -798,6 +804,14 @@ export function startWorker(options: WorkerOptions): {
   const handleComplete = (runId: string, outcome: { status: string; eventName?: string }): void => {
       inflight.delete(runId);
       log(`[worker] ${runId} → ${outcome.status}`);
+      // The live "now" line is only true while this worker executes the run;
+      // a park or a finish would otherwise leave "running: pnpm test" on the
+      // page for good. The ask park keeps its row: the question IS the state.
+      // Optional on the runtime for the test doubles that predate the store.
+      const liveStore = (options.runtime as Partial<Pick<NucleusShipRuntime, "live">>).live;
+      if (liveStore !== undefined && !(outcome.status === "waiting" && isAskEvent(outcome.eventName))) {
+        void liveStore.clear(runId).catch(() => {});
+      }
       // TERMINAL outcomes are processed exactly once, fleet-wide.
       //
       // A racing tick can replay-finalise a completed run (its due() snapshot

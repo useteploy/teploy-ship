@@ -9,7 +9,7 @@ import { LocalExecutor } from "@neutron-build/agents";
 import type { AgentExecutor } from "@neutron-build/agents";
 import { MemoryEventStore, cancelRun, deliverEvent, executeRun } from "@neutron-build/workflow";
 
-import { CHANGE_EVENT, MERGE_EVENT, PLAN_EVENT, approvalEvent, durableAgent } from "./durable.js";
+import { CHANGE_EVENT, MERGE_EVENT, PLAN_EVENT, approvalEvent, askEvent, durableAgent } from "./durable.js";
 import type { CommandRunner, PreviewTarget } from "./deploy.js";
 import type { TelemetryTarget } from "./observe.js";
 import { ladderRungsFromEvents } from "./ladder.js";
@@ -4137,4 +4137,57 @@ test("SB-A: a run that recorded no `warm` records no step — pre-cache logs rep
   const { step, committed } = await warmRun("warm-absent", { info: TEMPLATE });
   assert.equal(step, undefined);
   assert.equal(committed, 0);
+});
+
+test("```ask parks the run on askEvent(turn), the answer lands as the next observation, and a live store sees the phases", async () => {
+  const { model, callCount } = reactiveModel([
+    "```ask\nArchive the rows, or delete them?\n```",
+    (obs) => (obs.includes("Operator's answer: Archive them") ? "```bash\necho archived > done.txt\n```" : "```bash\necho wrong-answer\n```"),
+    (obs) => (obs.includes("exit 0") ? "```finish\narchived\n```" : "```bash\necho hmm\n```"),
+    (obs) => (obs.includes("Before finishing") ? "```bash\ncat done.txt\n```" : "```bash\necho hmm\n```"),
+    (obs) => (obs.includes("archived") ? "```finish\narchived\n```" : "```bash\necho hmm\n```"),
+  ]);
+  const { provider, execCount } = await localProvider();
+  const phases: string[] = [];
+  const live = { set: async (_runId: string, u: { phase: string; turn?: number; detail?: string }) => { phases.push(`${u.phase}:${u.turn ?? ""}:${u.detail ?? ""}`); } };
+  const wf = durableAgent({ model, executor: provider, live });
+  const store = new MemoryEventStore();
+
+  const parked = await executeRun({ workflow: wf, runId: "run-ask", store, input: { task: "tidy old rows", ask: true } });
+  assert.equal(parked.status, "waiting");
+  assert.equal(parked.eventName, askEvent(0));
+  assert.equal(execCount(), 0, "nothing executes while the question is open");
+  assert.equal(callCount(), 1);
+  assert.ok(phases.includes("thinking:0:"));
+  assert.ok(phases.includes("asking:0:Archive the rows, or delete them?"));
+
+  await deliverEvent(store, "run-ask", askEvent(0), { approved: true, answer: "Archive them", by: "user:tyler" });
+  const done = await executeRun({ workflow: wf, runId: "run-ask", store });
+  assert.equal(done.status, "completed");
+  assert.equal((done.output as { agentSummary: string }).agentSummary, "archived");
+  assert.ok(phases.some((p) => p.startsWith("running:1:bash: echo archived")), phases.join(","));
+
+  // Replay: the model is not called again and no new phase is written.
+  const before = phases.length;
+  const again = await executeRun({ workflow: wf, runId: "run-ask", store });
+  assert.equal(again.status, "completed");
+  assert.equal(callCount(), 5);
+  assert.equal(phases.length, before, "a replayed step must not write a live hint");
+});
+
+test("```ask on a run whose input does not admit it is refused in-transcript, with no park", async () => {
+  const { model } = reactiveModel([
+    "```ask\nWhich one?\n```",
+    (obs) => (obs.includes("Asking the operator is not available") ? "```bash\necho decided > d.txt\n```" : "```bash\necho wrong\n```"),
+    "```finish\ndecided\n```",
+    "```bash\ncat d.txt\n```",
+    "```finish\ndecided\n```",
+  ]);
+  const { provider } = await localProvider();
+  const wf = durableAgent({ model, executor: provider });
+  const store = new MemoryEventStore();
+  const done = await executeRun({ workflow: wf, runId: "run-noask", store, input: { task: "pick one" } });
+  assert.equal(done.status, "completed");
+  assert.equal((done.output as { agentSummary: string }).agentSummary, "decided");
+  assert.ok(!(await store.load("run-noask")).some((e) => e.type === "event-waiting"));
 });

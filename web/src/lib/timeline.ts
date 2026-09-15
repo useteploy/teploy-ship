@@ -208,14 +208,20 @@ export function toTimeline(events: WorkflowEvent[]): TimelineItem[] {
         break;
       }
       case "event-waiting":
-        items.push({ kind: "approval", title: "waiting for approval", body: event.name ?? "", at });
+        items.push({
+          kind: "approval",
+          title: /-ask$/.test(event.name ?? "") ? "waiting for an answer" : "waiting for approval",
+          body: event.name ?? "",
+          at,
+        });
         break;
       case "event-received": {
-        const payload = (event.data as { payload?: { approved?: boolean; reason?: string } } | undefined)?.payload;
+        const payload = (event.data as { payload?: { approved?: boolean; reason?: string; answer?: string } } | undefined)?.payload;
+        const asked = /-ask$/.test(event.name ?? "");
         items.push({
           kind: "decision",
-          title: payload?.approved === true ? "approved" : "denied",
-          body: payload?.reason ?? "",
+          title: asked ? "answered" : payload?.approved === true ? "approved" : "denied",
+          body: asked ? (payload?.answer ?? payload?.reason ?? "(no answer — the agent decides for itself)") : (payload?.reason ?? ""),
           at,
         });
         break;

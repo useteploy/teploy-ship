@@ -14,6 +14,7 @@
  */
 export {
   AKIROO_ORG_ID_KEY,
+  pendingQuestion,
   AKIROO_ORG_NAME_KEY,
   AKIROO_TOKEN_KEY,
   AKIROO_URL_KEY,

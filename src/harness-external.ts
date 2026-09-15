@@ -1,6 +1,8 @@
 import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 
 import { HARNESS_PACKAGES, HARNESS_VERSIONS } from "./harness.js";
+import { clipDetail } from "./live.js";
+import type { LiveUpdate } from "./live.js";
 import type { HarnessAdapter, HarnessResult, HarnessStatus, HarnessUsage } from "./harness.js";
 
 /**
@@ -305,8 +307,87 @@ export function parseOpencodeStream(stdout: string): { summary: string; turns: n
   return { summary: lastText, turns, usage, ...(error !== undefined ? { error } : {}) };
 }
 
+/**
+ * What a harness is doing right now, read off its event stream as it
+ * arrives (live.ts). Line-buffered: a chunk may end mid-object. Returns the
+ * update to publish when the picture changed, null otherwise, so a busy
+ * stream does not write the store per byte.
+ */
+export interface LiveTracker {
+  feed(chunk: string): LiveUpdate | null;
+}
+
+function lineBuffered(onLine: (event: Record<string, unknown>) => LiveUpdate | null): LiveTracker {
+  let buffer = "";
+  return {
+    feed(chunk) {
+      buffer += chunk;
+      let update: LiveUpdate | null = null;
+      let at: number;
+      while ((at = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, at).trim();
+        buffer = buffer.slice(at + 1);
+        if (!line.startsWith("{")) continue;
+        try {
+          const next = onLine(JSON.parse(line) as Record<string, unknown>);
+          if (next !== null) update = next;
+        } catch {
+          // torn or non-JSON line
+        }
+      }
+      return update;
+    },
+  };
+}
+
+/** claude's stream-json: assistant messages carry tool_use / text blocks. */
+export function claudeLiveTracker(): LiveTracker {
+  let turns = 0;
+  return lineBuffered((event) => {
+    if (event.type !== "assistant") return null;
+    turns += 1;
+    const message = (event.message ?? {}) as Record<string, unknown>;
+    const content = Array.isArray(message.content) ? (message.content as Record<string, unknown>[]) : [];
+    let detail = "";
+    for (const block of content) {
+      if (block.type === "tool_use") {
+        const input = (block.input ?? {}) as Record<string, unknown>;
+        const target = [input.file_path, input.command, input.pattern, input.query, input.description].find((v) => typeof v === "string" && v !== "");
+        detail = `${String(block.name ?? "tool")}${typeof target === "string" ? ` ${clipDetail(target, 100)}` : ""}`;
+      } else if (block.type === "text" && detail === "" && typeof block.text === "string") {
+        detail = clipDetail(block.text, 120);
+      }
+    }
+    return { phase: "harness", turn: turns, ...(detail !== "" ? { detail } : {}) };
+  });
+}
+
+/** opencode's --format json: `tool` parts name the tool, `step_finish` counts a turn. */
+export function opencodeLiveTracker(): LiveTracker {
+  let turns = 0;
+  return lineBuffered((event) => {
+    const part = (event.part ?? {}) as Record<string, unknown>;
+    if (event.type === "step_finish") {
+      turns += 1;
+      return { phase: "harness", turn: turns };
+    }
+    if (event.type === "tool") {
+      const state = (part.state ?? {}) as Record<string, unknown>;
+      const input = (state.input ?? part.input ?? {}) as Record<string, unknown>;
+      const target = [input.filePath, input.command, input.pattern, input.query].find((v) => typeof v === "string" && v !== "");
+      return { phase: "harness", turn: turns, detail: `${String(part.tool ?? "tool")}${typeof target === "string" ? ` ${clipDetail(target, 100)}` : ""}` };
+    }
+    if (event.type === "text" && typeof part.text === "string" && part.text.trim() !== "") {
+      return { phase: "harness", turn: turns, detail: clipDetail(part.text, 120) };
+    }
+    return null;
+  });
+}
+
 interface CommandSpec {
   binary: string;
+  /** The live tracker for this harness's event stream. */
+  live: () => LiveTracker;
   /** Build the shell command; `prompt` is the sh-quoted prompt path. */
   command: (opts: { config: ExternalHarnessConfig; maxSteps: number; maxRunCostUSD: number; priced: boolean }) => string;
   parse: (exec: ExecResult, priced: boolean) => { status: HarnessStatus; summary: string; turns: number; usage: HarnessUsage };
@@ -317,6 +398,7 @@ interface CommandSpec {
 const SPECS: Record<string, CommandSpec> = {
   "claude-code": {
     binary: "claude",
+    live: claudeLiveTracker,
     // claude refuses bypassPermissions as root unless it is told it is in a
     // sandbox; the sandbox image runs as root and IS a sandbox.
     command: ({ config, maxSteps, maxRunCostUSD, priced }) =>
@@ -361,6 +443,7 @@ const SPECS: Record<string, CommandSpec> = {
     },
     // Decided per run from the cost opencode reports (parseOpencodeStream).
     priced: () => true,
+    live: opencodeLiveTracker,
   },
 };
 
@@ -390,7 +473,21 @@ export function externalAdapter(id: "claude-code" | "opencode", options: Externa
           const command =
             `set -a; . ${shq(ENV_PATH)}; set +a; rm -f ${shq(ENV_PATH)}; ` +
             spec.command({ config, maxSteps: budget.maxSteps, maxRunCostUSD: budget.maxRunCostUSD, priced });
-          const exec = await ws.executor.exec(command, { timeoutMs: config.timeoutMs, maxOutputBytes: 16 * 1_048_576 });
+          const execOptions = { timeoutMs: config.timeoutMs, maxOutputBytes: 16 * 1_048_576 };
+          // Streamed when the executor can (the sandbox daemon), so the run
+          // page shows the harness's turns and tool calls as they happen
+          // instead of a thirty-minute blank. Same result either way; the
+          // recorded step is the exit, never the chunks.
+          ws.live?.({ phase: "harness", turn: 0, detail: `${spec.binary} starting` });
+          const tracker = spec.live();
+          const exec =
+            ws.execStream !== undefined
+              ? await ws.execStream(command, execOptions, (stream, chunk) => {
+                  if (stream !== "stdout") return;
+                  const update = tracker.feed(chunk);
+                  if (update !== null) ws.live?.(update);
+                })
+              : await ws.executor.exec(command, execOptions);
           const parsed = spec.parse(exec, priced);
           const timedOut = exec.timedOut === true;
           return {

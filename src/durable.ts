@@ -3,12 +3,16 @@ import { akirooTrailersFrom } from "./akiroo.js";
 import { generateText } from "@neutron-build/ai";
 import type { Message, ModelAdapter } from "@neutron-build/ai";
 import { SandboxExecutor } from "@neutron-build/agents";
-import type { AgentExecutor } from "@neutron-build/agents";
+import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 import { isSuspension, workflow } from "@neutron-build/workflow";
 import type { WorkflowContext, WorkflowDefinition } from "@neutron-build/workflow";
 
-import { executeAction, workspaceFingerprint } from "./agent.js";
-import { FINISH_NUDGE_CLEAN_TREE, FINISH_NUDGE_FAILED, FINISH_NUDGE_NO_EVIDENCE, FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, parseAction } from "./actions.js";
+import { DEFAULT_MAX_OUTPUT_TOKENS, executeAction, workspaceFingerprint } from "./agent.js";
+import { FINISH_NUDGE_CLEAN_TREE, FINISH_NUDGE_FAILED, FINISH_NUDGE_NO_EVIDENCE, FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, describeAction, parseAction } from "./actions.js";
+import { ASK_UNAVAILABLE, askAnswerMessage, askEvent } from "./ask.js";
+import type { AskDecisionPayload } from "./ask.js";
+import { clipDetail, liveSink } from "./live.js";
+import type { LiveStore } from "./live.js";
 import { criticFeedback, isApproved, parsePick, pickAttempt, reviewWork } from "./critic.js";
 import type { PickCandidate } from "./critic.js";
 import {
@@ -83,7 +87,7 @@ import { parseFindings } from "./findings.js";
 import type { ParsedFindings, ScanFinding } from "./findings.js";
 import { costUSD } from "./pricing.js";
 import { HARNESS_VERSIONS, NATIVE_HARNESS_ID, selectAdapter } from "./harness.js";
-import type { HarnessAdapter, HarnessBudget, HarnessRef, HarnessResult, HarnessTask, HarnessUsage, HarnessWorkspace } from "./harness.js";
+import type { HarnessAdapter, HarnessBudget, HarnessRef, HarnessResult, HarnessTask, HarnessUsage, HarnessWorkspace, StreamExec } from "./harness.js";
 import { attemptOutcomeLine, rankAttempts } from "./attempt-rank.js";
 import type { AttemptOutcome } from "./attempt-rank.js";
 
@@ -150,6 +154,14 @@ export interface DurableAgentInput {
    * replay without a step-sequence mismatch on any executor.
    */
   steer?: boolean;
+  /**
+   * The ```ask action: the agent may stop with a question for the operator
+   * and park on the answer (`askEvent(turn)`), the way an approval-required
+   * action parks on its decision. Input-gated like steer: a run enqueued
+   * before this existed was never told it could ask, and replays through
+   * the same steps whether or not the executing worker knows the action.
+   */
+  ask?: boolean;
   /**
    * Codebase indexing: repo runs refresh the Nucleus code index after
    * clone (a recorded step) and the agent gets the ```search action.
@@ -676,6 +688,12 @@ export interface ExecutorProvider {
    */
   destroy?: (handle: string) => Promise<void>;
   /**
+   * A streamed exec, when the provider can deliver output as it happens
+   * (the sandbox daemon's exec is SSE). Same result as `attach(h).exec`;
+   * the chunks feed the live hint. Absent means output arrives at exit.
+   */
+  execStream?: (handle: string, command: string, options: { timeoutMs?: number; maxOutputBytes?: number }, onChunk: (stream: "stdout" | "stderr", chunk: string) => void) => Promise<ExecResult>;
+  /**
    * The warm repo cache (SB-A), present only on a provider that can talk
    * to a daemon holding one. `warmInfo` reports the run volume's current
    * lockfile hash beside its repo's published template hash; `warmCommit`
@@ -784,9 +802,26 @@ export interface DurableAgentConfig {
    * listed here. Selection is by the run INPUT, never by this list.
    */
   harnesses?: HarnessAdapter[];
+  /**
+   * Where the run's live "now" hint is written (live.ts). Absent is fine:
+   * the hint is advisory, written from inside executing steps only, and
+   * changes no step sequence.
+   */
+  live?: Pick<LiveStore, "set">;
+  /**
+   * Ceiling on one model turn's output (SHIP_MAX_OUTPUT_TOKENS, default
+   * 16384). The adapter default of 4096 was hit on every one of the three
+   * long deployed runs measured on 2026-09-15 under GLM 5.3, whose thinking
+   * counts against the cap on z.ai's Anthropic route — a cap hit cuts the
+   * action block and costs the turn. Not on the run input: it changes no
+   * step, only what a step returns, and replay returns the recorded text.
+   */
+  maxOutputTokens?: number;
 }
 
 export { CHANGE_EVENT, MERGE_EVENT, PLAN_EVENT } from "./plan.js";
+export { ASK_DECLINED, ASK_UNAVAILABLE, askAnswerMessage, askEvent, isAskEvent, pendingQuestion } from "./ask.js";
+export type { AskDecisionPayload } from "./ask.js";
 export type { PlanDecisionPayload } from "./plan.js";
 
 const PLAN_REQUEST =
@@ -798,6 +833,7 @@ const PLAN_REQUEST =
 export function approvalEvent(turn: number): string {
   return `turn-${turn}-approval`;
 }
+
 
 export interface ApprovalDecisionPayload {
   approved: boolean;
@@ -1157,7 +1193,7 @@ export function durableAgent(
       // The loop used to hold handle/executor as `let` locals and reassign them
       // on a snapshot restore; the workspace carries them now so the publish
       // gate reads whichever container the attempt ended in.
-      const primary: HarnessWorkspace = { ctx, handle, executor, workdir, checkout, scopeKey, stepPrefix: "" };
+      const primary: HarnessWorkspace = { ctx, handle, executor, workdir, checkout, scopeKey, stepPrefix: "", ...liveWiring(config, ctx.runId, handle, "") };
 
       /**
        * Collect a scan's findings out of the agent's own finish message, as a
@@ -1285,7 +1321,7 @@ export function durableAgent(
         const p = `attempt-${i}-`;
         let ws: HarnessWorkspace;
         if (i === 0) {
-          ws = { ...primary, stepPrefix: p };
+          ws = { ...primary, stepPrefix: p, ...liveWiring(config, ctx.runId, primary.handle, p) };
         } else {
           const attemptHandle = await ctx.step(`${p}sandbox`, async () => (await config.executor.create(sandboxOverrides)).handle);
           const attemptExecutor = config.executor.attach(attemptHandle);
@@ -1296,7 +1332,7 @@ export function durableAgent(
             // clone into one that already holds the repo fails outright.
             return checkoutRepo(attemptExecutor, { ref, token: credentialFor(ref, repoPolicy), runId: ctx.runId, warm: input.warm === true });
           });
-          ws = { ctx, handle: attemptHandle, executor: attemptExecutor, workdir, checkout: attemptCheckout, scopeKey, stepPrefix: p };
+          ws = { ctx, handle: attemptHandle, executor: attemptExecutor, workdir, checkout: attemptCheckout, scopeKey, stepPrefix: p, ...liveWiring(config, ctx.runId, attemptHandle, p) };
         }
         const result = await attemptAdapter.run(harnessTask, ws, budget, () => {});
         const diff = await ctx.step(`${p}diff`, async () => {
@@ -1480,7 +1516,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
       let messages: Message[] = [
         {
           role: "system",
-          content: systemPrompt({ workdir: ws.workdir, task: task.prompt, search: searchable, browser: input.verification?.preview !== undefined }),
+          content: systemPrompt({ workdir: ws.workdir, task: task.prompt, search: searchable, browser: input.verification?.preview !== undefined, ask: input.ask === true }),
         },
       ];
       let anySuccessfulAction = false;
@@ -1684,7 +1720,10 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
         // recorded the bare text — both shapes replay.
         onEvent({ kind: "turn", turn });
         const generatedStep = await ws.ctx.step(`${p}turn-${turn}-think`, async () => {
-          const generated = await generateText({ model: config.model, messages });
+          // Inside the step, so a replay (which returns the recorded result
+          // without running this body) never writes a stale "thinking".
+          ws.live?.({ phase: "thinking", turn });
+          const generated = await generateText({ model: config.model, messages, maxOutputTokens: config.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS });
           return { text: generated.text, usage: generated.usage };
         });
         const step = typeof generatedStep === "string" ? { text: generatedStep, usage: undefined } : generatedStep;
@@ -2011,6 +2050,35 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
           continue;
         }
 
+        // The agent's question (```ask). Parks like an approval — snapshot,
+        // wait, restore — but what comes back is text for the transcript, not
+        // permission for an action. Gated on the run INPUT: a run never told
+        // it could ask cannot have emitted one, so the branch is unreachable
+        // on a pre-feature log, and a worker that predates the action feeds
+        // the block back as unknown exactly as before.
+        if (action.kind === "ask") {
+          if (input.ask !== true) {
+            messages.push({ role: "user", content: ASK_UNAVAILABLE });
+            continue;
+          }
+          const canSnapshot = config.executor.snapshot !== undefined && config.executor.createFrom !== undefined;
+          let askImage: string | undefined;
+          if (canSnapshot) {
+            askImage = await ws.ctx.step(`${p}turn-${turn}-snapshot`, () => config.executor.snapshot!(ws.handle));
+          }
+          ws.live?.({ phase: "asking", turn, detail: clipDetail(action.question) });
+          const answer = await ws.ctx.waitForEvent<AskDecisionPayload>(askEvent(turn));
+          if (askImage !== undefined) {
+            const superseded = ws.handle;
+            ws.handle = await ws.ctx.step(`${p}turn-${turn}-restore`, async () => (await config.executor.createFrom!(askImage, sandboxOverridesOf(input))).handle);
+            ws.executor = config.executor.attach(ws.handle);
+            Object.assign(ws, liveWiring(config, ws.ctx.runId, ws.handle, p));
+            if (superseded !== ws.handle) await dispose(config, superseded);
+          }
+          messages.push({ role: "user", content: askAnswerMessage(answer) });
+          continue;
+        }
+
         // Approval policy is deterministic (pure classifier), so the
         // decision to park replays identically; only the human decision
         // is external input, delivered via waitForEvent.
@@ -2035,6 +2103,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
             const superseded = ws.handle;
             ws.handle = await ws.ctx.step(`${p}turn-${turn}-restore`, async () => (await config.executor.createFrom!(parkImage, sandboxOverridesOf(input))).handle);
             ws.executor = config.executor.attach(ws.handle);
+            Object.assign(ws, liveWiring(config, ws.ctx.runId, ws.handle, p));
             if (superseded !== ws.handle) await dispose(config, superseded);
           }
 
@@ -2045,9 +2114,10 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
           }
         }
 
-        const result = await ws.ctx.step(`${p}turn-${turn}-exec`, () =>
-          executeAction(ws.executor, action, config.actionTimeoutMs, `t${turn}`),
-        );
+        const result = await ws.ctx.step(`${p}turn-${turn}-exec`, () => {
+          ws.live?.({ phase: "running", turn, detail: clipDetail(describeAction(action)) });
+          return executeAction(ws.executor, action, config.actionTimeoutMs, `t${turn}`);
+        });
         if (result.exitCode === 0) anySuccessfulAction = true;
         execsSinceNudge += 1;
         lastExecFailed = result.exitCode !== 0;
@@ -3337,6 +3407,24 @@ function prTitle(task: string, incomplete: boolean): string {
 }
 
 /**
+ * The workspace's live hint and streamed exec, bound to one handle. Rebuilt
+ * whenever the handle changes (a restore after a park), because a stream
+ * bound to the superseded container would talk to nothing.
+ */
+function liveWiring(
+  config: Pick<DurableAgentConfig, "live" | "executor">,
+  runId: string,
+  handle: string,
+  attempt: string,
+): Pick<HarnessWorkspace, "live" | "execStream"> {
+  const live = liveSink(config.live, runId, attempt);
+  const stream = config.executor.execStream;
+  const execStream: StreamExec | undefined =
+    stream === undefined ? undefined : (command, options, onChunk) => stream(handle, command, options, onChunk);
+  return { ...(live !== undefined ? { live } : {}), ...(execStream !== undefined ? { execStream } : {}) };
+}
+
+/**
  * ExecutorProvider over a live teploy-sandbox daemon, snapshot-capable —
  * the production wiring for durable Ship runs. Handles are
  * "runId" strings; snapshots are daemon image refs.
@@ -3395,6 +3483,9 @@ export function sandboxProvider(options: {
     },
     attach(handle: string) {
       return SandboxExecutor.attach(handle, base);
+    },
+    execStream(handle, command, opts, onChunk) {
+      return streamSandboxExec(base, handle, command, opts, onChunk);
     },
     async snapshot(handle: string) {
       return SandboxExecutor.attach(handle, base).snapshot();
@@ -3497,4 +3588,109 @@ function truncate(text: string, max: number): string {
   if (text.length <= max) return text;
   const head = Math.floor(max * 0.6);
   return `${text.slice(0, head)}\n... [${text.length - max} chars truncated] ...\n${text.slice(-(max - head))}`;
+}
+
+/**
+ * The daemon's exec, read as it streams. Same wire the SDK's
+ * `SandboxExecutor.exec` consumes (`POST /v1/runs/{id}/exec` → SSE frames
+ * `stdout` / `stderr` / `exit`); the SDK collects the frames and returns at
+ * exit, which is right for an action and wrong for a thirty-minute harness
+ * run nobody can watch. Duplicated here rather than patched there: the SDK
+ * contract is request/response, and this is a Ship concern (the live hint).
+ * Reported upstream as a wanted `onChunk` on ExecOptions.
+ */
+export async function streamSandboxExec(
+  base: { baseURL: string; token: string; fetch?: typeof globalThis.fetch },
+  handle: string,
+  command: string,
+  opts: { timeoutMs?: number; maxOutputBytes?: number },
+  onChunk: (stream: "stdout" | "stderr", chunk: string) => void,
+): Promise<ExecResult> {
+  const fetchImpl = base.fetch ?? globalThis.fetch;
+  const timeoutSec = Math.ceil((opts.timeoutMs ?? 120_000) / 1000);
+  const response = await fetchImpl(`${base.baseURL.replace(/\/+$/, "")}/v1/runs/${handle}/exec`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${base.token}`, "content-type": "application/json" },
+    body: JSON.stringify({ cmd: command, timeoutSec }),
+  });
+  if (!response.ok || response.body === null) {
+    let detail = `Sandbox exec failed with status ${response.status}.`;
+    try {
+      const problem = (await response.json()) as { detail?: unknown };
+      if (typeof problem.detail === "string") detail = problem.detail;
+    } catch {
+      // non-JSON body
+    }
+    throw new Error(detail);
+  }
+  const maxBytes = opts.maxOutputBytes ?? 1_048_576;
+  let stdout = "";
+  let stderr = "";
+  let truncated = false;
+  let exitCode = -1;
+  let timedOut = false;
+  const cap = (current: string, chunk: string): string => {
+    if (current.length >= maxBytes) {
+      truncated = true;
+      return current;
+    }
+    const next = current + chunk;
+    if (next.length > maxBytes) {
+      truncated = true;
+      return next.slice(0, maxBytes);
+    }
+    return next;
+  };
+  for await (const frame of parseSSEFrames(response.body)) {
+    if (frame.event === "stdout") {
+      stdout = cap(stdout, frame.data);
+      onChunk("stdout", frame.data);
+    } else if (frame.event === "stderr") {
+      stderr = cap(stderr, frame.data);
+      onChunk("stderr", frame.data);
+    } else if (frame.event === "exit") {
+      try {
+        const info = JSON.parse(frame.data) as { exitCode?: number; timedOut?: boolean };
+        exitCode = info.exitCode ?? -1;
+        timedOut = info.timedOut === true;
+      } catch {
+        // malformed exit frame — leave -1
+      }
+    }
+  }
+  return { exitCode, stdout, stderr, timedOut, truncated };
+}
+
+/** Minimal SSE reader: `event:` + one or more `data:` lines per frame, blank line terminates. */
+export async function* parseSSEFrames(body: ReadableStream<Uint8Array>): AsyncGenerator<{ event: string; data: string }> {
+  const decoder = new TextDecoder();
+  const reader = body.getReader();
+  let buffer = "";
+  const frame = (block: string): { event: string; data: string } | null => {
+    let event = "message";
+    const data: string[] = [];
+    for (const line of block.split("\n")) {
+      if (line.startsWith("event:")) event = line.slice(6).trim();
+      else if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
+    }
+    return data.length === 0 ? null : { event, data: data.join("\n") };
+  };
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let at: number;
+      while ((at = buffer.indexOf("\n\n")) !== -1) {
+        const block = buffer.slice(0, at).replace(/\r/g, "");
+        buffer = buffer.slice(at + 2);
+        const f = frame(block);
+        if (f !== null) yield f;
+      }
+    }
+    const tail = frame(buffer.replace(/\r/g, ""));
+    if (tail !== null) yield tail;
+  } finally {
+    reader.releaseLock();
+  }
 }

@@ -5,6 +5,47 @@ All notable changes to Teploy Ship are recorded here.
 ## [Unreleased]
 
 ### Added
+- **A run shows what it is doing while it does it.** The event log records a
+  step when it ends, so between steps the run page showed nothing — minutes
+  under a thinking model, and up to thirty minutes for an external harness,
+  whose whole attempt is one exec. `src/live.ts` is the side channel: one row
+  per run, overwritten in place, written from INSIDE the executing step
+  (`turn-N-think`, `turn-N-exec`, `harness-run`) so a replay, which returns the
+  recorded result without running the body, never writes a stale line. The
+  sandbox provider gains `execStream` over the daemon's SSE exec, and the
+  external adapters read claude's `stream-json` / opencode's JSON line by line
+  as it arrives — turn count and last tool call, live. The run page's **Now**
+  card shows the phase, the elapsed time in it, the run's total elapsed, and
+  `typically N min on this repo` from the median of earlier completed runs
+  (`web/src/lib/expect.ts`). The change poller watches the live rows. Nothing
+  here is evidence and nothing is in the log. Reported upstream: the SDK's
+  `ExecOptions` wants an `onChunk`.
+- **The agent can ask.** A ```ask action (offered when the run input carries
+  `ask`, which every newly-enqueued run now does) parks the run on
+  `turn-N-ask` the way an approval-required action parks on its decision —
+  snapshot, `waitForEvent`, restore — and the answer lands as the next
+  observation. Answer from the run page (an answer box; the steer grant, since
+  a reply authorises nothing), `teploy-ship answer <run> "<text>"`, the decide
+  API (`answer`, or `reason` on an approval), or Akiroo's approvals queue,
+  where the webhook's new `question` field puts the question in the card and
+  approving with a reason IS the reply. A denial or an empty answer tells the
+  agent to decide for itself. The prompt sets the bar deliberately high. The
+  live loop (`teploy-ship run`) has no park and feeds the block back as
+  unavailable. Fence: three new entries admitted by `ask`.
+- **`SHIP_MAX_OUTPUT_TOKENS`, default 16384.** The adapter's 4096 was hit on
+  every long deployed run measured on 2026-09-15 — GLM 5.3's always-on thinking
+  counts against it on z.ai's Anthropic route — and a cap hit cuts the action
+  block. Both loops read it; no recorded step changes.
+
+### Changed
+- `docs/DEPLOY.md`: `SHIP_SANDBOX_TTL_SEC` must be sized for the longest run
+  allowed, not the typical one. Three of the six most recent runs on the
+  reference deployment died at 80–160 turns under a 3-hour TTL with `the
+  sandbox this run recorded … is no longer available`; the deployment now
+  asks for the daemon maximum (24 h).
+- `docs/MODELS.md` §2a: what "thinking" means on GLM 5.3 (always on, effort
+  max by default) and that the product path's binding constraint was the
+  output ceiling, not the thinking budget.
 - **Three sandbox network tiers, a per-repo egress allowlist, and a default that
   is not "broken".** `sandboxNetwork` carried `none | egress`; it now carries
   `none | allowlist | open` (`egress` is still accepted everywhere and is still

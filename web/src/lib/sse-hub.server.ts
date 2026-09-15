@@ -43,15 +43,19 @@ async function computeVersion(): Promise<string> {
   // full run history is exactly the read that gets slower the longer Ship has
   // been useful. The dashboard only ever shows recent runs, so the change
   // signal only has to cover them.
-  const [runs, proposed, fleet] = await Promise.all([
+  const [runs, proposed, fleet, live] = await Promise.all([
     runtime.listMeta({ limit: CHANGE_WINDOW }),
     runtime.intake.list("proposed"),
     runtime.fleet.list(),
+    // The "now" line of every executing run (live.ts): a phase change between
+    // two recorded steps is a change the run page should show.
+    runtime.live.recent(CHANGE_WINDOW).catch(() => []),
   ]);
   const r = runs.map((m) => `${m.runId}:${m.status}:${m.updatedAt}`).sort().join("|");
   const p = proposed.map((t) => t.taskId).sort().join(",");
   const f = fleet.map((w) => `${w.owner}:${w.activeRuns}:${w.lastSeen}`).sort().join("|");
-  return hash(`${r}#${p}#${f}`);
+  const l = live.map((s) => `${s.runId}:${s.updatedAt}`).sort().join("|");
+  return hash(`${r}#${p}#${f}#${l}`);
 }
 
 function ensurePolling(): void {

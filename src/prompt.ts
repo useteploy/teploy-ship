@@ -40,13 +40,33 @@ await browser.close();
 `;
 
 /**
+ * The ```ask action, offered only when the run input admits it (durable.ts
+ * `input.ask`). The bar is deliberately high: an agent that asks about every
+ * fork is one a person has to babysit, which is the failure mode this product
+ * exists to remove. Ask when a wrong guess is expensive AND the answer is
+ * genuinely the operator's — never for something a test, the code or the
+ * task text can settle.
+ */
+const ASK_ACTION = `# Asking the operator
+
+If you reach a decision only the operator can make — two reasonable designs with different consequences, an ambiguity in the task that changes what you would build, a destructive step the task did not clearly authorise — you may ask ONCE with an ask block. The run pauses until a person answers; the answer arrives as your next observation.
+
+\`\`\`ask
+The task says "archive old records". Delete them, or move them to an archive table? Deleting is irreversible.
+\`\`\`
+
+Ask rarely. Anything reversible, anything the code or the tests can settle, anything the task already implies: decide it yourself and state the assumption in your finish message. Do not ask for permission to proceed, and do not ask a question you could answer by reading the repository.
+
+`;
+
+/**
  * The CodeAct system prompt. Establishes the action protocol: think,
  * then emit exactly one fenced code block per turn; observe its output;
  * repeat; finish with a ```finish block. Kept deliberately compact — the
  * ~30% of agent quality that lives in prompt/recovery tuning is a
  * later-milestone concern, but the protocol has to be unambiguous now.
  */
-export function systemPrompt(options: { workdir: string; task: string; search?: boolean; browser?: boolean }): string {
+export function systemPrompt(options: { workdir: string; task: string; search?: boolean; browser?: boolean; ask?: boolean }): string {
   // The index is PARTIAL, and the prompt has to say so.
   //
   // This block used to read "prefer this over grepping around". Measured on
@@ -130,7 +150,7 @@ Rules:
 - The filesystem always persists between actions. Python variables usually persist, but may reset after long pauses — anything important belongs in a file.
 - Prefer small, verifiable steps. Read errors and fix them.
 
-${options.browser === true ? BROWSER_PROOF : ""}# Finishing
+${options.browser === true ? BROWSER_PROOF : ""}${options.ask === true ? ASK_ACTION : ""}# Finishing
 
 When the task is complete and verified, emit a finish block with a short summary of what you did and the result:
 \`\`\`finish
