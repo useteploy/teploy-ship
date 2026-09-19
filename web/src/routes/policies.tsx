@@ -194,7 +194,7 @@ export default function Policies({ data, actionData }: { data: PoliciesData; act
         A grant names the roles and, optionally, individual users allowed to act. Anyone not named is refused,
         whatever their role. Users are the stable ids from Settings (or <code>issuer#sub</code> for SSO).
       </p>
-      <table class="runs">
+      <div class="table-wrap"><table class="runs">
         <thead>
           <tr><th>action</th><th>roles</th><th>named users</th><th /></tr>
         </thead>
@@ -236,7 +236,7 @@ export default function Policies({ data, actionData }: { data: PoliciesData; act
             );
           })}
         </tbody>
-      </table>
+      </table></div>
 
       <h2 class="section">Auto windows</h2>
       <p class="meta">
@@ -272,7 +272,7 @@ export default function Policies({ data, actionData }: { data: PoliciesData; act
         to runs enqueued after the rule is saved; the request is a recorded step on the run, and a request the forge
         refuses is recorded as such — the pull request still opens.
       </p>
-      <table class="runs">
+      <div class="table-wrap"><table class="runs">
         <thead>
           <tr><th>repository</th><th>users</th><th>teams</th><th /></tr>
         </thead>
@@ -313,7 +313,7 @@ export default function Policies({ data, actionData }: { data: PoliciesData; act
             <td style="text-align:right"><button class="approve sm" type="submit" form="reviewers-new" disabled={!data.canEdit}>Add</button></td>
           </tr>
         </tbody>
-      </table>
+      </table></div>
     </>
   );
 }

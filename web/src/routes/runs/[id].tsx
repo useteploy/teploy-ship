@@ -384,9 +384,9 @@ export default function RunDetail({ data }: { data: RunData }) {
           (the hold releases itself) or cancel the run.
         </p>
       )}
-      <h1 class="page">
-        <a href="/runs">runs</a> / {data.runId}
-      </h1>
+      <div class="eyebrow"><a href="/runs">All runs</a> / {data.runId}</div>
+      <h1 class="page">{data.meta ? data.meta.task.slice(0, 110) + (data.meta.task.length > 110 ? "…" : "") : "Run details"}</h1>
+      {data.meta && data.meta.task.length > 110 && <details class="disclosure"><summary>Read the full task</summary><p style="white-space:pre-wrap">{data.meta.task}</p></details>}
       {data.meta === null ? (
         <p class="empty">Unknown run — it may have been removed, or the id is mistyped. <a href="/runs">All runs</a></p>
       ) : (
@@ -562,7 +562,7 @@ export default function RunDetail({ data }: { data: RunData }) {
           )}
           {active && data.steerable && (
             <form class="newrun" method="post" style="margin:12px 0">
-              <input type="text" name="steer" placeholder='steer the run, e.g. "skip the docs, focus on the parser"' />
+              <input type="text" name="steer" aria-label="Guide this run" placeholder='steer the run, e.g. "skip the docs, focus on the parser"' />
               <button type="submit" name="intent" value="steer">
                 Steer
               </button>
@@ -573,7 +573,8 @@ export default function RunDetail({ data }: { data: RunData }) {
               queued steering (lands on the next turn): {data.steerPending.join(" · ")}
             </p>
           )}
-          <ul class="timeline">
+          <h2 class="section">Run activity</h2>
+          <ul class="timeline" aria-label="Run activity">
             {data.items.map((item, i) => {
               const elapsed = data.items.length > 0 ? since(data.items[0]!.at, item.at) : "";
               // A turn collapses to one line: what it ran, how it exited, how

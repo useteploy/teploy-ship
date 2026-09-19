@@ -11,10 +11,10 @@ export interface SubNavItem {
 
 export function SubNav({ items, current }: { items: SubNavItem[]; current: string }) {
   return (
-    <div class="chips subnav">
+    <nav class="chips subnav" aria-label="Section navigation">
       {items.map((i) => (
-        <a key={i.key} href={i.href} class={i.key === current ? "on" : undefined}>{i.label}</a>
+        <a key={i.key} href={i.href} aria-current={i.key === current ? "page" : undefined} class={i.key === current ? "on" : undefined}>{i.label}</a>
       ))}
-    </div>
+    </nav>
   );
 }

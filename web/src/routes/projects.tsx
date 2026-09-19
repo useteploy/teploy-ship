@@ -370,7 +370,7 @@ const INPUT = "background:var(--panel);color:var(--text);border:1px solid var(--
 function Field({ label, name, value, placeholder, type, list, width }: { label: string; name: string; value?: string; placeholder?: string; type?: string; list?: string; width?: string }) {
   return (
     <label class="meta" style="display:flex;flex-direction:column;gap:4px">
-      {label}
+      {label.charAt(0).toUpperCase() + label.slice(1)}
       <input type={type ?? "text"} name={name} value={value ?? ""} placeholder={placeholder} list={list} style={`${INPUT};width:${width ?? "100%"}`} />
     </label>
   );
@@ -378,10 +378,11 @@ function Field({ label, name, value, placeholder, type, list, width }: { label: 
 
 function ProjectForm({ p, data }: { p: Project | null; data: ProjectsData }) {
   return (
-    <form method="post" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;align-items:end">
+    <form method="post" class="project-form">
       {p !== null && <input type="hidden" name="repo" value={p.repo} />}
       <Field label="clone URL" name="url" value={p?.url} placeholder="https://forge.example/owner/repo" />
       <Field label="label" name="label" value={p?.label} placeholder="optional" />
+      <details class="form-section" open={p !== null}><summary>Execution environment</summary><div class="form-grid">
       <Field label={`sandbox image${data.workerImage !== "" ? ` (worker default ${data.workerImage})` : ""}`} name="image" value={p?.sandboxImage} placeholder="worker default" list="ship-images" />
       <datalist id="ship-images">
         {IMAGES.map((i) => (
@@ -430,15 +431,8 @@ function ProjectForm({ p, data }: { p: Project | null; data: ProjectsData }) {
           ))}
         </select>
       </label>
-      <label class="meta" style="display:flex;flex-direction:column;gap:4px">
-        intake policy
-        <select name="policy" style={INPUT}>
-          {POLICIES.map((n) => (
-            <option key={n} value={n} selected={(p?.sourcePolicy ?? "") === n}>{n === "" ? "inherit from source" : n}</option>
-          ))}
-        </select>
-      </label>
-      <Field label="daily budget $" name="budget" value={p?.dailyBudgetUSD !== undefined ? String(p.dailyBudgetUSD) : undefined} placeholder="source default" type="number" />
+      </div></details>
+      <details class="form-section" open={p !== null}><summary>Tests & verification</summary><div class="form-grid">
       <Field label="test command" name="testCommand" value={p?.testCommand ?? p?.verification?.tests} placeholder="detected from the repo" />
       <Field label="test timeout ms" name="testTimeoutMs" value={p?.testTimeoutMs !== undefined ? String(p.testTimeoutMs) : undefined} placeholder="default" type="number" />
       <Field label="Observe service" name="observeService" value={p?.observeService} placeholder="none" />
@@ -452,6 +446,18 @@ function ProjectForm({ p, data }: { p: Project | null; data: ProjectsData }) {
         <input type="checkbox" name="visual" checked={p?.verification?.visual === true} />
         visual diff rung
       </label>
+      </div></details>
+      <details class="form-section" open={p !== null}><summary>Automation & approval</summary><div class="form-grid">
+      <label class="meta" style="display:flex;flex-direction:column;gap:4px">
+        intake policy
+        <select name="policy" style={INPUT}>
+          {POLICIES.map((n) => (
+            <option key={n} value={n} selected={(p?.sourcePolicy ?? "") === n}>{n === "" ? "inherit from source" : n}</option>
+          ))}
+        </select>
+      </label>
+      <Field label="daily budget $" name="budget" value={p?.dailyBudgetUSD !== undefined ? String(p.dailyBudgetUSD) : undefined} placeholder="source default" type="number" />
+
       <label class="meta" style="display:flex;flex-direction:column;gap:4px">
         authority (ladder caps it)
         <select name="authority" style={INPUT} disabled={!data.canAuto}>
@@ -473,8 +479,9 @@ function ProjectForm({ p, data }: { p: Project | null; data: ProjectsData }) {
         <input type="checkbox" name="autoDeploy" checked={p?.autoDeploy === true} disabled={!data.canAuto} />
         auto-rollback a bad deploy
       </label>
-      <div class="row-actions" style="gap:8px">
-        <button class="approve sm" type="submit" name="intent" value="save" disabled={!data.canEdit}>{p === null ? "Add project" : "Save"}</button>
+      </div></details>
+      <div class="row-actions" style="gap:8px;grid-column:1/-1">
+        <button class="primary" type="submit" name="intent" value="save" disabled={!data.canEdit}>{p === null ? "Add project" : "Save"}</button>
         {p !== null && (
           <button class="sm" type="submit" name="intent" value="remove" disabled={!data.canEdit}>Remove</button>
         )}
@@ -489,7 +496,7 @@ export default function Projects({ data }: { data: ProjectsData | SourcesData | 
   const p = data.selected;
   return (
     <>
-      <h1 class="page">Projects</h1>
+      <div class="page-heading"><div><h1 class="page">Projects</h1><p class="meta">The repositories Ship works on.</p></div>{p === null && <a class="button primary" href="#add-project">Add project +</a>}</div>
       <SubNav items={PROJECT_VIEWS} current="repos" />
       {data.denied !== null && (
         <p class="card attn" style="margin:12px 0;color:var(--red)">Not applied — {deniedText(data.denied)}</p>
@@ -502,6 +509,8 @@ export default function Projects({ data }: { data: ProjectsData | SourcesData | 
           Read-only: your account may not change projects. An admin can grant it on <a href="/policies">Policies</a>.
         </p>
       )}
+      <p class="meta">Connect repositories and configure how Ship builds, tests, and delivers changes.</p>
+      <details class="disclosure"><summary>How project defaults, verification, and automation work</summary>
       <p class="meta">
         One record per repository. Adding a project allows its repo (the allowlist is this list plus{" "}
         <code>SHIP_REPO_ALLOWLIST</code>{data.envAllowlist !== "" ? ` = ${data.envAllowlist}` : ", unset"}), picks the sandbox image its runs boot,
@@ -531,6 +540,8 @@ export default function Projects({ data }: { data: ProjectsData | SourcesData | 
         visual rungs need sandbox egress to reach the preview URL — set the sandbox network to <code>egress</code> for repos
         with a ladder.
       </p>
+
+      </details>
 
       {p !== null ? (
         <>
@@ -616,7 +627,7 @@ export default function Projects({ data }: { data: ProjectsData | SourcesData | 
               </table>
             </div>
           )}
-          <h2 class="section">Add a project</h2>
+          <h2 class="section" id="add-project">Add a project</h2>
           <div class="card">
             <ProjectForm p={null} data={data} />
           </div>

@@ -55,3 +55,21 @@ Open items: 1 P2 improvement (1 total)
 - teploy-ship-01, -02, -06, -07: FIXED - see audit commits (safe-csv is opt-in via --safe-csv; raw output unchanged).
 - teploy-ship-05: PARTIALLY FIXED - the export now prefers a settled costUSD recorded at completion and labels recomputed rows costEstimated. UPSTREAM HANDOFF: writing the settled cost onto the run-completed event belongs to the vendored @neutron-build/agents run loop - report upstream (Neutron), then this export picks it up with no further change.
 - teploy-ship-04: DEFERRED (design) - moving from heuristic command classification to capability-scoped executor boundaries is an architecture project; until then the regexes stay advisory (documented).
+
+## 2026-09-19 — dashboard usability pass
+
+- Fixed Settings' Team/System switcher rendering identical content. Settings
+  now has overview, execution, connections, team, and advanced views; deployment
+  values are explicitly read-only, secrets stay masked, and editable project,
+  approval, and account controls are linked from the overview.
+- Reworked the shared shell, typography, spacing, accessible navigation, form
+  controls, and mobile layouts. Tables scroll inside their own containers.
+- Added a multiline task composer with configured-repository suggestions,
+  server-rendered run search combined with status filters, readable run dates,
+  and task-first run headings. Project options are grouped under execution,
+  verification, and automation disclosures. No worker steps or policy changed.
+- Validation: lint, 1,151 runtime + 40 script tests, 76 web tests, web typecheck
+  and production build. Isolated Chromium checks cover settings separation,
+  team creation, search/filter/clear, task submission, and desktop/tablet/mobile
+  layouts. Production preflight before rollout: five waiting runs, all safe,
+  no executing runs and no incompatible or unrecorded workflow fingerprints.

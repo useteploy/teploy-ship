@@ -260,7 +260,7 @@ export function BulletinAdmin({ data }: { data: BulletinAdminData }) {
         <p class="empty">No boards yet. Create one below.</p>
       ) : (
         <div class="table-wrap">
-          <table class="runs">
+          <div class="table-wrap"><table class="runs">
             <thead>
               <tr>
                 <th>Board</th>
@@ -298,7 +298,7 @@ export function BulletinAdmin({ data }: { data: BulletinAdminData }) {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </table></div>
         </div>
       )}
 

@@ -18,6 +18,7 @@ interface InboxData {
   proposed: IntakeTask[];
   store: string;
   model: string;
+  projects: Array<{ url: string; label: string }>;
   /** ?decision=taken — the operator's approve/deny lost the race to another one. */
   decisionTaken: boolean;
   /** ?denied=approve — this account lacks the approve authority. */
@@ -32,9 +33,9 @@ export async function loader({ request }: { request: Request }): Promise<InboxDa
   const query = new URL(request.url).searchParams;
   const decisionTaken = query.get("decision") === "taken";
   const denied = query.get("denied") === "approve";
-  const [runs, proposed] = await Promise.all([runtime.listMeta(), runtime.intake.list("proposed")]);
+  const [runs, proposed, projects] = await Promise.all([runtime.listMeta(), runtime.intake.list("proposed"), runtime.projects.list()]);
   const parked = runs.filter((r) => r.status === "waiting" && r.eventName !== undefined);
-  return { parked, proposed, store: runtime.kind, model: defaultModel(), decisionTaken, denied };
+  return { projects: projects.map(p => ({ url: p.url ?? p.repo, label: p.label ?? p.repo })), parked, proposed, store: runtime.kind, model: defaultModel(), decisionTaken, denied };
 }
 
 export async function action({ request }: { request: Request }): Promise<Response> {
@@ -158,30 +159,29 @@ export default function Inbox({ data }: { data: InboxData }) {
           Not applied — your account may not approve, deny or launch runs. An admin can grant it on <a href="/policies">Policies</a>.
         </p>
       )}
-      <h1 class="page">Inbox</h1>
-      <p class="meta">
-        Issues in, verified pull requests out. This page is everything waiting on you — a decision on a
-        parked run, or a launch call on a proposed task. · store: {data.store} · model: {data.model}
-        {data.store === "file" && " · file store has no worker — resume queued runs from the CLI"}
-      </p>
-
-      {/* Without a repo the run gets an empty sandbox: nothing to read, nothing
-          to change, no PR at the end. Optional, because a bare task is still
-          useful for one-off scratch work. */}
-      <form class="newrun" method="post">
-        <input type="text" name="task" placeholder='new task, e.g. "fix the failing test in api/"' />
-        <input type="text" name="repo" placeholder="repo URL (optional)" />
-        <label class="meta" style="display:flex;align-items:center;gap:6px;white-space:nowrap">
-          <input type="checkbox" name="plan" /> plan first
-        </label>
-        <button type="submit">Queue run</button>
+      <div class="page-heading"><div><div class="eyebrow">Your workspace</div><h1 class="page">What should we ship next?</h1><p class="meta">Start a task, review a plan, or pick up work that needs your decision.</p></div><a class="button" href="/runs">View all runs →</a></div>
+      <div class="summary-grid">
+        <a class="summary-card" href="#approvals"><strong>{data.parked.length}</strong><span>Awaiting your decision</span></a>
+        <a class="summary-card" href="#proposals"><strong>{data.proposed.length}</strong><span>Proposed tasks</span></a>
+        <a class="summary-card" href="/projects"><strong>{data.projects.length}</strong><span>Configured projects</span></a>
+      </div>
+      <form class="composer" method="post" id="new-task">
+        <label htmlFor="task-prompt">Give Ship a task</label>
+        <textarea id="task-prompt" name="task" rows={3} required placeholder="Describe the change you want, the problem to investigate, or the test to fix…" />
+        <div class="composer-footer">
+          <label class="field">Repository<input type="text" name="repo" list="task-projects" placeholder="Choose a project or paste a clone URL" /></label>
+          <datalist id="task-projects">{data.projects.map(p => <option key={p.url} value={p.url}>{p.label}</option>)}</datalist>
+          <label class="check-field"><input type="checkbox" name="plan" /> Review a plan first</label>
+          <button class="primary" type="submit">Queue task →</button>
+        </div>
+        <p class="meta" style="margin:12px 0 0">{data.store === "file" ? "File storage: queue here, then resume the run from the CLI." : "Your worker picks up queued tasks. A task without a repository runs in an empty workspace."}</p>
       </form>
 
-      <h2 class="section">
-        Needs approval <span class="count">({data.parked.length})</span>
+      <h2 class="section" id="approvals">
+        Needs your decision <span class="count">({data.parked.length})</span>
       </h2>
       {data.parked.length === 0 ? (
-        <p class="empty">No runs are parked.</p>
+        <div class="empty"><h3>You’re caught up</h3><p>Plans, approval requests, and agent questions will appear here.</p></div>
       ) : (
         data.parked.map((r) => (
           <div key={r.runId} class="card attn">
@@ -202,7 +202,7 @@ export default function Inbox({ data }: { data: InboxData }) {
         ))
       )}
 
-      <h2 class="section">
+      <h2 class="section" id="proposals">
         Proposed tasks <span class="count">({data.proposed.length})</span>
       </h2>
       {data.proposed.length === 0 ? (

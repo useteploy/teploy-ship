@@ -89,6 +89,8 @@ export default function Fleet({ data }: { data: FleetData | SpendData }) {
     <>
       <h1 class="page">Fleet</h1>
       <SubNav items={FLEET_VIEWS} current="workers" />
+      <p class="meta">See which workers are online, what they’re running, and how much capacity is available.</p>
+      <details class="disclosure"><summary>How worker capacity is calculated</summary>
       <p class="meta">
         Workers claim runs from one shared queue via leases, so many can run at once across servers. Each one <b>measures
         its own box</b> — cores, memory, and free space and inodes on the docker root — and derives its slot count from
@@ -100,6 +102,7 @@ export default function Fleet({ data }: { data: FleetData | SpendData }) {
         {data.store === "file" && " · file store runs no worker daemon — nothing to show here"}
       </p>
 
+      </details>
       {online.length > 0 && (
         <div class="row-actions" style="gap:24px;flex-wrap:wrap;margin:6px 0 18px">
           <span><b>{online.length}</b> <span class="meta">worker{online.length === 1 ? "" : "s"} online</span></span>

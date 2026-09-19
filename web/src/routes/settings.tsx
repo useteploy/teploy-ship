@@ -11,8 +11,7 @@ import {
 import type { AkirooResolution, ResolvedValue, Role, UserView, ShipRuntime } from "teploy-ship/runtime";
 
 import { shipRuntime, defaultModel } from "../lib/store.server.js";
-import { SubNav } from "../lib/subnav.js";
-import { SETTINGS_VIEWS } from "../views/settings-views.js";
+import { SETTINGS_VIEWS, settingsView, groupVisible, settingLabel, groupLabel } from "../views/settings-views.js";
 import { currentUser } from "../lib/session.server.js";
 import type { Principal } from "../lib/session.server.js";
 
@@ -38,7 +37,7 @@ interface Group {
 }
 
 interface SettingsData {
-  view: "team" | "system";
+  view: import("../views/settings-views.js").SettingsView;
   groups: Group[];
   users: UserView[];
   me: Principal;
@@ -189,7 +188,7 @@ export async function loader({ request }: { request: Request }): Promise<Setting
   const me = (await currentUser(request)) ?? { user: "token", role: "admin" as Role };
   const users = await runtime.users.list();
   const params = new URL(request.url).searchParams;
-  const view = params.get("view") === "team" ? "team" : "system";
+  const view = settingsView(params.get("view"));
   const justConnected = params.get("connected") === "1";
 
   const sandboxOn = (process.env.SHIP_SANDBOX_URL ?? "") !== "";
@@ -413,23 +412,45 @@ export async function action({ request }: { request: Request }): Promise<{ error
 
 const ROLE_OPTS: Role[] = ["viewer", "editor", "admin"];
 
-export default function Settings({ data, actionData }: { data: SettingsData; actionData?: { error?: string; ok?: string } }) {
-  return (
-    <>
-      <h1 class="page">Settings</h1>
-      <SubNav items={SETTINGS_VIEWS} current={data.view} />
-      {data.connected !== undefined && (
-        <p style="color:var(--green)">
-          Connected. This Ship now collects queued work from <b>{data.connected}</b> — the worker picks the connector up
-          on its next poll, within a few seconds. No redeploy is needed.
-        </p>
-      )}
-      <p class="meta">
-        The effective configuration this server is running. Set via environment on deploy (teploy.yml / secrets);
-        secrets show only as set/not set. Intake policies are edited on <a href="/projects?view=sources">Sources</a>.
-      </p>
+function ConfigGroup({ group, advanced }: { group: Group; advanced: boolean }) {
+  const rows = group.rows.map(row => <div class="config-row" key={row.label}>
+    <div class="config-label">{settingLabel(row.label)}{row.label.includes("_") && <code class="config-key">{row.label}</code>}</div>
+    <div class="config-value"><span>{row.value}</span>
+      {row.hint && <details><summary>Configuration details</summary><p class="meta">{row.hint}</p></details>}
+      {row.action && <p class="meta"><a href={row.action.href}>{row.action.label} →</a></p>}
+    </div>
+  </div>);
+  return advanced ? <details class="config-section"><summary>{groupLabel(group.title)} <span class="count">· {group.rows.length} values</span></summary>{rows}</details>
+    : <section class="config-section"><h3>{groupLabel(group.title)}</h3>{rows}</section>;
+}
 
-      <h2 class="section">Team access</h2>
+export default function Settings({ data, actionData }: { data: SettingsData; actionData?: { error?: string; ok?: string } }) {
+  const title = SETTINGS_VIEWS.find(view => view.key === data.view)?.label ?? "Overview";
+  const rowValue = (group: string, label: string) => data.groups.find(g => g.title === group)?.rows.find(r => r.label === label)?.value ?? "Not configured";
+  return <>
+    <div class="page-heading"><div><div class="eyebrow">Workspace</div><h1 class="page">Settings</h1><p class="meta">Manage your team, connections, and how Ship runs your work.</p></div><a class="button" href="/account">Your account</a></div>
+    {data.connected && <p class="notice" role="status">Connected to <b>{data.connected}</b>. Your worker will pick up the connection on its next poll.</p>}
+    <div class="settings-layout">
+      <nav class="settings-nav" aria-label="Settings navigation">{SETTINGS_VIEWS.map(view => <a key={view.key} href={view.href} class={view.key === data.view ? "active" : undefined} aria-current={view.key === data.view ? "page" : undefined}>{view.label}</a>)}</nav>
+      <div class="settings-content">
+        {data.view === "overview" && <>
+          <h2>Workspace overview</h2><p class="meta">Start with the setting you want to change. Repository-specific choices live in Projects.</p>
+          <section class="config-section"><h3>Current defaults</h3>
+            <div class="config-row"><span class="config-label">Model</span><span class="config-value">{rowValue("Runtime", "model")}</span></div>
+            <div class="config-row"><span class="config-label">Agent harness</span><span class="config-value">{rowValue("Harness", "harness")}</span></div>
+            <div class="config-row"><span class="config-label">Daily budget (USD)</span><span class="config-value">{rowValue("Budget & capacity", "SHIP_DAILY_BUDGET_USD")}</span></div>
+          </section>
+          <div class="settings-cards">
+            <a class="card" href="/settings?view=team"><h3>Team & access →</h3><p>Add teammates, assign roles, and reset passwords.</p><span class="chip">{data.users.length} named accounts</span></a>
+            <a class="card" href="/settings?view=integrations"><h3>Connections →</h3><p>Connect Akiroo and inspect Git, webhook, and Observe configuration.</p></a>
+            <a class="card" href="/projects"><h3>Project configuration →</h3><p>Choose a harness, sandbox, test command, and automation policy for each repository.</p></a>
+            <a class="card" href="/policies"><h3>Approval rules →</h3><p>Decide who can launch work and what may run unattended.</p></a>
+            <a class="card" href="/fleet?view=spend"><h3>Usage & spending →</h3><p>Review costs, budget limits, and unpriced runs.</p></a>
+            <a class="card" href="/settings?view=models"><h3>Models & execution →</h3><p>Inspect worker defaults for model access, capacity, and verification.</p></a>
+          </div>
+        </>}
+        {data.view === "team" && <>
+      <h2>Team & access</h2>
       <p class="meta">
         Accounts and roles for this dashboard. <b>Admin</b> manages users, sources, and secrets; <b>editor</b> approves
         runs and launches work; <b>viewer</b> is read-only. Access governs this dashboard — the SHIP_WEB_TOKEN remains an
@@ -438,19 +459,19 @@ export default function Settings({ data, actionData }: { data: SettingsData; act
       {actionData?.error !== undefined && <p style="color:var(--red)">{actionData.error}</p>}
       {actionData?.ok !== undefined && <p style="color:var(--green)">{actionData.ok}</p>}
 
-      <form method="post" class="row-actions" style="gap:8px;margin:12px 0 16px;flex-wrap:wrap">
+      <form method="post" class="team-form">
         <input type="hidden" name="intent" value="create" />
-        <input type="text" name="username" placeholder="username" required style="background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 10px" />
-        <input type="password" name="password" placeholder="password (8+ chars)" required style="background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 10px" />
-        <select name="role" style="background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 10px">
+        <label class="field">Username<input type="text" name="username" placeholder="e.g. alex" required autoComplete="off" /></label>
+        <label class="field">Temporary password<input type="password" name="password" placeholder="At least 8 characters" minLength={8} required autoComplete="new-password" /></label>
+        <label class="field">Role<select name="role">
           {ROLE_OPTS.map((r) => (
             <option key={r} value={r} selected={r === "editor"}>{r}</option>
           ))}
-        </select>
-        <button type="submit">Add user</button>
+        </select></label>
+        <button class="primary" type="submit">Add user</button>
       </form>
 
-      <table class="runs">
+      <div class="table-wrap"><table class="runs">
         <thead>
           <tr><th>Username</th><th>Role</th><th>Reset password</th><th /></tr>
         </thead>
@@ -465,7 +486,7 @@ export default function Settings({ data, actionData }: { data: SettingsData; act
                 <form method="post" class="row-actions" style="gap:6px">
                   <input type="hidden" name="intent" value="role" />
                   <input type="hidden" name="username" value={u.username} />
-                  <select name="role" style="background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px">
+                  <select name="role" aria-label={`Role for ${u.username}`} style="background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px">
                     {ROLE_OPTS.map((r) => (
                       <option key={r} value={r} selected={r === u.role}>{r}</option>
                     ))}
@@ -477,7 +498,7 @@ export default function Settings({ data, actionData }: { data: SettingsData; act
                 <form method="post" class="row-actions" style="gap:6px">
                   <input type="hidden" name="intent" value="password" />
                   <input type="hidden" name="username" value={u.username} />
-                  <input type="password" name="password" placeholder="new password" style="background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px" />
+                  <input type="password" name="password" aria-label={`New password for ${u.username}`} placeholder="New password" minLength={8} required style="background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px" />
                   <button class="sm" type="submit">Reset</button>
                 </form>
               </td>
@@ -493,31 +514,16 @@ export default function Settings({ data, actionData }: { data: SettingsData; act
             </tr>
           ))}
         </tbody>
-      </table>
+      </table></div>
 
-      {data.groups.map((g) => (
-        <div key={g.title}>
-          <h2 class="section">{g.title}</h2>
-          <table class="runs">
-            <tbody>
-              {g.rows.map((r) => (
-                <tr key={r.label}>
-                  <td class="meta" style="width:34%">{r.label}</td>
-                  <td>
-                    <span class={r.ok === false ? "meta" : ""} style={r.ok === false ? "color:var(--yellow)" : ""}>
-                      {r.value}
-                    </span>
-                    {r.hint !== undefined && <span class="meta" style="margin-left:10px">· {r.hint}</span>}
-                    {r.action !== undefined && (
-                      <a href={r.action.href} style="margin-left:10px">{r.action.label}</a>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ))}
-    </>
-  );
+        </>}
+        {data.view !== "overview" && data.view !== "team" && <>
+          <h2>{title}</h2>
+          <p class="meta">{data.view === "integrations" ? "Services that bring work into Ship and carry results back." : data.view === "models" ? "Worker defaults for new runs. A project's configuration takes precedence." : "Detailed configuration reported by this server. Expand a section to inspect its values."}</p>
+          <p class="notice"><b>Configuration reference.</b> These values are read-only here. Change worker defaults through your deployment environment and redeploy. Secrets are never displayed. <a href="/projects">Edit project overrides →</a></p>
+          {data.groups.filter(group => groupVisible(data.view, group.title)).map(group => <ConfigGroup key={group.title} group={group} advanced={data.view === "system"} />)}
+        </>}
+      </div>
+    </div>
+  </>;
 }

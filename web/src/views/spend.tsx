@@ -54,7 +54,7 @@ function attributionRows(
 function AttributionTable({ rows, kindLabel }: { rows: Array<[string, number, number]>; kindLabel: string }) {
   if (rows.length === 0) return null;
   return (
-    <table class="runs">
+    <div class="table-wrap"><table class="runs">
       <thead>
         <tr>
           <th>{kindLabel}</th>
@@ -71,7 +71,7 @@ function AttributionTable({ rows, kindLabel }: { rows: Array<[string, number, nu
           </tr>
         ))}
       </tbody>
-    </table>
+    </table></div>
   );
 }
 

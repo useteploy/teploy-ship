@@ -131,7 +131,7 @@ export default function Sources({ data }: { data: SourcesData }) {
         Point your git host's webhook here and label an issue/PR <code>ship</code>. The label is the trigger; this
         page decides what the labeled task becomes.
       </p>
-      <table class="runs">
+      <div class="table-wrap"><table class="runs">
         <thead>
           <tr><th>source</th><th>webhook path</th></tr>
         </thead>
@@ -139,7 +139,7 @@ export default function Sources({ data }: { data: SourcesData }) {
           <tr><td class="chip">forgejo</td><td class="meta">{data.hookBase || "<server-url>"}/hooks/forgejo</td></tr>
           <tr><td class="chip">github</td><td class="meta">{data.hookBase || "<server-url>"}/hooks/github</td></tr>
         </tbody>
-      </table>
+      </table></div>
       {data.hookBase === "" && (
         <p class="meta" style="margin-top:8px">Set <code>SHIP_PUBLIC_URL</code> to show the full webhook URLs here.</p>
       )}

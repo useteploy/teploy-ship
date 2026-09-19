@@ -1,3 +1,4 @@
+import { RUN_FILTERS, runCategory, filterRuns } from "../../lib/run-filter.js";
 import type { RunMeta } from "teploy-ship/runtime";
 
 import { shipRuntime } from "../../lib/store.server.js";
@@ -11,6 +12,10 @@ export const config = { mode: "app" };
 
 interface RunsData {
   view: "runs";
+  query: string;
+  status: string;
+  total: number;
+  counts: Record<string, number>;
   runs: RunMeta[];
 }
 
@@ -24,40 +29,18 @@ export async function loader({ request }: { request: Request }): Promise<RunsDat
   }
   // Most-recent first.
   runs.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
-  return { view: "runs", runs };
+  const params = new URL(request.url).searchParams;
+  const query = params.get("q") ?? "";
+  const requested = params.get("status") ?? "all";
+  const status = RUN_FILTERS.find(value => value === requested) ?? "all";
+  const counts: Record<string, number> = { all: runs.length };
+  for (const run of runs) { const key = runCategory(run.status); counts[key] = (counts[key] ?? 0) + 1; }
+  return { view: "runs", runs: filterRuns(runs, status, query), total: runs.length, counts, query, status };
 }
 
 function short(s: string, n: number): string {
   return s.length > n ? `${s.slice(0, n)}…` : s;
 }
-
-// Which filter category a status belongs to (chips filter by category, so
-// "active" covers every non-terminal, non-parked state).
-function category(status: string): string {
-  if (status === "completed") return "completed";
-  if (status === "failed") return "failed";
-  if (status === "cancelled") return "cancelled";
-  if (status === "waiting") return "waiting";
-  return "active";
-}
-
-// Client-side filter driven by ?status=<category>: hide non-matching rows,
-// mark the active chip. Keeps URLs shareable without a loader round-trip.
-const FILTER = `
-(function(){
-  var q=new URLSearchParams(location.search).get("status")||"all";
-  var shown=0;
-  document.querySelectorAll("tr[data-cat]").forEach(function(tr){
-    var on=(q==="all"||tr.getAttribute("data-cat")===q);
-    tr.style.display=on?"":"none"; if(on)shown++;
-  });
-  var none=document.getElementById("filter-empty");
-  if(none){ none.style.display=shown===0?"":"none"; none.textContent="No "+q+" runs."; }
-  document.querySelectorAll(".chips a").forEach(function(a){
-    if((a.getAttribute("data-f")||"all")===q)a.classList.add("on");
-  });
-})();
-`;
 
 const CHIPS: Array<{ f: string; label: string }> = [
   { f: "all", label: "All" },
@@ -72,48 +55,39 @@ export default function RunsList({ data }: { data: RunsData | ReviewsData }) {
   if (data.view === "reviews") return <Reviews data={data} />;
   return (
     <>
-      <h1 class="page">Runs</h1>
+      <div class="page-heading"><div><h1 class="page">Runs</h1><p class="meta">Follow work from the first step to the pull request.</p></div><a class="button primary" href="/#new-task">New task +</a></div>
       <SubNav items={RUN_VIEWS} current="runs" />
-      <p class="meta">{data.runs.length} run{data.runs.length === 1 ? "" : "s"} total. Open one for its timeline and the recorded steps behind the pull request.</p>
-
-      <div class="chips">
-        {CHIPS.map((c) => (
-          <a key={c.f} href={c.f === "all" ? "/runs" : `/runs?status=${c.f}`} data-f={c.f}>
-            {c.label}
-          </a>
-        ))}
+      <div class="run-toolbar">
+        <div class="chips" aria-label="Filter runs by status">{CHIPS.map(c => <a key={c.f} class={c.f === data.status ? "on" : undefined} aria-current={c.f === data.status ? "page" : undefined} href={`/runs?status=${c.f}${data.query ? `&q=${encodeURIComponent(data.query)}` : ""}`}>{c.label} <span class="count">{data.counts[c.f] ?? 0}</span></a>)}</div>
+        <form method="get" class="row-actions" role="search"><input type="hidden" name="status" value={data.status} /><input type="search" name="q" aria-label="Search runs" placeholder="Search tasks, run IDs, or models" value={data.query} /><button type="submit">Search</button></form>
       </div>
-
+      <p class="meta">Showing {data.runs.length} of {data.total} runs{data.query ? ` matching “${data.query}”` : ""}. {(data.query || data.status !== "all") && <a href="/runs">Clear filters</a>}</p>
       {data.runs.length === 0 ? (
-        <p class="empty">No runs yet. Queue one from the <a href="/">Inbox</a>.</p>
+        <div class="empty"><h3>{data.total ? "No matching runs" : "Your first task starts here"}</h3><p>{data.total ? <a href="/runs">Clear filters to see all runs</a> : <a href="/#new-task">Describe a task in your inbox →</a>}</p></div>
       ) : (
         <div class="table-wrap">
-        <p class="empty" id="filter-empty" style="display:none" />
         <table class="runs">
           <thead>
             <tr>
-              <th>run</th>
-              <th>status</th>
-              <th>task</th>
+              <th>Task</th>
+              <th>Status</th>
               <th>model</th>
               <th>updated</th>
             </tr>
           </thead>
           <tbody>
             {data.runs.map((run) => (
-              <tr key={run.runId} data-cat={category(run.status)}>
-                <td><a href={`/runs/${run.runId}`}>{run.runId}</a></td>
+              <tr key={run.runId}>
+                <td class="run-task"><a class="run-title" href={`/runs/${run.runId}`}>{short(run.task, 140)}</a><span class="run-id">{run.runId}</span></td>
                 <td><span class={`status ${run.status}`}>{run.status}</span></td>
-                <td>{short(run.task, 80)}</td>
                 <td class="meta">{run.model}{run.ranOn !== undefined ? ` · ${run.ranOn}` : ""}</td>
-                <td class="meta">{run.updatedAt}</td>
+                <td class="meta run-updated"><time dateTime={run.updatedAt} title={run.updatedAt}>{run.updatedAt.slice(0, 16).replace("T", " ")} UTC</time></td>
               </tr>
             ))}
           </tbody>
         </table>
         </div>
       )}
-      <script dangerouslySetInnerHTML={{ __html: FILTER }} />
       <script dangerouslySetInnerHTML={{ __html: `__shipLive("route:runs/index.tsx");` }} />
     </>
   );
