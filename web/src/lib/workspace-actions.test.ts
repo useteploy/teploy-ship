@@ -198,3 +198,20 @@ test("requesting changes at merge review claims the decision and keeps the PR op
     assert.equal((await runtime.store.load(id)).some(e=>e.name==='merge-decision'),false,'no deny/close operation is sent');
   } finally {clearInterval(responder)}
 });
+
+
+test("workspace JSON uses the active server Response constructor", async () => {
+  const resource = await import("../routes/api/runs/[id]/workspace.js");
+  const NativeResponse = globalThis.Response;
+  // Reproduce Hono's Response subclass: inherited static json() returns a
+  // native response that fails instanceof checks against the replacement.
+  class ServerResponse extends NativeResponse {}
+  globalThis.Response = ServerResponse;
+  try {
+    assert.equal(Response.json({}) instanceof Response, false);
+    await assert.rejects(
+      resource.loader({params:{id:"run-parent"},request:request("/api/runs/run-parent/workspace",{})}),
+      (response: unknown) => response instanceof ServerResponse && response.status === 200 && response.headers.get("content-type") === "application/json",
+    );
+  } finally { globalThis.Response = NativeResponse; }
+});

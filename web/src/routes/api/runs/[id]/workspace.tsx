@@ -11,7 +11,9 @@ export async function loader({
 }): Promise<Response> {
   if (!(await currentUser(request)))
     throw new Response("Unauthorized", { status: 401 });
-  throw Response.json(await runData({ request, params }), {
-    headers: { "cache-control": "no-store" },
+  // Hono replaces global Response; inherited Response.json returns the native
+  // class and fails Neutron’s instanceof check in production.
+  throw new Response(JSON.stringify(await runData({ request, params })), {
+    headers: { "cache-control": "no-store", "content-type": "application/json" },
   });
 }
