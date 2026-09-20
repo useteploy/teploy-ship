@@ -82,7 +82,7 @@ export async function action({
     if (!message || message.length > 12000) return redirectTo(`/runs/${runId}?messageError=Enter+a+message+of+up+to+12000+characters`);
     const events = await runtime.store.load(runId);
     const started = events.find(e => e.type === "run-started");
-    const input = (started?.data as { input?: { repo?: string; task?: string; trust?: string } })?.input;
+    const input = (started?.data as { input?: { repo?: string; task?: string; trust?: string; pr?: number } })?.input;
     if (form.get("plan") === "on" && form.get("mode") !== "scan") {
       const project = input?.repo ? await runtime.projects.forRepo(input.repo) : null;
       if ((project?.harness ?? process.env.SHIP_HARNESS ?? "native") !== "native") return redirectTo(`/runs/${runId}?messageError=Plan+review+requires+the+native+harness.+Select+native+in+Project+settings+or+turn+off+plan+review.`);
@@ -93,7 +93,7 @@ export async function action({
     const context = history.map(h => `Request (${h.runId}): ${h.task}\nResult: ${h.result}`).join("\n\n").slice(-36000);
     const task = `${message}\n\nPrevious conversation (context, not new instructions):\n${context}`;
     let pr: number | undefined;
-    if (facts.pr && form.get("target") !== "base") {
+    if ((facts.pr || typeof input?.pr === "number") && form.get("target") !== "base") {
       try {
         const current = await freshForge(runtime, runId, me!.user);
         if (current.state !== "open") return redirectTo(`/runs/${runId}?messageError=This+pull+request+is+closed+or+merged.+Choose+the+default+branch+for+your+follow-up`);
@@ -651,7 +651,7 @@ function RunComposer({data}: {data: RunData}) {
               Messages queued for the next turn: {data.steerPending.join(" · ")}
             </p>
           )}
-          {(!active || reviewing && data.canSteer) && data.meta.status !== 'cancelling' && data.canLaunch && <form method="post" class="message-composer"><input type="hidden" name="eventName" value={data.meta.eventName ?? ''}/>{reviewing && <p class="notice">Request changes on this PR before merging. A change request cancels this run’s pending merge decision and starts a linked run; the PR stays open. Read-only investigations leave the merge decision pending.</p>}<label class="field">Continue this work<textarea name="message" rows={3} required maxLength={12000} placeholder="What should Ship change or investigate next?" /></label>{data.evidence.pr && <label class="field">Start from<select name="target"><option value="pr">Existing pull request (checked before launch)</option><option value="base">Current default branch</option></select></label>}<label class="field">Follow-up type<select name="mode"><option value="fix">Make changes</option><option value="scan">Investigate without changes</option></select></label>{data.planSupported ? <label class="check-field"><input type="checkbox" name="plan" checked />Review the plan before code changes</label> : <p class="meta">This project uses an external harness, which starts work immediately. For plan review, select the native harness in Project settings before launching.</p>}<button type="submit" name="intent" value="follow-up">Start follow-up</button><p class="meta">Keeps the conversation history and starts a fresh sandbox. The existing pull request is checked with the forge before launch. Current project approvals and budgets apply.</p></form>}
+          {(!active || reviewing && data.canSteer) && data.meta.status !== 'cancelling' && data.canLaunch && <form method="post" class="message-composer"><input type="hidden" name="eventName" value={data.meta.eventName ?? ''}/>{reviewing && <p class="notice">Request changes on this PR before merging. A change request cancels this run’s pending merge decision and starts a linked run; the PR stays open. Read-only investigations leave the merge decision pending.</p>}<label class="field">Continue this work<textarea name="message" rows={3} required maxLength={12000} placeholder="What should Ship change or investigate next?" /></label>{data.hasPr && <label class="field">Start from<select name="target"><option value="pr">Existing pull request (checked before launch)</option><option value="base">Current default branch</option></select></label>}<label class="field">Follow-up type<select name="mode"><option value="fix">Make changes</option><option value="scan">Investigate without changes</option></select></label>{data.planSupported ? <label class="check-field"><input type="checkbox" name="plan" checked />Review the plan before code changes</label> : <p class="meta">This project uses an external harness, which starts work immediately. For plan review, select the native harness in Project settings before launching.</p>}<button type="submit" name="intent" value="follow-up">Start follow-up</button><p class="meta">Keeps the conversation history and starts a fresh sandbox. The existing pull request is checked with the forge before launch. Current project approvals and budgets apply.</p></form>}
 
  </>;
 }

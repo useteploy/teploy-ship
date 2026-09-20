@@ -353,3 +353,19 @@ test("external scan prompt asks for findings without an edited tree", () => {
   assert.match(p, /Nothing will be published/);
   assert.doesNotMatch(p, /EDITED WORKING TREE|what you changed/);
 });
+
+
+test("direct external execution cannot bypass requested plan review", async () => {
+  const recordTo = await mkdtemp(join(tmpdir(), "fake-harness-plan-"));
+  const { provider, runs } = await workspaceWithFakeClaude({ recordTo, stream: JSON.stringify(CLAUDE_RESULT) });
+  const wf = durableAgent({ model: neverModel, executor: provider, workdir: ".", harnesses: externalAdapters({ env: {} }) });
+  const store = new MemoryEventStore();
+  const input = { task: "Fix it", plan: true, harness: { id: "claude-code", version: "1" } };
+  const outcome = await executeRun({ workflow: wf, runId: "run-direct-plan", store, input });
+  assert.equal((outcome.output as DurableAgentOutput).status, "error");
+  assert.match((outcome.output as DurableAgentOutput).summary, /Plan review requires the native harness/);
+  assert.equal(await runs(), 0);
+  const replay = await executeRun({ workflow: wf, runId: "run-direct-plan", store, input });
+  assert.equal((replay.output as DurableAgentOutput).status, "error");
+  assert.equal(await runs(), 0);
+});

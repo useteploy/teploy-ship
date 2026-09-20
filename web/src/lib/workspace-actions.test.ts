@@ -234,3 +234,26 @@ test("an external harness cannot silently bypass requested plan approval", async
   await assert.rejects(enqueueRun(runtime, {runId:"run-external-plan",repo:"https://github.com/team/repo",task:"Fix it",model:"test",source:"manual",trust:"operator",harness:"claude-code",plan:true}), /Plan review requires the native harness/);
   assert.equal((await runtime.store.load("run-external-plan")).length, 0);
 });
+
+
+test("retrying a failed PR revision retains its original PR before publication", async () => {
+  const runtime = await shipRuntime();
+  const id = "run-failed-pr";
+  await enqueueRun(runtime, {runId:id,repo:"https://github.com/team/repo",pr:7,task:"Revise it",model:"test",source:"manual",trust:"operator"});
+  const meta = await runtime.loadMeta(id); assert.ok(meta);
+  await runtime.saveMeta({...meta,status:"failed"});
+  const responder=setInterval(async()=>{
+    const raw=await runtime.config.get("SHIP_WORKSPACE_REQUEST_"+id);if(!raw)return;
+    const req=JSON.parse(raw);
+    await runtime.config.set("SHIP_WORKSPACE_REPLY_"+id,JSON.stringify({id:req.id,at:new Date().toISOString(),forge:{number:7,state:"open",head:"abcdef1234",checkedAt:new Date().toISOString(),checks:[],reviews:[],warnings:[]}}));
+  },20);
+  try {
+    const data=await run.loader({params:{id},request:request("/runs/"+id,{})});
+    assert.equal(data.hasPr,true);
+    const res=await run.action({params:{id},request:request("/runs/"+id,{intent:"follow-up",message:"Retry the requested revision",mode:"fix"})});
+    const next=res.headers.get("location")!.split("/").pop()!;
+    const input=(await runtime.store.load(next))[0].data as any;
+    assert.equal(input.input.pr,7);
+    assert.equal(input.input.requireOpenPr,true);
+  } finally {clearInterval(responder)}
+});

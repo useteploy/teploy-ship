@@ -469,6 +469,10 @@ export function externalAdapter(id: "claude-code" | "opencode", options: Externa
         const forwardedEnv = envFile(config.forward, env);
         const priced = spec.priced(forwardedEnv.names);
         try {
+          // Admission covers the UI/queue; direct CLI workflow execution also
+          // must not silently skip an operator's requested plan gate. Keep
+          // this inside the recorded step so prior completed runs replay.
+          if (task.input.plan === true && task.input.mode !== "scan") throw new Error("Plan review requires the native harness; no external agent was started.");
           await ws.executor.putFile(PROMPT_PATH, externalPrompt(task.prompt, task.input.mode));
           await ws.executor.putFile(ENV_PATH, forwardedEnv.text);
           const command =
