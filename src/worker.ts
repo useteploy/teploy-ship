@@ -1,3 +1,6 @@
+import { sweepWorkflowSchedules } from "./workflow-schedules.js";
+import { serveWorkspaceRequests } from "./workspace-requests.js";
+import { policyFromEnv as workspacePolicyFromEnv } from "./repo-policy.js";
 import { NondeterminismError, completeSleep, executeRunExclusive } from "@neutron-build/workflow";
 import type { RunOutcome, WorkflowEvent } from "@neutron-build/workflow";
 import type { ModelAdapter } from "@neutron-build/ai";
@@ -721,6 +724,7 @@ export function startWorker(options: WorkerOptions): {
     ...(options.gitToken !== undefined ? { gitToken: options.gitToken } : {}),
     ...(options.githubToken !== undefined ? { githubToken: options.githubToken } : {}),
     ...(options.repoPolicy !== undefined ? { repoPolicy: options.repoPolicy } : {}),
+    artifacts: options.runtime.artifacts,
     repoMemory: options.runtime.memory,
     projects: options.runtime.projects,
     steer: options.runtime.steer,
@@ -1380,6 +1384,8 @@ export function startWorker(options: WorkerOptions): {
           task: task.detail !== undefined ? `${task.title}\n\n${task.detail}` : task.title,
           model: modelId,
           source: task.source,
+          ...(task.kind === "workflow-scan" ? { mode: "scan" as const } : {}),
+          ...(task.kind === "workflow-plan" ? { plan: true } : {}),
           // The handle the webhook payload asserted for whoever opened the
           // issue. Unverified — the delivery signature proves the payload came
           // from the forge, not that the forge is honest about the author.
@@ -1569,9 +1575,11 @@ export function startWorker(options: WorkerOptions): {
   const intakeTimer = setInterval(() => {
     if (sweepChain !== null) return;
     sweepChain = sweep()
+      .then(() => sweepWorkflowSchedules(options.runtime).catch(e => log(`[worker] workflow schedules: ${e instanceof Error ? e.message : String(e)}`)))
       .then(() => akirooSweep())
       .then(() => bulletinSweep())
       .then(() => holdSweep())
+      .then(() => serveWorkspaceRequests(options.runtime, executor, { ...workspacePolicyFromEnv(), ...options.repoPolicy, ...(options.gitToken !== undefined ? { gitToken: options.gitToken } : {}), ...(options.githubToken !== undefined ? { githubToken: options.githubToken } : {}) }).catch(e => log(`[worker] workspace request: ${e instanceof Error ? e.message : String(e)}`)))
       .then(() => retryNotifications())
       .catch((error) => log(`[worker] intake sweep: ${error instanceof Error ? error.message : String(error)}`))
       .finally(() => {

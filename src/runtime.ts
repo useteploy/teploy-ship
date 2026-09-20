@@ -1,3 +1,4 @@
+import { FileArtifacts, NucleusArtifacts, type ArtifactStore } from "./artifacts.js";
 import type { RunOrigin } from "./notify.js";
 import { resolveTestTarget } from "./test-detect.js";
 import {
@@ -364,6 +365,7 @@ export interface ShipRuntime {
    * See runtime-config.ts.
    */
   config: RuntimeConfigStore;
+  artifacts?: ArtifactStore;
   /**
    * Handshakes THIS Ship started, with the PKCE verifier for each. The control
    * that closes the phish: a /connect/return that names no row here is refused.
@@ -430,6 +432,7 @@ export function fileRuntime(): ShipRuntime {
     projects,
     evidence: new ProjectEvidenceStore(projects, new FileEvidenceStore()),
     config: new FileRuntimeConfig(),
+    artifacts: new FileArtifacts(),
     connectRequests: new FileConnectRequests(),
     akirooCursor: new FileAkirooCursor(),
     governance: new FileGovernanceStore(),
@@ -559,6 +562,7 @@ export async function nucleusRuntime(
     projects,
     evidence: new ProjectEvidenceStore(projects, new NucleusEvidenceStore(db)),
     config: new NucleusRuntimeConfig(db),
+    artifacts: new NucleusArtifacts(db),
     connectRequests: new NucleusConnectRequests(db),
     akirooCursor: new NucleusAkirooCursor(db),
     governance: new NucleusGovernanceStore(db),
@@ -849,6 +853,8 @@ export async function enqueueRun(
     runId: string;
     /** Conversation lineage only; never gates a workflow step. */
     parentRunId?: string;
+    userMessage?: string;
+    environmentCheck?: boolean;
     task: string;
     model: string;
     repo?: string;
@@ -1241,7 +1247,10 @@ export async function enqueueRun(
   // exact object the log will carry, rather than a reconstruction of it.
   const input = {
         task: options.task,
+        ...(options.environmentCheck === true ? { environmentCheck: true } : {}),
+        ...(options.userMessage !== undefined ? { userMessage: options.userMessage } : {}),
         ...(options.parentRunId !== undefined ? { parentRunId: options.parentRunId } : {}),
+        ...(options.parentRunId !== undefined && options.pr !== undefined ? { requireOpenPr: true } : {}),
         ...(options.repo !== undefined ? { repo: options.repo } : {}),
         // Provenance, recorded whenever the caller stated it — not only on
         // repo runs. A chat message or an issue comment with no repository
@@ -1295,6 +1304,7 @@ export async function enqueueRun(
         ...(evidence?.observeService !== undefined ? { observeService: evidence.observeService } : {}),
         ...(evidence?.observeService !== undefined ? { observeRepo: evidence.repo } : {}),
         ...(reviewers !== null ? { reviewers: { users: reviewers.users, teams: reviewers.teams } } : {}),
+        ...(project?.preparation !== undefined ? { preparation: project.preparation } : {}),
         ...(project?.sandboxImage !== undefined ? { sandboxImage: project.sandboxImage } : {}),
         // The network tier and this repo's extra allowlist entries, copied
         // from the record for the same reason as everything else here: the

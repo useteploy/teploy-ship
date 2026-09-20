@@ -4,10 +4,12 @@ declare module "@neutron-build/core" {
     paths:
     | "/"
     | "/account"
+    | `/api/artifacts/${string}`
     | "/api/bulletin/sweep"
     | "/api/policies"
     | `/api/runs/${string}/decide`
     | `/api/runs/${string}/findings`
+    | `/api/runs/${string}/workspace`
     | "/api/runs/scan"
     | "/bulletin-admin"
     | `/bulletin/${string}`

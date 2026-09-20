@@ -272,6 +272,7 @@ export async function action({ request }: { request: Request }): Promise<Respons
     url: str("url") ?? existing.url,
     label: str("label"),
     sandboxImage: str("image"),
+    preparation: str("prepare") ? { command: str("prepare")!, timeoutMs: (num("prepareTimeout") ?? 300) * 1000 } : undefined,
     sandboxNetwork: network,
     sandboxEgressAllow: egressAllow.length > 0 ? egressAllow : undefined,
     sandboxLimits: memoryMb !== undefined || cpus !== undefined ? { ...(memoryMb !== undefined ? { memoryMb } : {}), ...(cpus !== undefined ? { cpus } : {}) } : undefined,
@@ -433,6 +434,8 @@ function ProjectForm({ p, data }: { p: Project | null; data: ProjectsData }) {
       </label>
       </div></details>
       <details class="form-section" open={p !== null}><summary>Tests & verification</summary><div class="form-grid">
+      <label class="field form-section">Prepare environment<textarea name="prepare" rows={4} maxLength={8000} placeholder="Install dependencies and start required services">{p?.preparation?.command ?? ""}</textarea><span class="meta">Runs in the sandbox before the agent, on every new run. Keep commands repeatable. Store credentials in your sandbox configuration.</span></label>
+      <Field label="Preparation timeout (seconds)" name="prepareTimeout" value={String((p?.preparation?.timeoutMs ?? 300000) / 1000)} />
       <Field label="test command" name="testCommand" value={p?.testCommand ?? p?.verification?.tests} placeholder="detected from the repo" />
       <Field label="test timeout ms" name="testTimeoutMs" value={p?.testTimeoutMs !== undefined ? String(p.testTimeoutMs) : undefined} placeholder="default" type="number" />
       <Field label="Observe service" name="observeService" value={p?.observeService} placeholder="none" />

@@ -37,7 +37,6 @@ test("workflows require policy authority and persist through the shared store", 
       task: "Run meaningful tests",
       mode: "scan",
       plan: "on",
-      mode: "scan",
     }),
   });
   assert.equal(res.status, 303);
@@ -165,4 +164,16 @@ test("follow-up requires launch authority and a terminal parent; new run records
   assert.equal(input.mode, "scan");
   assert.match(input.task, /Fix the parser/);
   assert.match(input.task, /Add tests/);
+});
+
+test("setup preparation persists and verification enqueues recorded checks with no publication",async()=>{
+  const runtime=await shipRuntime();
+  await setup.action({request:request('/setup',{intent:'environment',repo:'team/repo',prepare:'npm ci',timeout:'120',tests:'npm test'})});
+  const project=await runtime.projects.forRepo('team/repo');
+  assert.equal(project?.preparation?.command,'npm ci');assert.equal(project?.preparation?.timeoutMs,120000);
+  const response=await setup.action({request:request('/setup',{intent:'verify',repo:'team/repo'})});
+  const id=response.headers.get('location')!.split('/').pop()!.split('?')[0];
+  const input=(await runtime.store.load(id))[0].data as any;
+  assert.equal(input.input.environmentCheck,true);assert.equal(input.input.mode,'scan');assert.equal(input.input.preparation.command,'npm ci');
+  assert.equal(input.input.autoMerge,undefined);
 });

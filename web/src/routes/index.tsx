@@ -100,6 +100,8 @@ export async function action({ request }: { request: Request }): Promise<Respons
         task: task.pr !== undefined ? (task.detail ?? task.title) : task.detail !== undefined ? `${task.title}\n\n${task.detail}` : task.title,
         model: defaultModel(),
         source: task.source,
+        ...(task.kind === "workflow-scan" ? { mode: "scan" as const } : {}),
+        ...(task.kind === "workflow-plan" ? { plan: true } : {}),
         // Whoever the payload named, not whoever clicked launch. The clicker
         // authorised it; the requester asked for it, and an audit reader wants
         // the second. A manual task nobody signed falls back to the operator.

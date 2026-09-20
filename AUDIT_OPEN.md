@@ -91,3 +91,25 @@ Existing workflow step sequences are unchanged. Settings no longer evaluates
 worker-only environment metadata in the browser. The shared Teploy shell and
 visual tokens are preserved. Scope and remaining competitor distinctions:
 [Working in Ship](docs/WORKSPACE.md).
+
+## 2026-09-19 — environment and review integration
+
+Added recorded project preparation, real environment verification, worker-side
+PR/CI/review reads, fresh-PR validation for follow-ups, bounded conversation
+lineage, tracked-file inspection, interval workflow schedules through existing
+intake policies, and authenticated content-addressed PNG/WebM artifacts.
+Run pages now update in place, preserve drafts, render formatted conversation,
+and support a side-by-side review while retaining the Teploy shell.
+
+New workflow steps are gated only on recorded preparation/environment-check
+inputs; preflight reports all five existing waiting runs compatible. Live
+Nucleus testing established its inline-row size constraint: artifacts use 8 KiB
+base64 chunks with manifest-last writes and integrity checks. Workspace replies
+are bounded to fit the same store. The Neutron dev returned-Response defect is
+reported upstream; resource loaders throw Responses as a compatibility path.
+
+Remaining distinct work: writable IDE/terminal/browser takeover, sandbox
+continuation across terminal runs, arbitrary-stack auto-provisioning, wider
+connector coverage and measured competitor coding-quality comparisons. This
+change adds interval schedules and forge reads, not automatic merge
+reconciliation or a general workflow graph. See docs/WORKSPACE.md.

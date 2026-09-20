@@ -34,6 +34,8 @@ export interface VerificationFacts {
   agent?: string;
   /** How the run ended, when it did not end at a finish. */
   status?: string;
+  preparation?: TestOutcome;
+  environmentCheck?: TestOutcome;
   baseline?: TestOutcome;
   /** The project's build command (the ladder's `build` rung), when it ran. */
   build?: TestOutcome;
@@ -135,6 +137,11 @@ export function verificationSummary(facts: VerificationFacts): string {
   const verified: string[] = [];
   const not: string[] = [];
 
+  for (const [label, outcome] of [["environment preparation", facts.preparation], ["environment tests", facts.environmentCheck]] as const) {
+    if (outcome?.kind === "passed") verified.push(`${label} passed (\`${outcome.command}\`)`);
+    else if (outcome?.kind === "failed") not.push(`${label} failed (exit ${outcome.exitCode})`);
+    else if (outcome?.kind === "errored" || outcome?.kind === "disabled") not.push(`${label}: ${outcome.reason}`);
+  }
   const account = accountOf(facts);
   if (account !== "") did.push(account);
   if (facts.changeClass !== undefined) {
@@ -434,6 +441,10 @@ export function verificationFactsFromEvents(events: WorkflowEvent[]): Verificati
     } else if (s.name === "observe-window") {
       const o = observeOutcome(s.result);
       if (o !== undefined) facts.observeWindow = o;
+    } else if (s.name === "environment-prepare") {
+      facts.preparation = testOutcome(s.result);
+    } else if (s.name === "environment-check") {
+      facts.environmentCheck = testOutcome(s.result);
     } else if (s.name === "tests" || /-tests$/.test(s.name)) {
       const o = testOutcome(s.result);
       if (o === undefined) continue;

@@ -37,6 +37,7 @@ const record = (v: unknown): Record<string, any> =>
     : {};
 export function safeLink(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
+  if (/^\/api\/artifacts\/[a-f0-9]{64}$/.test(value)) return value;
   try {
     const u = new URL(value);
     return ["http:", "https:"].includes(u.protocol) &&
@@ -54,7 +55,7 @@ export function conversation(events: LogEvent[]): Message[] {
     const d = record(e.data),
       r = d.result;
     if (e.type === "run-started" && typeof record(d.input).task === "string")
-      messages.push({ role: "You", text: record(d.input).task, at: e.at });
+      messages.push({ role: "You", text: record(d.input).userMessage ?? record(d.input).task, at: e.at });
     if (
       e.type === "step-completed" &&
       /-steer$/.test(e.name ?? "") &&
@@ -136,6 +137,8 @@ export function splitDiff(diff: string): { file: string; lines: string[] }[] {
 export function evidence(facts: Record<string, any>): Evidence {
   const checks: Check[] = [];
   for (const [key, name] of [
+    ["preparation", "Environment setup"],
+    ["environmentCheck", "Environment tests"],
     ["baseline", "Baseline tests"],
     ["build", "Build"],
     ["tests", "Tests"],

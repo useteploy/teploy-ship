@@ -947,6 +947,7 @@ async function executePass(
     model: resolveModel(modelId),
     executor: provider,
     projects: runtime.projects,
+    artifacts: runtime.artifacts,
     // Same rule as the worker: the provider's isolation flag decides the gate.
     approveAction: resolveApprovalPolicy({ sandboxed: provider.isolated === true }),
     // Local workspaces root every path at the run's own dir, so "." is

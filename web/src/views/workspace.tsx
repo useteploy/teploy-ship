@@ -1,3 +1,4 @@
+import { RichText } from "./rich-text.js";
 import { safeLink, splitDiff } from "../lib/workspace.js";
 import type { Message, DiffSnapshot, Evidence } from "../lib/workspace.js";
 export function Conversation({ messages }: { messages: Message[] }) {
@@ -9,7 +10,7 @@ export function Conversation({ messages }: { messages: Message[] }) {
             {m.role}
             <time dateTime={m.at}>{m.at.replace("T", " ").slice(0, 16)}</time>
           </div>
-          <div class="message-text">{m.text}</div>
+          <RichText text={m.text} />
         </article>
       ))}
       {messages.length === 0 && <p class="empty">No messages recorded yet.</p>}
@@ -112,7 +113,7 @@ export function Verification({ data }: { data: Evidence }) {
         )}
       </div>
       <div class="check-list">
-        {data.checks.map((c) => (
+        {data.checks.filter(c => c.state !== "not recorded").map((c) => (
           <article class="check-row" key={c.name}>
             <b>{c.name}</b>
             <span
@@ -138,6 +139,7 @@ export function Verification({ data }: { data: Evidence }) {
           </article>
         ))}
       </div>
+      {data.checks.some(c => c.state === "not recorded") && <details class="disclosure"><summary>{data.checks.filter(c => c.state === "not recorded").length} checks not recorded</summary><p class="meta">{data.checks.filter(c => c.state === "not recorded").map(c=>c.name).join(' · ')}</p><a href="/setup">Configure project verification</a></details>}
       {data.unattached.length > 0 && (
         <p class="notice">
           {data.unattached.length} captured file(s) have no downloadable

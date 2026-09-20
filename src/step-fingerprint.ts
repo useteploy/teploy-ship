@@ -437,6 +437,8 @@ const externalHarness = (i: RecordedInput): boolean =>
 export const WORKFLOW_STEPS: readonly WorkflowStep[] = [
   { key: "step:sandbox", admits: always },
   { key: "step:repo-setup", admits: repoRun },
+  { key: "step:environment-prepare", admits: (i) => repoRun(i) && i.preparation !== undefined },
+  { key: "step:environment-check", admits: (i) => repoRun(i) && i.environmentCheck === true },
   { key: "step:repo-context", admits: repoRun },
   { key: "step:repo-index", admits: (i) => i.index === true && scoped(i) },
   // The warm cache's publish step (SB-A). Gated on `warm`, a field no
@@ -454,6 +456,7 @@ export const WORKFLOW_STEPS: readonly WorkflowStep[] = [
   { key: "step:attempt-*-skipped", admits: multiAttempt },
   { key: "step:*sandbox", admits: multiAttempt },
   { key: "step:*repo-setup", admits: multiAttempt },
+  { key: "step:*environment-prepare", admits: (i) => multiAttempt(i) && i.preparation !== undefined },
   { key: "step:*diff", admits: multiAttempt },
   // The per-attempt verification and the one-step-per-attempt timeline record
   // (P6-1): what the ranking is computed from, and what the Verification

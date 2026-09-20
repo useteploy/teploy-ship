@@ -1,3 +1,4 @@
+import { normalizePreparation, type EnvironmentPreparation } from "./environment.js";
 import { join } from "node:path";
 
 import type { NucleusPgwire } from "./nucleus-pgwire.js";
@@ -38,6 +39,7 @@ export interface Project {
   url?: string;
   label?: string;
   sandboxImage?: string;
+  preparation?: EnvironmentPreparation;
   /**
    * Which network tier this repo's runs get (egress.ts): `none`, `allowlist`
    * or `open`. Absent = the worker's SHIP_SANDBOX_NETWORK, which itself
@@ -277,6 +279,7 @@ export function normalizeProject(input: Project): Project {
     // SHIP_HARNESS names a vendor agent. Absent means "inherit".
     ...(harness !== undefined ? { harness } : {}),
     ...(sandboxLimits !== undefined && Object.keys(sandboxLimits).length > 0 ? { sandboxLimits } : {}),
+    ...(normalizePreparation(input.preparation) ? { preparation: normalizePreparation(input.preparation) } : {}),
     ...(input.sourcePolicy !== undefined ? { sourcePolicy: input.sourcePolicy } : {}),
     ...(num(input.dailyBudgetUSD) !== undefined ? { dailyBudgetUSD: num(input.dailyBudgetUSD) } : {}),
     ...(num(input.testTimeoutMs) !== undefined ? { testTimeoutMs: num(input.testTimeoutMs) } : {}),

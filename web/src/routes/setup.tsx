@@ -1,3 +1,7 @@
+import { randomUUID } from "node:crypto";
+import { enqueueRun, actorFromPrincipal } from "../lib/ship.server.js";
+import { defaultModel } from "../lib/store.server.js";
+import type { Project } from "teploy-ship/runtime";
 import { currentUser } from "../lib/session.server.js";
 import { may } from "../lib/authority.server.js";
 import { shipRuntime } from "../lib/store.server.js";
@@ -5,6 +9,9 @@ import { readiness } from "../lib/readiness.server.js";
 import type { ReadinessCheck } from "../lib/readiness.server.js";
 export const config = { mode: "app" };
 interface Data {
+  selected: Project | null;
+  canLaunch: boolean;
+  recentRuns: { runId: string; task: string; status: string }[];
   projects: { repo: string; label: string }[];
   repo: string;
   checks: ReadinessCheck[];
@@ -17,7 +24,22 @@ export async function loader({ request }: { request: Request }): Promise<Data> {
     projects = await runtime.projects.list(),
     repo =
       new URL(request.url).searchParams.get("repo") ?? projects[0]?.repo ?? "";
+  const selected = projects.find((p) => p.repo === repo) ?? null;
+  const runs = await runtime.listMeta({ limit: 100 });
+  const recentRuns: Data["recentRuns"] = [];
+  for (const r of runs
+    .filter((r) => r.task.startsWith("Verify project environment:"))
+    .slice(0, 20)) {
+    const events = await runtime.store.load(r.runId);
+    const input = (events.find((e) => e.type === "run-started")?.data as any)
+      ?.input;
+    if (input?.repo === selected?.url)
+      recentRuns.push({ runId: r.runId, task: r.task, status: r.status });
+  }
   return {
+    selected,
+    canLaunch: await may("approve", await currentUser(request)),
+    recentRuns,
     projects: projects.map((p) => ({ repo: p.repo, label: p.label ?? p.repo })),
     repo,
     checks: await readiness(
@@ -36,12 +58,55 @@ export async function action({
 }): Promise<Response> {
   if (!(await may("policies", await currentUser(request))))
     return new Response("Not permitted", { status: 403 });
+  const me = await currentUser(request);
   const f = await request.formData(),
     runtime = await shipRuntime(),
     repo = String(f.get("url") ?? "").trim();
   const redirect = (location: string) =>
     new Response(null, { status: 303, headers: { location } });
   try {
+    if (f.get("intent") === "verify") {
+      if (!(await may("approve", me)))
+        return new Response("Not permitted", { status: 403 });
+      const project = await runtime.projects.forRepo(
+        String(f.get("repo") ?? ""),
+      );
+      if (!project?.url)
+        return redirect("/setup?error=Choose+a+registered+repository");
+      const runId = `run-${randomUUID().slice(0, 8)}`;
+      await enqueueRun(runtime, {
+        runId,
+        repo: project.url,
+        model: defaultModel(),
+        source: "manual",
+        actor: actorFromPrincipal(me),
+        trust: "operator",
+        mode: "scan",
+        environmentCheck: true,
+        task: `Verify project environment: ${project.label ?? project.repo}. Inspect repository instructions and dependency manifests. Run the configured test command ${project.testCommand ?? "or detect the appropriate test command"}. Confirm required runtimes and services are available. Do not modify tracked files or publish changes. Report exact commands and failures with actionable setup fixes. Finish after verification; do not broaden into a code audit.`,
+      });
+      return redirect(`/runs/${runId}?view=review`);
+    }
+    if (f.get("intent") === "environment") {
+      const project = await runtime.projects.forRepo(
+        String(f.get("repo") ?? ""),
+      );
+      if (!project) return redirect("/setup?error=Project+not+found");
+      const command = String(f.get("prepare") ?? "").trim();
+      const tests = String(f.get("tests") ?? "").trim();
+      if (tests.length > 2000) throw new Error("Test command is too long");
+      await runtime.projects.set({
+        ...project,
+        preparation: command
+          ? { command, timeoutMs: Number(f.get("timeout") || 300) * 1000 }
+          : undefined,
+        testCommand: tests || undefined,
+        verification: project.verification
+          ? { ...project.verification, tests: tests || undefined }
+          : undefined,
+      });
+      return redirect(`/setup?repo=${encodeURIComponent(project.repo)}`);
+    }
     const url = new URL(repo);
     if (
       !["http:", "https:"].includes(url.protocol) ||
@@ -73,9 +138,12 @@ export async function action({
     });
     const saved = await runtime.projects.forRepo(repo);
     return redirect(`/setup?repo=${encodeURIComponent(saved?.repo ?? repo)}`);
-  } catch {
+  } catch (e) {
     return redirect(
-      "/setup?error=Could+not+register+this+repository.+Check+the+clone+URL+and+try+again",
+      "/setup?error=" +
+        encodeURIComponent(
+          e instanceof Error ? e.message : "Could not save project setup",
+        ),
     );
   }
 }
@@ -158,6 +226,75 @@ export default function Setup({ data }: { data: Data }) {
             <button type="submit">Save and check setup</button>
           </form>
         </details>
+      )}
+      {data.selected && data.canEdit && (
+        <section class="setup-environment">
+          <h2 class="section">Prepare the environment</h2>
+          <p class="meta">
+            Configure repeatable setup for this repository. Ship runs it inside
+            each task’s sandbox before the agent starts; failures stop the run
+            with recorded output.
+          </p>
+          <form method="post" class="project-form">
+            <input type="hidden" name="repo" value={data.selected.repo} />
+            <label class="field form-section">
+              Preparation command
+              <textarea
+                name="prepare"
+                rows={4}
+                maxLength={8000}
+                placeholder="pnpm install --frozen-lockfile"
+              >
+                {data.selected.preparation?.command ?? ""}
+              </textarea>
+            </label>
+            <label class="field">
+              Timeout (seconds)
+              <input
+                name="timeout"
+                type="number"
+                min="1"
+                max="900"
+                value={(data.selected.preparation?.timeoutMs ?? 300000) / 1000}
+              />
+            </label>
+            <label class="field">
+              Test command
+              <input
+                name="tests"
+                maxLength={2000}
+                value={data.selected.testCommand ?? ""}
+                placeholder="pnpm test"
+              />
+            </label>
+            <button name="intent" value="environment">
+              Save environment
+            </button>
+          </form>
+          {data.canLaunch && (
+            <form method="post">
+              <input type="hidden" name="repo" value={data.selected.repo} />
+              <button name="intent" value="verify">
+                Verify environment with a real run
+              </button>
+              <p class="meta">
+                Uses your configured model and budget. Clones the repo, prepares
+                the sandbox and checks the environment without publishing
+                changes.
+              </p>
+            </form>
+          )}
+          {data.recentRuns.length > 0 && (
+            <ul>
+              {data.recentRuns.map((r) => (
+                <li>
+                  <a href={`/runs/${r.runId}?view=review`}>{r.runId}</a> ·{" "}
+                  {r.status}
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
       )}
       <ol class="setup-list">
         {data.checks.map((c, i) => (

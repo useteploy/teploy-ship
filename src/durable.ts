@@ -1,3 +1,5 @@
+import type { ArtifactStore } from "./artifacts.js";
+import { prepareEnvironment, type EnvironmentPreparation } from "./environment.js";
 import type { RunOrigin } from "./notify.js";
 import { akirooTrailersFrom } from "./akiroo.js";
 import { generateText } from "@neutron-build/ai";
@@ -490,6 +492,9 @@ export interface DurableAgentInput {
    * existed carries the old `egress` spelling, which parses as `allowlist`.
    */
   sandboxImage?: string;
+  preparation?: EnvironmentPreparation;
+  environmentCheck?: boolean;
+  requireOpenPr?: boolean;
   sandboxNetwork?: NetworkTier;
   /** Extra egress allowlist entries for this run (projects.ts sandboxEgressAllow). */
   sandboxEgressAllow?: string[];
@@ -710,6 +715,7 @@ export interface ExecutorProvider {
 export interface DurableAgentConfig {
   model: ModelAdapter;
   executor: ExecutorProvider;
+  artifacts?: ArtifactStore;
   /** Deterministic classifier: "required" actions park the run on an approval event. */
   approveAction?: ApprovalPolicy;
   workdir?: string;
@@ -1002,8 +1008,15 @@ export function durableAgent(
             resolved.headRepo !== undefined
               ? credentialFor(assertRepoAllowed(resolved.headRepo, { trust: "external", config: repoPolicy }), repoPolicy)
               : "";
-          return setupRepoForPr(executor, { ref, token, pr: input.pr, ...(headToken !== "" ? { headToken } : {}) });
+          return setupRepoForPr(executor, { ref, token, pr: input.pr, requireOpen: input.requireOpenPr === true, ...(headToken !== "" ? { headToken } : {}) });
         });
+      }
+      if (input.preparation !== undefined && checkout !== null) {
+        const prepared = await ctx.step("environment-prepare", () => prepareEnvironment(executor, input.preparation!));
+        if (prepared.kind !== "passed") throw new Error("Environment preparation failed. Review its output and update Project setup before retrying.");
+      }
+      if (input.environmentCheck === true && checkout !== null) {
+        await ctx.step("environment-check", () => { const target = testTargetFromInput(input) ?? config.tests; return target ? runTests(executor, target) : { kind: "disabled" as const, reason: "Configure a test command in Project setup to verify the environment" }; });
       }
       const repoKey = input.repo !== undefined ? repoKeyOf(input.repo) : null;
       /**
@@ -1333,6 +1346,10 @@ export function durableAgent(
             // clone into one that already holds the repo fails outright.
             return checkoutRepo(attemptExecutor, { ref, token: credentialFor(ref, repoPolicy), runId: ctx.runId, warm: input.warm === true });
           });
+          if (input.preparation !== undefined) {
+            const prepared = await ctx.step(`${p}environment-prepare`, () => prepareEnvironment(attemptExecutor, input.preparation!));
+            if (prepared.kind !== "passed") throw new Error("Environment preparation failed for this attempt");
+          }
           ws = { ctx, handle: attemptHandle, executor: attemptExecutor, workdir, checkout: attemptCheckout, scopeKey, stepPrefix: p, ...liveWiring(config, ctx.runId, attemptHandle, p) };
         }
         const result = await attemptAdapter.run(harnessTask, ws, budget, () => {});
@@ -2517,7 +2534,7 @@ async function publishIfRepoRun(
     // numbers moved. Refresh both, run the ladder legs over the fresh preview,
     // then amend the same Verification section.
     const followUpPreview = push.kind === "pushed" ? await previewIfAsked(ctx, config, input, co.branch) : undefined;
-    const legs = await runLadderLegs(ctx, executor, config, input, followUpPreview, co.branch, { baseline, build, tests }, assetSink(ref, token, input.pr));
+    const legs = await runLadderLegs(ctx, executor, config, input, followUpPreview, co.branch, { baseline, build, tests }, assetSink(ref, token, input.pr, config.artifacts));
     const followUpProof = proofLinks(legs);
     const followUp: Evidence = {
       ...(tests !== undefined ? { tests } : {}),
@@ -2604,7 +2621,7 @@ async function publishIfRepoRun(
   // against main, the observe window after it — then the rung list, recorded
   // as its own step so the webhook and the run page read ONE list instead of
   // each re-deriving it from six steps and disagreeing.
-  const legs = await runLadderLegs(ctx, executor, config, input, preview, co.branch, { baseline, build, tests }, assetSink(ref, token, pr.number));
+  const legs = await runLadderLegs(ctx, executor, config, input, preview, co.branch, { baseline, build, tests }, assetSink(ref, token, pr.number, config.artifacts));
   if (legs.smoke !== undefined) facts.smoke = legs.smoke;
   if (legs.visual !== undefined) facts.visual = legs.visual;
   if (legs.flow !== undefined) facts.flow = legs.flow;
@@ -3173,9 +3190,19 @@ async function runLadderLegs(
  * that captured the picture, so its URL is recorded once and never re-sent
  * on replay.
  */
-function assetSink(ref: RepoRef, token: string, pr: number | undefined): AssetSink | undefined {
-  if (pr === undefined || ref.kind !== "forgejo") return undefined;
-  return { upload: (name, bytes) => uploadPrAsset({ ref, token, pr, name, bytes }) };
+function assetSink(ref: RepoRef, token: string, pr: number | undefined, artifacts?: ArtifactStore): AssetSink | undefined {
+  if (pr === undefined && artifacts === undefined) return undefined;
+  return { async upload(name, bytes) {
+    if (artifacts) {
+      try {
+        const id = await artifacts.put(name, bytes);
+        const base = (process.env.SHIP_PUBLIC_URL ?? "").replace(/\/$/, "");
+        return `${base}/api/artifacts/${id}`;
+      } catch { /* fallback to forge attachment if storage is unavailable */ }
+    }
+    if (pr !== undefined) return uploadPrAsset({ ref, token, pr, name, bytes });
+    throw new Error("Artifact storage unavailable");
+  } };
 }
 
 /**

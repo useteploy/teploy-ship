@@ -635,6 +635,7 @@ export async function resolvePr(
   token: string,
   pr: number,
   fetchImpl: typeof fetch = fetch,
+  requireOpen = false,
 ): Promise<RepoCheckout> {
   const endpoint =
     ref.kind === "github"
@@ -645,9 +646,12 @@ export async function resolvePr(
   });
   if (!response.ok) throw new Error(`PR #${pr} lookup failed (${response.status})`);
   const data = (await response.json()) as {
+    state?: string;
+    merged?: boolean;
     head?: { ref?: string; sha?: string; repo?: { clone_url?: string; html_url?: string; full_name?: string } };
     base?: { ref?: string; repo?: { clone_url?: string; full_name?: string } };
   };
+  if (requireOpen && (data.state !== "open" || data.merged === true)) throw new Error(`PR #${pr} is no longer open. Start a follow-up from the default branch.`);
   if (data.head?.ref === undefined || data.base?.ref === undefined) {
     throw new Error(`PR #${pr} payload missing head/base`);
   }
@@ -670,10 +674,10 @@ export async function resolvePr(
 /** Clone and stand on an EXISTING PR head branch (review follow-ups). */
 export async function setupRepoForPr(
   executor: AgentExecutor,
-  options: { ref: RepoRef; token: string; pr: number; headToken?: string },
+  options: { ref: RepoRef; token: string; pr: number; headToken?: string; requireOpen?: boolean },
 ): Promise<RepoCheckout> {
   const { ref, token, pr } = options;
-  const checkout = await resolvePr(ref, token, pr);
+  const checkout = await resolvePr(ref, token, pr, fetch, options.requireOpen);
   await git(executor, `git clone --depth 50 ${authenticatedUrl(ref, token)} . 2>&1`, 300_000);
   await git(executor, `git remote set-url origin ${ref.cloneUrl}`);
   await git(executor, 'git config user.name "Teploy Ship" && git config user.email "ship@teploy.dev"');

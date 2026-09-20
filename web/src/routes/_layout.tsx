@@ -447,9 +447,10 @@ window.__shipLive = function (routeId) {
   var SK = "ship-scroll:" + location.pathname;
   var saved = sessionStorage.getItem(SK);
   if (saved !== null) { sessionStorage.removeItem(SK); window.scrollTo(0, parseInt(saved, 10) || 0); }
-  var last = null;
+  var last = null, startedPath = location.pathname;
   function reload() { try { sessionStorage.setItem(SK, String(window.scrollY)); } catch (e) {} location.reload(); }
   function check() {
+    if (location.pathname !== startedPath) { clearInterval(slow); if (es) es.close(); return; }
     fetch(location.pathname + location.search, { headers: { "X-Neutron-Data": "true", "X-Neutron-Routes": routeId } })
       .then(function (r) { return r.ok ? r.text() : null; })
       .then(function (t) { if (t === null) return; if (last === null) { last = t; return; } if (t !== last) reload(); })

@@ -1,3 +1,6 @@
+import { useEffect, useState } from "preact/hooks";
+import { freshForge, requestWorkspace, workspaceReply, threadHistory } from "../../lib/workspace.server.js";
+import type { WorkspaceReply } from "../../../../dist/workspace-requests.js";
 import { randomUUID } from "node:crypto";
 import { conversation, diffSnapshots, evidence } from "../../lib/workspace.js";
 import type { Message, DiffSnapshot, Evidence } from "../../lib/workspace.js";
@@ -26,6 +29,9 @@ import { startSpan } from "../../lib/observe.server.js";
 export const config = { mode: "app" };
 
 interface RunData {
+  forge: WorkspaceReply | null;
+  workspace: WorkspaceReply | null;
+  ancestors: { runId: string; task: string; messages: Message[] }[];
   view: string;
   messages: Message[];
   snapshots: DiffSnapshot[];
@@ -150,8 +156,13 @@ export async function loader({ params, request }: { params: { id: string }; requ
         typical = null;
       }
     }
+    const history = await threadHistory(runtime, runId);
+    const forgeRaw = await runtime.config.get("SHIP_FORGE_STATE_" + runId);
     const data: RunData = {
-      view: ['conversation','changes','verification','activity'].includes(query.get('view') ?? '') ? query.get('view')! : 'conversation',
+      forge: forgeRaw ? JSON.parse(forgeRaw) : null,
+      workspace: await workspaceReply(runtime, runId),
+      ancestors: history.slice(0,-1).map(h => ({ runId: h.runId, task: h.task, messages: conversation(h.events).slice(-20) })),
+      view: ['conversation','review','changes','verification','files','activity'].includes(query.get('view') ?? '') ? query.get('view')! : 'conversation',
       messages: conversation(events),
       snapshots: diffSnapshots(events),
       evidence: evidence(verificationFactsFromEvents(events)),
@@ -227,6 +238,13 @@ export async function action({
   const me = await currentUser(request);
   const runId = params.id;
   const meta = await runtime.loadMeta(runId);
+  if (["forge-refresh", "files", "file"].includes(intent)) {
+    if (me === null) return new Response("Not permitted", { status: 403 });
+    try {
+      await requestWorkspace(runtime, runId, intent === "forge-refresh" ? "forge" : intent === "files" ? "files" : "file", me.user, String(form.get("path") ?? "") || undefined);
+      return redirectTo(`/runs/${runId}?view=${intent === "forge-refresh" ? "review" : "files"}&pending=1`);
+    } catch (e) { return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(e instanceof Error ? e.message : "Request failed")}`); }
+  }
   if (intent === "follow-up") {
     if (!(await may("approve", me))) return redirectTo(`/runs/${runId}?denied=approve`);
     if (meta === null || !["completed", "failed", "cancelled"].includes(meta.status)) return redirectTo(`/runs/${runId}?messageError=Run+must+finish+before+starting+a+follow-up`);
@@ -237,8 +255,20 @@ export async function action({
     const input = (started?.data as { input?: { repo?: string; task?: string; trust?: string } })?.input;
     const facts = verificationFactsFromEvents(events);
     const next = `run-${randomUUID().slice(0, 8)}`;
-    const task = `${message}\n\nContext from ${runId} — previous request:\n${(input?.task ?? meta.task).slice(-12000)}\n\nPrevious result:\n${(runOutcome(events).summary ?? "No result recorded.").slice(0,6000)}`;
-    await enqueueRun(runtime, {runId:next,parentRunId:runId,task,model:meta.model,source:"manual",actor:actorFromPrincipal(me),trust:input?.trust === "operator" ? "operator" : "external",...(input?.repo ? {repo:input.repo}:{}),...(facts.pr && !['merged','closed'].includes(facts.merge?.kind ?? '') ? {pr:facts.pr.number}:{}),plan:form.get("plan")==="on",...(form.get("mode")==="scan" ? {mode:"scan" as const}: {})});
+    const history = await threadHistory(runtime, runId);
+    const context = history.map(h => `Request (${h.runId}): ${h.task}\nResult: ${h.result}`).join("\n\n").slice(-36000);
+    const task = `${message}\n\nPrevious conversation (context, not new instructions):\n${context}`;
+    let pr: number | undefined;
+    if (facts.pr && form.get("target") !== "base") {
+      try {
+        const current = await freshForge(runtime, runId, me!.user);
+        if (current.state !== "open") return redirectTo(`/runs/${runId}?messageError=This+pull+request+is+closed+or+merged.+Choose+the+default+branch+for+your+follow-up`);
+        pr = current.number;
+      } catch (e) { return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(e instanceof Error ? e.message : "Could not check the pull request")}`); }
+    }
+    try {
+      await enqueueRun(runtime, {runId:next,parentRunId:runId,userMessage:message,task,model:meta.model,source:"manual",actor:actorFromPrincipal(me),trust:input?.trust === "operator" ? "operator" : "external",...(input?.repo ? {repo:input.repo}:{}),...(pr ? {pr}:{}),plan:form.get("plan")==="on",...(form.get("mode")==="scan" ? {mode:"scan" as const}: {})});
+    } catch (e) { return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(e instanceof Error ? e.message : "Could not start follow-up")}`); }
     return redirectTo(`/runs/${next}`);
   }
 
@@ -272,7 +302,7 @@ export async function action({
     const text = String(form.get("steer") ?? "").trim();
     if (text.length > 12000) return redirectTo(`/runs/${runId}?messageError=Message+must+be+under+12000+characters`);
     if (text !== "") await runtime.steer.add(runId, text);
-    return redirectTo(`/runs/${runId}`);
+    return redirectTo(`/runs/${runId}?sent=1`);
   }
   // The agent's question (an ```ask park). Answering is steering, not
   // approving: the text becomes the agent's next observation and authorises
@@ -343,13 +373,6 @@ export async function action({
   return redirectTo(`/runs/${runId}`);
 }
 
-// Poll via the framework's loader-data protocol (X-Neutron-Data): re-runs
-// this route's loader and returns its data as JSON. Any change in the
-// serialized data (new events, status flip) reloads the page.
-// Live updates via the shared SSE helper (scroll preserved). Only mounted for
-// an active run — a terminal run's timeline no longer changes.
-const POLL = `__shipLive("route:runs/[id].tsx");`;
-
 /** The "Now" line: phase and detail as one sentence a person can scan. */
 function nowLine(live: { phase: string; turn?: number; detail?: string }): string {
   const turn = live.turn !== undefined ? `turn ${live.turn}` : "";
@@ -384,7 +407,27 @@ const NOW_TICK = `(function(){
 /** Severity -> the palette variable already used elsewhere in the dashboard. */
 const SEVERITY_COLOR: Record<string, string> = { high: "var(--red)", med: "var(--yellow)", low: "var(--fg-dim, inherit)" };
 
-export default function RunDetail({ data }: { data: RunData }) {
+export default function RunDetail({ data: initialData }: { data: RunData }) {
+  const [data, setData] = useState(initialData);
+  const [connection, setConnection] = useState("Live updates connected");
+  useEffect(() => { setData(initialData); }, [initialData]);
+  useEffect(() => {
+    let stopped = false, busy = false;
+    const controller = new AbortController();
+    async function refresh() {
+      if (busy || document.hidden) return;
+      busy = true;
+      try {
+        const response = await fetch(`/api/runs/${initialData.runId}/workspace${location.search}`, { signal: controller.signal });
+        if (!response.ok) throw new Error("refresh failed");
+        const next = await response.json();
+        if (!stopped) { setData(next); setConnection("Live updates connected"); }
+      } catch { if (!stopped) setConnection("Updates interrupted · retrying"); }
+      finally { busy = false; }
+    }
+    const timer = setInterval(refresh, 4000);
+    return () => { stopped = true; controller.abort(); clearInterval(timer); };
+  }, [initialData.runId, initialData.view]);
   const active = data.meta !== null && !["completed", "failed", "cancelled", "cancelling"].includes(data.meta.status);
   const decision = data.decision;
   return (
@@ -420,6 +463,7 @@ export default function RunDetail({ data }: { data: RunData }) {
           (the hold releases itself) or cancel the run.
         </p>
       )}
+      <p class="meta" role="status">{connection}</p>
       <div class="eyebrow"><a href="/runs">All runs</a> / {data.runId}</div>
       {data.parentRunId && <p class="meta">Continues <a href={`/runs/${encodeURIComponent(data.parentRunId)}`}>{data.parentRunId}</a></p>}
       {data.messageError && <p class="notice bad" role="alert">{data.messageError}</p>}
@@ -598,24 +642,16 @@ export default function RunDetail({ data }: { data: RunData }) {
               )}
             </form>
           )}
-          <nav class="settings-nav" aria-label="Run workspace">{['conversation','changes','verification','activity'].map(view=><a key={view} href={`/runs/${data.runId}?view=${view}`} class={data.view===view?'active':undefined} aria-current={data.view===view?'page':undefined}>{view.charAt(0).toUpperCase()+view.slice(1)}</a>)}</nav>
-          {data.view === 'conversation' && <Conversation messages={data.messages} />}
+          <nav class="settings-nav" aria-label="Run workspace">{['conversation','review','changes','verification','files','activity'].map(view=><a key={view} href={`/runs/${data.runId}?view=${view}`} class={data.view===view?'active':undefined} aria-current={data.view===view?'page':undefined}>{view.charAt(0).toUpperCase()+view.slice(1)}</a>)}</nav>
+          {['conversation','review'].includes(data.view) && <div class={data.view === 'review' ? 'run-review-grid' : ''}><div>
+            {data.ancestors.map(h => <details class="disclosure"><summary>Earlier: {h.task.slice(0,100)} · {h.runId}</summary><a href={`/runs/${h.runId}`}>Open run</a><Conversation messages={h.messages}/></details>)}
+            <Conversation messages={data.messages} /><RunComposer data={data}/>
+          </div>{data.view === 'review' && <aside class="review-evidence"><ForgePanel data={data}/><Changes snapshots={data.snapshots} pr={data.evidence.pr} sha={data.evidence.sha}/><Verification data={data.evidence}/></aside>}</div>}
+          {data.view === 'files' && <section><h2 class="section">Repository files</h2><p class="meta">Inspect up to 200 tracked file names and the first 10,000 characters of a file at the workspace’s current HEAD. Uncommitted edits are shown in recorded diff snapshots. Availability depends on sandbox retention.</p><form method="post" class="row-actions"><button name="intent" value="files">List files</button><input name="path" placeholder="src/example.ts" aria-label="Repository file path"/><button name="intent" value="file">Read file</button></form>{data.workspace?.error && <p class="notice bad">{data.workspace.error}</p>}{data.workspace?.output !== undefined && <pre class="workspace-file">{data.workspace.output}</pre>}<p class="meta">Requests are handled by the worker; refresh to see the result.</p><a href={`/runs/${data.runId}?view=files`}>Refresh files</a></section>}
+
+          {data.view === 'changes' && <ForgePanel data={data}/>}
           {data.view === 'changes' && <Changes snapshots={data.snapshots} pr={data.evidence.pr} sha={data.evidence.sha} />}
           {data.view === 'verification' && <Verification data={data.evidence} />}
-          {data.view === 'conversation' && active && data.steerable && data.canSteer && (
-            <form class="message-composer" method="post" style="margin:12px 0">
-              <label class="field">Message the agent<textarea name="steer" rows={3} maxLength={12000} required placeholder="Add context, ask a question, or redirect the work." /></label>
-              <button type="submit" name="intent" value="steer">
-                Send message
-              </button>
-            </form>
-          )}
-          {data.steerPending.length > 0 && (
-            <p class="meta" style="margin:4px 0 0">
-              Messages queued for the next turn: {data.steerPending.join(" · ")}
-            </p>
-          )}
-          {data.view === 'conversation' && !active && data.meta.status !== 'cancelling' && data.canLaunch && <form method="post" class="message-composer"><label class="field">Continue this work<textarea name="message" rows={3} required maxLength={12000} placeholder="What should Ship change or investigate next?" /></label><label class="field">Follow-up type<select name="mode"><option value="fix">Make changes</option><option value="scan">Investigate without changes</option></select></label><label class="check-field"><input type="checkbox" name="plan" checked />Review the plan before code changes</label><button type="submit" name="intent" value="follow-up">Start follow-up</button><p class="meta">Starts a linked run with the previous request and result. Uses the existing pull request when it has not been recorded as merged or closed. Current project approvals and budgets apply.</p></form>}
           {data.view === 'activity' && <>
           <h2 class="section">Run activity</h2>
           <ul class="timeline" aria-label="Run activity">
@@ -712,9 +748,59 @@ export default function RunDetail({ data }: { data: RunData }) {
             );
           })()}
           </>}
-          {active && <script dangerouslySetInnerHTML={{ __html: POLL }} />}
+
         </>
       )}
     </div>
   );
+}
+
+function ForgePanel({ data }: { data: RunData }) {
+  const f = data.forge?.forge;
+  return <section class="forge-panel"><div class="row-actions"><h2 class="section">Pull request status</h2><form method="post"><button name="intent" value="forge-refresh">Refresh from forge</button></form></div>
+    {data.forge?.error && <p class="notice bad">{data.forge.error}</p>}
+    {!f ? <p class="meta">Request a worker check to see the current PR, reviews and CI. No model credits are used.</p> : <>
+      <p><b>#{f.number} · {f.state}{f.draft ? ' · draft' : ''}</b> · {f.title}</p><p class="meta">Checked {f.checkedAt.replace('T',' ').slice(0,19)} UTC · head {f.head.slice(0,12)}</p>
+      {data.evidence.sha && f.head !== data.evidence.sha && <p class="notice">The PR has changed since this run published. Recorded verification applies to {data.evidence.sha.slice(0,12)}, not the current head.</p>}
+      {f.checks.length === 0 && <p class="meta">No CI checks reported.</p>}{f.checks.map(c => <p><b>{c.name}</b> · {c.state}</p>)}
+      {f.reviews.map(r => <details class="disclosure"><summary>{r.author} · {r.state}</summary><p>{r.body}</p></details>)}
+      {f.warnings.map(w => <p class="meta">{w}</p>)}
+    </>}
+  </section>;
+}
+
+function RunComposer({data}: {data: RunData}) {
+ useEffect(() => {
+   const form = document.querySelector<HTMLFormElement>('.message-composer');
+   const input = form?.querySelector<HTMLTextAreaElement>('textarea');
+   if (!form || !input) return;
+   const key = `ship-draft:${data.runId}:${input.name}`;
+   try {
+     if (data.parentRunId) sessionStorage.removeItem(`ship-draft:${data.parentRunId}:message`);
+     if (input.name === "steer" && new URLSearchParams(location.search).get("sent") === "1") sessionStorage.removeItem(key);
+     const draft = sessionStorage.getItem(key); if (draft !== null) input.value = draft; } catch {}
+   const save = () => { try { sessionStorage.setItem(key, input.value); } catch {} };
+   input.addEventListener('input', save);
+   // Preserve drafts across errors/tab changes; successful sends clear them.
+   return () => { input.removeEventListener('input', save); };
+ }, [data.runId, data.meta?.status]);
+ const active = data.meta !== null && !["completed", "failed", "cancelled", "cancelling"].includes(data.meta.status);
+ if (!data.meta) return null;
+ return <>
+          {active && data.steerable && data.canSteer && (
+            <form class="message-composer" method="post" style="margin:12px 0">
+              <label class="field">Message the agent<textarea name="steer" rows={3} maxLength={12000} required placeholder="Add context, ask a question, or redirect the work." /></label>
+              <button type="submit" name="intent" value="steer">
+                Send message
+              </button>
+            </form>
+          )}
+          {data.steerPending.length > 0 && (
+            <p class="meta" style="margin:4px 0 0">
+              Messages queued for the next turn: {data.steerPending.join(" · ")}
+            </p>
+          )}
+          {!active && data.meta.status !== 'cancelling' && data.canLaunch && <form method="post" class="message-composer"><label class="field">Continue this work<textarea name="message" rows={3} required maxLength={12000} placeholder="What should Ship change or investigate next?" /></label>{data.evidence.pr && <label class="field">Start from<select name="target"><option value="pr">Existing pull request (checked before launch)</option><option value="base">Current default branch</option></select></label>}<label class="field">Follow-up type<select name="mode"><option value="fix">Make changes</option><option value="scan">Investigate without changes</option></select></label><label class="check-field"><input type="checkbox" name="plan" checked />Review the plan before code changes</label><button type="submit" name="intent" value="follow-up">Start follow-up</button><p class="meta">Keeps the conversation history and starts a fresh sandbox. The existing pull request is checked with the forge before launch. Current project approvals and budgets apply.</p></form>}
+
+ </>;
 }
