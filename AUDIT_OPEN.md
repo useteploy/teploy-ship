@@ -80,3 +80,14 @@ Restored the original top navigation, monospace typography, palette, title
 sizes and controls after user feedback. Settings navigation uses horizontal
 pills; counts and overview links are compact. The functional settings split,
 search, multiline composer and clearer project forms remain.
+
+## 2026-09-19 — task workspace and team workflows
+
+Added run conversation/changes/verification/activity views, governed linked
+follow-ups, shared workflow templates, guided project registration and
+configuration checks, and bounded service diagnostics. Published runs retain
+a diff snapshot; browser-flow recordings have bounded attachment support.
+Existing workflow step sequences are unchanged. Settings no longer evaluates
+worker-only environment metadata in the browser. The shared Teploy shell and
+visual tokens are preserved. Scope and remaining competitor distinctions:
+[Working in Ship](docs/WORKSPACE.md).

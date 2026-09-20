@@ -225,6 +225,15 @@ it.
 Filesystem state persists between actions; process/Python-variable state
 does not (a persistent kernel is a later milestone).
 
+## Task workspace
+
+The dashboard groups each run into Conversation, Changes, Verification and
+Activity. Start from a reusable workflow, set up a repository with the guided
+checklist, and continue finished work as a linked follow-up. Recorded diffs,
+test outcomes, preview links, screenshots and supported browser recordings
+make results reviewable. See [Working in Ship](docs/WORKSPACE.md) for the
+workflow, permission model and evidence limits.
+
 ## Watching a run, and being asked
 
 A run page follows the event log, and the log records a step when it ends —

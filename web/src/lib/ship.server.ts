@@ -70,3 +70,5 @@ export {
   utcDay,
 } from "teploy-ship/runtime";
 export { cancelRun, deliverEvent } from "@neutron-build/workflow";
+
+export { verificationFactsFromEvents } from "../../../dist/verification-summary.js";

@@ -39,6 +39,7 @@ import {
   updatePullRequestBody,
   uploadPrAsset,
   workingDiff,
+  publishedDiff,
 } from "./git.js";
 import { deployPreview, resolvePreviewTarget, rollbackDeploy, type PreviewOutcome, type PreviewTarget } from "./deploy.js";
 import {
@@ -2463,6 +2464,7 @@ async function publishIfRepoRun(
         ? {
             kind: "pushed" as const,
             sha: result.sha,
+            diff: await publishedDiff(executor, co.base),
             // An unusual-looking diff is published, but as a draft that says
             // what looked unusual — the reviewer decides, not the limit.
             ...(result.screen !== undefined ? { warning: warningMessage(result.screen) } : {}),

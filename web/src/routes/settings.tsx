@@ -1,3 +1,5 @@
+import { checkConnections } from "../lib/connections.server.js";
+import type { ConnectionCheck } from "../lib/connections.server.js";
 import {
   AKIROO_ORG_ID_KEY,
   AKIROO_ORG_NAME_KEY,
@@ -49,12 +51,7 @@ interface SettingsData {
  * Names of secrets `teploy-ship web` deliberately removed from this process's
  * environment (they belong to the worker). Reported, not read.
  */
-const WORKER_ONLY = new Set(
-  (process.env.SHIP_WORKER_ONLY_SECRETS ?? "")
-    .split(",")
-    .map((n) => n.trim())
-    .filter((n) => n !== ""),
-);
+
 
 /**
  * Present a secret as set/unset without ever revealing it.
@@ -64,7 +61,8 @@ const WORKER_ONLY = new Set(
  * credential that was never wrong.
  */
 function secret(name: string): Row {
-  if (WORKER_ONLY.has(name)) {
+  const workerOnly = new Set((process.env.SHIP_WORKER_ONLY_SECRETS ?? "").split(",").map(n => n.trim()));
+  if (workerOnly.has(name)) {
     return { label: name, value: "set — scoped to the worker, not readable here", ok: true };
   }
   const v = process.env[name];
@@ -367,12 +365,16 @@ async function ensureAdminRemains(runtime: ShipRuntime, undo: () => Promise<void
   throw new Error("cannot remove or demote the last admin (another admin was changed at the same time)");
 }
 
-export async function action({ request }: { request: Request }): Promise<{ error?: string; ok?: string }> {
+export async function action({ request }: { request: Request }): Promise<{ error?: string; ok?: string; checks?: ConnectionCheck[] }> {
   const runtime = await shipRuntime();
   const form = await request.formData();
   const intent = String(form.get("intent") ?? "");
   const username = String(form.get("username") ?? "");
   try {
+    if (intent === "check-connections") {
+      if ((await currentUser(request))?.role !== "admin") return { error: "Only an administrator can check service connections." };
+      return { checks: await checkConnections() };
+    }
     if (intent === "create") {
       await runtime.users.create(username, String(form.get("password") ?? ""), normalizeRole(String(form.get("role") ?? "viewer")));
       return { ok: `Added ${username}.` };
@@ -424,7 +426,7 @@ function ConfigGroup({ group, advanced }: { group: Group; advanced: boolean }) {
     : <section class="config-section"><h3>{groupLabel(group.title)}</h3>{rows}</section>;
 }
 
-export default function Settings({ data, actionData }: { data: SettingsData; actionData?: { error?: string; ok?: string } }) {
+export default function Settings({ data, actionData }: { data: SettingsData; actionData?: { error?: string; ok?: string; checks?: ConnectionCheck[] } }) {
   const title = SETTINGS_VIEWS.find(view => view.key === data.view)?.label ?? "Overview";
   const rowValue = (group: string, label: string) => data.groups.find(g => g.title === group)?.rows.find(r => r.label === label)?.value ?? "Not configured";
   return <>
@@ -434,7 +436,7 @@ export default function Settings({ data, actionData }: { data: SettingsData; act
       <nav class="settings-nav" aria-label="Settings navigation">{SETTINGS_VIEWS.map(view => <a key={view.key} href={view.href} class={view.key === data.view ? "active" : undefined} aria-current={view.key === data.view ? "page" : undefined}>{view.label}</a>)}</nav>
       <div class="settings-content">
         {data.view === "overview" && <>
-          <h2>Workspace overview</h2><p class="meta">Start with the setting you want to change. Repository-specific choices live in Projects.</p>
+          <h2>Workspace overview</h2><p class="notice"><b>Where changes belong:</b> account preferences affect you; project overrides affect one repository; deployment defaults affect workers. Saved project changes apply to new runs.</p><p class="row-actions"><a href="/setup">Check project setup</a><a href="/workflows">Manage reusable workflows</a></p><p class="meta">Start with the setting you want to change. Repository-specific choices live in Projects.</p>
           <section class="config-section"><h3>Current defaults</h3>
             <div class="config-row"><span class="config-label">Model</span><span class="config-value">{rowValue("Runtime", "model")}</span></div>
             <div class="config-row"><span class="config-label">Agent harness</span><span class="config-value">{rowValue("Harness", "harness")}</span></div>
@@ -520,7 +522,9 @@ export default function Settings({ data, actionData }: { data: SettingsData; act
         {data.view !== "overview" && data.view !== "team" && <>
           <h2>{title}</h2>
           <p class="meta">{data.view === "integrations" ? "Services that bring work into Ship and carry results back." : data.view === "models" ? "Worker defaults for new runs. A project's configuration takes precedence." : "Detailed configuration reported by this server. Expand a section to inspect its values."}</p>
-          <p class="notice"><b>Configuration reference.</b> These values are read-only here. Change worker defaults through your deployment environment and redeploy. Secrets are never displayed. <a href="/projects">Edit project overrides →</a></p>
+          {data.view === "integrations" && <section class="connection-checks"><form method="post"><button name="intent" value="check-connections">Check service connections</button></form><p class="meta">Tests configured health endpoints from this dashboard without model inference. Worker credentials and worker network access are checked by a real run.</p>{actionData?.checks && <div role="status">{actionData.checks.map(c=><article class="check-row"><b>{c.name}</b><span>{c.state}</span><div>{c.detail}</div></article>)}</div>}</section>}
+          {data.view === "models" && <p class="row-actions"><a href="/projects">Edit repository execution settings</a><a href="/setup">Check an environment</a></p>}
+          <p class="notice"><b>Deployment defaults · read-only.</b> These values are read-only here. Change worker defaults through your deployment environment and redeploy. Secrets are never displayed. <a href="/projects">Edit project overrides →</a></p>
           {data.groups.filter(group => groupVisible(data.view, group.title)).map(group => <ConfigGroup key={group.title} group={group} advanced={data.view === "system"} />)}
         </>}
       </div>

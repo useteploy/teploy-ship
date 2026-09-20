@@ -97,7 +97,7 @@ export function verificationSection(evidence: Evidence, runId: string): string |
   // The pictures, inline: a reviewer who can see the changed page needs no
   // hash. Names are the script's own file names, so they read in order.
   if (evidence.proof !== undefined && evidence.proof.length > 0) {
-    parts.push(`**Proof**\n\n${evidence.proof.map((p) => `${p.name}\n\n![${p.name}](${p.url})`).join("\n\n")}`);
+    parts.push(`**Proof**\n\n${evidence.proof.map((p) => p.name.endsWith(".webm") ? `[Watch ${p.name}](${p.url})` : `${p.name}\n\n![${p.name}](${p.url})`).join("\n\n")}`);
   }
   if (parts.length === 0) return null;
   return `${VERIFICATION_START}\n## Verification\n\n${parts.join("\n\n---\n\n")}\n${VERIFICATION_END}`;

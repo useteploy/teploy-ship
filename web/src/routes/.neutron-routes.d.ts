@@ -32,8 +32,10 @@ declare module "@neutron-build/core" {
     | "/runs"
     | `/runs/${string}`
     | "/settings"
+    | "/setup"
     | "/sources"
     | "/spend"
+    | "/workflows"
   }
 }
 

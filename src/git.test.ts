@@ -11,6 +11,7 @@ import {
   authenticatedUrl,
   closePullRequest,
   commitAndPush,
+  publishedDiff,
   markPullRequestReady,
   mergePullRequest,
   findOpenPullRequest,
@@ -96,6 +97,10 @@ test("setupRepo + commitAndPush against a local bare remote", async () => {
   await executor.exec("echo fixed >> readme.md && echo new > lib.py");
   const pushed = await commitAndPush(executor, { ref, token: "", checkout, message: "fix: the thing\n\nrun-test1234" });
   assert.equal(pushed.kind, "pushed", "an ordinary two-file change passes the publication screen");
+
+  const snapshot = await publishedDiff(executor, checkout.base);
+  assert.match(snapshot ?? "", /diff --git a\/lib.py b\/lib.py/);
+  assert.match(snapshot ?? "", /\+fixed/);
 
   const check = new LocalExecutor({ root: bare });
   const branchList = await check.exec("cd repo.git && git branch --list 'ship/*'");
@@ -685,6 +690,10 @@ test("uploadPrAsset posts multipart to Forgejo's issue assets and returns the do
   assert.ok(form instanceof FormData, "the body is multipart form data");
   const file = form.get("attachment");
   assert.ok(file instanceof Blob && file.size === 4, "the PNG bytes travel as the attachment field");
+  await uploadPrAsset({ ref: forgejo, token: "tok", pr: 7, name: "walkthrough.webm", bytes: new Uint8Array([1, 2]), fetchImpl });
+  const video = (calls[1]?.init.body as FormData).get("attachment");
+  assert.ok(video instanceof Blob);
+  assert.equal(video.type, "video/webm");
 
   await assert.rejects(
     () => uploadPrAsset({ ref: parseRepoUrl("https://github.com/o/r"), token: "t", pr: 1, name: "x.png", bytes: new Uint8Array([1]), fetchImpl }),

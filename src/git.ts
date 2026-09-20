@@ -389,6 +389,17 @@ export function truncateMiddle(text: string, maxChars: number): string {
   return `${headText}\n\n... [${dropped} chars omitted from the middle of this diff] ...\n\n${tailText}`;
 }
 
+/** Bounded review snapshot of the commit just published; no workspace mutation. */
+export async function publishedDiff(executor: AgentExecutor, base: string): Promise<string | undefined> {
+  const ref = `origin/${base}...HEAD`;
+  const quoted = "'" + ref.replace(/'/g, "'\\''") + "'";
+  try {
+    const result = await executor.exec(`git --no-pager diff --no-ext-diff --no-textconv ${quoted} --`, { timeoutMs: 30_000 });
+    if (result.exitCode !== 0 || !result.stdout.startsWith("diff --git ")) return undefined;
+    return truncateMiddle(result.stdout, 100_000);
+  } catch { return undefined; }
+}
+
 export interface PullRequest {
   url: string;
   number: number;
@@ -728,7 +739,7 @@ export async function uploadPrAsset(options: {
   const fetchImpl = options.fetchImpl ?? fetch;
   if (ref.kind === "github") throw new Error("GitHub has no API for attaching a file to a pull request");
   const form = new FormData();
-  form.append("attachment", new Blob([Buffer.from(bytes)], { type: "image/png" }), name);
+  form.append("attachment", new Blob([Buffer.from(bytes)], { type: name.endsWith(".webm") ? "video/webm" : "image/png" }), name);
   const response = await fetchImpl(`${ref.base}/api/v1/repos/${ref.owner}/${ref.repo}/issues/${pr}/assets?name=${encodeURIComponent(name)}`, {
     method: "POST",
     headers: { authorization: `token ${token}` },

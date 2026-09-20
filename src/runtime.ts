@@ -847,6 +847,8 @@ export async function enqueueRun(
   runtime: ShipRuntime,
   options: {
     runId: string;
+    /** Conversation lineage only; never gates a workflow step. */
+    parentRunId?: string;
     task: string;
     model: string;
     repo?: string;
@@ -1239,6 +1241,7 @@ export async function enqueueRun(
   // exact object the log will carry, rather than a reconstruction of it.
   const input = {
         task: options.task,
+        ...(options.parentRunId !== undefined ? { parentRunId: options.parentRunId } : {}),
         ...(options.repo !== undefined ? { repo: options.repo } : {}),
         // Provenance, recorded whenever the caller stated it — not only on
         // repo runs. A chat message or an issue comment with no repository

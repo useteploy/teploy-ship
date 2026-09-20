@@ -343,9 +343,9 @@ function flowOutcome(v: unknown): FlowOutcome | undefined {
   const script = String(r.script ?? ".ship/flow.mjs");
   switch (r.kind) {
     case "passed":
-      return { kind: "passed", script, durationMs: Number(r.durationMs ?? 0), shots: flowShots(r.shots) };
+      return { kind: "passed", script, durationMs: Number(r.durationMs ?? 0), shots: flowShots(r.shots), ...(Array.isArray(r.videos) ? { videos: flowShots(r.videos) } : {}) };
     case "failed":
-      return { kind: "failed", script, exitCode: Number(r.exitCode ?? 1), output: String(r.output ?? ""), shots: flowShots(r.shots) };
+      return { kind: "failed", script, exitCode: Number(r.exitCode ?? 1), output: String(r.output ?? ""), shots: flowShots(r.shots), ...(Array.isArray(r.videos) ? { videos: flowShots(r.videos) } : {}) };
     case "errored":
       return { kind: "errored", script, reason: String(r.reason ?? "") };
     case "skipped":

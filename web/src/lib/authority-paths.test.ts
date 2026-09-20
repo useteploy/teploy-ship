@@ -47,7 +47,7 @@ function form(fields: Record<string, string>): BodyInit {
 test("authority-governed paths are role-open so the route's grant decides; the rest keep the role gate", () => {
   // These routes call may() on every mutation (governance.ts), so a named
   // viewer holding `approve` or `policies` must reach the route at all.
-  for (const path of ["/", "/runs/run-1", "/api/runs/run-1/decide", "/sources", "/projects", "/policies", "/api/policies"]) {
+  for (const path of ["/", "/runs/run-1", "/api/runs/run-1/decide", "/sources", "/projects", "/workflows", "/setup", "/policies", "/api/policies"]) {
     assert.equal(requiredRole("POST", path), "viewer", path);
   }
   // Unchanged: secrets/accounts are admin, other mutations are editor, reads are viewer.

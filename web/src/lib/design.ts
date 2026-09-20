@@ -68,7 +68,47 @@ table.runs td { padding-top: 10px; padding-bottom: 10px; }
 .run-id { display: block; font-size: 11px; color: var(--dim); margin-top: 5px; }
 .run-task { min-width: 250px; max-width: 560px; }
 .run-updated { white-space: nowrap; }
+
+.conversation { margin: 16px 0 24px; }
+.message { border-bottom: 1px solid var(--border); padding: 16px 0; }
+.message .kind { display: flex; justify-content: space-between; gap: 12px; color: var(--dim); font-size: 12px; margin-bottom: 8px; }
+.message time { font-size: 11px; }
+.message-text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7; }
+.message-composer { border-top: 1px solid var(--border); padding-top: 18px; margin-top: 24px; }
+.message-composer textarea { padding: 10px; font: inherit; width: 100%; }
+.message-composer button { margin-top: 10px; }
+.diff-snapshot { margin: 18px 0; }
+.diff-snapshot > summary, .diff-file > summary { cursor: pointer; overflow-wrap: anywhere; padding: 10px 0; }
+.diff-file { border-top: 1px solid var(--border); }
+.diff-code { overflow: auto; max-height: 600px; font-size: 12px; line-height: 1.6; padding: 12px; background: var(--panel); }
+.diff-code span { white-space: pre; }
+.diff-add { color: var(--green); background: #3fb9500d; }
+.diff-remove { color: var(--red); background: #f851490d; }
+.diff-hunk { color: var(--blue); }
+.evidence-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 16px 0; }
+.check-row { display: grid; grid-template-columns: 150px 120px minmax(0,1fr); gap: 14px; padding: 14px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+.check-row b { font-weight: 500; }
+.check-row > div { overflow-wrap: anywhere; }
+.check-row pre { max-height: 350px; overflow: auto; white-space: pre-wrap; }
+.browser-recording { margin: 16px 0; }
+.browser-recording video { width: 100%; max-height: 550px; background: var(--panel); }
+.evidence-gallery { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; }
+.evidence-gallery figure { margin: 0; }
+.evidence-gallery img { max-width: 100%; border: 1px solid var(--border); }
+.evidence-gallery figcaption { color: var(--dim); font-size: 12px; margin: 8px 0; }
+.workflow-row { display: flex; justify-content: space-between; gap: 20px; padding: 20px 0; border-bottom: 1px solid var(--border); }
+.workflow-row h2, .setup-step h2 { font-size: 14px; font-weight: 500; margin: 0 0 8px; }
+.workflow-row .row-actions { align-content: center; flex-shrink: 0; }
+.setup-list { padding: 0; list-style: none; }
+.setup-step { padding: 20px 0; border-bottom: 1px solid var(--border); }
+.setup-step > div { display: flex; justify-content: space-between; gap: 20px; }
+.setup-step p { color: var(--dim); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
 @media (max-width: 720px) {
+  .check-row { grid-template-columns: 1fr 1fr; }
+  .check-row > div { grid-column: 1 / -1; }
+  .evidence-gallery { grid-template-columns: 1fr; }
+  .workflow-row { flex-direction: column; }
+
   .page-heading { gap: 12px; }
   .summary-grid { gap: 10px 18px; }
   .summary-card { font-size: 11px; }

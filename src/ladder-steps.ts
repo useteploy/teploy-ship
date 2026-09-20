@@ -311,9 +311,22 @@ export async function flowIfPresent(
         const asset = await attach(sink, `ship-${ctx.runId}-flow-${name}`, png);
         shots.push({ name, sha256: createHash("sha256").update(png).digest("hex"), bytes: png.byteLength, ...(asset !== undefined ? { asset } : {}) });
       }
+      // Optional browser recordings. Bound count and bytes before transferring
+      // from the sandbox; missing recordings never invent evidence or fail a flow.
+      const videos: FlowShot[] = [];
+      const videoList = await executor.exec(`find ${FLOW_OUT} -maxdepth 1 -type f -name '*.webm' -size -4096k | sort`, { timeoutMs: 15_000 }).catch(() => ({ stdout: "" }));
+      for (const file of videoList.stdout.split("\n").filter(p => /^\.ship\/flow-out\/[a-zA-Z0-9._-]+\.webm$/.test(p)).slice(0, 2)) {
+        try {
+          const bytes = await executor.getFile(file);
+          if (!bytes.byteLength || bytes.byteLength > MAX_SHOT_BYTES) continue;
+          const name = file.slice(file.lastIndexOf("/") + 1);
+          const asset = await attach(sink, `ship-${ctx.runId}-flow-${name}`, bytes);
+          videos.push({ name, sha256: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.byteLength, ...(asset ? { asset } : {}) });
+        } catch { /* The flow result still reports its test outcome. */ }
+      }
       if (r.timedOut) return { kind: "errored", script: FLOW_SCRIPT, reason: `timed out after ${Math.round(durationMs / 1000)}s` };
-      if (r.exitCode === 0) return { kind: "passed", script: FLOW_SCRIPT, durationMs, shots };
-      return { kind: "failed", script: FLOW_SCRIPT, exitCode: r.exitCode, output: tail(`${r.stdout}${r.stderr}`), shots };
+      if (r.exitCode === 0) return { kind: "passed", script: FLOW_SCRIPT, durationMs, shots, ...(videos.length ? { videos } : {}) };
+      return { kind: "failed", script: FLOW_SCRIPT, exitCode: r.exitCode, output: tail(`${r.stdout}${r.stderr}`), shots, ...(videos.length ? { videos } : {}) };
     } catch (error) {
       return { kind: "errored", script: FLOW_SCRIPT, reason: error instanceof Error ? error.message : String(error) };
     } finally {

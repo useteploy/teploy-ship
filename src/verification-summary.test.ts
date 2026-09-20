@@ -182,3 +182,10 @@ test("the browser flow is reported from its recorded outcome, never from the age
   }
   assert.match(runVerificationSummary(events), /attached to the pull request/);
 });
+
+test("browser recording attachments survive the recorded-facts projection", () => {
+  const video = { name: "walkthrough.webm", sha256: "abc", bytes: 12, asset: "https://forge.test/recording" };
+  const facts = verificationFactsFromEvents([step("flow", { kind: "passed", script: ".ship/flow.mjs", durationMs: 50, shots: [], videos: [video] }, 1)]);
+  assert.equal(facts.flow?.kind, "passed");
+  if (facts.flow?.kind === "passed") assert.deepEqual(facts.flow.videos, [video]);
+});

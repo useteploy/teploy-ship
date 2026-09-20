@@ -162,8 +162,8 @@ export interface FlowShot {
  * and a person can look at.
  */
 export type FlowOutcome =
-  | { kind: "passed"; script: string; durationMs: number; shots: FlowShot[] }
-  | { kind: "failed"; script: string; exitCode: number; output: string; shots: FlowShot[] }
+  | { kind: "passed"; script: string; durationMs: number; shots: FlowShot[]; videos?: FlowShot[] }
+  | { kind: "failed"; script: string; exitCode: number; output: string; shots: FlowShot[]; videos?: FlowShot[] }
   | { kind: "errored"; script: string; reason: string }
   | { kind: "skipped"; reason: string };
 
@@ -356,7 +356,7 @@ export function proofLinks(facts: { visual?: VisualOutcome; flow?: FlowOutcome }
     if (facts.visual.main.asset !== undefined) out.push({ name: "main", url: facts.visual.main.asset });
   }
   if (facts.flow?.kind === "passed" || facts.flow?.kind === "failed") {
-    for (const s of facts.flow.shots) if (s.asset !== undefined) out.push({ name: s.name, url: s.asset });
+    for (const s of [...facts.flow.shots, ...(facts.flow.videos ?? [])]) if (s.asset !== undefined) out.push({ name: s.name, url: s.asset });
   }
   return out;
 }

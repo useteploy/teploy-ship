@@ -1,4 +1,8 @@
-import { cancelRun, deliverEvent, costUSD, isPricedModel, actorFromPrincipal, pendingQuestion } from "../../lib/ship.server.js";
+import { randomUUID } from "node:crypto";
+import { conversation, diffSnapshots, evidence } from "../../lib/workspace.js";
+import type { Message, DiffSnapshot, Evidence } from "../../lib/workspace.js";
+import { Conversation, Changes, Verification } from "../../views/workspace.js";
+import { cancelRun, deliverEvent, costUSD, isPricedModel, actorFromPrincipal, pendingQuestion, verificationFactsFromEvents, enqueueRun } from "../../lib/ship.server.js";
 import { roughDuration, typicalDuration } from "../../lib/expect.js";
 import type { Typical } from "../../lib/expect.js";
 
@@ -22,6 +26,14 @@ import { startSpan } from "../../lib/observe.server.js";
 export const config = { mode: "app" };
 
 interface RunData {
+  view: string;
+  messages: Message[];
+  snapshots: DiffSnapshot[];
+  evidence: Evidence;
+  parentRunId?: string;
+  canSteer: boolean;
+  canLaunch: boolean;
+  messageError: string | null;
   meta: RunMeta | null;
   items: TimelineItem[];
   outcome: RunOutcome;
@@ -139,6 +151,14 @@ export async function loader({ params, request }: { params: { id: string }; requ
       }
     }
     const data: RunData = {
+      view: ['conversation','changes','verification','activity'].includes(query.get('view') ?? '') ? query.get('view')! : 'conversation',
+      messages: conversation(events),
+      snapshots: diffSnapshots(events),
+      evidence: evidence(verificationFactsFromEvents(events)),
+      parentRunId: typeof (started?.data as any)?.input?.parentRunId === 'string' ? (started?.data as any).input.parentRunId : undefined,
+      canSteer: await may('steer', await currentUser(request)),
+      canLaunch: await may('approve', await currentUser(request)),
+      messageError: query.get('messageError'),
       meta,
       items: toTimeline(events),
       outcome,
@@ -207,6 +227,21 @@ export async function action({
   const me = await currentUser(request);
   const runId = params.id;
   const meta = await runtime.loadMeta(runId);
+  if (intent === "follow-up") {
+    if (!(await may("approve", me))) return redirectTo(`/runs/${runId}?denied=approve`);
+    if (meta === null || !["completed", "failed", "cancelled"].includes(meta.status)) return redirectTo(`/runs/${runId}?messageError=Run+must+finish+before+starting+a+follow-up`);
+    const message = String(form.get("message") ?? "").trim();
+    if (!message || message.length > 12000) return redirectTo(`/runs/${runId}?messageError=Enter+a+message+of+up+to+12000+characters`);
+    const events = await runtime.store.load(runId);
+    const started = events.find(e => e.type === "run-started");
+    const input = (started?.data as { input?: { repo?: string; task?: string; trust?: string } })?.input;
+    const facts = verificationFactsFromEvents(events);
+    const next = `run-${randomUUID().slice(0, 8)}`;
+    const task = `${message}\n\nContext from ${runId} — previous request:\n${(input?.task ?? meta.task).slice(-12000)}\n\nPrevious result:\n${(runOutcome(events).summary ?? "No result recorded.").slice(0,6000)}`;
+    await enqueueRun(runtime, {runId:next,parentRunId:runId,task,model:meta.model,source:"manual",actor:actorFromPrincipal(me),trust:input?.trust === "operator" ? "operator" : "external",...(input?.repo ? {repo:input.repo}:{}),...(facts.pr && !['merged','closed'].includes(facts.merge?.kind ?? '') ? {pr:facts.pr.number}:{}),plan:form.get("plan")==="on",...(form.get("mode")==="scan" ? {mode:"scan" as const}: {})});
+    return redirectTo(`/runs/${next}`);
+  }
+
   // "cancelling" is not terminal — the executor has not settled it yet — but a
   // second cancel click while one is pending is noise, so it is not active
   // either for the purposes of offering the button.
@@ -235,6 +270,7 @@ export async function action({
   // Mid-run steering: queue a note; the run's next turn drains it.
   if (active && intent === "steer") {
     const text = String(form.get("steer") ?? "").trim();
+    if (text.length > 12000) return redirectTo(`/runs/${runId}?messageError=Message+must+be+under+12000+characters`);
     if (text !== "") await runtime.steer.add(runId, text);
     return redirectTo(`/runs/${runId}`);
   }
@@ -385,6 +421,8 @@ export default function RunDetail({ data }: { data: RunData }) {
         </p>
       )}
       <div class="eyebrow"><a href="/runs">All runs</a> / {data.runId}</div>
+      {data.parentRunId && <p class="meta">Continues <a href={`/runs/${encodeURIComponent(data.parentRunId)}`}>{data.parentRunId}</a></p>}
+      {data.messageError && <p class="notice bad" role="alert">{data.messageError}</p>}
       <h1 class="page">{data.meta ? data.meta.task.slice(0, 110) + (data.meta.task.length > 110 ? "…" : "") : "Run details"}</h1>
       {data.meta && data.meta.task.length > 110 && <details class="disclosure"><summary>Read the full task</summary><p style="white-space:pre-wrap">{data.meta.task}</p></details>}
       {data.meta === null ? (
@@ -560,19 +598,25 @@ export default function RunDetail({ data }: { data: RunData }) {
               )}
             </form>
           )}
-          {active && data.steerable && (
-            <form class="newrun" method="post" style="margin:12px 0">
-              <input type="text" name="steer" aria-label="Guide this run" placeholder='steer the run, e.g. "skip the docs, focus on the parser"' />
+          <nav class="settings-nav" aria-label="Run workspace">{['conversation','changes','verification','activity'].map(view=><a key={view} href={`/runs/${data.runId}?view=${view}`} class={data.view===view?'active':undefined} aria-current={data.view===view?'page':undefined}>{view.charAt(0).toUpperCase()+view.slice(1)}</a>)}</nav>
+          {data.view === 'conversation' && <Conversation messages={data.messages} />}
+          {data.view === 'changes' && <Changes snapshots={data.snapshots} pr={data.evidence.pr} sha={data.evidence.sha} />}
+          {data.view === 'verification' && <Verification data={data.evidence} />}
+          {data.view === 'conversation' && active && data.steerable && data.canSteer && (
+            <form class="message-composer" method="post" style="margin:12px 0">
+              <label class="field">Message the agent<textarea name="steer" rows={3} maxLength={12000} required placeholder="Add context, ask a question, or redirect the work." /></label>
               <button type="submit" name="intent" value="steer">
-                Steer
+                Send message
               </button>
             </form>
           )}
           {data.steerPending.length > 0 && (
             <p class="meta" style="margin:4px 0 0">
-              queued steering (lands on the next turn): {data.steerPending.join(" · ")}
+              Messages queued for the next turn: {data.steerPending.join(" · ")}
             </p>
           )}
+          {data.view === 'conversation' && !active && data.meta.status !== 'cancelling' && data.canLaunch && <form method="post" class="message-composer"><label class="field">Continue this work<textarea name="message" rows={3} required maxLength={12000} placeholder="What should Ship change or investigate next?" /></label><label class="field">Follow-up type<select name="mode"><option value="fix">Make changes</option><option value="scan">Investigate without changes</option></select></label><label class="check-field"><input type="checkbox" name="plan" checked />Review the plan before code changes</label><button type="submit" name="intent" value="follow-up">Start follow-up</button><p class="meta">Starts a linked run with the previous request and result. Uses the existing pull request when it has not been recorded as merged or closed. Current project approvals and budgets apply.</p></form>}
+          {data.view === 'activity' && <>
           <h2 class="section">Run activity</h2>
           <ul class="timeline" aria-label="Run activity">
             {data.items.map((item, i) => {
@@ -667,6 +711,7 @@ export default function RunDetail({ data }: { data: RunData }) {
               </details>
             );
           })()}
+          </>}
           {active && <script dangerouslySetInnerHTML={{ __html: POLL }} />}
         </>
       )}

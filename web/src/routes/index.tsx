@@ -1,3 +1,5 @@
+import { workflows } from "../lib/workflows.server.js";
+import type { WorkflowTemplate } from "../lib/workflows.server.js";
 import { randomUUID } from "node:crypto";
 
 import { deliverEvent, enqueueRun, actorFromPrincipal, intakeActor } from "../lib/ship.server.js";
@@ -12,6 +14,8 @@ import { may } from "../lib/authority.server.js";
 export const config = { mode: "app" };
 
 interface InboxData {
+  template?: WorkflowTemplate;
+  selectedRepo: string;
   /** Runs parked on an approval — the top priority. */
   parked: RunMeta[];
   /** Proposed intake tasks awaiting a launch/dismiss decision. */
@@ -35,7 +39,7 @@ export async function loader({ request }: { request: Request }): Promise<InboxDa
   const denied = query.get("denied") === "approve";
   const [runs, proposed, projects] = await Promise.all([runtime.listMeta(), runtime.intake.list("proposed"), runtime.projects.list()]);
   const parked = runs.filter((r) => r.status === "waiting" && r.eventName !== undefined);
-  return { projects: projects.map(p => ({ url: p.url ?? p.repo, label: p.label ?? p.repo })), parked, proposed, store: runtime.kind, model: defaultModel(), decisionTaken, denied };
+  return { template: (await workflows(runtime)).find(t=>t.id===query.get("workflow")), selectedRepo: query.get("repo") ?? "", projects: projects.map(p => ({ url: p.url ?? p.repo, label: p.label ?? p.repo })), parked, proposed, store: runtime.kind, model: defaultModel(), decisionTaken, denied };
 }
 
 export async function action({ request }: { request: Request }): Promise<Response> {
@@ -119,7 +123,7 @@ export async function action({ request }: { request: Request }): Promise<Respons
 
   // Quick new run.
   const task = String(form.get("task") ?? "").trim();
-  if (task === "") return redirect("/");
+  if (task === "" || task.length > 20000) return redirect("/");
   const repo = String(form.get("repo") ?? "").trim();
   const runId = `run-${randomUUID().slice(0, 8)}`;
   await enqueueRun(runtime, {
@@ -132,6 +136,7 @@ export async function action({ request }: { request: Request }): Promise<Respons
     trust: "operator",
     ...(repo !== "" ? { repo } : {}),
     ...(form.get("plan") === "on" ? { plan: true } : {}),
+    ...(form.get("mode") === "scan" ? { mode: "scan" as const } : {}),
   });
   return redirect(`/runs/${runId}`);
 }
@@ -165,13 +170,16 @@ export default function Inbox({ data }: { data: InboxData }) {
         <a class="summary-card" href="#proposals"><strong>{data.proposed.length}</strong><span>Proposed tasks</span></a>
         <a class="summary-card" href="/projects"><strong>{data.projects.length}</strong><span>Configured projects</span></a>
       </div>
+      <p class="row-actions"><a href="/workflows">Choose a workflow</a><a href="/setup">Set up a project</a></p>
+      {data.template && <p class="notice">Workflow: <b>{data.template.name}</b>. Fill in the details below before starting.</p>}
       <form class="composer" method="post" id="new-task">
+        <input type="hidden" name="mode" value={data.template?.mode ?? "fix"} />
         <label htmlFor="task-prompt">Give Ship a task</label>
-        <textarea id="task-prompt" name="task" rows={3} required placeholder="Describe the change you want, the problem to investigate, or the test to fix…" />
+        <textarea id="task-prompt" name="task" rows={data.template ? 9 : 3} maxLength={20000} required placeholder="Describe the change you want, the problem to investigate, or the test to fix…">{data.template?.task ?? ""}</textarea>
         <div class="composer-footer">
-          <label class="field">Repository<input type="text" name="repo" list="task-projects" placeholder="Choose a project or paste a clone URL" /></label>
+          <label class="field">Repository<input type="text" name="repo" value={data.selectedRepo} list="task-projects" placeholder="Choose a project or paste a clone URL" /></label>
           <datalist id="task-projects">{data.projects.map(p => <option key={p.url} value={p.url}>{p.label}</option>)}</datalist>
-          <label class="check-field"><input type="checkbox" name="plan" /> Review a plan first</label>
+          <label class="check-field"><input type="checkbox" name="plan" checked={data.template?.plan ?? false} /> Review a plan before code changes</label>
           <button class="primary" type="submit">Queue task →</button>
         </div>
         <p class="meta" style="margin:12px 0 0">{data.store === "file" ? "File storage: queue here, then resume the run from the CLI." : "Your worker picks up queued tasks. A task without a repository runs in an empty workspace."}</p>

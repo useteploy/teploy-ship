@@ -497,7 +497,7 @@ export default function Projects({ data }: { data: ProjectsData | SourcesData | 
   return (
     <>
       <div class="page-heading"><div><h1 class="page">Projects</h1><p class="meta">The repositories Ship works on.</p></div>{p === null && <a class="button primary" href="#add-project">Add project +</a>}</div>
-      <SubNav items={PROJECT_VIEWS} current="repos" />
+      <SubNav items={PROJECT_VIEWS} current="repos" /><p class="row-actions"><a href="/setup">Project setup checklist</a><a href="/workflows">Reusable workflows</a></p>
       {data.denied !== null && (
         <p class="card attn" style="margin:12px 0;color:var(--red)">Not applied — {deniedText(data.denied)}</p>
       )}

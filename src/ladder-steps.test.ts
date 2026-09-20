@@ -236,6 +236,7 @@ if (!existsSync(".ship/node_modules/playwright")) throw new Error("playwright no
 writeFileSync(out + "/02-after.png", "b");
 writeFileSync(out + "/01-before.png", "a");
 writeFileSync(out + "/notes.txt", "ignored");
+writeFileSync(out + "/walkthrough.webm", "video");
 console.log("drove the page");
 EOF`);
     const uploads: string[] = [];
@@ -245,9 +246,11 @@ EOF`);
     if (outcome?.kind === "passed") {
       assert.deepEqual(outcome.shots.map((s) => s.name), ["01-before.png", "02-after.png"], "sorted by name, PNGs only");
       assert.equal(outcome.shots[0]?.asset, "http://f/ship-run-ladder-test-flow-01-before.png");
+      assert.equal(outcome.videos?.[0]?.name, "walkthrough.webm");
+      assert.equal(outcome.videos?.[0]?.asset, "http://f/ship-run-ladder-test-flow-walkthrough.webm");
       assert.equal(outcome.script, ".ship/flow.mjs");
     }
-    assert.deepEqual(uploads, ["ship-run-ladder-test-flow-01-before.png:1", "ship-run-ladder-test-flow-02-after.png:1"]);
+    assert.deepEqual(uploads, ["ship-run-ladder-test-flow-01-before.png:1", "ship-run-ladder-test-flow-02-after.png:1", "ship-run-ladder-test-flow-walkthrough.webm:5"]);
     const left = await exec.exec("ls -d .ship/flow-out .ship/node_modules 2>/dev/null | wc -l");
     assert.equal(left.stdout.trim(), "0", "output and the link are removed; the script stays");
     assert.equal((await exec.exec("test -f .ship/flow.mjs")).exitCode, 0);

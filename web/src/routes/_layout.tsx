@@ -30,7 +30,7 @@ export async function loader({ request }: { request: Request }): Promise<{ nav: 
 const NAV_LINKS = [
   { href: "/", label: "Inbox", match: [] as string[] },
   { href: "/runs", label: "Runs", match: ["/reviews"] },
-  { href: "/projects", label: "Projects", match: ["/sources", "/knowledge", "/bulletin-admin"] },
+  { href: "/projects", label: "Projects", match: ["/sources", "/knowledge", "/bulletin-admin", "/workflows", "/setup"] },
   { href: "/fleet", label: "Fleet", match: ["/spend"] },
   { href: "/settings", label: "Settings", match: ["/policies", "/users"] },
 ];
@@ -164,7 +164,8 @@ function withSecurityHeaders(response: Response, request: Request): Response {
       "form-action 'self'",
       "frame-ancestors 'none'",
       "object-src 'none'",
-      "img-src 'self' data:",
+      "img-src 'self' data: https: http:",
+      "media-src 'self' https: http:",
       "style-src 'self' 'unsafe-inline'",
       "script-src 'self' 'unsafe-inline'",
       "connect-src 'self'",
