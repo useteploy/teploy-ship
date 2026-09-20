@@ -174,14 +174,15 @@ function errorResult(summary: string): HarnessResult {
  * agent; this states the contract those agents need: the tree is the
  * deliverable, git is not theirs.
  */
-export function externalPrompt(prompt: string): string {
+export function externalPrompt(prompt: string, mode?: "fix" | "scan"): string {
   return (
     `${prompt}\n\n` +
     "You are running unattended inside a sandbox with no one to answer questions. " +
-    "Work in the current directory. Your deliverable is the EDITED WORKING TREE: do not commit, push, stash, " +
-    "create branches or change git configuration — the change is published after you stop. " +
+    (mode === "scan"
+      ? "This is a read-only investigation. Your deliverable is findings and verification results; do not edit tracked files, commit, push, stash, create branches or change git configuration. Nothing will be published. "
+      : "Work in the current directory. Your deliverable is the EDITED WORKING TREE: do not commit, push, stash, create branches or change git configuration — the change is published after you stop. ") +
     "Do not ask for confirmation; if something is ambiguous, pick the smallest reasonable interpretation and say so in your final message. " +
-    "Finish with a short plain-text summary of what you changed and how you verified it."
+    (mode === "scan" ? "Finish with findings in the requested format and the commands and results you verified." : "Finish with a short plain-text summary of what you changed and how you verified it.")
   );
 }
 
@@ -468,7 +469,7 @@ export function externalAdapter(id: "claude-code" | "opencode", options: Externa
         const forwardedEnv = envFile(config.forward, env);
         const priced = spec.priced(forwardedEnv.names);
         try {
-          await ws.executor.putFile(PROMPT_PATH, externalPrompt(task.prompt));
+          await ws.executor.putFile(PROMPT_PATH, externalPrompt(task.prompt, task.input.mode));
           await ws.executor.putFile(ENV_PATH, forwardedEnv.text);
           const command =
             `set -a; . ${shq(ENV_PATH)}; set +a; rm -f ${shq(ENV_PATH)}; ` +

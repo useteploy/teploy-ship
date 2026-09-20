@@ -190,6 +190,18 @@ test("requesting changes at merge review claims the decision and keeps the PR op
     await runtime.config.set('SHIP_WORKSPACE_REPLY_'+id,JSON.stringify({id:req.id,at:new Date().toISOString(),forge:{number:1,state:'open',head:'abcdef1234',checkedAt:new Date().toISOString(),checks:[],reviews:[],warnings:[]}}));
   },20);
   try {
+    const previousAttempts = process.env.SHIP_HARNESS_ATTEMPTS;
+    process.env.SHIP_HARNESS_ATTEMPTS = 'native,claude-code';
+    try {
+      const refused = await run.action({params:{id},request:request('/runs/'+id,{intent:'follow-up',eventName:'approve-merge',message:'Review before changing',mode:'fix',plan:'on'})});
+      assert.match(refused.headers.get('location')!, /messageError=/);
+      assert.equal((await runtime.loadMeta(id))?.eventName, 'approve-merge', 'failed admission restores the pending decision');
+      assert.equal((await runtime.loadMeta(id))?.status, 'waiting');
+      assert.equal((await runtime.store.load(id)).some(e=>e.type==='run-cancelled'), false);
+    } finally {
+      if (previousAttempts === undefined) delete process.env.SHIP_HARNESS_ATTEMPTS;
+      else process.env.SHIP_HARNESS_ATTEMPTS = previousAttempts;
+    }
     const res=await run.action({params:{id},request:request('/runs/'+id,{intent:'follow-up',eventName:'approve-merge',message:'Also cover negative values',mode:'fix'})});
     const next=res.headers.get('location')!.split('/').pop()!;assert.match(next,/^run-/);
     const input=(await runtime.store.load(next))[0].data as any;
@@ -214,4 +226,11 @@ test("workspace JSON uses the active server Response constructor", async () => {
       (response: unknown) => response instanceof ServerResponse && response.status === 200 && response.headers.get("content-type") === "application/json",
     );
   } finally { globalThis.Response = NativeResponse; }
+});
+
+
+test("an external harness cannot silently bypass requested plan approval", async () => {
+  const runtime = await shipRuntime();
+  await assert.rejects(enqueueRun(runtime, {runId:"run-external-plan",repo:"https://github.com/team/repo",task:"Fix it",model:"test",source:"manual",trust:"operator",harness:"claude-code",plan:true}), /Plan review requires the native harness/);
+  assert.equal((await runtime.store.load("run-external-plan")).length, 0);
 });

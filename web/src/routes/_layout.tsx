@@ -318,7 +318,7 @@ button.deny { color: var(--red); border-color: var(--red); }
 .empty { color: var(--dim); padding: 30px 0; }
 /* Native form controls default to the platform's light theme; give every one
    the panel look so a <select> on Sources is not a white box on a dark page. */
-select, textarea, input[type=text], input[type=password], input[type=number], input[type=url] {
+select, textarea, input:not([type]), input[type=text], input[type=password], input[type=number], input[type=url] {
   background: var(--panel); color: var(--text); border: 1px solid var(--border);
   border-radius: 6px; padding: 6px 8px; font: inherit; }
 select option { background: var(--panel); color: var(--text); }

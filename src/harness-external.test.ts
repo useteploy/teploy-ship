@@ -346,3 +346,10 @@ test("claude-code adapter streams through execStream when the workspace has one,
   assert.ok(phases.some((p) => p.phase === "harness" && p.turn === 1 && p.detail === "Bash go test ./..."), JSON.stringify(phases));
   assert.ok(phases.some((p) => p.phase === "harness" && p.turn === 2 && p.detail === "Done."), JSON.stringify(phases));
 });
+
+test("external scan prompt asks for findings without an edited tree", () => {
+  const p = externalPrompt("Verify the environment", "scan");
+  assert.match(p, /read-only investigation/);
+  assert.match(p, /Nothing will be published/);
+  assert.doesNotMatch(p, /EDITED WORKING TREE|what you changed/);
+});

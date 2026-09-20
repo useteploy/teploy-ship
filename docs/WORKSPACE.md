@@ -122,3 +122,14 @@ At merge review, requesting changes starts a linked run on the open PR and
 cancels the old pending merge decision without closing the PR. Read-only
 investigations leave that decision pending. Both require the existing
 approval and steering grants.
+
+Plan approval currently requires the native harness. External adapters start
+work immediately; launches that explicitly request unsupported plan approval
+are rejected instead of silently skipping it. External scan prompts request
+findings and verification results, with no edited-tree deliverable.
+
+A repeatable read-only production browser check is available as
+`scripts/workspace-browser-check.mjs`. Provide `SHIP_URL`, `SHIP_WEB_TOKEN` and
+`SHIP_TEST_RUN`, with Playwright installed (or `PLAYWRIGHT_MODULE` pointing to
+its entry module). It checks eighteen desktop/tablet/mobile pages, hydration,
+live JSON and unsent-draft retention without launching or approving runs.

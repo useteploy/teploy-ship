@@ -25,6 +25,7 @@ export interface RunData {
   parentRunId?: string;
   canSteer: boolean;
   canLaunch: boolean;
+  planSupported: boolean;
   messageError: string | null;
   meta: RunMeta | null;
   items: TimelineItem[];
@@ -142,6 +143,8 @@ export async function runData({ params, request }: { params: { id: string }; req
         typical = null;
       }
     }
+    const currentProject = repo ? await runtime.projects.forRepo(repo) : null;
+    const planSupported = (currentProject?.harness ?? process.env.SHIP_HARNESS ?? "native") === "native";
     const history = await threadHistory(runtime, runId);
     const forgeRaw = await runtime.config.get("SHIP_FORGE_STATE_" + runId);
     const data: RunData = {
@@ -154,6 +157,7 @@ export async function runData({ params, request }: { params: { id: string }; req
       evidence: evidence(verificationFactsFromEvents(events)),
       parentRunId: typeof (started?.data as any)?.input?.parentRunId === 'string' ? (started?.data as any).input.parentRunId : undefined,
       canSteer: await may('steer', await currentUser(request)),
+      planSupported,
       canLaunch: await may('approve', await currentUser(request)),
       messageError: query.get('messageError'),
       meta,

@@ -1208,6 +1208,9 @@ export async function enqueueRun(
   // cost for an answer the critic picks between on the strength of a DIFF,
   // which a scan does not have.
   const attempts = options.repo !== undefined && !scan ? harnessAttempts(process.env.SHIP_HARNESS_ATTEMPTS) : [];
+  if (options.plan === true && !scan && (harness.id !== "native" || attempts.some(h => h.id !== "native"))) {
+    throw new Error("Plan review requires the native harness. Select native in Project settings, or turn off plan review before launching an external harness.");
+  }
   // Independent attempts of one task, ranked by the project's own verification
   // (P6-1). Repo runs only — a second attempt is a second checkout — and never
   // on a scan, which produces findings rather than a tree to rank. Only where

@@ -35,6 +35,10 @@ export function RichText({ text }: { text: string }) {
       while (i < lines.length && !/^\s*```/.test(lines[i]!))
         code.push(lines[i++]!);
       i++;
+      if (language === "finish" && blocks.length > 0) {
+        blocks.push(<details class="disclosure"><summary>Completion details</summary><pre><code>{code.join("\n")}</code></pre></details>);
+        continue;
+      }
       blocks.push(
         <div class="code-block">
           <span class="meta">{language || "Code"}</span>

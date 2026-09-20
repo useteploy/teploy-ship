@@ -1,3 +1,4 @@
+import { RichText } from "../../views/rich-text.js";
 import { runData } from "../../lib/run-data.server.js";
 import type { RunData } from "../../lib/run-data.server.js";
 import { useEffect, useState } from "preact/hooks";
@@ -82,6 +83,10 @@ export async function action({
     const events = await runtime.store.load(runId);
     const started = events.find(e => e.type === "run-started");
     const input = (started?.data as { input?: { repo?: string; task?: string; trust?: string } })?.input;
+    if (form.get("plan") === "on" && form.get("mode") !== "scan") {
+      const project = input?.repo ? await runtime.projects.forRepo(input.repo) : null;
+      if ((project?.harness ?? process.env.SHIP_HARNESS ?? "native") !== "native") return redirectTo(`/runs/${runId}?messageError=Plan+review+requires+the+native+harness.+Select+native+in+Project+settings+or+turn+off+plan+review.`);
+    }
     const facts = verificationFactsFromEvents(events);
     const next = `run-${randomUUID().slice(0, 8)}`;
     const history = await threadHistory(runtime, runId);
@@ -95,16 +100,25 @@ export async function action({
         pr = current.number;
       } catch (e) { return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(e instanceof Error ? e.message : "Could not check the pull request")}`); }
     }
-    if (reviewing && form.get("mode") !== "scan") {
-      if (String(form.get("eventName") ?? "") !== MERGE_EVENT || !(await runtime.claimDecision(runId, MERGE_EVENT))) return redirectTo(`/runs/${runId}?decision=taken`);
-      try { await cancelRun(runtime.store, runId, `Changes requested in follow-up ${next}`); }
-      catch (e) { await runtime.releaseDecision(runId, MERGE_EVENT).catch(() => {}); throw e; }
-      await runtime.saveMeta({ ...meta, status: "cancelling", eventName: "", updatedAt: new Date().toISOString() });
-      await runtime.markWake?.(runId);
-    }
+    const replacingReview = reviewing && form.get("mode") !== "scan";
+    if (replacingReview && (String(form.get("eventName") ?? "") !== MERGE_EVENT || !(await runtime.claimDecision(runId, MERGE_EVENT)))) return redirectTo(`/runs/${runId}?decision=taken`);
     try {
       await enqueueRun(runtime, {runId:next,parentRunId:runId,userMessage:message,task,model:meta.model,source:"manual",actor:actorFromPrincipal(me),trust:input?.trust === "operator" ? "operator" : "external",...(input?.repo ? {repo:input.repo}:{}),...(pr ? {pr}:{}),plan:form.get("plan")==="on",...(form.get("mode")==="scan" ? {mode:"scan" as const}: {})});
-    } catch (e) { return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(e instanceof Error ? e.message : "Could not start follow-up")}`); }
+    } catch (e) {
+      if (replacingReview) await runtime.releaseDecision(runId, MERGE_EVENT);
+      return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(e instanceof Error ? e.message : "Could not start follow-up")}`);
+    }
+    if (replacingReview) {
+      // Only cancel after admission succeeds. A refused follow-up must leave
+      // the original review actionable, rather than silently discarding it.
+      try {
+        await cancelRun(runtime.store, runId, `Changes requested in follow-up ${next}`);
+        await runtime.saveMeta({ ...meta, status: "cancelling", eventName: "", updatedAt: new Date().toISOString() });
+        await runtime.markWake?.(runId);
+      } catch {
+        return redirectTo(`/runs/${next}?messageError=Follow-up+started,+but+the+previous+run+could+not+be+cancelled.+Its+merge+decision+remains+held;+check+the+previous+run.`);
+      }
+    }
     return redirectTo(`/runs/${next}`);
   }
 
@@ -374,7 +388,7 @@ export default function RunDetail({ data: initialData }: { data: RunData }) {
                 )}
               </div>
               {data.outcome.summary !== undefined && data.outcome.summary !== "" && (
-                <div style="margin-top:8px">{data.outcome.summary}</div>
+                <details class="disclosure" style="margin-top:8px"><summary>Run summary</summary><RichText text={data.outcome.summary} /></details>
               )}
             </div>
           )}
@@ -637,7 +651,7 @@ function RunComposer({data}: {data: RunData}) {
               Messages queued for the next turn: {data.steerPending.join(" · ")}
             </p>
           )}
-          {(!active || reviewing && data.canSteer) && data.meta.status !== 'cancelling' && data.canLaunch && <form method="post" class="message-composer"><input type="hidden" name="eventName" value={data.meta.eventName ?? ''}/>{reviewing && <p class="notice">Request changes on this PR before merging. A change request cancels this run’s pending merge decision and starts a linked run; the PR stays open. Read-only investigations leave the merge decision pending.</p>}<label class="field">Continue this work<textarea name="message" rows={3} required maxLength={12000} placeholder="What should Ship change or investigate next?" /></label>{data.evidence.pr && <label class="field">Start from<select name="target"><option value="pr">Existing pull request (checked before launch)</option><option value="base">Current default branch</option></select></label>}<label class="field">Follow-up type<select name="mode"><option value="fix">Make changes</option><option value="scan">Investigate without changes</option></select></label><label class="check-field"><input type="checkbox" name="plan" checked />Review the plan before code changes</label><button type="submit" name="intent" value="follow-up">Start follow-up</button><p class="meta">Keeps the conversation history and starts a fresh sandbox. The existing pull request is checked with the forge before launch. Current project approvals and budgets apply.</p></form>}
+          {(!active || reviewing && data.canSteer) && data.meta.status !== 'cancelling' && data.canLaunch && <form method="post" class="message-composer"><input type="hidden" name="eventName" value={data.meta.eventName ?? ''}/>{reviewing && <p class="notice">Request changes on this PR before merging. A change request cancels this run’s pending merge decision and starts a linked run; the PR stays open. Read-only investigations leave the merge decision pending.</p>}<label class="field">Continue this work<textarea name="message" rows={3} required maxLength={12000} placeholder="What should Ship change or investigate next?" /></label>{data.evidence.pr && <label class="field">Start from<select name="target"><option value="pr">Existing pull request (checked before launch)</option><option value="base">Current default branch</option></select></label>}<label class="field">Follow-up type<select name="mode"><option value="fix">Make changes</option><option value="scan">Investigate without changes</option></select></label>{data.planSupported ? <label class="check-field"><input type="checkbox" name="plan" checked />Review the plan before code changes</label> : <p class="meta">This project uses an external harness, which starts work immediately. For plan review, select the native harness in Project settings before launching.</p>}<button type="submit" name="intent" value="follow-up">Start follow-up</button><p class="meta">Keeps the conversation history and starts a fresh sandbox. The existing pull request is checked with the forge before launch. Current project approvals and budgets apply.</p></form>}
 
  </>;
 }
