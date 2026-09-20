@@ -177,3 +177,24 @@ test("setup preparation persists and verification enqueues recorded checks with 
   assert.equal(input.input.environmentCheck,true);assert.equal(input.input.mode,'scan');assert.equal(input.input.preparation.command,'npm ci');
   assert.equal(input.input.autoMerge,undefined);
 });
+
+test("requesting changes at merge review claims the decision and keeps the PR open", async () => {
+  const runtime = await shipRuntime();
+  const id = 'run-review-parent';
+  await enqueueRun(runtime, {runId:id,repo:'https://github.com/team/repo',task:'Fix parser',model:'test',source:'manual',trust:'operator'});
+  await runtime.store.append(id, {v:1,seq:1,at:new Date().toISOString(),type:'step-completed',name:'repo-pr',data:{result:{number:1,url:'https://github.com/team/repo/pull/1'}}});
+  const meta=await runtime.loadMeta(id);assert.ok(meta);await runtime.saveMeta({...meta,status:'waiting',eventName:'approve-merge'});
+  const responder=setInterval(async()=>{
+    const raw=await runtime.config.get('SHIP_WORKSPACE_REQUEST_'+id);if(!raw)return;
+    const req=JSON.parse(raw);
+    await runtime.config.set('SHIP_WORKSPACE_REPLY_'+id,JSON.stringify({id:req.id,at:new Date().toISOString(),forge:{number:1,state:'open',head:'abcdef1234',checkedAt:new Date().toISOString(),checks:[],reviews:[],warnings:[]}}));
+  },20);
+  try {
+    const res=await run.action({params:{id},request:request('/runs/'+id,{intent:'follow-up',eventName:'approve-merge',message:'Also cover negative values',mode:'fix'})});
+    const next=res.headers.get('location')!.split('/').pop()!;assert.match(next,/^run-/);
+    const input=(await runtime.store.load(next))[0].data as any;
+    assert.equal(input.input.pr,1);assert.equal(input.input.requireOpenPr,true);assert.equal(input.input.parentRunId,id);
+    assert.equal((await runtime.loadMeta(id))?.status,'cancelling');
+    assert.equal((await runtime.store.load(id)).some(e=>e.name==='merge-decision'),false,'no deny/close operation is sent');
+  } finally {clearInterval(responder)}
+});

@@ -1,14 +1,14 @@
 import type { Project } from "teploy-ship/runtime";
 import type { AuthoritySuggestion, ManagedDrift, RepoCounts } from "teploy-ship/runtime";
 import type { NetworkTier } from "teploy-ship/runtime";
+import { NETWORK_TIERS } from "teploy-ship/egress";
 
-// VALUES go through ship.server.js. `NETWORK_TIERS`, `parseNetworkTier` and
+// Server-only values go through ship.server.js. `parseNetworkTier` and
 // `splitEgressAllow` are pure, but they are re-exported from
 // `teploy-ship/runtime` — whose module graph reaches node:fs — and a value
 // imported from there in a route module survives Neutron's client strip and
 // breaks the browser bundle. Read ship.server.ts's header before touching this.
 import {
-  NETWORK_TIERS,
   authorityCap,
   costPerMerge,
   managedDrift,

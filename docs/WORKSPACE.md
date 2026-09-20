@@ -117,3 +117,8 @@ controlled head-to-head coding evaluation remain distinct work. Live forge
 reads are available on request; they do not automatically merge or rewrite
 recorded verification. No full product
 parity claim is made by this usability pass.
+
+At merge review, requesting changes starts a linked run on the open PR and
+cancels the old pending merge decision without closing the PR. Read-only
+investigations leave that decision pending. Both require the existing
+approval and steering grants.

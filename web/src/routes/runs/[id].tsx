@@ -1,205 +1,32 @@
+import { runData } from "../../lib/run-data.server.js";
+import type { RunData } from "../../lib/run-data.server.js";
 import { useEffect, useState } from "preact/hooks";
-import { freshForge, requestWorkspace, workspaceReply, threadHistory } from "../../lib/workspace.server.js";
-import type { WorkspaceReply } from "../../../../dist/workspace-requests.js";
+import { freshForge, requestWorkspace, threadHistory } from "../../lib/workspace.server.js";
 import { randomUUID } from "node:crypto";
-import { conversation, diffSnapshots, evidence } from "../../lib/workspace.js";
-import type { Message, DiffSnapshot, Evidence } from "../../lib/workspace.js";
 import { Conversation, Changes, Verification } from "../../views/workspace.js";
-import { cancelRun, deliverEvent, costUSD, isPricedModel, actorFromPrincipal, pendingQuestion, verificationFactsFromEvents, enqueueRun } from "../../lib/ship.server.js";
-import { roughDuration, typicalDuration } from "../../lib/expect.js";
-import type { Typical } from "../../lib/expect.js";
+import { cancelRun, deliverEvent, actorFromPrincipal, verificationFactsFromEvents, enqueueRun } from "../../lib/ship.server.js";
+import { roughDuration } from "../../lib/expect.js";
 
 // PLAN_EVENT comes from the dependency-free plan module: it's used in the
 // component (client bundle), where teploy-ship/runtime (node-only) can't go.
-import { PLAN_EVENT } from "teploy-ship/plan";
+import { PLAN_EVENT, MERGE_EVENT } from "teploy-ship/plan";
 // Same reason: the ask module is dependency-free, so the component may test
 // the park's event name without reaching runtime.ts.
 import { isAskEvent } from "teploy-ship/ask";
 import { UPGRADE_HOLD_EVENT } from "teploy-ship/fence";
 
-import type { RunMeta, ScanFinding } from "teploy-ship/runtime";
 
 import { shipRuntime } from "../../lib/store.server.js";
 import { currentUser } from "../../lib/session.server.js";
 import { may } from "../../lib/authority.server.js";
-import { itemClass, runOutcome, since, took, toTimeline, recordedSteps } from "../../lib/timeline.js";
-import type { RunOutcome, TimelineItem, RecordedStep } from "../../lib/timeline.js";
-import { startSpan } from "../../lib/observe.server.js";
+import { itemClass, since, took } from "../../lib/timeline.js";
 
 export const config = { mode: "app" };
 
-interface RunData {
-  forge: WorkspaceReply | null;
-  workspace: WorkspaceReply | null;
-  ancestors: { runId: string; task: string; messages: Message[] }[];
-  view: string;
-  messages: Message[];
-  snapshots: DiffSnapshot[];
-  evidence: Evidence;
-  parentRunId?: string;
-  canSteer: boolean;
-  canLaunch: boolean;
-  messageError: string | null;
-  meta: RunMeta | null;
-  items: TimelineItem[];
-  outcome: RunOutcome;
-  costUSD: number;
-  /** False when the model is absent from the pricing table and the cost is a ceiling, not a price. */
-  costPriced: boolean;
-  /** True when the run consumed a quota Ship cannot price (P5-3): counted on Spend, never a dollar figure. */
-  costUnpriced: boolean;
-  runId: string;
-  eventCount: number;
-  /** The agent's proposed plan, when this run is parked on plan approval. */
-  plan?: string;
-  /**
-   * What a scan run found (L2 / D3), read off its `scan-findings` step.
-   *
-   * A scan opens no pull request, so without this the run page shows a
-   * completed run with no deliverable on it at all — which is exactly how the
-   * prompt-only MVP managed to produce seven scans nobody could read.
-   */
-  findings: ScanFinding[];
-  /** Why entries were dropped, or why no array was found. Shown when non-empty. */
-  findingsNotes: string[];
-  /** True when this run is a scan, even if it found nothing. */
-  isScan: boolean;
-  /** Steerable run (input.steer): show the steer box while active. */
-  steerable: boolean;
-  /** Steer notes sent but not yet consumed by a turn. */
-  steerPending: string[];
-  /** Every step-completed event, ordered — the log's index (see timeline.ts). */
-  steps: RecordedStep[];
-  /** ?decision=stale|taken — read server-side so the banner survives hydration. */
-  decision: string | null;
-  /** ?cancel=failed */
-  cancelFailed: boolean;
-  /** ?denied=approve|steer — the authority grant this account lacks. */
-  denied: string | null;
-  /** The agent's question, when this run is parked on an ```ask. */
-  question?: string;
-  /** What the run is doing right now (live.ts), while it executes. */
-  live: { phase: string; turn?: number; detail?: string; updatedAt: string } | null;
-  /** Median duration of earlier completed runs on the same repo, when there are enough. */
-  typical: Typical | null;
-  /** When this run was enqueued, for the elapsed line. */
-  createdAt?: string;
-}
-
-/**
- * The `scan-findings` step's recorded result (a ParsedFindings).
- *
- * Read from the STEP rather than from the run's output because a scan that is
- * still running, or that failed after its findings were recorded, has the step
- * and no output. Shape-checked field by field: this is JSON out of an event
- * log, and a log written by an older build is a normal thing to be reading.
- */
-function findingsFrom(events: { type: string; name?: string; data?: unknown }[]): { findings: ScanFinding[]; notes: string[] } {
-  const step = events.find((e) => e.type === "step-completed" && e.name === "scan-findings");
-  const result = (step?.data as { result?: unknown } | undefined)?.result as
-    | { findings?: unknown; errors?: unknown; found?: unknown }
-    | undefined;
-  if (result === undefined) return { findings: [], notes: [] };
-  const findings = Array.isArray(result.findings)
-    ? result.findings.filter((f): f is ScanFinding => typeof f === "object" && f !== null && typeof (f as ScanFinding).title === "string")
-    : [];
-  const notes = Array.isArray(result.errors) ? result.errors.filter((e): e is string => typeof e === "string") : [];
-  return { findings, notes };
-}
-
-/** The plan-think step's recorded text ({text, usage} or a bare string). */
-function planFrom(events: { type: string; name?: string; data?: unknown }[]): string | undefined {
-  const step = events.find((e) => e.type === "step-completed" && e.name === "plan-think");
-  if (step === undefined) return undefined;
-  const result = (step.data as { result?: unknown } | undefined)?.result;
-  if (typeof result === "string") return result;
-  const text = (result as { text?: unknown } | undefined)?.text;
-  return typeof text === "string" ? text : undefined;
-}
-
-// This is the one route with an open reliability question (b7d5db3: a run
-// page occasionally 500'd with the trigger never pinned down), so it gets a
-// trace span in addition to the ErrorBoundary every route already has —
-// no-op unless OBSERVE_URL/OBSERVE_API_KEY are set.
-export async function loader({ params, request }: { params: { id: string }; request: Request }): Promise<RunData> {
-  const runId = params.id;
-  const query = new URL(request.url).searchParams;
-  const span = startSpan("GET /runs/:id", { "run.id": runId });
-  try {
-    const runtime = await shipRuntime();
-    const [meta, events, ranOn, steerNotes] = await Promise.all([
-      runtime.loadMeta(runId),
-      runtime.store.load(runId),
-      runtime.placement.get(runId),
-      runtime.steer.pending(runId).catch(() => []),
-    ]);
-    if (meta !== null && ranOn !== null) meta.ranOn = ranOn;
-    const outcome = runOutcome(events);
-    const cost = costUSD(meta?.model ?? "", outcome.usage);
-    const started = events.find((e) => e.type === "run-started");
-    const steerable =
-      (started?.data as { input?: { steer?: boolean } } | undefined)?.input?.steer === true;
-    const plan = planFrom(events);
-    const scanned = findingsFrom(events);
-    const executing = meta !== null && !["completed", "failed", "cancelled", "cancelling"].includes(meta.status);
-    const question = meta?.eventName !== undefined && isAskEvent(meta.eventName) ? pendingQuestion(events) : undefined;
-    // Advisory reads, never allowed to fail the page: a missing live row is
-    // "nothing to show", and the expectation is a courtesy.
-    const live = executing ? await runtime.live.get(runId).catch(() => null) : null;
-    const repo = (started?.data as { input?: { repo?: string } } | undefined)?.input?.repo;
-    let typical: Typical | null = null;
-    if (repo !== undefined) {
-      try {
-        const [stats, runs] = await Promise.all([runtime.repoStats.list(repo), runtime.listMeta({ limit: 300 })]);
-        typical = typicalDuration(runs, new Set(stats.map((s) => s.runId)), runId);
-      } catch {
-        typical = null;
-      }
-    }
-    const history = await threadHistory(runtime, runId);
-    const forgeRaw = await runtime.config.get("SHIP_FORGE_STATE_" + runId);
-    const data: RunData = {
-      forge: forgeRaw ? JSON.parse(forgeRaw) : null,
-      workspace: await workspaceReply(runtime, runId),
-      ancestors: history.slice(0,-1).map(h => ({ runId: h.runId, task: h.task, messages: conversation(h.events).slice(-20) })),
-      view: ['conversation','review','changes','verification','files','activity'].includes(query.get('view') ?? '') ? query.get('view')! : 'conversation',
-      messages: conversation(events),
-      snapshots: diffSnapshots(events),
-      evidence: evidence(verificationFactsFromEvents(events)),
-      parentRunId: typeof (started?.data as any)?.input?.parentRunId === 'string' ? (started?.data as any).input.parentRunId : undefined,
-      canSteer: await may('steer', await currentUser(request)),
-      canLaunch: await may('approve', await currentUser(request)),
-      messageError: query.get('messageError'),
-      meta,
-      items: toTimeline(events),
-      outcome,
-      costUSD: cost,
-      // A harness that priced its own usage is priced whatever the table says.
-      costPriced: isPricedModel(meta?.model ?? "") || typeof outcome.usage?.costUSD === "number",
-      costUnpriced: outcome.usage?.priced === false,
-      runId,
-      eventCount: events.length,
-      ...(plan !== undefined ? { plan } : {}),
-      findings: scanned.findings,
-      findingsNotes: scanned.notes,
-      isScan: (started?.data as { input?: { mode?: string } } | undefined)?.input?.mode === "scan",
-      steerable,
-      steerPending: steerNotes.map((n) => n.text),
-      steps: recordedSteps(events),
-      decision: query.get("decision"),
-      cancelFailed: query.get("cancel") === "failed",
-      denied: query.get("denied"),
-      ...(question !== undefined ? { question } : {}),
-      live: live === null ? null : { phase: live.phase, ...(live.turn !== undefined ? { turn: live.turn } : {}), ...(live.detail !== undefined ? { detail: live.detail } : {}), updatedAt: live.updatedAt },
-      typical,
-      ...(meta?.createdAt !== undefined ? { createdAt: meta.createdAt } : {}),
-    };
-    span.end("ok", { "run.status": meta?.status ?? "unknown", "run.event_count": events.length });
-    return data;
-  } catch (err) {
-    span.end("error");
-    throw err;
-  }
+// Shared server data must not import a route module: production route transforms
+// own its loader export and cannot be used as a resource-handler dependency.
+export async function loader(args: { params: { id: string }; request: Request }): Promise<RunData> {
+  return runData(args);
 }
 
 function redirectTo(location: string): Response {
@@ -247,7 +74,9 @@ export async function action({
   }
   if (intent === "follow-up") {
     if (!(await may("approve", me))) return redirectTo(`/runs/${runId}?denied=approve`);
-    if (meta === null || !["completed", "failed", "cancelled"].includes(meta.status)) return redirectTo(`/runs/${runId}?messageError=Run+must+finish+before+starting+a+follow-up`);
+    const reviewing = meta?.status === "waiting" && meta.eventName === MERGE_EVENT;
+    if (meta === null || (!reviewing && !["completed", "failed", "cancelled"].includes(meta.status))) return redirectTo(`/runs/${runId}?messageError=Run+must+finish+or+reach+merge+review+before+starting+a+follow-up`);
+    if (reviewing && !(await may("steer", me))) return redirectTo(`/runs/${runId}?denied=steer`);
     const message = String(form.get("message") ?? "").trim();
     if (!message || message.length > 12000) return redirectTo(`/runs/${runId}?messageError=Enter+a+message+of+up+to+12000+characters`);
     const events = await runtime.store.load(runId);
@@ -265,6 +94,13 @@ export async function action({
         if (current.state !== "open") return redirectTo(`/runs/${runId}?messageError=This+pull+request+is+closed+or+merged.+Choose+the+default+branch+for+your+follow-up`);
         pr = current.number;
       } catch (e) { return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(e instanceof Error ? e.message : "Could not check the pull request")}`); }
+    }
+    if (reviewing && form.get("mode") !== "scan") {
+      if (String(form.get("eventName") ?? "") !== MERGE_EVENT || !(await runtime.claimDecision(runId, MERGE_EVENT))) return redirectTo(`/runs/${runId}?decision=taken`);
+      try { await cancelRun(runtime.store, runId, `Changes requested in follow-up ${next}`); }
+      catch (e) { await runtime.releaseDecision(runId, MERGE_EVENT).catch(() => {}); throw e; }
+      await runtime.saveMeta({ ...meta, status: "cancelling", eventName: "", updatedAt: new Date().toISOString() });
+      await runtime.markWake?.(runId);
     }
     try {
       await enqueueRun(runtime, {runId:next,parentRunId:runId,userMessage:message,task,model:meta.model,source:"manual",actor:actorFromPrincipal(me),trust:input?.trust === "operator" ? "operator" : "external",...(input?.repo ? {repo:input.repo}:{}),...(pr ? {pr}:{}),plan:form.get("plan")==="on",...(form.get("mode")==="scan" ? {mode:"scan" as const}: {})});
@@ -785,9 +621,10 @@ function RunComposer({data}: {data: RunData}) {
    return () => { input.removeEventListener('input', save); };
  }, [data.runId, data.meta?.status]);
  const active = data.meta !== null && !["completed", "failed", "cancelled", "cancelling"].includes(data.meta.status);
+ const reviewing = data.meta?.status === "waiting" && data.meta.eventName === MERGE_EVENT;
  if (!data.meta) return null;
  return <>
-          {active && data.steerable && data.canSteer && (
+          {active && !reviewing && data.steerable && data.canSteer && (
             <form class="message-composer" method="post" style="margin:12px 0">
               <label class="field">Message the agent<textarea name="steer" rows={3} maxLength={12000} required placeholder="Add context, ask a question, or redirect the work." /></label>
               <button type="submit" name="intent" value="steer">
@@ -800,7 +637,7 @@ function RunComposer({data}: {data: RunData}) {
               Messages queued for the next turn: {data.steerPending.join(" · ")}
             </p>
           )}
-          {!active && data.meta.status !== 'cancelling' && data.canLaunch && <form method="post" class="message-composer"><label class="field">Continue this work<textarea name="message" rows={3} required maxLength={12000} placeholder="What should Ship change or investigate next?" /></label>{data.evidence.pr && <label class="field">Start from<select name="target"><option value="pr">Existing pull request (checked before launch)</option><option value="base">Current default branch</option></select></label>}<label class="field">Follow-up type<select name="mode"><option value="fix">Make changes</option><option value="scan">Investigate without changes</option></select></label><label class="check-field"><input type="checkbox" name="plan" checked />Review the plan before code changes</label><button type="submit" name="intent" value="follow-up">Start follow-up</button><p class="meta">Keeps the conversation history and starts a fresh sandbox. The existing pull request is checked with the forge before launch. Current project approvals and budgets apply.</p></form>}
+          {(!active || reviewing && data.canSteer) && data.meta.status !== 'cancelling' && data.canLaunch && <form method="post" class="message-composer"><input type="hidden" name="eventName" value={data.meta.eventName ?? ''}/>{reviewing && <p class="notice">Request changes on this PR before merging. A change request cancels this run’s pending merge decision and starts a linked run; the PR stays open. Read-only investigations leave the merge decision pending.</p>}<label class="field">Continue this work<textarea name="message" rows={3} required maxLength={12000} placeholder="What should Ship change or investigate next?" /></label>{data.evidence.pr && <label class="field">Start from<select name="target"><option value="pr">Existing pull request (checked before launch)</option><option value="base">Current default branch</option></select></label>}<label class="field">Follow-up type<select name="mode"><option value="fix">Make changes</option><option value="scan">Investigate without changes</option></select></label><label class="check-field"><input type="checkbox" name="plan" checked />Review the plan before code changes</label><button type="submit" name="intent" value="follow-up">Start follow-up</button><p class="meta">Keeps the conversation history and starts a fresh sandbox. The existing pull request is checked with the forge before launch. Current project approvals and budgets apply.</p></form>}
 
  </>;
 }

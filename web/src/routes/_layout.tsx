@@ -173,7 +173,9 @@ function withSecurityHeaders(response: Response, request: Request): Response {
   );
   headers.set("x-content-type-options", "nosniff");
   headers.set("x-frame-options", "DENY");
-  headers.set("referrer-policy", "no-referrer");
+  // Plain-HTTP browsers may send Origin: null under no-referrer. Keep the
+  // same-origin Referer available for CSRF checks without leaking it off-site.
+  headers.set("referrer-policy", "same-origin");
   headers.set("permissions-policy", "camera=(), microphone=(), geolocation=(), payment=()");
   // Only on an HTTPS deployment: sending HSTS from a plain-HTTP tailnet box
   // would strand it behind a browser-pinned upgrade it cannot satisfy.
