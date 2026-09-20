@@ -428,7 +428,7 @@ export default function Settings({ data, actionData }: { data: SettingsData; act
   const title = SETTINGS_VIEWS.find(view => view.key === data.view)?.label ?? "Overview";
   const rowValue = (group: string, label: string) => data.groups.find(g => g.title === group)?.rows.find(r => r.label === label)?.value ?? "Not configured";
   return <>
-    <div class="page-heading"><div><div class="eyebrow">Workspace</div><h1 class="page">Settings</h1><p class="meta">Manage your team, connections, and how Ship runs your work.</p></div><a class="button" href="/account">Your account</a></div>
+    <div class="page-heading"><div><h1 class="page">Settings</h1><p class="meta">Manage your team, connections, and how Ship runs your work.</p></div><a class="button" href="/account">Your account</a></div>
     {data.connected && <p class="notice" role="status">Connected to <b>{data.connected}</b>. Your worker will pick up the connection on its next poll.</p>}
     <div class="settings-layout">
       <nav class="settings-nav" aria-label="Settings navigation">{SETTINGS_VIEWS.map(view => <a key={view.key} href={view.href} class={view.key === data.view ? "active" : undefined} aria-current={view.key === data.view ? "page" : undefined}>{view.label}</a>)}</nav>

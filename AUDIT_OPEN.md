@@ -73,3 +73,10 @@ Open items: 1 P2 improvement (1 total)
   team creation, search/filter/clear, task submission, and desktop/tablet/mobile
   layouts. Production preflight before rollout: five waiting runs, all safe,
   no executing runs and no incompatible or unrecorded workflow fingerprints.
+
+### Visual correction — preserve the Teploy identity
+
+Restored the original top navigation, monospace typography, palette, title
+sizes and controls after user feedback. Settings navigation uses horizontal
+pills; counts and overview links are compact. The functional settings split,
+search, multiline composer and clearer project forms remain.

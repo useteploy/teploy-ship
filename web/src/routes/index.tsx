@@ -159,7 +159,7 @@ export default function Inbox({ data }: { data: InboxData }) {
           Not applied — your account may not approve, deny or launch runs. An admin can grant it on <a href="/policies">Policies</a>.
         </p>
       )}
-      <div class="page-heading"><div><div class="eyebrow">Your workspace</div><h1 class="page">What should we ship next?</h1><p class="meta">Start a task, review a plan, or pick up work that needs your decision.</p></div><a class="button" href="/runs">View all runs →</a></div>
+      <div class="page-heading"><div><h1 class="page">Inbox</h1><p class="meta">Tasks and runs waiting for your decision.</p></div><a class="button" href="/runs">View all runs →</a></div>
       <div class="summary-grid">
         <a class="summary-card" href="#approvals"><strong>{data.parked.length}</strong><span>Awaiting your decision</span></a>
         <a class="summary-card" href="#proposals"><strong>{data.proposed.length}</strong><span>Proposed tasks</span></a>

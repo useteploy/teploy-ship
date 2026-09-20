@@ -468,11 +468,6 @@ export function head() {
   return `<link rel="icon" type="image/svg+xml" href="${faviconUrl}" />`;
 }
 
-function NavIcon({ index }: { index: number }) {
-  const paths = ["M3 5h18v14H3z M3 13h5l2 3h4l2-3h5", "M8 5l12 7-12 7z", "M3 7h7l2 2h9v11H3z M3 7V4h7l2 3", "M4 3h16v7H4z M4 14h16v7H4z M7 6h1 M7 17h1", "M4 7h16 M4 17h16 M8 4v6 M16 14v6"];
-  return <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d={paths[index]} /></svg>;
-}
-
 export default function Layout({ children, data }: { children: ComponentChildren; data?: { nav: NavData; signedIn?: boolean; path?: string; user?: string } }) {
   const nav = data?.nav;
   // /login renders inside this layout, so without this the sign-in page shows
@@ -483,7 +478,7 @@ export default function Layout({ children, data }: { children: ComponentChildren
   return (
     <>
       <style dangerouslySetInnerHTML={{ __html: CSS + DESIGN_CSS }} />
-      <header class={signedIn ? "top app-sidebar" : "top"}>
+      <header class="top">
         <div class="brand-group">
         <a href="/" class="brand">Teploy</a>
         {/* Always name the current product; only offer the dropdown when a
@@ -502,28 +497,30 @@ export default function Layout({ children, data }: { children: ComponentChildren
           <span class="switcher-static">Ship</span>
         )}
         </div>
-        {signedIn && <a class="button primary sidebar-new" href="/#new-task">New task <span aria-hidden="true">+</span></a>}
-        {signedIn && <div class="sidebar-work"><div class="sidebar-caption">Workspace</div>
-          <nav class="nav" aria-label="Main navigation">
-            {NAV_LINKS.map((l, index) => <a key={l.href} href={l.href} data-match={l.match.join(",")} aria-current={l.href === current ? "page" : undefined} class={l.href === current ? "active" : undefined}><NavIcon index={index} />{l.label}</a>)}
-          </nav></div>}
-        {!signedIn && <span class="spacer" />}
         {signedIn && (
-          <div class="sidebar-footer"><details class="switcher avatar">
-            <summary title={data?.user ?? "account"}><span class="avatar-dot">{(data?.user ?? "?").slice(0, 1).toUpperCase()}</span><span class="account-name">{data?.user ?? "Account"}</span><span class="caret">▾</span></summary>
+          <nav class="nav" aria-label="Main navigation">
+            {NAV_LINKS.map((l) => (
+              <a href={l.href} data-match={l.match.join(",")} aria-current={l.href === current ? "page" : undefined} class={l.href === current ? "active" : undefined}>{l.label}</a>
+            ))}
+          </nav>
+        )}
+        <span class="spacer" />
+        {signedIn && (
+          <details class="switcher avatar">
+            <summary title={data?.user ?? "account"}><span class="avatar-dot">{(data?.user ?? "?").slice(0, 1).toUpperCase()}</span><span class="caret">▾</span></summary>
             <div class="switcher-menu">
               <span class="switcher-item current">{data?.user ?? ""}</span>
               <a class="switcher-item" href="/account">Account</a>
               <form method="post" action="/logout"><button class="switcher-item" type="submit">Sign out</button></form>
             </div>
-          </details><small>Teploy Ship · self-hosted</small></div>
+          </details>
         )}
         <span class="load-bar" id="load-bar" />
       </header>
       <script dangerouslySetInnerHTML={{ __html: NAV_PROGRESS }} />
       <script dangerouslySetInnerHTML={{ __html: SHIP_LIVE }} />
       <a class="skip-link" href="#main-content">Skip to content</a>
-      <main id="main-content" class={signedIn ? "app-content" : ""}><div class="page-body">{children}</div></main>
+      <main id="main-content">{children}</main>
     </>
   );
 }
