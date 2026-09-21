@@ -81,6 +81,7 @@ COPY web/index.html web/tsconfig.json web/vite.config.ts web/neutron.config.ts w
 RUN cd web && npm ci --omit=dev --no-audit --no-fund
 
 ENV NODE_ENV=production
+ENV SHIP_WEB_HOST=0.0.0.0
 # durable state lives on a volume in file-store mode; nucleus mode needs none
 ENV TEPLOY_SHIP_STATE=/data
 VOLUME /data

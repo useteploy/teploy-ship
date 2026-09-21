@@ -1048,3 +1048,9 @@ that order in each directory, then copy the two lockfiles back under `deploy/`.
 Keep the relative layout: the web package links `teploy-ship` via `file:..`.
 Review resolved changes and run `node scripts/audit-deployment.mjs`, required
 suites/build, and image/browser acceptance before deploying.
+
+Before replacing a live installation after framework/image changes, build first
+with `teploy build`, then run `bash scripts/smoke-image.sh IMAGE` on the Docker
+host. It uses synthetic credentials and isolated file state and checks the
+published port. Deploy that tested image with `teploy deploy --image IMAGE`.
+The container sets `SHIP_WEB_HOST=0.0.0.0`; local preview defaults to loopback.

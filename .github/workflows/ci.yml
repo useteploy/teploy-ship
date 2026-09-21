@@ -93,3 +93,7 @@ jobs:
         with:
           context: .
           push: false
+          load: true
+          tags: teploy-ship:ci
+      - name: Smoke the image through its published port
+        run: bash scripts/smoke-image.sh teploy-ship:ci
