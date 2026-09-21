@@ -20,11 +20,11 @@ function inline(text: string): ComponentChildren[] {
     });
 }
 export function RichText({ text }: { text: string }) {
-  const marker = /(?:^|\n)FINDINGS_JSON:\s*(\[[\s\S]*\])\s*$/.exec(text);
+  const marker = /(?:^|\n)FINDINGS_JSON\s*:?\s*(\[[\s\S]*\])\s*$/.exec(text);
   if (marker) {
     try {
       const findings = JSON.parse(marker[1]!);
-      if (Array.isArray(findings)) return <><RichText text={text.slice(0, marker.index)} /><details class="disclosure"><summary>Structured findings ({findings.length})</summary><pre>{marker[1]}</pre></details></>;
+      if (Array.isArray(findings)) return <><RichText text={text.slice(0, marker.index)} />{findings.length > 0 && <details class="disclosure"><summary>Structured findings ({findings.length})</summary><pre>{marker[1]}</pre></details>}</>;
     } catch {}
   }
   const lines = text.split("\n"),

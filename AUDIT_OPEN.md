@@ -143,5 +143,16 @@ trailing-newline matching requirement. These are mitigations, not proof that
 model answers are always correct. `evals/product-journeys` now contains an
 independent browser/SQLite grader. Snapshot identity validation has unit coverage;
 the latest live plan used a warm retained sandbox, so its successful worker
-upgrade/resume is not new proof of snapshot restoration. Full-stack search
-acceptance and the wider journey catalogue remain separate work.
+upgrade/resume is not new proof of snapshot restoration. The wider journey catalogue remains open.
+
+
+The UI/API search fixture also passed independent name/email, case, whitespace,
+literal-wildcard, empty/no-match, stale-response, browser and data-preservation
+checks. Its baseline fails the same search grade (negative control). The agent’s
+14 tests passed, the PR changed only UI/API/tests, and existing styling was
+preserved. An active worker replacement paused publication until the five-minute
+repository lock expired, then recovered automatically without manual unlock.
+A repeated question corrected the size-limit claim but incorrectly described a
+relative database path as relative to the app file rather than the working
+directory. Keep factual answer grading open. Empty machine findings are hidden
+from the readable response; Activity retains the original output.
