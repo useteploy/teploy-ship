@@ -447,20 +447,8 @@ export function fileRuntime(): ShipRuntime {
     deliveries: new FileDeliveryLog(),
     outbox: new FileOutbox(),
     repoStats: new FileRepoStatsStore(),
-    // File mode is single-process by construction, so read-check-write is the
-    // honest implementation; the Nucleus path below is the real atomic one.
-    claimDecision: async (runId, eventName) => {
-      const current = await meta.load(runId);
-      if (current === null || current.eventName !== eventName) return false;
-      const { eventName: _drop, ...rest } = current;
-      await meta.save({ ...rest, updatedAt: new Date().toISOString() });
-      return true;
-    },
-    releaseDecision: async (runId, eventName) => {
-      const current = await meta.load(runId);
-      if (current === null) return;
-      await meta.save({ ...current, eventName, updatedAt: new Date().toISOString() });
-    },
+    claimDecision: (runId, eventName) => meta.claimDecision(runId, eventName),
+    releaseDecision: (runId, eventName) => meta.releaseDecision(runId, eventName),
     execute: (workflow, runId, input) =>
       executeRun({ workflow, runId, store, ...(input !== undefined ? { input } : {}) }),
     saveMeta: (m) => meta.save(m),

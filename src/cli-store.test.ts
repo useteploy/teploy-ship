@@ -151,6 +151,25 @@ test("RunMetaStore saves, lists newest-first, and tracks the parked event", asyn
   assert.equal(await meta.load("ghost"), null);
 });
 
+test("file decision claims have one winner across concurrent handlers and store instances", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ship-decision-"));
+  const a = new RunMetaStore(dir);
+  const b = new RunMetaStore(dir);
+  const original = {runId:"decision",task:"test",model:"test",status:"waiting",eventName:"approval",createdAt:"2026-09-21",updatedAt:"2026-09-21"};
+  await a.save(original);
+  const claims = await Promise.all(Array.from({length:20},(_,i) => (i % 2 ? a : b).claimDecision(original.runId,"approval")));
+  assert.equal(claims.filter(Boolean).length,1);
+  assert.equal((await b.load(original.runId))?.eventName,undefined);
+  await b.releaseDecision(original.runId,"approval");
+  assert.equal(await a.claimDecision(original.runId,"approval"),true);
+  await b.save({...original,eventName:"next-approval"});
+  await a.releaseDecision(original.runId,"approval");
+  assert.equal((await b.load(original.runId))?.eventName,"next-approval", "failed old delivery cannot replace a newer decision");
+  await b.save({...original,status:"completed",eventName:undefined});
+  await a.releaseDecision(original.runId,"approval");
+  assert.equal((await b.load(original.runId))?.eventName,undefined, "terminal runs cannot regain an old approval");
+});
+
 test("runAgent aggregates usage across calls, cache fields included", async () => {
   const executor = new LocalExecutor({ root: await mkdtemp(join(tmpdir(), "ship-usage-")) });
   const result = await runAgent({

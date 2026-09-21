@@ -153,6 +153,9 @@ export async function action({ request }: { request: Request }): Promise<Respons
         title: task, dedupeKey: `team-request:${me!.user}:${id}`,
         requestedBy: me!.user, ...(pr ? { pr } : {}),
       });
+      if (proposed.task.title !== task || proposed.task.repo !== project.url || proposed.task.kind !== `request-${journey}` || proposed.task.pr !== pr) {
+        throw new Error("This request ID already belongs to different content. Edit your draft before sending it as a new request.");
+      }
       return redirect(`/?submitted=${encodeURIComponent(proposed.task.taskId)}`);
     }
     const runId = `run-${randomUUID().slice(0, 8)}`;

@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import type { EventStore, WorkflowEvent } from "@neutron-build/workflow";
 
-import { appendLineSync, assertSafeId, readJsonFile, writeJsonFile } from "./file-store.js";
+import { appendLineSync, assertSafeId, readJsonFile, writeJsonFile, withFileLock } from "./file-store.js";
 
 /**
  * File-backed durable-run storage for the CLI: an event log per run
@@ -165,7 +165,29 @@ export class RunMetaStore {
 
   /** Atomic (temp + fsync + rename): a crash mid-write left a truncated file that read back as "unknown run". */
   async save(meta: RunMeta): Promise<void> {
-    await writeJsonFile(this.#path(meta.runId), meta);
+    const path = this.#path(meta.runId);
+    await withFileLock(path, () => writeJsonFile(path, meta));
+  }
+
+  /** Single-process file mode still has concurrent HTTP handlers. */
+  async claimDecision(runId: string, eventName: string): Promise<boolean> {
+    const path = this.#path(runId);
+    return withFileLock(path, async () => {
+      const current = await this.load(runId);
+      if (current === null || current.eventName !== eventName) return false;
+      const { eventName: _drop, ...rest } = current;
+      await writeJsonFile(path, { ...rest, updatedAt: new Date().toISOString() });
+      return true;
+    });
+  }
+
+  async releaseDecision(runId: string, eventName: string): Promise<void> {
+    const path = this.#path(runId);
+    await withFileLock(path, async () => {
+      const current = await this.load(runId);
+      if (current === null || current.eventName !== undefined || current.status !== "waiting") return;
+      await writeJsonFile(path, { ...current, eventName, updatedAt: new Date().toISOString() });
+    });
   }
 
   async load(runId: string): Promise<RunMeta | null> {

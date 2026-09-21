@@ -20,10 +20,11 @@ function request(role: "editor" | "viewer", fields: Record<string, string>) {
 }
 test("teammate can submit a deduplicated plan request without launching; viewer cannot submit", async () => {
   const fields = { intent: "submit-request", task: "Plan simpler wording", journey: "plan", repo: url, requestId: randomUUID() };
-  const first = await action({ request: request("editor", fields) });
-  const again = await action({ request: request("editor", fields) });
+  const [first, ...retries] = await Promise.all(Array.from({length:8}, () => action({ request: request("editor", fields) })));
   assert.equal(first.status, 302);
-  assert.equal(first.headers.get("location"), again.headers.get("location"));
+  assert.ok(retries.every(again => first.headers.get("location") === again.headers.get("location")));
+  const changed = await action({request:request("editor",{...fields,task:"Different request with reused ID"})});
+  assert.match(decodeURIComponent(changed.headers.get("location") ?? ""), /different content/);
   const tasks = await runtime.intake.list("proposed");
   assert.equal(tasks.length, 1);
   assert.equal(tasks[0].kind, "request-plan");

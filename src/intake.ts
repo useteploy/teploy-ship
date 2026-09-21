@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -7,6 +7,7 @@ const DEDUPE_TTL_S = 60;
 
 import type { NucleusPgwire } from "./nucleus-pgwire.js";
 import { stateDir } from "./run-store.js";
+import { readJsonFile, writeJsonFile, withFileLock } from "./file-store.js";
 
 /**
  * Per-source intake policy. Auto is OFF unless a source is explicitly
@@ -63,7 +64,7 @@ export interface ProposeInput {
 }
 
 export interface IntakeStore {
-  /** Insert unless a non-dismissed task already holds the dedupeKey. */
+  /** Insert unless a task holds the dedupeKey. Team requests retain their key after dismissal. */
   propose(input: ProposeInput): Promise<{ created: boolean; task: IntakeTask }>;
   list(state?: IntakeTask["state"]): Promise<IntakeTask[]>;
   get(taskId: string): Promise<IntakeTask | null>;
@@ -140,29 +141,28 @@ export class FileIntakeStore implements IntakeStore {
     const names = (await readdir(this.#dir)).filter((n) => n.endsWith(".json"));
     const tasks: IntakeTask[] = [];
     for (const name of names) {
-      try {
-        tasks.push(JSON.parse(await readFile(join(this.#dir, name), "utf8")) as IntakeTask);
-      } catch {
-        // a torn write is skipped, never fatal
-      }
+      const task = await readJsonFile<IntakeTask | null>(join(this.#dir, name), null);
+      if (task) tasks.push(task);
     }
     return tasks.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
   }
 
   async #write(task: IntakeTask): Promise<void> {
     await mkdir(this.#dir, { recursive: true });
-    await writeFile(join(this.#dir, `${task.taskId}.json`), JSON.stringify(task, null, 2));
+    await writeJsonFile(join(this.#dir, `${task.taskId}.json`), task);
   }
 
   async propose(input: ProposeInput): Promise<{ created: boolean; task: IntakeTask }> {
-    const key = normalizeDedupeKey(input.dedupeKey);
-    const existing = (await this.#all()).find(
-      (t) => normalizeDedupeKey(t.dedupeKey) === key && t.state !== "dismissed",
-    );
-    if (existing !== undefined) return { created: false, task: existing };
-    const task = newTask(input);
-    await this.#write(task);
-    return { created: true, task };
+    return withFileLock(this.#dir, async () => {
+      const key = normalizeDedupeKey(input.dedupeKey);
+      const existing = (await this.#all()).find(
+        (t) => normalizeDedupeKey(t.dedupeKey) === key && (t.state !== "dismissed" || t.source === "team-request"),
+      );
+      if (existing !== undefined) return { created: false, task: existing };
+      const task = newTask(input);
+      await this.#write(task);
+      return { created: true, task };
+    });
   }
 
   async list(state?: IntakeTask["state"]): Promise<IntakeTask[]> {
@@ -175,28 +175,30 @@ export class FileIntakeStore implements IntakeStore {
   }
 
   async setState(taskId: string, state: IntakeTask["state"], runId?: string): Promise<void> {
-    const task = await this.get(taskId);
-    if (task === null) return;
-    task.state = state;
-    if (runId !== undefined) task.runId = runId;
-    task.updatedAt = new Date().toISOString();
-    await this.#write(task);
+    await withFileLock(this.#dir, async () => {
+      const task = await this.get(taskId);
+      if (task === null) return;
+      task.state = state;
+      if (runId !== undefined) task.runId = runId;
+      task.updatedAt = new Date().toISOString();
+      await this.#write(task);
+    });
   }
 
   /**
-   * Best-effort in file mode: read-check-write is not atomic across
-   * processes, but file mode is the single-process dev path — multi-worker
-   * deployments run on the Nucleus store, where claim is a conditional
-   * UPDATE.
+   * Serialize concurrent handlers in file mode. Multi-process deployments
+   * still require Nucleus, where the claim is a conditional UPDATE.
    */
   async claim(taskId: string, runId?: string): Promise<boolean> {
-    const task = await this.get(taskId);
-    if (task === null || task.state !== "proposed") return false;
-    task.state = "launched";
-    if (runId !== undefined) task.runId = runId;
-    task.updatedAt = new Date().toISOString();
-    await this.#write(task);
-    return true;
+    return withFileLock(this.#dir, async () => {
+      const task = await this.get(taskId);
+      if (task === null || task.state !== "proposed") return false;
+      task.state = "launched";
+      if (runId !== undefined) task.runId = runId;
+      task.updatedAt = new Date().toISOString();
+      await this.#write(task);
+      return true;
+    });
   }
 
   async reconcile(exists: (runId: string) => Promise<boolean>): Promise<string[]> {
@@ -276,7 +278,7 @@ export class NucleusIntakeStore implements IntakeStore {
     // behaves as it always did.
     const key = normalizeDedupeKey(input.dedupeKey);
     const rows = await this.#db.query(
-      "SELECT * FROM ship_tasks WHERE dedupe_key = $1 AND state <> 'dismissed'",
+      "SELECT * FROM ship_tasks WHERE dedupe_key = $1 AND (state <> 'dismissed' OR source = 'team-request')",
       [key],
     );
     if (rows.length > 0) return { created: false, task: this.#toTask(rows[0]!) };
@@ -293,11 +295,17 @@ export class NucleusIntakeStore implements IntakeStore {
       // either already visible or about to be, and returning "not created" with
       // their task is exactly what a duplicate delivery should get.
       const again = await this.#db.query(
-        "SELECT * FROM ship_tasks WHERE dedupe_key = $1 AND state <> 'dismissed'",
+        "SELECT * FROM ship_tasks WHERE dedupe_key = $1 AND (state <> 'dismissed' OR source = 'team-request')",
         [key],
       );
       if (again.length > 0) return { created: false, task: this.#toTask(again[0]!) };
+      throw new Error("This request is still being recorded. Retry with the same request ID.");
     }
+    // The first SELECT may predate a prior holder's completed insertion.
+    const afterClaim = await this.#db.query(
+      "SELECT * FROM ship_tasks WHERE dedupe_key = $1 AND (state <> 'dismissed' OR source = 'team-request')", [key],
+    );
+    if (afterClaim.length > 0) return { created: false, task: this.#toTask(afterClaim[0]!) };
     const task = newTask(input);
     await this.#db.query(
       `INSERT INTO ship_tasks (task_id, source, kind, repo, pr, title, detail, dedupe_key, state, run_id, requested_by, created_at, updated_at)

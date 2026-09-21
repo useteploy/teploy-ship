@@ -2,6 +2,15 @@ import { useEffect, useState } from "preact/hooks";
 import { JOURNEYS, type Journey } from "teploy-ship/journeys";
 
 export interface TaskProject { url: string; label: string; planSupported: boolean }
+// getRandomValues also works on private HTTP installs, where randomUUID may
+// be unavailable. The ID is an idempotency key, never an authorization token.
+function nextRequestId(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6]! & 15) | 64;
+  bytes[8] = (bytes[8]! & 63) | 128;
+  const hex = Array.from(bytes, b => b.toString(16).padStart(2,"0")).join("");
+  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+}
 export function TaskComposer({ projects, selectedRepo, initialTask = "", initialJourney = "change", initialPlan = false, canLaunch, canRequest, requestId, clearDraft = false }: {
   projects: TaskProject[]; selectedRepo: string; initialTask?: string; initialJourney?: Journey; initialPlan?: boolean;
   canLaunch: boolean; canRequest: boolean; requestId: string; clearDraft?: boolean;
@@ -12,6 +21,7 @@ export function TaskComposer({ projects, selectedRepo, initialTask = "", initial
   const [pr, setPr] = useState("");
   const [plan, setPlan] = useState(initialPlan);
   const [restored, setRestored] = useState(false);
+  const [submissionId, setSubmissionId] = useState(requestId);
   useEffect(() => {
     try {
       if (clearDraft) sessionStorage.removeItem("ship-new-request");
@@ -24,17 +34,20 @@ export function TaskComposer({ projects, selectedRepo, initialTask = "", initial
         if (typeof draft.task === "string") setTask(draft.task);
         if (typeof draft.repo === "string" && projects.some(p => p.url === draft.repo)) setRepo(draft.repo);
         if (JOURNEYS.some(j => j.id === draft.journey)) setJourney(draft.journey);
+        if (typeof draft.requestId === "string" && /^[a-f0-9-]{36}$/.test(draft.requestId)) setSubmissionId(draft.requestId);
       }
     } catch {}
     setRestored(true);
   }, []);
   const saveDraft = (patch: {task?: string; repo?: string; journey?: Journey; pr?: string; plan?: boolean}) => {
-    try { sessionStorage.setItem("ship-new-request", JSON.stringify({ task, repo, journey, pr, plan, template: initialTask, ...patch })); } catch {}
+    const id = nextRequestId();
+    setSubmissionId(id);
+    try { sessionStorage.setItem("ship-new-request", JSON.stringify({ task, repo, journey, pr, plan, requestId:id, template: initialTask, ...patch })); } catch {}
   };
   const selected = projects.find(p => p.url === repo);
   const choice = JOURNEYS.find(j => j.id === journey)!;
   return <form class="composer" method="post" id="new-task" data-ready={restored ? "true" : "false"}>
-    <input type="hidden" name="requestId" value={requestId} />
+    <input type="hidden" name="requestId" value={submissionId} />
     <label class="field">Project<select name="repo" required value={repo} onChange={e => { setRepo(e.currentTarget.value); saveDraft({ repo: e.currentTarget.value }); }}>
       <option value="" disabled>Choose a project</option>
       {projects.map(p => <option key={p.url} value={p.url}>{p.label}</option>)}

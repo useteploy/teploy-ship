@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { FileIntakeStore, normalizeDedupeKey } from "./intake.js";
+import { FileIntakeStore, NucleusIntakeStore, normalizeDedupeKey } from "./intake.js";
+import type { NucleusPgwire } from "./nucleus-pgwire.js";
 
 test("intake: propose dedupes on key, dismiss frees the key, launch links the run", async () => {
   const store = new FileIntakeStore(await mkdtemp(join(tmpdir(), "intake-")));
@@ -84,6 +85,44 @@ test("a claim still collapses two racing launchers to one", async () => {
   assert.equal(await store.claim(task.taskId, "run-a"), true);
   assert.equal(await store.claim(task.taskId, "run-b"), false, "the second launcher loses");
   assert.equal((await store.get(task.taskId))?.runId, "run-a");
+});
+
+test("file intake serializes simultaneous proposals and launch claims across store instances", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "intake-concurrent-"));
+  const stores = [new FileIntakeStore(dir), new FileIntakeStore(dir)];
+  const proposed = await Promise.all(Array.from({length:20}, (_,i) => stores[i%2]!.propose({source:"team-request",kind:"task",title:"One request",dedupeKey:"team-request:user:one"})));
+  assert.equal(proposed.filter(p => p.created).length,1);
+  assert.equal(new Set(proposed.map(p => p.task.taskId)).size,1);
+  const taskId = proposed[0]!.task.taskId;
+  const claims = await Promise.all(Array.from({length:20}, (_,i) => stores[i%2]!.claim(taskId,`run-${i}`)));
+  assert.equal(claims.filter(Boolean).length,1);
+  assert.equal((await stores[0]!.get(taskId))?.runId,`run-${claims.indexOf(true)}`);
+});
+
+test("unreadable intake cannot silently discard a deduplication record", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "intake-corrupt-"));
+  await writeFile(join(dir,"task-corrupt.json"),'{"taskId":');
+  const store = new FileIntakeStore(dir);
+  await assert.rejects(store.propose({source:"team-request",kind:"task",title:"Retry",dedupeKey:"same"}), /unreadable/);
+});
+
+test("a dismissed team request remains deduplicated after a lost response", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "intake-dismissed-"));
+  const store = new FileIntakeStore(dir);
+  const input = {source:"team-request",kind:"task",title:"One request",dedupeKey:"team-request:user:one"};
+  const first = await store.propose(input);
+  await store.setState(first.task.taskId,"dismissed");
+  const retry = await new FileIntakeStore(dir).propose(input);
+  assert.equal(retry.created,false);
+  assert.equal(retry.task.taskId,first.task.taskId);
+  assert.equal(retry.task.state,"dismissed");
+});
+
+test("Nucleus intake never inserts after losing the dedupe guard while the winner is not yet visible", async () => {
+  let inserts = 0;
+  const db = {query:async(sql:string) => { if(sql.startsWith("INSERT")) inserts++; return []; }, kv:{setNX:async()=>false}} as unknown as NucleusPgwire;
+  await assert.rejects(new NucleusIntakeStore(db).propose({source:"team-request",kind:"task",title:"One",dedupeKey:"same"}), /still being recorded/);
+  assert.equal(inserts,0);
 });
 
 test("intake: the owner/repo segment of a forge key is case-insensitive", async () => {
