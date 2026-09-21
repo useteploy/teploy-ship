@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Customer directory</title>
+<style>body{font:16px system-ui;max-width:720px;margin:40px auto;padding:20px;background:#111820;color:#eef2f6}label{display:block;margin:16px 0}input,button{font:inherit;padding:10px;border-radius:4px}input{display:block;margin-top:6px}li{padding:12px 0;border-bottom:1px solid #46505a}#status{min-height:24px}</style>
+<h1>Customer directory</h1><p>Keep your customer contacts in one place.</p>
+<form id="contact-form"><label>Name<input name="name" required></label><label>Email<input name="email" type="email" required></label><button>Add contact</button></form>
+<p id="status" role="status"></p><h2>Contacts</h2><ul id="contacts"></ul>
+<script>
+async function load(){const response=await fetch('/api/contacts');const contacts=await response.json();const list=document.querySelector('#contacts');list.replaceChildren();for(const contact of contacts){const item=document.createElement('li');item.textContent=contact.name+' — '+contact.email;list.append(item);}}
+document.querySelector('form').addEventListener('submit',async event=>{event.preventDefault();const form=event.currentTarget;const response=await fetch('/api/contacts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.fromEntries(new FormData(form)))});const result=await response.json();document.querySelector('#status').textContent=response.ok?'Contact added':result.error;if(response.ok){form.reset();await load();}});load();
+</script></html>

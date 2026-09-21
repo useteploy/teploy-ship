@@ -149,7 +149,7 @@ export function durableInput({ task, arm, settle = false, critic = false, index 
     // point — this arm is meant to be the real thing, not a tidied one.
     // The product arm records its harness like enqueueRun does (harness.ts):
     // the benchmark measures the native loop, and the log should say so.
-    ...(arm === "product" ? { steer: true, ask: true, index: true, guard: true, harness: harnessRef(undefined) } : {}),
+    ...(arm === "product" ? { restoreValidation: 1, steer: true, ask: true, index: true, guard: true, harness: harnessRef(undefined) } : {}),
     ...(critic === true ? { critic: true } : {}),
     ...(index === true ? { index: true } : {}),
     ...(workspaceKey !== undefined ? { workspaceKey } : {}),

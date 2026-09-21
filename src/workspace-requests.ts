@@ -58,6 +58,26 @@ export async function workspaceReply(
   const raw = await runtime.config.get(replyKey(runId));
   return raw ? JSON.parse(raw) : null;
 }
+/** Refresh visible PRs without a manual click. Never displace an in-flight file request. */
+export async function refreshForgeIfStale(
+  runtime: Pick<ShipRuntime, "config" | "loadMeta">,
+  runId: string,
+  by: string,
+  now = Date.now(),
+): Promise<void> {
+  const cached = await runtime.config.get("SHIP_FORGE_STATE_" + runId);
+  if (cached) {
+    const reply = JSON.parse(cached) as WorkspaceReply;
+    if (now - Date.parse(reply.at) < (reply.error ? 60000 : 30000)) return;
+  }
+  const raw = await runtime.config.get(requestKey(runId));
+  if (raw) {
+    const pending = JSON.parse(raw) as WorkspaceRequest;
+    const reply = await workspaceReply(runtime, runId);
+    if (reply?.id !== pending.id && now - Date.parse(pending.at) < 120000) return;
+  }
+  await requestWorkspace(runtime, runId, "forge", by);
+}
 /** Reads tracked files only; git show cannot follow working-tree symlinks or read .env files outside the repository. */
 export function fileCommand(path?: string): string {
   if (path === undefined) return "git ls-files | head -200";

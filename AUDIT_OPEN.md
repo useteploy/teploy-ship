@@ -113,3 +113,15 @@ continuation across terminal runs, arbitrary-stack auto-provisioning, wider
 connector coverage and measured competitor coding-quality comparisons. This
 change adds interval schedules and forge reads, not automatic merge
 reconciliation or a general workflow graph. See docs/WORKSPACE.md.
+
+## 2026-09-21 — journey foundations (verification in progress)
+
+Project-based change/question/plan/review requests, approval-only team intake,
+requester-visible history, draft retention and clearer task status. Non-change
+journeys materialize scan inputs before execution; older workflow-plan semantics
+remain unchanged. Visible PR reads refresh automatically, without granting merge
+authority. Project readiness receipts detect configuration drift. New snapshot
+restores refuse invalid checkouts before agent execution. Intake claims now carry
+the intended run ID in both launch paths so reconciliation can recover interrupted
+launches. Full persistent interactive workspaces, automatic merge reconciliation,
+coordinated multi-repository work and release-loop proof remain open.

@@ -1,3 +1,4 @@
+import type { Journey } from "teploy-ship/journeys";
 import type { ShipRuntime } from "teploy-ship/runtime";
 export interface WorkflowTemplate {
   id: string;
@@ -7,8 +8,12 @@ export interface WorkflowTemplate {
   plan: boolean;
   mode: "fix" | "scan";
   custom?: boolean;
+  journey?: Journey;
 }
 export const BUILTIN_WORKFLOWS: WorkflowTemplate[] = [
+  { id: "wording", name: "Update wording", description: "Change text on a page while keeping the existing design.", task: "On [page], change [current wording] to [new wording]. Keep the existing style and check the result.", plan: false, mode: "fix", journey: "change" },
+  { id: "explain", name: "Understand a feature", description: "Get a plain-language explanation of how your project works.", task: "Explain how [feature] works for a customer. Point to the relevant implementation and call out anything you could not verify.", plan: false, mode: "scan", journey: "investigate" },
+  { id: "idea", name: "Explore an idea", description: "Work out the approach and open questions before making changes.", task: "We would like [outcome]. Explore what the project already supports, suggest an approach and explain what decisions we need to make. Stop after the plan.", plan: false, mode: "scan", journey: "plan" },
   {
     id: "fix",
     name: "Fix a bug",

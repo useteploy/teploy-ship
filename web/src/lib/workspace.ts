@@ -9,6 +9,7 @@ export interface Message {
   role: "You" | "Agent" | "Decision";
   text: string;
   at: string;
+  detail?: string;
 }
 export interface DiffSnapshot {
   name: string;
@@ -72,7 +73,7 @@ export function conversation(events: LogEvent[]): Message[] {
       if (typeof raw === "string") {
         // Commands stay in Activity; retain the human-readable progress and questions.
         const text = raw
-          .replace(/```(?:bash|python|sh|javascript)[^\n]*\n[\s\S]*?```/g, "")
+          .replace(/```(?:bash|python|sh|javascript|edit|create)[^\n]*\n[\s\S]*?```/g, "")
           .trim();
         if (text)
           messages.push({

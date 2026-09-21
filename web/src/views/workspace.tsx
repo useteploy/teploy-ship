@@ -1,10 +1,13 @@
 import { RichText } from "./rich-text.js";
 import { safeLink, splitDiff } from "../lib/workspace.js";
 import type { Message, DiffSnapshot, Evidence } from "../lib/workspace.js";
-export function Conversation({ messages }: { messages: Message[] }) {
+export function Conversation({ messages, expanded = false }: { messages: Message[]; expanded?: boolean }) {
+  const earlier = !expanded && messages.length > 8 ? messages.slice(0, -6) : [];
+  const recent = earlier.length ? messages.slice(-6) : messages;
   return (
     <section aria-label="Conversation" class="conversation">
-      {messages.map((m, i) => (
+      {earlier.length > 0 && <details class="disclosure"><summary>{earlier.length} earlier messages</summary><Conversation messages={earlier} expanded /></details>}
+      {recent.map((m, i) => (
         <article class="message" key={i}>
           <div class="kind">
             {m.role}

@@ -4,6 +4,26 @@ Ship keeps the shared Teploy navigation, typography and colors. The run page
 organizes each task into Conversation, Review, Changes, Verification, Files and Activity. Review keeps the
 conversation and composer beside the evidence; live updates preserve typed drafts.
 
+## Simple team requests
+
+In the Inbox, choose a connected project and describe what you need in everyday
+language. **Make a change**, **Ask a question**, **Make a plan**, and **Review
+work** state the expected result. Questions, plans and reviews use scan mode;
+Ship does not publish changes for those tasks. A plan is a deliverable you can
+then discuss or turn into a separate change request. This differs from the
+native harness's optional approval pause before implementation.
+
+Editors can **Send for approval** without execution authority. These requests
+stay proposed even on an automatic project; an authorized teammate must approve
+and start them. Recent requests link to the launched task. Viewers can follow
+work but cannot submit requests. The project supplies the environment, agent,
+permissions and budget; teammates do not enter infrastructure settings.
+
+Starter workflows include updating wording, understanding a feature and exploring
+an idea. Drafts are retained in the current browser tab. Task pages summarize
+what needs attention, fold execution metadata and older messages, and keep the
+follow-up composer outside the scrolling history.
+
 ## A normal task
 
 1. Open **Projects → Project setup**. Register the repository, choose an image
@@ -29,7 +49,8 @@ conversation and composer beside the evidence; live updates preserve typed draft
    launch, then checks again at checkout; a closed or merged PR requires the
    default-branch choice. This starts a fresh sandbox, with bounded conversation
    context and the PR branch’s code, not a resumed terminal or browser session.
-8. **Refresh from forge** reads the PR’s current head, reviews, commit statuses
+8. While a PR task page is open, Ship requests worker refreshes at most every
+   30 seconds (60 seconds after errors). **Refresh from forge** also reads the PR’s current head, reviews, commit statuses
    and GitHub check runs through the worker. The timestamp is explicit. A changed
    head warns that this run’s recorded verification belongs to an older commit.
    These reads never grant merge authority or substitute for verification gates.
@@ -114,7 +135,7 @@ patterns and documented capabilities, not measured claims about coding quality.
 Full interactive IDE/terminal/browser takeover, automatic merge reconciliation,
 arbitrary-stack environment provisioning, broader connector coverage and a
 controlled head-to-head coding evaluation remain distinct work. Live forge
-reads are available on request; they do not automatically merge or rewrite
+reads refresh while the task page is open; they do not automatically merge or rewrite
 recorded verification. No full product
 parity claim is made by this usability pass.
 
@@ -133,3 +154,14 @@ A repeatable read-only production browser check is available as
 `SHIP_TEST_RUN`, with Playwright installed (or `PLAYWRIGHT_MODULE` pointing to
 its entry module). It checks eighteen desktop/tablet/mobile pages, hydration,
 live JSON and unsent-draft retention without launching or approving runs.
+
+Environment verification records a fingerprint of project setup. Project setup
+shows a verified receipt only when the matching run completed and independently
+recorded passing environment tests and preparation (when configured). Changing
+relevant project settings marks the receipt stale. This does not attest to later
+worker credential, image or service changes; re-run verification after those.
+
+New runs check restored snapshots for a valid Git checkout before the agent
+continues, and check the origin for non-PR tasks. Fork PR identity remains the
+forge resolver's responsibility. This guards missing/wrong checkouts; it does not
+prove every uncommitted byte survived. Existing run inputs retain old behavior.

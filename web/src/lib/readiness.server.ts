@@ -1,7 +1,9 @@
+import { projectReadinessKey } from "../../../dist/project-readiness.js";
+import { verificationFactsFromEvents } from "./ship.server.js";
 import type { ShipRuntime, Project } from "teploy-ship/runtime";
 export interface ReadinessCheck {
   name: string;
-  state: "ready" | "attention" | "unknown";
+  state: "ready" | "attention" | "unknown" | "verified" | "stale";
   detail: string;
   href?: string;
 }
@@ -80,5 +82,25 @@ export async function readiness(
       ? `/?workflow=review&repo=${encodeURIComponent(project.url ?? project.repo)}#new-task`
       : "/workflows",
   });
+  if (project) {
+    const configId = projectReadinessKey(project);
+    const runs = (await runtime.listMeta({ limit: 100 })).sort((a,b) => b.updatedAt.localeCompare(a.updatedAt));
+    for (const run of runs) {
+      if (!run.task.startsWith("Verify project environment:")) continue;
+      const events = await runtime.store.load(run.runId);
+      const input = (events.find(e => e.type === "run-started")?.data as any)?.input;
+      if (!input?.environmentCheck || input.repo !== project.url) continue;
+      const facts = verificationFactsFromEvents(events);
+      const matches = input.environmentConfigId === configId;
+      const passed = run.status === "completed" && facts.environmentCheck?.kind === "passed" && (!input.preparation || facts.preparation?.kind === "passed");
+      checks.unshift({
+        name: "Recorded environment verification",
+        state: !matches ? "stale" : passed ? "verified" : ["completed", "failed", "cancelled"].includes(run.status) ? "attention" : "unknown",
+        detail: !matches ? "Project settings changed or this older run did not record its configuration. Verify the current setup before relying on it." : passed ? `Preparation (when configured) and environment tests passed in the worker on ${run.updatedAt}. This verifies the recorded project configuration; changed worker credentials, images or services need a fresh check.` : `Latest check: ${run.status}. A completed agent response alone does not establish passing environment tests.`,
+        href: `/runs/${run.runId}?view=verification`,
+      });
+      break;
+    }
+  }
   return checks;
 }

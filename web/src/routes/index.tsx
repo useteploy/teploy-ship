@@ -1,3 +1,5 @@
+import { TaskComposer, type TaskProject } from "../views/task-composer.js";
+import { JOURNEYS, intakeJourney, parseJourney, journeyOptions, type Journey } from "teploy-ship/journeys";
 import { workflows } from "../lib/workflows.server.js";
 import type { WorkflowTemplate } from "../lib/workflows.server.js";
 import { randomUUID } from "node:crypto";
@@ -18,11 +20,17 @@ interface InboxData {
   selectedRepo: string;
   /** Runs parked on an approval — the top priority. */
   parked: RunMeta[];
+  recentRequests: IntakeTask[];
   /** Proposed intake tasks awaiting a launch/dismiss decision. */
   proposed: IntakeTask[];
   store: string;
   model: string;
-  projects: Array<{ url: string; label: string }>;
+  projects: TaskProject[];
+  canLaunch: boolean;
+  canRequest: boolean;
+  requestId: string;
+  submitted: string | null;
+  error: string | null;
   /** ?decision=taken — the operator's approve/deny lost the race to another one. */
   decisionTaken: boolean;
   /** ?denied=approve — this account lacks the approve authority. */
@@ -38,8 +46,11 @@ export async function loader({ request }: { request: Request }): Promise<InboxDa
   const decisionTaken = query.get("decision") === "taken";
   const denied = query.get("denied") === "approve";
   const [runs, proposed, projects] = await Promise.all([runtime.listMeta(), runtime.intake.list("proposed"), runtime.projects.list()]);
+  const me = await currentUser(request);
+  const canLaunch = await may("approve", me);
+  const recentRequests = (await runtime.intake.list()).filter(t => t.source === "team-request" && t.state !== "proposed" && (canLaunch || t.requestedBy === me?.user)).sort((a,b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 12);
   const parked = runs.filter((r) => r.status === "waiting" && r.eventName !== undefined);
-  return { template: (await workflows(runtime)).find(t=>t.id===query.get("workflow")), selectedRepo: query.get("repo") ?? "", projects: projects.map(p => ({ url: p.url ?? p.repo, label: p.label ?? p.repo })), parked, proposed, store: runtime.kind, model: defaultModel(), decisionTaken, denied };
+  return { template: (await workflows(runtime)).find(t=>t.id===query.get("workflow")), selectedRepo: query.get("repo") ?? "", canLaunch, canRequest: me?.role === "admin" || me?.role === "editor", requestId: randomUUID(), submitted: query.get("submitted"), error: query.get("error"), projects: projects.map(p => ({ url: p.url ?? p.repo, label: p.label ?? p.repo, planSupported: (p.harness ?? process.env.SHIP_HARNESS ?? "native") === "native" })), parked, recentRequests, proposed, store: runtime.kind, model: defaultModel(), decisionTaken, denied };
 }
 
 export async function action({ request }: { request: Request }): Promise<Response> {
@@ -53,7 +64,7 @@ export async function action({ request }: { request: Request }): Promise<Respons
 
   // Deciding a park and launching a proposed task both authorise code
   // execution and spend: the `approve` grant (governance.ts), deny by default.
-  if ((intent === "approve" || intent === "deny" || intent === "launch-task" || intent === "new-run") && !(await may("approve", me))) {
+  if ((intent === "approve" || intent === "deny" || intent === "launch-task" || intent === "dismiss-task" || intent === "new-run") && !(await may("approve", me))) {
     return redirect("/?denied=approve");
   }
 
@@ -92,16 +103,15 @@ export async function action({ request }: { request: Request }): Promise<Respons
     }
     // Claim first: a worker's auto-sweep may race this click; the claim's
     // conditional update decides who launches (the loser is a no-op).
-    if (!(await runtime.intake.claim(taskId))) return redirect("/");
     const runId = `run-${randomUUID().slice(0, 8)}`;
+    if (!(await runtime.intake.claim(taskId, runId))) return redirect("/");
     try {
       await enqueueRun(runtime, {
         runId,
         task: task.pr !== undefined ? (task.detail ?? task.title) : task.detail !== undefined ? `${task.title}\n\n${task.detail}` : task.title,
         model: defaultModel(),
         source: task.source,
-        ...(task.kind === "workflow-scan" ? { mode: "scan" as const } : {}),
-        ...(task.kind === "workflow-plan" ? { plan: true } : {}),
+        ...intakeJourney(task.kind),
         // Whoever the payload named, not whoever clicked launch. The clicker
         // authorised it; the requester asked for it, and an audit reader wants
         // the second. A manual task nobody signed falls back to the operator.
@@ -123,24 +133,38 @@ export async function action({ request }: { request: Request }): Promise<Respons
     return redirect(`/runs/${runId}`);
   }
 
-  // Quick new run.
-  const task = String(form.get("task") ?? "").trim();
-  if (task === "" || task.length > 20000) return redirect("/");
-  const repo = String(form.get("repo") ?? "").trim();
-  const runId = `run-${randomUUID().slice(0, 8)}`;
-  await enqueueRun(runtime, {
-    runId,
-    task,
-    model: defaultModel(),
-    source: "manual",
-    actor: actorFromPrincipal(me),
-    // An authenticated editor typed this URL into the form.
-    trust: "operator",
-    ...(repo !== "" ? { repo } : {}),
-    ...(form.get("plan") === "on" ? { plan: true } : {}),
-    ...(form.get("mode") === "scan" ? { mode: "scan" as const } : {}),
-  });
-  return redirect(`/runs/${runId}`);
+  if (intent !== "new-run" && intent !== "submit-request") return new Response("Unknown action", { status: 400 });
+  if (intent === "submit-request" && me?.role !== "editor" && me?.role !== "admin") return new Response("Not permitted", { status: 403 });
+  try {
+    const task = String(form.get("task") ?? "").trim();
+    if (!task || task.length > 20000) throw new Error("Describe your request in 20,000 characters or fewer.");
+    const repo = String(form.get("repo") ?? "").trim();
+    const project = await runtime.projects.forRepo(repo);
+    if (!project?.url) throw new Error("Choose a connected project. An administrator can add one in Project setup.");
+    const journey = parseJourney(form.get("journey") ?? (form.get("mode") === "scan" ? "review" : "change"));
+    const rawPr = String(form.get("pr") ?? "").trim();
+    const pr = rawPr ? Number(rawPr) : undefined;
+    if (pr !== undefined && (journey !== "review" || !Number.isSafeInteger(pr) || pr < 1)) throw new Error("Enter a valid pull request number for a review.");
+    if (intent === "submit-request") {
+      const id = String(form.get("requestId") ?? "");
+      if (!/^[a-f0-9-]{36}$/.test(id)) throw new Error("Refresh the page before sending your request.");
+      const proposed = await runtime.intake.propose({
+        source: "team-request", kind: `request-${journey}`, repo: project.url,
+        title: task, dedupeKey: `team-request:${me!.user}:${id}`,
+        requestedBy: me!.user, ...(pr ? { pr } : {}),
+      });
+      return redirect(`/?submitted=${encodeURIComponent(proposed.task.taskId)}`);
+    }
+    const runId = `run-${randomUUID().slice(0, 8)}`;
+    await enqueueRun(runtime, {
+      runId, task, ...journeyOptions(journey), model: defaultModel(), source: "manual",
+      actor: actorFromPrincipal(me), trust: "operator", repo: project.url,
+      ...(pr ? { pr } : {}), ...(form.get("plan") === "on" && journey === "change" ? { plan: true } : {}),
+    });
+    return redirect(`/runs/${runId}?created=1`);
+  } catch (error) {
+    return redirect("/?error=" + encodeURIComponent(error instanceof Error ? error.message : "Could not submit your request"));
+  }
 }
 
 
@@ -172,20 +196,11 @@ export default function Inbox({ data }: { data: InboxData }) {
         <a class="summary-card" href="#proposals"><strong>{data.proposed.length}</strong><span>Proposed tasks</span></a>
         <a class="summary-card" href="/projects"><strong>{data.projects.length}</strong><span>Configured projects</span></a>
       </div>
-      <p class="row-actions"><a href="/workflows">Choose a workflow</a><a href="/setup">Set up a project</a></p>
+      <p class="row-actions" style="display:flex;gap:16px"><a href="/workflows">Choose a workflow</a><a href="/setup">Set up a project</a></p>
       {data.template && <p class="notice">Workflow: <b>{data.template.name}</b>. Fill in the details below before starting.</p>}
-      <form class="composer" method="post" id="new-task">
-        <input type="hidden" name="mode" value={data.template?.mode ?? "fix"} />
-        <label htmlFor="task-prompt">Give Ship a task</label>
-        <textarea id="task-prompt" name="task" rows={data.template ? 9 : 3} maxLength={20000} required placeholder="Describe the change you want, the problem to investigate, or the test to fix…">{data.template?.task ?? ""}</textarea>
-        <div class="composer-footer">
-          <label class="field">Repository<input type="text" name="repo" value={data.selectedRepo} list="task-projects" placeholder="Choose a project or paste a clone URL" /></label>
-          <datalist id="task-projects">{data.projects.map(p => <option key={p.url} value={p.url}>{p.label}</option>)}</datalist>
-          <label class="check-field"><input type="checkbox" name="plan" checked={data.template?.plan ?? false} /> Review a plan before code changes</label>
-          <button class="primary" type="submit">Queue task →</button>
-        </div>
-        <p class="meta" style="margin:12px 0 0">{data.store === "file" ? "File storage: queue here, then resume the run from the CLI." : "Your worker picks up queued tasks. A task without a repository runs in an empty workspace."}</p>
-      </form>
+      {data.submitted && <p class="notice good" role="status">Your request was sent for approval. It has not started yet. Find it in Proposed tasks below.</p>}
+      {data.error && <p class="notice bad" role="alert">{data.error} Your draft is preserved in this browser.</p>}
+      <TaskComposer projects={data.projects} selectedRepo={data.selectedRepo} initialTask={data.template?.task} initialJourney={data.template?.journey ?? (data.template?.mode === "scan" ? "review" : "change")} initialPlan={data.template?.plan} canLaunch={data.canLaunch} canRequest={data.canRequest} requestId={data.requestId} clearDraft={!!data.submitted} />
 
       <h2 class="section" id="approvals">
         Needs your decision <span class="count">({data.parked.length})</span>
@@ -203,8 +218,7 @@ export default function Inbox({ data }: { data: InboxData }) {
                 <input type="hidden" name="runId" value={r.runId} />
                 {/* Binds the decision to the park this card was rendered from. */}
                 <input type="hidden" name="eventName" value={r.eventName ?? ""} />
-                <button class="approve sm" type="submit" name="intent" value="approve">Approve</button>
-                <button class="deny sm" type="submit" name="intent" value="deny">Deny</button>
+                <a class="button sm" href={`/runs/${r.runId}`}>Review and respond</a>
               </form>
             </div>
             <div class="meta" style="margin:8px 0 0">{short(r.task, 140)}</div>
@@ -221,20 +235,20 @@ export default function Inbox({ data }: { data: InboxData }) {
         data.proposed.map((t) => (
           <div key={t.taskId} class="card">
             <div class="row-actions">
-              <span class="chip">{t.source}/{t.kind}</span>
+              <span class="chip">{t.source === "team-request" ? JOURNEYS.find(j => `request-${j.id}` === t.kind)?.label ?? "Team request" : `${t.source}/${t.kind}`}</span>
               {t.repo !== undefined && <span class="meta">{t.repo.replace(/^https?:\/\//, "").slice(0, 44)}</span>}
               <span style="flex:1" />
               <form method="post" class="row-actions">
                 <input type="hidden" name="taskId" value={t.taskId} />
-                <button class="approve sm" type="submit" name="intent" value="launch-task">Launch</button>
-                <button class="sm" type="submit" name="intent" value="dismiss-task">Dismiss</button>
+                {data.canLaunch && <><button class="approve sm" type="submit" name="intent" value="launch-task">Approve and start</button><button class="sm" type="submit" name="intent" value="dismiss-task">Dismiss</button></>}
               </form>
             </div>
-            <div class="meta" style="margin:8px 0 0">{short(t.title, 140)}</div>
+            <div class="meta" style="margin:8px 0 0">{t.title}<p class="meta">Requested by {t.requestedBy ?? "an integration"}</p></div>
           </div>
         ))
       )}
 
+      {data.recentRequests.length > 0 && <section><h2 class="section">Recent requests</h2>{data.recentRequests.map(t => <article class="card" key={t.taskId}><b>{t.title}</b><p class="meta">{t.state === "launched" ? "Approved and started" : "Dismissed"} · {t.requestedBy}</p>{t.runId && <a href={`/runs/${t.runId}`}>Follow the task and its result →</a>}</article>)}</section>}
       {nothing && <p class="empty" style="margin-top:28px">Inbox zero. <a href="/runs">See all runs →</a></p>}
       <script dangerouslySetInnerHTML={{ __html: POLL }} />
     </>

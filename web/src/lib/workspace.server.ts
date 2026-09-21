@@ -2,9 +2,10 @@ import {
   requestWorkspace,
   workspaceReply,
   replyKey,
+  refreshForgeIfStale,
 } from "../../../dist/workspace-requests.js";
 import type { ShipRuntime } from "teploy-ship/runtime";
-export { requestWorkspace, workspaceReply };
+export { requestWorkspace, workspaceReply, refreshForgeIfStale };
 export async function freshForge(
   runtime: ShipRuntime,
   runId: string,

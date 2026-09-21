@@ -1,3 +1,4 @@
+import { intakeJourney } from "./journeys.js";
 import { sweepWorkflowSchedules } from "./workflow-schedules.js";
 import { serveWorkspaceRequests } from "./workspace-requests.js";
 import { policyFromEnv as workspacePolicyFromEnv } from "./repo-policy.js";
@@ -359,6 +360,8 @@ export async function sweepIntake(deps: IntakeSweepDeps): Promise<void> {
 
   const parkedOutsideWindow = new Set<string>();
   for (const task of await deps.intake.list("proposed")) {
+    // Team submissions explicitly request human approval, even on auto projects.
+    if (task.source === "team-request") continue;
     const project = projectOf(task);
     if ((project?.sourcePolicy ?? deps.policies[task.source]) !== "auto") continue;
     // Outside its window an auto source is a propose source: the task waits
@@ -374,9 +377,8 @@ export async function sweepIntake(deps: IntakeSweepDeps): Promise<void> {
 
     // Claim first: two workers sweeping the same proposed list must collapse to
     // one run. Losing just means someone else got there — take no resources.
-    if (!(await deps.intake.claim(task.taskId))) continue;
-
     const runId = deps.newRunId();
+    if (!(await deps.intake.claim(task.taskId, runId))) continue;
     let slotTaken = false;
     let holdTaken = false;
     try {
@@ -1384,8 +1386,7 @@ export function startWorker(options: WorkerOptions): {
           task: task.detail !== undefined ? `${task.title}\n\n${task.detail}` : task.title,
           model: modelId,
           source: task.source,
-          ...(task.kind === "workflow-scan" ? { mode: "scan" as const } : {}),
-          ...(task.kind === "workflow-plan" ? { plan: true } : {}),
+          ...intakeJourney(task.kind),
           // The handle the webhook payload asserted for whoever opened the
           // issue. Unverified — the delivery signature proves the payload came
           // from the forge, not that the forge is honest about the author.

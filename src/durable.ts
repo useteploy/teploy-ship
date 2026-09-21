@@ -1,3 +1,4 @@
+import { assertRestoredRepository } from "./workspace-integrity.js";
 import type { ArtifactStore } from "./artifacts.js";
 import { prepareEnvironment, type EnvironmentPreparation } from "./environment.js";
 import type { RunOrigin } from "./notify.js";
@@ -451,6 +452,8 @@ export interface DurableAgentInput {
    * push; a run mode cannot be forgotten mid-run.
    */
   mode?: "fix" | "scan";
+  journey?: import("./journeys.js").Journey;
+  restoreValidation?: 1;
   /**
    * Per-repo evidence, materialised at ENQUEUE from the evidence store
    * (`teploy-ship evidence set`): the test command this repo runs and the
@@ -1179,6 +1182,7 @@ export function durableAgent(
         input.mode === "scan"
           ? scanPrompt({
               task: input.task,
+              journey: input.journey,
               ...(checkout !== null ? { branch: checkout.branch } : {}),
               ...(repoContext !== "" ? { context: repoContext } : {}),
             })
@@ -1651,7 +1655,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
         const decision = await ws.ctx.waitForEvent<PlanDecisionPayload>(PLAN_EVENT);
         if (parkImage !== undefined) {
           const superseded = ws.handle;
-          ws.handle = await ws.ctx.step(`${p}plan-restore`, async () => (await config.executor.createFrom!(parkImage, sandboxOverridesOf(input))).handle);
+          ws.handle = await ws.ctx.step(`${p}plan-restore`, async () => (await restoreChecked(config, input, parkImage)).handle);
           ws.executor = config.executor.attach(ws.handle);
           // The snapshot captured everything the old container held; keeping it
           // allocated through the park (and every later park) is pure waste.
@@ -2091,7 +2095,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
           const answer = await ws.ctx.waitForEvent<AskDecisionPayload>(askEvent(turn));
           if (askImage !== undefined) {
             const superseded = ws.handle;
-            ws.handle = await ws.ctx.step(`${p}turn-${turn}-restore`, async () => (await config.executor.createFrom!(askImage, sandboxOverridesOf(input))).handle);
+            ws.handle = await ws.ctx.step(`${p}turn-${turn}-restore`, async () => (await restoreChecked(config, input, askImage)).handle);
             ws.executor = config.executor.attach(ws.handle);
             Object.assign(ws, liveWiring(config, ws.ctx.runId, ws.handle, p));
             if (superseded !== ws.handle) await dispose(config, superseded);
@@ -2122,7 +2126,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
           // replay re-attaches identically without re-creating anything.
           if (parkImage !== undefined) {
             const superseded = ws.handle;
-            ws.handle = await ws.ctx.step(`${p}turn-${turn}-restore`, async () => (await config.executor.createFrom!(parkImage, sandboxOverridesOf(input))).handle);
+            ws.handle = await ws.ctx.step(`${p}turn-${turn}-restore`, async () => (await restoreChecked(config, input, parkImage)).handle);
             ws.executor = config.executor.attach(ws.handle);
             Object.assign(ws, liveWiring(config, ws.ctx.runId, ws.handle, p));
             if (superseded !== ws.handle) await dispose(config, superseded);
@@ -2762,7 +2766,7 @@ async function mergeBoundaryGate(
     if (parkImage !== undefined) {
       const image = parkImage;
       const superseded = handle;
-      handle = (await ctx.step("merge-restore", async () => config.executor.createFrom!(image, sandboxOverridesOf(input)))).handle;
+      handle = (await ctx.step("merge-restore", async () => restoreChecked(config, input, image))).handle;
       exec = config.executor.attach(handle);
       if (superseded !== undefined && superseded !== handle) await dispose(config, superseded);
     }
@@ -3740,5 +3744,17 @@ export async function* parseSSEFrames(body: ReadableStream<Uint8Array>): AsyncGe
     if (tail !== null) yield tail;
   } finally {
     reader.releaseLock();
+  }
+}
+
+/** Existing restore step owns both allocation and validation; old recorded inputs retain their behavior. */
+async function restoreChecked(config: DurableAgentConfig, input: DurableAgentInput, image: string): Promise<{ handle: string }> {
+  const restored = await config.executor.createFrom!(image, sandboxOverridesOf(input));
+  try {
+    if (input.restoreValidation === 1) await assertRestoredRepository(config.executor.attach(restored.handle), input.repo, input.pr !== undefined);
+    return restored;
+  } catch (error) {
+    await dispose(config, restored.handle);
+    throw error;
   }
 }

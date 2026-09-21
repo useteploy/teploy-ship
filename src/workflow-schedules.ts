@@ -1,3 +1,4 @@
+import { JOURNEYS, type Journey } from "./journeys.js";
 import type { ShipRuntime } from "./runtime.js";
 export interface WorkflowSchedule {
   id: string;
@@ -5,6 +6,7 @@ export interface WorkflowSchedule {
   repo: string;
   task: string;
   mode: "fix" | "scan";
+  journey?: Journey;
   plan: boolean;
   everyMinutes: number;
   enabled: boolean;
@@ -24,6 +26,7 @@ export function validSchedule(v: any): v is WorkflowSchedule {
     v.task.length > 0 &&
     v.task.length <= 12000 &&
     ["fix", "scan"].includes(v.mode) &&
+    (v.journey === undefined || JOURNEYS.some(j => j.id === v.journey)) &&
     typeof v.plan === "boolean" &&
     typeof v.enabled === "boolean" &&
     Number.isInteger(v.everyMinutes) &&
@@ -66,7 +69,7 @@ export async function sweepWorkflowSchedules(
     if ((await runtime.config.get(receipt)) === String(slot)) continue;
     await runtime.intake.propose({
       source: "workflow",
-      kind:
+      kind: s.journey ? `request-${s.journey}` :
         s.mode === "scan"
           ? "workflow-scan"
           : s.plan

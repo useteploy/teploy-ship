@@ -2,7 +2,7 @@
   "name": "teploy-ship",
   "version": "0.2.1",
   "private": true,
-  "description": "Teploy Ship — Teploy's coding agent: a CodeAct brain on the Neutron primitives. Issues in, PRs out, self-hosted.",
+  "description": "Teploy Ship \u2014 Teploy's coding agent: a CodeAct brain on the Neutron primitives. Issues in, PRs out, self-hosted.",
   "author": "Tyler",
   "license": "MIT",
   "type": "module",
@@ -37,6 +37,10 @@
     "./bulletin": {
       "types": "./dist/bulletin.d.ts",
       "import": "./dist/bulletin.js"
+    },
+    "./journeys": {
+      "types": "./dist/journeys.d.ts",
+      "import": "./dist/journeys.js"
     }
   },
   "scripts": {

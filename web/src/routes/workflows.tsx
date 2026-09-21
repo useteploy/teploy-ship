@@ -98,6 +98,7 @@ export async function action({
         task: template.task,
         repo: project.repo,
         mode: template.mode,
+        ...(template.journey ? { journey: template.journey } : {}),
         plan: template.plan,
         everyMinutes: Number(f.get("every")),
         enabled: true,

@@ -192,12 +192,19 @@ ${options.task}`;
  * the tree is either published (and a scan publishes nothing) or refused —
  * see the header of findings.ts.
  */
-export function scanPrompt(options: { task: string; branch?: string; context?: string }): string {
+export function scanPrompt(options: { task: string; branch?: string; context?: string; journey?: string }): string {
   const context = options.context !== undefined && options.context !== "" ? `\n\n${options.context}` : "";
   const where =
     options.branch !== undefined
       ? `You are in a git repository, already cloned at your working directory on branch ${options.branch}.`
       : "You are in a working directory holding the code to scan.";
+  if (options.journey === "investigate" || options.journey === "plan") {
+    return `This is a read-only ${options.journey === "plan" ? "planning" : "investigation"} task. ${where}${context}
+Do not edit tracked files or publish changes. Answer the request using observed repository evidence, cite file locations, and state uncertainty. Stay within the requested scope.
+User request:
+${frameUntrusted(options.task)}
+Deliver your answer or implementation plan inside a finish block. Include ${FINDINGS_MARKER} followed by [] after the prose, unless you verified specific defects worth reporting. A plan ends with acceptance criteria and open questions; it must not proceed to implementation.`;
+  }
   return `This is a READ-ONLY SCAN. ${where}${context}
 
 Nothing you change here can ever be published: this run's publish gate is disabled, no branch is pushed and no pull request is opened, and \`\`\`edit and \`\`\`create actions are refused before they run. Do not fix anything — every turn spent editing is a turn not spent finding. Read, grep, and run read-only commands.

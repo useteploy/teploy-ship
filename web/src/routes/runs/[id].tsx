@@ -1,3 +1,5 @@
+import { taskStatus, taskTitle } from "../../lib/task-status.js";
+import { JOURNEYS, parseJourney, journeyOptions } from "teploy-ship/journeys";
 import { RichText } from "../../views/rich-text.js";
 import { runData } from "../../lib/run-data.server.js";
 import type { RunData } from "../../lib/run-data.server.js";
@@ -83,7 +85,11 @@ export async function action({
     const events = await runtime.store.load(runId);
     const started = events.find(e => e.type === "run-started");
     const input = (started?.data as { input?: { repo?: string; task?: string; trust?: string; pr?: number } })?.input;
-    if (form.get("plan") === "on" && form.get("mode") !== "scan") {
+    let journey;
+    try { journey = parseJourney(form.get("journey") ?? (form.get("mode") === "scan" ? "investigate" : "change")); }
+    catch { return redirectTo(`/runs/${runId}?messageError=Choose+a+supported+task+type`); }
+    const readOnly = journey !== "change";
+    if (form.get("plan") === "on" && !readOnly) {
       const project = input?.repo ? await runtime.projects.forRepo(input.repo) : null;
       if ((project?.harness ?? process.env.SHIP_HARNESS ?? "native") !== "native") return redirectTo(`/runs/${runId}?messageError=Plan+review+requires+the+native+harness.+Select+native+in+Project+settings+or+turn+off+plan+review.`);
     }
@@ -100,10 +106,10 @@ export async function action({
         pr = current.number;
       } catch (e) { return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(e instanceof Error ? e.message : "Could not check the pull request")}`); }
     }
-    const replacingReview = reviewing && form.get("mode") !== "scan";
+    const replacingReview = reviewing && !readOnly;
     if (replacingReview && (String(form.get("eventName") ?? "") !== MERGE_EVENT || !(await runtime.claimDecision(runId, MERGE_EVENT)))) return redirectTo(`/runs/${runId}?decision=taken`);
     try {
-      await enqueueRun(runtime, {runId:next,parentRunId:runId,userMessage:message,task,model:meta.model,source:"manual",actor:actorFromPrincipal(me),trust:input?.trust === "operator" ? "operator" : "external",...(input?.repo ? {repo:input.repo}:{}),...(pr ? {pr}:{}),plan:form.get("plan")==="on",...(form.get("mode")==="scan" ? {mode:"scan" as const}: {})});
+      await enqueueRun(runtime, {runId:next,parentRunId:runId,userMessage:message,task,model:meta.model,source:"manual",actor:actorFromPrincipal(me),trust:input?.trust === "operator" ? "operator" : "external",...(input?.repo ? {repo:input.repo}:{}),...(pr ? {pr}:{}),plan:form.get("plan")==="on" && !readOnly,...journeyOptions(journey)});
     } catch (e) {
       if (replacingReview) await runtime.releaseDecision(runId, MERGE_EVENT);
       return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(e instanceof Error ? e.message : "Could not start follow-up")}`);
@@ -278,7 +284,8 @@ export default function RunDetail({ data: initialData }: { data: RunData }) {
     const timer = setInterval(refresh, 4000);
     return () => { stopped = true; controller.abort(); clearInterval(timer); };
   }, [initialData.runId, initialData.view]);
-  const active = data.meta !== null && !["completed", "failed", "cancelled", "cancelling"].includes(data.meta.status);
+  const [followJourney, setFollowJourney] = useState(data.journey === "plan" ? "plan" : data.isScan ? "investigate" : "change");
+ const active = data.meta !== null && !["completed", "failed", "cancelled", "cancelling"].includes(data.meta.status);
   const decision = data.decision;
   return (
     <div id="run-root" data-event-count={String(data.eventCount)} data-run-status={data.meta?.status ?? "unknown"}>
@@ -317,13 +324,14 @@ export default function RunDetail({ data: initialData }: { data: RunData }) {
       <div class="eyebrow"><a href="/runs">All runs</a> / {data.runId}</div>
       {data.parentRunId && <p class="meta">Continues <a href={`/runs/${encodeURIComponent(data.parentRunId)}`}>{data.parentRunId}</a></p>}
       {data.messageError && <p class="notice bad" role="alert">{data.messageError}</p>}
-      <h1 class="page">{data.meta ? data.meta.task.slice(0, 110) + (data.meta.task.length > 110 ? "…" : "") : "Run details"}</h1>
-      {data.meta && data.meta.task.length > 110 && <details class="disclosure"><summary>Read the full task</summary><p style="white-space:pre-wrap">{data.meta.task}</p></details>}
+      <h1 class="page">{data.meta ? taskTitle(data.userMessage ?? data.meta.task) : "Run details"}</h1>
+      {data.meta && data.meta.task.length > 110 && <details class="disclosure"><summary>Read the full task</summary><p style="white-space:pre-wrap">{data.userMessage ?? data.meta.task}</p></details>}
       {data.meta === null ? (
         <p class="empty">Unknown run — it may have been removed, or the id is mistyped. <a href="/runs">All runs</a></p>
       ) : (
         <>
-          <p class="meta">
+          <section class="task-status" aria-label="Task status"><b>{taskStatus(data.meta.status, data.meta.eventName, data.hasPr, data.journey).label}</b><p>{taskStatus(data.meta.status, data.meta.eventName, data.hasPr, data.journey).next}</p><a href="#reply">Continue the conversation</a></section>
+          <details class="disclosure"><summary>Execution details</summary><p class="meta">
             <span class={`status ${data.meta.status}`}>{data.meta.status}</span> · {data.meta.model}
             {data.meta.ranOn !== undefined && <> · ran on {data.meta.ranOn}</>} · updated{" "}
             {data.meta.updatedAt}
@@ -334,6 +342,7 @@ export default function RunDetail({ data: initialData }: { data: RunData }) {
               </>
             )}
           </p>
+          </details>
           {active && data.live !== null && (
             <div class="card" style="margin:12px 0" id="now" data-updated-at={data.live.updatedAt} data-created-at={data.createdAt ?? ""}>
               <div class="kind" style="margin-bottom:6px">
@@ -392,7 +401,7 @@ export default function RunDetail({ data: initialData }: { data: RunData }) {
               )}
             </div>
           )}
-          {data.isScan && (
+          {data.isScan && (!data.journey || data.journey === 'review') && (
             <div class="card" style="margin:12px 0">
               <div class="kind" style="margin-bottom:8px">
                 Scan findings{data.findings.length > 0 ? ` (${data.findings.length})` : ""}
@@ -495,7 +504,7 @@ export default function RunDetail({ data: initialData }: { data: RunData }) {
           <nav class="settings-nav" aria-label="Run workspace">{['conversation','review','changes','verification','files','activity'].map(view=><a key={view} href={`/runs/${data.runId}?view=${view}`} class={data.view===view?'active':undefined} aria-current={data.view===view?'page':undefined}>{view.charAt(0).toUpperCase()+view.slice(1)}</a>)}</nav>
           {['conversation','review'].includes(data.view) && <div class={data.view === 'review' ? 'run-review-grid' : ''}><div>
             {data.ancestors.map(h => <details class="disclosure"><summary>Earlier: {h.task.slice(0,100)} · {h.runId}</summary><a href={`/runs/${h.runId}`}>Open run</a><Conversation messages={h.messages}/></details>)}
-            <Conversation messages={data.messages} /><RunComposer data={data}/>
+            <div class="conversation-scroll"><Conversation messages={data.messages} /></div><div id="reply"><RunComposer data={data}/></div>
           </div>{data.view === 'review' && <aside class="review-evidence"><ForgePanel data={data}/><Changes snapshots={data.snapshots} pr={data.evidence.pr} sha={data.evidence.sha}/><Verification data={data.evidence}/></aside>}</div>}
           {data.view === 'files' && <section><h2 class="section">Repository files</h2><p class="meta">Inspect up to 200 tracked file names and the first 10,000 characters of a file at the workspace’s current HEAD. Uncommitted edits are shown in recorded diff snapshots. Availability depends on sandbox retention.</p><form method="post" class="row-actions"><button name="intent" value="files">List files</button><input name="path" placeholder="src/example.ts" aria-label="Repository file path"/><button name="intent" value="file">Read file</button></form>{data.workspace?.error && <p class="notice bad">{data.workspace.error}</p>}{data.workspace?.output !== undefined && <pre class="workspace-file">{data.workspace.output}</pre>}<p class="meta">Requests are handled by the worker; refresh to see the result.</p><a href={`/runs/${data.runId}?view=files`}>Refresh files</a></section>}
 
@@ -609,7 +618,7 @@ function ForgePanel({ data }: { data: RunData }) {
   const f = data.forge?.forge;
   return <section class="forge-panel"><div class="row-actions"><h2 class="section">Pull request status</h2><form method="post"><button name="intent" value="forge-refresh">Refresh from forge</button></form></div>
     {data.forge?.error && <p class="notice bad">{data.forge.error}</p>}
-    {!f ? <p class="meta">Request a worker check to see the current PR, reviews and CI. No model credits are used.</p> : <>
+    {!f ? <p class="meta">The worker checks PR status automatically while this page is open. You can also refresh now. No model credits are used.</p> : <>
       <p><b>#{f.number} · {f.state}{f.draft ? ' · draft' : ''}</b> · {f.title}</p><p class="meta">Checked {f.checkedAt.replace('T',' ').slice(0,19)} UTC · head {f.head.slice(0,12)}</p>
       {data.evidence.sha && f.head !== data.evidence.sha && <p class="notice">The PR has changed since this run published. Recorded verification applies to {data.evidence.sha.slice(0,12)}, not the current head.</p>}
       {f.checks.length === 0 && <p class="meta">No CI checks reported.</p>}{f.checks.map(c => <p><b>{c.name}</b> · {c.state}</p>)}
@@ -626,6 +635,7 @@ function RunComposer({data}: {data: RunData}) {
    if (!form || !input) return;
    const key = `ship-draft:${data.runId}:${input.name}`;
    try {
+     if (new URLSearchParams(location.search).get("created") === "1") sessionStorage.removeItem("ship-new-request");
      if (data.parentRunId) sessionStorage.removeItem(`ship-draft:${data.parentRunId}:message`);
      if (input.name === "steer" && new URLSearchParams(location.search).get("sent") === "1") sessionStorage.removeItem(key);
      const draft = sessionStorage.getItem(key); if (draft !== null) input.value = draft; } catch {}
@@ -634,6 +644,7 @@ function RunComposer({data}: {data: RunData}) {
    // Preserve drafts across errors/tab changes; successful sends clear them.
    return () => { input.removeEventListener('input', save); };
  }, [data.runId, data.meta?.status]);
+ const [followJourney, setFollowJourney] = useState(data.journey === "plan" ? "plan" : data.isScan ? "investigate" : "change");
  const active = data.meta !== null && !["completed", "failed", "cancelled", "cancelling"].includes(data.meta.status);
  const reviewing = data.meta?.status === "waiting" && data.meta.eventName === MERGE_EVENT;
  if (!data.meta) return null;
@@ -651,7 +662,7 @@ function RunComposer({data}: {data: RunData}) {
               Messages queued for the next turn: {data.steerPending.join(" · ")}
             </p>
           )}
-          {(!active || reviewing && data.canSteer) && data.meta.status !== 'cancelling' && data.canLaunch && <form method="post" class="message-composer"><input type="hidden" name="eventName" value={data.meta.eventName ?? ''}/>{reviewing && <p class="notice">Request changes on this PR before merging. A change request cancels this run’s pending merge decision and starts a linked run; the PR stays open. Read-only investigations leave the merge decision pending.</p>}<label class="field">Continue this work<textarea name="message" rows={3} required maxLength={12000} placeholder="What should Ship change or investigate next?" /></label>{data.hasPr && <label class="field">Start from<select name="target"><option value="pr">Existing pull request (checked before launch)</option><option value="base">Current default branch</option></select></label>}<label class="field">Follow-up type<select name="mode"><option value="fix">Make changes</option><option value="scan">Investigate without changes</option></select></label>{data.planSupported ? <label class="check-field"><input type="checkbox" name="plan" checked />Review the plan before code changes</label> : <p class="meta">This project uses an external harness, which starts work immediately. For plan review, select the native harness in Project settings before launching.</p>}<button type="submit" name="intent" value="follow-up">Start follow-up</button><p class="meta">Keeps the conversation history and starts a fresh sandbox. The existing pull request is checked with the forge before launch. Current project approvals and budgets apply.</p></form>}
+          {(!active || reviewing && data.canSteer) && data.meta.status !== 'cancelling' && data.canLaunch && <form method="post" class="message-composer"><input type="hidden" name="eventName" value={data.meta.eventName ?? ''}/>{reviewing && <p class="notice">Request changes on this PR before merging. A change request cancels this run’s pending merge decision and starts a linked run; the PR stays open. Read-only investigations leave the merge decision pending.</p>}<label class="field">Continue this work<textarea name="message" rows={3} required maxLength={12000} placeholder="What should Ship change or investigate next?" /></label>{data.hasPr && <label class="field">Start from<select name="target"><option value="pr">Existing pull request (checked before launch)</option><option value="base">Current default branch</option></select></label>}<label class="field">What should happen next?<select name="journey" value={followJourney} onChange={e => setFollowJourney(e.currentTarget.value)}>{JOURNEYS.map(j => <option value={j.id}>{j.label}</option>)}</select></label>{followJourney === "change" && (data.planSupported ? <label class="check-field"><input type="checkbox" name="plan" checked />Review the plan before code changes</label> : <p class="meta">This project uses an external harness, which starts work immediately. For plan review, select the native harness in Project settings before launching.</p>)}<button type="submit" name="intent" value="follow-up">Start follow-up</button><p class="meta">Keeps the conversation history and starts a fresh sandbox. The existing pull request is checked with the forge before launch. Current project approvals and budgets apply.</p></form>}
 
  </>;
 }

@@ -303,8 +303,8 @@ export default function Setup({ data }: { data: Data }) {
               <h2>
                 {i + 1}. {c.name}
               </h2>
-              <span class={c.state === "ready" ? "good" : "meta"}>
-                {c.state === "ready"
+              <span class={["ready", "verified"].includes(c.state) ? "good" : "meta"}>
+                {c.state === "verified" ? "Verified in a real run" : c.state === "stale" ? "Verification out of date" : c.state === "ready"
                   ? "Configured"
                   : c.state === "attention"
                     ? "Action needed"
@@ -314,7 +314,7 @@ export default function Setup({ data }: { data: Data }) {
             <p>{c.detail}</p>
             {c.href && (
               <a href={c.href}>
-                {c.name === "Credentials & first run"
+                {c.name === "Recorded environment verification" ? "Review verification →" : c.name === "Credentials & first run"
                   ? "Prepare first review →"
                   : "Open configuration →"}
               </a>

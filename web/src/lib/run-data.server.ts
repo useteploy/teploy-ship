@@ -1,4 +1,4 @@
-import { threadHistory, workspaceReply } from "./workspace.server.js";
+import { threadHistory, workspaceReply, refreshForgeIfStale } from "./workspace.server.js";
 import type { WorkspaceReply } from "../../../dist/workspace-requests.js";
 import { conversation, diffSnapshots, evidence } from "./workspace.js";
 import type { Message, DiffSnapshot, Evidence } from "./workspace.js";
@@ -15,6 +15,8 @@ import type { RunOutcome, TimelineItem, RecordedStep } from "./timeline.js";
 import { startSpan } from "./observe.server.js";
 
 export interface RunData {
+  userMessage?: string;
+  journey?: string;
   forge: WorkspaceReply | null;
   workspace: WorkspaceReply | null;
   ancestors: { runId: string; task: string; messages: Message[] }[];
@@ -147,9 +149,15 @@ export async function runData({ params, request }: { params: { id: string }; req
     const currentProject = repo ? await runtime.projects.forRepo(repo) : null;
     const planSupported = (currentProject?.harness ?? process.env.SHIP_HARNESS ?? "native") === "native";
     const facts = verificationFactsFromEvents(events);
+    if (facts.pr || typeof (started?.data as any)?.input?.pr === "number") {
+      const principal = await currentUser(request);
+      if (principal) await refreshForgeIfStale(runtime, runId, principal.user).catch(() => {});
+    }
     const history = await threadHistory(runtime, runId);
     const forgeRaw = await runtime.config.get("SHIP_FORGE_STATE_" + runId);
     const data: RunData = {
+      userMessage: (started?.data as any)?.input?.userMessage,
+      journey: (started?.data as any)?.input?.journey,
       forge: forgeRaw ? JSON.parse(forgeRaw) : null,
       workspace: await workspaceReply(runtime, runId),
       ancestors: history.slice(0,-1).map(h => ({ runId: h.runId, task: h.task, messages: conversation(h.events).slice(-20) })),

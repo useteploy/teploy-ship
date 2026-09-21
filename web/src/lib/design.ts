@@ -138,4 +138,16 @@ table.runs td { padding-top: 10px; padding-bottom: 10px; }
   .config-row { grid-template-columns: 1fr; gap: 6px; padding: 12px 0; }
   .run-toolbar input { width: 100%; min-width: 0; }
 }
+
+.task-choices { border: 0; padding: 0; margin: 20px 0; display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
+.task-choices legend { margin-bottom: 10px; }
+.task-choice { display: flex; align-items: flex-start; gap: 9px; padding: 12px; border: 1px solid var(--border); border-radius: 5px; cursor: pointer; }
+.task-choice.selected { border-color: var(--blue); background: var(--panel); }
+.task-choice small { display: block; color: var(--dim); margin-top: 6px; line-height: 1.6; }
+.task-choice input { margin-top: 3px; }
+.task-status { border-left: 2px solid var(--blue); padding: 12px 16px; margin: 16px 0; background: var(--panel); }
+.task-status p { margin: 8px 0; line-height: 1.6; }
+.conversation-scroll { max-height: 58vh; overflow-y: auto; overscroll-behavior: contain; padding-right: 12px; scrollbar-gutter: stable; }
+#reply { scroll-margin-top: 72px; }
+@media(max-width:600px) { .task-choices { grid-template-columns: 1fr; } .conversation-scroll { max-height: 52vh; } }
 `;

@@ -126,6 +126,14 @@ function harness(overrides: Partial<IntakeSweepDeps>, tasks: IntakeTask[]): Harn
   return { deps, launched, terminal, spend, intake, admission };
 }
 
+test("team requests remain proposed even when the source is configured auto", async () => {
+  const task = { ...mkTask("team"), source: "team-request", kind: "request-change" };
+  const h = harness({ policies: { "team-request": "auto" } }, [task]);
+  await sweepIntake(h.deps);
+  assert.equal(h.launched.length, 0);
+  assert.equal((await h.intake.list("proposed")).length, 1);
+});
+
 test("launchDueBounded: a host without room holds launches below the ceiling, and resumes when it clears", async () => {
   const due = [
     { runId: "h1", sleeping: false },

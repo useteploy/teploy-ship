@@ -1,3 +1,5 @@
+import { projectReadinessKey } from "./project-readiness.js";
+import { parseJourney, journeyInstruction, type Journey } from "./journeys.js";
 import { FileArtifacts, NucleusArtifacts, type ArtifactStore } from "./artifacts.js";
 import type { RunOrigin } from "./notify.js";
 import { resolveTestTarget } from "./test-detect.js";
@@ -854,6 +856,7 @@ export async function enqueueRun(
     /** Conversation lineage only; never gates a workflow step. */
     parentRunId?: string;
     userMessage?: string;
+    journey?: Journey;
     environmentCheck?: boolean;
     task: string;
     model: string;
@@ -1003,6 +1006,7 @@ export async function enqueueRun(
     trust?: RepoTrust;
   },
 ): Promise<void> {
+  const journey = options.journey === undefined ? undefined : parseJourney(options.journey);
   const now = new Date().toISOString();
   // Materialise the thresholds at ENQUEUE, never leave a bare `true` in the
   // log. durable.ts's contract is that the thresholds are fixed at enqueue,
@@ -1028,7 +1032,7 @@ export async function enqueueRun(
   // block below spells out at length: the recorded input is what gates step
   // presence, so "off for a scan" has to be a fact in the log, not a decision a
   // worker makes while replaying one.
-  const scan = options.mode === "scan";
+  const scan = options.mode === "scan" || (journey !== undefined && journey !== "change");
   // Stuck detection (recovery.ts) is ON by default since 2026-09-15. It had
   // been opt-in (`SHIP_RECOVERY=1`) on the product path while the live loop
   // had it on unconditionally, and run-a3d15f43 showed the cost of the gap:
@@ -1249,8 +1253,10 @@ export async function enqueueRun(
   // Hoisted out of the append below so the upgrade fence can fingerprint the
   // exact object the log will carry, rather than a reconstruction of it.
   const input = {
-        task: options.task,
-        ...(options.environmentCheck === true ? { environmentCheck: true } : {}),
+        restoreValidation: 1 as const,
+        task: journey ? `${options.task}\n\n${journeyInstruction(journey)}` : options.task,
+        ...(journey ? { journey, userMessage: options.userMessage ?? options.task } : {}),
+        ...(options.environmentCheck === true ? { environmentCheck: true, ...(project ? { environmentConfigId: projectReadinessKey(project) } : {}) } : {}),
         ...(options.userMessage !== undefined ? { userMessage: options.userMessage } : {}),
         ...(options.parentRunId !== undefined ? { parentRunId: options.parentRunId } : {}),
         ...(options.parentRunId !== undefined && options.pr !== undefined ? { requireOpenPr: true } : {}),
@@ -1365,7 +1371,7 @@ export async function enqueueRun(
   });
   await runtime.saveMeta({
     runId: options.runId,
-    task: options.task,
+    task: options.userMessage ?? options.task,
     model: options.model,
     status: "queued",
     ...(options.source !== undefined ? { source: options.source } : {}),
