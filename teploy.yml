@@ -117,7 +117,15 @@ accessories:
     # tags appear only where a KV mutation runs inside a coordinating SQL
     # transaction. A v0.1.8 physical snapshot still restores into v1.0.0, so
     # the pre-upgrade backup is the way back — fix forward, do not swap.
-    image: ghcr.io/neutron-build/nucleus:v1.0.0
+    # v1.1.1: upgrade from the live v1.0.2 engine (the previous config pin
+    # incorrectly remained v1.0.0). First open migrates the WAL to v2.
+    # Stop writers and the engine, verify a full data-directory backup, and
+    # rehearse on a restored copy before upgrading. Keep the full archive:
+    # mvcc.wal.v1 can be retired on the next clean open. Rollback requires
+    # restoring pre-upgrade data with its matching image, not an image swap.
+    # Migration can take minutes; wait for health instead of restart-looping.
+    # The binary's startup banner still says v1.0.2; verify the image tag.
+    image: ghcr.io/neutron-build/nucleus:v1.1.1
     port: 5432
     # Hard cgroup cap. NUCLEUS_MAX_MEMORY_MB below is the engine's own
     # accounting and is advisory — it was set to 16 GB on the day this engine

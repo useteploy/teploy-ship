@@ -108,6 +108,20 @@ across the fleet migrates; the others skip and proceed rather than waiting.
 **The Nucleus engine is a separate concern.** It is a pinned accessory and it
 does not move with a Ship deploy. Upgrade it deliberately and separately:
 
+Before a WAL-format upgrade, pause Ship's web and worker writers, stop Nucleus,
+and archive its complete data directory. Verify the archive and rehearse the
+upgrade on an isolated restored copy, without starting a worker against that
+copy. Compare run histories and parked-run preflight results, then exercise
+database writes. Update the accessory image pin in `teploy.yml` as well as the
+running engine. Keep writers stopped during the live migration and verification.
+
+**v1.1.1 upgrades the WAL to format v2 on first open.** Retain a full pre-upgrade
+archive: the engine's `mvcc.wal.v1` copy can be retired on the next clean open.
+Rollback requires restoring that archive with the previous matching image;
+changing only the image tag is insufficient. Allow the migration to finish
+without restart-looping. This release's startup banner still says v1.0.2, so
+verify the deployed image rather than the banner.
+
 ```sh
 teploy accessory upgrade nucleus ghcr.io/neutron-build/nucleus:vX.Y.Z
 ```
