@@ -16,8 +16,13 @@ interventions and results. Start with these distinct outcomes:
 4. Approve the verified scratch PR through Ship. Confirm the forge actually
    reports it merged; do not infer this from an accepted UI decision.
 5. Request customer search from the merged default branch. Grade name/email
-   matching, empty/no-match behavior, literal wildcards, preserved data and stale
-   response handling independently of the agent-authored tests.
+   matching, empty/no-match behavior, literal wildcards, preserved data, stale
+   responses and saving under an active filter independently of agent-authored tests.
+6. Seed a separate PR changing the search predicate from OR to AND. Verify it
+   fails the independent grade, then request a read-only PR review. Check that
+   findings identify the regression at the recorded head and leave it unchanged.
+7. Request a same-PR correction. Grade the new exact head, verify the old review
+   is visibly out of date, and distinguish an updated PR from a merged result.
 
 The wording grader requires Python 3 and Playwright with Chromium installed:
 

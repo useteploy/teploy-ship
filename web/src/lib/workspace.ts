@@ -1,3 +1,4 @@
+import { transcriptTurn } from "../../../dist/actions.js";
 /** Read-only projections of recorded work. Never infer a passing check from agent prose. */
 export interface LogEvent {
   type: string;
@@ -72,7 +73,8 @@ export function conversation(events: LogEvent[]): Message[] {
       const raw = typeof r === "string" ? r : record(r).text;
       if (typeof raw === "string") {
         // Commands stay in Activity; retain the human-readable progress and questions.
-        const text = raw
+        const consumed = /(?:^|-)plan-think$/.test(e.name ?? "") ? raw : transcriptTurn(raw);
+        const text = consumed
           .replace(/```(?:bash|python|sh|javascript|edit|create)[^\n]*\n[\s\S]*?```/g, "")
           .trim();
         if (text)
@@ -135,7 +137,7 @@ export function splitDiff(diff: string): { file: string; lines: string[] }[] {
       lines: s.split("\n"),
     }));
 }
-export function evidence(facts: Record<string, any>): Evidence {
+export function evidence(facts: Record<string, any>, reviewedHead?: string): Evidence {
   const checks: Check[] = [];
   for (const [key, name] of [
     ["preparation", "Environment setup"],
@@ -212,6 +214,6 @@ export function evidence(facts: Record<string, any>): Evidence {
     preview: safeLink(record(facts.preview).url),
     pr: safeLink(record(facts.pr).url),
     sha:
-      record(facts.push).kind === "pushed" ? record(facts.push).sha : undefined,
+      record(facts.push).kind === "pushed" ? record(facts.push).sha : typeof reviewedHead === "string" && /^[a-f0-9]{7,64}$/i.test(reviewedHead) ? reviewedHead : undefined,
   };
 }

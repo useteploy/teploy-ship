@@ -43,7 +43,7 @@ export function Changes({
       <h2 class="section">Changes</h2>
       {sha && (
         <p class="meta">
-          Published commit <code>{sha}</code>
+          Recorded revision <code>{sha}</code>
         </p>
       )}
       {safeLink(pr) && (

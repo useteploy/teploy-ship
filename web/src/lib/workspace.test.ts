@@ -117,3 +117,27 @@ test("connection diagnostics use configured endpoints only and do not forward cr
   assert.equal(checks[1].state, "Invalid address");
   assert.ok(!JSON.stringify(checks).includes("secret"));
 });
+
+test("conversation follows the executor transcript and discards imagined post-action output", () => {
+  const messages = conversation([
+    { type: "step-completed", name: "turn-0-think", at, data: { result: { text: "I will inspect the form.\n```bash\ncat index.html\n```\nThe output was: customer data is in local storage.\n```bash\ncat imaginary.js\n```" } } },
+    { type: "step-completed", name: "turn-1-think", at, data: { result: { text: "```finish\nThe observed implementation uses SQLite.\n```\nInvented extra conclusion." } } },
+  ]);
+  assert.equal(messages[0].text, "I will inspect the form.");
+  assert.match(messages[1].text, /observed implementation uses SQLite/);
+  assert.doesNotMatch(messages.map(m => m.text).join("\n"), /local storage|imaginary|Invented/);
+});
+
+test("planning prose after a command example is retained because planning does not execute actions", () => {
+  const messages = conversation([{ type: "step-completed", name: "attempt-1-plan-think", at, data: { result: { text: "First inspect the repository.\n```bash\nls\n```\nThen agree on acceptance criteria before editing." } } }]);
+  assert.match(messages[0].text, /Then agree on acceptance criteria/);
+});
+
+test("read-only evidence identifies the checked-out revision without pretending it was pushed", () => {
+  const reviewed = "a".repeat(40), pushed = "b".repeat(40);
+  const scan = evidence({}, reviewed);
+  assert.equal(scan.sha, reviewed);
+  assert.equal(scan.pr, undefined);
+  assert.equal(evidence({}, "not-a-revision").sha, undefined);
+  assert.equal(evidence({ push: { kind: "pushed", sha: pushed } }, reviewed).sha, pushed);
+});

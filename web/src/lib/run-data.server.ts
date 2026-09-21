@@ -149,6 +149,7 @@ export async function runData({ params, request }: { params: { id: string }; req
     const currentProject = repo ? await runtime.projects.forRepo(repo) : null;
     const planSupported = (currentProject?.harness ?? process.env.SHIP_HARNESS ?? "native") === "native";
     const facts = verificationFactsFromEvents(events);
+    const reviewedHead = (started?.data as any)?.input?.mode === "scan" ? (events.find(e => e.type === "step-completed" && e.name === "repo-setup")?.data as any)?.result?.headSha : undefined;
     if (facts.pr || typeof (started?.data as any)?.input?.pr === "number") {
       const principal = await currentUser(request);
       if (principal) await refreshForgeIfStale(runtime, runId, principal.user).catch(() => {});
@@ -164,7 +165,7 @@ export async function runData({ params, request }: { params: { id: string }; req
       view: ['conversation','review','changes','verification','files','activity'].includes(query.get('view') ?? '') ? query.get('view')! : 'conversation',
       messages: conversation(events),
       snapshots: diffSnapshots(events),
-      evidence: evidence(facts),
+      evidence: evidence(facts, reviewedHead),
       hasPr: facts.pr !== undefined || typeof (started?.data as any)?.input?.pr === "number",
       parentRunId: typeof (started?.data as any)?.input?.parentRunId === 'string' ? (started?.data as any).input.parentRunId : undefined,
       canSteer: await may('steer', await currentUser(request)),

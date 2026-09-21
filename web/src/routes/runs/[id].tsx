@@ -620,7 +620,7 @@ function ForgePanel({ data }: { data: RunData }) {
     {data.forge?.error && <p class="notice bad">{data.forge.error}</p>}
     {!f ? <p class="meta">The worker checks PR status automatically while this page is open. You can also refresh now. No model credits are used.</p> : <>
       <p><b>#{f.number} · {f.state}{f.draft ? ' · draft' : ''}</b> · {f.title}</p><p class="meta">Checked {f.checkedAt.replace('T',' ').slice(0,19)} UTC · head {f.head.slice(0,12)}</p>
-      {data.evidence.sha && f.head !== data.evidence.sha && <p class="notice">The PR has changed since this run published. Recorded verification applies to {data.evidence.sha.slice(0,12)}, not the current head.</p>}
+      {data.evidence.sha && f.head !== data.evidence.sha && <p class="notice">The PR has changed since this run’s recorded revision. Recorded results apply to {data.evidence.sha.slice(0,12)}, not the current head.</p>}
       {f.checks.length === 0 && <p class="meta">No CI checks reported.</p>}{f.checks.map(c => <p><b>{c.name}</b> · {c.state}</p>)}
       {f.reviews.map(r => <details class="disclosure"><summary>{r.author} · {r.state}</summary><p>{r.body}</p></details>)}
       {f.warnings.map(w => <p class="meta">{w}</p>)}

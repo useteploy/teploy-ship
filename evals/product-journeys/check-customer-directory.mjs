@@ -82,7 +82,18 @@ try {
     assert.deepEqual(await page.locator('#contacts li').allTextContents(), ['Grace Hopper — grace@example.test']);
     const saved = await page.request.get(base + '/api/contacts');
     assert.equal((await saved.json()).length, 5, 'Search must not modify stored contacts');
-    console.log('Search API, literal wildcards, trimming, browser filtering/clearing, stale responses and data preservation passed.');
+    for (const [name, email] of [['Grace New', 'grace.new@example.test'], ['Ada New', 'ada.new@example.test']]) {
+      await page.getByLabel('Name', { exact: true }).fill(name);
+      await page.getByLabel('Email', { exact: true }).fill(email);
+      const refreshed = page.waitForResponse(r => new URL(r.url()).pathname === '/api/contacts' && r.request().method() === 'GET');
+      await button.click();
+      await refreshed;
+      await names(['Grace Hopper', 'Grace New']);
+      assert.equal(await search.inputValue(), 'Grace', 'Saving must retain the active search');
+    }
+    const count = Number(execFileSync('python3', ['-c', 'import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute("SELECT COUNT(*) FROM contacts").fetchone()[0])', db], { encoding: 'utf8' }));
+    assert.equal(count, 7, 'Both matching and nonmatching customers must be saved');
+    console.log('Search API, literal wildcards, trimming, browser filtering/clearing, stale responses, active-filter saves and data preservation passed.');
   }
   for (const width of [390, 1440]) {
     await page.setViewportSize({ width, height: 900 });

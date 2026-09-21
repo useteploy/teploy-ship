@@ -127,7 +127,7 @@ launches. Full persistent interactive workspaces, automatic merge reconciliation
 coordinated multi-repository work and release-loop proof remain open.
 
 
-Verification: 1,167 runtime, 40 script and 91 web tests; production web build;
+Verification: 1,167 runtime, 40 script and 94 web tests; production web build;
 18 live responsive page checks. A real private fixture completed a question,
 standalone plan, UI-approved wording change, baseline/final tests, independently
 checked browser/API/SQLite behavior and a merge approved through Ship. The
@@ -156,3 +156,17 @@ A repeated question corrected the size-limit claim but incorrectly described a
 relative database path as relative to the app file rather than the working
 directory. Keep factual answer grading open. Empty machine findings are hidden
 from the readable response; Activity retains the original output.
+
+
+Follow-up evaluation found the conversation displayed unconsumed model text after
+the first action, including imagined tool output. The UI now uses the executor’s
+`transcriptTurn` projection; plan-only prose is exempt because it is not an
+execution turn. Regression coverage includes both cases. Independent PR review
+found the seeded search regression but mixed in pre-existing issues; prompt scope
+attribution was tightened. An expanded browser grade exposed active-filter/save
+behavior missing from the first search grade; same-PR correction passed the expanded independent browser grade, including matching and nonmatching saves under an active filter.
+
+Read-only reviews now carry the checked-out SHA into the evidence view, so a
+later PR update warns that the recorded results apply to the earlier revision.
+The display says “recorded revision” for both reviews and published changes;
+a review is never described as having pushed a commit.
