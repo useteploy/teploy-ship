@@ -18,11 +18,11 @@ export function TaskComposer({ projects, selectedRepo, initialTask = "", initial
       const raw = sessionStorage.getItem("ship-new-request");
       if (raw) {
         const draft = JSON.parse(raw);
-        if ((draft.template ?? "") !== initialTask) { setRestored(true); return; }
+        if ((draft.template ?? "") !== initialTask || (selectedRepo && draft.repo !== selectedRepo)) { setRestored(true); return; }
         if (typeof draft.pr === "string") setPr(draft.pr);
         if (typeof draft.plan === "boolean") setPlan(draft.plan);
         if (typeof draft.task === "string") setTask(draft.task);
-        if (typeof draft.repo === "string") setRepo(draft.repo);
+        if (typeof draft.repo === "string" && projects.some(p => p.url === draft.repo)) setRepo(draft.repo);
         if (JOURNEYS.some(j => j.id === draft.journey)) setJourney(draft.journey);
       }
     } catch {}

@@ -606,7 +606,7 @@ async function applyEdits(executor: AgentExecutor, edits: EditHunk[]): Promise<E
     const occurrences = hunk.search === "" ? 0 : current.split(hunk.search).length - 1;
     if (occurrences === 0) {
       return fail(
-        `edit failed${label}: SEARCH text not found in ${hunk.file}. Read the file and copy the exact text (whitespace matters).` +
+        `edit failed${label}: SEARCH text not found in ${hunk.file}. Read the file and copy complete lines exactly (whitespace and the trailing newline matter). An inline fragment followed by more text on the same line will not match a SEARCH block ending in a newline.` +
           (i > 0 ? " No hunk in this block was applied." : ""),
       );
     }

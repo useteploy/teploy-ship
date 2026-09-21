@@ -114,7 +114,7 @@ connector coverage and measured competitor coding-quality comparisons. This
 change adds interval schedules and forge reads, not automatic merge
 reconciliation or a general workflow graph. See docs/WORKSPACE.md.
 
-## 2026-09-21 — journey foundations (verification in progress)
+## 2026-09-21 — journey foundations and simple team requests
 
 Project-based change/question/plan/review requests, approval-only team intake,
 requester-visible history, draft retention and clearer task status. Non-change
@@ -125,3 +125,23 @@ restores refuse invalid checkouts before agent execution. Intake claims now carr
 the intended run ID in both launch paths so reconciliation can recover interrupted
 launches. Full persistent interactive workspaces, automatic merge reconciliation,
 coordinated multi-repository work and release-loop proof remain open.
+
+
+Verification: 1,167 runtime, 40 script and 91 web tests; production web build;
+18 live responsive page checks. A real private fixture completed a question,
+standalone plan, UI-approved wording change, baseline/final tests, independently
+checked browser/API/SQLite behavior and a merge approved through Ship. The
+wording diff contained only the requested label. Real preparation/test receipts
+became stale after configuration changed and valid after restoring the exact
+tested configuration. A worker timer produced one proposal across repeated ticks
+and stopped when paused (the scratch schedule timestamp was advanced for the
+test, rather than waiting an hour). The scratch schedule remains paused.
+
+Evaluation found an unsupported claim in an investigation answer and wasted
+inline-edit retries: tightened question instructions and explained the editor's
+trailing-newline matching requirement. These are mitigations, not proof that
+model answers are always correct. `evals/product-journeys` now contains an
+independent browser/SQLite grader. Snapshot identity validation has unit coverage;
+the latest live plan used a warm retained sandbox, so its successful worker
+upgrade/resume is not new proof of snapshot restoration. Full-stack search
+acceptance and the wider journey catalogue remain separate work.

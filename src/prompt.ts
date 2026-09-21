@@ -118,7 +118,7 @@ data = load_something()
 print(len(data))
 \`\`\`${searchDoc}
 
-- Edit a file surgically (the SEARCH text must match the file exactly — copy it verbatim, whitespace included):
+- Edit a file surgically (the SEARCH text must match the file exactly, including its trailing newline — copy complete lines verbatim. For inline/minified HTML, copy the whole containing line, not only the button or phrase):
 \`\`\`edit path/to/file.py
 <<<<<<< SEARCH
 def broken(x):

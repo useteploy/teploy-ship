@@ -83,6 +83,7 @@ export async function action({
         trust: "operator",
         mode: "scan",
         environmentCheck: true,
+        journey: "investigate",
         task: `Verify project environment: ${project.label ?? project.repo}. Inspect repository instructions and dependency manifests. Run the configured test command ${project.testCommand ?? "or detect the appropriate test command"}. Confirm required runtimes and services are available. Do not modify tracked files or publish changes. Report exact commands and failures with actionable setup fixes. Finish after verification; do not broaden into a code audit.`,
       });
       return redirect(`/runs/${runId}?view=review`);
