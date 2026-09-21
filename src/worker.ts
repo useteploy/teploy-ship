@@ -28,6 +28,7 @@ import type { NucleusPgwire } from "./nucleus-pgwire.js";
 import type { IntakeStore, IntakePolicy, IntakeTask } from "./intake.js";
 import type { SourcePolicy } from "./policies.js";
 import type { Project, ProjectStore } from "./projects.js";
+import { projectForReference } from "./projects.js";
 import { repoSlug } from "./observe.js";
 import {
   DEFAULT_MAX_INODE_USED_PCT,
@@ -353,7 +354,8 @@ export async function sweepIntake(deps: IntakeSweepDeps): Promise<void> {
   for (const p of (await deps.projects?.list()) ?? []) projects.set(p.repo, p);
   const projectOf = (task: IntakeTask): Project | undefined => {
     const slug = task.repo !== undefined ? repoSlug(task.repo) : null;
-    return slug === null ? undefined : projects.get(slug);
+    const project = slug === null ? undefined : projects.get(slug);
+    return project && task.repo ? projectForReference(project, task.repo) : project;
   };
   const anyAuto = Object.values(deps.policies).some((p) => p === "auto") || [...projects.values()].some((p) => p.sourcePolicy === "auto");
   if (!anyAuto) return;
@@ -362,7 +364,12 @@ export async function sweepIntake(deps: IntakeSweepDeps): Promise<void> {
   for (const task of await deps.intake.list("proposed")) {
     // Team submissions explicitly request human approval, even on auto projects.
     if (task.source === "team-request") continue;
-    const project = projectOf(task);
+    let project: Project | undefined;
+    try { project = projectOf(task); }
+    catch (error) {
+      deps.log(`[worker] intake: project identity unresolved; task ${task.taskId} stays proposed`);
+      continue;
+    }
     if ((project?.sourcePolicy ?? deps.policies[task.source]) !== "auto") continue;
     // Outside its window an auto source is a propose source: the task waits
     // for a human, nothing is claimed, and the next in-window sweep takes it.

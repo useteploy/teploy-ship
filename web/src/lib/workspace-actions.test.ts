@@ -257,3 +257,20 @@ test("retrying a failed PR revision retains its original PR before publication",
     assert.equal(input.input.requireOpenPr,true);
   } finally {clearInterval(responder)}
 });
+
+test("legacy project identity conflicts preserve run history but prevent new work", async () => {
+  const runtime = await shipRuntime();
+  const repo = "https://github.com/legacy/history";
+  const id = "run-legacy-identity";
+  await enqueueRun(runtime, {runId:id,repo,task:"Original request",model:"test",source:"manual",trust:"operator"});
+  const meta = await runtime.loadMeta(id); assert.ok(meta);
+  await runtime.saveMeta({...meta,status:"completed"});
+  await runtime.projects.set({repo:"legacy/history",autoMerge:false,autoDeploy:false});
+  const data = await run.loader({params:{id},request:request("/runs/"+id,{})});
+  assert.equal(data.meta?.runId,id);
+  assert.match(data.messageError ?? "", /identity conflicts/);
+  assert.equal(data.planSupported,false);
+  const res = await run.action({params:{id},request:request("/runs/"+id,{intent:"follow-up",message:"Try again",journey:"change"})});
+  assert.match(decodeURIComponent(res.headers.get("location") ?? ""), /identity conflicts/);
+  assert.equal((await runtime.listMeta({limit:100})).filter(m => m.task === "Try again").length,0);
+});

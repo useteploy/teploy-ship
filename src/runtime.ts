@@ -802,7 +802,7 @@ async function dailyBudgetForSource(
   repo?: string,
 ): Promise<number> {
   if (repo !== undefined) {
-    const project = await runtime.projects.forRepo(repo).catch(() => null);
+    const project = await runtime.projects.forRepo(repo);
     if (project?.dailyBudgetUSD !== undefined) return project.dailyBudgetUSD;
   }
   // A policy store that cannot be read must not silently mean "no cap" — that

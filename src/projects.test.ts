@@ -29,7 +29,7 @@ test("project store: keyed by slug, url kept, enums validated, empty fields drop
   await store.set({ repo: GO_URL, url: GO_URL, sandboxImage: " golang:1.24 ", label: "", autoMerge: false, autoDeploy: false });
   const p = await store.forRepo("tyler/ship-go");
   assert.deepEqual(p, { repo: "tyler/ship-go", url: GO_URL, sandboxImage: "golang:1.24", autoMerge: false, autoDeploy: false });
-  assert.deepEqual(await store.forRepo("git@100.108.123.49:Tyler/ship-go"), p, "any URL form finds the record");
+  await assert.rejects(store.forRepo("git@100.108.123.49:Tyler/ship-go"), /identity conflicts/, "SSH cannot implicitly alias a different HTTP origin/port");
 
   assert.throws(() => normalizeProject({ repo: "a/b", sandboxNetwork: "bridge" as never, autoMerge: false, autoDeploy: false }), /none, allowlist \(alias: egress\) or open/);
   assert.throws(() => normalizeProject({ repo: "a/b", sourcePolicy: "yes" as never, autoMerge: false, autoDeploy: false }), /ignore, propose or auto/);
@@ -210,7 +210,7 @@ test("sweep: a project's sourcePolicy overrides its source's for that repo's tas
   const projects = new FileProjectStore(dir);
   await projects.set({ repo: GO_URL, url: GO_URL, sourcePolicy: "auto", autoMerge: false, autoDeploy: false });
   await projects.set({ repo: TS_URL, url: TS_URL, sourcePolicy: "propose", autoMerge: false, autoDeploy: false });
-  const tasks = [task("go", GO_URL), task("ts", TS_URL), task("plain")];
+  const tasks = [task("go", GO_URL), task("foreign-go", "https://other-forge.example/Tyler/ship-go"), task("ts", TS_URL), task("plain")];
   const states = new Map(tasks.map((t) => [t.taskId, t]));
   const launched: string[] = [];
   const deps: IntakeSweepDeps = {
@@ -236,7 +236,8 @@ test("sweep: a project's sourcePolicy overrides its source's for that repo's tas
     log: () => {},
   };
   await sweepIntake(deps);
-  assert.deepEqual(launched, ["go"], "the auto project launched; the propose project and the repo-less task waited");
+  assert.deepEqual(launched, ["go"], "only the matching auto project launched; a different forge cannot borrow its policy");
+  assert.equal(states.get("foreign-go")?.state, "proposed");
 });
 
 /**
@@ -455,4 +456,39 @@ test("C4: enqueue materialises the declaration and the ladder-capped authority; 
   } finally {
     for (const k of envKeys) process.env[k] = saved[k];
   }
+});
+
+test("project identity: another forge cannot read, overwrite or remove a registered project's settings", async () => {
+  const store = new FileProjectStore(await tempDir());
+  const original = { repo: 'team/app', url: 'https://github.com/team/app', autoMerge: false, autoDeploy: false, dailyBudgetUSD: 1 };
+  await store.set(original);
+  for (const ref of ['https://forge.example/team/app', 'http://github.com/team/app', 'https://github.com:444/team/app']) {
+    await assert.rejects(store.forRepo(ref), /identity conflicts/);
+    await assert.rejects(store.remove(ref), /identity conflicts/);
+    await assert.rejects(store.set({ ...original, url: ref }), /identity conflicts/);
+  }
+  await assert.rejects(store.set({ ...original, url: undefined }), /identity conflicts/);
+  assert.deepEqual(await store.forRepo(original.url + '.git/'), original);
+  assert.deepEqual(await store.forRepo('team/app'), original);
+});
+
+test("project identity: concurrent same-slug registration never replaces the winning origin", async () => {
+  const store = new FileProjectStore(await tempDir());
+  const outcomes = await Promise.allSettled(['https://github.com/team/app', 'https://forge.example/team/app'].map(url => store.set({ repo: 'team/app', url, autoMerge: false, autoDeploy: false })));
+  assert.equal(outcomes.filter(x => x.status === 'fulfilled').length, 1);
+  const [saved] = await store.list();
+  assert.ok(saved?.url);
+  assert.deepEqual(await store.forRepo(saved.url), saved);
+  const other = saved.url.includes('github.com') ? 'https://forge.example/team/app' : 'https://github.com/team/app';
+  await assert.rejects(store.forRepo(other), /identity conflicts/);
+});
+
+test("project identity: a URL-less legacy record requires an explicit clone URL before URL-based execution", async () => {
+  const store = new FileProjectStore(await tempDir());
+  const old = { repo: 'team/app', autoMerge: false, autoDeploy: false, testCommand: 'true' };
+  await store.set(old);
+  assert.ok(await store.forRepo('team/app'));
+  await assert.rejects(store.forRepo('https://github.com/team/app'), /identity conflicts/);
+  await store.set({ ...old, url: 'https://github.com/team/app' });
+  assert.equal((await store.forRepo('https://github.com/team/app'))?.testCommand, 'true');
 });

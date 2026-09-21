@@ -90,7 +90,9 @@ export async function action({
     catch { return redirectTo(`/runs/${runId}?messageError=Choose+a+supported+task+type`); }
     const readOnly = journey !== "change";
     if (form.get("plan") === "on" && !readOnly) {
-      const project = input?.repo ? await runtime.projects.forRepo(input.repo) : null;
+      let project;
+      try { project = input?.repo ? await runtime.projects.forRepo(input.repo) : null; }
+      catch (e) { return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(e instanceof Error ? e.message : "Could not resolve project")}`); }
       if ((project?.harness ?? process.env.SHIP_HARNESS ?? "native") !== "native") return redirectTo(`/runs/${runId}?messageError=Plan+review+requires+the+native+harness.+Select+native+in+Project+settings+or+turn+off+plan+review.`);
     }
     const facts = verificationFactsFromEvents(events);

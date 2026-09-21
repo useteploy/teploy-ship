@@ -214,7 +214,7 @@ export function normalizeProject(input: Project): Project {
     return t === undefined || t === "" ? undefined : t;
   };
   const num = (v: number | undefined): number | undefined => (v !== undefined && Number.isFinite(v) && v > 0 ? v : undefined);
-  const url = str(input.url);
+  const url = str(input.url) ?? (repositoryIdentity(input.repo) !== null ? str(input.repo) : undefined);
   if (url !== undefined && repoSlug(url) === null) throw new Error(`not a repository URL: ${url}`);
   const sandboxNetwork = parseNetworkTier(input.sandboxNetwork);
   if (sandboxNetwork === null) {
@@ -302,6 +302,40 @@ export function normalizeProject(input: Project): Project {
   };
 }
 
+/** A legacy slug must never silently select configuration from another forge. */
+export class ProjectIdentityError extends Error {
+  constructor(repo: string) {
+    super(`Repository identity conflicts with project ${repo}. Check the clone URL in Projects; legacy records need an explicit URL. Same-named repositories on different forges are not supported yet.`);
+    this.name = "ProjectIdentityError";
+  }
+}
+
+function repositoryIdentity(value: string): string | null {
+  try {
+    const url = new URL(value);
+    if (!["http:", "https:", "file:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) return null;
+    const path = url.pathname.replace(/\/+$/, "").replace(/\.git$/i, "");
+    return `${url.protocol}//${url.host}${url.protocol === "file:" ? path : path.toLowerCase()}`;
+  } catch { return null; }
+}
+
+/** Bare legacy slugs remain valid explicit references. URLs must match exactly. */
+export function projectForReference(project: Project, reference: string): Project {
+  const slug = repoSlug(reference);
+  if (slug === project.repo && slug === reference.trim().toLowerCase()) return project;
+  if (project.url !== undefined && repositoryIdentity(project.url) !== null && repositoryIdentity(project.url) === repositoryIdentity(reference)) return project;
+  // URL-less legacy records cannot establish the origin of a URL request.
+  throw new ProjectIdentityError(project.repo);
+}
+
+function assertSameProject(existing: Project | null, next: Project): void {
+  if (!existing?.url) return;
+  const identity = repositoryIdentity(existing.url);
+  // Unsupported legacy clone spellings can be edited without letting two
+  // unparsable values (both null) silently rebind the project.
+  if (!next.url || (identity === null ? existing.url !== next.url : identity !== repositoryIdentity(next.url))) throw new ProjectIdentityError(existing.repo);
+}
+
 type Stored = Omit<Project, "repo">;
 
 /**
@@ -340,12 +374,15 @@ export class FileProjectStore implements ProjectStore {
     const key = repoSlug(repo);
     if (key === null) return null;
     const entry = (await this.#read())[key];
-    return entry === undefined ? null : fromStored(key, entry);
+    return entry === undefined ? null : projectForReference(fromStored(key, entry), repo);
   }
 
   async set(project: Project): Promise<void> {
     const { repo, ...rest } = normalizeProject(project);
-    await updateJsonFile<Record<string, Stored>>(this.#path, {}, (all) => ({ ...all, [repo]: rest }));
+    await updateJsonFile<Record<string, Stored>>(this.#path, {}, (all) => {
+      assertSameProject(all[repo] ? fromStored(repo, all[repo]!) : null, { repo, ...rest });
+      return { ...all, [repo]: rest };
+    });
   }
 
   async list(): Promise<Project[]> {
@@ -359,6 +396,7 @@ export class FileProjectStore implements ProjectStore {
     const key = repoSlug(repo) ?? repo.trim().toLowerCase();
     await updateJsonFile<Record<string, Stored>>(this.#path, {}, (all) => {
       const next = { ...all };
+      if (all[key]) projectForReference(fromStored(key, all[key]!), repo);
       delete next[key];
       return next;
     });
@@ -399,7 +437,7 @@ export class NucleusProjectStore implements ProjectStore {
     const key = repoSlug(repo);
     if (key === null) return null;
     const rows = await this.#db.query("SELECT repo, doc FROM ship_projects WHERE repo = $1", [key]);
-    return rows.length > 0 ? this.#parse(rows[0]!) : null;
+    return rows.length > 0 ? projectForReference(this.#parse(rows[0]!), repo) : null;
   }
 
   async set(project: Project): Promise<void> {
@@ -410,7 +448,16 @@ export class NucleusProjectStore implements ProjectStore {
       table: "ship_projects",
       keyColumn: "repo",
       key: repo,
-      update: () => this.#db.query("UPDATE ship_projects SET doc = $1 WHERE repo = $2", [doc, repo]),
+      update: async () => {
+        const rows = await this.#db.query("SELECT repo, doc FROM ship_projects WHERE repo = $1", [repo]);
+        if (!rows.length) throw new Error("Project changed during update; retry");
+        const prior = rows[0]!;
+        assertSameProject(this.#parse(prior), { repo, ...rest });
+        // Compare-and-set prevents a concurrent registration changing identity
+        // between the check and write. Never overwrite an unexamined record.
+        const changed = await this.#db.exec("UPDATE ship_projects SET doc = $1 WHERE repo = $2 AND doc = $3", [doc, repo, prior.doc]);
+        if (changed === 0) throw new Error("Project changed during update; retry");
+      },
       insert: () => this.#db.query("INSERT INTO ship_projects (repo, doc) VALUES ($1, $2)", [repo, doc]),
     });
   }
@@ -424,7 +471,12 @@ export class NucleusProjectStore implements ProjectStore {
   async remove(repo: string): Promise<void> {
     await this.#ensure();
     const key = repoSlug(repo) ?? repo.trim().toLowerCase();
-    await this.#db.query("DELETE FROM ship_projects WHERE repo = $1", [key]);
+    const rows = await this.#db.query("SELECT repo, doc FROM ship_projects WHERE repo = $1", [key]);
+    if (!rows.length) return;
+    projectForReference(this.#parse(rows[0]!), repo);
+    if (await this.#db.exec("DELETE FROM ship_projects WHERE repo = $1 AND doc = $2", [key, rows[0]!.doc]) === 0) {
+      throw new Error("Project changed during removal; retry");
+    }
   }
 }
 

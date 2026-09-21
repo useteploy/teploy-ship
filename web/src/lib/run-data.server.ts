@@ -13,6 +13,7 @@ import { may } from "./authority.server.js";
 import { runOutcome, toTimeline, recordedSteps } from "./timeline.js";
 import type { RunOutcome, TimelineItem, RecordedStep } from "./timeline.js";
 import { startSpan } from "./observe.server.js";
+import { ProjectIdentityError } from "../../../dist/projects.js";
 
 export interface RunData {
   userMessage?: string;
@@ -146,8 +147,15 @@ export async function runData({ params, request }: { params: { id: string }; req
         typical = null;
       }
     }
-    const currentProject = repo ? await runtime.projects.forRepo(repo) : null;
-    const planSupported = (currentProject?.harness ?? process.env.SHIP_HARNESS ?? "native") === "native";
+    let projectError: string | null = null;
+    const currentProject = repo ? await runtime.projects.forRepo(repo).catch(error => {
+      if (!(error instanceof ProjectIdentityError)) throw error;
+      projectError = error.message;
+      return null;
+    }) : null;
+    // Historical events remain readable even when current project identity
+    // needs repair. This advisory read grants no authority to start new work.
+    const planSupported = projectError === null && (currentProject?.harness ?? process.env.SHIP_HARNESS ?? "native") === "native";
     const facts = verificationFactsFromEvents(events);
     const reviewedHead = (started?.data as any)?.input?.mode === "scan" ? (events.find(e => e.type === "step-completed" && e.name === "repo-setup")?.data as any)?.result?.headSha : undefined;
     if (facts.pr || typeof (started?.data as any)?.input?.pr === "number") {
@@ -170,8 +178,8 @@ export async function runData({ params, request }: { params: { id: string }; req
       parentRunId: typeof (started?.data as any)?.input?.parentRunId === 'string' ? (started?.data as any).input.parentRunId : undefined,
       canSteer: await may('steer', await currentUser(request)),
       planSupported,
-      canLaunch: await may('approve', await currentUser(request)),
-      messageError: query.get('messageError'),
+      canLaunch: projectError === null && await may('approve', await currentUser(request)),
+      messageError: query.get('messageError') ?? projectError,
       meta,
       items: toTimeline(events),
       outcome,

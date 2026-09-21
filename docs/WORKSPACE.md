@@ -165,3 +165,14 @@ New runs check restored snapshots for a valid Git checkout before the agent
 continues, and check the origin for non-PR tasks. Fork PR identity remains the
 forge resolver's responsibility. This guards missing/wrong checkouts; it does not
 prove every uncommitted byte survived. Existing run inputs retain old behavior.
+# Project identity compatibility
+
+Projects currently use an owner/repository key with an explicit clone URL.
+Requests must match that URL's origin, protocol and port. Ship refuses a second
+forge's same-named repository instead of borrowing the first project's settings.
+Multiple same-named repositories across forges are not supported yet.
+
+If a legacy project reports an identity conflict, open Projects using its
+owner/repository name and set its correct clone URL. Existing run histories
+remain readable and parked runs retain their recorded inputs. Do not delete a
+project to resolve a conflict without first checking its settings and references.
