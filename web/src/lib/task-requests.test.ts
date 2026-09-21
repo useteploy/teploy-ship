@@ -12,6 +12,7 @@ const { action } = await import("../routes/index.js");
 const { shipRuntime } = await import("./store.server.js");
 const { signSession, SESSION_COOKIE } = await import("./session.server.js");
 const runtime = await shipRuntime();
+await runtime.governance.setAuthority("approve", { roles: ["admin"], users: [] });
 const url = "https://git.example.com/team/site";
 await runtime.projects.set({ repo: url, url, autoMerge: false, autoDeploy: false });
 function request(role: "editor" | "viewer", fields: Record<string, string>) {
@@ -29,6 +30,8 @@ test("teammate can submit a deduplicated plan request without launching; viewer 
   assert.equal(tasks[0].source, "team-request");
   assert.equal(tasks[0].requestedBy, "editor");
   assert.equal((await runtime.listMeta()).length, 0);
+  const refused = await action({ request: request("editor", { ...fields, intent: "new-run" }) });
+  assert.match(refused.headers.get("location") ?? "", /denied=approve/);
   assert.equal((await action({ request: request("viewer", { ...fields, requestId: randomUUID() }) })).status, 403);
 });
 test("unregistered project and invalid journey do not create a proposal", async () => {

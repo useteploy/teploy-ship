@@ -1,11 +1,20 @@
+import { useEffect, useRef } from "preact/hooks";
 import { RichText } from "./rich-text.js";
 import { safeLink, splitDiff } from "../lib/workspace.js";
 import type { Message, DiffSnapshot, Evidence } from "../lib/workspace.js";
 export function Conversation({ messages, expanded = false }: { messages: Message[]; expanded?: boolean }) {
+  const root = useRef<HTMLElement>(null);
+  const previousHeight = useRef<number | null>(null);
+  useEffect(() => {
+    const scroller = root.current?.parentElement;
+    if (!scroller?.classList.contains("conversation-scroll")) return;
+    if (previousHeight.current === null || scroller.scrollTop + scroller.clientHeight >= previousHeight.current - 60) scroller.scrollTop = scroller.scrollHeight;
+    previousHeight.current = scroller.scrollHeight;
+  }, [messages.length]);
   const earlier = !expanded && messages.length > 8 ? messages.slice(0, -6) : [];
   const recent = earlier.length ? messages.slice(-6) : messages;
   return (
-    <section aria-label="Conversation" class="conversation">
+    <section ref={root} aria-label="Conversation" class="conversation">
       {earlier.length > 0 && <details class="disclosure"><summary>{earlier.length} earlier messages</summary><Conversation messages={earlier} expanded /></details>}
       {recent.map((m, i) => (
         <article class="message" key={i}>

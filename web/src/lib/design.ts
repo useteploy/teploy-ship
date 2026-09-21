@@ -150,4 +150,6 @@ table.runs td { padding-top: 10px; padding-bottom: 10px; }
 .conversation-scroll { max-height: 58vh; overflow-y: auto; overscroll-behavior: contain; padding-right: 12px; scrollbar-gutter: stable; }
 #reply { scroll-margin-top: 72px; }
 @media(max-width:600px) { .task-choices { grid-template-columns: 1fr; } .conversation-scroll { max-height: 52vh; } }
+.project-cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr)); gap:16px; }
+.project-cards h2 { font-size:15px; overflow-wrap:anywhere; }
 `;

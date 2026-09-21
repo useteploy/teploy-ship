@@ -550,9 +550,15 @@ export default function Projects({ data }: { data: ProjectsData | SourcesData | 
         <>
           <p class="meta"><a href="/projects">projects</a> / {p.repo}{p.label !== undefined ? ` · ${p.label}` : ""}</p>
           {p.managedBy !== undefined && <ManagedPanel p={p} drift={(data as ProjectsData).drift[p.repo] ?? []} />}
-          <div class="card">
-            <ProjectForm p={p} data={data} />
-          </div>
+          <section class="card"><h2 class="section">{p.label ?? p.repo}</h2><p>Choose this project when requesting work. Its setup is applied automatically to new tasks.</p><p class="row-actions" style="display:flex;gap:16px">{p.url && <a class="button primary" href={`/?repo=${encodeURIComponent(p.url)}#new-task`}>Request work</a>}<a href={`/setup?repo=${encodeURIComponent(p.repo)}`}>Check project readiness</a></p>
+          <div class="table-wrap"><table><thead><tr><th>Setting</th><th>Effective configuration</th><th>Source</th></tr></thead><tbody>
+            <tr><td>Agent</td><td>{p.harness ?? (data.workerHarness || "native")}</td><td>{p.harness ? "Project override" : "Deployment default"}</td></tr>
+            <tr><td>Environment</td><td>{p.sandboxImage ?? (data.workerImage || "Not configured")}</td><td>{p.sandboxImage ? "Project override" : "Deployment default"}</td></tr>
+            <tr><td>Preparation</td><td>{p.preparation?.command ?? "No preparation command"}</td><td>Project</td></tr>
+            <tr><td>Tests</td><td>{p.verification?.tests ?? p.testCommand ?? "Detected from repository; deployment fallback when available"}</td><td>{p.verification?.tests || p.testCommand ? "Project override" : "Resolved when the task starts"}</td></tr>
+            <tr><td>Team requests</td><td>Always require approval to start</td><td>Request policy</td></tr>
+          </tbody></table></div><p class="meta">Deployment defaults shown here are the dashboard's configuration. Verify readiness through a real worker run. Changes apply to future tasks; existing tasks retain their recorded setup.</p></section>
+          {data.canEdit && <details class="disclosure"><summary>Edit project configuration</summary><div class="card"><ProjectForm p={p} data={data} /></div><p class="meta">Choose “worker default” or clear an optional override to inherit it again. Save to apply the change to new tasks.</p></details>}
           <h2 class="section">Webhook</h2>
           <p class="meta">
             Point the repo's webhook at{" "}
@@ -566,6 +572,9 @@ export default function Projects({ data }: { data: ProjectsData | SourcesData | 
           {data.projects.length === 0 ? (
             <p class="empty">No projects yet.</p>
           ) : (
+            <>
+            <div class="project-cards">{data.projects.map(r => <article class="card" key={r.repo}><h2>{r.label ?? r.repo}</h2><p class="meta">{r.url ? "Accepts team requests. Verify setup before starting work." : "An administrator needs to connect this repository."}</p><p class="row-actions" style="display:flex;gap:16px">{r.url && <a class="button" href={`/?repo=${encodeURIComponent(r.url)}#new-task`}>Request work</a>}<a href={`/projects?repo=${encodeURIComponent(r.repo)}`}>Project details</a></p></article>)}</div>
+            <details class="disclosure"><summary>Execution and automation overview</summary>
             <div class="table-wrap">
               <table class="runs">
                 <thead>
@@ -628,7 +637,7 @@ export default function Projects({ data }: { data: ProjectsData | SourcesData | 
                   })}
                 </tbody>
               </table>
-            </div>
+            </div></details></>
           )}
           <h2 class="section" id="add-project">Add a project</h2>
           <div class="card">

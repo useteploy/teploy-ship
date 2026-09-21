@@ -20,7 +20,7 @@ export function intakeJourney(kind: string) {
 }
 export function journeyInstruction(journey: Journey): string {
   switch (journey) {
-    case "investigate": return "Answer the user's question directly using the repository and observed evidence. Cite relevant file paths and lines, explain uncertainty, and suggest next steps. Do not broaden this into an unrelated repository audit. Do not publish changes.";
+    case "investigate": return "Answer the user's question in plain language, starting with a short direct answer. Put file references and technical details in a supporting section. Distinguish behavior actually tested from conclusions based on reading code; do not claim a test proved something it did not exercise. Stay within the question, and do not add an unsolicited defect audit or speculative findings. Do not publish changes.";
     case "plan": return "Produce a plan, not an implementation. Investigate the current project, state assumptions and open questions, propose scoped steps and acceptance checks, and explain tradeoffs in plain language. Do not modify tracked files or publish changes. The user will decide whether to implement in a separate task.";
     case "review": return "Review the requested scope for concrete defects. Give file locations, impact, evidence and suggested fixes. Distinguish verified defects from questions. Do not implement or publish changes.";
     case "change": return "Make the requested focused change using the project's existing conventions. Ask when a material requirement is unclear. Verify the relevant behavior and explain the result in plain language, including what could not be verified.";

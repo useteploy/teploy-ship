@@ -50,7 +50,7 @@ export async function loader({ request }: { request: Request }): Promise<InboxDa
   const canLaunch = await may("approve", me);
   const recentRequests = (await runtime.intake.list()).filter(t => t.source === "team-request" && t.state !== "proposed" && (canLaunch || t.requestedBy === me?.user)).sort((a,b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 12);
   const parked = runs.filter((r) => r.status === "waiting" && r.eventName !== undefined);
-  return { template: (await workflows(runtime)).find(t=>t.id===query.get("workflow")), selectedRepo: query.get("repo") ?? "", canLaunch, canRequest: me?.role === "admin" || me?.role === "editor", requestId: randomUUID(), submitted: query.get("submitted"), error: query.get("error"), projects: projects.map(p => ({ url: p.url ?? p.repo, label: p.label ?? p.repo, planSupported: (p.harness ?? process.env.SHIP_HARNESS ?? "native") === "native" })), parked, recentRequests, proposed, store: runtime.kind, model: defaultModel(), decisionTaken, denied };
+  return { template: (await workflows(runtime)).find(t=>t.id===query.get("workflow")), selectedRepo: query.get("repo") ?? "", canLaunch, canRequest: me?.role === "admin" || me?.role === "editor", requestId: randomUUID(), submitted: query.get("submitted"), error: query.get("error"), projects: projects.filter(p => !!p.url).map(p => ({ url: p.url ?? p.repo, label: p.label ?? p.repo, planSupported: (p.harness ?? process.env.SHIP_HARNESS ?? "native") === "native" })), parked, recentRequests, proposed, store: runtime.kind, model: defaultModel(), decisionTaken, denied };
 }
 
 export async function action({ request }: { request: Request }): Promise<Response> {
