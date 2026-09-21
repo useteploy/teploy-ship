@@ -1031,3 +1031,20 @@ teploy secret set SHIP_WEB_TOKEN "$(openssl rand -hex 32)" && teploy deploy
 Every session minted from the old token stops working immediately. Named
 accounts are unaffected — their roles are re-read from the store on every
 request.
+
+### Dependency updates
+
+Install both root and `web/` dependencies before running `pnpm test`: deployment
+seam tests compare production pins to the installed packages exercised locally.
+Docker uses `deploy/package.ship.json` and `deploy/package.web.json`, with their
+matching `package-lock.ship.json` / `package-lock.web.json` files. Both installs
+use `npm ci`; changing a manifest requires refreshing the corresponding lockfile.
+Web security overrides must be carried into the deployment npm manifest too.
+
+To regenerate production lockfiles, stage the Ship manifest as `package.json`
+in an empty temporary directory and the web manifest as `web/package.json`.
+Run `npm install --package-lock-only --ignore-scripts --no-audit --no-fund` in
+that order in each directory, then copy the two lockfiles back under `deploy/`.
+Keep the relative layout: the web package links `teploy-ship` via `file:..`.
+Review resolved changes and run `node scripts/audit-deployment.mjs`, required
+suites/build, and image/browser acceptance before deploying.

@@ -170,3 +170,13 @@ Read-only reviews now carry the checked-out SHA into the evidence view, so a
 later PR update warns that the recorded results apply to the earlier revision.
 The display says “recorded revision” for both reviews and published changes;
 a review is never described as having pushed a commit.
+
+## 2026-09-21 — release programme audit started
+
+[Incremental findings](docs/AUDIT_2026-09-21.md): production manifests differed
+from tested framework/driver versions and omitted security overrides. Aligned
+pins, frozen production lockfiles, deployment seam checks and expanded CI audits
+address that dependency drift. Eight web advisory entries are patched; local and
+production dependency scans report zero at the time of review. This is not a
+completed security audit. Project boundaries, submission idempotency, merge races,
+preview authorization and recovery targets remain explicitly open in the report.

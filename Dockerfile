@@ -62,22 +62,23 @@ RUN set -eux; \
 
 WORKDIR /app
 
-# ship runtime. deploy/package.ship.json pins EXACT versions (no ^ ranges), so
-# this install resolves the same tree every time even without a lockfile —
-# which is what the vendored @neutron-build tarballs make awkward to carry.
+# Production lockfiles freeze transitive dependencies as well as direct pins.
+# Keep both deployment manifests aligned with the versions tested locally.
 COPY deploy/package.ship.json package.json
+COPY deploy/package-lock.ship.json package-lock.json
 COPY dist/ dist/
-RUN pnpm install --prod --no-lockfile
+RUN npm ci --omit=dev --no-audit --no-fund
 
 # web app runtime (the web command spawns `pnpm exec neutron-ts preview` here)
 COPY deploy/package.web.json web/package.json
+COPY deploy/package-lock.web.json web/package-lock.json
 COPY web/dist/ web/dist/
 # the app-mode preview server SSRs route modules from SOURCE at runtime
 COPY web/src/ web/src/
 COPY web/index.html web/tsconfig.json web/vite.config.ts web/neutron.config.ts web/
 # npm here, not pnpm: pnpm 10 hard-fails on esbuild's postinstall in this
 # layout, while npm runs the required postinstall correctly.
-RUN cd web && npm install --omit=dev --no-package-lock --no-audit --no-fund
+RUN cd web && npm ci --omit=dev --no-audit --no-fund
 
 ENV NODE_ENV=production
 # durable state lives on a volume in file-store mode; nucleus mode needs none

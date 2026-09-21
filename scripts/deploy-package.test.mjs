@@ -55,3 +55,44 @@ test("the deployed package exports nothing that the build does not produce", () 
     assert.ok(statSync(file).isFile(), `${subpath} points at ${target.import}, which \`pnpm run build\` did not produce`);
   }
 });
+
+// SSR executes framework source in the deployed image. Testing a newer local
+// framework while pinning an older deployment tree misses security fixes and
+// route/runtime regressions even when the browser build is green.
+test("deployment pins match the installed packages exercised by Ship's suites", () => {
+  for (const [manifest, base] of [["deploy/package.ship.json", root], ["deploy/package.web.json", join(root, "web")]]) {
+    const deployed = JSON.parse(readFileSync(join(root, manifest), "utf8"));
+    for (const [name, version] of Object.entries(deployed.dependencies)) {
+      if (name === "teploy-ship") continue;
+      const installed = JSON.parse(readFileSync(join(base, "node_modules", name, "package.json"), "utf8"));
+      assert.equal(version, installed.version, `${manifest}: ${name} must deploy the tested version`);
+    }
+  }
+});
+
+test("production npm retains every web security override used by local pnpm", () => {
+  const local = JSON.parse(readFileSync(join(root, "web/package.json"), "utf8"));
+  const deployed = JSON.parse(readFileSync(join(root, "deploy/package.web.json"), "utf8"));
+  assert.ok(Object.keys(local.pnpm.overrides).length > 0);
+  for (const [name, version] of Object.entries(local.pnpm.overrides)) {
+    assert.equal(deployed.overrides[name], version, `${name}: production must retain the tested security override`);
+  }
+});
+
+test("production lockfiles describe the deployed manifests and Docker installs them frozen", () => {
+  for (const name of ["ship", "web"]) {
+    const manifest = JSON.parse(readFileSync(join(root, `deploy/package.${name}.json`), "utf8"));
+    const lock = JSON.parse(readFileSync(join(root, `deploy/package-lock.${name}.json`), "utf8"));
+    assert.equal(lock.lockfileVersion, 3);
+    assert.deepEqual(lock.packages[""].dependencies, manifest.dependencies);
+    for (const [path, pkg] of Object.entries(lock.packages)) {
+      if (!path.startsWith("node_modules/") || pkg.link) continue;
+      assert.ok(pkg.integrity, `${name}: ${path} needs registry integrity`);
+    }
+  }
+  const dockerfile = readFileSync(join(root, "Dockerfile"), "utf8");
+  assert.match(dockerfile, /COPY deploy\/package-lock.ship.json package-lock.json/);
+  assert.match(dockerfile, /COPY deploy\/package-lock.web.json web\/package-lock.json/);
+  assert.equal((dockerfile.match(/npm ci --omit=dev/g) ?? []).length, 2);
+  assert.doesNotMatch(dockerfile, /--no-lockfile|--no-package-lock/);
+});

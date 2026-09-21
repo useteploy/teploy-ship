@@ -4,15 +4,23 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@neutron-build/cli": "0.1.4",
-    "@neutron-build/core": "0.1.8",
-    "@preact/preset-vite": "2.9.4",
+    "@neutron-build/cli": "0.2.3",
+    "@neutron-build/core": "0.2.2",
+    "@preact/preset-vite": "2.10.5",
     "openid-client": "6.8.4",
     "preact": "10.25.4",
     "teploy-ship": "file:..",
-    "vite": "6.0.7"
+    "vite": "6.4.3"
   },
   "overrides": {
-    "@neutron-build/core": "0.1.8"
+    "nanoid@<4": ">=3.3.18",
+    "postcss": ">=8.5.23",
+    "hono": "4.13.5",
+    "@hono/node-server": ">=1.19.15",
+    "js-yaml@<4": "3.15.2",
+    "devalue": "5.9.2",
+    "browserslist": "4.28.7",
+    "baseline-browser-mapping": "2.11.0",
+    "@neutron-build/core": "0.2.2"
   }
 }

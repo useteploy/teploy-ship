@@ -15,6 +15,7 @@ jobs:
       - name: Ship build + tests
         run: |
           pnpm install --frozen-lockfile
+          pnpm --dir web install --frozen-lockfile
           pnpm test
 
       - name: Web production build
