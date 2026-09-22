@@ -14,12 +14,28 @@ export interface LaunchIntent {
   /** Cancel this held merge review before making the child runnable. */
   reviewParent?: string;
 }
+export interface LaunchDisposition {
+  runId: string;
+  actor: string;
+  reason: string;
+  at: string;
+}
+
 export interface LaunchJournal {
   get(runId: string): Promise<LaunchIntent | null>;
   prepare(intent: LaunchIntent): Promise<LaunchIntent>;
   publish(intent: LaunchIntent): Promise<void>;
   /** Bounded ID page; decoding failures are isolated during recovery. */
   pending(after?: string): Promise<string[]>;
+  /**
+   * Operator disposition for an accepted intent that can never publish: mark
+   * it abandoned — never deleted — with the deciding actor and reason. Atomic
+   * against a concurrent publish: the loser is told what won, not overwritten.
+   * Abandoning enqueues nothing and touches no review claim.
+   */
+  abandon(runId: string, disposition: Omit<LaunchDisposition, "runId" | "at">): Promise<"abandoned" | "already-published" | "already-abandoned" | "missing">;
+  /** Most recent dispositions, newest first (bounded), for the audit surface. */
+  dispositions(limit?: number): Promise<LaunchDisposition[]>;
 }
 const hash = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 /** Object key order is not part of request identity. Array order is. */
@@ -88,9 +104,12 @@ export class FileLaunchJournal implements LaunchJournal {
   }
   async publish(intent:LaunchIntent):Promise<void> {
     await withFileLock(this.path(intent.runId),async()=>{
-      const entry=await readJsonFile<{intent:LaunchIntent;published:boolean}|null>(this.path(intent.runId),null);
+      const entry=await readJsonFile<
+        {intent:LaunchIntent;published:boolean;abandoned?:{actor:string;reason:string;at:string}}|null
+      >(this.path(intent.runId),null);
       if(!entry)throw new Error("Launch intent has not been accepted");
       assertSameLaunch(entry.intent,intent.requestHash);
+      if(entry.abandoned)throw new Error("This accepted launch was abandoned by an operator; submit a new request if the work is still wanted");
       if(entry.published)return;
       if (entry.intent.reviewParent && !this.beforePublish) throw new Error("Revision recovery is unavailable");
       await this.beforePublish?.(entry.intent);
@@ -98,6 +117,37 @@ export class FileLaunchJournal implements LaunchJournal {
       if(await this.meta.load(intent.runId)===null)await this.meta.save(launchMetadata(entry.intent));
       await writeJsonFile(this.path(intent.runId),{intent:entry.intent,published:true});
     });
+  }
+  async abandon(
+    runId:string,
+    disposition:Omit<LaunchDisposition,"runId"|"at">,
+  ):Promise<"abandoned"|"already-published"|"already-abandoned"|"missing"> {
+    assertSafeId("run id",runId);
+    return withFileLock(this.path(runId),async()=>{
+      const entry=await readJsonFile<{intent:LaunchIntent;published:boolean;abandoned?:unknown}|null>(this.path(runId),null);
+      if(!entry)return "missing" as const;
+      if(entry.published)return "already-published" as const;
+      if(entry.abandoned)return "already-abandoned" as const;
+      await writeJsonFile(this.path(runId),{
+        intent:entry.intent,
+        published:false,
+        abandoned:{actor:disposition.actor,reason:disposition.reason,at:new Date().toISOString()},
+      });
+      return "abandoned" as const;
+    });
+  }
+  async dispositions(limit=20):Promise<LaunchDisposition[]> {
+    let names:string[];
+    try { names=await readdir(this.dir); } catch { return []; }
+    const found:LaunchDisposition[]=[];
+    for(const name of names.filter(n=>n.endsWith(".json"))){
+      if(found.length>=limit)break;
+      try {
+        const entry=await readJsonFile<{abandoned?:{actor:string;reason:string;at:string}}|null>(join(this.dir,name),null);
+        if(entry?.abandoned)found.push({runId:name.slice(0,-5),...entry.abandoned});
+      } catch { /* a corrupt file is not a disposition */ }
+    }
+    return found.sort((a,b)=>b.at.localeCompare(a.at)).slice(0,limit);
   }
   async pending(after?:string):Promise<string[]> {
     let names:string[];
@@ -107,8 +157,9 @@ export class FileLaunchJournal implements LaunchJournal {
       const id=name.slice(0,-5);
       if(after !== undefined && id <= after)continue;
       try {
-        const entry=await readJsonFile<{published:boolean}|null>(join(this.dir,name),null);
+        const entry=await readJsonFile<{published:boolean;abandoned?:unknown}|null>(join(this.dir,name),null);
         if(entry?.published)continue;
+        if(entry?.abandoned)continue;
       } catch { /* Include a corrupt file so recovery reports it individually. */ }
       out.push(id);
       if(out.length===100)break;
@@ -123,6 +174,7 @@ export class FileLaunchJournal implements LaunchJournal {
  */
 export class NucleusLaunchJournal implements LaunchJournal {
   private ready:Promise<void>|undefined;
+  private dispositionsReady:Promise<void>|undefined;
   constructor(private db:NucleusPgwire,private store:EventStore, private beforePublish?: (intent:LaunchIntent)=>Promise<void>) {}
   private ensure():Promise<void> {
     return this.ready??=(async()=>{
@@ -130,6 +182,14 @@ export class NucleusLaunchJournal implements LaunchJournal {
       await this.db.query("CREATE TABLE IF NOT EXISTS ship_launches (run_id TEXT PRIMARY KEY, request_hash TEXT, blob_id TEXT, parts TEXT, bytes TEXT, state TEXT, created_at TEXT)");
       await this.db.query("CREATE TABLE IF NOT EXISTS ship_launch_commits (run_id TEXT PRIMARY KEY)");
     })().catch(error=>{this.ready=undefined;throw error;});
+  }
+  // Dispositions get a sibling table (not a column on ship_launches): that
+  // table is populated on deployed boxes, and Nucleus cannot ALTER-ADD to a
+  // populated table — the same pattern the fleet/capacity stores use.
+  private ensureDispositions():Promise<void> {
+    return this.dispositionsReady??=(async()=>{
+      await this.db.query("CREATE TABLE IF NOT EXISTS ship_launch_dispositions (run_id TEXT PRIMARY KEY, actor TEXT, reason TEXT, at TEXT)");
+    })().catch(error=>{this.dispositionsReady=undefined;throw error;});
   }
   private async decode(row:Record<string,unknown>):Promise<LaunchIntent> {
     const count=Number(row.parts),bytes=Number(row.bytes),id=String(row.blob_id);
@@ -174,6 +234,11 @@ export class NucleusLaunchJournal implements LaunchJournal {
     if(!accepted)throw new Error("Launch intent has not been accepted");
     assertSameLaunch(accepted,intent.requestHash);
     if ((await this.db.query("SELECT run_id FROM ship_launch_commits WHERE run_id = $1",[accepted.runId])).length) return;
+    // An operator disposition is a decision this journal must not quietly
+    // undo: a published run cannot be un-published by recovery, and an
+    // abandoned intent stays abandoned until a person submits new work.
+    const [current]=await this.db.query("SELECT state FROM ship_launches WHERE run_id = $1",[accepted.runId]);
+    if(current?.state==="abandoned")throw new Error("This accepted launch was abandoned by an operator; submit a new request if the work is still wanted");
     if (accepted.reviewParent && !this.beforePublish) throw new Error("Revision recovery is unavailable");
     await this.beforePublish?.(accepted);
     await ensureStarted(this.store,accepted);
@@ -186,13 +251,43 @@ export class NucleusLaunchJournal implements LaunchJournal {
         }
         await tx.document.insert("ship_meta",{...launchMetadata(accepted)});
         await tx.document.insert("ship_runs",{runId:accepted.runId,workflow:(accepted.started.data as {workflow:string}).workflow,status:"wake",updatedAt:accepted.meta.updatedAt});
-        const changed = await tx.exec("UPDATE ship_launches SET state = 'published' WHERE run_id = $1",[accepted.runId]);
+        const changed = await tx.exec("UPDATE ship_launches SET state = 'published' WHERE run_id = $1 AND state <> 'abandoned'",[accepted.runId]);
         if (changed !== 1) throw new Error("Launch manifest disappeared during publication");
       });
     }catch(error){
       if((error as {code?:string}).code!=="23505")throw error;
       if(!(await this.db.query("SELECT run_id FROM ship_launch_commits WHERE run_id = $1",[accepted.runId])).length)throw error;
     }
+  }
+  async abandon(
+    runId:string,
+    disposition:Omit<LaunchDisposition,"runId"|"at">,
+  ):Promise<"abandoned"|"already-published"|"already-abandoned"|"missing"> {
+    assertSafeId("run id",runId);await this.ensure();
+    await this.ensureDispositions();
+    // The state transition is the fence: exactly one of publish/abandon can
+    // move a pending row, and the loser sees what won.
+    const changed=await this.db.exec("UPDATE ship_launches SET state = 'abandoned' WHERE run_id = $1 AND state = 'pending'",[runId]);
+    if(changed===1){
+      await this.db.query(
+        "INSERT INTO ship_launch_dispositions (run_id,actor,reason,at) VALUES ($1,$2,$3,$4)",
+        [runId,disposition.actor.slice(0,200),disposition.reason.slice(0,2000),new Date().toISOString()],
+      ).catch(()=>undefined); // the state row is the fence; the audit row is best-effort here
+      return "abandoned" as const;
+    }
+    const [row]=await this.db.query("SELECT state FROM ship_launches WHERE run_id = $1",[runId]);
+    if(row===undefined)return "missing" as const;
+    return row.state==="abandoned"?"already-abandoned" as const:"already-published" as const;
+  }
+  async dispositions(limit=20):Promise<LaunchDisposition[]> {
+    await this.ensureDispositions();
+    const rows=await this.db.query("SELECT run_id,actor,reason,at FROM ship_launch_dispositions ORDER BY at DESC LIMIT $1",[String(limit)]);
+    return rows.map(row=>({
+      runId:String(row.run_id),
+      actor:String(row.actor),
+      reason:String(row.reason),
+      at:String(row.at),
+    }));
   }
   async pending(after?:string):Promise<string[]> {
     await this.ensure();

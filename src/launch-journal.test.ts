@@ -99,3 +99,30 @@ test("long Unicode request stays intact while metadata fits inline storage", asy
   assert.ok(summary.endsWith("…"));
   assert.ok(!summary.includes("\ufffd"));
 });
+
+// --- A.4: operator disposition for accepted intents that can never publish ---
+
+test("abandon removes an intent from pending, records the actor and reason, and refuses later publish", async () => {
+  const f = await fixture();
+  const accepted = await f.journal.prepare(intent("run-stuck-conflict"));
+  assert.equal(await f.journal.abandon("run-stuck-conflict", { actor: "admin@ship", reason: "history conflicts with a competing review claim" }), "abandoned");
+  assert.deepEqual(await f.journal.pending(), [], "an abandoned intent no longer blocks recovery pages");
+  const dispositions = await f.journal.dispositions();
+  assert.equal(dispositions.length, 1);
+  assert.equal(dispositions[0]!.runId, "run-stuck-conflict");
+  assert.equal(dispositions[0]!.actor, "admin@ship");
+  assert.match(dispositions[0]!.reason, /competing review claim/);
+  // Never deleted, never resurrected: the record stays and publish refuses.
+  assert.notEqual(await f.journal.get("run-stuck-conflict"), null);
+  await assert.rejects(f.journal.publish(accepted), /abandoned by an operator/);
+  assert.equal(await f.journal.abandon("run-stuck-conflict", { actor: "admin@ship", reason: "again for idempotence" }), "already-abandoned");
+});
+
+test("abandon loses to a launch that already published, and a missing intent says so", async () => {
+  const f = await fixture();
+  const accepted = await f.journal.prepare(intent("run-out"));
+  await f.journal.publish(accepted);
+  assert.equal(await f.journal.abandon("run-out", { actor: "admin@ship", reason: "operator was too late" }), "already-published");
+  assert.notEqual(await f.journal.get("run-out"), null, "the published launch is untouched");
+  assert.equal(await f.journal.abandon("run-nothing", { actor: "admin@ship", reason: "does not exist" }), "missing");
+});

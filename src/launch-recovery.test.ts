@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileEventStore, RunMetaStore } from "./run-store.js";
 import { FileLaunchJournal, launchRequestHash, type LaunchIntent } from "./launch-journal.js";
-import { pendingLaunches, retryAcceptedLaunch } from "./launch-recovery.js";
+import { abandonAcceptedLaunch, launchDispositions, pendingLaunches, retryAcceptedLaunch } from "./launch-recovery.js";
 
 test("operator recovery isolates corrupt records and retries the accepted identity without restarting a completed run", async () => {
   const dir = await mkdtemp(join(tmpdir(), "ship-recovery-"));
@@ -37,4 +37,26 @@ test("operator recovery cannot override a competing review decision", async () =
   await assert.rejects(retryAcceptedLaunch(journal,"run-child"),/already claimed/);
   assert.deepEqual(await store.load("run-child"),[]);
   assert.equal((await pendingLaunches(journal)).rows[0].reviewParent,"run-parent");
+});
+
+test("A.4: abandoning a permanently conflicting intent needs authority, a reason, and loses to a concurrent publish", async () => {
+  const dir=await mkdtemp(join(tmpdir(),"ship-recovery-abandon-"));
+  const store=new FileEventStore(join(dir,"runs")),meta=new RunMetaStore(join(dir,"runs"));
+  const journal=new FileLaunchJournal(store,meta,join(dir,"launches"));
+  const at=new Date().toISOString();
+  const of=(runId:string):LaunchIntent=>({runId,requestHash:launchRequestHash(runId),meta:{runId,task:"A task",status:"queued",model:"test",createdAt:at,updatedAt:at},started:{v:1,seq:0,type:"run-started",at,data:{workflow:"test",input:{task:"A task"}}}});
+  await journal.prepare(of("run-conflict"));
+  await assert.rejects(abandonAcceptedLaunch(journal,"run-conflict",{actor:" ",reason:"a real reason"}),/deciding operator/);
+  await assert.rejects(abandonAcceptedLaunch(journal,"run-conflict",{actor:"op",reason:"short"}),/reason/);
+  await abandonAcceptedLaunch(journal,"run-conflict",{actor:"op@ship",reason:"history conflicts; the work is superseded"});
+  assert.deepEqual((await pendingLaunches(journal)).rows,[],"the disposition clears it from pending");
+  const d=await launchDispositions(journal);
+  assert.equal(d[0]!.runId,"run-conflict");
+  assert.match(d[0]!.reason,/superseded/);
+  await assert.rejects(retryAcceptedLaunch(journal,"run-conflict"),/abandoned by an operator/,"recovery cannot resurrect a disposition");
+
+  const live=await journal.prepare(of("run-live"));
+  await journal.publish(live);
+  await assert.rejects(abandonAcceptedLaunch(journal,"run-live",{actor:"op@ship",reason:"too late, it published"}),/published/);
+  await assert.rejects(abandonAcceptedLaunch(journal,"run-ghost",{actor:"op@ship",reason:"never existed at all"}),/No accepted launch/);
 });

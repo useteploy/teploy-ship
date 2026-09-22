@@ -1,5 +1,6 @@
-import { pendingLaunches, retryAcceptedLaunch, safeForDisplay } from "../lib/launch-recovery.server.js";
+import { abandonAcceptedLaunch, launchDispositions, pendingLaunches, retryAcceptedLaunch, safeForDisplay } from "../lib/launch-recovery.server.js";
 import { shipRuntime } from "../lib/store.server.js";
+import { actorFromPrincipal } from "../lib/ship.server.js";
 import { currentUser } from "../lib/session.server.js";
 import { may } from "../lib/authority.server.js";
 import { redirect } from "../lib/http.server.js";
@@ -9,7 +10,8 @@ export async function loader({ request }: { request: Request }) {
   const runtime = await shipRuntime();
   const query = new URL(request.url).searchParams;
   const page = runtime.launches ? await pendingLaunches(runtime.launches, query.get("after") ?? undefined) : { rows: [] };
-  return { ...page, error: query.get("error"), enabled: !!runtime.launches };
+  const abandoned = runtime.launches ? await launchDispositions(runtime.launches).catch(() => []) : [];
+  return { ...page, abandoned, error: query.get("error"), enabled: !!runtime.launches };
 }
 export async function action({ request }: { request: Request }): Promise<Response> {
   if (!(await may("approve", await currentUser(request)))) return new Response("Not permitted", { status: 403 });
@@ -18,6 +20,15 @@ export async function action({ request }: { request: Request }): Promise<Respons
   const runId = String(form.get("runId") ?? "");
   try {
     if (!runtime.launches) throw new Error("Launch journal is unavailable");
+    if (form.get("intent") === "abandon") {
+      const principal = await currentUser(request);
+      if (principal === null) return new Response("Not permitted", { status: 403 });
+      await abandonAcceptedLaunch(runtime.launches, runId, {
+        actor: actorFromPrincipal(principal).id,
+        reason: String(form.get("reason") ?? ""),
+      });
+      return redirect(`/recovery`);
+    }
     await retryAcceptedLaunch(runtime.launches, runId);
     return redirect(`/runs/${encodeURIComponent(runId)}`);
   } catch (error) {
@@ -37,8 +48,35 @@ export default function Recovery({ data }: { data: Awaited<ReturnType<typeof loa
       {row.reviewParent && <p><a href={`/runs/${encodeURIComponent(row.reviewParent)}`}>Inspect the original review decision →</a></p>}
       {row.error && <p class="notice bad">{row.error}</p>}
       <form method="post"><input type="hidden" name="runId" value={row.runId}/><button type="submit">Retry accepted launch</button></form>
+      <details class="disclosure" style="margin-top:10px">
+        <summary>Abandon this accepted launch</summary>
+        <p class="meta">For intents that can never publish (a conflicting history or a competing review claim). The record and reason are kept, nothing is resubmitted automatically, and no review claim is reopened. If the work is still wanted, submit it as a new request.</p>
+        <form method="post" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start">
+          <input type="hidden" name="runId" value={row.runId}/>
+          <input type="hidden" name="intent" value="abandon"/>
+          <label class="meta" for={`reason-${row.runId}`}>Reason (audited)</label>
+          <textarea id={`reason-${row.runId}`} name="reason" rows={2} style="flex:1;min-width:240px" placeholder="Why this accepted launch can never publish" required minLength={8}></textarea>
+          <button type="submit" class="sm">Abandon</button>
+        </form>
+      </details>
     </article>)}
     {data.next && <a href={`/recovery?after=${encodeURIComponent(data.next)}`}>Next pending launches →</a>}
-    <p class="meta">A persistent conflict needs investigation of the original decision. Recovery does not abandon accepted tasks, restart completed runs, or resolve unknown forge and deployment outcomes.</p>
+    {data.abandoned.length > 0 && (
+      <section style="margin-top:24px">
+        <h2>Abandoned launches (audit)</h2>
+        <table>
+          <tbody>
+            {data.abandoned.map(d => <tr key={d.runId}>
+              <td><code>{d.runId}</code></td>
+              <td class="meta">{new Date(d.at).toISOString().slice(0, 19).replace("T", " ")}</td>
+              <td class="meta">{d.actor}</td>
+              <td>{d.reason}</td>
+            </tr>)}
+          </tbody>
+        </table>
+        <p class="meta">Abandoned records are retained, never deleted. Re-doing the work means a new request through normal intake.</p>
+      </section>
+    )}
+    <p class="meta">A persistent conflict needs investigation of the original decision. Recovery does not delete accepted tasks, restart completed runs, or resolve unknown forge and deployment outcomes.</p>
   </>;
 }
