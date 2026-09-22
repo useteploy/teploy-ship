@@ -1374,7 +1374,14 @@ export async function enqueueRun(
         // the usual reason — it adds a recorded step and asks the daemon for
         // a volume, so the log has to say the run wanted one. A worker whose
         // daemon has no cache store degrades to the cold path.
-        ...(warmRun ? { warm: true, warmParks: true } : {}),
+        // warmParks needs the sandbox daemon's volume-aware snapshots
+        // (teploy-sandbox 2a89f72, 2026-09-22): an older daemon's commit
+        // skips the warm volume, so a warm park snapshot would restore an
+        // EMPTY workspace and the run would continue from it. Capability is
+        // an operator assertion (SHIP_WARM_PARKS=1 after the daemon is
+        // upgraded — see docs/UPGRADING.md), recorded HERE so a replay
+        // under a mixed fleet stays exactly what its log says.
+        ...(warmRun ? { warm: true, ...(envFlag("SHIP_WARM_PARKS") ? { warmParks: true } : {}) } : {}),
         harness,
         ...(attempts.length >= 2 ? { harnessAttempts: attempts } : {}),
         // K, clamped and defaulted at enqueue so a replay launches exactly the

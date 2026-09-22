@@ -472,3 +472,25 @@ untouched.
 A worker that cannot reach its store logs `tick failed (store unreachable?)`
 and **fails closed on policy reads**, so it will not auto-launch anything while
 degraded. That is by design: a worker unsure of its policy launches nothing.
+
+## Sandbox daemon coupling: warm parks via snapshot (af5996c, 2026-09-22)
+
+`warmParks` (warm runs parking through snapshot/restore instead of keeping
+the container) requires a teploy-sandbox daemon at `2a89f72` (2026-09-22) or
+later: volume-aware snapshots. Against an older daemon, a warm park's
+snapshot would NOT carry the warm volume — docker commit skips bind mounts —
+and the restored run would continue from an EMPTY workspace, potentially
+publishing wrong results.
+
+The capability is an explicit operator assertion, because the enqueueing web
+process cannot probe the worker hosts' daemon version:
+
+1. Upgrade the teploy-sandbox daemon on every worker host first.
+2. Then enable: `teploy env set SHIP_WARM_PARKS=1` on the Ship deployment.
+3. Runs enqueued before the flag keep the keep-container park path forever
+   (their recorded inputs lack `warmParks`), so no replay can diverge.
+
+Runs enqueued with the flag off record `warm: true` without `warmParks` and
+park the legacy way. There is no automatic downgrade path from a run
+enqueued with `warmParks` back to the legacy park; upgrade the daemon before
+setting the flag, per fleet, in that order.

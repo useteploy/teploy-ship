@@ -10,8 +10,19 @@ export async function loader({ request }: { request: Request }) {
   const runtime = await shipRuntime();
   const query = new URL(request.url).searchParams;
   const page = runtime.launches ? await pendingLaunches(runtime.launches, query.get("after") ?? undefined) : { rows: [] };
-  const abandoned = runtime.launches ? await launchDispositions(runtime.launches).catch(() => []) : [];
-  return { ...page, abandoned, error: query.get("error"), enabled: !!runtime.launches };
+  // Disposition-load errors SURFACE (audit finding 2026-09-22): an audit
+  // table that silently disappears is indistinguishable from "nothing was
+  // ever abandoned" — the one thing this page must never imply.
+  let abandoned: Awaited<ReturnType<typeof launchDispositions>> = [];
+  let dispositionsError: string | undefined;
+  if (runtime.launches) {
+    try {
+      abandoned = await launchDispositions(runtime.launches);
+    } catch (error) {
+      dispositionsError = error instanceof Error ? error.message : String(error);
+    }
+  }
+  return { ...page, abandoned, ...(dispositionsError !== undefined ? { dispositionsError } : {}), error: query.get("error"), enabled: !!runtime.launches };
 }
 export async function action({ request }: { request: Request }): Promise<Response> {
   if (!(await may("approve", await currentUser(request)))) return new Response("Not permitted", { status: 403 });
@@ -61,6 +72,9 @@ export default function Recovery({ data }: { data: Awaited<ReturnType<typeof loa
       </details>
     </article>)}
     {data.next && <a href={`/recovery?after=${encodeURIComponent(data.next)}`}>Next pending launches →</a>}
+    {data.dispositionsError !== undefined && (
+      <p class="notice bad" role="alert">Abandoned-launch audit is unreadable right now: {data.dispositionsError}</p>
+    )}
     {data.abandoned.length > 0 && (
       <section style="margin-top:24px">
         <h2>Abandoned launches (audit)</h2>

@@ -265,16 +265,22 @@ export class NucleusLaunchJournal implements LaunchJournal {
   ):Promise<"abandoned"|"already-published"|"already-abandoned"|"missing"> {
     assertSafeId("run id",runId);await this.ensure();
     await this.ensureDispositions();
-    // The state transition is the fence: exactly one of publish/abandon can
-    // move a pending row, and the loser sees what won.
-    const changed=await this.db.exec("UPDATE ship_launches SET state = 'abandoned' WHERE run_id = $1 AND state = 'pending'",[runId]);
-    if(changed===1){
-      await this.db.query(
-        "INSERT INTO ship_launch_dispositions (run_id,actor,reason,at) VALUES ($1,$2,$3,$4)",
-        [runId,disposition.actor.slice(0,200),disposition.reason.slice(0,2000),new Date().toISOString()],
-      ).catch(()=>undefined); // the state row is the fence; the audit row is best-effort here
-      return "abandoned" as const;
-    }
+    // State transition and audit row commit TOGETHER: an abandonment is a
+    // decision with a mandatory actor and reason, and a state flip whose
+    // record failed must not stand (an audit finding, 2026-09-22 — the old
+    // best-effort insert could leave an abandoned launch with no record of
+    // who decided or why).
+    let changed = 0;
+    await this.db.transaction(async tx=>{
+      changed = await tx.exec("UPDATE ship_launches SET state = 'abandoned' WHERE run_id = $1 AND state = 'pending'",[runId]);
+      if(changed===1){
+        await tx.query(
+          "INSERT INTO ship_launch_dispositions (run_id,actor,reason,at) VALUES ($1,$2,$3,$4)",
+          [runId,disposition.actor.slice(0,200),disposition.reason.slice(0,2000),new Date().toISOString()],
+        );
+      }
+    });
+    if(changed===1) return "abandoned" as const;
     const [row]=await this.db.query("SELECT state FROM ship_launches WHERE run_id = $1",[runId]);
     if(row===undefined)return "missing" as const;
     return row.state==="abandoned"?"already-abandoned" as const:"already-published" as const;
