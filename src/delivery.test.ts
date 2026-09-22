@@ -52,6 +52,10 @@ test("delivery records move only through legal, field-complete transitions, fenc
   assert.equal(winner.state, "held", "the loser learns what won, silently");
 
   assert.equal(transitionAllowed("executing", "unknown"), true);
+  // executeDelivery holds from executing whenever a precondition failed
+  // before touching the target — the store must be able to record that
+  // (found live 2026-09-22: the refused transition stuck the record).
+  assert.equal(transitionAllowed("executing", "held"), true);
   assert.equal(transitionAllowed("confirmed", "anything" as never) && false, false);
 });
 

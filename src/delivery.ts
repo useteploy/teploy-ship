@@ -57,7 +57,14 @@ export type DeliveryState = "proposed" | "approved" | "executing" | "confirmed" 
 const ALLOWED: Record<DeliveryState, DeliveryState[]> = {
   proposed: ["approved", "held"],
   approved: ["executing", "held"],
-  executing: ["confirmed", "unknown", "failed"],
+  // executing→held is legal because executeDelivery holds BEFORE touching
+  // the target whenever a precondition fails (no trusted dir, unproven
+  // merge, fetch/build failure): the delivery never deployed anything, so
+  // held-with-reason is the honest outcome. Found live 2026-09-22: slice 1
+  // shipped an executor that could return held from executing against a
+  // state machine that refused to record it — the record stuck in
+  // executing forever and the reason was lost with the refused transition.
+  executing: ["confirmed", "unknown", "failed", "held"],
   unknown: ["confirmed", "failed", "held"],
   failed: ["held", "approved"],
   held: ["approved"],

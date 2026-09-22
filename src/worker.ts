@@ -1797,10 +1797,10 @@ export function startWorker(options: WorkerOptions): {
               ...(outcome.artifactDigest !== undefined ? { artifactDigest: outcome.artifactDigest } : {}),
               ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}),
             })
+            .then(() => log(`[worker] delivery ${approved.id} → ${to}`))
             .catch((error: unknown) =>
               log(`[worker] delivery ${approved.id}: outcome could not be recorded: ${error instanceof Error ? error.message : String(error)}`),
             );
-          log(`[worker] delivery ${approved.id} → ${to}`);
           return;
         }
         // Reconcile one unknown delivery by reading the target back: unknown
