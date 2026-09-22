@@ -11,6 +11,8 @@ export interface LaunchIntent {
   requestHash: string;
   started: WorkflowEvent;
   meta: RunMeta;
+  /** Cancel this held merge review before making the child runnable. */
+  reviewParent?: string;
 }
 export interface LaunchJournal {
   get(runId: string): Promise<LaunchIntent | null>;
@@ -41,6 +43,10 @@ function validate(intent: LaunchIntent): void {
   if (!/^[a-f0-9]{64}$/.test(intent.requestHash) || intent.meta.runId !== intent.runId || intent.started.type !== "run-started" || intent.started.seq !== 0) {
     throw new Error("Invalid launch intent");
   }
+  if (intent.reviewParent !== undefined) {
+    assertSafeId("review parent", intent.reviewParent);
+    if (intent.reviewParent === intent.runId) throw new Error("A revision cannot replace itself");
+  }
   launchMetadata(intent);
   if (Buffer.byteLength(JSON.stringify(intent)) > 1024*1024) throw new Error("Launch intent exceeds 1 MiB");
 }
@@ -61,7 +67,7 @@ async function ensureStarted(store: EventStore, intent: LaunchIntent): Promise<v
  * retry repairs missing projections and never resets an existing run's state.
  */
 export class FileLaunchJournal implements LaunchJournal {
-  constructor(private store: EventStore, private meta: Pick<RunMetaStore,"load"|"save">, private dir=join(stateDir(),"launches")) {}
+  constructor(private store: EventStore, private meta: Pick<RunMetaStore,"load"|"save">, private dir=join(stateDir(),"launches"), private beforePublish?: (intent:LaunchIntent)=>Promise<void>) {}
   private path(id:string) { return join(this.dir,assertSafeId("run id",id)+".json"); }
   async get(id:string):Promise<LaunchIntent|null> {
     const entry = await readJsonFile<{intent:LaunchIntent;published:boolean}|null>(this.path(id),null);
@@ -86,6 +92,8 @@ export class FileLaunchJournal implements LaunchJournal {
       if(!entry)throw new Error("Launch intent has not been accepted");
       assertSameLaunch(entry.intent,intent.requestHash);
       if(entry.published)return;
+      if (entry.intent.reviewParent && !this.beforePublish) throw new Error("Revision recovery is unavailable");
+      await this.beforePublish?.(entry.intent);
       await ensureStarted(this.store,entry.intent);
       if(await this.meta.load(intent.runId)===null)await this.meta.save(launchMetadata(entry.intent));
       await writeJsonFile(this.path(intent.runId),{intent:entry.intent,published:true});
@@ -115,7 +123,7 @@ export class FileLaunchJournal implements LaunchJournal {
  */
 export class NucleusLaunchJournal implements LaunchJournal {
   private ready:Promise<void>|undefined;
-  constructor(private db:NucleusPgwire,private store:EventStore) {}
+  constructor(private db:NucleusPgwire,private store:EventStore, private beforePublish?: (intent:LaunchIntent)=>Promise<void>) {}
   private ensure():Promise<void> {
     return this.ready??=(async()=>{
       await this.db.query("CREATE TABLE IF NOT EXISTS ship_launch_chunks (chunk_id TEXT PRIMARY KEY, value TEXT)");
@@ -165,6 +173,9 @@ export class NucleusLaunchJournal implements LaunchJournal {
     const accepted=await this.get(intent.runId);
     if(!accepted)throw new Error("Launch intent has not been accepted");
     assertSameLaunch(accepted,intent.requestHash);
+    if ((await this.db.query("SELECT run_id FROM ship_launch_commits WHERE run_id = $1",[accepted.runId])).length) return;
+    if (accepted.reviewParent && !this.beforePublish) throw new Error("Revision recovery is unavailable");
+    await this.beforePublish?.(accepted);
     await ensureStarted(this.store,accepted);
     try {
       await this.db.transaction(async tx=>{

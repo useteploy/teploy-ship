@@ -1,3 +1,4 @@
+import { finishReviewReplacement } from "./revision-launch.js";
 import { projectReadinessKey } from "./project-readiness.js";
 import { taskRootRunId } from "./task-session.js";
 import { FileLaunchJournal, NucleusLaunchJournal, assertSameLaunch, launchRequestHash, type LaunchJournal } from "./launch-journal.js";
@@ -416,7 +417,7 @@ export interface ShipRuntime {
    * same conditional write, so two operators submitting opposite decisions on
    * the same park cannot both deliver. Losers must not call deliverEvent.
    */
-  claimDecision(runId: string, eventName: string): Promise<boolean>;
+  claimDecision(runId: string, eventName: string, revisionOwner?: string): Promise<boolean>;
   /** Put back an eventName after a claim whose delivery then failed. */
   releaseDecision(runId: string, eventName: string): Promise<void>;
   close(): Promise<void>;
@@ -426,9 +427,10 @@ export function fileRuntime(): ShipRuntime {
   const store = new FileEventStore();
   const meta = new RunMetaStore();
   const projects = new FileProjectStore();
-  return {
+  let runtime: ShipRuntime;
+  return runtime = {
     kind: "file",
-    launches: new FileLaunchJournal(store, meta),
+    launches: new FileLaunchJournal(store, meta, undefined, intent => finishReviewReplacement(runtime, intent)),
     bulletin: new FileBulletinStore(),
     store,
     intake: new FileIntakeStore(),
@@ -452,7 +454,7 @@ export function fileRuntime(): ShipRuntime {
     deliveries: new FileDeliveryLog(),
     outbox: new FileOutbox(),
     repoStats: new FileRepoStatsStore(),
-    claimDecision: (runId, eventName) => meta.claimDecision(runId, eventName),
+    claimDecision: (runId, eventName, owner) => meta.claimDecision(runId, eventName, owner),
     releaseDecision: (runId, eventName) => meta.releaseDecision(runId, eventName),
     execute: (workflow, runId, input) =>
       executeRun({ workflow, runId, store, ...(input !== undefined ? { input } : {}) }),
@@ -541,9 +543,10 @@ export async function nucleusRuntime(
   };
 
   const projects = new NucleusProjectStore(db);
-  return {
+  let runtime: NucleusShipRuntime;
+  return runtime = {
     kind: "nucleus",
-    launches: new NucleusLaunchJournal(db, store),
+    launches: new NucleusLaunchJournal(db, store, intent => finishReviewReplacement(runtime, intent)),
     bulletin: new NucleusBulletinStore(db),
     store,
     index,
@@ -577,16 +580,19 @@ export async function nucleusRuntime(
      * admin) updates zero rows and is told to look again. Clearing eventName
      * in the same statement is what makes it a claim rather than a check.
      */
-    async claimDecision(runId, eventName) {
+    async claimDecision(runId, eventName, owner) {
       const updated = await db.document.update(
         META_COLLECTION,
         { runId, eventName },
-        { eventName: null, status: "wake", updatedAt: new Date().toISOString() },
+        { eventName: owner ? `revision:${owner}` : null, status: "wake", updatedAt: new Date().toISOString() },
       );
-      return updated > 0;
+      if (updated > 0) return true;
+      return owner !== undefined && (await db.document.find(META_COLLECTION, {runId, eventName:`revision:${owner}`})).length === 1;
     },
     async releaseDecision(runId, eventName) {
-      await db.document.update(META_COLLECTION, { runId }, { eventName, status: "waiting" });
+      // The document filter stringifies null; use SQL IS NULL for a held
+      // generic decision, and never overwrite a revision owner token.
+      await db.exec("UPDATE ship_docs SET event_name = $1, status = 'waiting' WHERE collection = $2 AND run_id = $3 AND event_name IS NULL AND status = 'wake'", [eventName, META_COLLECTION, runId]);
     },
     async execute(workflow, runId, input) {
       const outcome = await executeRunExclusive({
@@ -851,6 +857,8 @@ export async function enqueueRun(
      * defaults. Enables a lost-response retry to reuse the accepted config.
      * Do not accept this value verbatim from an HTTP client. */
     requestIdentity?: string;
+    /** Authorized replacement of a pending merge review, outside workflow input. */
+    reviewParent?: string;
     /** Conversation lineage only; never gates a workflow step. */
     parentRunId?: string;
     userMessage?: string;
@@ -1013,6 +1021,7 @@ export async function enqueueRun(
     await runtime.launches!.publish(accepted);
     return;
   }
+  if (options.reviewParent && (options.reviewParent !== options.parentRunId || !runtime.launches)) throw new Error("Review replacement requires a journal and matching parent");
   const taskRoot = options.parentRunId === undefined ? options.runId : await taskRootRunId(runtime.store, options.parentRunId);
   const now = new Date().toISOString();
   // Materialise the thresholds at ENQUEUE, never leave a bare `true` in the
@@ -1398,7 +1407,7 @@ export async function enqueueRun(
     updatedAt: now,
   };
   if (runtime.launches) {
-    const intent = await runtime.launches.prepare({runId:options.runId,requestHash,started,meta});
+    const intent = await runtime.launches.prepare({runId:options.runId,requestHash,started,meta,...(options.reviewParent ? {reviewParent:options.reviewParent} : {})});
     await runtime.launches.publish(intent);
     return;
   }

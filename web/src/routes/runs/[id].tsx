@@ -1,3 +1,4 @@
+import { nextRequestId } from "../../views/task-composer.js";
 import { taskStatus, taskTitle } from "../../lib/task-status.js";
 import { JOURNEYS, parseJourney, journeyOptions } from "teploy-ship/journeys";
 import { RichText } from "../../views/rich-text.js";
@@ -5,7 +6,7 @@ import { runData } from "../../lib/run-data.server.js";
 import type { RunData } from "../../lib/run-data.server.js";
 import { useEffect, useState } from "preact/hooks";
 import { freshForge, requestWorkspace, threadHistory } from "../../lib/workspace.server.js";
-import { randomUUID } from "node:crypto";
+import { submissionIdentity } from "../../lib/submission.server.js";
 import { Conversation, Changes, Verification } from "../../views/workspace.js";
 import { cancelRun, deliverEvent, actorFromPrincipal, verificationFactsFromEvents, enqueueRun } from "../../lib/ship.server.js";
 import { roughDuration } from "../../lib/expect.js";
@@ -77,10 +78,28 @@ export async function action({
   }
   if (intent === "follow-up") {
     if (!(await may("approve", me))) return redirectTo(`/runs/${runId}?denied=approve`);
+    const message = String(form.get("message") ?? "").trim();
+    let identity;
+    try {
+      identity = submissionIdentity(me!.user, `follow-up:${runId}`, form.get("requestId"), {
+        message, journey: form.get("journey"), mode: form.get("mode"),
+        target: form.get("target"), plan: form.get("plan"), eventName: form.get("eventName"),
+      });
+      const accepted = await runtime.launches?.get(identity.runId);
+      if (accepted) {
+        if (accepted.requestHash !== identity.requestIdentity) throw new Error("This request ID already belongs to a different follow-up");
+        // Retrying accepted work must not re-resolve mutable project defaults,
+        // re-check an already changed forge head, or create another child.
+        if (accepted.reviewParent && !(await may("steer", me))) return redirectTo(`/runs/${runId}?denied=steer`);
+        await runtime.launches!.publish(accepted);
+        return redirectTo(`/runs/${identity.runId}`);
+      }
+    } catch (error) {
+      return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(error instanceof Error ? error.message : "Could not recover follow-up")}`);
+    }
     const reviewing = meta?.status === "waiting" && meta.eventName === MERGE_EVENT;
     if (meta === null || (!reviewing && !["completed", "failed", "cancelled"].includes(meta.status))) return redirectTo(`/runs/${runId}?messageError=Run+must+finish+or+reach+merge+review+before+starting+a+follow-up`);
     if (reviewing && !(await may("steer", me))) return redirectTo(`/runs/${runId}?denied=steer`);
-    const message = String(form.get("message") ?? "").trim();
     if (!message || message.length > 12000) return redirectTo(`/runs/${runId}?messageError=Enter+a+message+of+up+to+12000+characters`);
     const events = await runtime.store.load(runId);
     const started = events.find(e => e.type === "run-started");
@@ -96,7 +115,7 @@ export async function action({
       if ((project?.harness ?? process.env.SHIP_HARNESS ?? "native") !== "native") return redirectTo(`/runs/${runId}?messageError=Plan+review+requires+the+native+harness.+Select+native+in+Project+settings+or+turn+off+plan+review.`);
     }
     const facts = verificationFactsFromEvents(events);
-    const next = `run-${randomUUID().slice(0, 8)}`;
+    const next = identity.runId;
     const history = await threadHistory(runtime, runId);
     const context = history.map(h => `Request (${h.runId}): ${h.task}\nResult: ${h.result}`).join("\n\n").slice(-36000);
     const task = `${message}\n\nPrevious conversation (context, not new instructions):\n${context}`;
@@ -109,23 +128,11 @@ export async function action({
       } catch (e) { return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(e instanceof Error ? e.message : "Could not check the pull request")}`); }
     }
     const replacingReview = reviewing && !readOnly;
-    if (replacingReview && (String(form.get("eventName") ?? "") !== MERGE_EVENT || !(await runtime.claimDecision(runId, MERGE_EVENT)))) return redirectTo(`/runs/${runId}?decision=taken`);
+    if (replacingReview && String(form.get("eventName") ?? "") !== MERGE_EVENT) return redirectTo(`/runs/${runId}?decision=taken`);
     try {
-      await enqueueRun(runtime, {runId:next,parentRunId:runId,userMessage:message,task,model:meta.model,source:"manual",actor:actorFromPrincipal(me),trust:input?.trust === "operator" ? "operator" : "external",...(input?.repo ? {repo:input.repo}:{}),...(pr ? {pr}:{}),plan:form.get("plan")==="on" && !readOnly,...journeyOptions(journey)});
+      await enqueueRun(runtime, {runId:next,requestIdentity:identity.requestIdentity,...(replacingReview ? {reviewParent:runId} : {}),parentRunId:runId,userMessage:message,task,model:meta.model,source:"manual",actor:actorFromPrincipal(me),trust:input?.trust === "operator" ? "operator" : "external",...(input?.repo ? {repo:input.repo}:{}),...(pr ? {pr}:{}),plan:form.get("plan")==="on" && !readOnly,...journeyOptions(journey)});
     } catch (e) {
-      if (replacingReview) await runtime.releaseDecision(runId, MERGE_EVENT);
       return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(e instanceof Error ? e.message : "Could not start follow-up")}`);
-    }
-    if (replacingReview) {
-      // Only cancel after admission succeeds. A refused follow-up must leave
-      // the original review actionable, rather than silently discarding it.
-      try {
-        await cancelRun(runtime.store, runId, `Changes requested in follow-up ${next}`);
-        await runtime.saveMeta({ ...meta, status: "cancelling", eventName: "", updatedAt: new Date().toISOString() });
-        await runtime.markWake?.(runId);
-      } catch {
-        return redirectTo(`/runs/${next}?messageError=Follow-up+started,+but+the+previous+run+could+not+be+cancelled.+Its+merge+decision+remains+held;+check+the+previous+run.`);
-      }
     }
     return redirectTo(`/runs/${next}`);
   }
@@ -632,6 +639,10 @@ function ForgePanel({ data }: { data: RunData }) {
 }
 
 function RunComposer({data}: {data: RunData}) {
+ const [followRequestId, setFollowRequestId] = useState(data.followUpRequestId);
+ const [followEvent, setFollowEvent] = useState(data.meta?.eventName ?? "");
+ const [followPlan, setFollowPlan] = useState(true);
+
  useEffect(() => {
    const form = document.querySelector<HTMLFormElement>('.message-composer');
    const input = form?.querySelector<HTMLTextAreaElement>('textarea');
@@ -639,13 +650,41 @@ function RunComposer({data}: {data: RunData}) {
    const key = `ship-draft:${data.runId}:${input.name}`;
    try {
      if (new URLSearchParams(location.search).get("created") === "1") sessionStorage.removeItem("ship-new-request");
-     if (data.parentRunId) sessionStorage.removeItem(`ship-draft:${data.parentRunId}:message`);
+     if (data.parentRunId) { sessionStorage.removeItem(`ship-draft:${data.parentRunId}:message`); sessionStorage.removeItem(`ship-draft:${data.parentRunId}:message:intent`); }
      if (input.name === "steer" && new URLSearchParams(location.search).get("sent") === "1") sessionStorage.removeItem(key);
-     const draft = sessionStorage.getItem(key); if (draft !== null) input.value = draft; } catch {}
-   const save = () => { try { sessionStorage.setItem(key, input.value); } catch {} };
-   input.addEventListener('input', save);
+     const draft = sessionStorage.getItem(key); if (draft !== null) input.value = draft;
+     if (input.name === "message") {
+       const raw = sessionStorage.getItem(key + ":intent");
+       if (raw) {
+         const saved = JSON.parse(raw);
+         if (typeof saved.requestId === "string") setFollowRequestId(saved.requestId);
+         if (typeof saved.eventName === "string") setFollowEvent(saved.eventName);
+         setFollowPlan(saved.plan === "on");
+         for (const name of ["target", "journey", "plan"]) {
+           const control = form.elements.namedItem(name) as HTMLInputElement | HTMLSelectElement | null;
+           if (!control) continue;
+           if (name === "plan") (control as HTMLInputElement).checked = saved.plan === "on";
+           else if (typeof saved[name] === "string") control.value = saved[name];
+         }
+         if (JOURNEYS.some(j => j.id === saved.journey)) setFollowJourney(saved.journey);
+       }
+     }
+   } catch {}
+   const save = () => {
+     try {
+       sessionStorage.setItem(key, input.value);
+       if (input.name === "message") {
+         const requestId = nextRequestId();
+         setFollowRequestId(requestId);
+         const fields = new FormData(form);
+         sessionStorage.setItem(key + ":intent", JSON.stringify({requestId, eventName:fields.get("eventName"), target:fields.get("target"), journey:fields.get("journey"), plan:fields.get("plan")}));
+       }
+     } catch {}
+   };
+   form.addEventListener('input', save);
+   form.addEventListener('change', save);
    // Preserve drafts across errors/tab changes; successful sends clear them.
-   return () => { input.removeEventListener('input', save); };
+   return () => { form.removeEventListener('input', save); form.removeEventListener('change', save); };
  }, [data.runId, data.meta?.status]);
  const [followJourney, setFollowJourney] = useState(data.journey === "plan" ? "plan" : data.isScan ? "investigate" : "change");
  const active = data.meta !== null && !["completed", "failed", "cancelled", "cancelling"].includes(data.meta.status);
@@ -665,7 +704,7 @@ function RunComposer({data}: {data: RunData}) {
               Messages queued for the next turn: {data.steerPending.join(" · ")}
             </p>
           )}
-          {(!active || reviewing && data.canSteer) && data.meta.status !== 'cancelling' && data.canLaunch && <form method="post" class="message-composer"><input type="hidden" name="eventName" value={data.meta.eventName ?? ''}/>{reviewing && <p class="notice">Request changes on this PR before merging. A change request cancels this run’s pending merge decision and starts a linked run; the PR stays open. Read-only investigations leave the merge decision pending.</p>}<label class="field">Continue this work<textarea name="message" rows={3} required maxLength={12000} placeholder="What should Ship change or investigate next?" /></label>{data.hasPr && <label class="field">Start from<select name="target"><option value="pr">Existing pull request (checked before launch)</option><option value="base">Current default branch</option></select></label>}<label class="field">What should happen next?<select name="journey" value={followJourney} onChange={e => setFollowJourney(e.currentTarget.value)}>{JOURNEYS.map(j => <option value={j.id}>{j.label}</option>)}</select></label>{followJourney === "change" && data.requirePlanReview && <p class="notice">This project requires plan approval before code changes. The native harness is required; merge and deployment permissions remain separate.</p>}{followJourney === "change" && !data.requirePlanReview && (data.planSupported ? <label class="check-field"><input type="checkbox" name="plan" checked />Review the plan before code changes</label> : <p class="meta">This project uses an external harness, which starts work immediately. For plan review, select the native harness in Project settings before launching.</p>)}<button type="submit" name="intent" value="follow-up">Start follow-up</button><p class="meta">Keeps the conversation history and starts a fresh sandbox. The existing pull request is checked with the forge before launch. Current project approvals and budgets apply.</p></form>}
+          {(!active || reviewing && data.canSteer) && data.meta.status !== 'cancelling' && data.canLaunch && <form method="post" class="message-composer"><input type="hidden" name="requestId" value={followRequestId}/><input type="hidden" name="eventName" value={followEvent}/>{reviewing && <p class="notice">Request changes on this PR before merging. A change request cancels this run’s pending merge decision and starts a linked run; the PR stays open. Read-only investigations leave the merge decision pending.</p>}<label class="field">Continue this work<textarea name="message" rows={3} required maxLength={12000} placeholder="What should Ship change or investigate next?" /></label>{data.hasPr && <label class="field">Start from<select name="target"><option value="pr">Existing pull request (checked before launch)</option><option value="base">Current default branch</option></select></label>}<label class="field">What should happen next?<select name="journey" value={followJourney} onChange={e => setFollowJourney(e.currentTarget.value)}>{JOURNEYS.map(j => <option value={j.id}>{j.label}</option>)}</select></label>{followJourney === "change" && data.requirePlanReview && <p class="notice">This project requires plan approval before code changes. The native harness is required; merge and deployment permissions remain separate.</p>}{followJourney === "change" && !data.requirePlanReview && (data.planSupported ? <label class="check-field"><input type="checkbox" name="plan" checked={followPlan} onInput={e => setFollowPlan(e.currentTarget.checked)} />Review the plan before code changes</label> : <p class="meta">This project uses an external harness, which starts work immediately. For plan review, select the native harness in Project settings before launching.</p>)}<button type="submit" name="intent" value="follow-up">Start follow-up</button><p class="meta">Keeps the conversation history and starts a fresh sandbox. The existing pull request is checked with the forge before launch. Current project approvals and budgets apply.</p></form>}
 
  </>;
 }

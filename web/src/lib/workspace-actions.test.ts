@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdtempSync } from "node:fs";
@@ -17,7 +18,7 @@ function request(path: string, fields: Record<string, string>, auth = true) {
   return new Request("http://localhost" + path, {
     method: "POST",
     headers: auth ? { authorization: "Bearer workspace-tests" } : {},
-    body: new URLSearchParams(fields),
+    body: new URLSearchParams({...(fields.intent === "follow-up" ? {requestId:randomUUID()} : {}), ...fields}),
   });
 }
 test("workflows require policy authority and persist through the shared store", async () => {
@@ -297,4 +298,26 @@ test("project plan requirement is saved through UI and enforced on unchecked lau
   assert.equal((await runtime.projects.forRepo(url))?.requirePlanReview, true);
   await projectsRoute.action({ request: request("/projects", { repo: url, url, harness: "native", planReviewPresent: "1" }) });
   assert.notEqual((await runtime.projects.forRepo(url))?.requirePlanReview, true);
+});
+
+test("follow-up retries share one child and refuse changed content under the same key",async()=>{
+  const runtime=await shipRuntime();
+  const id='run-followup-idempotence';
+  await enqueueRun(runtime,{runId:id,task:'Original',model:'test',source:'manual',trust:'operator'});
+  const meta=await runtime.loadMeta(id);assert.ok(meta);await runtime.saveMeta({...meta,status:'completed'});
+  const fields={intent:'follow-up',message:'Explain the result',journey:'investigate',requestId:randomUUID()};
+  const results=await Promise.all(Array.from({length:8},()=>run.action({params:{id},request:request('/runs/'+id,fields)})));
+  const locations=results.map(r=>r.headers.get('location'));
+  assert.equal(new Set(locations).size,1);
+  assert.match(locations[0]!,/^\/runs\/run-request-/);
+  const child=locations[0]!.split('/').pop()!;
+  assert.equal((await runtime.store.load(child)).length,1);
+  const current=await runtime.loadMeta(child);assert.ok(current);await runtime.saveMeta({...current,status:'completed'});
+  const retry=await run.action({params:{id},request:request('/runs/'+id,fields)});
+  assert.equal(retry.headers.get('location'),locations[0]);
+  assert.equal((await runtime.loadMeta(child))?.status,'completed');
+  const changed=await run.action({params:{id},request:request('/runs/'+id,{...fields,message:'Do something else'})});
+  assert.match(decodeURIComponent(changed.headers.get('location')!),/different follow-up/);
+  const missing=await run.action({params:{id},request:request('/runs/'+id,{...fields,requestId:''})});
+  assert.match(decodeURIComponent(missing.headers.get('location')!),/Refresh the page/);
 });

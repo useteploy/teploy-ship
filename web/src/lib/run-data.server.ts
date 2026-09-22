@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { threadHistory, workspaceReply, refreshForgeIfStale } from "./workspace.server.js";
 import type { WorkspaceReply } from "../../../dist/workspace-requests.js";
 import { conversation, diffSnapshots, evidence } from "./workspace.js";
@@ -16,6 +17,7 @@ import { startSpan } from "./observe.server.js";
 import { ProjectIdentityError } from "../../../dist/projects.js";
 
 export interface RunData {
+  followUpRequestId: string;
   userMessage?: string;
   journey?: string;
   forge: WorkspaceReply | null;
@@ -192,6 +194,7 @@ export async function runData({ params, request }: { params: { id: string }; req
       costPriced: isPricedModel(meta?.model ?? "") || typeof outcome.usage?.costUSD === "number",
       costUnpriced: outcome.usage?.priced === false,
       runId,
+      followUpRequestId: randomUUID(),
       eventCount: events.length,
       ...(plan !== undefined ? { plan } : {}),
       findings: scanned.findings,

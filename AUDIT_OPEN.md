@@ -196,3 +196,11 @@ Open: durable follow-up/parent-decision coordination, complete reservation
 reconciliation, full canonical multi-forge identity, broader audit/evaluations
 and the remaining release programme. Tests and isolated-engine/browser proofs
 do not establish whole-product completion or competitor superiority.
+
+
+## Follow-up recovery continuation
+
+Stable follow-up identities and durable review-parent replacement now cover lost
+responses and interrupted launch publication. See the F06 continuation and upgrade
+notes. Conflicting held intents, generic approval delivery and external outcome
+reconciliation remain open; do not infer full transactionality across the forge.

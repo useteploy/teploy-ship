@@ -4,7 +4,7 @@ import { JOURNEYS, type Journey } from "teploy-ship/journeys";
 export interface TaskProject { url: string; label: string; planSupported: boolean; requirePlanReview?: boolean }
 // getRandomValues also works on private HTTP installs, where randomUUID may
 // be unavailable. The ID is an idempotency key, never an authorization token.
-function nextRequestId(): string {
+export function nextRequestId(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   bytes[6] = (bytes[6]! & 15) | 64;
   bytes[8] = (bytes[8]! & 63) | 128;

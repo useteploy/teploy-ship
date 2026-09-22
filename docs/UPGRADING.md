@@ -51,6 +51,21 @@ It requires `SHIP_ISOLATED_CHECK=1` and an explicit `NUCLEUS_URL`; it creates an
 removes only uniquely named proof records. Check restart persistence and parked
 run preflight on a restored copy before the first production cutover.
 
+## Revision launch coordination
+
+Revision intents can carry `reviewParent`. The matching launch publisher must
+claim that parent's merge decision for the child, record cancellation, then
+publish the child. A durable `revision:<child-id>` decision token supports retry
+without reopening merge approval. No recorded workflow input or step changes.
+
+Stop old web and worker writers before enabling this build; an older worker
+cannot honor the new intent prerequisite. Deploy the matching processes together,
+using the backup/preflight procedure below. Do not downgrade with pending revision
+intents or held revision decisions. Fix forward or explicitly reconcile them.
+`scripts/check-revision-recovery.mjs seed` followed by an isolated engine restart
+and `verify <printed-id>` checks persistence, competing claims and publication.
+Never run the mutating proof against production.
+
 ## Durable launch acceptance
 
 The launch journal adds `ship_launches`, `ship_launch_chunks` and

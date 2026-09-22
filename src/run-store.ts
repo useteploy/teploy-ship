@@ -170,13 +170,14 @@ export class RunMetaStore {
   }
 
   /** Single-process file mode still has concurrent HTTP handlers. */
-  async claimDecision(runId: string, eventName: string): Promise<boolean> {
+  async claimDecision(runId: string, eventName: string, owner?: string): Promise<boolean> {
     const path = this.#path(runId);
     return withFileLock(path, async () => {
       const current = await this.load(runId);
+      if (owner && current?.eventName === `revision:${owner}`) return true;
       if (current === null || current.eventName !== eventName) return false;
       const { eventName: _drop, ...rest } = current;
-      await writeJsonFile(path, { ...rest, updatedAt: new Date().toISOString() });
+      await writeJsonFile(path, { ...rest, ...(owner ? {eventName:`revision:${owner}`} : {}), updatedAt: new Date().toISOString() });
       return true;
     });
   }

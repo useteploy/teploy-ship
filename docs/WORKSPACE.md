@@ -210,6 +210,16 @@ Ship keeps the original run identity. The worker automatically finishes
 publication of durably accepted launches. A retry does not bypass project plan
 requirements, and pending/unknown acceptance is not represented as completion.
 
-This recovery guarantee currently covers direct task submissions and intake
-launches. Follow-up messages and replacement of an outstanding merge decision
-still have separate recovery work; do not assume their operation is atomic.
+Follow-up messages also retain their request ID, task type, target and plan
+choice with the draft. Retrying an accepted follow-up returns its existing run;
+changing the request creates a new ID. Reusing an ID with different content is
+refused. Current launch authority is still required on every retry.
+
+A change requested at merge review records its replacement intent durably. Ship
+holds that decision for the specific revision and records cancellation before
+scheduling the revision. The worker can resume this handoff after a crash. A
+competing merge/revision that already owns the decision prevents the child from
+starting; Ship reports that conflict instead of overriding it. Such conflicting
+accepted intents remain held for operator diagnosis; automatic reassignment or
+abandonment is not implemented. This is not an atomic transaction with the forge,
+and does not resolve ambiguous external push/merge outcomes.
