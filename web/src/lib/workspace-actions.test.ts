@@ -321,3 +321,23 @@ test("follow-up retries share one child and refuse changed content under the sam
   const missing=await run.action({params:{id},request:request('/runs/'+id,{...fields,requestId:''})});
   assert.match(decodeURIComponent(missing.headers.get('location')!),/Refresh the page/);
 });
+
+test("project settings refuse a mismatched clone URL without storing ineffective policy",async()=>{
+  const projects=await import('../routes/projects.js');
+  const runtime=await shipRuntime();
+  const response=await projects.action({request:request('/projects',{repo:'binding/expected',url:'https://forge.example/binding/different',planReviewPresent:'1',requirePlanReview:'on'})});
+  assert.match(decodeURIComponent(response.headers.get('location')!),/must match its clone URL/);
+  assert.equal(await runtime.projects.forRepo('binding/expected'),null);
+  assert.equal(await runtime.projects.forRepo('https://forge.example/binding/different'),null);
+});
+
+
+test("project settings cannot persist or echo a credential-bearing clone URL",async()=>{
+  const projects=await import('../routes/projects.js');
+  const runtime=await shipRuntime();
+  const response=await projects.action({request:request('/projects',{repo:'binding/credentials',url:'https://synthetic:DO_NOT_ECHO@forge.example/binding/credentials'})});
+  const location=decodeURIComponent(response.headers.get('location')!);
+  assert.match(location,/without embedded credentials/);
+  assert.equal(location.includes('DO_NOT_ECHO'),false);
+  assert.equal(await runtime.projects.forRepo('binding/credentials'),null);
+});

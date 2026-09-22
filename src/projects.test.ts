@@ -50,7 +50,7 @@ test("evidence is a view of projects: reads through to legacy rows, writes move 
   assert.deepEqual(await view.forRepo("tyler/old"), { repo: "tyler/old", testCommand: "go test ./..." });
 
   // A project with evidence fields wins over a legacy row for the same repo.
-  await projects.set({ repo: "tyler/old", url: GO_URL, testCommand: "make test", autoMerge: false, autoDeploy: false });
+  await projects.set({ repo: "tyler/old", url: "https://git.example.com/tyler/old", testCommand: "make test", autoMerge: false, autoDeploy: false });
   assert.deepEqual(await view.forRepo("tyler/old"), { repo: "tyler/old", testCommand: "make test" });
 
   // `evidence set` writes to the project (creating one) and retires the legacy row.
@@ -65,7 +65,7 @@ test("evidence is a view of projects: reads through to legacy rows, writes move 
   // Setting evidence on an existing project keeps its other fields.
   await view.set({ repo: "tyler/old", testCommand: "go test -race ./..." });
   const kept = await projects.forRepo("tyler/old");
-  assert.equal(kept?.url, GO_URL);
+  assert.equal(kept?.url, "https://git.example.com/tyler/old");
   assert.equal(kept?.testCommand, "go test -race ./...");
 
   const listed = (await view.list()).map((e) => `${e.repo}=${e.testCommand}`);
@@ -73,7 +73,7 @@ test("evidence is a view of projects: reads through to legacy rows, writes move 
 
   await view.remove("tyler/old");
   assert.equal(await view.forRepo("tyler/old"), null);
-  assert.equal((await projects.forRepo("tyler/old"))?.url, GO_URL, "removing evidence keeps the project");
+  assert.equal((await projects.forRepo("tyler/old"))?.url, "https://git.example.com/tyler/old", "removing evidence keeps the project");
 });
 
 test("allowlist = env floor + project repos, by exact repo only", async () => {
@@ -504,4 +504,20 @@ test("required plan review persists, validates and survives evidence updates", a
   const stored = (await projects.forRepo(GO_URL))!;
   await projects.set({ ...stored, requirePlanReview: false });
   assert.notEqual((await projects.forRepo(GO_URL))?.requirePlanReview, true);
+});
+
+
+test("project clone URL cannot bind policies under a different repository name", async () => {
+  const store = new FileProjectStore(await tempDir());
+  await assert.rejects(store.set({repo:"team/expected",url:"https://forge.example/team/different",autoMerge:false,autoDeploy:false,requirePlanReview:true}),/must match its clone URL/);
+  assert.deepEqual(await store.list(),[]);
+  await store.set({repo:"team/expected",url:"https://forge.example/team/expected.git",autoMerge:false,autoDeploy:false,requirePlanReview:true});
+  assert.equal((await store.forRepo("https://forge.example/team/expected"))?.requirePlanReview,true);
+});
+
+
+test("project configuration refuses credentials and ambiguous URL suffixes without echoing them", () => {
+  for (const url of ["https://synthetic:DO_NOT_ECHO@forge.example/team/repo", "https://forge.example/team/repo?token=DO_NOT_ECHO", "https://forge.example/team/repo#DO_NOT_ECHO", "ssh://git@forge.example/team/repo"]) {
+    assert.throws(() => normalizeProject({repo:"team/repo",url,autoMerge:false,autoDeploy:false}),error => error instanceof Error && /without embedded credentials/.test(error.message) && !error.message.includes("DO_NOT_ECHO"));
+  }
 });

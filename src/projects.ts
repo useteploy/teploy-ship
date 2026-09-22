@@ -220,7 +220,9 @@ export function normalizeProject(input: Project): Project {
   };
   const num = (v: number | undefined): number | undefined => (v !== undefined && Number.isFinite(v) && v > 0 ? v : undefined);
   const url = str(input.url) ?? (repositoryIdentity(input.repo) !== null ? str(input.repo) : undefined);
-  if (url !== undefined && repoSlug(url) === null) throw new Error(`not a repository URL: ${url}`);
+  if (url !== undefined && repositoryIdentity(url) === null) throw new Error("not a repository URL: use HTTP(S) or file without embedded credentials, query parameters or fragments");
+  if (url !== undefined && repoSlug(url) === null) throw new Error("not a repository URL: include the repository path");
+  if (url !== undefined && repoSlug(url) !== repo) throw new Error("Project repository name must match its clone URL; configure a separate project for another repository");
   const sandboxNetwork = parseNetworkTier(input.sandboxNetwork);
   if (sandboxNetwork === null) {
     throw new Error(`sandboxNetwork must be ${NETWORK_TIER_HELP}, got: ${String(input.sandboxNetwork)}`);
