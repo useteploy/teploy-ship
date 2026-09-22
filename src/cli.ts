@@ -2175,6 +2175,11 @@ async function webCommand(rest: string[]): Promise<void> {
   if (!existsSync(bin)) fail(`web app dependencies are not installed (${bin} missing) — run: pnpm install in ${webDir}`);
   const child = spawn(bin, [mode], { cwd: webDir, env, stdio: "inherit" });
   child.on("exit", (code) => process.exit(code ?? 1));
+  // The CLI is PID 1 in the image. Docker signals it, not the server child;
+  // forwarding lets the listener stop before Docker's forced-kill timeout.
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.on(signal, () => child.kill(signal));
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -405,3 +405,58 @@ test("a cap of 0 disables the check, exactly as it does in the worker", async ()
     else process.env.SHIP_DAILY_BUDGET_USD = saved;
   }
 });
+
+for (const scenario of [
+  {name:'passing tests',command:'test -f f.txt',expected:'completed'},
+  {name:'failing tests',command:'exit 1',expected:'failed'},
+  {name:'missing test command',command:undefined,expected:'failed'},
+  {name:'failed preparation',command:'test -f f.txt',expected:'failed',prepare:'exit 1'},
+] as const) {
+  test(`setup-only verification: ${scenario.name} records the real outcome without model or publication`,async()=>{
+    const fixture=await scanRepo('setup-only');
+    let destroyed=0;
+    fixture.provider.destroy=async()=>{destroyed++};
+    const scripted=scriptedModel(['This model must never be called']);
+    const store=new MemoryEventStore();
+    try {
+      const outcome=await executeRun({
+        workflow:durableAgent({model:scripted.model,executor:fixture.provider}),
+        runId:'run-setup-only',store,
+        input:{task:'Verify environment',repo:fixture.repo,mode:'scan',environmentCheck:true,environmentCheckOnly:true,
+          ...(scenario.command?{testCommand:scenario.command}:{}),
+          ...(scenario.prepare?{preparation:{command:scenario.prepare,timeoutMs:1000}}:{}),
+        },
+      });
+      assert.equal(outcome.status,scenario.expected);
+      assert.equal(scripted.calls(),0);
+      assert.deepEqual(fixture.calls,[],'no forge mutation');
+      assert.equal(destroyed,1,'workspace is released on success or failure');
+      const steps=(await store.load('run-setup-only')).filter(e=>e.type==='step-completed').map(e=>e.name);
+      assert.ok(!steps.some(name=>String(name).includes('turn-')||name==='scan-findings'||name==='repo-context'));
+      if(scenario.expected==='completed')assert.equal((outcome.output as {turns:number}).turns,0);
+    }finally{fixture.restore()}
+  });
+}
+
+test('setup-only replay finishes recorded checks after sandbox release without running commands again',async()=>{
+  const fixture=await scanRepo('setup-replay'),store=new MemoryEventStore();
+  const scripted=scriptedModel(['must not run']);
+  const input={task:'verify',repo:fixture.repo,mode:'scan' as const,environmentCheck:true,environmentCheckOnly:true,testCommand:'test -f f.txt'};
+  try {
+    const first=await executeRun({workflow:durableAgent({model:scripted.model,executor:fixture.provider}),runId:'run-setup-replay',store,input});
+    assert.equal(first.status,'completed');
+    // Crash boundary: all step results persisted, terminal run result missing.
+    const restored=new MemoryEventStore();
+    for(const e of await store.load('run-setup-replay'))if(e.type!=='run-completed')await restored.append('run-setup-replay',e);
+    const provider:ExecutorProvider={
+      isolated:true,
+      create:async()=>{throw new Error('must not create another sandbox')},
+      attach:handle=>new Proxy(fixture.provider.attach(handle),{get(target,key){if(key==='exec')return async()=>{throw new Error('sandbox already released')};return Reflect.get(target,key,target)}}),
+      destroy:async()=>{},
+    };
+    const replay=await executeRun({workflow:durableAgent({model:scripted.model,executor:provider}),runId:'run-setup-replay',store:restored,input});
+    assert.equal(replay.status,'completed');
+    assert.deepEqual(replay.output,first.output);
+    assert.equal(scripted.calls(),0);
+  }finally{fixture.restore()}
+});

@@ -85,8 +85,9 @@ export async function action({
         trust: "operator",
         mode: "scan",
         environmentCheck: true,
+        environmentCheckOnly: true,
         journey: "investigate",
-        task: `Verify project environment: ${project.label ?? project.repo}. Inspect repository instructions and dependency manifests. Run the configured test command ${project.testCommand ?? "or detect the appropriate test command"}. Confirm required runtimes and services are available. Do not modify tracked files or publish changes. Report exact commands and failures with actionable setup fixes. Finish after verification; do not broaden into a code audit.`,
+        task: `Verify project environment: ${project.label ?? project.repo}. Clone the repository, run its configured preparation and test commands, and record their actual result.`,
       });
       return redirect(`/runs/${runId}?view=review`);
     }
@@ -289,12 +290,11 @@ export default function Setup({ data }: { data: Data }) {
             <form method="post">
               <input type="hidden" name="repo" value={data.selected.url ?? data.selected.repo} />
               <button name="intent" value="verify">
-                Verify environment with a real run
+                Verify environment
               </button>
               <p class="meta">
-                Uses your configured model and budget. Clones the repo, prepares
-                the sandbox and checks the environment without publishing
-                changes.
+                Clones the repository and runs your saved preparation and test
+                commands on the worker. No model calls or published changes.
               </p>
             </form>
           )}

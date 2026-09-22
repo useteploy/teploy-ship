@@ -557,9 +557,20 @@ export const WORKFLOW_STEPS: readonly WorkflowStep[] = [
  */
 export const FINGERPRINT_SCHEME = "s1";
 
+/** Setup-only runs return immediately after environment-check. Keep their
+ * admitted prefix distinct so an older worker cannot replay them as paid scans.
+ * Absent flag preserves every historical fingerprint.
+ */
+function applicableSteps(steps: readonly WorkflowStep[], input: RecordedInput): readonly WorkflowStep[] {
+  if(input.environmentCheckOnly !== true)return steps;
+  const boundary=steps.findIndex(step=>step.key === "step:environment-check");
+  if(boundary<0)throw new Error("Setup verification step is missing from the workflow table");
+  return steps.slice(0,boundary+1);
+}
+
 /** The step keys a run with this recorded input can produce, in source order. */
 export function admittedSteps(input: RecordedInput): string[] {
-  return WORKFLOW_STEPS.filter((s) => s.admits(input)).map((s) => s.key);
+  return applicableSteps(WORKFLOW_STEPS,input).filter((s) => s.admits(input)).map((s) => s.key);
 }
 
 function hash(keys: readonly string[]): string {
@@ -573,7 +584,7 @@ function hash(keys: readonly string[]): string {
  * one moves only the runs that set the flag" without editing durable.ts.
  */
 export function fingerprintOf(steps: readonly WorkflowStep[], input: RecordedInput): string {
-  return hash(steps.filter((s) => s.admits(input)).map((s) => s.key));
+  return hash(applicableSteps(steps,input).filter((s) => s.admits(input)).map((s) => s.key));
 }
 
 /** The fingerprint of a run with this recorded input, under this build. */

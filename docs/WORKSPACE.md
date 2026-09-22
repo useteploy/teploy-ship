@@ -66,12 +66,18 @@ inside the sandbox after checkout and before the agent. A failed command stops
 execution with a recorded outcome. The same setup applies to additional attempts.
 Existing runs keep their recorded configuration and step fingerprints.
 
-**Verify environment with a real run** launches a scan through the normal
-model/budget/approval path. Ship independently executes the configured test
-command and records it as Environment tests; the agent inspects the environment
-and reports problems. No test command means disabled, never passed. The scan
-cannot publish changes. Preparation commands may install dependencies or start
-services, but Ship does not automatically provision arbitrary databases/secrets.
+**Verify environment** launches a deterministic check through the worker's
+normal authorization and admission path. It clones the repository, runs saved
+preparation and test commands, records the actual results, then releases the
+sandbox. It makes no model calls and publishes no changes. Missing or failing
+tests cannot produce a successful verification. Use a separate review request
+when you want an agent to investigate a failure.
+
+The setup-only behavior is recorded in new run inputs. Older environment checks
+keep their original agent-backed behavior, and an older worker holds new checks
+rather than accidentally running them as paid scans. Preparation commands may
+install dependencies or start services, but Ship does not automatically
+provision arbitrary databases or secrets.
 
 ## Scheduled workflows
 

@@ -176,7 +176,7 @@ test("setup preparation persists and verification enqueues recorded checks with 
   const response=await setup.action({request:request('/setup',{intent:'verify',repo:'team/repo'})});
   const id=response.headers.get('location')!.split('/').pop()!.split('?')[0];
   const input=(await runtime.store.load(id))[0].data as any;
-  assert.equal(input.input.environmentCheck,true);assert.equal(input.input.mode,'scan');assert.equal(input.input.preparation.command,'npm ci');
+  assert.equal(input.input.environmentCheckOnly,true);assert.equal(input.input.environmentCheck,true);assert.equal(input.input.mode,'scan');assert.equal(input.input.preparation.command,'npm ci');
   assert.equal(input.input.autoMerge,undefined);
 });
 

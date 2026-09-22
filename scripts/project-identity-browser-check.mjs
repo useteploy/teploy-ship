@@ -20,6 +20,7 @@ try {
     await details.getByRole('button',{name:'Save and check setup'}).click();
     await page.waitForURL(url=>url.searchParams.get('repo')===urls[i]);
     assert.equal(await page.locator('select[name=repo]').inputValue(),urls[i]);
+    assert.equal(await page.getByRole('button',{name:'Verify environment',exact:true}).count(),1);
     assert.equal(await page.locator('section.setup-environment input[name=tests]').inputValue(),`echo forge-${i}`);
   }
   for(const width of [390,768,1440]){

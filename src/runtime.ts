@@ -868,6 +868,8 @@ export async function enqueueRun(
     userMessage?: string;
     journey?: Journey;
     environmentCheck?: boolean;
+    /** Deterministic setup probe: no model turns or publication. */
+    environmentCheckOnly?: boolean;
     task: string;
     model: string;
     repo?: string;
@@ -1053,6 +1055,7 @@ export async function enqueueRun(
   // presence, so "off for a scan" has to be a fact in the log, not a decision a
   // worker makes while replaying one.
   const scan = options.mode === "scan" || (journey !== undefined && journey !== "change");
+  if(options.environmentCheckOnly === true && (!options.repo || options.environmentCheck !== true || !scan))throw new Error("A setup-only check requires a repository and read-only environment verification");
   // Stuck detection (recovery.ts) is ON by default since 2026-09-15. It had
   // been opt-in (`SHIP_RECOVERY=1`) on the product path while the live loop
   // had it on unconditionally, and run-a3d15f43 showed the cost of the gap:
@@ -1229,7 +1232,7 @@ export async function enqueueRun(
   // The project record's declared harness (B5) sits between an explicit
   // request and the worker's env: the repo says what its image was baked with,
   // and a caller naming one explicitly still wins.
-  const harness = harnessRef(options.harness ?? project?.harness ?? process.env.SHIP_HARNESS);
+  const harness = harnessRef(options.environmentCheckOnly === true ? "native" : options.harness ?? project?.harness ?? process.env.SHIP_HARNESS);
   // Multi-harness attempts (P5-4): repo runs only, two or more ids, off unless
   // SHIP_HARNESS_ATTEMPTS says so. Materialised like everything else here.
   // Not on a scan: N harnesses producing N sets of findings is N times the
@@ -1268,7 +1271,7 @@ export async function enqueueRun(
   // run (its checkout resolves a head branch that may live in a fork, so the
   // volume would not be the repository's steady state).
   const warmRun =
-    options.repo !== undefined && options.pr === undefined && warmCacheEnabled() && warmSlugOf(options.repo) !== null;
+    options.environmentCheckOnly !== true && options.repo !== undefined && options.pr === undefined && warmCacheEnabled() && warmSlugOf(options.repo) !== null;
   // The spend cap, checked BEFORE the run exists. Order matters: a refusal
   // after `store.append` would leave a `run-started` event for a run no worker
   // is allowed to execute — a ghost in the runs list that no surface can
@@ -1284,6 +1287,7 @@ export async function enqueueRun(
         restoreValidation: 1 as const,
         task: journey ? `${options.task}\n\n${journeyInstruction(journey)}` : options.task,
         ...(journey ? { journey, userMessage: options.userMessage ?? options.task } : {}),
+        ...(options.environmentCheckOnly === true ? { environmentCheckOnly: true } : {}),
         ...(options.environmentCheck === true ? { environmentCheck: true, ...(project ? { environmentConfigId: projectReadinessKey(project) } : {}) } : {}),
         ...(options.userMessage !== undefined ? { userMessage: options.userMessage } : {}),
         ...(options.parentRunId !== undefined ? { parentRunId: options.parentRunId } : {}),

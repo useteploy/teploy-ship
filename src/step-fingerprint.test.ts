@@ -596,3 +596,13 @@ test("the refusal a decision surface gets names the two honest actions and the d
   assert.match(refusal, /log the hold protects/, "the operator must be told WHY approving is refused, not just that it is");
   assert.doesNotMatch(refusal, /approve/i);
 });
+
+test('setup-only checks admit only the setup prefix and cannot replay as a paid legacy scan',()=>{
+  const input:RecordedInput={task:'verify',repo:'https://forge.example/team/app',mode:'scan',environmentCheck:true};
+  const old=stepFingerprint(input);
+  const deterministic={...input,environmentCheckOnly:true};
+  assert.notEqual(stepFingerprint(deterministic),old,'an older worker must hold this new path');
+  assert.deepEqual(admittedSteps(deterministic),['step:sandbox','step:repo-setup','step:environment-check']);
+  assert.deepEqual(admittedSteps({...deterministic,preparation:{command:'npm ci',timeoutMs:1000}}),['step:sandbox','step:repo-setup','step:environment-prepare','step:environment-check']);
+  assert.equal(stepFingerprint({...input,environmentCheckOnly:false}),old,'legacy check fingerprints do not change');
+});

@@ -501,6 +501,8 @@ export interface DurableAgentInput {
   sandboxImage?: string;
   preparation?: EnvironmentPreparation;
   environmentCheck?: boolean;
+  /** Recorded opt-in: stop after deterministic setup checks, without a model. */
+  environmentCheckOnly?: boolean;
   requireOpenPr?: boolean;
   sandboxNetwork?: NetworkTier;
   /** Extra egress allowlist entries for this run (projects.ts sandboxEgressAllow). */
@@ -903,6 +905,7 @@ export function durableAgent(
   return workflow<DurableAgentInput, DurableAgentOutput>(
     config.name ?? "coding-agent",
     async (ctx: WorkflowContext, input: DurableAgentInput): Promise<DurableAgentOutput> => {
+      if(input.environmentCheckOnly === true && (!input.repo || input.environmentCheck !== true || input.mode !== "scan"))throw new Error("A setup-only check requires a repository and read-only environment verification");
       // Untrusted work needs isolation, and the check belongs HERE rather than
       // at process start: a worker that refuses to boot is a worker whose
       // operator reaches for the override, and then everything is unsandboxed
@@ -971,7 +974,9 @@ export function durableAgent(
       // Deliberately NOT a recorded step: it is a liveness probe about the
       // container, not a fact about the run, and recording it would make its
       // answer replay as "alive" forever — which is the exact bug.
-      if (config.executor.isolated === true) {
+      // Setup-only replay can finish from recorded checks after its workspace
+      // was released. Unfinished commands still fail if the sandbox is gone.
+      if (config.executor.isolated === true && input.environmentCheckOnly !== true) {
         const alive = await executor.exec("true", { timeoutMs: 15_000 }).then(
           (r) => r.exitCode === 0,
           () => false,
@@ -990,40 +995,50 @@ export function durableAgent(
       // a repo-aware task. On replay the step returns the recorded
       // checkout without touching the network.
       let checkout: RepoCheckout | null = null;
-      if (input.repo !== undefined) {
-        const repoUrl = input.repo;
-        checkout = await ctx.step("repo-setup", async () => {
-          // The last gate before a credential meets an origin. Intake screens
-          // the URL too, but this run may have been enqueued by an older
-          // binary or a surface that forgot to — so the check that actually
-          // guards the token lives next to the token.
-          const ref = assertRepoAllowed(repoUrl, { trust: input.trust ?? "operator", config: repoPolicy });
-          const token = credentialFor(ref, repoPolicy);
-          // file:// remotes (tests, local mirrors) take no credentials
-          if (token === "" && ref.base !== "file://") {
-            throw new Error("repo run needs a git credential on the executing worker (SHIP_GIT_TOKEN or SHIP_GIT_TOKENS)");
+      try {
+        if (input.repo !== undefined) {
+          const repoUrl = input.repo;
+          checkout = await ctx.step("repo-setup", async () => {
+            // The last gate before a credential meets an origin. Intake screens
+            // the URL too, but this run may have been enqueued by an older
+            // binary or a surface that forgot to — so the check that actually
+            // guards the token lives next to the token.
+            const ref = assertRepoAllowed(repoUrl, { trust: input.trust ?? "operator", config: repoPolicy });
+            const token = credentialFor(ref, repoPolicy);
+            // file:// remotes (tests, local mirrors) take no credentials
+            if (token === "" && ref.base !== "file://") {
+              throw new Error("repo run needs a git credential on the executing worker (SHIP_GIT_TOKEN or SHIP_GIT_TOKENS)");
+            }
+            // Warm reuse (SB-A) when this run booted a warm volume that already
+            // holds a clone; a cold clone otherwise. Both end in the same
+            // checkout, so the step's OUTPUT — the only thing a replay reads —
+            // does not depend on which path ran.
+            if (input.pr === undefined) return checkoutRepo(executor, { ref, token, runId: ctx.runId, warm: input.warm === true });
+            // A fork PR's head branch lives in another repository, which the
+            // allowlist has to cover too — resolve its credential the same way.
+            const resolved = await resolvePr(ref, token, input.pr);
+            const headToken =
+              resolved.headRepo !== undefined
+                ? credentialFor(assertRepoAllowed(resolved.headRepo, { trust: "external", config: repoPolicy }), repoPolicy)
+                : "";
+            return setupRepoForPr(executor, { ref, token, pr: input.pr, requireOpen: input.requireOpenPr === true, ...(headToken !== "" ? { headToken } : {}) });
+          });
+        }
+        if (input.preparation !== undefined && checkout !== null) {
+          const prepared = await ctx.step("environment-prepare", () => prepareEnvironment(executor, input.preparation!));
+          if (prepared.kind !== "passed") throw new Error("Environment preparation failed. Review its output and update Project setup before retrying.");
+        }
+        if (input.environmentCheck === true && checkout !== null) {
+          const check = await ctx.step("environment-check", () => { const target = testTargetFromInput(input) ?? config.tests; return target ? runTests(executor, target) : { kind: "disabled" as const, reason: "Configure a test command in Project setup to verify the environment" }; });
+          if(input.environmentCheckOnly === true){
+            if(check.kind !== "passed")throw new Error(check.kind === "disabled" ? check.reason : "Environment verification failed. Review the recorded command output in Project setup before retrying.");
+            await dispose(config,handle);
+            return {status:"finished",turns:0,summary:"Repository checkout and configured environment checks passed. No model was called and no changes were published."};
           }
-          // Warm reuse (SB-A) when this run booted a warm volume that already
-          // holds a clone; a cold clone otherwise. Both end in the same
-          // checkout, so the step's OUTPUT — the only thing a replay reads —
-          // does not depend on which path ran.
-          if (input.pr === undefined) return checkoutRepo(executor, { ref, token, runId: ctx.runId, warm: input.warm === true });
-          // A fork PR's head branch lives in another repository, which the
-          // allowlist has to cover too — resolve its credential the same way.
-          const resolved = await resolvePr(ref, token, input.pr);
-          const headToken =
-            resolved.headRepo !== undefined
-              ? credentialFor(assertRepoAllowed(resolved.headRepo, { trust: "external", config: repoPolicy }), repoPolicy)
-              : "";
-          return setupRepoForPr(executor, { ref, token, pr: input.pr, requireOpen: input.requireOpenPr === true, ...(headToken !== "" ? { headToken } : {}) });
-        });
-      }
-      if (input.preparation !== undefined && checkout !== null) {
-        const prepared = await ctx.step("environment-prepare", () => prepareEnvironment(executor, input.preparation!));
-        if (prepared.kind !== "passed") throw new Error("Environment preparation failed. Review its output and update Project setup before retrying.");
-      }
-      if (input.environmentCheck === true && checkout !== null) {
-        await ctx.step("environment-check", () => { const target = testTargetFromInput(input) ?? config.tests; return target ? runTests(executor, target) : { kind: "disabled" as const, reason: "Configure a test command in Project setup to verify the environment" }; });
+        }
+      } catch(error) {
+        if(input.environmentCheckOnly === true)await dispose(config,handle);
+        throw error;
       }
       const repoKey = input.repo !== undefined ? repoKeyOf(input.repo, input.repositoryScopeVersion) : null;
       /**

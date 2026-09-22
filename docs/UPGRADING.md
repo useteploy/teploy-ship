@@ -28,6 +28,16 @@ new code**. Everything below is about making that safe.
 - [ ] **Note the current version**, so rollback has a target:
       `docker ps --format '{{.Names}}'` on the host shows `ship-web-<sha>`.
 
+## Deterministic setup verification
+
+New Project setup checks record `environmentCheckOnly: true` and a setup-prefix
+fingerprint. They run checkout, preparation and configured tests, then finish
+without a model or publication. Existing environment-check runs retain their
+recorded agent-backed path. An old worker sees a fingerprint mismatch for the
+new path and holds it; deploy matching web and workers before inviting checks.
+Completed check steps can replay to the final result after their sandbox has
+been released. This proves recorded checks, not continued service availability.
+
 ## Repository identity storage
 
 Projects now use the full clone URL (scheme, host, port and repository path) as
