@@ -1,0 +1,11 @@
+--- a/service.py
++++ b/service.py	2026-09-22 12:52:46
+@@ -9,7 +9,7 @@
+ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+ from pathlib import Path
+ 
+-SESSION_TTL_SECONDS = 24 * 60 * 60  # pinned by tests/test_service.py -- do not change without a contract decision
++SESSION_TTL_SECONDS = 30 * 60  # align with the documented 30-minute inactivity window in README.md
+ 
+ try:
+     import markdown as _markdown

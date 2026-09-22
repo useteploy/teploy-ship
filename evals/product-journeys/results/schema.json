@@ -1,0 +1,92 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Product-journey scenario result",
+  "type": "object",
+  "required": [
+    "scenarioId",
+    "family",
+    "runId",
+    "harnessRevision",
+    "fixtureRevision",
+    "firstAttempt",
+    "eventualSuccess",
+    "interventions",
+    "latencyMs",
+    "cost",
+    "verifiedEvidence",
+    "claimedEvidence",
+    "artifacts",
+    "preserve"
+  ],
+  "properties": {
+    "scenarioId": { "type": "string", "pattern": "^pj-[sbc]-[a-z-]+$" },
+    "family": { "enum": ["small-site", "ui-api-db", "unfamiliar-service"] },
+    "runId": { "type": "string" },
+    "harnessRevision": { "type": "string", "description": "git SHA of teploy-ship when the run executed" },
+    "fixtureRevision": { "type": "string", "description": "git SHA or sha256 of the fixture tree used" },
+    "firstAttempt": {
+      "type": "object",
+      "required": ["pass"],
+      "properties": {
+        "pass": { "type": "boolean" },
+        "graderReasons": { "type": "array", "items": { "type": "string" } },
+        "endedBy": { "enum": ["agent", "step-cap", "intervention", "harness-error"] }
+      }
+    },
+    "eventualSuccess": {
+      "type": "object",
+      "required": ["pass"],
+      "properties": {
+        "pass": { "type": "boolean", "description": "success without rescue: interventions of kind 'rescue' make this false even if the grader passes" }
+      }
+    },
+    "interventions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "at", "note"],
+        "properties": {
+          "kind": { "enum": ["rescue", "clarification", "approval", "probe", "restart"] },
+          "at": { "type": "string", "description": "ISO 8601 timestamp" },
+          "by": { "type": "string" },
+          "note": { "type": "string" }
+        }
+      }
+    },
+    "latencyMs": { "type": "integer", "minimum": 0 },
+    "cost": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {
+        "status": { "enum": ["priced", "unknown"] },
+        "amount": { "type": "number" },
+        "currency": { "type": "string" },
+        "source": { "type": "string", "description": "e.g. teploy-gateway telemetry" },
+        "reason": { "type": "string", "description": "required when status is unknown" }
+      }
+    },
+    "verifiedEvidence": {
+      "type": "array",
+      "items": { "type": "object", "required": ["check"], "properties": { "check": { "type": "string" }, "value": {} } }
+    },
+    "claimedEvidence": {
+      "type": "array",
+      "items": { "type": "object", "required": ["claim"], "properties": { "claim": { "type": "string" }, "verdict": { "enum": ["verified", "disproved", "unverified"] } } }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": { "type": "string", "description": "repo-relative or run-relative artifact paths (diffs, grader output, screenshots)" }
+    },
+    "preserve": {
+      "type": "object",
+      "required": ["dir"],
+      "properties": {
+        "dir": { "type": "string", "description": "directory holding the raw transcript and failed attempts; additive-only" }
+      }
+    },
+    "probesApplied": {
+      "type": "array",
+      "items": { "enum": ["interruption", "stale-approval", "permissions"] }
+    }
+  }
+}
