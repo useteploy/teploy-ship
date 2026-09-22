@@ -72,6 +72,20 @@ test("deliveryFromEvents reads the merge off the recorded steps, never the accou
   assert.equal(record!.mergedSha, "abc123def456");
   assert.equal(record!.reviewedHead, "feed0000beef");
 
+  // The boundary path: the sha lives on merge-rebase, the decision says only `merged`.
+  const boundary = [
+    step("repo-push", { kind: "pushed", sha: "feed0000beef" }, 1),
+    step("merge-rebase", { kind: "up-to-date", sha: "feed0000beef" }, 2),
+    step("merge-decision", { kind: "merged", rebase: "up-to-date" }, 3),
+  ];
+  assert.equal(deliveryFromEvents("run-b", "r", boundary)!.mergedSha, "feed0000beef");
+  // An explicit decision sha still wins over the rebase sha.
+  const bothShas = [
+    step("merge-rebase", { kind: "rebased", sha: "ccc" }, 1),
+    step("merge-decision", { kind: "merged", sha: "ddd" }, 2),
+  ];
+  assert.equal(deliveryFromEvents("run-c", "r", bothShas)!.mergedSha, "ddd");
+
   // Unmerged and unknown outcomes record NOTHING.
   assert.equal(deliveryFromEvents("run-y", "r", [step("merge-decision", { kind: "merge-failed", status: 405 }, 1)]), null);
   assert.equal(deliveryFromEvents("run-z", "r", [step("merge-decision", { kind: "merge-unknown", status: 0 }, 1)]), null);

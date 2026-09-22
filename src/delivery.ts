@@ -129,6 +129,12 @@ export function deliveryFromEvents(
   const result = (e: { type: string; name?: string; data?: unknown }): Record<string, unknown> | undefined =>
     (e.data as { result?: Record<string, unknown> } | undefined)?.result;
   let merged: Record<string, unknown> | undefined;
+  // The boundary path (approve-merge) records WHICH tree merged on the
+  // merge-rebase step — the merge-decision itself just says `merged`, and a
+  // forge that answers a merge without a sha leaves it at that. The rebase
+  // step's sha IS the exact head the merge merged (up-to-date: the PR head;
+  // rebased: the rebased head), so it is the proof, never a guess.
+  let rebaseSha: string | undefined;
   for (const e of events) {
     if (e.type !== "step-completed") continue;
     const r = result(e);
@@ -136,13 +142,20 @@ export function deliveryFromEvents(
     // The boundary decision supersedes the auto gate on the same PR; the
     // LAST merged answer wins (same precedence as the verification facts).
     if ((e.name === "merge-decision" || e.name === "auto-merge") && r.kind === "merged") merged = r;
+    if (e.name === "merge-rebase" && typeof r.sha === "string" && r.sha !== "") rebaseSha = r.sha;
   }
   if (merged === undefined) return null;
+  const sha =
+    typeof merged.sha === "string" && merged.sha !== ""
+      ? merged.sha
+      : rebaseSha !== undefined
+        ? rebaseSha
+        : undefined;
   const record: Omit<DeliveryRecord, "state" | "updatedAt"> = {
     id: runId,
     runId,
     repo,
-    ...(typeof merged.sha === "string" && merged.sha !== "" ? { mergedSha: merged.sha } : {}),
+    ...(sha !== undefined ? { mergedSha: sha } : {}),
     ...(e2s(events, "repo-push") !== undefined ? { reviewedHead: e2s(events, "repo-push") } : {}),
   };
   return record;
