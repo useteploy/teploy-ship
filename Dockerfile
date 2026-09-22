@@ -10,13 +10,14 @@
 FROM node:22-slim@sha256:f32b81066cde10a75dbac96646099533316d94bac4150c55da1636e1f0ffdc46
 
 # git: repo runs clone/push inside this container (worker role, local
-# executor path). ca-certificates for https remotes. rsync: `teploy build`
-# syncs the build context to the server through a LOCAL rsync binary, so the
-# worker role needs it for preview deploys and delivery execution (found
-# live 2026-09-22: the shipped CLI could not build from inside the image).
-# curl only to fetch the teploy CLI below, then removed — it is not part of
-# the runtime.
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl rsync \
+# executor path). ca-certificates for https remotes. rsync + openssh-client:
+# `teploy build` syncs the build context through a LOCAL rsync that shells
+# out to `ssh` for its transport (the CLI's own SSH is Go-native, but the
+# rsync path is not), so the worker role needs both for preview deploys and
+# delivery execution (found live 2026-09-22: the shipped CLI could not build
+# from inside the image). curl only to fetch the teploy CLI below, then
+# removed — it is not part of the runtime.
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl rsync openssh-client \
   && rm -rf /var/lib/apt/lists/* \
   && corepack enable
 
@@ -33,9 +34,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
 # actually happen — a clone of the repo being fixed at SHIP_PREVIEW_DIR, and an
 # SSH key plus known_hosts for the deploy target. Neither belongs in an image.
 #
-# No openssh-client: the CLI speaks SSH through Go's crypto/ssh, not by
-# shelling out. It does read ~/.ssh/known_hosts and fails closed when it cannot,
-# so mount one.
+# The CLI speaks SSH through Go's crypto/ssh for its own connections, but
+# `teploy build`'s rsync transport shells out to `ssh` — hence the
+# openssh-client in the apt list above. It reads ~/.ssh/known_hosts either
+# way and fails closed when it cannot, so mount one.
 #
 # Needs >= v0.1.27, the first release carrying `teploy build`. Before that the
 # only way to produce a runnable image was `teploy deploy`, which replaces
