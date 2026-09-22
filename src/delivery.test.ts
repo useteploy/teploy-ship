@@ -221,9 +221,9 @@ test("readBackDelivery confirms only on the version AND the artifact, and never 
   assert.equal(lost.state, "confirmed", "the late reconciler learns it lost");
 
   // A failed delivery can be re-approved (the recovery path this slice
-  // itself exercised live) and the fence still holds.
-  const redone = await store.transition(record.id, "confirmed", "held", {});
-  assert.equal(redone.state, "confirmed", "confirmed is terminal — the fence refuses");
+  // itself exercised live), and confirmed is terminal — an illegal move out
+  // of it is refused outright, not soft-lost.
+  await assert.rejects(store.transition(record.id, "confirmed", "held", {}), /cannot move/);
 });
 
 test("readBackDelivery parses the CLI's real status shape, captured live", async () => {
