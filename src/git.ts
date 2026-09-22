@@ -942,8 +942,86 @@ export function formatReviewComments(comments: PrReviewComment[]): string {
  * `failed` with the status, and the caller records that on the timeline.
  */
 export type MergeOutcome =
-  | { kind: "merged"; sha?: string }
-  | { kind: "failed"; status: number; reason: string };
+  | { kind: "merged"; sha?: string; reconciled?: true }
+  | { kind: "failed"; status: number; reason: string }
+  | { kind: "unknown"; status: number; reason: string };
+
+/** What a read-back of the pull request proved about its merge state. */
+export type PullRequestRead =
+  | { kind: "read"; state: "open" | "closed"; merged: boolean; sha?: string }
+  | { kind: "unreadable"; reason: string };
+
+/**
+ * Read a pull request's current state from the forge.
+ *
+ * The single source of truth for reconciling an uncertain merge outcome: both
+ * forges answer GET on the pull request with `state`, `merged` and
+ * `merge_commit_sha`. A read that cannot be completed is `unreadable`, which
+ * is different from "not merged" — the caller must not turn an unreachable
+ * provider into a verdict.
+ */
+export async function readPullRequestState(
+  ref: RepoRef,
+  token: string,
+  pr: number,
+  fetchImpl: typeof fetch = fetch,
+): Promise<PullRequestRead> {
+  try {
+    const response = await fetchImpl(pullEndpoint(ref, pr), { headers: forgeHeaders(ref, token) });
+    if (!response.ok) return { kind: "unreadable", reason: `read failed (${response.status})` };
+    const body = (await response.json().catch(() => ({}))) as { state?: unknown; merged?: unknown; merge_commit_sha?: unknown };
+    return {
+      kind: "read",
+      state: body.state === "closed" ? "closed" : "open",
+      merged: body.merged === true,
+      ...(typeof body.merge_commit_sha === "string" && body.merge_commit_sha !== "" ? { sha: body.merge_commit_sha } : {}),
+    };
+  } catch (error) {
+    return { kind: "unreadable", reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
+ * Merge, then reconcile the outcome against the provider before recording it.
+ *
+ * A merge call that errors is not evidence the merge did not happen: the
+ * request can reach the forge, merge, and lose its response — and a replay of
+ * a step whose receipt was lost re-POSTs a merge the forge already performed,
+ * which the forge answers with the same 4xx it uses for genuinely unmergeable
+ * pull requests. Both directions are settled by READING THE PULL REQUEST
+ * BACK, never by trusting the failing answer:
+ *
+ *   merged read-back      -> `merged` (reconciled), with the forge's own sha
+ *   read-back says open and the forge definitively refused (4xx/5xx) -> `failed`
+ *   read-back says open after a call that never answered (status 0) -> `unknown`
+ *   read-back unreadable  -> `unknown`
+ *
+ * `unknown` is a first-class outcome, not a soft failure: only the provider
+ * can move it, by being read later. No caller may record it as failed.
+ */
+export async function mergePullRequestReconciled(
+  ref: RepoRef,
+  token: string,
+  pr: number,
+  options: { method?: "squash" | "merge" | "rebase"; title?: string; message?: string } = {},
+  fetchImpl: typeof fetch = fetch,
+): Promise<MergeOutcome> {
+  const outcome = await mergePullRequest(ref, token, pr, options, fetchImpl);
+  if (outcome.kind === "merged") return outcome;
+  const read = await readPullRequestState(ref, token, pr, fetchImpl);
+  if (read.kind === "read" && read.merged) {
+    return { kind: "merged", ...(read.sha !== undefined ? { sha: read.sha } : {}), reconciled: true };
+  }
+  if (read.kind === "read" && !read.merged && outcome.status > 0) {
+    return outcome; // the forge answered the merge request with a refusal it stands behind
+  }
+  const readReason = read.kind === "unreadable" ? `read-back failed: ${read.reason}` : `read-back shows ${read.state}, not merged`;
+  return {
+    kind: "unknown",
+    status: outcome.status,
+    reason: `${outcome.reason}; ${readReason}`,
+  };
+}
 
 /**
  * Merge a pull request over the host's API.

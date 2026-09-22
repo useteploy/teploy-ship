@@ -5,6 +5,7 @@ import type { WorkflowEvent } from "@neutron-build/workflow";
 
 import {
   SUMMARY_LIMIT,
+  mergeFact,
   runVerificationSummary,
   verificationFactsFromEvents,
   verificationSummary,
@@ -61,6 +62,34 @@ test("merge outcomes read differently by who authorised them", () => {
   assert.match(verificationSummary({ ...base, merge: { kind: "held", reasons: ["the change classified serious"] } }), /auto-merge held: the change classified serious/);
   assert.match(verificationSummary({ ...base, merge: { kind: "closed", reason: "too risky" } }), /merge was denied and the pull request closed \(too risky\)/);
   assert.match(verificationSummary({ ...base, merge: { kind: "blocked", reasons: ["suite did not pass after the rebase"] } }), /approved but blocked/);
+});
+
+test("an unproven merge outcome is UNKNOWN with a next action, and a reconciled merge says how it is known", () => {
+  const base = { agent: "Done.", tests: { kind: "passed" as const, command: "t", durationMs: 1 } };
+  const unknown = verificationSummary({
+    ...base,
+    merge: { kind: "merge-unknown", reason: "ETIMEDOUT; read-back failed: provider dark" },
+  });
+  assert.match(unknown, /merge outcome could not be confirmed/);
+  assert.match(unknown, /inspect the pull request on the forge/);
+  assert.doesNotMatch(unknown, /merge attempt failed/, "unknown is never worded as a known failure");
+  const reconciled = verificationSummary({
+    ...base,
+    merge: { kind: "merged", via: "approved", reconciled: true },
+  });
+  assert.match(reconciled, /merged it on the approved merge decision/);
+  assert.match(reconciled, /confirmed by reading the pull request back/);
+});
+
+test("mergeFact maps the recorded unknown step kinds from both merge paths", () => {
+  assert.deepEqual(mergeFact({ kind: "merge-unknown", rebase: "up-to-date", status: 0, reason: "dark" }, "approved"), {
+    kind: "merge-unknown",
+    reason: "dark",
+  });
+  assert.deepEqual(mergeFact({ kind: "unknown", status: 0, reason: "dark" }, "auto"), {
+    kind: "merge-unknown",
+    reason: "dark",
+  });
 });
 
 test("the critic is reported as advisory, and never as a gate", () => {

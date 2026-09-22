@@ -28,7 +28,7 @@ import {
   formatReviewComments,
   listPrReviewComments,
   openPullRequest,
-  mergePullRequest,
+  mergePullRequestReconciled,
   markPullRequestReady,
   closePullRequest,
   rebaseOntoBase,
@@ -2686,6 +2686,7 @@ async function publishIfRepoRun(
   if (merge?.outcome.kind === "merged") facts.merge = { kind: "merged", via: "auto" };
   else if (merge?.outcome.kind === "held") facts.merge = { kind: "held", reasons: merge.outcome.reasons };
   else if (merge?.outcome.kind === "failed") facts.merge = { kind: "merge-failed", reason: merge.outcome.reason };
+  else if (merge?.outcome.kind === "unknown") facts.merge = { kind: "merge-unknown", reason: merge.outcome.reason };
   if (boundaryPark && changeVerdict !== undefined) {
     const decided = await mergeBoundaryGate(ctx, executor, config, input, { ref, token, checkout: co, pr, handle }, {
       verdict: changeVerdict,
@@ -2710,8 +2711,9 @@ async function publishIfRepoRun(
 type MergeDecisionStep =
   | { kind: "closed"; reason: string; ok: boolean; detail?: string }
   | { kind: "ready"; rebase: "up-to-date" | "rebased"; sha: string; ok: boolean; detail?: string }
-  | { kind: "merged"; rebase: "up-to-date" | "rebased"; sha?: string }
+  | { kind: "merged"; rebase: "up-to-date" | "rebased"; sha?: string; reconciled?: true }
   | { kind: "merge-failed"; rebase: "up-to-date" | "rebased"; status: number; reason: string }
+  | { kind: "merge-unknown"; rebase: "up-to-date" | "rebased"; status: number; reason: string }
   | { kind: "blocked"; reasons: string[] };
 
 /**
@@ -2835,21 +2837,30 @@ ${reason}`).catch(() => undefined);
             : `already on the tip of ${checkout.base}; the recorded verification stands`;
         // Marked ready first because a forge refuses to merge a draft; if that
         // refusal stands, the merge outcome below says so.
-        const outcome = await mergePullRequest(ref, token, pr.number, {
+        const outcome = await mergePullRequestReconciled(ref, token, pr.number, {
           method: "squash",
           message: `Merged by Teploy Ship (run ${ctx.runId}) on an approved merge decision.
 
 Classified ${facts.verdict.class}: ${facts.verdict.reasons.join("; ")}
 ${note}.`,
         });
-        return outcome.kind === "merged"
-          ? { kind: "merged", rebase: rebase.kind, ...(outcome.sha !== undefined ? { sha: outcome.sha } : {}) }
-          : {
-              kind: "merge-failed",
-              rebase: rebase.kind,
-              status: outcome.status,
-              reason: ready.ok ? outcome.reason : `${outcome.reason} (the pull request could not be marked ready first: ${ready.reason ?? "refused"})`,
-            };
+        if (outcome.kind === "merged") {
+          return {
+            kind: "merged",
+            rebase: rebase.kind,
+            ...(outcome.sha !== undefined ? { sha: outcome.sha } : {}),
+            ...(outcome.reconciled === true ? { reconciled: true } : {}),
+          };
+        }
+        if (outcome.kind === "unknown") {
+          return { kind: "merge-unknown", rebase: rebase.kind, status: outcome.status, reason: outcome.reason };
+        }
+        return {
+          kind: "merge-failed",
+          rebase: rebase.kind,
+          status: outcome.status,
+          reason: ready.ok ? outcome.reason : `${outcome.reason} (the pull request could not be marked ready first: ${ready.reason ?? "refused"})`,
+        };
       },
       EXTERNAL_EFFECT_RETRY,
     );
@@ -2942,9 +2953,10 @@ async function rollbackIfWorse(
 
 /** What the `auto-merge` step recorded. `held` is the interesting one: it says WHY not. */
 type AutoMergeStep =
-  | { kind: "merged"; why: string[]; sha?: string }
+  | { kind: "merged"; why: string[]; sha?: string; reconciled?: true }
   | { kind: "held"; reasons: string[] }
-  | { kind: "failed"; status: number; reason: string };
+  | { kind: "failed"; status: number; reason: string }
+  | { kind: "unknown"; status: number; reason: string };
 
 /**
  * Merge without a human (L5 / D5, recut by C4 / D3).
@@ -3072,7 +3084,7 @@ async function autoMergeIfAllowed(
     if (held.length > 0) return { kind: "held", reasons: held };
 
     const why = facts.verdict?.reasons ?? [];
-    const outcome = await mergePullRequest(ref, token, pr, {
+    const outcome = await mergePullRequestReconciled(ref, token, pr, {
       method: "squash",
       message:
         `Merged by Teploy Ship (run ${ctx.runId}) without a human.\n\n` +
@@ -3081,9 +3093,13 @@ async function autoMergeIfAllowed(
             `Rungs: ${(rungs ?? []).map((r) => `${r.name} ${r.status}`).join(", ") || "none recorded"}.`
           : `Classified trivial: ${why.join("; ")}\nSuite: ${tests?.kind ?? "not run"}.`),
     });
-    return outcome.kind === "merged"
-      ? { kind: "merged", why, ...(outcome.sha !== undefined ? { sha: outcome.sha } : {}) }
-      : { kind: "failed", status: outcome.status, reason: outcome.reason };
+    if (outcome.kind === "merged") {
+      return { kind: "merged", why, ...(outcome.sha !== undefined ? { sha: outcome.sha } : {}), ...(outcome.reconciled === true ? { reconciled: true } : {}) };
+    }
+    if (outcome.kind === "unknown") {
+      return { kind: "unknown", status: outcome.status, reason: outcome.reason };
+    }
+    return { kind: "failed", status: outcome.status, reason: outcome.reason };
   });
   // The rebase path's re-run suite, when it happened: the caller's verification
   // paragraph must describe the tree that was merged, not the pre-rebase one.

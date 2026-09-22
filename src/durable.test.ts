@@ -3149,6 +3149,184 @@ test("C1: denying the boundary closes the pull request and keeps the branch", as
   }
 });
 
+/** Drops the FIRST append of the named step's receipt and every append after
+ * it — a process that dies between an external effect and its durable record
+ * writes nothing further; the engine's own run-failed append included. */
+class DiesBeforeReceipt extends MemoryEventStore {
+  #step: string;
+  #died = false;
+  #crashed = false;
+  constructor(step: string) {
+    super();
+    this.#step = step;
+  }
+  get died(): boolean {
+    return this.#died;
+  }
+  /** The process comes back up: appends work again, the log is as it was. */
+  revive(): void {
+    this.#died = false;
+  }
+  override async append(runId: string, event: { type?: string; name?: string }): Promise<void> {
+    if (!this.#died && !this.#crashed && event.type === "step-completed" && event.name === this.#step) {
+      this.#crashed = true;
+      this.#died = true;
+      throw new Error("process died before the step receipt was written");
+    }
+    if (this.#died) throw new Error("process is dead; nothing further is written");
+    return super.append(runId, event as Parameters<MemoryEventStore["append"]>[1]);
+  }
+}
+
+test("A: a merge whose answer is lost reads back as merged — the effect is the outcome, not the dead response", async () => {
+  const fixture = await mergeFixture("a-lost-answer", { ok: true }, {
+    // The forge performed the merge; the response never came back.
+    onMerge: (attempt) => (attempt === 1 ? { applied: true, answer: "throw" } : { applied: false, answer: "refuse" }),
+  });
+  try {
+    const { model } = reactiveModel([
+      "```bash\n(yes x | head -501) > big.txt\n```",
+      "```finish\nadded the big file\n```",
+      "```bash\nwc -l big.txt\n```",
+      "```finish\nadded the big file\n```",
+    ]);
+    const store = new MemoryEventStore();
+    const input = { task: "add the big file", repo: fixture.repo, changeClass: true, mergeGate: true };
+    await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-a-lost-answer",
+      store,
+      input,
+    });
+    await deliverEvent(store, "run-a-lost-answer", MERGE_EVENT, { approved: true });
+    const done = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-a-lost-answer",
+      store,
+      input,
+    });
+    assert.equal(done.status, "completed", "a lost response is not a failed run");
+    const decision = stepResult(await store.load("run-a-lost-answer"), "merge-decision");
+    assert.equal(decision?.kind, "merged", "the read-back settled what the dead response could not");
+    assert.equal(decision?.reconciled, true, "and the record says HOW it is known");
+    assert.equal(decision?.sha, "merged1234", "with the forge's own merge sha");
+    assert.equal(fixture.merges().length, 1, "one merge POST — no blind retry, the state was read instead");
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("A: a crash between the merge effect and its receipt replays to the truth, not to a false failure", async () => {
+  const fixture = await mergeFixture("a-crash-window", { ok: true }, {
+    onMerge: (attempt) => (attempt === 1 ? { applied: true, answer: "ok" } : { applied: false, answer: "refuse" }),
+  });
+  try {
+    const { model } = reactiveModel([
+      "```bash\n(yes x | head -501) > big.txt\n```",
+      "```finish\nadded the big file\n```",
+      "```bash\nwc -l big.txt\n```",
+      "```finish\nadded the big file\n```",
+    ]);
+    const store = new DiesBeforeReceipt("merge-decision");
+    const input = { task: "add the big file", repo: fixture.repo, changeClass: true, mergeGate: true };
+    await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-a-crash-window",
+      store,
+      input,
+    });
+    await deliverEvent(store, "run-a-crash-window", MERGE_EVENT, { approved: true });
+    // The merge lands, the process dies before the receipt is persisted.
+    await assert.rejects(
+      executeRun({
+        workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+        runId: "run-a-crash-window",
+        store,
+        input,
+      }),
+      /process (died|is dead)/,
+    );
+    assert.ok(store.died, "the crash was injected exactly where the window is");
+    store.revive();
+    // A replay (restart, lease takeover) re-executes the step: the forge says
+    // 405 to a merge it already performed, and the read-back turns that into
+    // the truth instead of recording a failure for work that happened.
+    const resumed = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-a-crash-window",
+      store,
+      input,
+    });
+    assert.equal(resumed.status, "completed");
+    const decision = stepResult(await store.load("run-a-crash-window"), "merge-decision");
+    assert.equal(decision?.kind, "merged");
+    assert.equal(decision?.reconciled, true, "the replay learned the outcome from the provider");
+    assert.equal(fixture.merges().length, 2, "two POSTs — but the forge state applied exactly one merge");
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("A: a forge that cannot be read after a failed merge stays UNKNOWN — never failed, never merged", async () => {
+  const fixture = await mergeFixture("a-dark-forge", { ok: true }, {
+    onMerge: () => ({ applied: false, answer: "throw" }),
+    readDown: "provider dark",
+  });
+  try {
+    const { model } = reactiveModel([
+      "```bash\n(yes x | head -501) > big.txt\n```",
+      "```finish\nadded the big file\n```",
+      "```bash\nwc -l big.txt\n```",
+      "```finish\nadded the big file\n```",
+    ]);
+    const store = new MemoryEventStore();
+    const input = { task: "add the big file", repo: fixture.repo, changeClass: true, mergeGate: true };
+    await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-a-dark-forge",
+      store,
+      input,
+    });
+    await deliverEvent(store, "run-a-dark-forge", MERGE_EVENT, { approved: true });
+    const done = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-a-dark-forge",
+      store,
+      input,
+    });
+    assert.equal(done.status, "completed", "unknown is an honest outcome, not a failed run");
+    const decision = stepResult(await store.load("run-a-dark-forge"), "merge-decision");
+    assert.equal(decision?.kind, "merge-unknown");
+    assert.equal(decision?.status, 0);
+    assert.match(String(decision?.reason), /provider dark/, "the record says why it could not be settled");
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("A: an unattended auto-merge into a dark forge records unknown, and the run keeps its pull request", async () => {
+  const fixture = await mergeFixture("a-dark-auto", { ok: true }, {
+    onMerge: () => ({ applied: false, answer: "throw" }),
+    readDown: "provider dark",
+  });
+  try {
+    const { model } = reactiveModel(TRIVIAL_SCRIPT);
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-a-dark-auto",
+      store,
+      input: { task: "fix the greeting", repo: fixture.repo, changeClass: true, tests: true, testCommand: "true", autoMerge: true },
+    });
+    assert.equal(outcome.status, "completed");
+    const result = stepResult(await store.load("run-a-dark-auto"), "auto-merge");
+    assert.equal(result?.kind, "unknown", "the machine did not learn an outcome, and says exactly that");
+    assert.ok(outcome.output !== undefined && String((outcome.output as { pr?: string }).pr).includes("pulls/1"), "the PR is still the output");
+  } finally {
+    fixture.restore();
+  }
+});
+
 test("C1: an approved rebase onto a MOVED base re-runs the suite before the PR is marked ready", async () => {
   const fixture = await mergeFixture("c1-rebase");
   // A second checkout of the same bare, used to move main while the run parks.
@@ -3446,7 +3624,26 @@ test("C7: an auto-merge that CONFLICTS with the moved base holds with the files 
  * Like repoFixture, but it records the URL and METHOD of every forge call —
  * which is the only way to tell an auto-merge from a PR that was merely opened.
  */
-async function mergeFixture(name: string, mergeReply: { ok: boolean; status?: number } = { ok: true }): Promise<{
+/** What the scripted forge does with one /merge request. */
+interface MergeScript {
+  /** Did this call perform the merge? Applied merges mutate the PR state. */
+  applied: boolean;
+  /** `ok` answers 200; `refuse` answers 405; `throw` loses the response. */
+  answer: "ok" | "refuse" | "throw";
+}
+
+async function mergeFixture(
+  name: string,
+  mergeReply: { ok: boolean; status?: number } = { ok: true },
+  script?: {
+    /** Per-call behaviour for /merge, by 1-based attempt; default: mergeReply with no state change. */
+    onMerge?: (attempt: number) => MergeScript;
+    /** The pull request a read-back sees. Applied merges set merged/closed/sha. */
+    pr?: { state: "open" | "closed"; merged: boolean; sha?: string };
+    /** When set, every read-back (GET the PR) fails with this message. */
+    readDown?: string;
+  },
+): Promise<{
   repo: string;
   calls: { url: string; method: string; body: unknown }[];
   merges: () => { url: string; method: string; body: unknown }[];
@@ -3461,6 +3658,8 @@ async function mergeFixture(name: string, mergeReply: { ok: boolean; status?: nu
   );
   const work = await mkdtemp(join(tmpdir(), `durable-${name}-work-`));
   const calls: { url: string; method: string; body: unknown }[] = [];
+  let mergeAttempts = 0;
+  const pr = script?.pr ?? { state: "open" as const, merged: false };
   const orig = globalThis.fetch;
   (globalThis as unknown as { fetch: unknown }).fetch = (url: unknown, init?: { method?: string; body?: string }) => {
     const href = String(url);
@@ -3470,6 +3669,21 @@ async function mergeFixture(name: string, mergeReply: { ok: boolean; status?: nu
       body: typeof init?.body === "string" ? (JSON.parse(init.body) as unknown) : undefined,
     });
     if (href.endsWith("/merge")) {
+      const plan = script?.onMerge?.(++mergeAttempts) ?? { applied: false, answer: mergeReply.ok ? ("ok" as const) : ("refuse" as const) };
+      if (plan.applied) {
+        pr.state = "closed";
+        pr.merged = true;
+        pr.sha = "merged1234";
+      }
+      if (plan.answer === "throw") return Promise.reject(new Error("response lost in the network"));
+      if (plan.answer === "refuse") {
+        return Promise.resolve({
+          ok: false,
+          status: 405,
+          json: () => Promise.resolve({}),
+          text: () => Promise.resolve("Pull Request is not mergeable"),
+        });
+      }
       return Promise.resolve({
         ok: mergeReply.ok,
         status: mergeReply.status ?? (mergeReply.ok ? 200 : 405),
@@ -3477,10 +3691,20 @@ async function mergeFixture(name: string, mergeReply: { ok: boolean; status?: nu
         text: () => Promise.resolve("Pull Request is not mergeable"),
       });
     }
+    if (script?.readDown !== undefined && /\/pulls\/\d+$/.test(href)) return Promise.reject(new Error(script.readDown));
     return Promise.resolve({
       ok: true,
       status: 200,
-      json: () => Promise.resolve({ number: 1, html_url: "http://example/owner/repo/pulls/1", body: "" }),
+      json: () =>
+        Promise.resolve({
+          number: 1,
+          html_url: "http://example/owner/repo/pulls/1",
+          body: "",
+          title: "",
+          state: pr.state,
+          merged: pr.merged,
+          ...(pr.merged && pr.sha !== undefined ? { merge_commit_sha: pr.sha } : {}),
+        }),
       text: () => Promise.resolve(""),
     });
   };

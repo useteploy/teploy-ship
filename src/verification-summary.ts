@@ -73,12 +73,13 @@ export interface VerificationFacts {
  * paraphrase of it.
  */
 export type MergeFact =
-  | { kind: "merged"; via: "auto" | "approved" }
+  | { kind: "merged"; via: "auto" | "approved"; reconciled?: true }
   | { kind: "held"; reasons: string[] }
   | { kind: "closed"; reason: string }
   | { kind: "ready" }
   | { kind: "blocked"; reasons: string[] }
-  | { kind: "merge-failed"; reason: string };
+  | { kind: "merge-failed"; reason: string }
+  | { kind: "merge-unknown"; reason: string };
 
 /**
  * Map a recorded `auto-merge` or `merge-decision` step onto a MergeFact.
@@ -90,7 +91,7 @@ export function mergeFact(v: unknown, via: "auto" | "approved"): MergeFact | und
   if (r === undefined || typeof r.kind !== "string") return undefined;
   switch (r.kind) {
     case "merged":
-      return { kind: "merged", via };
+      return { kind: "merged", via, ...(r.reconciled === true ? { reconciled: true } : {}) };
     case "held":
     case "blocked":
       return { kind: r.kind, reasons: Array.isArray(r.reasons) ? r.reasons.map(String) : [] };
@@ -101,6 +102,9 @@ export function mergeFact(v: unknown, via: "auto" | "approved"): MergeFact | und
     case "failed":
     case "merge-failed":
       return { kind: "merge-failed", reason: String(r.reason ?? "") };
+    case "unknown":
+    case "merge-unknown":
+      return { kind: "merge-unknown", reason: String(r.reason ?? "") };
     default:
       return undefined;
   }
@@ -232,11 +236,13 @@ export function verificationSummary(facts: VerificationFacts): string {
   const mg = facts.merge;
   if (mg?.kind === "merged") {
     did.push(mg.via === "auto" ? "merged it under the repo's auto-merge authority" : "merged it on the approved merge decision");
+    if (mg.reconciled === true) did.push("the merge was confirmed by reading the pull request back after an uncertain answer");
   } else if (mg?.kind === "ready") did.push("the approved pull request was marked ready for review");
   else if (mg?.kind === "closed") did.push(`the merge was denied and the pull request closed${mg.reason !== "" ? ` (${mg.reason.slice(0, 120)})` : ""}`);
   else if (mg?.kind === "held" && mg.reasons.length > 0) not.push(`auto-merge held: ${mg.reasons[0]}`);
   else if (mg?.kind === "blocked" && mg.reasons.length > 0) not.push(`the merge was approved but blocked: ${mg.reasons[0]}`);
   else if (mg?.kind === "merge-failed") not.push(`the merge attempt failed (${mg.reason.slice(0, 120)})`);
+  else if (mg?.kind === "merge-unknown") not.push(`the merge outcome could not be confirmed (${mg.reason.slice(0, 120)}) — inspect the pull request on the forge; if it is still open and should merge, merge it there`);
 
   const text =
     `What I did: ${did.join("; ")}. ` +

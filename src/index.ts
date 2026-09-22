@@ -21,8 +21,8 @@ export { deployPreview, destroyPreview, hostRunner, previewComment, previewTarge
 // D5/D4: merging a trivial change, and judging whether a deploy made things
 // worse. Exported here for the same reason deployPreview/compareHealth are —
 // they are part of what a caller embedding Ship can drive.
-export { mergePullRequest } from "./git.js";
-export type { MergeOutcome } from "./git.js";
+export { mergePullRequest, mergePullRequestReconciled, readPullRequestState } from "./git.js";
+export type { MergeOutcome, PullRequestRead } from "./git.js";
 export { defaultRegressionThresholds, telemetryRegression } from "./observe.js";
 export type { RegressionThresholds } from "./observe.js";
 export { runTests, testComment, testTargetFromEnv } from "./tests.js";

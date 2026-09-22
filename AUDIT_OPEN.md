@@ -18,15 +18,18 @@ tested build, login is reachable and collection resumed. No run was approved.
 A coordinated Nucleus snapshot (LSN 1650451) is retained privately and restored
 successfully into a disposable container. This is not the full end-to-end proof.
 
-SKIPPED (separate design/operational proof): automatic reconciliation of unknown
-forge/run outcomes; crash recovery before a notification intent is enqueued;
-one-shot project/revert notifier recovery; commit-bound verification and
-independent forge merge synchronization; warm-volume approval restoration;
-settled multi-attempt cost propagation (upstream event support); historical
-repair; retention/capacity policy for durable receipts and overdue retries.
-Acceptance: fault-inject each boundary, restart the actual worker,
-prove one approved standalone and milestone loop, and reconcile the same tested,
-merged and deployed revision without duplicate external effects. These are not
+SKIPPED (separate design/operational proof): crash recovery before a
+notification intent is enqueued; one-shot project/revert notifier recovery;
+commit-bound verification and independent forge merge synchronization;
+warm-volume approval restoration; settled multi-attempt cost propagation
+(upstream event support); historical repair; retention/capacity policy for
+durable receipts and overdue retries. PARTIALLY ADDRESSED 2026-09-22: unknown
+MERGE outcomes are now reconciled by provider read-back (`mergePullRequestReconciled`,
+`git.ts`) with an honest `merge-unknown` recorded outcome — the remaining
+effects (push/comment/preview windows) stay on this list. Acceptance:
+fault-inject each boundary, restart the actual worker, prove one approved
+standalone and milestone loop, and reconcile the same tested, merged and
+deployed revision without duplicate external effects. These are not
 cosmetic tasks to delegate without the integration context.
 
 SKIPPED (upstream): Nucleus v1.0.2 arm64 image still fails at startup with a

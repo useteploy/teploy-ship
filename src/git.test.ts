@@ -14,6 +14,8 @@ import {
   publishedDiff,
   markPullRequestReady,
   mergePullRequest,
+  mergePullRequestReconciled,
+  readPullRequestState,
   findOpenPullRequest,
   formatReviewComments,
   listPrReviewComments,
@@ -438,6 +440,98 @@ test("D5: a refused merge is DATA — never a throw, so the PR stays open and th
   const thrown = (async () => { throw new Error("ECONNRESET"); }) as unknown as typeof fetch;
   // status 0 distinguishes "never reached the forge" from "the forge said no".
   assert.deepEqual(await mergePullRequest(GITHUB_REF, "tok", 9, {}, thrown), { kind: "failed", status: 0, reason: "ECONNRESET" });
+});
+
+/** A forge whose /merge answer and pull-request state are scripted per call. */
+function scriptableFetch(mergeReply: () => Promise<Response>, readReply: () => Promise<Response>): { impl: typeof fetch; urls: string[] } {
+  const urls: string[] = [];
+  const impl = (async (url: string | URL | Request) => {
+    const href = String(url);
+    urls.push(href);
+    return href.endsWith("/merge") ? mergeReply() : readReply();
+  }) as unknown as typeof fetch;
+  return { impl, urls };
+}
+
+test("A: readPullRequestState reads merged state and sha off the pull request", async () => {
+  const ok = scriptableFetch(
+    async () => new Response("no"),
+    async () => new Response(JSON.stringify({ state: "closed", merged: true, merge_commit_sha: "cafe1234" }), { status: 200 }),
+  );
+  assert.deepEqual(await readPullRequestState(FORGEJO_REF, "tok", 7, ok.impl), { kind: "read", state: "closed", merged: true, sha: "cafe1234" });
+
+  const open = scriptableFetch(
+    async () => new Response("no"),
+    async () => new Response(JSON.stringify({ state: "open", merged: false }), { status: 200 }),
+  );
+  assert.deepEqual(await readPullRequestState(GITHUB_REF, "tok", 7, open.impl), { kind: "read", state: "open", merged: false });
+
+  const down = scriptableFetch(
+    async () => new Response("no"),
+    async () => { throw new Error("ECONNRESET"); },
+  );
+  assert.deepEqual(await readPullRequestState(FORGEJO_REF, "tok", 7, down.impl), { kind: "unreadable", reason: "ECONNRESET" });
+
+  const refused = scriptableFetch(
+    async () => new Response("no"),
+    async () => new Response("gone", { status: 500 }),
+  );
+  assert.deepEqual(await readPullRequestState(FORGEJO_REF, "tok", 7, refused.impl), { kind: "unreadable", reason: "read failed (500)" });
+});
+
+test("A: an uncertain merge answer is reconciled by reading the pull request back, never guessed", async () => {
+  // status 0: the merge call never answered, but the forge shows the pull
+  // request merged — that IS the outcome, with the forge's own sha.
+  const landed = scriptableFetch(
+    async () => { throw new Error("ETIMEDOUT"); },
+    async () => new Response(JSON.stringify({ state: "closed", merged: true, merge_commit_sha: "cafe1234" }), { status: 200 }),
+  );
+  assert.deepEqual(await mergePullRequestReconciled(GITHUB_REF, "tok", 9, {}, landed.impl), { kind: "merged", sha: "cafe1234", reconciled: true });
+  assert.ok(landed.urls[1]!.endsWith("/pulls/9"), "the read-back targeted the same pull request");
+
+  // A replayed merge the forge already performed answers 405; the read-back
+  // turns the ambiguity into the truth instead of recording a failure.
+  const replayed = scriptableFetch(
+    async () => new Response("Pull Request is not mergeable", { status: 405 }),
+    async () => new Response(JSON.stringify({ state: "closed", merged: true, merge_commit_sha: "cafe1234" }), { status: 200 }),
+  );
+  assert.deepEqual(await mergePullRequestReconciled(FORGEJO_REF, "tok", 9, {}, replayed.impl), { kind: "merged", sha: "cafe1234", reconciled: true });
+
+  // A definitive refusal the provider stands behind (read-back open) stays a
+  // failure — that is a real "no", not an unknown.
+  const refused = scriptableFetch(
+    async () => new Response("Pull Request is not mergeable", { status: 405 }),
+    async () => new Response(JSON.stringify({ state: "open", merged: false }), { status: 200 }),
+  );
+  assert.equal((await mergePullRequestReconciled(FORGEJO_REF, "tok", 9, {}, refused.impl)).kind, "failed");
+
+  // status 0 with an open read-back cannot distinguish "never arrived" from
+  // "landed late": unknown, not failed.
+  const inconclusive = scriptableFetch(
+    async () => { throw new Error("ETIMEDOUT"); },
+    async () => new Response(JSON.stringify({ state: "open", merged: false }), { status: 200 }),
+  );
+  const inconclusiveOutcome = await mergePullRequestReconciled(GITHUB_REF, "tok", 9, {}, inconclusive.impl);
+  assert.equal(inconclusiveOutcome.kind, "unknown");
+  assert.equal(inconclusiveOutcome.status, 0);
+
+  // The provider unreachable for BOTH calls: unknown — the caller must not
+  // record a failure it cannot prove.
+  const dark = scriptableFetch(
+    async () => { throw new Error("ETIMEDOUT"); },
+    async () => { throw new Error("ECONNRESET"); },
+  );
+  const darkOutcome = await mergePullRequestReconciled(FORGEJO_REF, "tok", 9, {}, dark.impl);
+  assert.equal(darkOutcome.kind, "unknown");
+  assert.match(darkOutcome.reason, /read-back failed/);
+
+  // A successful merge answer passes through untouched.
+  const plain = scriptableFetch(
+    async () => new Response(JSON.stringify({ sha: "deadbeef", merged: true }), { status: 200 }),
+    async () => new Response("no"),
+  );
+  assert.deepEqual(await mergePullRequestReconciled(GITHUB_REF, "tok", 7, {}, plain.impl), { kind: "merged", sha: "deadbeef" });
+  assert.equal(plain.urls.length, 1, "no read-back when the merge answered");
 });
 
 // --- C1 / C7: the merge boundary's forge calls and the rebase ----------------
