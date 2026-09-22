@@ -286,8 +286,8 @@ export async function executeDelivery(
   }
   // A returned command is not a verified outcome: the deploy may succeed and
   // lose its response. `unknown` is the honest state until the target is
-  // READ BACK — the same discipline as merge reconciliation. (Read-back is
-  // the next slice: it needs the CLI's deploy-status surface.)
+  // READ BACK — the same discipline as merge reconciliation. The sweep
+  // reconciles unknown records through readBackDelivery below.
   return {
     ...record,
     artifactDigest: image,
@@ -295,6 +295,66 @@ export async function executeDelivery(
     updatedAt: now,
     reason: "deployment command completed; target state not yet read back",
   };
+}
+
+/** What reading the target back proved. */
+export type ReadBackOutcome =
+  | { outcome: "confirmed"; detail: string }
+  /** The target is readable and is NOT running the approved delivery. */
+  | { outcome: "mismatch"; detail: string }
+  /** The target could not be read; the record stays unknown and retries. */
+  | { outcome: "unreadable"; detail: string };
+
+/**
+ * Reconcile an `unknown` delivery by READING the target back — never by
+ * trusting the deploy command's exit code. Confirmed requires BOTH of the
+ * identity pair the delivery was approved under: the deployed version in the
+ * app's state AND a running container whose image is the recorded artifact.
+ * A readable target running something else is a `mismatch` (the deployment
+ * did not take effect); an unreadable one stays `unknown` and is retried by
+ * the next sweep — unknown never records as failed on a lost read.
+ */
+export async function readBackDelivery(
+  record: DeliveryRecord,
+  options: {
+    dir?: string;
+    run: (argv: string[], opts: { cwd: string; timeoutMs: number }) => Promise<{ code: number; stdout: string; stderr: string }>;
+  },
+): Promise<ReadBackOutcome> {
+  if (options.dir === undefined || options.dir === "") {
+    return { outcome: "unreadable", detail: "no trusted delivery directory configured (SHIP_DELIVERY_DIR); cannot read the target back" };
+  }
+  if (record.mergedSha === undefined || record.artifactDigest === undefined) {
+    return { outcome: "unreadable", detail: "the record carries no deployed identity (merged SHA / artifact digest); cannot reconcile" };
+  }
+  const expected = record.mergedSha.slice(0, 7);
+  const read = await options.run(["teploy", "status", "--json"], { cwd: options.dir, timeoutMs: 120_000 });
+  if (read.code !== 0) {
+    return { outcome: "unreadable", detail: `target status could not be read (exit ${read.code}): ${(read.stderr || read.stdout).slice(0, 300)}` };
+  }
+  let parsed: { state?: { current_hash?: unknown }; containers?: Array<{ image?: unknown; state?: unknown }> };
+  try {
+    parsed = JSON.parse(read.stdout.trim()) as typeof parsed;
+  } catch {
+    return { outcome: "unreadable", detail: `target status was not JSON: ${read.stdout.slice(0, 300)}` };
+  }
+  const running = (parsed.containers ?? []).filter((c) => c.state === "running");
+  const current = typeof parsed.state?.current_hash === "string" ? parsed.state.current_hash : "";
+  if (current !== expected) {
+    return {
+      outcome: "mismatch",
+      detail: `the target runs version ${current === "" ? "(none)" : current}, not the approved ${expected} — the deployment did not take effect`,
+    };
+  }
+  const onArtifact = running.some((c) => c.image === record.artifactDigest);
+  if (!onArtifact) {
+    const images = running.map((c) => String(c.image)).join(", ");
+    return {
+      outcome: "mismatch",
+      detail: `state names ${expected} but the running ${running.length === 0 ? "containers are none" : `container image(s) [${images}]`} — not the approved artifact ${record.artifactDigest}`,
+    };
+  }
+  return { outcome: "confirmed", detail: `target read back: version ${expected} serving on the approved artifact` };
 }
 /** Nucleus-backed store over a fresh sibling table (the fleet-store pattern). */
 export class NucleusDeliveryStore implements DeliveryStore {

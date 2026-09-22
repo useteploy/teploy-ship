@@ -23,7 +23,7 @@ import { enqueueRun, proposeExternal } from "./runtime.js";
 import { changeClassRequired, sweepBulletin } from "./bulletin.js";
 import { parseSandboxUrls } from "./sandbox-pool.js";
 import { attributionsFrom } from "./attributed-spend.js";
-import { deliveryFromEvents, executeDelivery } from "./delivery.js";
+import { deliveryFromEvents, executeDelivery, readBackDelivery } from "./delivery.js";
 import { intakeActor } from "./actor.js";
 import type { NucleusShipRuntime } from "./runtime.js";
 import type { RunMeta } from "./run-store.js";
@@ -1787,20 +1787,37 @@ export function startWorker(options: WorkerOptions): {
     return records
       .due("approved", 1)
       .then(async ([approved]) => {
-        if (approved === undefined) return;
-        const claimed = await records.transition(approved.id, "approved", "executing", {});
-        if (claimed.state !== "executing") return; // another worker claimed it first
-        const outcome = await executeDelivery(claimed, { dir: deliveryDir, run: deliveryRunner });
-        const to = outcome.state === "held" ? "held" : "unknown";
-        await records
-          .transition(claimed.id, "executing", to, {
-            ...(outcome.artifactDigest !== undefined ? { artifactDigest: outcome.artifactDigest } : {}),
-            ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}),
-          })
-          .catch((error: unknown) =>
-            log(`[worker] delivery ${approved.id}: outcome could not be recorded: ${error instanceof Error ? error.message : String(error)}`),
-          );
-        log(`[worker] delivery ${approved.id} → ${to}`);
+        if (approved !== undefined) {
+          const claimed = await records.transition(approved.id, "approved", "executing", {});
+          if (claimed.state !== "executing") return; // another worker claimed it first
+          const outcome = await executeDelivery(claimed, { dir: deliveryDir, run: deliveryRunner });
+          const to = outcome.state === "held" ? "held" : "unknown";
+          await records
+            .transition(claimed.id, "executing", to, {
+              ...(outcome.artifactDigest !== undefined ? { artifactDigest: outcome.artifactDigest } : {}),
+              ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}),
+            })
+            .catch((error: unknown) =>
+              log(`[worker] delivery ${approved.id}: outcome could not be recorded: ${error instanceof Error ? error.message : String(error)}`),
+            );
+          log(`[worker] delivery ${approved.id} → ${to}`);
+          return;
+        }
+        // Reconcile one unknown delivery by reading the target back: unknown
+        // is a promise to verify, not a resting state. Confirmed needs the
+        // version AND the artifact on the target; a readable target running
+        // something else fails with that evidence; an unreadable one stays
+        // unknown and retries on the next sweep.
+        const [unknown] = await records.due("unknown", 1);
+        if (unknown === undefined) return;
+        const read = await readBackDelivery(unknown, { dir: deliveryDir, run: deliveryRunner });
+        if (read.outcome === "confirmed") {
+          await records.transition(unknown.id, "unknown", "confirmed", { reason: read.detail });
+          log(`[worker] delivery ${unknown.id} → confirmed`);
+        } else if (read.outcome === "mismatch") {
+          await records.transition(unknown.id, "unknown", "failed", { reason: read.detail });
+          log(`[worker] delivery ${unknown.id} → failed (read-back: ${read.detail})`);
+        }
       })
       .catch((error) => log(`[worker] delivery sweep: ${error instanceof Error ? error.message : String(error)}`));
   };

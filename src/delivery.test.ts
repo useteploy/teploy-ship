@@ -9,6 +9,7 @@ import {
   FileDeliveryStore,
   deliveryFromEvents,
   executeDelivery,
+  readBackDelivery,
   transitionAllowed,
   type DeliveryRecord,
 } from "./delivery.js";
@@ -124,3 +125,77 @@ test("executeDelivery holds honestly without a trusted copy, a proven merge, or 
 async function never(): Promise<{ code: number; stdout: string; stderr: string }> {
   throw new Error("this path must not run commands");
 }
+
+const unknownRecord = (over: Partial<DeliveryRecord> = {}): DeliveryRecord =>
+  ({
+    ...base(),
+    state: "unknown",
+    updatedAt: "2026-09-22T00:00:00.000Z",
+    artifactDigest: "ship-delivery-abc123",
+    destination: "scratch-7471",
+    recoveryVersion: "v9",
+    actor: "op@ship",
+    ...over,
+  }) as DeliveryRecord;
+
+const statusRunner = (body: unknown, code = 0): CommandRunner => async () => ({
+  code,
+  stdout: code === 0 ? JSON.stringify(body) : "",
+  stderr: code === 0 ? "" : "ssh: connection refused",
+});
+
+const status = (currentHash: string, containers: Array<{ image: string; state: string }> = [{ image: "ship-delivery-abc123", state: "running" }]) => ({
+  app: "scratch",
+  server: "infra-home",
+  state: { current_hash: currentHash },
+  containers,
+});
+
+test("readBackDelivery confirms only on the version AND the artifact, and never fails on a lost read", async () => {
+  // Both identity halves match → confirmed.
+  const confirmed = await readBackDelivery(unknownRecord(), { dir: "/srv/trusted", run: statusRunner(status("abc123d")) });
+  assert.equal(confirmed.outcome, "confirmed");
+
+  // Version matches but the running image is not the approved artifact → mismatch.
+  const wrongImage = await readBackDelivery(unknownRecord(), {
+    dir: "/srv/trusted",
+    run: statusRunner(status("abc123d", [{ image: "other:9", state: "running" }])),
+  });
+  assert.equal(wrongImage.outcome, "mismatch");
+  assert.match(wrongImage.detail, /not the approved artifact/);
+
+  // Version matches but nothing is running → mismatch, not confirmed.
+  const stopped = await readBackDelivery(unknownRecord(), {
+    dir: "/srv/trusted",
+    run: statusRunner(status("abc123d", [{ image: "ship-delivery-abc123", state: "exited" }])),
+  });
+  assert.equal(stopped.outcome, "mismatch");
+
+  // The target still runs the recovery version → the deployment did not take effect.
+  const oldVersion = await readBackDelivery(unknownRecord(), { dir: "/srv/trusted", run: statusRunner(status("v9")) });
+  assert.equal(oldVersion.outcome, "mismatch");
+  assert.match(oldVersion.detail, /v9.*not the approved abc123d/s);
+
+  // A lost or unreadable read never records as failed — unknown retries.
+  const refused = await readBackDelivery(unknownRecord(), { dir: "/srv/trusted", run: statusRunner(null, 1) });
+  assert.equal(refused.outcome, "unreadable");
+  assert.match(refused.detail, /connection refused/);
+  const garbage: CommandRunner = async () => ({ code: 0, stdout: "Deploying...", stderr: "" });
+  const unparseable = await readBackDelivery(unknownRecord(), { dir: "/srv/trusted", run: garbage });
+  assert.equal(unparseable.outcome, "unreadable");
+  const unconfigured = await readBackDelivery(unknownRecord(), { run: never });
+  assert.equal(unconfigured.outcome, "unreadable");
+  assert.match(unconfigured.detail, /SHIP_DELIVERY_DIR/);
+
+  // The store's fence moves unknown → confirmed / failed exactly once.
+  const dir = await mkdtemp(join(tmpdir(), "ship-delivery-"));
+  const store = new FileDeliveryStore(dir);
+  const record = await store.propose(base());
+  await store.transition(record.id, "proposed", "approved", { actor: "op", destination: "scratch", recoveryVersion: "v9" });
+  await store.transition(record.id, "approved", "executing", {});
+  await store.transition(record.id, "executing", "unknown", { artifactDigest: "ship-delivery-abc123" });
+  const won = await store.transition(record.id, "unknown", "confirmed", { reason: "target read back" });
+  assert.equal(won.state, "confirmed");
+  const lost = await store.transition(record.id, "unknown", "failed", { reason: "late reader" });
+  assert.equal(lost.state, "confirmed", "the late reconciler learns it lost");
+});
