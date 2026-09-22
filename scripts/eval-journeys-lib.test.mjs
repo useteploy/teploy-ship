@@ -106,21 +106,23 @@ test('argument parsing: unknown flag, relative grader dir, missing values', () =
   assert.ok(parseArgs(['--scenario']).errors.some(e => e.includes('requires a value')));
   assert.deepEqual(parseArgs(['--list']).mode, 'list');
   assert.deepEqual(parseArgs(['--scenario', 'pj-s-copy', '--dry-run']), {
-    mode: 'scenario', scenario: 'pj-s-copy', dryRun: true, graderDir: null, authorizeSpend: false, errors: []
+    mode: 'scenario', scenario: 'pj-s-copy', dryRun: true, graderDir: null, authorizeSpend: false,
+    adapter: 'mock', fixtureRoot: null, resultsRoot: null, shipRepo: null, errors: []
   });
+  assert.deepEqual(parseArgs(['--scenario', 'pj-s-copy', '--adapter', 'ship', '--ship-repo', 'https://forge/tyler/canary']).adapter, 'ship');
+  assert.ok(parseArgs(['--adapter', 'telepathy']).errors.some(e => e.includes('unknown adapter')));
 });
 
-test('spend gate: dry-run passes, unauthorized refuses with exit 2, authorized stops at exit 3', () => {
+test('spend gate: dry-run passes, unauthorized refuses with exit 2, authorized executes', () => {
   const dry = spendGateDecision(parseArgs(['--scenario', 'pj-s-copy', '--dry-run']));
   assert.equal(dry.action, 'dry-run');
   const refuse = spendGateDecision(parseArgs(['--scenario', 'pj-s-copy']));
   assert.equal(refuse.action, 'refuse');
   assert.equal(refuse.exitCode, EXIT.SPEND_REFUSED);
   assert.match(refuse.message, /--i-authorize-spend/);
-  const wired = spendGateDecision(parseArgs(['--scenario', 'pj-s-copy', '--i-authorize-spend']));
-  assert.equal(wired.action, 'not-wired');
-  assert.equal(wired.exitCode, EXIT.NOT_WIRED);
-  assert.match(wired.message, /execution intentionally not wired in this slice/);
+  const execute = spendGateDecision(parseArgs(['--scenario', 'pj-s-copy', '--i-authorize-spend']));
+  assert.equal(execute.action, 'execute');
+  assert.equal(execute.exitCode, null);
 });
 
 test('grader separation: pj-s-copy loads from an out-of-tree grader dir, passes a worked tree, fails the pristine fixture', async () => {

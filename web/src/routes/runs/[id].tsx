@@ -521,6 +521,7 @@ export default function RunDetail({ data: initialData }: { data: RunData }) {
           {data.view === 'changes' && <ForgePanel data={data}/>}
           {data.view === 'changes' && <Changes snapshots={data.snapshots} pr={data.evidence.pr} sha={data.evidence.sha} />}
           {data.view === 'verification' && <Verification data={data.evidence} />}
+          {data.delivery && data.view === 'verification' && <DeliveryCard data={data} />}
           {data.view === 'activity' && <>
           <h2 class="section">Run activity</h2>
           <ul class="timeline" aria-label="Run activity">
@@ -707,4 +708,49 @@ function RunComposer({data}: {data: RunData}) {
           {(!active || reviewing && data.canSteer) && data.meta.status !== 'cancelling' && data.canLaunch && <form method="post" class="message-composer"><input type="hidden" name="requestId" value={followRequestId}/><input type="hidden" name="eventName" value={followEvent}/>{reviewing && <p class="notice">Request changes on this PR before merging. A change request cancels this run’s pending merge decision and starts a linked run; the PR stays open. Read-only investigations leave the merge decision pending.</p>}<label class="field">Continue this work<textarea name="message" rows={3} required maxLength={12000} placeholder="What should Ship change or investigate next?" /></label>{data.hasPr && <label class="field">Start from<select name="target"><option value="pr">Existing pull request (checked before launch)</option><option value="base">Current default branch</option></select></label>}<label class="field">What should happen next?<select name="journey" value={followJourney} onChange={e => setFollowJourney(e.currentTarget.value)}>{JOURNEYS.map(j => <option value={j.id}>{j.label}</option>)}</select></label>{followJourney === "change" && data.requirePlanReview && <p class="notice">This project requires plan approval before code changes. The native harness is required; merge and deployment permissions remain separate.</p>}{followJourney === "change" && !data.requirePlanReview && (data.planSupported ? <label class="check-field"><input type="checkbox" name="plan" checked={followPlan} onInput={e => setFollowPlan(e.currentTarget.checked)} />Review the plan before code changes</label> : <p class="meta">This project uses an external harness, which starts work immediately. For plan review, select the native harness in Project settings before launching.</p>)}<button type="submit" name="intent" value="follow-up">Start follow-up</button><p class="meta">Keeps the conversation history and starts a fresh sandbox. The existing pull request is checked with the forge before launch. Current project approvals and budgets apply.</p></form>}
 
  </>;
+}
+
+/**
+ * The merged change's delivery card (Package B, S14): what merged, from the
+ * recorded steps, and — for an operator with the approve authority — the
+ * explicit promotion approval: a destination and the retained recovery
+ * version, both required, both recorded. Approving deploys nothing by
+ * itself; the worker's delivery sweep executes approved records, and only
+ * against a configured trusted working copy.
+ */
+function DeliveryCard({ data }: { data: RunData }) {
+  const d = data.delivery!;
+  return <section class="card" style="margin-top:18px">
+    <div class="row-actions" style="gap:12px;align-items:center">
+      <h2 class="section" style="margin:0">Delivery</h2>
+      <span class={`status ${d.state === "confirmed" ? "completed" : d.state === "proposed" ? "waiting" : d.state === "approved" || d.state === "executing" || d.state === "unknown" ? "held" : "failed"}`}>{d.state}</span>
+      <span class="meta">merged change</span>
+    </div>
+    <table style="margin-top:10px">
+      <tbody>
+        {d.repo && <tr><td class="meta">repository</td><td><code>{d.repo}</code></td></tr>}
+        {d.mergedSha && <tr><td class="meta">merged SHA</td><td><code>{d.mergedSha.slice(0, 12)}</code></td></tr>}
+        {d.reviewedHead && <tr><td class="meta">reviewed head</td><td><code>{d.reviewedHead.slice(0, 12)}</code></td></tr>}
+        {d.destination && <tr><td class="meta">destination</td><td><code>{d.destination}</code></td></tr>}
+        {d.recoveryVersion && <tr><td class="meta">recovery version</td><td><code>{d.recoveryVersion}</code></td></tr>}
+        {d.artifactDigest && <tr><td class="meta">artifact</td><td><code>{d.artifactDigest}</code></td></tr>}
+        {d.actor && <tr><td class="meta">approved by</td><td>{d.actor}</td></tr>}
+      </tbody>
+    </table>
+    {d.reason && <p class="meta" style="margin-top:8px">{d.reason}</p>}
+    {data.deliveryError && <p class="notice bad" role="alert">{data.deliveryError}</p>}
+    {d.state === "proposed" && data.canLaunch && (
+      <form method="post" action={`/api/runs/${data.runId}/promote`} style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;margin-top:12px">
+        <label class="meta" for="delivery-destination">Destination</label>
+        <input id="delivery-destination" name="destination" required placeholder="e.g. scratch-infra-home-7471" style="min-width:220px"/>
+        <label class="meta" for="delivery-recovery">Retained recovery version</label>
+        <input id="delivery-recovery" name="recoveryVersion" required placeholder="current version to roll back to" style="min-width:220px"/>
+        <label class="meta" for="delivery-reason">Reason</label>
+        <input id="delivery-reason" name="reason" placeholder="why this promotion" style="min-width:220px"/>
+        <button type="submit" class="sm">Approve promotion</button>
+      </form>
+    )}
+    {d.state === "proposed" && !data.canLaunch && <p class="meta">Approving a promotion needs the approve authority.</p>}
+    <p class="meta" style="margin-top:8px">Approval records intent against this exact tuple; deployment happens from the worker's trusted working copy and rolls back only to the retained version.</p>
+  </section>;
 }

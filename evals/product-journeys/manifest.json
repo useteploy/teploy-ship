@@ -1,7 +1,7 @@
 {
   "version": 1,
   "programme": "S02 product-journey evaluation",
-  "note": "Scaffold slice: fixtures are minimal, no baseline has run, execution wiring is deliberately absent. See evals/product-journeys/README.md.",
+  "note": "Execution is wired behind the --i-authorize-spend gate and validated by the mock adapter only; no baseline has run. See evals/product-journeys/README.md.",
   "families": {
     "small-site": {
       "fixture": "evals/product-journeys/fixtures/small-site",
@@ -35,7 +35,7 @@
       "taskPrompt": "In this static site, where exactly does the home-page tagline live, and everywhere the word \"Tideline\" appears? Answer with file, line number and the exact current string for each occurrence. Change nothing.",
       "checks": [
         "every cited file:line:string occurrence exists verbatim in the fixture (grader re-opens the files)",
-        "the occurrence count matches an independent count over the fixture (4 occurrences of Tideline, 1 tagline)",
+        "the occurrence count matches an independent count over the fixture (6 occurrences of Tideline, 1 tagline)",
         "no file in the work tree changed; no PR opened"
       ],
       "probes": [],

@@ -33,6 +33,8 @@ results/
 
 ## Status: NO BASELINE NUMBERS EXIST YET
 
-Nothing has run. This directory contains the schema and the convention
-only. The first real baseline requires the execution wiring that this
-slice deliberately does not include (see the runner's spend gate).
+Execution wiring exists and is gated (`--i-authorize-spend`); it has been
+validated against the mock adapter only. No scenario has run against a real
+model through this harness — the first live run is the orchestrator's
+single-scenario canary (`pj-s-question` via the ship adapter). Records
+written so far by tests use temp results roots and are not baselines.

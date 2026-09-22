@@ -10,7 +10,7 @@ One file per scenario id, named `<scenario-id>.mjs` (see `../manifest.json`),
 plus this shared `lib.mjs`. Each grader exports exactly:
 
 ```js
-export async function grade({ workDir, fixture, scenario }) {
+export async function grade({ workDir, fixture, scenario, transcriptPath, summary }) {
   return { pass: boolean, reasons: string[], evidence: object[] };
 }
 ```
@@ -18,13 +18,20 @@ export async function grade({ workDir, fixture, scenario }) {
 - `workDir` — absolute path to the evaluated checkout (the agent's result).
 - `fixture` — absolute path to the pristine fixture for the family.
 - `scenario` — the scenario object from `manifest.json`.
+- `transcriptPath` — absolute path to the run transcript, when the runner
+  executed the scenario through an adapter (null for direct grader
+  development calls).
+- `summary` — the adapter-reported summary object (e.g. `{prOpened: false}`).
 
 Rules:
 
-1. **No grader passes on checks it cannot actually perform.** Checks that
-   need run transcripts (PR behavior, review text, citations) are reported
-   as `not-wired:` reasons until execution wiring exists. Until then, any
-   grader with a not-wired check returns `pass: false` — deliberately.
+1. **No grader passes on checks it cannot actually perform.** Checks the
+   grader cannot verify with what it was given are reported as `not-wired:`
+   reasons and force `pass: false` — deliberately. Execution wiring now
+   exists (`pj-s-question` verifies transcript citations against the
+   pristine fixture); transcript-dependent checks in other graders (PR
+   behavior, review text) stay `not-wired` until they are wired the same
+   way, with tests.
 2. **Structural and behavioral checks are real today.** Graders boot the
    worked tree's own server, probe HTTP, run the fixture's shipped tests,
    build pre-existing databases, inject fake dependency modules and diff

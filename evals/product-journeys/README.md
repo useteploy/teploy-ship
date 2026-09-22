@@ -7,14 +7,17 @@ graders under `graders/`; results land under `results/`.
 
 **Status — read before quoting anything here:**
 
-- **No baseline numbers exist.** Nothing has been run against a model. There
+- **No baseline numbers exist.** Nothing has run against a model. There
   is no pass rate, no latency figure, no cost figure for any scenario below.
 - **Fixtures are minimal scaffolds.** Three static files; a zero-dependency
   Node API with seeded defects; a small Python service with a deliberately
   false README claim. They are instruments, not products.
-- **Execution wiring is deliberately absent.** The runner refuses real runs
-  at a spend gate and exits 3 even when authorized (see "Runner"). The
-  orchestrator wires model execution after review.
+- **Execution is wired, gated, and mock-validated only.** The runner's real
+  execution path (staging, agent adapter, grading, result records) is
+  complete in code but refuses to run without `--i-authorize-spend`, and the
+  ship adapter separately refuses without its env contract. Everything so
+  far is validated against the mock adapter — the first live run is the
+  orchestrator's canary, one scenario, never a batch (see "Execution").
 
 ## The 12 scenarios
 
@@ -110,13 +113,62 @@ node scripts/eval-journeys.mjs --list                        # ids, families, pr
 node scripts/eval-journeys.mjs --manifest                    # manifest<->fixtures<->graders<->README<->schema validation
 node scripts/eval-journeys.mjs --scenario pj-s-copy --dry-run # full plan, nothing executed
 node scripts/eval-journeys.mjs --scenario pj-s-copy           # REFUSES: exit 2 without --i-authorize-spend
-node scripts/eval-journeys.mjs --scenario pj-s-copy --i-authorize-spend
-                                                            # 'runner: execution intentionally not wired in this slice' exit 3
+node scripts/eval-journeys.mjs --scenario pj-s-copy --i-authorize-spend \
+  --grader-dir /abs/journey-graders [--adapter mock]         # execution: mock end to end, no model
 ```
 
-Exit codes: 0 ok; 1 usage/validation; 2 spend refused; 3 execution not
-wired (this slice). Unit tests: `node --test scripts/eval-journeys-lib.test.mjs`
+Exit codes: 0 ok (including a recorded failing grade — the record is the
+product); 1 usage/validation; 2 spend refused; 3 adapter refusal (e.g. the
+ship adapter's env contract unmet). Unit tests:
+`node --test scripts/eval-journeys-lib.test.mjs scripts/eval-journeys-exec.test.mjs`
 (also part of `pnpm test`).
+
+## Execution
+
+One scenario end to end: stage the fixture into a fresh temp workDir,
+execute the task through an injectable agent adapter, grade the worked tree
+with the scenario's grader from `--grader-dir`, and write a result record to
+`results/eval-<date>-<n>/<scenario>/` per `results/schema.json`
+(`preserve/transcript.txt` is never deleted; `artifacts/grader-output.json`
+carries the grader's full output).
+
+Adapters (`--adapter`, default `mock`):
+
+- **mock** — loads a canned response from
+  `fixtures/<family>/mock-responses/<id>.txt` (transcript, JSON summary,
+  full-file edits applied to the workDir). With no canned file it writes an
+  honest "MOCK: no response canned" transcript and changes nothing, which
+  graders must fail — that failure preservation is itself tested. Canned
+  responses exist for `pj-s-question` and `pj-s-copy` only; they are harness
+  data, excluded from staging and from grader snapshots, so the evaluated
+  agent never sees them. The mock adapter never invokes a model.
+- **ship** — HTTP against a real Ship instance. Refuses (exit 3) unless
+  `--i-authorize-spend` passed **and** all of the env contract is set:
+
+  | env | meaning |
+  | --- | --- |
+  | `SHIP_URL` | base URL of the Ship instance |
+  | `SHIP_WEB_TOKEN` | bearer token (`Authorization: Bearer ...`) |
+  | `SHIP_JOURNEY_REPO` | the fixture repo Ship will read (or pass `--ship-repo <url>`) |
+
+  Intake is the existing bearer-token request API
+  (`POST /api/runs/scan` with `{repo, task, source: "product-journey"}`),
+  status and transcript come from `GET /api/runs/<id>/workspace` polled to a
+  terminal status. The scan intake is read-only by construction — it cannot
+  open pull requests — so the ship adapter is only correct for read-only
+  scenarios until a change-capable intake exists. **The ship adapter has
+  never been exercised against a live instance**; it is covered by unit
+  tests with a mocked fetch only. The orchestrator runs the first REAL
+  canary (one scenario: `pj-s-question`) before any batch, per the repo's
+  canary rule. The `pj-s-question` grader verifies citations in a
+  machine-checkable form (`index.html:6:"Tideline Woodworks"`, separators
+  tolerated, quoted exact string required) — a canary that answers in pure
+  prose without quoting the strings will correctly fail.
+
+**Cost is honestly unknown.** Every record carries
+`cost: {status: "unknown", reason: ...}` — no gateway telemetry is wired
+into this harness slice, and cost is never guessed (schema allows
+`priced|unknown`). Latency and adapter name are recorded per run.
 
 ## Results
 

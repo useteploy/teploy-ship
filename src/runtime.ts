@@ -61,6 +61,7 @@ import { FileDeliveryLog, NucleusDeliveryLog } from "./deliveries.js";
 import type { DeliveryLog } from "./deliveries.js";
 import type { Actor } from "./actor.js";
 import { FileOutbox, NucleusOutbox } from "./outbox.js";
+import { FileDeliveryStore, NucleusDeliveryStore, type DeliveryStore } from "./delivery.js";
 import type { Outbox } from "./outbox.js";
 import { NucleusPgwire } from "./nucleus-pgwire.js";
 import { migrate } from "./migrations.js";
@@ -415,6 +416,8 @@ export interface ShipRuntime {
   repoStats: RepoStatsStore;
   /** Durable notification outbox (see outbox.ts). */
   outbox: Outbox;
+  /** Delivery records for merged changes (see delivery.ts). */
+  deliveryRecords?: DeliveryStore;
   /**
    * Atomically take ownership of the decision a parked run is waiting on.
    * True iff THIS caller won: the run's eventName is cleared as part of the
@@ -457,6 +460,7 @@ export function fileRuntime(): ShipRuntime {
     users: new FileUserStore(),
     deliveries: new FileDeliveryLog(),
     outbox: new FileOutbox(),
+    deliveryRecords: new FileDeliveryStore(),
     repoStats: new ScopedRepoStatsStore(new FileRepoStatsStore(),store),
     claimDecision: (runId, eventName, owner) => meta.claimDecision(runId, eventName, owner),
     releaseDecision: (runId, eventName) => meta.releaseDecision(runId, eventName),
@@ -577,6 +581,7 @@ export async function nucleusRuntime(
     users: new NucleusUserStore(db),
     deliveries: new NucleusDeliveryLog(db),
     outbox: new NucleusOutbox(db),
+    deliveryRecords: new NucleusDeliveryStore(db),
     repoStats: new ScopedRepoStatsStore(new NucleusRepoStatsStore(db),store),
     /**
      * One conditional UPDATE decides the winner: the filter includes the

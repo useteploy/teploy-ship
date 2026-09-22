@@ -1,20 +1,25 @@
 #!/usr/bin/env node
-// S02 product-journey harness runner. Everything around execution; no
-// execution. Proves wiring with --list / --manifest / --scenario --dry-run,
-// and refuses real runs at a spend gate (exit 2), and even when authorized
-// refuses to invoke a model in this slice (exit 3) — the orchestrator wires
-// execution after review.
+// S02 product-journey harness runner. List/manifest/dry-run prove wiring;
+// real execution is complete in code but gated: it refuses without
+// --i-authorize-spend (exit 2), and the ship adapter separately refuses
+// without its env contract (exit 3). The mock adapter (default) runs the
+// whole path — staging, execution, grading, result records — without ever
+// invoking a model.
 //
 // Usage:
 //   node scripts/eval-journeys.mjs --list
 //   node scripts/eval-journeys.mjs --manifest [--grader-dir /abs/path]
 //   node scripts/eval-journeys.mjs --scenario <id> --dry-run
-//   node scripts/eval-journeys.mjs --scenario <id> [--i-authorize-spend]  # gated / not wired
+//   node scripts/eval-journeys.mjs --scenario <id> --i-authorize-spend \
+//     [--adapter mock|ship] [--fixture-root <dir>] [--results-root <dir>] \
+//     [--grader-dir /abs/path] [--ship-repo <url>]
 import { join, resolve } from 'node:path';
+import { rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   repoRootFrom, loadManifest, validateManifest, buildDryRun,
-  parseArgs, spendGateDecision, EXIT
+  parseArgs, spendGateDecision, createMockAdapter, createShipAdapter,
+  runScenario, AdapterRefusal, EXIT
 } from './eval-journeys-lib.mjs';
 
 const repoRoot = repoRootFrom(fileURLToPath(import.meta.url));
@@ -49,7 +54,7 @@ if (args.mode === 'list') {
     const probes = s.probes.length > 0 ? `  probes: ${s.probes.join(', ')}` : '';
     console.log(`${s.id}  (${s.family}, ${s.type})${flag}${probes}`);
   }
-  console.log(`runner: ${manifest.scenarios.length} scenarios, 0 executed (execution not wired in this slice)`);
+  console.log(`runner: ${manifest.scenarios.length} scenarios, 0 executed (list mode runs nothing)`);
   process.exit(EXIT.OK);
 }
 
@@ -68,11 +73,41 @@ if (!scenario) {
 }
 
 const gate = spendGateDecision(args);
-if (gate.action === 'refuse' || gate.action === 'not-wired') {
+if (gate.action === 'refuse') {
   die(gate.message, gate.exitCode);
 }
 
-const plan = buildDryRun(manifest, scenario);
-console.log(JSON.stringify(plan, null, 2));
-console.error('runner: dry-run only — proved the wiring, ran nothing.');
+if (gate.action === 'dry-run') {
+  const plan = buildDryRun(manifest, scenario);
+  console.log(JSON.stringify(plan, null, 2));
+  console.error('runner: dry-run only — proved the wiring, ran nothing.');
+  process.exit(EXIT.OK);
+}
+
+// gate.action === 'execute': the real path, adapter by adapter.
+const fixtureRoot = resolve(args.fixtureRoot ?? join(repoRoot, 'evals', 'product-journeys', 'fixtures'));
+const resultsRoot = resolve(args.resultsRoot ?? join(repoRoot, 'evals', 'product-journeys', 'results'));
+
+let adapter;
+if (args.adapter === 'mock') {
+  adapter = createMockAdapter({ repoRoot });
+} else if (args.adapter === 'ship') {
+  adapter = createShipAdapter({ repo: args.shipRepo });
+} else {
+  die(`runner: unknown adapter ${args.adapter}`, EXIT.USAGE);
+}
+
+let execution;
+try {
+  execution = await runScenario({ repoRoot, manifest, scenario, adapter, graderDir, fixtureRoot, resultsRoot });
+} catch (err) {
+  if (err instanceof AdapterRefusal) die(err.message, EXIT.ADAPTER_REFUSED);
+  die(`runner: execution failed before recording: ${err.message}`, EXIT.USAGE);
+}
+
+const { record, outDir } = execution;
+rmSync(execution.workDir, { recursive: true, force: true });
+console.error(`runner: scenario ${record.scenarioId} adapter=${record.adapter} pass=${record.firstAttempt.pass} endedBy=${record.firstAttempt.endedBy} latencyMs=${record.latencyMs} cost=${record.cost.status}`);
+console.error(`runner: record ${join(outDir, 'result.json')} — transcript preserved under ${join(outDir, 'preserve')}`);
+console.log(JSON.stringify(record, null, 2));
 process.exit(EXIT.OK);

@@ -58,6 +58,19 @@ export interface RunData {
   findings: ScanFinding[];
   /** Why entries were dropped, or why no array was found. Shown when non-empty. */
   findingsNotes: string[];
+  /** The merged change's delivery record (Package B), when one exists. */
+  delivery?: {
+    state: string;
+    repo?: string;
+    mergedSha?: string;
+    reviewedHead?: string;
+    destination?: string;
+    recoveryVersion?: string;
+    artifactDigest?: string;
+    actor?: string;
+    reason?: string;
+  };
+  deliveryError?: string;
   /** True when this run is a scan, even if it found nothing. */
   isScan: boolean;
   /** Steerable run (input.steer): show the steer box while active. */
@@ -169,6 +182,9 @@ export async function runData({ params, request }: { params: { id: string }; req
     }
     const history = await threadHistory(runtime, runId);
     const forgeRaw = await runtime.config.get("SHIP_FORGE_STATE_" + runId);
+    // The merged change's delivery record (Package B): advisory read for the
+    // card; the approve action is the authority boundary, not this loader.
+    const deliveryRecord = (await runtime.deliveryRecords?.get(runId).catch(() => null)) ?? null;
     const data: RunData = {
       userMessage: (started?.data as any)?.input?.userMessage,
       journey: (started?.data as any)?.input?.journey,
@@ -188,6 +204,22 @@ export async function runData({ params, request }: { params: { id: string }; req
       requirePlanReview: currentProject?.requirePlanReview === true,
       canLaunch: projectError === null && await may('approve', await currentUser(request)),
       messageError: query.get('messageError') ?? projectError,
+      ...(deliveryRecord !== null
+        ? {
+            delivery: {
+              state: deliveryRecord.state,
+              ...(deliveryRecord.repo !== undefined ? { repo: deliveryRecord.repo } : {}),
+              ...(deliveryRecord.mergedSha !== undefined ? { mergedSha: deliveryRecord.mergedSha } : {}),
+              ...(deliveryRecord.reviewedHead !== undefined ? { reviewedHead: deliveryRecord.reviewedHead } : {}),
+              ...(deliveryRecord.destination !== undefined ? { destination: deliveryRecord.destination } : {}),
+              ...(deliveryRecord.recoveryVersion !== undefined ? { recoveryVersion: deliveryRecord.recoveryVersion } : {}),
+              ...(deliveryRecord.artifactDigest !== undefined ? { artifactDigest: deliveryRecord.artifactDigest } : {}),
+              ...(deliveryRecord.actor !== undefined ? { actor: deliveryRecord.actor } : {}),
+              ...(deliveryRecord.reason !== undefined ? { reason: deliveryRecord.reason } : {}),
+            },
+          }
+        : {}),
+      ...(query.get("deliveryError") !== null ? { deliveryError: query.get("deliveryError") ?? undefined } : {}),
       meta,
       items: toTimeline(events),
       outcome,

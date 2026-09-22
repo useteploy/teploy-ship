@@ -7,7 +7,10 @@ import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 
-const JUNK = new Set(['.git', 'node_modules', '__pycache__', '.DS_Store']);
+// 'mock-responses' holds harness-canned mock outputs inside the fixture
+// trees: never fixture content, never visible to the evaluated agent (the
+// runner excludes it when staging), never counted by a snapshot.
+const JUNK = new Set(['.git', 'node_modules', '__pycache__', '.DS_Store', 'mock-responses']);
 
 export function mktmp(prefix) {
   return mkdtempSync(join(tmpdir(), prefix));

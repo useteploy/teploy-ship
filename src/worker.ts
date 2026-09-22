@@ -14,7 +14,8 @@ import { durableAgent, repoKeyOf } from "./durable.js";
 import { resolveApprovalPolicy } from "./approval.js";
 import { externalAdapters } from "./harness-external.js";
 import { isAskEvent, pendingQuestion } from "./ask.js";
-import { previewTargetFromEnv, sweepStalePreviewCheckouts } from "./deploy.js";
+import { hostRunner, previewTargetFromEnv, sweepStalePreviewCheckouts } from "./deploy.js";
+import type { CommandRunner } from "./deploy.js";
 import { telemetryTargetFromEnv } from "./observe.js";
 import { testTargetFromEnv } from "./tests.js";
 import type { ExecutorProvider, RunUsage, SandboxOverrides } from "./durable.js";
@@ -22,6 +23,7 @@ import { enqueueRun, proposeExternal } from "./runtime.js";
 import { changeClassRequired, sweepBulletin } from "./bulletin.js";
 import { parseSandboxUrls } from "./sandbox-pool.js";
 import { attributionsFrom } from "./attributed-spend.js";
+import { deliveryFromEvents, executeDelivery } from "./delivery.js";
 import { intakeActor } from "./actor.js";
 import type { NucleusShipRuntime } from "./runtime.js";
 import type { RunMeta } from "./run-store.js";
@@ -884,6 +886,24 @@ export function startWorker(options: WorkerOptions): {
         // The fleet resources this run held come back whatever the outcome was.
         await admission.releaseSlot(runId);
         await options.runtime.spend.release(runId).catch(() => {});
+        // A merged change earns a PROPOSED delivery record (Package B): what
+        // merged, from the recorded steps — never the model's account — so an
+        // operator can approve a promotion against a tuple later. Purely
+        // additive; unmerged runs record nothing.
+        if (options.runtime.deliveryRecords !== undefined) {
+          try {
+            const attribution = attributionsFrom(meta, events);
+            if (attribution.repo !== undefined) {
+              const facts = deliveryFromEvents(runId, attribution.repo, events);
+              if (facts !== null) {
+                await options.runtime.deliveryRecords.propose(facts);
+                log(`[worker] ${runId}: merged change recorded as a proposed delivery (${attribution.repo})`);
+              }
+            }
+          } catch (error) {
+            log(`[worker] ${runId}: delivery record could not be written: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
         const source = meta?.source;
         if (source === undefined || source === "") return; // pre-source run; nothing to attribute
         const model = meta?.model ?? modelId;
@@ -1753,6 +1773,41 @@ export function startWorker(options: WorkerOptions): {
       .catch((error) => log(`[worker] preview sweep: ${error instanceof Error ? error.message : String(error)}`));
   }
 
+  // Approved delivery execution (Package B, S14): one operator-approved
+  // promotion at a time, fenced by the store's approved→executing claim so
+  // two workers can never both deploy. The execution path is OFF until the
+  // trusted working copy exists (SHIP_DELIVERY_DIR): an approval made
+  // anyway is HELD with the reason rather than sitting unexecutable
+  // forever — the record always tells the operator what it is waiting for.
+  const deliveryDir = process.env.SHIP_DELIVERY_DIR;
+  const deliveryRunner: CommandRunner = hostRunner();
+  const sweepDeliveries = (): Promise<void> => {
+    const records = options.runtime.deliveryRecords;
+    if (records === undefined) return Promise.resolve();
+    return records
+      .due("approved", 1)
+      .then(async ([approved]) => {
+        if (approved === undefined) return;
+        const claimed = await records.transition(approved.id, "approved", "executing", {});
+        if (claimed.state !== "executing") return; // another worker claimed it first
+        const outcome = await executeDelivery(claimed, { dir: deliveryDir, run: deliveryRunner });
+        const to = outcome.state === "held" ? "held" : "unknown";
+        await records
+          .transition(claimed.id, "executing", to, {
+            ...(outcome.artifactDigest !== undefined ? { artifactDigest: outcome.artifactDigest } : {}),
+            ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}),
+          })
+          .catch((error: unknown) =>
+            log(`[worker] delivery ${approved.id}: outcome could not be recorded: ${error instanceof Error ? error.message : String(error)}`),
+          );
+        log(`[worker] delivery ${approved.id} → ${to}`);
+      })
+      .catch((error) => log(`[worker] delivery sweep: ${error instanceof Error ? error.message : String(error)}`));
+  };
+  const deliveryTimer = setInterval(() => void sweepDeliveries(), 60_000);
+  deliveryTimer.unref?.();
+  void sweepDeliveries();
+
   log(`[worker] watching for due runs as ${options.runtime.owner}`);
   return {
     /**
@@ -1767,6 +1822,7 @@ export function startWorker(options: WorkerOptions): {
       clearInterval(intakeTimer);
       clearInterval(heartbeatTimer);
       clearInterval(reapTimer);
+      clearInterval(deliveryTimer);
       if (selfwatchTimer !== undefined) clearInterval(selfwatchTimer);
       clearInterval(driveTimer);
       // The wait the rewritten shutdown dropped: a sweep that was mid-pass
