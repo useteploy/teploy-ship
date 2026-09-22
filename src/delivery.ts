@@ -352,13 +352,18 @@ export async function readBackDelivery(
   if (read.code !== 0) {
     return { outcome: "unreadable", detail: `target status could not be read (exit ${read.code}): ${(read.stderr || read.stdout).slice(0, 300)}` };
   }
-  let parsed: { state?: { current_hash?: unknown }; containers?: Array<{ image?: unknown; state?: unknown }> };
+  let parsed: { state?: { current_hash?: unknown }; containers?: Array<Record<string, unknown>> };
   try {
     parsed = JSON.parse(read.stdout.trim()) as typeof parsed;
   } catch {
     return { outcome: "unreadable", detail: `target status was not JSON: ${read.stdout.slice(0, 300)}` };
   }
-  const running = (parsed.containers ?? []).filter((c) => c.state === "running");
+  // Field shapes are teploy status --json's, exactly as the CLI emits them:
+  // the container entries carry CAPITALIZED Image/State (Go struct fields
+  // with no json tags), while the app state carries snake_case current_hash.
+  // The first live read-back matched neither and failed a deployment that
+  // had succeeded — the test now uses the CLI's real shape, not a guess.
+  const running = (parsed.containers ?? []).filter((c) => c.State === "running");
   const current = typeof parsed.state?.current_hash === "string" ? parsed.state.current_hash : "";
   if (current !== expected) {
     return {
@@ -366,7 +371,7 @@ export async function readBackDelivery(
       detail: `the target runs version ${current === "" ? "(none)" : current}, not the approved ${expected} — the deployment did not take effect`,
     };
   }
-  const onArtifact = running.some((c) => c.image === record.artifactDigest);
+  const onArtifact = running.some((c) => c.Image === record.artifactDigest);
   if (!onArtifact) {
     const images = running.map((c) => String(c.image)).join(", ");
     return {

@@ -162,7 +162,10 @@ const statusRunner = (body: unknown, code = 0): CommandRunner => async () => ({
   stderr: code === 0 ? "" : "ssh: connection refused",
 });
 
-const status = (currentHash: string, containers: Array<{ image: string; state: string }> = [{ image: "ship-delivery-abc123", state: "running" }]) => ({
+const status = (
+  currentHash: string,
+  containers: Array<{ Image: string; State: string }> = [{ Image: "ship-delivery-abc123", State: "running" }],
+) => ({
   app: "scratch",
   server: "infra-home",
   state: { current_hash: currentHash },
@@ -177,7 +180,7 @@ test("readBackDelivery confirms only on the version AND the artifact, and never 
   // Version matches but the running image is not the approved artifact → mismatch.
   const wrongImage = await readBackDelivery(unknownRecord(), {
     dir: "/srv/trusted",
-    run: statusRunner(status("abc123d", [{ image: "other:9", state: "running" }])),
+    run: statusRunner(status("abc123d", [{ Image: "other:9", State: "running" }])),
   });
   assert.equal(wrongImage.outcome, "mismatch");
   assert.match(wrongImage.detail, /not the approved artifact/);
@@ -185,7 +188,7 @@ test("readBackDelivery confirms only on the version AND the artifact, and never 
   // Version matches but nothing is running → mismatch, not confirmed.
   const stopped = await readBackDelivery(unknownRecord(), {
     dir: "/srv/trusted",
-    run: statusRunner(status("abc123d", [{ image: "ship-delivery-abc123", state: "exited" }])),
+    run: statusRunner(status("abc123d", [{ Image: "ship-delivery-abc123", State: "exited" }])),
   });
   assert.equal(stopped.outcome, "mismatch");
 
@@ -216,4 +219,33 @@ test("readBackDelivery confirms only on the version AND the artifact, and never 
   assert.equal(won.state, "confirmed");
   const lost = await store.transition(record.id, "unknown", "failed", { reason: "late reader" });
   assert.equal(lost.state, "confirmed", "the late reconciler learns it lost");
+
+  // A failed delivery can be re-approved (the recovery path this slice
+  // itself exercised live) and the fence still holds.
+  const redone = await store.transition(record.id, "confirmed", "held", {});
+  assert.equal(redone.state, "confirmed", "confirmed is terminal — the fence refuses");
+});
+
+test("readBackDelivery parses the CLI's real status shape, captured live", async () => {
+  // Byte-for-byte the shape `teploy status --json` emitted against the live
+  // scratch target on 2026-09-22 (fields trimmed to the ones read). The
+  // capitalized Image/State are the CLI's Go struct fields; a parser written
+  // from assumption instead of this shape failed a succeeded deployment.
+  const live = {
+    app: "ship-delivery-proof",
+    server: "100.108.123.49",
+    state: { current_hash: "abc123d", schema_version: 2 },
+    containers: [
+      {
+        ID: "b2906f37bdd8",
+        Name: "ship-delivery-proof-web-abc123d",
+        Image: "ship-delivery-abc123",
+        State: "running",
+        Status: "Up 5 seconds",
+        Labels: { "teploy.app": "ship-delivery-proof", "teploy.version": "abc123d" },
+      },
+    ],
+  };
+  const read = await readBackDelivery(unknownRecord(), { dir: "/srv/trusted", run: statusRunner(live) });
+  assert.equal(read.outcome, "confirmed");
 });
