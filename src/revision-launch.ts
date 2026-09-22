@@ -25,5 +25,5 @@ export async function finishReviewReplacement(runtime: Pick<ShipRuntime,"store"|
   if (current && !["completed", "failed", "cancelled", "cancelling"].includes(current.status)) {
     await runtime.saveMeta({...current, status:"cancelling", eventName:`revision:${intent.runId}`, updatedAt:new Date().toISOString()});
   }
-  await runtime.markWake?.(parent);
+  if (current && !["completed", "failed", "cancelled"].includes(current.status)) await runtime.markWake?.(parent);
 }

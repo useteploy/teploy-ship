@@ -15,10 +15,11 @@ async function fixture() {
   const now = new Date().toISOString();
   await store.append('parent',{v:1,seq:0,type:'run-started',at:now,data:{}});
   await meta.save({runId:'parent',task:'Original',model:'test',status:'waiting',eventName:MERGE_EVENT,createdAt:now,updatedAt:now});
-  const runtime = {store,loadMeta:(id:string)=>meta.load(id),saveMeta:meta.save.bind(meta),claimDecision:meta.claimDecision.bind(meta)};
+  let wakes = 0;
+  const runtime = {markWake:async()=>{wakes++},store,loadMeta:(id:string)=>meta.load(id),saveMeta:meta.save.bind(meta),claimDecision:meta.claimDecision.bind(meta)};
   const journal = () => new FileLaunchJournal(store,meta,join(dir,'launches'),intent=>finishReviewReplacement(runtime,intent));
   const intent:LaunchIntent = {runId:'child',reviewParent:'parent',requestHash:'a'.repeat(64),started:{v:1,seq:0,type:'run-started',at:now,data:{input:{parentRunId:'parent'}}},meta:{runId:'child',task:'Revise',model:'test',status:'queued',createdAt:now,updatedAt:now}};
-  return {store,meta,runtime,journal,intent};
+  return {store,meta,runtime,journal,intent,wakes:()=>wakes};
 }
 
 test('accepted revision recovers a crash after holding merge review before cancellation',async()=>{
@@ -69,7 +70,10 @@ test('failure after parent cancellation recovers without reopening review or dup
   assert.equal(await f.meta.claimDecision('parent',MERGE_EVENT),false);
   assert.equal(await f.meta.load('child'),null);
   f.store.append=append;
+  const parent = await f.meta.load('parent');assert.ok(parent);await f.meta.save({...parent,status:'cancelled'});
+  const before = f.wakes();
   assert.deepEqual((await recoverLaunches(f.journal())).recovered,['child']);
+  assert.equal(f.wakes(),before,'recovery does not wake a settled parent');
   assert.equal((await f.store.load('parent')).filter(e=>e.type==='run-cancelled').length,1);
   assert.equal((await f.store.load('child')).length,1);
 });
