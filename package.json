@@ -41,6 +41,10 @@
     "./journeys": {
       "types": "./dist/journeys.d.ts",
       "import": "./dist/journeys.js"
+    },
+    "./selfwatch": {
+      "types": "./dist/selfwatch.d.ts",
+      "import": "./dist/selfwatch.js"
     }
   },
   "scripts": {

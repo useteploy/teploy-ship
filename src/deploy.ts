@@ -26,6 +26,117 @@ import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { assertGitSafe } from "./git.js";
 
+/** A preview attempt's leftovers: the UUID that named its ref and worktree. */
+export interface PreviewLeftover {
+  id: string;
+  kind: "worktree" | "ref";
+  /** Worktree path (kind=worktree) or ref name (kind=ref). */
+  at: string;
+}
+
+/** What a sweep of crash-left preview checkouts did. */
+export interface PreviewSweep {
+  removed: PreviewLeftover[];
+  /** Left in place — too young, or not verifiably ours. */
+  kept: PreviewLeftover[];
+}
+
+const PREVIEW_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const PREVIEW_TREE = /\.teploy-ship-preview-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+const PREVIEW_REF = /^refs\/ship-previews\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+
+/**
+ * Reclaim preview leftovers a crash left behind (A.6).
+ *
+ * deployPreview cleans its worktree and ref in a `finally`, but a SIGKILL, a
+ * power cut or a host restart skips it, and those UUID-named worktrees and
+ * refs then sit in the operator's clone forever. This sweep removes ONLY what
+ * is verifiably ours and verifiably dead:
+ *
+ *   - a path registered as a git worktree of THIS clone whose basename is
+ *     exactly `.teploy-ship-preview-<uuid>`, older than `olderThanMs`;
+ *   - a ref under `refs/ship-previews/<uuid>` whose matching worktree no
+ *     longer exists at all (nothing on disk can still be building from it).
+ *
+ * Everything else — any other worktree, any younger path, any directory that
+ * is not a registered worktree, any other ref — is `kept` and never touched.
+ * The default threshold (6h) is far past the longest legal attempt (the
+ * per-command ceiling is minutes), so an in-flight preview cannot be reclaimed
+ * out from under its run.
+ */
+export async function sweepStalePreviewCheckouts(
+  target: Pick<PreviewTarget, "dir" | "timeoutMs">,
+  options: { olderThanMs?: number; now?: () => number } = {},
+): Promise<PreviewSweep> {
+  const run = hostRunner();
+  const cwd = target.dir;
+  const olderThanMs = options.olderThanMs ?? 6 * 60 * 60 * 1000;
+  const nowMs = options.now?.() ?? Date.now();
+  const removed: PreviewLeftover[] = [];
+  const kept: PreviewLeftover[] = [];
+
+  const listed = await run(["git", "-C", cwd, "worktree", "list", "--porcelain"], { cwd, timeoutMs: 60_000 });
+  if (listed.code !== 0) return { removed, kept };
+  const trees = new Map<string, string>();
+  for (const block of listed.stdout.split("\n\n")) {
+    const line = block.split("\n").find((l) => l.startsWith("worktree "));
+    if (line === undefined) continue;
+    const at = line.slice("worktree ".length).trim();
+    const id = at.match(PREVIEW_TREE)?.[1];
+    if (id !== undefined) trees.set(id, at);
+  }
+
+  const refs = await run(["git", "-C", cwd, "for-each-ref", "--format=%(refname)", "refs/ship-previews/"], { cwd, timeoutMs: 60_000 });
+  const refIds = new Set<string>();
+  if (refs.code === 0) {
+    for (const line of refs.stdout.split("\n")) {
+      const id = line.trim().match(PREVIEW_REF)?.[1];
+      if (id !== undefined) refIds.add(id);
+    }
+  }
+
+  for (const [id, at] of trees) {
+    let ageMs = -1;
+    try {
+      ageMs = nowMs - statSync(at).mtimeMs;
+    } catch {
+      ageMs = Infinity; // registered but the path is gone: prune-able metadata
+    }
+    const ref = `refs/ship-previews/${id}`;
+    if (ageMs >= olderThanMs) {
+      const gone = await run(["git", "-C", cwd, "worktree", "remove", "--force", at], { cwd, timeoutMs: 60_000 });
+      if (gone.code === 0) {
+        removed.push({ id, kind: "worktree", at });
+        // The ref went with the attempt; reclaim it in the same sweep.
+        if (refIds.delete(id)) await run(["git", "-C", cwd, "update-ref", "-d", ref], { cwd, timeoutMs: 60_000 }).catch(() => undefined);
+      } else {
+        kept.push({ id, kind: "worktree", at });
+        refIds.delete(id); // an unremovable worktree keeps its ref too
+      }
+    } else {
+      kept.push({ id, kind: "worktree", at });
+      refIds.delete(id); // a live attempt owns both
+    }
+  }
+
+  // Refs whose worktree no longer exists anywhere: the only owner a preview
+  // ref ever had was the attempt that created it, named by the same UUID.
+  for (const id of refIds) {
+    const ref = `refs/ship-previews/${id}`;
+    // Belt and braces: if a directory with that UUID still sits in the preview
+    // dir unregistered, leave it — an operator may be inspecting it.
+    const tree = join(cwd, `.teploy-ship-preview-${id}`);
+    if (existsSync(tree)) {
+      kept.push({ id, kind: "ref", at: ref });
+      continue;
+    }
+    const gone = await run(["git", "-C", cwd, "update-ref", "-d", ref], { cwd, timeoutMs: 60_000 });
+    if (gone.code === 0) removed.push({ id, kind: "ref", at: ref });
+    else kept.push({ id, kind: "ref", at: ref });
+  }
+  return { removed, kept };
+}
+
 /** One command's result. Non-zero exit is data here, not an exception. */
 export interface CommandResult {
   code: number;

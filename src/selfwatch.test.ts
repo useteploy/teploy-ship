@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { computeHealth, healthWarnings, makeObserveLogEmitter, selfwatchOnce, WORKER_STALE_S } from "./selfwatch.js";
+import { computeHealth, healthWarnings, makeObserveLogEmitter, selfwatchOnce, WarningGate, WORKER_STALE_S } from "./selfwatch.js";
 import type { RunMeta } from "./run-store.js";
 
 interface FakeEvents {
@@ -90,6 +90,7 @@ test("worker staleness is heartbeat age past the mark", async () => {
     fleet: fakeFleet([
       { owner: "live", host: "h", lastSeen: ago(0), activeRuns: 0 },
       { owner: "dead", host: "h", lastSeen: ago(WORKER_STALE_S + 30), activeRuns: 0 },
+      { owner: "gone", host: "h2", lastSeen: ago(WORKER_STALE_S + 900), activeRuns: 0 },
     ]),
     owner: "live",
     activeRuns: 0,
@@ -97,8 +98,25 @@ test("worker staleness is heartbeat age past the mark", async () => {
   });
   const dead = snapshot.workers.find((w) => w.owner === "dead")!;
   assert.equal(dead.stale, true);
-  const warnings = healthWarnings(snapshot);
-  assert.ok(warnings.some((l) => l.includes("worker dead@h") && l.includes("stale")));
+  // ONE aggregated line names every stale worker: a replaced container fleet
+  // used to log one line per dead worker per minute for a day.
+  const staleLines = healthWarnings(snapshot).filter((l) => l.includes("stale"));
+  assert.equal(staleLines.length, 1);
+  assert.ok(staleLines[0]!.includes("dead@h"));
+  assert.ok(staleLines[0]!.includes("gone@h2"));
+  assert.ok(staleLines[0]!.startsWith("2 workers stale:"), `aggregated shape: ${staleLines[0]}`);
+});
+
+test("WarningGate admits new conditions once and reminds periodically, forgetting healed ones", () => {
+  const gate = new WarningGate(4);
+  const same = ["run r1 looks stuck: no event for 40m (status wake)"];
+  assert.deepEqual(gate.admit(same), same, "first sighting is logged");
+  assert.deepEqual(gate.admit(same), [], "unchanged conditions are not re-logged");
+  assert.deepEqual(gate.admit(same), [], "still unchanged");
+  assert.deepEqual(gate.admit(same), same, "the periodic reminder re-states everything");
+  const healed: string[] = [];
+  assert.deepEqual(gate.admit(healed), [], "healing logs nothing");
+  assert.deepEqual(gate.admit(same), same, "a recurrence after healing is fresh news again");
 });
 
 test("warnings name the stuck and never-started runs with their ages", async () => {

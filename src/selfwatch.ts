@@ -139,10 +139,39 @@ export function healthWarnings(snapshot: HealthSnapshot): string[] {
   for (const s of snapshot.neverStarted) {
     lines.push(`run ${s.runId} was enqueued ${Math.round(s.lastEventAgeS / 60)}m ago and never started`);
   }
-  for (const w of snapshot.workers) {
-    if (w.stale) lines.push(`worker ${w.owner}@${w.host} last heartbeat ${w.lastSeenAgeS}s ago (stale)`);
+  // ONE line for all stale workers, not one each: a replaced container park
+  // landed here with a per-worker line every minute for up to 24h, which is
+  // noise that trains an operator to stop reading the log. The registry
+  // deliberately keeps dead workers visible for a day; the warning just has
+  // to say it once.
+  const stale = snapshot.workers.filter((w) => w.stale);
+  if (stale.length > 0) {
+    const listed = stale.map((w) => `${w.owner}@${w.host} (${w.lastSeenAgeS}s)`).join(", ");
+    lines.push(`${stale.length} worker${stale.length === 1 ? "" : "s"} stale: ${listed}`.slice(0, 400));
   }
   return lines;
+}
+
+/**
+ * Log-gate for recurring warnings: admit a line when it is NEW, and re-admit
+ * everything once every `reminderEvery` passes so a persistent condition is
+ * still visible in a rolling log window. Lines that heal are forgotten, so a
+ * recurrence is fresh news again. Observe emission stays every pass — the
+ * metric must be continuous; only the local log is gated.
+ */
+export class WarningGate {
+  #seen = new Set<string>();
+  #pass = 0;
+  #reminderEvery: number;
+  constructor(reminderEvery = 30) {
+    this.#reminderEvery = Math.max(1, reminderEvery);
+  }
+  admit(warnings: string[]): string[] {
+    this.#pass += 1;
+    const fresh = warnings.filter((w) => !this.#seen.has(w));
+    this.#seen = new Set(warnings);
+    return this.#pass % this.#reminderEvery === 0 ? warnings : fresh;
+  }
 }
 
 export interface ObserveLogEmitter {
@@ -185,14 +214,18 @@ export function makeObserveLogEmitter(log: (line: string) => void = () => {}): O
 /**
  * One observation pass: compute, report anomalies locally, always emit the
  * snapshot to Observe when wired. Returns the warnings so callers (and tests)
- * can assert on them.
+ * can assert on them. `warnSink`, when provided, replaces the default
+ * per-line local logging — the worker passes a WarningGate-backed sink so a
+ * persistent condition is logged on change, not every pass.
  */
 export async function selfwatchOnce(
-  deps: HealthDeps & { emitter?: ObserveLogEmitter; log?: (line: string) => void },
+  deps: HealthDeps & { emitter?: ObserveLogEmitter; log?: (line: string) => void; warnSink?: (lines: string[]) => void },
 ): Promise<HealthSnapshot> {
   const log = deps.log ?? (() => {});
   const snapshot = await computeHealth(deps);
-  for (const line of healthWarnings(snapshot)) log(`[selfwatch] ${line}`);
+  const warnings = healthWarnings(snapshot);
+  if (deps.warnSink !== undefined) deps.warnSink(warnings);
+  else for (const line of warnings) log(`[selfwatch] ${line}`);
   if (deps.emitter?.enabled) {
     deps.emitter.emitLog({
       level: snapshot.stuck.length > 0 || snapshot.neverStarted.length > 0 ? "warn" : "info",

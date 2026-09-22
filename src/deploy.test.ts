@@ -1,9 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile, rm, utimes } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { hostRunner, deployPreview, destroyPreview, previewComment, previewTargetFromEnv, resolvePreviewTarget, rollbackDeploy, type CommandResult, type CommandRunner, type PreviewOutcome } from "./deploy.js";
+import { hostRunner, deployPreview, destroyPreview, previewComment, previewTargetFromEnv, resolvePreviewTarget, rollbackDeploy, sweepStalePreviewCheckouts, type CommandResult, type CommandRunner, type PreviewOutcome } from "./deploy.js";
 
 /** A runner that plays scripted results and records every argv it saw. */
 function scriptedRunner(results: Record<string, CommandResult>): {
@@ -298,4 +299,91 @@ test("parallel previews build their own exact commits and leave the operator che
     assert.notEqual((results[0] as any).branch,(results[1] as any).branch);
     assert.equal((results[0] as any).revision,one);
   } finally { await rm(dir,{recursive:true,force:true}); }
+});
+
+// --- A.6: crash-left preview checkout sweep -----------------------------------
+
+test("A.6: the sweep removes only verifiably-ours, verifiably-dead preview leftovers", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ship-preview-sweep-"));
+  const git = hostRunner();
+  const exec = async (...args: string[]) => {
+    const r = await git(["git", ...args], { cwd: dir, timeoutMs: 20_000 });
+    assert.equal(r.code, 0, `${args.join(" ")}: ${r.stderr}`);
+    return r.stdout.trim();
+  };
+  try {
+    await exec("init"); await exec("config", "user.email", "t@t"); await exec("config", "user.name", "t");
+    await writeFile(join(dir, "f"), "one"); await exec("add", "f"); await exec("commit", "-m", "one");
+
+    const uuid = (): string => randomUUID();
+    // A STALE crash-left worktree + its ref: old enough to reclaim.
+    const oldId = uuid();
+    const oldTree = join(dir, `.teploy-ship-preview-${oldId}`);
+    await exec("worktree", "add", "--detach", oldTree, "HEAD");
+    await exec("update-ref", `refs/ship-previews/${oldId}`, "HEAD");
+    const old = new Date(Date.now() - 8 * 60 * 60 * 1000);
+    await utimes(oldTree, old, old);
+
+    // A FRESH attempt (young mtime): an in-flight build must never be reclaimed.
+    const newId = uuid();
+    const newTree = join(dir, `.teploy-ship-preview-${newId}`);
+    await exec("worktree", "add", "--detach", newTree, "HEAD");
+    await exec("update-ref", `refs/ship-previews/${newId}`, "HEAD");
+
+    // An OPERATOR worktree: any name outside our exact UUID convention — old,
+    // registered, whatever — is not ours and must survive.
+    const opTree = join(dir, "operator-checkout");
+    await exec("worktree", "add", "--detach", opTree, "HEAD");
+    await utimes(opTree, old, old);
+
+    // A dangling ref whose worktree is entirely gone: reclaimable.
+    const goneId = uuid();
+    await exec("update-ref", `refs/ship-previews/${goneId}`, "HEAD");
+
+    // A dangling ref with an unregistered directory still on disk: an operator
+    // may be inspecting it; the ref stays.
+    const heldId = uuid();
+    await exec("update-ref", `refs/ship-previews/${heldId}`, "HEAD");
+    await mkdir(join(dir, `.teploy-ship-preview-${heldId}`));
+
+    const sweep = await sweepStalePreviewCheckouts({ dir }, { olderThanMs: 6 * 60 * 60 * 1000 });
+
+    assert.deepEqual(
+      sweep.removed.map((r) => `${r.kind}:${r.id}`).sort(),
+      [`worktree:${oldId}`, `ref:${goneId}`].sort(),
+      "exactly the stale worktree (with its ref) and the worktree-less ref",
+    );
+    const keptIds = sweep.kept.map((r) => r.id);
+    assert.ok(keptIds.includes(newId), "the fresh attempt is kept");
+    assert.ok(keptIds.includes(heldId), "a ref with a live directory on disk is kept");
+
+    const refs = await exec("for-each-ref", "--format=%(refname)", "refs/ship-previews/");
+    assert.ok(!refs.includes(oldId), "the stale attempt's ref went with its worktree");
+    assert.ok(!refs.includes(goneId), "the dangling ref was reclaimed");
+    assert.ok(refs.includes(newId) && refs.includes(heldId), "the kept refs remain");
+    assert.equal(await exec("rev-parse", "--verify", "--quiet", `refs/ship-previews/${heldId}`) !== "", true);
+    // The operator worktree still registered and on disk.
+    assert.ok((await exec("worktree", "list", "--porcelain")).includes(opTree));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("A.6: the sweep leaves a clone with no leftovers alone and reports nothing removed", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ship-preview-clean-"));
+  const git = hostRunner();
+  const exec = async (...args: string[]) => {
+    const r = await git(["git", ...args], { cwd: dir, timeoutMs: 20_000 });
+    assert.equal(r.code, 0, r.stderr);
+    return r.stdout.trim();
+  };
+  try {
+    await exec("init"); await exec("config", "user.email", "t@t"); await exec("config", "user.name", "t");
+    await writeFile(join(dir, "f"), "one"); await exec("add", "f"); await exec("commit", "-m", "one");
+    const sweep = await sweepStalePreviewCheckouts({ dir });
+    assert.equal(sweep.removed.length, 0);
+    assert.equal(sweep.kept.length, 0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

@@ -1,4 +1,5 @@
 import type { WorkerInfo } from "teploy-ship/runtime";
+import { computeHealth, type StuckRun } from "teploy-ship/selfwatch";
 
 import { shipRuntime } from "../lib/store.server.js";
 import { SubNav } from "../lib/subnav.js";
@@ -21,6 +22,9 @@ interface FleetData {
   view: "workers";
   workers: FleetWorker[];
   store: string;
+  /** Non-terminal, non-parked runs with no progress event for 30m+. */
+  stalled: Array<StuckRun & { href: string }>;
+  stalledError?: string;
 }
 
 export async function loader({ request }: { request: Request }): Promise<FleetData | SpendData> {
@@ -35,7 +39,24 @@ export async function loader({ request }: { request: Request }): Promise<FleetDa
       return { ...w, online: ageMs < STALE_MS, ageMs };
     })
     .sort((a, b) => (a.online !== b.online ? (a.online ? -1 : 1) : a.host.localeCompare(b.host)));
-  return { view: "workers", workers, store: runtime.kind };
+  // Stalled-vs-running (A.6): the same health pass the worker's selfwatch
+  // runs, surfaced where an operator already looks. Bounded to the recent-run
+  // window exactly like computeHealth does; a store error degrades to a note
+  // rather than taking the page down.
+  let stalled: Array<StuckRun & { href: string }> = [];
+  let stalledError: string | undefined;
+  try {
+    const snapshot = await computeHealth({
+      runtime: { listMeta: (options) => runtime.listMeta(options), store: { load: (runId) => runtime.store.load(runId) } },
+      fleet: { list: () => runtime.fleet.list() },
+      owner: "web",
+      activeRuns: 0,
+    });
+    stalled = [...snapshot.stuck, ...snapshot.neverStarted].map((s) => ({ ...s, href: `/runs/${s.runId}` }));
+  } catch (error) {
+    stalledError = error instanceof Error ? error.message : String(error);
+  }
+  return { view: "workers", workers, store: runtime.kind, stalled, ...(stalledError !== undefined ? { stalledError } : {}) };
 }
 
 /** MB as a number an operator reads at a glance: GB above a gigabyte, MB below. */
@@ -157,6 +178,32 @@ export default function Fleet({ data }: { data: FleetData | SpendData }) {
             </div>
           );
         })
+      )}
+      {data.stalled.length > 0 && (
+        <div class="card" style="border-left:3px solid var(--yellow)">
+          <div class="row-actions" style="gap:12px;align-items:center">
+            <span class="status waiting">stalled</span>
+            <span style="font-weight:600">{data.stalled.length} run{data.stalled.length === 1 ? "" : "s"} without progress for 30m+</span>
+          </div>
+          <table style="margin-top:10px">
+            <tbody>
+              {data.stalled.map((s) => (
+                <tr key={s.runId}>
+                  <td><a href={s.href}>{s.runId}</a></td>
+                  <td class="meta">{s.status}</td>
+                  <td class="meta">{s.progressed ? `no event for ${Math.round(s.lastEventAgeS / 60)}m` : "never started"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p class="meta" style="margin-top:8px">
+            Detected from event logs, not status columns: a run here is either executing very slowly or not at all.
+            Cancelling is an operator decision — open the run first.
+          </p>
+        </div>
+      )}
+      {data.stalledError !== undefined && (
+        <p class="meta">Stalled-run detection unavailable right now: {data.stalledError}</p>
       )}
       <script dangerouslySetInnerHTML={{ __html: POLL }} />
     </>

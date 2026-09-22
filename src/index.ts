@@ -17,7 +17,7 @@ export { condenseIfNeeded, defaultCondenseConfig, historySize } from "./memory.j
 export type { CondenseConfig, Summarizer } from "./memory.js";
 
 export { approvalEvent, durableAgent, sandboxProvider } from "./durable.js";
-export { deployPreview, destroyPreview, hostRunner, previewComment, previewTargetFromEnv, rollbackDeploy } from "./deploy.js";
+export { deployPreview, destroyPreview, hostRunner, previewComment, previewTargetFromEnv, rollbackDeploy, sweepStalePreviewCheckouts } from "./deploy.js";
 // D5/D4: merging a trivial change, and judging whether a deploy made things
 // worse. Exported here for the same reason deployPreview/compareHealth are —
 // they are part of what a caller embedding Ship can drive.

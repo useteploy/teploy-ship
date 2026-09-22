@@ -14,7 +14,7 @@ import { durableAgent, repoKeyOf } from "./durable.js";
 import { resolveApprovalPolicy } from "./approval.js";
 import { externalAdapters } from "./harness-external.js";
 import { isAskEvent, pendingQuestion } from "./ask.js";
-import { previewTargetFromEnv } from "./deploy.js";
+import { previewTargetFromEnv, sweepStalePreviewCheckouts } from "./deploy.js";
 import { telemetryTargetFromEnv } from "./observe.js";
 import { testTargetFromEnv } from "./tests.js";
 import type { ExecutorProvider, RunUsage, SandboxOverrides } from "./durable.js";
@@ -81,7 +81,7 @@ import { registerProject } from "./akiroo-project.js";
 import type { CodeSearch } from "./code-index.js";
 import { costUSD, isPricedModel } from "./pricing.js";
 import { UPGRADE_HOLD_EVENT, replayDrift, upgradeHoldReason } from "./step-fingerprint.js";
-import { makeObserveLogEmitter, selfwatchOnce } from "./selfwatch.js";
+import { makeObserveLogEmitter, selfwatchOnce, WarningGate } from "./selfwatch.js";
 
 export type { IntakePolicy } from "./intake.js";
 
@@ -815,18 +815,33 @@ export function startWorker(options: WorkerOptions): {
       });
   };
   const claimTerminalOutcome = makeTerminalClaim(options.runtime, host);
+  /**
+   * Consecutive errored attempts per run, in THIS worker. A run whose attempt
+   * throws (store unreachable, sandbox create failing) stays due by design —
+   * the retry IS the queue for transient faults — but an unbounded silent
+   * hammer is invisible. The count rides the log line so a persistent fault is
+   * readable as one, and clears the moment the run makes progress.
+   */
+  const failedAttempts = new Map<string, number>();
   const handleError = (runId: string, error: unknown): void => {
     inflight.delete(runId);
-    log(`[worker] run ${runId}: ${error instanceof Error ? error.message : String(error)}`);
+    const consecutive = (failedAttempts.get(runId) ?? 0) + 1;
+    failedAttempts.set(runId, consecutive);
+    log(
+      `[worker] run ${runId}: ${error instanceof Error ? error.message : String(error)}` +
+        (consecutive > 1 ? ` (consecutive attempt ${consecutive})` : ""),
+    );
   };
   const handleStart = (runId: string): void => {
     inflight.add(runId);
+    failedAttempts.delete(runId);
     log(`[worker] picked up ${runId}`);
     // Record where this run is executing so the dashboard can show placement.
     void options.runtime.placement.set(runId, host).catch(() => {});
   };
   const handleComplete = (runId: string, outcome: { status: string; eventName?: string }): void => {
       inflight.delete(runId);
+      failedAttempts.delete(runId);
       log(`[worker] ${runId} → ${outcome.status}`);
       // The live "now" line is only true while this worker executes the run;
       // a park or a finish would otherwise leave "running: pnpm test" on the
@@ -1676,12 +1691,15 @@ export function startWorker(options: WorkerOptions): {
   heartbeatTimer.unref?.();
 
   // Self-observability (P3-6): one health pass a minute — queue depth, worker
-  // liveness, stuck-run detection — reported locally only when something is
-  // wrong, and always emitted to Observe's log ingest when wired. Reports, never
-  // kills: a "stuck" run may be a long thinking call, and terminating a live run
-  // is the operator's call with the evidence in front of them.
+  // liveness, stuck-run detection — reported locally only when the picture
+  // CHANGES (plus a periodic reminder), and always emitted to Observe's log
+  // ingest when wired. Reports, never kills: a "stuck" run may be a long
+  // thinking call, and terminating a live run is the operator's call with the
+  // evidence in front of them. The gate exists because a replaced worker
+  // container used to log one stale-worker line per minute for a day.
   const selfwatch = makeObserveLogEmitter(log);
   const selfwatchIntervalS = envInt("SHIP_SELFWATCH_INTERVAL_S") ?? 60;
+  const warningGate = new WarningGate(30);
   let selfwatchTimer: ReturnType<typeof setInterval> | undefined;
   if (selfwatchIntervalS > 0) {
     const watch = (): Promise<void> =>
@@ -1691,6 +1709,9 @@ export function startWorker(options: WorkerOptions): {
         owner: options.runtime.owner,
         activeRuns: inflight.size,
         log,
+        warnSink: (lines) => {
+          for (const line of warningGate.admit(lines)) log(`[selfwatch] ${line}`);
+        },
         ...(selfwatch.enabled ? { emitter: selfwatch } : {}),
       }).then(() => undefined);
     void watch().catch(() => {});
@@ -1714,6 +1735,23 @@ export function startWorker(options: WorkerOptions): {
   void reap();
   const reapTimer = setInterval(() => void reap(), 60 * 60 * 1000);
   reapTimer.unref?.();
+
+  // Crash-left preview checkouts (A.6): deployPreview cleans its worktree and
+  // ref in a finally, but a SIGKILL skips finallys, and UUID leftovers then sit
+  // in the operator's clone forever. The sweep removes only what is verifiably
+  // ours (.teploy-ship-preview-<uuid> worktrees of this clone past a safe age,
+  // and refs/ship-previews refs with no worktree left); everything else is
+  // kept. Scoped to the configured preview directory — per-app clones under a
+  // preview root are swept when they are the configured dir.
+  if (previewTargetFromEnv() !== undefined) {
+    const target = previewTargetFromEnv()!;
+    void sweepStalePreviewCheckouts(target)
+      .then((sweep) => {
+        for (const r of sweep.removed) log(`[worker] preview sweep: removed ${r.kind} ${r.at}`);
+        if (sweep.removed.length > 0) log(`[worker] preview sweep: ${sweep.removed.length} removed, ${sweep.kept.length} kept`);
+      })
+      .catch((error) => log(`[worker] preview sweep: ${error instanceof Error ? error.message : String(error)}`));
+  }
 
   log(`[worker] watching for due runs as ${options.runtime.owner}`);
   return {
