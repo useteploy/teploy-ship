@@ -1374,7 +1374,7 @@ export async function enqueueRun(
         // the usual reason — it adds a recorded step and asks the daemon for
         // a volume, so the log has to say the run wanted one. A worker whose
         // daemon has no cache store degrades to the cold path.
-        ...(warmRun ? { warm: true } : {}),
+        ...(warmRun ? { warm: true, warmParks: true } : {}),
         harness,
         ...(attempts.length >= 2 ? { harnessAttempts: attempts } : {}),
         // K, clamped and defaulted at enqueue so a replay launches exactly the

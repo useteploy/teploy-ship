@@ -4417,7 +4417,11 @@ test("```ask on a run whose input does not admit it is refused in-transcript, wi
   assert.ok(!(await store.load("run-noask")).some((e) => e.type === "event-waiting"));
 });
 
-test("a warm-volume run parks on ```ask WITHOUT a snapshot: the container is kept and re-attached (teploy-sandbox #1)", async () => {
+test("a LEGACY warm run (no warmParks) parks on ```ask WITHOUT a snapshot: the container is kept and re-attached", async () => {
+  // Runs enqueued before volume-aware snapshots (teploy-sandbox 2026-09-22)
+  // have no park-snapshot steps in their logs; replaying them must keep the
+  // keep-container path exactly, or the step sequence diverges and the
+  // upgrade fence holds them.
   const { model } = reactiveModel([
     "```ask\nA or B?\n```",
     (obs) => (obs.includes("Operator's answer: B") ? "```bash\necho B > pick.txt\n```" : "```bash\necho wrong\n```"),
@@ -4434,7 +4438,7 @@ test("a warm-volume run parks on ```ask WITHOUT a snapshot: the container is kep
       return "img";
     },
     async createFrom() {
-      throw new Error("a warm run must never restore from a snapshot: the volume is not in it");
+      throw new Error("a legacy warm run must not restore from a snapshot: its log never took one");
     },
   };
   const wf = durableAgent({ model, executor: snapshotting });
@@ -4442,11 +4446,86 @@ test("a warm-volume run parks on ```ask WITHOUT a snapshot: the container is kep
   const parked = await executeRun({ workflow: wf, runId: "run-ask-warm", store, input: { task: "pick", ask: true, warm: true } });
   assert.equal(parked.status, "waiting");
   assert.equal(parked.eventName, askEvent(0));
-  assert.equal(snapshots, 0, "no snapshot on a warm run");
+  assert.equal(snapshots, 0, "no snapshot on a legacy warm run");
   assert.ok(!(await store.load("run-ask-warm")).some((e) => e.type === "step-completed" && /snapshot$/.test(e.name ?? "")));
   await deliverEvent(store, "run-ask-warm", askEvent(0), { approved: true, answer: "B" });
   const done = await executeRun({ workflow: wf, runId: "run-ask-warm", store });
   assert.equal(done.status, "completed");
   assert.equal((done.output as { agentSummary: string }).agentSummary, "picked B");
   assert.ok(!(await store.load("run-ask-warm")).some((e) => e.type === "step-completed" && /restore$/.test(e.name ?? "")));
+});
+
+test("a warmParks run snapshots the warm workspace at the park and restores it with the volume bytes", async () => {
+  const { model } = reactiveModel([
+    "```bash\necho kept-bytes > park-proof.txt\n```",
+    "```ask\nKeep the workspace?\n```",
+    "```bash\ncat park-proof.txt\n```",
+    (obs) => (obs.includes("kept-bytes") ? "```finish\nworkspace survived the park\n```" : "```bash\necho wrong\n```"),
+    "```finish\nworkspace survived the park\n```",
+    "```bash\ncat park-proof.txt\n```",
+    "```finish\nworkspace survived the park\n```",
+    "```finish\nworkspace survived the park\n```",
+  ]);
+  // The provider models the FIXED daemon: a snapshot carries the workspace
+  // bytes (volume included), and createFrom boots a fresh container whose
+  // workspace is seeded from the image.
+  const images = new Map<string, Map<string, string>>();
+  const workspaces = new Map<string, Map<string, string>>();
+  let counter = 0;
+  let reapedBeforeRestore = false;
+  const makeExecutor = (handle: string): AgentExecutor => ({
+    async exec(cmd) {
+      const ws = workspaces.get(handle);
+      if (ws === undefined) throw new Error(`workspace ${handle} was reaped`);
+      if (cmd.includes("park-proof") && cmd.includes("cat")) {
+        return { exitCode: 0, stdout: ws.get("park-proof") === "kept-bytes" ? "kept-bytes\n" : "lost\n", stderr: "", timedOut: false, truncated: false };
+      }
+      if (cmd.includes("echo kept-bytes")) ws.set("park-proof", "kept-bytes");
+      return { exitCode: 0, stdout: "", stderr: "", timedOut: false, truncated: false };
+    },
+    async putFile() {},
+    async getFile() {
+      return new Uint8Array();
+    },
+    async destroy() {
+      if (!reapedBeforeRestore) reapedBeforeRestore = workspaces.get(handle) !== undefined;
+      workspaces.delete(handle);
+    },
+  });
+  const provider: ExecutorProvider = {
+    async create() {
+      const handle = `ws-${counter++}`;
+      workspaces.set(handle, new Map());
+      return { handle };
+    },
+    attach: makeExecutor,
+    async snapshot(handle) {
+      const ws = workspaces.get(handle);
+      if (ws === undefined) throw new Error("cannot snapshot a reaped workspace");
+      const image = `snap-${counter++}`;
+      images.set(image, new Map(ws));
+      return image;
+    },
+    async createFrom(image) {
+      const state = images.get(image);
+      if (state === undefined) throw new Error(`no such image ${image}`);
+      const handle = `ws-${counter++}`;
+      workspaces.set(handle, new Map(state));
+      return { handle };
+    },
+  };
+  const wf = durableAgent({ model, executor: provider });
+  const store = new MemoryEventStore();
+  const parked = await executeRun({ workflow: wf, runId: "run-ask-warmparks", store, input: { task: "pick", ask: true, warm: true, warmParks: true } });
+  assert.equal(parked.status, "waiting");
+  const events = await store.load("run-ask-warmparks");
+  const snap = events.find((e) => e.type === "step-completed" && e.name === "turn-1-snapshot");
+  assert.ok(snap !== undefined, "the park took a snapshot of the WARM workspace");
+  // The parked container may be reaped while waiting — the bytes live in the image.
+  for (const [handle] of workspaces) workspaces.delete(handle);
+  await deliverEvent(store, "run-ask-warmparks", askEvent(1), { approved: true, answer: "yes" });
+  const done = await executeRun({ workflow: wf, runId: "run-ask-warmparks", store });
+  assert.equal(done.status, "completed");
+  assert.ok((await store.load("run-ask-warmparks")).some((e) => e.type === "step-completed" && e.name === "turn-1-restore"));
+  assert.equal((done.output as { agentSummary: string }).agentSummary, "workspace survived the park");
 });

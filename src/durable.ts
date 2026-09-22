@@ -200,6 +200,17 @@ export interface DurableAgentInput {
    */
   warm?: boolean;
   /**
+   * Warm runs may PARK VIA SNAPSHOT (plan/ask/merge parks) instead of
+   * keeping the container allocated for the whole park. Materialised at
+   * enqueue beside `warm`, for the same replay reason: parks predate
+   * volume-aware snapshots, and an old warm run's log has no park-snapshot
+   * steps — replaying it under a runtime that suddenly takes them would
+   * diverge and hold. Absent on every run enqueued before the daemon could
+   * bake volume bytes into a snapshot (teploy-sandbox 2026-09-22), which is
+   * exactly the population that must keep the keep-container path.
+   */
+  warmParks?: boolean;
+  /**
    * Post-finish critic pass: before a finish that survives the verify
    * nudge is honored, an independent reviewer (Team/TeamPolicy over a
    * single critic member — see critic.ts) checks the working-tree diff
@@ -3489,8 +3500,16 @@ function prTitle(task: string, incomplete: boolean): string {
  * container and re-attaching to it after the decision, which the 24-hour
  * TTL now makes survivable. A fact of the recorded input, so replay agrees.
  */
-function parkCanSnapshot(config: Pick<DurableAgentConfig, "executor">, input: Pick<DurableAgentInput, "warm">): boolean {
-  return config.executor.snapshot !== undefined && config.executor.createFrom !== undefined && input.warm !== true;
+function parkCanSnapshot(
+  config: Pick<DurableAgentConfig, "executor">,
+  input: Pick<DurableAgentInput, "warm" | "warmParks">,
+): boolean {
+  if (config.executor.snapshot === undefined || config.executor.createFrom === undefined) return false;
+  // Legacy warm runs (no warmParks) keep their container across the park:
+  // their daemon could not snapshot a volume, so keeping the container was
+  // the only way to keep the workspace. Runs recorded with warmParks know
+  // their snapshots carry the volume bytes and park via snapshot/restore.
+  return input.warmParks === true || input.warm !== true;
 }
 
 /**
