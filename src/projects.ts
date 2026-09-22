@@ -119,6 +119,10 @@ export interface Project {
   authority?: Authority;
   /** Policy floor (D4): this repo never merges unattended, whatever the metrics say. */
   neverAuto?: boolean;
+  /** Require the existing native plan-approval checkpoint on every new change run.
+   * This is a policy floor: per-run false cannot disable it. Old runs retain
+   * their recorded inputs. It grants no merge or deployment authority. */
+  requirePlanReview?: boolean;
   /** Contract 1: Akiroo owns the weekly spend cap for a managed project. */
   weeklyBudgetUSD?: number;
   /** Present when Akiroo manages this record (L8, contract 1). See managedDrift. */
@@ -208,6 +212,7 @@ const POLICIES: ReadonlySet<string> = new Set(["ignore", "propose", "auto"]);
 
 /** Normalise a record before storage: key by slug, drop empty strings, validate enums. */
 export function normalizeProject(input: Project): Project {
+  if (input.requirePlanReview !== undefined && typeof input.requirePlanReview !== "boolean") throw new Error("requirePlanReview must be a boolean");
   const repo = repoSlug(input.repo) ?? input.repo.trim().toLowerCase();
   const str = (v: string | undefined): string | undefined => {
     const t = v?.trim();
@@ -297,6 +302,7 @@ export function normalizeProject(input: Project): Project {
     ...(verification?.tests !== undefined ? { testCommand: verification.tests } : str(input.testCommand) !== undefined ? { testCommand: str(input.testCommand) } : {}),
     ...(isAuthority(input.authority) ? { authority: input.authority } : {}),
     ...(input.neverAuto === true ? { neverAuto: true } : {}),
+    ...(input.requirePlanReview === true ? { requirePlanReview: true } : {}),
     ...(num(input.weeklyBudgetUSD) !== undefined ? { weeklyBudgetUSD: num(input.weeklyBudgetUSD) } : {}),
     ...(input.managedBy !== undefined ? { managedBy: input.managedBy } : {}),
   };

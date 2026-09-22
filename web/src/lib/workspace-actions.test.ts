@@ -160,6 +160,7 @@ test("follow-up requires launch authority and a terminal parent; new run records
   const events = await runtime.store.load(id);
   const input = (events[0].data as any).input;
   assert.equal(input.parentRunId, "run-parent");
+  assert.equal((events[0].data as any).taskRootRunId, "run-parent");
   assert.equal(input.plan, undefined, "read-only investigation does not park on a code-change plan");
   assert.equal(input.mode, "scan");
   assert.match(input.task, /Fix the parser/);
@@ -273,4 +274,27 @@ test("legacy project identity conflicts preserve run history but prevent new wor
   const res = await run.action({params:{id},request:request("/runs/"+id,{intent:"follow-up",message:"Try again",journey:"change"})});
   assert.match(decodeURIComponent(res.headers.get("location") ?? ""), /identity conflicts/);
   assert.equal((await runtime.listMeta({limit:100})).filter(m => m.task === "Try again").length,0);
+});
+
+test("project plan requirement is saved through UI and enforced on unchecked launches", async () => {
+  const projectsRoute = await import("../routes/projects.js");
+  const inbox = await import("../routes/index.js");
+  const runtime = await shipRuntime();
+  const url = "https://github.com/team/plan-policy";
+  await runtime.projects.set({ repo: url, url, harness: "native", autoMerge: false, autoDeploy: false });
+  const saved = await projectsRoute.action({ request: request("/projects", { repo: url, url, harness: "native", planReviewPresent: "1", requirePlanReview: "on" }) });
+  assert.equal(saved.status, 302);
+  assert.equal((await runtime.projects.forRepo(url))?.requirePlanReview, true);
+  const page = await inbox.loader({ request: request("/", {}) });
+  assert.equal(page.projects.find(p => p.url === url)?.requirePlanReview, true);
+  const launched = await inbox.action({ request: request("/", { intent: "new-run", repo: url, journey: "change", task: "Change one button label", requestId: "ac33a1df-7d2b-4ae0-a71b-ac9ed66fa23e" }) });
+  const location = launched.headers.get("location")!;
+  assert.match(location, /^\/runs\//);
+  const id = location.split("/").pop()!.split("?")[0]!;
+  assert.equal(((await runtime.store.load(id))[0]?.data as any).input.plan, true);
+  // An old settings form omitting the new control must not remove the floor.
+  await projectsRoute.action({ request: request("/projects", { repo: url, url, harness: "native" }) });
+  assert.equal((await runtime.projects.forRepo(url))?.requirePlanReview, true);
+  await projectsRoute.action({ request: request("/projects", { repo: url, url, harness: "native", planReviewPresent: "1" }) });
+  assert.notEqual((await runtime.projects.forRepo(url))?.requirePlanReview, true);
 });

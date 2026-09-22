@@ -13,7 +13,7 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 button.primary, .button.primary { color: var(--green); border-color: var(--green); }
 .skip-link { position: fixed; top: -60px; left: 12px; z-index: 100; padding: 10px; background: var(--panel); }
 .skip-link:focus { top: 8px; }
-h1.page, .meta, code, .config-value { overflow-wrap: anywhere; }
+h1.page, .eyebrow, .meta, code, .config-value { overflow-wrap: anywhere; }
 .page-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
 .page-heading .meta { margin-bottom: 0; }
 .eyebrow { font-size: 12px; color: var(--dim); margin-bottom: 10px; }

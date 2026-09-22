@@ -1,9 +1,6 @@
 import { mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
-
-/** How long a dedupe guard is held. Long enough to cover an insert, short enough to self-heal. */
-const DEDUPE_TTL_S = 60;
+import { randomUUID, createHash } from "node:crypto";
 
 import type { NucleusPgwire } from "./nucleus-pgwire.js";
 import { stateDir } from "./run-store.js";
@@ -78,14 +75,17 @@ export interface IntakeStore {
    * instead of duplicate PRs. Writing the run id AS PART OF the claim is what
    * makes the launch crash-consistent: a process that dies between claiming and
    * enqueueing leaves a task that names a run which does not exist, which
-   * {@link IntakeStore.reconcile} can recognise and release. Previously the id
+   * an authorized same-ID retry can recover. Previously the id
    * was written afterwards, so the same crash left a "launched" task pointing
    * at nothing and no way to tell it from a healthy one.
    *
-   * A claimer whose launch then fails must setState back to "proposed".
+   * Only a known pre-launch refusal may return to "proposed". Once launch
+   * begins, an error may hide accepted work: retain the claim and run ID.
    */
   claim(taskId: string, runId?: string): Promise<boolean>;
   /**
+   * Offline repair only, with all launch writers stopped. Never use missing
+   * events to release a claim while enqueue may still be running.
    * Release tasks that were claimed for a run that never came into existence.
    * `exists` answers whether a run id has any recorded events. Returns the
    * task ids released.
@@ -223,32 +223,24 @@ export class NucleusIntakeStore implements IntakeStore {
   }
 
   #ensure(): Promise<void> {
-    this.#ready ??= this.#db
-      .query(
-        `CREATE TABLE IF NOT EXISTS ship_tasks (
-          task_id TEXT,
-          source TEXT,
-          kind TEXT,
-          repo TEXT,
-          pr TEXT,
-          title TEXT,
-          detail TEXT,
-          dedupe_key TEXT,
-          state TEXT,
-          run_id TEXT,
-          requested_by TEXT,
-          created_at TEXT,
-          updated_at TEXT
-        )`,
-      )
-      .then(() => undefined)
-      // A failed ensure must not be cached: one transient store error would
-      // otherwise poison every later call for the life of the process.
-      .catch((error: unknown) => {
-        this.#ready = null;
-        throw error;
-      });
+    this.#ready ??= (async () => {
+      const columns = `source TEXT, kind TEXT, repo TEXT, pr TEXT, title TEXT,
+        detail TEXT, dedupe_key TEXT, state TEXT, run_id TEXT, requested_by TEXT,
+        created_at TEXT, updated_at TEXT`;
+      // Additive storage: never ALTER/rewrite the populated legacy table.
+      await this.#db.query(`CREATE TABLE IF NOT EXISTS ship_tasks (task_id TEXT, ${columns})`);
+      await this.#db.query(`CREATE TABLE IF NOT EXISTS ship_tasks_v2 (task_id TEXT PRIMARY KEY, generation TEXT, ${columns})`);
+    })().catch((error: unknown) => { this.#ready = null; throw error; });
     return this.#ready;
+  }
+
+  #table(taskId: string): string {
+    return taskId.startsWith("task-v2-") ? "ship_tasks_v2" : "ship_tasks";
+  }
+
+  async #rows(where = "", params: unknown[] = []): Promise<Record<string, unknown>[]> {
+    const rows = await Promise.all(["ship_tasks", "ship_tasks_v2"].map(table => this.#db.query(`SELECT * FROM ${table}${where}`, params)));
+    return rows.flat();
   }
 
   #toTask(row: Record<string, unknown>): IntakeTask {
@@ -272,60 +264,47 @@ export class NucleusIntakeStore implements IntakeStore {
 
   async propose(input: ProposeInput): Promise<{ created: boolean; task: IntakeTask }> {
     await this.#ensure();
-    // Normalized on write (newTask) and on read, so the comparison is exact
-    // and needs no lower() in the query. Rows written before this existed
-    // keep their case; a re-proposal of one of those under the other case
-    // behaves as it always did.
     const key = normalizeDedupeKey(input.dedupeKey);
-    const rows = await this.#db.query(
-      "SELECT * FROM ship_tasks WHERE dedupe_key = $1 AND (state <> 'dismissed' OR source = 'team-request')",
-      [key],
-    );
-    if (rows.length > 0) return { created: false, task: this.#toTask(rows[0]!) };
-
-    // SELECT-then-INSERT is not dedupe: two concurrent deliveries of one
-    // webhook both see nothing, both insert, and the two rows get different
-    // task ids — so the later conditional claim cannot collapse them and the
-    // same issue becomes two runs and two PRs. The table has no unique index
-    // to lean on (Nucleus), so the KV's atomic setNX decides the winner.
-    const guard = `ship:dedupe:${key}`;
-    const holder = `${process.pid}:${randomUUID()}`;
-    if (!(await this.#db.kv.setNX(guard, holder, { ttl: DEDUPE_TTL_S }))) {
-      // Someone else is inserting this key right now. Re-read: their row is
-      // either already visible or about to be, and returning "not created" with
-      // their task is exactly what a duplicate delivery should get.
-      const again = await this.#db.query(
-        "SELECT * FROM ship_tasks WHERE dedupe_key = $1 AND (state <> 'dismissed' OR source = 'team-request')",
-        [key],
-      );
-      if (again.length > 0) return { created: false, task: this.#toTask(again[0]!) };
-      throw new Error("This request is still being recorded. Retry with the same request ID.");
+    const rows = await this.#rows(" WHERE dedupe_key = $1", [key]);
+    const existing = rows.find(r => r.state !== "dismissed" || r.source === "team-request");
+    if (existing) return { created: false, task: this.#toTask(existing) };
+    // Every contender for this generation computes the same primary key.
+    // A paused writer cannot mint another identity after a lease expires:
+    // there is no expiring lock, and the unique constraint arbitrates INSERT.
+    const generations = rows.map(r => Number(r.generation ?? 0));
+    if (generations.some(g => !Number.isSafeInteger(g) || g < 0 || g === Number.MAX_SAFE_INTEGER)) {
+      throw new Error("Invalid intake generation; refusing to replace stored request identity");
     }
-    // The first SELECT may predate a prior holder's completed insertion.
-    const afterClaim = await this.#db.query(
-      "SELECT * FROM ship_tasks WHERE dedupe_key = $1 AND (state <> 'dismissed' OR source = 'team-request')", [key],
-    );
-    if (afterClaim.length > 0) return { created: false, task: this.#toTask(afterClaim[0]!) };
-    const task = newTask(input);
-    await this.#db.query(
-      `INSERT INTO ship_tasks (task_id, source, kind, repo, pr, title, detail, dedupe_key, state, run_id, requested_by, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
-      [
-        task.taskId,
-        task.source,
-        task.kind,
-        task.repo ?? null,
-        task.pr !== undefined ? String(task.pr) : null,
-        task.title,
-        task.detail ?? null,
-        task.dedupeKey,
-        task.state,
-        null,
-        task.requestedBy ?? null,
-        task.createdAt,
-        task.updatedAt,
-      ],
-    );
+    const generation = 1 + Math.max(0, ...generations);
+    const taskId = `task-v2-${createHash("sha256").update(key).digest("hex")}-${generation}`;
+    const task = { ...newTask(input), taskId };
+    try {
+      await this.#db.query(
+        `INSERT INTO ship_tasks_v2 (task_id, source, kind, repo, pr, title, detail, dedupe_key, state, run_id, requested_by, created_at, updated_at, generation)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+        [
+          task.taskId,
+          task.source,
+          task.kind,
+          task.repo ?? null,
+          task.pr !== undefined ? String(task.pr) : null,
+          task.title,
+          task.detail ?? null,
+          task.dedupeKey,
+          task.state,
+          null,
+          task.requestedBy ?? null,
+          task.createdAt,
+          task.updatedAt,
+          String(generation),
+        ],
+      );
+    } catch (error) {
+      if ((error as { code?: string }).code !== "23505") throw error;
+      const winner = await this.get(taskId);
+      if (!winner) throw new Error("Intake identity exists without its task record");
+      return { created: false, task: winner };
+    }
     return { created: true, task };
   }
 
@@ -333,28 +312,28 @@ export class NucleusIntakeStore implements IntakeStore {
     await this.#ensure();
     const rows =
       state === undefined
-        ? await this.#db.query("SELECT * FROM ship_tasks")
-        : await this.#db.query("SELECT * FROM ship_tasks WHERE state = $1", [state]);
+        ? await this.#rows()
+        : await this.#rows(" WHERE state = $1", [state]);
     return rows.map((r) => this.#toTask(r)).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
   }
 
   async get(taskId: string): Promise<IntakeTask | null> {
     await this.#ensure();
-    const rows = await this.#db.query("SELECT * FROM ship_tasks WHERE task_id = $1", [taskId]);
+    const rows = await this.#db.query(`SELECT * FROM ${this.#table(taskId)} WHERE task_id = $1`, [taskId]);
     return rows.length > 0 ? this.#toTask(rows[0]!) : null;
   }
 
   async setState(taskId: string, state: IntakeTask["state"], runId?: string): Promise<void> {
     await this.#ensure();
     if (runId !== undefined) {
-      await this.#db.query("UPDATE ship_tasks SET state = $1, run_id = $2, updated_at = $3 WHERE task_id = $4", [
+      await this.#db.query(`UPDATE ${this.#table(taskId)} SET state = $1, run_id = $2, updated_at = $3 WHERE task_id = $4`, [
         state,
         runId,
         new Date().toISOString(),
         taskId,
       ]);
     } else {
-      await this.#db.query("UPDATE ship_tasks SET state = $1, updated_at = $2 WHERE task_id = $3", [
+      await this.#db.query(`UPDATE ${this.#table(taskId)} SET state = $1, updated_at = $2 WHERE task_id = $3`, [
         state,
         new Date().toISOString(),
         taskId,
@@ -370,11 +349,11 @@ export class NucleusIntakeStore implements IntakeStore {
     const claimed =
       runId !== undefined
         ? await this.#db.exec(
-            "UPDATE ship_tasks SET state = 'launched', run_id = $1, updated_at = $2 WHERE task_id = $3 AND state = 'proposed'",
+            `UPDATE ${this.#table(taskId)} SET state = 'launched', run_id = $1, updated_at = $2 WHERE task_id = $3 AND state = 'proposed'`,
             [runId, new Date().toISOString(), taskId],
           )
         : await this.#db.exec(
-            "UPDATE ship_tasks SET state = 'launched', updated_at = $1 WHERE task_id = $2 AND state = 'proposed'",
+            `UPDATE ${this.#table(taskId)} SET state = 'launched', updated_at = $1 WHERE task_id = $2 AND state = 'proposed'`,
             [new Date().toISOString(), taskId],
           );
     return claimed === 1;
@@ -389,7 +368,7 @@ export class NucleusIntakeStore implements IntakeStore {
       // Conditional on still being launched for THIS run, so a task that got
       // relaunched between the read and now is left alone.
       const freed = await this.#db.exec(
-        "UPDATE ship_tasks SET state = 'proposed', updated_at = $1 WHERE task_id = $2 AND state = 'launched' AND run_id = $3",
+        `UPDATE ${this.#table(task.taskId)} SET state = 'proposed', updated_at = $1 WHERE task_id = $2 AND state = 'launched' AND run_id = $3`,
         [new Date().toISOString(), task.taskId, task.runId],
       );
       if (freed === 1) released.push(task.taskId);

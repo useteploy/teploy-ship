@@ -4,9 +4,9 @@ Ship is self-hosted, so upgrading it is your operation, not ours. This document
 is the procedure, the one hazard that is specific to Ship, and what rollback
 can and cannot undo.
 
-**The short version.** Web and worker ship in one image and move together, so
-the classic split-version problem does not arise. Schema migrations are
-**forward-only**. The real hazard is neither of those: it is a **durable run
+Web and worker share an image but can overlap during a rolling deployment.
+Read the storage-format notes below before allowing mixed versions. Schema
+migrations are **forward-only**. Another upgrade hazard is a **durable run
 that was enqueued under the old code and is replayed by a worker running the
 new code**. Everything below is about making that safe.
 
@@ -27,6 +27,52 @@ new code**. Everything below is about making that safe.
       run's event log, which is also its audit record — lives there.
 - [ ] **Note the current version**, so rollback has a target:
       `docker ps --format '{{.Names}}'` on the host shows `ship-web-<sha>`.
+
+## Intake primary-key storage
+
+New Nucleus intake requests use `ship_tasks_v2`, whose task IDs have an enforced
+primary key. IDs are derived from the deduplication key and generation, so a
+paused writer and a retry cannot create separate tasks. Dismissed webhook tasks
+can start a new generation; team request IDs remain consumed after dismissal.
+The existing `ship_tasks` table is retained, read alongside the new table, and
+updated in place for existing tasks. Run inputs and workflow steps do not change.
+
+This requires a coordinated first rollout: stop all old web, worker and direct
+CLI intake writers, take and rehearse the store backup, then start the new web
+and workers together. Do not mix old intake writers with the new version.
+Old binaries cannot see new-table requests. After accepting new requests,
+rollback requires a compatible reader or an explicit data reconciliation;
+restoring the earlier backup would discard later accepted work. Do not silently
+restore it. Record the cutover and retain both tables.
+
+`scripts/check-intake-concurrency.mjs` exercises paused insertion, simultaneous
+claims, legacy records and concurrent reopening against an isolated engine.
+It requires `SHIP_ISOLATED_CHECK=1` and an explicit `NUCLEUS_URL`; it creates and
+removes only uniquely named proof records. Check restart persistence and parked
+run preflight on a restored copy before the first production cutover.
+
+## Durable launch acceptance
+
+The launch journal adds `ship_launches`, `ship_launch_chunks` and
+`ship_launch_commits`. Large immutable intents are chunked and checked against
+their digest. SQL transactions publish metadata, scheduling and the commit
+receipt together; start events are reconciled separately. Accepted pending
+intents are repaired by the worker. Metadata uses a bounded display summary to
+fit Nucleus inline rows; the complete request remains in the accepted intent and
+event log. Do not mix old and new launch writers during
+this first rollout: older binaries neither recover accepted pending intents nor
+understand the new intake table. Stop/drain writers, back up, rehearse and start
+matching web/worker builds. Pending intents and post-cutover requests must be
+reconciled before any downgrade; restoring an old snapshot is not a lossless
+rollback after new work has been accepted.
+
+An interrupted intake claim without an accepted journal entry stays held and
+appears in the Inbox. An authorized retry keeps its original run ID. Do not
+manually reset claims or release budget holds while acceptance is uncertain.
+`scripts/check-launch-recovery.mjs` exercises real-engine races and rollback;
+`scripts/check-launch-restart.mjs` seeds an accepted intent and verifies it after
+restarting an isolated engine. These scripts require explicit isolated-test
+configuration and never start a model worker.
 
 ## 1b. Upgrading past the B5 release
 

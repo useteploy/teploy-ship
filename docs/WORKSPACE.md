@@ -186,3 +186,30 @@ was dismissed. Editing the draft creates a new request ID. Direct “Start task�
 and follow-up launch recovery are separate work; do not assume these have the
 same retry guarantee yet. File-store deployments support one server process;
 use Nucleus for a shared deployment.
+
+
+## Proportionate planning
+
+See [One task, proportionate workflow](ADAPTIVE_WORKFLOW.md). Small changes still
+need scope, an approach and verification. Project settings can require the native
+plan-approval checkpoint for all new change tasks, including follow-ups and
+automations; a task cannot disable that requirement. Questions, plans and reviews
+remain read-only intentions. Existing runs retain their recorded checkpoints.
+
+
+## Retrying an interrupted launch
+
+If starting a task loses its response, return to the Inbox and retry the saved
+draft. Its submission identity is retained, so the retry opens the original
+accepted run. Editing the draft starts a new request. Already completed runs
+are not restarted by retrying their submission.
+
+An approved intake request that has not produced a visible run appears under
+“Starting or awaiting recovery”. An authorized teammate can retry its launch;
+Ship keeps the original run identity. The worker automatically finishes
+publication of durably accepted launches. A retry does not bypass project plan
+requirements, and pending/unknown acceptance is not represented as completion.
+
+This recovery guarantee currently covers direct task submissions and intake
+launches. Follow-up messages and replacement of an outstanding merge decision
+still have separate recovery work; do not assume their operation is atomic.

@@ -1,4 +1,6 @@
 import { projectReadinessKey } from "./project-readiness.js";
+import { taskRootRunId } from "./task-session.js";
+import { FileLaunchJournal, NucleusLaunchJournal, assertSameLaunch, launchRequestHash, type LaunchJournal } from "./launch-journal.js";
 import { parseJourney, journeyInstruction, type Journey } from "./journeys.js";
 import { FileArtifacts, NucleusArtifacts, type ArtifactStore } from "./artifacts.js";
 import type { RunOrigin } from "./notify.js";
@@ -11,7 +13,7 @@ import {
   executeRun,
   executeRunExclusive,
 } from "@neutron-build/workflow";
-import type { EventStore, RunOutcome, WorkflowDefinition } from "@neutron-build/workflow";
+import type { EventStore, RunOutcome, WorkflowDefinition, WorkflowEvent } from "@neutron-build/workflow";
 
 import { defaultRecoveryConfig } from "./recovery.js";
 import { FileIntakeStore, NucleusIntakeStore } from "./intake.js";
@@ -282,6 +284,8 @@ export { costUSD, pricingFor, isPricedModel, UNKNOWN_MODEL_PRICING } from "./pri
  * continue, or complete a run.
  */
 export interface ShipRuntime {
+  /** Present on both built-in runtimes; optional for legacy injected adapters. */
+  launches?: LaunchJournal;
   kind: "file" | "nucleus";
   store: EventStore;
   /**
@@ -424,6 +428,7 @@ export function fileRuntime(): ShipRuntime {
   const projects = new FileProjectStore();
   return {
     kind: "file",
+    launches: new FileLaunchJournal(store, meta),
     bulletin: new FileBulletinStore(),
     store,
     intake: new FileIntakeStore(),
@@ -538,6 +543,7 @@ export async function nucleusRuntime(
   const projects = new NucleusProjectStore(db);
   return {
     kind: "nucleus",
+    launches: new NucleusLaunchJournal(db, store),
     bulletin: new NucleusBulletinStore(db),
     store,
     index,
@@ -841,6 +847,10 @@ export async function enqueueRun(
   runtime: ShipRuntime,
   options: {
     runId: string;
+    /** Server-computed hash of authenticated user intent, excluding resolved
+     * defaults. Enables a lost-response retry to reuse the accepted config.
+     * Do not accept this value verbatim from an HTTP client. */
+    requestIdentity?: string;
     /** Conversation lineage only; never gates a workflow step. */
     parentRunId?: string;
     userMessage?: string;
@@ -995,6 +1005,15 @@ export async function enqueueRun(
   },
 ): Promise<void> {
   const journey = options.journey === undefined ? undefined : parseJourney(options.journey);
+  const requestHash = options.requestIdentity ?? launchRequestHash(options);
+  if (!/^[a-f0-9]{64}$/.test(requestHash)) throw new Error("Invalid request identity");
+  const accepted = await runtime.launches?.get(options.runId);
+  if (accepted) {
+    assertSameLaunch(accepted, requestHash);
+    await runtime.launches!.publish(accepted);
+    return;
+  }
+  const taskRoot = options.parentRunId === undefined ? options.runId : await taskRootRunId(runtime.store, options.parentRunId);
   const now = new Date().toISOString();
   // Materialise the thresholds at ENQUEUE, never leave a bare `true` in the
   // log. durable.ts's contract is that the thresholds are fixed at enqueue,
@@ -1200,8 +1219,12 @@ export async function enqueueRun(
   // cost for an answer the critic picks between on the strength of a DIFF,
   // which a scan does not have.
   const attempts = options.repo !== undefined && !scan ? harnessAttempts(process.env.SHIP_HARNESS_ATTEMPTS) : [];
-  if (options.plan === true && !scan && (harness.id !== "native" || attempts.some(h => h.id !== "native"))) {
-    throw new Error("Plan review requires the native harness. Select native in Project settings, or turn off plan review before launching an external harness.");
+  // A project requirement is a floor, never a heuristic based on prompt size.
+  // Resolve only for new runs; accepted launches and parked histories retain
+  // the recorded checkpoint so changing policy cannot change their replay.
+  const planReview = !scan && (project?.requirePlanReview === true || options.plan === true);
+  if (planReview && (harness.id !== "native" || attempts.some(h => h.id !== "native"))) {
+    throw new Error("Plan review requires the native harness. Select native in Project settings. A required project checkpoint cannot be disabled for an individual task.");
   }
   // Independent attempts of one task, ranked by the project's own verification
   // (P6-1). Repo runs only — a second attempt is a second checkout — and never
@@ -1262,7 +1285,7 @@ export async function enqueueRun(
         ...(options.origin !== undefined ? { origin: options.origin } : {}),
         // Both suppressed on a scan: the plan park asks an operator to approve
         // work that will not happen, and the critic reviews a diff there is none of.
-        ...(options.plan === true && !scan ? { plan: true } : {}),
+        ...(planReview ? { plan: true } : {}),
         ...(options.critic === true && !scan ? { critic: true } : {}),
         ...(scan ? { mode: "scan" as const } : {}),
         // Deliberately NOT in the unconditional block below: stuck detection
@@ -1339,13 +1362,14 @@ export async function enqueueRun(
         // sequences — and therefore their fingerprints — untouched.
         ...(attemptsK !== undefined && attemptsK > 1 ? { attempts: attemptsK } : {}),
   };
-  await runtime.store.append(options.runId, {
+  const started: WorkflowEvent = {
     v: WIRE_FORMAT_VERSION,
     seq: 0,
     type: "run-started",
     at: now,
     data: {
       workflow: options.workflowName ?? "coding-agent",
+      taskRootRunId: taskRoot,
       input,
       // The upgrade fence (step-fingerprint.ts): what step sequence the build
       // that enqueued this run would replay it through. A SIBLING of `input`,
@@ -1356,8 +1380,8 @@ export async function enqueueRun(
       // this event, so this key is inert to replay.
       stepFingerprint: stepFingerprint(input),
     },
-  });
-  await runtime.saveMeta({
+  };
+  const meta: RunMeta = {
     runId: options.runId,
     task: options.userMessage ?? options.task,
     model: options.model,
@@ -1372,7 +1396,14 @@ export async function enqueueRun(
       : {}),
     createdAt: now,
     updatedAt: now,
-  });
+  };
+  if (runtime.launches) {
+    const intent = await runtime.launches.prepare({runId:options.runId,requestHash,started,meta});
+    await runtime.launches.publish(intent);
+    return;
+  }
+  await runtime.store.append(options.runId, started);
+  await runtime.saveMeta(meta);
   // markWake only updates an existing index record; a freshly enqueued
   // run has none, so the scheduler would never see it. record() is the
   // insert-or-update path — "wake" makes the run due immediately.

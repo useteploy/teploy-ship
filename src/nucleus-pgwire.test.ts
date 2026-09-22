@@ -340,3 +340,25 @@ test("listMeta overlays exactly what the unbounded implementation overlaid", asy
     );
   }
 });
+
+test("transaction pins statements and commit to one connection; errors roll back without retry", async () => {
+  const statements:string[]=[];
+  const releases:boolean[]=[];
+  let connects=0;
+  const pool:PoolLike={
+    query:async(sql)=>{assert.match(sql,/CREATE TABLE IF NOT EXISTS ship_docs/);return {rows:[],rowCount:0};},
+    on:()=>undefined,end:async()=>undefined,
+    connect:async()=>{connects++;return {
+      query:async(sql)=>{statements.push(sql);if(sql==="BROKEN")throw MASKED;return {rows:[{value:"ok"}],rowCount:1};},
+      release:(destroy)=>{releases.push(destroy===true);},
+    };},
+  };
+  const db=new NucleusPgwire("","transaction-test",{pool});
+  assert.equal(await db.transaction(async tx=>{await tx.exec("WRITE");return (await tx.query("READ"))[0]?.value;}),"ok");
+  assert.deepEqual(statements,["BEGIN","WRITE","READ","COMMIT"]);
+  statements.length=0;
+  await assert.rejects(db.transaction(async tx=>{await tx.exec("BROKEN");}),error=>error===MASKED);
+  assert.deepEqual(statements,["BEGIN","BROKEN","ROLLBACK"]);
+  assert.equal(connects,2);
+  assert.deepEqual(releases,[false,true]);
+});

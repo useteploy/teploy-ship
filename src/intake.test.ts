@@ -118,11 +118,25 @@ test("a dismissed team request remains deduplicated after a lost response", asyn
   assert.equal(retry.task.state,"dismissed");
 });
 
-test("Nucleus intake never inserts after losing the dedupe guard while the winner is not yet visible", async () => {
-  let inserts = 0;
-  const db = {query:async(sql:string) => { if(sql.startsWith("INSERT")) inserts++; return []; }, kv:{setNX:async()=>false}} as unknown as NucleusPgwire;
-  await assert.rejects(new NucleusIntakeStore(db).propose({source:"team-request",kind:"task",title:"One",dedupeKey:"same"}), /still being recorded/);
-  assert.equal(inserts,0);
+test("Nucleus intake contenders use the same primary key and recover the stored winner", async () => {
+  const rows = new Map<string,Record<string,unknown>>();
+  const columns = ["task_id","source","kind","repo","pr","title","detail","dedupe_key","state","run_id","requested_by","created_at","updated_at","generation"];
+  const db = {query:async(sql:string, params:unknown[]=[]) => {
+    if(sql.startsWith("CREATE")) return [];
+    if(sql.startsWith("INSERT")) {
+      const id = String(params[0]);
+      if(rows.has(id)) throw Object.assign(new Error("duplicate"),{code:"23505"});
+      rows.set(id,Object.fromEntries(columns.map((c,i)=>[c,params[i]])));
+      return [];
+    }
+    if(sql.includes("FROM ship_tasks_v2")) return [...rows.values()].filter(r=>sql.includes("task_id =") ? r.task_id===params[0] : r.dedupe_key===params[0]);
+    return [];
+  }} as unknown as NucleusPgwire;
+  const store = new NucleusIntakeStore(db);
+  const results = await Promise.all(Array.from({length:20},()=>store.propose({source:"team-request",kind:"task",title:"One",dedupeKey:"same"})));
+  assert.equal(results.filter(r=>r.created).length,1);
+  assert.equal(new Set(results.map(r=>r.task.taskId)).size,1);
+  assert.equal(rows.size,1);
 });
 
 test("intake: the owner/repo segment of a forge key is case-insensitive", async () => {

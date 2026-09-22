@@ -41,10 +41,11 @@ function memIntake(tasks: IntakeTask[]): Pick<import("./intake.js").IntakeStore,
       t.state = state;
       if (runId !== undefined) t.runId = runId;
     },
-    async claim(taskId) {
+    async claim(taskId, runId) {
       const t = byId.get(taskId);
       if (t === undefined || t.state !== "proposed") return false;
       t.state = "launched";
+      if (runId !== undefined) t.runId = runId;
       return true;
     },
   };
@@ -406,7 +407,7 @@ test("worker sweep claims atomically: two workers racing on one proposed task la
   assert.equal(await b.admission.takeDailyLaunch("forgejo", DAY, 2), true, "B took nothing from the daily counter");
 });
 
-test("worker sweep releases the claim when launch fails, so a later sweep retries", async () => {
+test("worker sweep holds uncertain launch identity instead of creating another run", async () => {
   const h = harness(
     {
       launch: async () => {
@@ -417,13 +418,14 @@ test("worker sweep releases the claim when launch fails, so a later sweep retrie
   );
 
   await assert.rejects(() => sweepIntake(h.deps), /enqueue exploded/);
-  assert.equal((await h.intake.list("proposed")).length, 1, "the failed launch put the task back to proposed");
-  assert.equal(h.deps.inFlight.size, 0);
+  assert.equal((await h.intake.list("proposed")).length, 0);
+  assert.equal((await h.intake.list("launched"))[0]?.runId, [...h.deps.inFlight.keys()][0]);
+  assert.equal(h.deps.inFlight.size, 1);
 
-  // The same store retried by a healthy worker launches normally.
+  // A second worker must not interpret uncertain acceptance as a new task.
   const retry = harness({ intake: h.intake }, []);
   await sweepIntake(retry.deps);
-  assert.equal(retry.launched.length, 1, "the released task launches on retry");
+  assert.equal(retry.launched.length, 0, "the accepted intent or an authorized same-ID retry recovers this task");
 });
 
 test("worker sweep refuses to auto-launch a source at or over its daily budget", async () => {

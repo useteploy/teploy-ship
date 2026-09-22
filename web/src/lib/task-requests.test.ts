@@ -42,3 +42,41 @@ test("unregistered project and invalid journey do not create a proposal", async 
   }
   assert.equal((await runtime.intake.list()).length, 1);
 });
+
+function adminRequest(fields: Record<string,string>) {
+  return new Request("http://ship.test/", {method:"POST",headers:{authorization:"Bearer request-test-token"},body:new URLSearchParams(fields)});
+}
+test("direct launches survive concurrent retries and reject changed intent under the same ID",async()=>{
+  const fields={intent:"new-run",repo:url,journey:"change",task:"Update the label",requestId:randomUUID()};
+  const responses=await Promise.all(Array.from({length:8},()=>action({request:adminRequest(fields)})));
+  const location=responses[0].headers.get("location")!;
+  assert.match(location,/^\/runs\/run-request-/);
+  assert.ok(responses.every(r=>r.headers.get("location")===location));
+  const runId=location.split("/").pop()!.split("?")[0]!;
+  assert.equal((await runtime.store.load(runId)).length,1);
+  const meta=(await runtime.loadMeta(runId))!;
+  await runtime.saveMeta({...meta,status:"completed"});
+  await action({request:adminRequest(fields)});
+  assert.equal((await runtime.loadMeta(runId))?.status,"completed");
+  const conflict=await action({request:adminRequest({...fields,task:"Do unrelated work"})});
+  assert.match(decodeURIComponent(conflict.headers.get("location")!),/different launch/);
+  const missing=await action({request:adminRequest({...fields,requestId:""})});
+  assert.match(decodeURIComponent(missing.headers.get("location")!),/Refresh the page/);
+});
+
+test("interrupted intake claim remains visible and authorized retries reuse its run identity",async()=>{
+  const {task}=await runtime.intake.propose({source:"team-request",kind:"request-change",repo:url,title:"Fix a typo",dedupeKey:randomUUID(),requestedBy:"editor"});
+  const runId="run-interrupted-intake";
+  await runtime.intake.claim(task.taskId,runId);
+  const {loader}=await import("../routes/index.js");
+  const page=await loader({request:adminRequest({})});
+  assert.ok(page.pendingLaunches.some(t=>t.taskId===task.taskId));
+  const fields={intent:"retry-task",taskId:task.taskId};
+  const denied=await action({request:request("editor",fields)});
+  assert.match(denied.headers.get("location")!,/denied=approve/);
+  const retries=await Promise.all(Array.from({length:5},()=>action({request:adminRequest(fields)})));
+  assert.ok(retries.every(r=>r.headers.get("location")===`/runs/${runId}`));
+  assert.equal((await runtime.store.load(runId)).length,1);
+  assert.equal((await runtime.intake.get(task.taskId))?.runId,runId);
+  assert.equal((await loader({request:adminRequest({})})).pendingLaunches.some(t=>t.taskId===task.taskId),false);
+});

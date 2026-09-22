@@ -492,3 +492,16 @@ test("project identity: a URL-less legacy record requires an explicit clone URL 
   await store.set({ ...old, url: 'https://github.com/team/app' });
   assert.equal((await store.forRepo('https://github.com/team/app'))?.testCommand, 'true');
 });
+
+test("required plan review persists, validates and survives evidence updates", async () => {
+  const dir = await tempDir();
+  const projects = new FileProjectStore(dir);
+  const evidence = new ProjectEvidenceStore(projects, new FileEvidenceStore(dir));
+  await projects.set({ repo: GO_URL, requirePlanReview: true, autoMerge: false, autoDeploy: false });
+  await evidence.set({ repo: GO_URL, testCommand: "make test" });
+  assert.equal((await projects.forRepo(GO_URL))?.requirePlanReview, true);
+  assert.throws(() => normalizeProject({ repo: GO_URL, requirePlanReview: "false" as never, autoMerge: false, autoDeploy: false }), /must be a boolean/);
+  const stored = (await projects.forRepo(GO_URL))!;
+  await projects.set({ ...stored, requirePlanReview: false });
+  assert.notEqual((await projects.forRepo(GO_URL))?.requirePlanReview, true);
+});

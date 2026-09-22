@@ -1,3 +1,4 @@
+import { recoverLaunches } from "./launch-journal.js";
 import { intakeJourney } from "./journeys.js";
 import { sweepWorkflowSchedules } from "./workflow-schedules.js";
 import { serveWorkspaceRequests } from "./workspace-requests.js";
@@ -384,10 +385,11 @@ export async function sweepIntake(deps: IntakeSweepDeps): Promise<void> {
 
     // Claim first: two workers sweeping the same proposed list must collapse to
     // one run. Losing just means someone else got there — take no resources.
-    const runId = deps.newRunId();
+    const runId = task.runId ?? deps.newRunId();
     if (!(await deps.intake.claim(task.taskId, runId))) continue;
     let slotTaken = false;
     let holdTaken = false;
+    let launchStarted = false;
     try {
       if (!(await deps.admission.acquireSlot(runId, deps.maxConcurrentRuns))) {
         deps.log(
@@ -420,6 +422,7 @@ export async function sweepIntake(deps: IntakeSweepDeps): Promise<void> {
         continue;
       }
 
+      launchStarted = true;
       await deps.launch(task, runId);
       await deps.intake.setState(task.taskId, "launched", runId);
       deps.inFlight.set(runId, task.source);
@@ -427,8 +430,16 @@ export async function sweepIntake(deps: IntakeSweepDeps): Promise<void> {
       holdTaken = false; // released at settlement
       deps.log(`[worker] intake: auto-launched ${task.taskId} (${task.source}) as ${runId}`);
     } catch (error) {
-      // Put everything back so a later sweep can retry cleanly, then surface it.
-      await deps.intake.setState(task.taskId, "proposed").catch(() => {});
+      // Once enqueue begins the outcome may be unknown. Keep the task and
+      // reservations tied to this identity; recovery publishes accepted intents.
+      // No-events-yet cannot distinguish a slow caller from a dead process.
+      if (launchStarted) {
+        slotTaken = false;
+        holdTaken = false;
+        deps.inFlight.set(runId, task.source);
+      } else {
+        await deps.intake.setState(task.taskId, "proposed").catch(() => {});
+      }
       throw error;
     } finally {
       if (slotTaken) await deps.admission.releaseSlot(runId).catch(() => {});
@@ -1328,7 +1339,21 @@ export function startWorker(options: WorkerOptions): {
     await flush();
   };
 
+  let launchRecoveryAfter: string | undefined;
   const sweep = async (): Promise<void> => {
+    if (options.runtime.launches) {
+      try {
+        const result = await recoverLaunches(options.runtime.launches, {
+          after: launchRecoveryAfter,
+          onError: (id) => log(`[worker] launch ${id} needs recovery; its accepted intent remains held`),
+        });
+        launchRecoveryAfter = result.after;
+        if (result.recovered.length) log(`[worker] recovered ${result.recovered.length} accepted launch(es)`);
+      } catch {
+        log("[worker] launch recovery unavailable; skipping intake this sweep");
+        return;
+      }
+    }
     // Re-read the live policies each tick so dashboard edits take effect
     // without a worker restart. Store wins over the env seed; a per-source
     // budget in the store overrides the global default.
@@ -1363,15 +1388,9 @@ export function startWorker(options: WorkerOptions): {
       policies[p.source] = p.policy;
       if (p.dailyBudgetUSD !== undefined) storeBudgets[p.source] = p.dailyBudgetUSD;
     }
-    // Release tasks claimed for a run that never came into existence (the
-    // worker died between claiming and enqueueing). Without this they stay
-    // "launched" forever, pointing at a run id nothing will ever produce.
-    await options.runtime.intake
-      .reconcile(async (runId) => (await options.runtime.store.load(runId)).length > 0)
-      .then((released) => {
-        if (released.length > 0) log(`[worker] intake: released ${released.length} task(s) whose launch never landed`);
-      })
-      .catch((error) => log(`[worker] intake reconcile: ${error instanceof Error ? error.message : String(error)}`));
+    // Do not recycle claims based on missing events. Enqueue may still be
+    // preparing the accepted request. Unaccepted interrupted claims are visible
+    // in the Inbox and can be retried by an authorized user with the same ID.
 
     return sweepIntake({
       intake: options.runtime.intake,

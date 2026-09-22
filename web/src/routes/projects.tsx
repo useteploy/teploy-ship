@@ -282,6 +282,7 @@ export async function action({ request }: { request: Request }): Promise<Respons
     // nothing installs it per run. normalizeProject rejects an unknown id, and
     // the redirect below shows the message.
     harness,
+    requirePlanReview: form.has("planReviewPresent") ? form.get("requirePlanReview") === "on" : existing.requirePlanReview,
     dailyBudgetUSD: num("budget"),
     testCommand: str("testCommand"),
     testTimeoutMs: num("testTimeoutMs"),
@@ -469,6 +470,12 @@ function ProjectForm({ p, data }: { p: Project | null; data: ProjectsData }) {
           ))}
         </select>
       </label>
+      <label class="check-field">
+        <input type="hidden" name="planReviewPresent" value="1" />
+        <input type="checkbox" name="requirePlanReview" checked={p?.requirePlanReview === true} />
+        Require plan approval before code changes
+      </label>
+      <p class="meta">Applies to new change tasks from every source, including follow-ups and automations. Requires the native harness. Existing tasks keep their recorded checkpoints. Plan approval does not grant merge or deployment permission.</p>
       <label class="meta" style="display:flex;gap:6px;align-items:center">
         <input type="hidden" name="neverAuto" value="off" />
         <input type="checkbox" name="neverAuto" checked={p?.neverAuto === true} />
@@ -556,6 +563,7 @@ export default function Projects({ data }: { data: ProjectsData | SourcesData | 
             <tr><td>Environment</td><td>{p.sandboxImage ?? (data.workerImage || "Not configured")}</td><td>{p.sandboxImage ? "Project override" : "Deployment default"}</td></tr>
             <tr><td>Preparation</td><td>{p.preparation?.command ?? "No preparation command"}</td><td>Project</td></tr>
             <tr><td>Tests</td><td>{p.verification?.tests ?? p.testCommand ?? "Detected from repository; deployment fallback when available"}</td><td>{p.verification?.tests || p.testCommand ? "Project override" : "Resolved when the task starts"}</td></tr>
+            <tr><td>Plan approval</td><td>{p.requirePlanReview ? "Required before code changes (native harness)" : "Optional per task; planning and verification still expected"}</td><td>{p.requirePlanReview ? "Project requirement" : "Task choice"}</td></tr>
             <tr><td>Team requests</td><td>Always require approval to start</td><td>Request policy</td></tr>
           </tbody></table></div><p class="meta">Deployment defaults shown here are the dashboard's configuration. Verify readiness through a real worker run. Changes apply to future tasks; existing tasks retain their recorded setup.</p></section>
           {data.canEdit && <details class="disclosure"><summary>Edit project configuration</summary><div class="card"><ProjectForm p={p} data={data} /></div><p class="meta">Choose “worker default” or clear an optional override to inherit it again. Save to apply the change to new tasks.</p></details>}

@@ -180,3 +180,19 @@ address that dependency drift. Eight web advisory entries are patched; local and
 production dependency scans report zero at the time of review. This is not a
 completed security audit. Project boundaries, submission idempotency, merge races,
 preview authorization and recovery targets remain explicitly open in the report.
+
+
+## 2026-09-21 — durable launch recovery and project plan floor
+
+Added additive primary-key intake storage and a durable accepted-launch journal,
+transactional Nucleus scheduling publication, bounded worker recovery and stable
+direct-request submission IDs. Removed the live missing-events claim-release
+race; interrupted intake launches have an authorized same-ID Inbox retry. Project
+plan-review requirements are enforced at shared enqueue and cannot be overridden
+per task. Details and remaining boundaries: [F06](docs/AUDIT_2026-09-21.md),
+[upgrade procedure](docs/UPGRADING.md), [adaptive workflow](docs/ADAPTIVE_WORKFLOW.md).
+
+Open: durable follow-up/parent-decision coordination, complete reservation
+reconciliation, full canonical multi-forge identity, broader audit/evaluations
+and the remaining release programme. Tests and isolated-engine/browser proofs
+do not establish whole-product completion or competitor superiority.

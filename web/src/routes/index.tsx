@@ -1,3 +1,4 @@
+import { submissionIdentity } from "../lib/submission.server.js";
 import { TaskComposer, type TaskProject } from "../views/task-composer.js";
 import { JOURNEYS, intakeJourney, parseJourney, journeyOptions, type Journey } from "teploy-ship/journeys";
 import { workflows } from "../lib/workflows.server.js";
@@ -20,7 +21,8 @@ interface InboxData {
   selectedRepo: string;
   /** Runs parked on an approval — the top priority. */
   parked: RunMeta[];
-  recentRequests: IntakeTask[];
+  recentRequests: Array<IntakeTask & { runVisible: boolean }>;
+  pendingLaunches: IntakeTask[];
   /** Proposed intake tasks awaiting a launch/dismiss decision. */
   proposed: IntakeTask[];
   store: string;
@@ -48,9 +50,19 @@ export async function loader({ request }: { request: Request }): Promise<InboxDa
   const [runs, proposed, projects] = await Promise.all([runtime.listMeta(), runtime.intake.list("proposed"), runtime.projects.list()]);
   const me = await currentUser(request);
   const canLaunch = await may("approve", me);
-  const recentRequests = (await runtime.intake.list()).filter(t => t.source === "team-request" && t.state !== "proposed" && (canLaunch || t.requestedBy === me?.user)).sort((a,b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 12);
+  const allTasks = await runtime.intake.list();
+  const runPresence = new Map(runs.map(run => [run.runId,true]));
+  const launched = allTasks.filter(t => t.state === "launched" && t.runId && (canLaunch || t.requestedBy === me?.user));
+  const unknown = [...new Set(launched.map(t => t.runId!))].filter(id => !runPresence.has(id));
+  // Bound concurrent reads, not which requests are eligible for recovery.
+  // A first-100 cutoff could hide an older interrupted launch forever.
+  for (let i=0;i<unknown.length;i+=4) await Promise.all(unknown.slice(i,i+4).map(async id => {
+    runPresence.set(id, await runtime.loadMeta(id) !== null);
+  }));
+  const pendingLaunches = canLaunch ? launched.filter(t => runPresence.get(t.runId!) === false) : [];
+  const recentRequests = allTasks.filter(t => t.source === "team-request" && t.state !== "proposed" && (canLaunch || t.requestedBy === me?.user)).sort((a,b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 12).map(t => ({...t,runVisible: !!t.runId && runPresence.get(t.runId) === true}));
   const parked = runs.filter((r) => r.status === "waiting" && r.eventName !== undefined);
-  return { template: (await workflows(runtime)).find(t=>t.id===query.get("workflow")), selectedRepo: query.get("repo") ?? "", canLaunch, canRequest: me?.role === "admin" || me?.role === "editor", requestId: randomUUID(), submitted: query.get("submitted"), error: query.get("error"), projects: projects.filter(p => !!p.url).map(p => ({ url: p.url ?? p.repo, label: p.label ?? p.repo, planSupported: (p.harness ?? process.env.SHIP_HARNESS ?? "native") === "native" })), parked, recentRequests, proposed, store: runtime.kind, model: defaultModel(), decisionTaken, denied };
+  return { template: (await workflows(runtime)).find(t=>t.id===query.get("workflow")), selectedRepo: query.get("repo") ?? "", canLaunch, canRequest: me?.role === "admin" || me?.role === "editor", requestId: randomUUID(), submitted: query.get("submitted"), error: query.get("error"), projects: projects.filter(p => !!p.url).map(p => ({ url: p.url ?? p.repo, label: p.label ?? p.repo, requirePlanReview: p.requirePlanReview === true, planSupported: (p.harness ?? process.env.SHIP_HARNESS ?? "native") === "native" })), parked, recentRequests, pendingLaunches, proposed, store: runtime.kind, model: defaultModel(), decisionTaken, denied };
 }
 
 export async function action({ request }: { request: Request }): Promise<Response> {
@@ -64,7 +76,7 @@ export async function action({ request }: { request: Request }): Promise<Respons
 
   // Deciding a park and launching a proposed task both authorise code
   // execution and spend: the `approve` grant (governance.ts), deny by default.
-  if ((intent === "approve" || intent === "deny" || intent === "launch-task" || intent === "dismiss-task" || intent === "new-run") && !(await may("approve", me))) {
+  if ((intent === "approve" || intent === "deny" || intent === "launch-task" || intent === "retry-task" || intent === "dismiss-task" || intent === "new-run") && !(await may("approve", me))) {
     return redirect("/?denied=approve");
   }
 
@@ -93,19 +105,29 @@ export async function action({ request }: { request: Request }): Promise<Respons
   }
 
   // Launch / dismiss a proposed intake task.
-  if (intent === "launch-task" || intent === "dismiss-task") {
+  if (intent === "launch-task" || intent === "retry-task" || intent === "dismiss-task") {
     const taskId = String(form.get("taskId") ?? "");
     const task = await runtime.intake.get(taskId);
-    if (task === null || task.state !== "proposed") return redirect("/");
+    if (task === null) return redirect("/");
+    const retry = intent === "retry-task" && task.state === "launched" && task.runId !== undefined;
+    if (!retry && task.state !== "proposed") return redirect("/");
+    if (retry && await runtime.loadMeta(task.runId!) !== null) return redirect(`/runs/${task.runId}`);
     if (intent === "dismiss-task") {
       await runtime.intake.setState(taskId, "dismissed");
       return redirect("/");
     }
     // Claim first: a worker's auto-sweep may race this click; the claim's
     // conditional update decides who launches (the loser is a no-op).
-    const runId = `run-${randomUUID().slice(0, 8)}`;
-    if (!(await runtime.intake.claim(taskId, runId))) return redirect("/");
+    const runId = task.runId ?? `run-${randomUUID()}`;
+    if (!retry && !(await runtime.intake.claim(taskId, runId))) return redirect("/");
     try {
+      // An accepted intent already records who authorized it and its config.
+      // Repair that exact intent instead of resolving today's defaults again.
+      const accepted = await runtime.launches?.get(runId);
+      if (accepted) {
+        await runtime.launches!.publish(accepted);
+        return redirect(`/runs/${runId}`);
+      }
       await enqueueRun(runtime, {
         runId,
         task: task.pr !== undefined ? (task.detail ?? task.title) : task.detail !== undefined ? `${task.title}\n\n${task.detail}` : task.title,
@@ -126,8 +148,9 @@ export async function action({ request }: { request: Request }): Promise<Respons
         ...(task.pr !== undefined ? { pr: task.pr } : {}),
       });
     } catch (error) {
-      await runtime.intake.setState(taskId, "proposed");
-      throw error;
+      // It may have been accepted before the response failed. Retain the
+      // claim and identity so a retry cannot create another run.
+      return redirect("/?error=" + encodeURIComponent(error instanceof Error ? error.message : "Launch needs recovery. Retry the same request."));
     }
     await runtime.intake.setState(taskId, "launched", runId);
     return redirect(`/runs/${runId}`);
@@ -158,9 +181,12 @@ export async function action({ request }: { request: Request }): Promise<Respons
       }
       return redirect(`/?submitted=${encodeURIComponent(proposed.task.taskId)}`);
     }
-    const runId = `run-${randomUUID().slice(0, 8)}`;
+    const submission = submissionIdentity(actorFromPrincipal(me).id, "new-run", form.get("requestId"), {
+      task, repo: project.url, journey, pr: pr ?? null, plan: form.get("plan") === "on" && journey === "change",
+    });
+    const runId = submission.runId;
     await enqueueRun(runtime, {
-      runId, task, ...journeyOptions(journey), model: defaultModel(), source: "manual",
+      ...submission, task, ...journeyOptions(journey), model: defaultModel(), source: "manual",
       actor: actorFromPrincipal(me), trust: "operator", repo: project.url,
       ...(pr ? { pr } : {}), ...(form.get("plan") === "on" && journey === "change" ? { plan: true } : {}),
     });
@@ -229,6 +255,10 @@ export default function Inbox({ data }: { data: InboxData }) {
         ))
       )}
 
+      {data.pendingLaunches.length > 0 && <section><h2 class="section">Starting or awaiting recovery</h2>
+        <p class="meta">These requests have a reserved task identity but no visible run yet. Retrying resumes the same request.</p>
+        {data.pendingLaunches.map(t => <article class="card" key={t.taskId}><b>{t.title}</b><form method="post"><input type="hidden" name="taskId" value={t.taskId} /><button type="submit" name="intent" value="retry-task">Retry launch</button></form></article>)}
+      </section>}
       <h2 class="section" id="proposals">
         Proposed tasks <span class="count">({data.proposed.length})</span>
       </h2>
@@ -251,8 +281,8 @@ export default function Inbox({ data }: { data: InboxData }) {
         ))
       )}
 
-      {data.recentRequests.length > 0 && <section><h2 class="section">Recent requests</h2>{data.recentRequests.map(t => <article class="card" key={t.taskId}><b>{t.title}</b><p class="meta">{t.state === "launched" ? "Approved and started" : "Dismissed"} · {t.requestedBy}</p>{t.runId && <a href={`/runs/${t.runId}`}>Follow the task and its result →</a>}</article>)}</section>}
-      {nothing && <p class="empty" style="margin-top:28px">Inbox zero. <a href="/runs">See all runs →</a></p>}
+      {data.recentRequests.length > 0 && <section><h2 class="section">Recent requests</h2>{data.recentRequests.map(t => <article class="card" key={t.taskId}><b>{t.title}</b><p class="meta">{t.state === "launched" ? "Approved for launch" : "Dismissed"} · {t.requestedBy}</p>{t.runVisible && t.runId && <a href={`/runs/${t.runId}`}>Follow the task and its result →</a>}</article>)}</section>}
+      {nothing && data.pendingLaunches.length === 0 && <p class="empty" style="margin-top:28px">Inbox zero. <a href="/runs">See all runs →</a></p>}
       <script dangerouslySetInnerHTML={{ __html: POLL }} />
     </>
   );

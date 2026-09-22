@@ -1,7 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { JOURNEYS, type Journey } from "teploy-ship/journeys";
 
-export interface TaskProject { url: string; label: string; planSupported: boolean }
+export interface TaskProject { url: string; label: string; planSupported: boolean; requirePlanReview?: boolean }
 // getRandomValues also works on private HTTP installs, where randomUUID may
 // be unavailable. The ID is an idempotency key, never an authorization token.
 function nextRequestId(): string {
@@ -59,10 +59,12 @@ export function TaskComposer({ projects, selectedRepo, initialTask = "", initial
     <label htmlFor="task-prompt">Describe what you need</label>
     <textarea id="task-prompt" name="task" rows={4} maxLength={20000} required value={task} onInput={e => { setTask(e.currentTarget.value); saveDraft({ task: e.currentTarget.value }); }} placeholder={journey === "change" ? 'For example: Change “Start trial” to “Try it free” on the pricing page, keeping its current style.' : journey === "plan" ? "For example: How could we let customers download their invoices? Give me a plan first." : journey === "review" ? "For example: Check the signup flow for problems that could stop a new customer." : "For example: What happens when a customer cancels their subscription?"} />
     <p class="meta">Expected result: {choice.outcome}. You can describe this in everyday language.</p>
+    {journey === "change" && <p class="meta">Ship should inspect the affected code, outline an approach and verify the result even for a small change. Project review and delivery rules still apply.</p>}
+    {journey === "change" && selected?.requirePlanReview && <p class="notice">This project requires plan approval before code changes.{!selected.planSupported && " An administrator must select the native harness before this change can start."}</p>}
     <details class="disclosure"><summary>More options</summary>
       {journey === "review" && <label class="field">Pull request number (optional)<input type="number" name="pr" min="1" step="1" value={pr} onInput={e => { setPr(e.currentTarget.value); saveDraft({ pr: e.currentTarget.value }); }} placeholder="Review the project if left blank" /></label>}
-      {journey === "change" && canLaunch && selected?.planSupported && <label class="check-field"><input type="checkbox" name="plan" checked={plan} onChange={e => { setPlan(e.currentTarget.checked); saveDraft({ plan: e.currentTarget.checked }); }} />Approve a plan before changes begin</label>}
-      {journey === "change" && !selected?.planSupported && <p class="meta">To discuss an approach first, choose “Make a plan”, then request implementation when you are ready.</p>}
+      {journey === "change" && canLaunch && selected?.planSupported && !selected.requirePlanReview && <label class="check-field"><input type="checkbox" name="plan" checked={plan} onChange={e => { setPlan(e.currentTarget.checked); saveDraft({ plan: e.currentTarget.checked }); }} />Approve a plan before changes begin</label>}
+      {journey === "change" && !selected?.planSupported && !selected?.requirePlanReview && <p class="meta">To discuss an approach first, choose “Make a plan”, then request implementation when you are ready.</p>}
       <p class="meta">The project supplies the agent, environment and checks. <a href="/projects">Project settings</a></p>
     </details>
     <div class="composer-footer">

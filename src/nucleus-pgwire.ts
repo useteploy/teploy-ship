@@ -113,6 +113,7 @@ export class NucleusPgwire {
   #pool: PoolLike;
   #owner: string;
   #docsReady: Promise<void> | null = null;
+  #inTransaction = false;
   /** How the retry path opens a connection that shares nothing with the pool. */
   #solo: (() => SoloClientLike) | null;
 
@@ -217,6 +218,7 @@ export class NucleusPgwire {
    * constraint) is still thrown as-is; those are not transient.
    */
   async #run(sql: string, params: unknown[] = []): Promise<QueryResultLike> {
+    if (this.#inTransaction) return this.#pool.query(sql, params);
     try {
       return await this.#pool.query(sql, params);
     } catch (error) {
@@ -427,6 +429,36 @@ export class NucleusPgwire {
 
   close(): Promise<void> {
     return this.#pool.end();
+  }
+
+  /** One checked-out connection; never retry a transaction statement on a
+   * different connection. Callers reconcile an uncertain COMMIT by identity.
+   * Only SQL/document operations are exposed: KV/stream transaction semantics
+   * are not assumed to match SQL rollback.
+   */
+  async transaction<T>(fn: (db: Pick<NucleusPgwire, "query" | "exec" | "document">) => Promise<T>): Promise<T> {
+    if (this.#inTransaction) throw new Error("Nested transactions are not supported");
+    await this.#ensureDocs();
+    const client = await this.#pool.connect();
+    let destroy = false;
+    try {
+      await client.query("BEGIN");
+      const bound = new NucleusPgwire("", this.#owner + ":transaction", {pool:{
+        query:(sql,params)=>client.query(sql,params),
+        connect:async()=>{throw new Error("Transaction cannot acquire another connection");},
+        on:()=>undefined,
+        end:async()=>undefined,
+      }});
+      bound.#inTransaction = true;
+      bound.#docsReady = Promise.resolve();
+      const value = await fn(bound);
+      await client.query("COMMIT");
+      return value;
+    } catch (error) {
+      destroy = true;
+      await client.query("ROLLBACK").catch(()=>undefined);
+      throw error;
+    } finally { client.release(destroy); }
   }
 }
 

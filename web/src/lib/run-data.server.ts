@@ -26,9 +26,11 @@ export interface RunData {
   snapshots: DiffSnapshot[];
   evidence: Evidence;
   parentRunId?: string;
+  taskRootRunId?: string;
   canSteer: boolean;
   canLaunch: boolean;
   planSupported: boolean;
+  requirePlanReview: boolean;
   hasPr: boolean;
   messageError: string | null;
   meta: RunMeta | null;
@@ -176,8 +178,10 @@ export async function runData({ params, request }: { params: { id: string }; req
       evidence: evidence(facts, reviewedHead),
       hasPr: facts.pr !== undefined || typeof (started?.data as any)?.input?.pr === "number",
       parentRunId: typeof (started?.data as any)?.input?.parentRunId === 'string' ? (started?.data as any).input.parentRunId : undefined,
+      taskRootRunId: typeof (started?.data as any)?.taskRootRunId === 'string' ? (started?.data as any).taskRootRunId : undefined,
       canSteer: await may('steer', await currentUser(request)),
       planSupported,
+      requirePlanReview: currentProject?.requirePlanReview === true,
       canLaunch: projectError === null && await may('approve', await currentUser(request)),
       messageError: query.get('messageError') ?? projectError,
       meta,
