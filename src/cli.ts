@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { canonicalRepositoryURL } from "./project-identity.js";
 // teploy-ship — the Ship CLI: run coding-agent tasks live in your
 // terminal (streamed, interactive approvals) or as durable runs that
 // park on approval, survive exits/crashes, and resume later.
@@ -763,7 +764,7 @@ async function fixCommand(rest: string[]): Promise<void> {
   const runtime = await makeRuntime(args, config);
   // Same origin-scoped key the durable path uses, so a repo's history is
   // one history whichever surface produced it.
-  const repoKey = repoKeyOf(repoUrl);
+  const repoKey = repoKeyOf(repoUrl, 2);
   const context = await loadRepoContext(executor, { repo: repoKey, memory: runtime.memory });
   if (context !== "") process.stderr.write(dim("injecting repo playbook/history\n"));
 
@@ -1484,7 +1485,7 @@ async function projectCommand(rest: string[]): Promise<void> {
       // A clone URL as the target sets --url too; a bare slug needs --url to join the allowlist.
       const url = str("url") ?? (/^[a-z]+:\/\//i.test(target) || target.startsWith("git@") ? target : undefined);
       const existing = (await runtime.projects.forRepo(target)) ?? { repo: target, autoMerge: false, autoDeploy: false };
-      const { sourcePolicy: _p, ...keep } = existing;
+      const { sourcePolicy: _p, ...keep } = {...existing,repo:existing.url ?? existing.repo};
       const build = str("build");
       const previewApp = str("preview-app");
       const previewSmoke = str("preview-smoke");
@@ -1667,7 +1668,7 @@ async function policyCommand(rest: string[]): Promise<void> {
     const runtime = await makeRuntime(args, config);
     try {
       await runtime.governance.setReviewers({ repo: third, users: list("users") ?? [], teams: list("teams") ?? [] });
-      const key = repoSlug(third) ?? third.trim().toLowerCase();
+      const key = canonicalRepositoryURL(third) ?? repoSlug(third) ?? third.trim().toLowerCase();
       const rule = (await runtime.governance.get()).reviewers.find((r) => r.repo === key);
       process.stderr.write(rule === undefined ? `${green("removed")} reviewer rule for ${third}\n` : `${green("set")} ${rule.repo}: users ${rule.users.join(",") || "-"}, teams ${rule.teams.join(",") || "-"}\n`);
     } finally {

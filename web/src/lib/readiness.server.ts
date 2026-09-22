@@ -35,7 +35,7 @@ export async function readiness(
       ? `${project.label ?? project.repo} is registered. Clone access has not been tested by this check.`
       : "Register the clone URL and repository name to continue.",
     href: project
-      ? `/projects?repo=${encodeURIComponent(project.repo)}`
+      ? `/projects?repo=${encodeURIComponent(project.url ?? project.repo)}`
       : "/projects#add-project",
   });
   const image = project?.sandboxImage || process.env.SHIP_SANDBOX_IMAGE;
@@ -46,7 +46,7 @@ export async function readiness(
       ? `Image: ${image}. ${project?.sandboxImage ? "Project override" : "Worker default"}. Image availability is verified when the worker starts a run.`
       : "Choose a sandbox image in project settings or configure a worker default.",
     href: project
-      ? `/projects?repo=${encodeURIComponent(project.repo)}`
+      ? `/projects?repo=${encodeURIComponent(project.url ?? project.repo)}`
       : "/settings?view=models",
   });
   const command =
@@ -60,7 +60,7 @@ export async function readiness(
       ? `Configured: ${command}`
       : "No explicit test command. Ship will try repository detection at enqueue; review the first run’s evidence.",
     href: project
-      ? `/projects?repo=${encodeURIComponent(project.repo)}`
+      ? `/projects?repo=${encodeURIComponent(project.url ?? project.repo)}`
       : "/projects",
   });
   checks.push({
@@ -70,7 +70,7 @@ export async function readiness(
       ? "Preview target configured. A real run must prove deployment, smoke checks and browser flow."
       : "No project preview target configured. Add one to review the running app and browser evidence.",
     href: project
-      ? `/projects?repo=${encodeURIComponent(project.repo)}`
+      ? `/projects?repo=${encodeURIComponent(project.url ?? project.repo)}`
       : "/projects",
   });
   checks.push({

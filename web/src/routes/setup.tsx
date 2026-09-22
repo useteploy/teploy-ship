@@ -1,3 +1,4 @@
+import { ProjectIdentityError } from "../lib/ship.server.js";
 import { randomUUID } from "node:crypto";
 import { enqueueRun, actorFromPrincipal } from "../lib/ship.server.js";
 import { defaultModel } from "../lib/store.server.js";
@@ -23,8 +24,9 @@ export async function loader({ request }: { request: Request }): Promise<Data> {
   const runtime = await shipRuntime(),
     projects = await runtime.projects.list(),
     repo =
-      new URL(request.url).searchParams.get("repo") ?? projects[0]?.repo ?? "";
-  const selected = projects.find((p) => p.repo === repo) ?? null;
+      new URL(request.url).searchParams.get("repo") ?? projects[0]?.url ?? projects[0]?.repo ?? "";
+  let selected:Project|null=null, identityError:string|null=null;
+  try {selected=repo?await runtime.projects.forRepo(repo):null;}catch(error){if(!(error instanceof ProjectIdentityError))throw error;identityError=error.message;}
   const runs = await runtime.listMeta({ limit: 100 });
   const recentRuns: Data["recentRuns"] = [];
   for (const r of runs
@@ -40,15 +42,15 @@ export async function loader({ request }: { request: Request }): Promise<Data> {
     selected,
     canLaunch: await may("approve", await currentUser(request)),
     recentRuns,
-    projects: projects.map((p) => ({ repo: p.repo, label: p.label ?? p.repo })),
-    repo,
+    projects: projects.map((p) => ({ repo: p.url ?? p.repo, label: `${p.label ?? p.repo}${p.url ? " · "+new URL(p.url).host : ""}` })),
+    repo:selected?.url ?? repo,
     checks: await readiness(
       runtime,
-      projects.find((p) => p.repo === repo) ?? null,
+      selected,
     ),
     checkedAt: new Date().toISOString(),
     canEdit: await may("policies", await currentUser(request)),
-    error: new URL(request.url).searchParams.get("error"),
+    error: identityError ?? new URL(request.url).searchParams.get("error"),
   };
 }
 export async function action({
@@ -106,7 +108,7 @@ export async function action({
           ? { ...project.verification, tests: tests || undefined }
           : undefined,
       });
-      return redirect(`/setup?repo=${encodeURIComponent(project.repo)}`);
+      return redirect(`/setup?repo=${encodeURIComponent(project.url ?? project.repo)}`);
     }
     const url = new URL(repo);
     if (
@@ -117,9 +119,20 @@ export async function action({
       return redirect(
         "/setup?error=Use+an+HTTP+clone+URL+without+embedded+credentials",
       );
-    const existing = await runtime.projects.forRepo(repo);
+    let existing:Project|null=null;
+    try {existing=await runtime.projects.forRepo(repo);} catch(error) {
+      if(!(error instanceof ProjectIdentityError))throw error;
+      // A submitted clone URL is an explicit connection. Preserve the old
+      // record's policies rather than applying new-project defaults to it.
+      const path=url.pathname.replace(/\/+$/, '').replace(/\.git$/i, '').split('/').filter(Boolean);
+      const slug=path.slice(-2).join('/').toLowerCase();
+      const candidates=(await runtime.projects.list()).filter(p=>p.repo===slug);
+      if(candidates.length!==1||candidates[0]!.url)throw error;
+      existing={...candidates[0]!,url:repo};
+      await runtime.projects.set(existing);
+    }
     if (existing)
-      return redirect(`/setup?repo=${encodeURIComponent(existing.repo)}`);
+      return redirect(`/setup?repo=${encodeURIComponent(existing.url ?? existing.repo)}`);
     const label = String(f.get("label") ?? "").trim(),
       image = String(f.get("image") ?? "").trim(),
       tests = String(f.get("tests") ?? "").trim();
@@ -138,7 +151,7 @@ export async function action({
       authority: "send",
     });
     const saved = await runtime.projects.forRepo(repo);
-    return redirect(`/setup?repo=${encodeURIComponent(saved?.repo ?? repo)}`);
+    return redirect(`/setup?repo=${encodeURIComponent(saved?.url ?? saved?.repo ?? repo)}`);
   } catch (e) {
     return redirect(
       "/setup?error=" +
@@ -237,7 +250,7 @@ export default function Setup({ data }: { data: Data }) {
             with recorded output.
           </p>
           <form method="post" class="project-form">
-            <input type="hidden" name="repo" value={data.selected.repo} />
+            <input type="hidden" name="repo" value={data.selected.url ?? data.selected.repo} />
             <label class="field form-section">
               Preparation command
               <textarea
@@ -274,7 +287,7 @@ export default function Setup({ data }: { data: Data }) {
           </form>
           {data.canLaunch && (
             <form method="post">
-              <input type="hidden" name="repo" value={data.selected.repo} />
+              <input type="hidden" name="repo" value={data.selected.url ?? data.selected.repo} />
               <button name="intent" value="verify">
                 Verify environment with a real run
               </button>

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { FileProjectStore, ProjectEvidenceStore, normalizeProject } from "./projects.js";
-import type { ProjectStore } from "./projects.js";
+import type { Project, ProjectStore } from "./projects.js";
 import { FileEvidenceStore } from "./evidence.js";
 import { assertRepoAllowed, effectiveAllowlist, RepoNotAllowedError } from "./repo-policy.js";
 import { enqueueRun, proposeExternal } from "./runtime.js";
@@ -69,7 +69,7 @@ test("evidence is a view of projects: reads through to legacy rows, writes move 
   assert.equal(kept?.testCommand, "go test -race ./...");
 
   const listed = (await view.list()).map((e) => `${e.repo}=${e.testCommand}`);
-  assert.deepEqual(listed, ["tyler/new=pnpm test", "tyler/old=go test -race ./..."]);
+  assert.deepEqual(listed, ["https://git.example.com/tyler/old=go test -race ./...", "tyler/new=pnpm test"]);
 
   await view.remove("tyler/old");
   assert.equal(await view.forRepo("tyler/old"), null);
@@ -124,12 +124,12 @@ test("proposeExternal accepts a webhook repo that only a project allows", async 
 
 test("a record written before three tiers reads back as allowlist, and the alias is accepted on the way in", async () => {
   const dir = await tempDir();
+  await writeFile(join(dir, "projects.json"), JSON.stringify({ "tyler/ship-go": { url: GO_URL, sandboxNetwork: "egress", autoMerge: false, autoDeploy: false } }));
   const store = new FileProjectStore(dir);
   // The legacy spelling on the way IN.
   await store.set({ repo: TS_URL, url: TS_URL, sandboxNetwork: "egress" as never, autoMerge: false, autoDeploy: false });
   assert.equal((await store.forRepo(TS_URL))!.sandboxNetwork, "allowlist");
-  // ...and a legacy row already on disk, which no save has rewritten.
-  await writeFile(join(dir, "projects.json"), JSON.stringify({ "tyler/ship-go": { url: GO_URL, sandboxNetwork: "egress", autoMerge: false, autoDeploy: false } }));
+  // The legacy file was snapshotted without changing its original bytes.
   assert.equal((await store.forRepo(GO_URL))!.sandboxNetwork, "allowlist", "read through, not migrated");
   assert.equal((await store.list())[0]!.sandboxNetwork, "allowlist");
 
@@ -458,29 +458,22 @@ test("C4: enqueue materialises the declaration and the ladder-capped authority; 
   }
 });
 
-test("project identity: another forge cannot read, overwrite or remove a registered project's settings", async () => {
+test("project identity: same-named repositories retain separate policies and require qualified references", async () => {
   const store = new FileProjectStore(await tempDir());
-  const original = { repo: 'team/app', url: 'https://github.com/team/app', autoMerge: false, autoDeploy: false, dailyBudgetUSD: 1 };
-  await store.set(original);
-  for (const ref of ['https://forge.example/team/app', 'http://github.com/team/app', 'https://github.com:444/team/app']) {
-    await assert.rejects(store.forRepo(ref), /identity conflicts/);
-    await assert.rejects(store.remove(ref), /identity conflicts/);
-    await assert.rejects(store.set({ ...original, url: ref }), /identity conflicts/);
-  }
-  await assert.rejects(store.set({ ...original, url: undefined }), /identity conflicts/);
-  assert.deepEqual(await store.forRepo(original.url + '.git/'), original);
-  assert.deepEqual(await store.forRepo('team/app'), original);
-});
-
-test("project identity: concurrent same-slug registration never replaces the winning origin", async () => {
-  const store = new FileProjectStore(await tempDir());
-  const outcomes = await Promise.allSettled(['https://github.com/team/app', 'https://forge.example/team/app'].map(url => store.set({ repo: 'team/app', url, autoMerge: false, autoDeploy: false })));
-  assert.equal(outcomes.filter(x => x.status === 'fulfilled').length, 1);
-  const [saved] = await store.list();
-  assert.ok(saved?.url);
-  assert.deepEqual(await store.forRepo(saved.url), saved);
-  const other = saved.url.includes('github.com') ? 'https://forge.example/team/app' : 'https://github.com/team/app';
-  await assert.rejects(store.forRepo(other), /identity conflicts/);
+  const a={repo:'team/app',url:'https://github.com/team/app',autoMerge:false,autoDeploy:false,dailyBudgetUSD:1};
+  const b={...a,url:'https://forge.example/team/app',dailyBudgetUSD:7};
+  await store.set(a);
+  assert.equal(await store.forRepo(b.url),null);
+  await store.remove(b.url);
+  assert.deepEqual(await store.forRepo('team/app'),a);
+  await Promise.all([store.set(a),store.set(b)]);
+  assert.deepEqual(await store.forRepo(a.url+'.git/'),a);
+  assert.deepEqual(await store.forRepo(b.url),b);
+  await assert.rejects(store.forRepo('team/app'),/identity conflicts/);
+  await assert.rejects(store.remove('team/app'),/identity conflicts/);
+  await assert.rejects(store.set({...a,url:undefined}),/identity conflicts/);
+  await store.remove(b.url);
+  assert.deepEqual(await store.forRepo(a.url),a);
 });
 
 test("project identity: a URL-less legacy record requires an explicit clone URL before URL-based execution", async () => {
@@ -520,4 +513,29 @@ test("project configuration refuses credentials and ambiguous URL suffixes witho
   for (const url of ["https://synthetic:DO_NOT_ECHO@forge.example/team/repo", "https://forge.example/team/repo?token=DO_NOT_ECHO", "https://forge.example/team/repo#DO_NOT_ECHO", "ssh://git@forge.example/team/repo"]) {
     assert.throws(() => normalizeProject({repo:"team/repo",url,autoMerge:false,autoDeploy:false}),error => error instanceof Error && /without embedded credentials/.test(error.message) && !error.message.includes("DO_NOT_ECHO"));
   }
+});
+
+test('canonical project migration retains the legacy file and does not resurrect removed entries',async()=>{
+  const {readFile}=await import('node:fs/promises');
+  const dir=await tempDir(),path=join(dir,'projects.json');
+  const original=JSON.stringify({'team/app':{url:'https://github.com/team/app',autoMerge:false,autoDeploy:false,requirePlanReview:true}});
+  await writeFile(path,original);
+  const first=new FileProjectStore(dir);
+  assert.equal((await first.forRepo('https://github.com/team/app'))?.requirePlanReview,true);
+  await first.remove('https://github.com/team/app');
+  const second=new FileProjectStore(dir);
+  assert.equal(await second.forRepo('https://github.com/team/app'),null);
+  assert.equal(await readFile(path,'utf8'),original);
+});
+
+
+test('migration preserves malformed unbound legacy records for inspection and removal',async()=>{
+  const dir=await tempDir();
+  await writeFile(join(dir,'projects.json'),JSON.stringify({'--store':{autoMerge:false,autoDeploy:false,unknownLegacyField:'retained'}}));
+  const store=new FileProjectStore(dir);
+  assert.equal((await store.forRepo('--store'))?.repo,'--store');
+  assert.equal(((await store.list())[0] as Project & {unknownLegacyField:string}).unknownLegacyField,'retained');
+  await assert.rejects(store.set({repo:'--new-invalid',autoMerge:false,autoDeploy:false}),/owner and name/);
+  await store.remove('--store');
+  assert.deepEqual(await new FileProjectStore(dir).list(),[]);
 });

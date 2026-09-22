@@ -207,7 +207,7 @@ function captureRuntime(spend?: SpendStore): { runtime: ShipRuntime; inputs: Arr
     kind: "file",
     ...(spend !== undefined ? { spend } : {}),
     evidence: { forRepo: async () => ({ repo: "owner/repo", testCommand: "pnpm test", observeService: "svc" }) },
-    projects: { forRepo: async () => null },
+    projects: { list: async () => [], forRepo: async () => null },
     policies: { list: async () => [] },
     governance: { get: async () => ({ authority: {}, windows: {}, reviewers: [] }) },
     store: {

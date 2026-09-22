@@ -1,3 +1,6 @@
+import { ScopedRepoMemory } from "./scoped-repo-memory.js";
+import { canonicalRepositoryURL, repoSlug } from "./repository-reference.js";
+import { ScopedRepoStatsStore } from "./scoped-repo-stats.js";
 import { finishReviewReplacement } from "./revision-launch.js";
 import { projectReadinessKey } from "./project-readiness.js";
 import { taskRootRunId } from "./task-session.js";
@@ -299,6 +302,7 @@ export interface ShipRuntime {
     input?: {
       task: string;
       repo?: string;
+      repositoryScopeVersion?: 2;
       trust?: RepoTrust;
       pr?: number;
       plan?: boolean;
@@ -447,13 +451,13 @@ export function fileRuntime(): ShipRuntime {
     governance: new FileGovernanceStore(),
     fleet: new FileFleetStore(),
     placement: new FilePlacementStore(),
-    memory: new FileRepoMemory(),
+    memory: new ScopedRepoMemory(new FileRepoMemory(),store),
     steer: new FileSteerStore(),
     live: new FileLiveStore(),
     users: new FileUserStore(),
     deliveries: new FileDeliveryLog(),
     outbox: new FileOutbox(),
-    repoStats: new FileRepoStatsStore(),
+    repoStats: new ScopedRepoStatsStore(new FileRepoStatsStore(),store),
     claimDecision: (runId, eventName, owner) => meta.claimDecision(runId, eventName, owner),
     releaseDecision: (runId, eventName) => meta.releaseDecision(runId, eventName),
     execute: (workflow, runId, input) =>
@@ -567,13 +571,13 @@ export async function nucleusRuntime(
     governance: new NucleusGovernanceStore(db),
     fleet: new NucleusFleetStore(db),
     placement: new NucleusPlacementStore(db),
-    memory: new NucleusRepoMemory(db),
+    memory: new ScopedRepoMemory(new NucleusRepoMemory(db),store),
     steer: new NucleusSteerStore(db),
     live: new NucleusLiveStore(db),
     users: new NucleusUserStore(db),
     deliveries: new NucleusDeliveryLog(db),
     outbox: new NucleusOutbox(db),
-    repoStats: new NucleusRepoStatsStore(db),
+    repoStats: new ScopedRepoStatsStore(new NucleusRepoStatsStore(db),store),
     /**
      * One conditional UPDATE decides the winner: the filter includes the
      * eventName the caller believes is parked, so a stale tab (or a second
@@ -1105,6 +1109,10 @@ export async function enqueueRun(
   const preview = scan ? undefined : (options.preview ?? (envFlag("SHIP_PREVIEW") || project?.verification?.preview !== undefined ? true : undefined));
   // Read the affected service's telemetry around the change. Same opt-in shape.
   const telemetry = scan ? undefined : (options.telemetry ?? (evidence?.observeService !== undefined || envFlag("SHIP_TELEMETRY") ? true : undefined));
+  const globalObserveRepo=process.env.OBSERVE_REPO?.trim();
+  if(telemetry===true&&evidence?.observeService===undefined&&options.repo&&globalObserveRepo&&!canonicalRepositoryURL(globalObserveRepo)&&repoSlug(globalObserveRepo)===repoSlug(options.repo)) {
+    throw new Error("The Observe repository mapping needs a full credential-free clone URL. Set OBSERVE_REPO or configure Observe on this project before starting work.");
+  }
   // Run the project's suite after the agent stops. Same opt-in shape.
   const tests = scan ? undefined : (options.tests ?? (evidence?.testCommand !== undefined || envFlag("SHIP_TESTS") ? true : undefined));
   // On by default wherever the suite itself is on, with an env off-switch —
@@ -1255,7 +1263,7 @@ export async function enqueueRun(
   // its presence must be a function of the recorded input, and the rule is
   // editable, so a replay must request the reviewers the log was written
   // under. Absent on runs enqueued before the rule existed.
-  const reviewers = options.repo !== undefined ? reviewersFor((await runtime.governance.get()).reviewers, options.repo) : null;
+  const reviewers = options.repo !== undefined ? reviewersFor((await runtime.governance.get()).reviewers, options.repo, await runtime.projects.list()) : null;
   // Warm cache eligibility: a repo run with a cacheable origin, never a PR
   // run (its checkout resolves a head branch that may live in a fork, so the
   // volume would not be the repository's steady state).
@@ -1280,7 +1288,7 @@ export async function enqueueRun(
         ...(options.userMessage !== undefined ? { userMessage: options.userMessage } : {}),
         ...(options.parentRunId !== undefined ? { parentRunId: options.parentRunId } : {}),
         ...(options.parentRunId !== undefined && options.pr !== undefined ? { requireOpenPr: true } : {}),
-        ...(options.repo !== undefined ? { repo: options.repo } : {}),
+        ...(options.repo !== undefined ? { repo: options.repo, repositoryScopeVersion: 2 as const } : {}),
         // Provenance, recorded whenever the caller stated it — not only on
         // repo runs. A chat message or an issue comment with no repository
         // still came from outside, and two rules read this field: the
@@ -1331,7 +1339,7 @@ export async function enqueueRun(
         ...(testTarget !== undefined ? { testCommand: testTarget.command } : {}),
         ...(testTarget?.timeoutMs !== undefined ? { testTimeoutMs: testTarget.timeoutMs } : {}),
         ...(evidence?.observeService !== undefined ? { observeService: evidence.observeService } : {}),
-        ...(evidence?.observeService !== undefined ? { observeRepo: evidence.repo } : {}),
+        ...(evidence?.observeService !== undefined ? { observeRepo: project?.url ?? options.repo ?? evidence.repo } : {}),
         ...(reviewers !== null ? { reviewers: { users: reviewers.users, teams: reviewers.teams } } : {}),
         ...(project?.preparation !== undefined ? { preparation: project.preparation } : {}),
         ...(project?.sandboxImage !== undefined ? { sandboxImage: project.sandboxImage } : {}),

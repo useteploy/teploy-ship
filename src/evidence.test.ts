@@ -24,7 +24,7 @@ function captureRuntime(evidence: EvidenceStore): { runtime: ShipRuntime; inputs
   const runtime = {
     kind: "file",
     evidence,
-    projects: { forRepo: async () => null },
+    projects: { list: async () => [], forRepo: async () => null },
     governance: { get: async () => ({ authority: {}, windows: {}, reviewers: [] }) },
     store: {
       append: async (_runId: string, event: { type: string; data?: { input?: Record<string, unknown> } }) => {
@@ -105,7 +105,8 @@ test("enqueueRun materialises per-repo evidence into the recorded input, and the
   assert.equal(go.testCommand, "go test ./...");
   assert.equal(go.telemetry, true, "a configured observeService asks for telemetry");
   assert.equal(go.observeService, "go-svc");
-  assert.equal(go.observeRepo, "tyler/go-repo", "the evidence key names the repo the service is built from");
+  assert.equal(go.repositoryScopeVersion, 2, "new runs record the scope version for replay");
+  assert.equal(go.observeRepo, "https://git.example.com/tyler/go-repo", "the evidence key names the repo the service is built from");
 
   const ts = inputs[1]!;
   assert.equal(ts.testCommand, "pnpm test", "the second repo carries ITS command, not the worker's");

@@ -477,7 +477,7 @@ function captureRuntime(): { runtime: ShipRuntime; events: WorkflowEvent[] } {
   const runtime = {
     kind: "file",
     evidence: { forRepo: async () => null },
-    projects: { forRepo: async () => null },
+    projects: { list: async () => [], forRepo: async () => null },
     governance: { get: async () => ({ authority: {}, windows: {}, reviewers: [] }) },
     store: { append: async (_runId: string, event: WorkflowEvent) => void events.push(event) },
     saveMeta: async () => {},

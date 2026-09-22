@@ -1,3 +1,5 @@
+import { canonicalRepositoryURL, repoSlug } from "./repository-reference.js";
+export { repoSlug } from "./repository-reference.js";
 import { costUSD } from "./pricing.js";
 import type { RunUsage } from "./durable.js";
 
@@ -258,12 +260,6 @@ export type TelemetryVerdict =
  * ABOUT the repo a run touched (telemetryAppliesTo), and keying the per-repo
  * evidence store. They must never disagree about what "same repo" means.
  */
-export function repoSlug(s: string): string | null {
-  const cleaned = s.trim().toLowerCase().replace(/\/+$/, "").replace(/\.git$/, "");
-  const parts = cleaned.split(/[/:]/).filter((x) => x !== "");
-  if (parts.length < 2) return null;
-  return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
-}
 
 /**
  * Is this run's repo the one the configured service is built from?
@@ -273,7 +269,12 @@ export function repoSlug(s: string): string | null {
  */
 export function telemetryAppliesTo(target: TelemetryTarget, runRepo: string | undefined): boolean {
   if (runRepo === undefined || runRepo.trim() === "") return false;
+  const identity=canonicalRepositoryURL(target.repo);
+  if(identity)return canonicalRepositoryURL(runRepo)===identity;
   const a = repoSlug(target.repo);
+  // Legacy parked inputs retain their old explicit bare-slug mapping. New
+  // enqueue refuses an ambiguous global mapping before accepting work.
+  if(a!==target.repo.trim().toLowerCase())return false;
   const b = repoSlug(runRepo);
   return a !== null && b !== null && a === b;
 }

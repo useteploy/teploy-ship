@@ -1,3 +1,4 @@
+import { canonicalRepositoryURL, ProjectIdentityError } from "./project-identity.js";
 import { join } from "node:path";
 
 import type { NucleusPgwire } from "./nucleus-pgwire.js";
@@ -233,7 +234,7 @@ export function parseDays(text: string): number[] {
 // ── Reviewers ─────────────────────────────────────────────────────────────
 
 export function normalizeReviewerRule(raw: { repo: string; users?: unknown; teams?: unknown }): ReviewerRule {
-  const key = repoSlug(raw.repo) ?? raw.repo.trim().toLowerCase();
+  const key = canonicalRepositoryURL(raw.repo) ?? repoSlug(raw.repo) ?? raw.repo.trim().toLowerCase();
   if (key === "") throw new Error("a repo is required");
   const list = (v: unknown): string[] =>
     Array.isArray(v) ? [...new Set(v.filter((x): x is string => typeof x === "string").map((x) => x.trim()).filter((x) => x !== ""))] : [];
@@ -241,10 +242,17 @@ export function normalizeReviewerRule(raw: { repo: string; users?: unknown; team
 }
 
 /** The rule for a repo URL or slug, or null when none (or the rule is empty). */
-export function reviewersFor(reviewers: ReviewerRule[], repo: string): ReviewerRule | null {
+export function reviewersFor(reviewers: ReviewerRule[], repo: string, projects?: Array<{repo:string;url?:string}>): ReviewerRule | null {
   const key = repoSlug(repo);
   if (key === null) return null;
-  const rule = reviewers.find((r) => r.repo === key);
+  const identity=canonicalRepositoryURL(repo);
+  const qualified=identity ? reviewers.find(r=>canonicalRepositoryURL(r.repo)===identity) : undefined;
+  const legacy=reviewers.find(r=>r.repo===key);
+  if(!qualified&&legacy&&projects){
+    const origins=new Set(projects.filter(p=>p.repo===key&&p.url).map(p=>canonicalRepositoryURL(p.url!)));
+    if(origins.size>1||(identity&&origins.size===1&&!origins.has(identity)))throw new ProjectIdentityError(key);
+  }
+  const rule = qualified ?? legacy;
   if (rule === undefined || (rule.users.length === 0 && rule.teams.length === 0)) return null;
   return rule;
 }

@@ -8,7 +8,7 @@ test("non-change journeys force non-publishing scan inputs even when caller asks
   const inputs: any[] = [];
   const runtime = {
     kind: "file",
-    projects: { forRepo: async () => null },
+    projects: { list: async () => [], forRepo: async () => null },
     governance: { get: async () => ({ authority: {}, windows: {}, reviewers: [] }) },
     store: { append: async (_: string, e: any) => { if (e.type === "run-started") inputs.push(e.data.input); } },
     saveMeta: async () => {},
@@ -40,7 +40,7 @@ test("project plan approval cannot be bypassed by source, small wording or per-r
   const runtime = {
     kind: "file",
     evidence: { forRepo: async () => null },
-    projects: { forRepo: async () => ({ repo: "team/app", requirePlanReview: required, harness: "native", autoMerge: false, autoDeploy: false }) },
+    projects: { list: async () => [], forRepo: async () => ({ repo: "team/app", requirePlanReview: required, harness: "native", autoMerge: false, autoDeploy: false }) },
     governance: { get: async () => ({ authority: {}, windows: {}, reviewers: [] }) },
     store: { append: async (_: string, e: any) => { if (e.type === "run-started") inputs.push(e.data.input); } },
     saveMeta: async () => {},

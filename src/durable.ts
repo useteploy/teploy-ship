@@ -1,3 +1,5 @@
+import { repoKeyOf } from "./repository-scope.js";
+export { repoKeyOf } from "./repository-scope.js";
 import { assertRestoredRepository } from "./workspace-integrity.js";
 import type { ArtifactStore } from "./artifacts.js";
 import { prepareEnvironment, type EnvironmentPreparation } from "./environment.js";
@@ -128,6 +130,8 @@ export interface DurableAgentInput {
    * diff and opens a PR as recorded steps.
    */
   repo?: string;
+  /** v2 records the full origin for memory/index scope; absent preserves parked runs. */
+  repositoryScopeVersion?: 2;
   /** Review follow-up: work PR #pr's existing head branch and reply there. */
   pr?: number;
   /**
@@ -1021,7 +1025,7 @@ export function durableAgent(
       if (input.environmentCheck === true && checkout !== null) {
         await ctx.step("environment-check", () => { const target = testTargetFromInput(input) ?? config.tests; return target ? runTests(executor, target) : { kind: "disabled" as const, reason: "Configure a test command in Project setup to verify the environment" }; });
       }
-      const repoKey = input.repo !== undefined ? repoKeyOf(input.repo) : null;
+      const repoKey = input.repo !== undefined ? repoKeyOf(input.repo, input.repositoryScopeVersion) : null;
       /**
        * The code-index scope for this run: the repo key on a repo run, the
        * caller's `workspaceKey` on a keyed workspace run, null when there is
@@ -2257,11 +2261,6 @@ function allowUnsandboxedIntake(env: NodeJS.ProcessEnv = process.env): boolean {
   return raw === "1" || raw === "true" || raw === "yes";
 }
 
-export function repoKeyOf(repoUrl: string): string {
-  const ref = parseRepoUrl(repoUrl);
-  const origin = ref.base.replace(/^https?:\/\//, "").replace(/\/+$/, "");
-  return `${origin}/${ref.owner}/${ref.repo}`;
-}
 
 /**
  * Publish a repo run's work: commit, push, open or update the PR, remember it.
@@ -2506,7 +2505,7 @@ async function publishIfRepoRun(
           // The SAME key loadRepoContext reads with. These had drifted apart:
           // context was read under the origin-scoped key and notes were written
           // under a bare owner/repo, so a run never saw its own history back.
-          repo: repoKeyOf(repoUrl),
+          repo: repoKeyOf(repoUrl, input.repositoryScopeVersion),
           note: runNote({ task: input.task, summary, ...(pr !== undefined ? { pr } : {}) }),
           runId: ctx.runId,
         })

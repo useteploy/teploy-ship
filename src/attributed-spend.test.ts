@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { FileAttributedSpendStore, attributionsFrom } from "./attributed-spend.js";
-import { repoKeyOf } from "./durable.js";
+import { canonicalRepositoryURL } from "./project-identity.js";
 
 const T0 = "2026-08-24T12:00:00.000Z";
 
@@ -49,10 +49,10 @@ function runStarted(repo?: string): { type: string; data: unknown } {
   return { type: "run-started", data: { input: { task: "t", ...(repo !== undefined ? { repo } : {}) } } };
 }
 
-test("attributionsFrom: https URLs (with and without .git) land on the repoKeyOf key", () => {
+test("attributionsFrom: https URLs (with and without .git) retain their full forge origin", () => {
   const https = attributionsFrom(null, [runStarted("https://git.example.com/tyler/teploy-ship.git")]);
   const bare = attributionsFrom(null, [runStarted("https://git.example.com/tyler/teploy-ship")]);
-  assert.equal(https.repo, repoKeyOf("https://git.example.com/tyler/teploy-ship.git"));
+  assert.equal(https.repo, canonicalRepositoryURL("https://git.example.com/tyler/teploy-ship.git"));
   assert.equal(bare.repo, https.repo, "clone-URL spelling must not split one repo into two buckets");
   assert.equal(https.actor, undefined, "null meta omits the actor field");
 });
@@ -80,7 +80,7 @@ test("attributionsFrom: a missing or empty actor is omitted, never recorded as a
   assert.equal(empty.actor, undefined);
   const absent = attributionsFrom({}, [runStarted("https://git.example.com/tyler/a")]);
   assert.equal(absent.actor, undefined);
-  assert.equal(absent.repo, repoKeyOf("https://git.example.com/tyler/a"), "the repo dimension still lands");
+  assert.equal(absent.repo, canonicalRepositoryURL("https://git.example.com/tyler/a"), "the repo dimension still lands");
 });
 
 test("attributionsFrom: no run-started event at all yields neither field", () => {

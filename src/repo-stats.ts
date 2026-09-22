@@ -1,3 +1,4 @@
+import { canonicalRepositoryURL } from "./project-identity.js";
 import { join } from "node:path";
 
 import type { NucleusPgwire } from "./nucleus-pgwire.js";
@@ -49,11 +50,11 @@ export interface RepoStatsStore {
 }
 
 export function repoStatKey(entry: Pick<RepoStatEntry, "repo" | "kind" | "runId">): string {
-  return `${entry.repo}:${entry.kind}:${entry.runId}`;
+  return `${repoSlug(entry.repo) ?? entry.repo}:${entry.kind}:${entry.runId}`;
 }
 
 function normalize(entry: RepoStatEntry): RepoStatEntry {
-  const repo = repoSlug(entry.repo) ?? entry.repo.trim().toLowerCase();
+  const repo = canonicalRepositoryURL(entry.repo) ?? repoSlug(entry.repo) ?? entry.repo.trim().toLowerCase();
   return {
     repo,
     kind: entry.kind,
@@ -67,7 +68,7 @@ function normalize(entry: RepoStatEntry): RepoStatEntry {
 
 function matchesRepo(entry: RepoStatEntry, repo: string | undefined): boolean {
   if (repo === undefined) return true;
-  const key = repoSlug(repo) ?? repo.trim().toLowerCase();
+  const key = canonicalRepositoryURL(repo) ?? repoSlug(repo) ?? repo.trim().toLowerCase();
   return entry.repo === key;
 }
 
@@ -169,7 +170,7 @@ export class FileRepoStatsStore implements RepoStatsStore {
       repo === undefined
         ? await this.#db.query("SELECT repo, kind, run_id, pr, pr_number, sha, recorded_at FROM ship_repo_stats")
         : await this.#db.query("SELECT repo, kind, run_id, pr, pr_number, sha, recorded_at FROM ship_repo_stats WHERE repo = $1", [
-            repoSlug(repo) ?? repo.trim().toLowerCase(),
+            canonicalRepositoryURL(repo) ?? repoSlug(repo) ?? repo.trim().toLowerCase(),
           ]);
     return rows
       .map((r): RepoStatEntry => {
@@ -222,12 +223,20 @@ export function costPerMerge(
   attributed: Array<{ kind: string; key: string; amountUSD: number }>,
 ): number | null {
   if (counts.merged === 0) return null;
-  const slug = repoSlug(repo) ?? repo;
-  let total = 0;
-  for (const e of attributed) {
-    if (e.kind === "repo" && repoSlug(e.key) === slug) total += e.amountUSD;
+  const rows=attributed.filter(e=>e.kind==='repo');
+  const identity=canonicalRepositoryURL(repo);
+  let matched:typeof rows;
+  if(identity){
+    // Earlier spend buckets omitted the URL scheme (and full file path).
+    // Keep those records readable, but do not invent an exact-origin ratio.
+    if(rows.some(e=>!canonicalRepositoryURL(e.key)&&repoSlug(e.key)===repoSlug(repo)))return null;
+    matched=rows.filter(e=>canonicalRepositoryURL(e.key)===identity);
+  }else{
+    matched=rows.filter(e=>repoSlug(e.key)===repoSlug(repo));
+    if(new Set(matched.map(e=>e.key)).size>1)return null;
   }
-  return total / counts.merged;
+  if(!matched.length)return null;
+  return matched.reduce((sum,e)=>sum+e.amountUSD,0)/counts.merged;
 }
 
 export interface AuthoritySuggestion {

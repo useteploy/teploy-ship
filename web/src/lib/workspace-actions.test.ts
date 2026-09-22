@@ -341,3 +341,20 @@ test("project settings cannot persist or echo a credential-bearing clone URL",as
   assert.equal(location.includes('DO_NOT_ECHO'),false);
   assert.equal(await runtime.projects.forRepo('binding/credentials'),null);
 });
+
+
+test('guided connection binds an unbound project without resetting policies and same-named forges stay separate',async()=>{
+  const runtime=await shipRuntime();
+  await runtime.projects.set({repo:'identity-setup/app',autoMerge:false,autoDeploy:false,requirePlanReview:true,neverAuto:true,testCommand:'make check'});
+  const first='https://first.setup.invalid/identity-setup/app',second='https://second.setup.invalid/identity-setup/app';
+  const connected=await setup.action({request:request('/setup',{url:first,tests:'ignored'})});
+  assert.equal(connected.headers.get('location'),`/setup?repo=${encodeURIComponent(first)}`);
+  assert.equal((await runtime.projects.forRepo(first))?.requirePlanReview,true);
+  assert.equal((await runtime.projects.forRepo(first))?.testCommand,'make check');
+  await setup.action({request:request('/setup',{url:second,tests:'pnpm test'})});
+  const page=await setup.loader({request:new Request(`http://localhost/setup?repo=${encodeURIComponent(second)}`)});
+  assert.equal(page.selected?.url,second);
+  assert.equal(page.selected?.testCommand,'pnpm test');
+  assert.equal((await runtime.projects.forRepo(first))?.testCommand,'make check');
+  await assert.rejects(runtime.projects.forRepo('identity-setup/app'),/identity conflicts/);
+});

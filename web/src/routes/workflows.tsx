@@ -31,8 +31,8 @@ export async function loader({ request }: { request: Request }): Promise<Data> {
   return {
     schedules: await workflowSchedules(runtime),
     projects: (await runtime.projects.list()).map((p) => ({
-      repo: p.repo,
-      label: p.label ?? p.repo,
+      repo: p.url ?? p.repo,
+      label: `${p.label ?? p.repo}${p.url ? " · " + new URL(p.url).host : ""}`,
     })),
     history: (await runtime.intake.list())
       .filter((t) => t.source === "workflow")

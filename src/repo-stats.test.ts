@@ -24,7 +24,7 @@ test("the file store records once per (repo, kind, run), across url and slug spe
   assert.equal(await stats.record({ repo: "tyler/site", kind: "sent", runId: "run-1", at: "t2" }), false);
   const rows = await stats.list(REPO);
   assert.equal(rows.length, 1);
-  assert.equal(rows[0]!.repo, "tyler/site");
+  assert.equal(rows[0]!.repo, "http://forge.test/tyler/site");
   assert.deepEqual(await stats.list("http://forge.test/other/x.git"), []);
 });
 

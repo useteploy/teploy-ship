@@ -29,8 +29,7 @@ import type { NucleusPgwire } from "./nucleus-pgwire.js";
 import type { IntakeStore, IntakePolicy, IntakeTask } from "./intake.js";
 import type { SourcePolicy } from "./policies.js";
 import type { Project, ProjectStore } from "./projects.js";
-import { projectForReference } from "./projects.js";
-import { repoSlug } from "./observe.js";
+import { resolveProject, projectReference } from "./projects.js";
 import {
   DEFAULT_MAX_INODE_USED_PCT,
   DEFAULT_MAX_LOAD_PER_CPU,
@@ -352,12 +351,8 @@ export async function sweepIntake(deps: IntakeSweepDeps): Promise<void> {
 
   // 2) Launch, if any source or project is configured "auto".
   const projects = new Map<string, Project>();
-  for (const p of (await deps.projects?.list()) ?? []) projects.set(p.repo, p);
-  const projectOf = (task: IntakeTask): Project | undefined => {
-    const slug = task.repo !== undefined ? repoSlug(task.repo) : null;
-    const project = slug === null ? undefined : projects.get(slug);
-    return project && task.repo ? projectForReference(project, task.repo) : project;
-  };
+  for (const p of (await deps.projects?.list()) ?? []) projects.set(projectReference(p), p);
+  const projectOf = (task: IntakeTask): Project | undefined => task.repo ? resolveProject([...projects.values()],task.repo) ?? undefined : undefined;
   const anyAuto = Object.values(deps.policies).some((p) => p === "auto") || [...projects.values()].some((p) => p.sourcePolicy === "auto");
   if (!anyAuto) return;
 

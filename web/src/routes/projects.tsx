@@ -1,3 +1,4 @@
+import { projectReference, ProjectIdentityError } from "../lib/ship.server.js";
 import type { Project } from "teploy-ship/runtime";
 import type { AuthoritySuggestion, ManagedDrift, RepoCounts } from "teploy-ship/runtime";
 import type { NetworkTier } from "teploy-ship/runtime";
@@ -63,6 +64,7 @@ interface ProjectsData {
   /** L8 D4: per-repo numbers + $ per merge, from the stats store. */
   counts: Record<string, RepoCounts>;
   costPerMerge: Record<string, number | null>;
+  historyNotice: string | null;
   /** L8 D4: what the numbers say next, per repo. Suggestion only. */
   suggestions: Record<string, AuthoritySuggestion>;
   /**
@@ -106,15 +108,20 @@ export async function loader({ request }: { request: Request }): Promise<Project
     runtime.repoStats.list(),
     runtime.attributedSpend.list(),
   ]);
-  const counts = summarizeRepoStats(statRows);
+  const scopedCounts = summarizeRepoStats(statRows);
+  const counts=Object.fromEntries(projects.map(p=>[p.url??p.repo,scopedCounts[projectReference(p)]??{sent:0,merged:0,reverted:0,parked:0}]));
+  const unscoped=statRows.filter(row=>!row.repo.includes("://"));
+  const incomplete=(p:Project)=>unscoped.some(row=>row.repo===p.repo);
   const repo = url.searchParams.get("repo") ?? "";
-  const selected = repo !== "" ? (await runtime.projects.forRepo(repo)) : null;
+  let selected:Project|null=null, identityError:string|null=null;
+  try {selected=repo!==""?await runtime.projects.forRepo(repo):null;}
+  catch(error){if(!(error instanceof ProjectIdentityError))throw error;identityError=error.message;}
   return {
     view: "repos",
     projects,
     effective: Object.fromEntries(
       projects.map((p) => [
-        p.repo,
+        p.url ?? p.repo,
         p.authority !== undefined || p.verification !== undefined || p.neverAuto === true
           ? effectiveAuthority(p)
           : p.autoMerge === true
@@ -124,22 +131,22 @@ export async function loader({ request }: { request: Request }): Promise<Project
     ),
     counts,
     costPerMerge: Object.fromEntries(
-      projects.map((p) => [p.repo, costPerMerge(p.repo, counts[p.repo] ?? { sent: 0, merged: 0, reverted: 0, parked: 0 }, attributed)]),
+      projects.map((p) => [p.url ?? p.repo, incomplete(p)?null:costPerMerge(p.url ?? p.repo, counts[p.url ?? p.repo] ?? { sent: 0, merged: 0, reverted: 0, parked: 0 }, attributed)]),
     ),
     // The ratchet's suggestion (D4): what the measured merge/revert rates say
     // the NEXT authority should be. Suggestion only — the promote button is
     // the human click, and neverAuto + the ladder cap bound what it may ask.
     suggestions: Object.fromEntries(
       projects.map((p) => [
-        p.repo,
-        suggestAuthority(counts[p.repo] ?? { sent: 0, merged: 0, reverted: 0, parked: 0 }, p.authority ?? "propose", {
+        p.url ?? p.repo,
+        incomplete(p)?{authority:p.authority??"propose",move:"hold" as const,why:"Historical outcomes lack a recorded repository origin"}:suggestAuthority(counts[p.url ?? p.repo] ?? { sent: 0, merged: 0, reverted: 0, parked: 0 }, p.authority ?? "propose", {
           neverAuto: p.neverAuto === true,
           cap: authorityCap(p.verification),
         }),
       ]),
     ),
     // C2 drift per repo (see the field's comment): server-side, once.
-    drift: Object.fromEntries(projects.map((p) => [p.repo, managedDrift(p)])),
+    drift: Object.fromEntries(projects.map((p) => [p.url ?? p.repo, managedDrift(p)])),
     selected,
     hookBase: (process.env.SHIP_PUBLIC_URL ?? "").replace(/\/+$/, ""),
     envAllowlist: process.env.SHIP_REPO_ALLOWLIST ?? "",
@@ -150,7 +157,8 @@ export async function loader({ request }: { request: Request }): Promise<Project
     canEdit,
     canAuto,
     denied: url.searchParams.get("denied"),
-    error: url.searchParams.get("error"),
+    error: identityError ?? url.searchParams.get("error"),
+    historyNotice: unscoped.length || attributed.some(e=>e.kind==="repo"&&!e.key.includes("://")) ? "Some older results or costs cannot be matched to a specific repository. Affected comparisons and promotion suggestions are unavailable; the original history remains in Activity and Spend." : null,
     store: runtime.kind,
   };
 }
@@ -181,7 +189,7 @@ export async function action({ request }: { request: Request }): Promise<Respons
   if (!(await may("policies", me))) return redirect("/projects?denied=policies");
 
   if (intent === "remove") {
-    await runtime.projects.remove(target);
+    try {await runtime.projects.remove(target);}catch(error){return redirect(`/projects?error=${encodeURIComponent(error instanceof Error?error.message:"Could not remove project")}`);}
     return redirect("/projects");
   }
 
@@ -195,7 +203,8 @@ export async function action({ request }: { request: Request }): Promise<Respons
     if (asked === undefined || !["propose", "send", "auto_trivial", "auto_normal"].includes(asked)) {
       return redirect(`/projects?error=${encodeURIComponent(`promote target must be an authority, got: ${asked ?? "nothing"}`)}`);
     }
-    const existingPromote = await runtime.projects.forRepo(target);
+    let existingPromote:Project|null;
+    try {existingPromote=await runtime.projects.forRepo(target);}catch(error){return redirect(`/projects?error=${encodeURIComponent(error instanceof Error?error.message:"Could not resolve project")}`);}
     if (existingPromote === null) return redirect("/projects?error=" + encodeURIComponent("no such project"));
     const cap = existingPromote.neverAuto === true ? "send" : authorityCap(existingPromote.verification);
     const order = ["propose", "send", "auto_trivial", "auto_normal"];
@@ -209,11 +218,12 @@ export async function action({ request }: { request: Request }): Promise<Respons
     } catch (e) {
       return redirect(`/projects?error=${encodeURIComponent(e instanceof Error ? e.message : String(e))}`);
     }
-    return redirect(`/projects?repo=${encodeURIComponent(existingPromote.repo)}`);
+    return redirect(`/projects?repo=${encodeURIComponent(existingPromote.url ?? existingPromote.repo)}`);
   }
 
   const policy = str("policy");
-  const existing = (await runtime.projects.forRepo(target)) ?? { repo: target, autoMerge: false, autoDeploy: false };
+  let existing:Project;
+  try {existing=(await runtime.projects.forRepo(target))??{repo:target,autoMerge:false,autoDeploy:false};}catch(error){return redirect(`/projects?error=${encodeURIComponent(error instanceof Error?error.message:"Could not resolve project")}`);}
   const canAuto = await may("auto", me);
   if (policy === "auto" && existing.sourcePolicy !== "auto" && !canAuto) {
     return redirect(`/projects?denied=auto`);
@@ -269,6 +279,7 @@ export async function action({ request }: { request: Request }): Promise<Respons
   const neverAuto = form.get("neverAuto") === "on";
   const next: Project = {
     ...existing,
+    repo:existing.url ?? existing.repo,
     url: str("url") ?? existing.url,
     label: str("label"),
     sandboxImage: str("image"),
@@ -314,7 +325,7 @@ export async function action({ request }: { request: Request }): Promise<Respons
     return redirect(`/projects?error=${encodeURIComponent(e instanceof Error ? e.message : String(e))}`);
   }
   const saved = await runtime.projects.forRepo(next.url ?? next.repo);
-  return redirect(saved !== null ? `/projects?repo=${encodeURIComponent(saved.repo)}` : "/projects");
+  return redirect(saved !== null ? `/projects?repo=${encodeURIComponent(saved.url ?? saved.repo)}` : "/projects");
 }
 
 function deniedText(denied: string): string {
@@ -381,7 +392,7 @@ function Field({ label, name, value, placeholder, type, list, width }: { label: 
 function ProjectForm({ p, data }: { p: Project | null; data: ProjectsData }) {
   return (
     <form method="post" class="project-form">
-      {p !== null && <input type="hidden" name="repo" value={p.repo} />}
+      {p !== null && <input type="hidden" name="repo" value={p.url ?? p.repo} />}
       <Field label="clone URL" name="url" value={p?.url} placeholder="https://forge.example/owner/repo" />
       <Field label="label" name="label" value={p?.label} placeholder="optional" />
       <details class="form-section" open={p !== null}><summary>Execution environment</summary><div class="form-grid">
@@ -511,6 +522,7 @@ export default function Projects({ data }: { data: ProjectsData | SourcesData | 
       {data.denied !== null && (
         <p class="card attn" style="margin:12px 0;color:var(--red)">Not applied — {deniedText(data.denied)}</p>
       )}
+      {data.view === "repos" && data.historyNotice && <p class="notice">{data.historyNotice}</p>}
       {data.error !== null && (
         <p class="card attn" style="margin:12px 0;color:var(--red)">Not saved — {data.error}</p>
       )}
@@ -556,8 +568,8 @@ export default function Projects({ data }: { data: ProjectsData | SourcesData | 
       {p !== null ? (
         <>
           <p class="meta"><a href="/projects">projects</a> / {p.repo}{p.label !== undefined ? ` · ${p.label}` : ""}</p>
-          {p.managedBy !== undefined && <ManagedPanel p={p} drift={(data as ProjectsData).drift[p.repo] ?? []} />}
-          <section class="card"><h2 class="section">{p.label ?? p.repo}</h2><p>Choose this project when requesting work. Its setup is applied automatically to new tasks.</p><p class="row-actions" style="display:flex;gap:16px">{p.url && <a class="button primary" href={`/?repo=${encodeURIComponent(p.url)}#new-task`}>Request work</a>}<a href={`/setup?repo=${encodeURIComponent(p.repo)}`}>Check project readiness</a></p>
+          {p.managedBy !== undefined && <ManagedPanel p={p} drift={(data as ProjectsData).drift[p.url ?? p.repo] ?? []} />}
+          <section class="card"><h2 class="section">{p.label ?? p.repo}</h2><p>Choose this project when requesting work. Its setup is applied automatically to new tasks.</p><p class="row-actions" style="display:flex;gap:16px">{p.url && <a class="button primary" href={`/?repo=${encodeURIComponent(p.url)}#new-task`}>Request work</a>}<a href={`/setup?repo=${encodeURIComponent(p.url ?? p.repo)}`}>Check project readiness</a></p>
           <div class="table-wrap"><table><thead><tr><th>Setting</th><th>Effective configuration</th><th>Source</th></tr></thead><tbody>
             <tr><td>Agent</td><td>{p.harness ?? (data.workerHarness || "native")}</td><td>{p.harness ? "Project override" : "Deployment default"}</td></tr>
             <tr><td>Environment</td><td>{p.sandboxImage ?? (data.workerImage || "Not configured")}</td><td>{p.sandboxImage ? "Project override" : "Deployment default"}</td></tr>
@@ -581,7 +593,7 @@ export default function Projects({ data }: { data: ProjectsData | SourcesData | 
             <p class="empty">No projects yet.</p>
           ) : (
             <>
-            <div class="project-cards">{data.projects.map(r => <article class="card" key={r.repo}><h2>{r.label ?? r.repo}</h2><p class="meta">{r.url ? "Accepts team requests. Verify setup before starting work." : "An administrator needs to connect this repository."}</p><p class="row-actions" style="display:flex;gap:16px">{r.url && <a class="button" href={`/?repo=${encodeURIComponent(r.url)}#new-task`}>Request work</a>}<a href={`/projects?repo=${encodeURIComponent(r.repo)}`}>Project details</a></p></article>)}</div>
+            <div class="project-cards">{data.projects.map(r => <article class="card" key={r.url ?? r.repo}><h2>{r.label ?? r.repo}</h2><p class="meta">{r.url ? "Accepts team requests. Verify setup before starting work." : "An administrator needs to connect this repository."}</p><p class="row-actions" style="display:flex;gap:16px">{r.url && <a class="button" href={`/?repo=${encodeURIComponent(r.url)}#new-task`}>Request work</a>}<a href={`/projects?repo=${encodeURIComponent(r.url ?? r.repo)}`}>Project details</a></p></article>)}</div>
             <details class="disclosure"><summary>Execution and automation overview</summary>
             <div class="table-wrap">
               <table class="runs">
@@ -590,15 +602,15 @@ export default function Projects({ data }: { data: ProjectsData | SourcesData | 
                 </thead>
                 <tbody>
                   {data.projects.map((r) => {
-                    const c = (data as ProjectsData).counts[r.repo];
-                    const cost = (data as ProjectsData).costPerMerge[r.repo];
-                    const suggestion = (data as ProjectsData).suggestions[r.repo];
+                    const c = (data as ProjectsData).counts[r.url ?? r.repo];
+                    const cost = (data as ProjectsData).costPerMerge[r.url ?? r.repo];
+                    const suggestion = (data as ProjectsData).suggestions[r.url ?? r.repo];
                     return (
-                    <tr key={r.repo}>
+                    <tr key={r.url ?? r.repo}>
                       <td>
-                        <a href={`/projects?repo=${encodeURIComponent(r.repo)}`}>{r.repo}</a>
+                        <a href={`/projects?repo=${encodeURIComponent(r.url ?? r.repo)}`}>{r.repo}</a>
                         {r.managedBy !== undefined && (
-                          <span class="meta"> · <b>managed by Akiroo</b>{((data as ProjectsData).drift[r.repo] ?? []).length > 0 ? " (drift)" : ""}</span>
+                          <span class="meta"> · <b>managed by Akiroo</b>{((data as ProjectsData).drift[r.url ?? r.repo] ?? []).length > 0 ? " (drift)" : ""}</span>
                         )}
                         {r.label !== undefined && <span class="meta"> · {r.label}</span>}
                         {r.url === undefined && <span class="meta"> · no clone URL — not allowlisted</span>}
@@ -613,7 +625,7 @@ export default function Projects({ data }: { data: ProjectsData | SourcesData | 
                       <td class="meta">{r.testCommand ?? r.verification?.tests ?? "detected"}</td>
                       <td class="meta">{r.observeService ?? "—"}</td>
                       <td class="meta">
-                        {(data as ProjectsData).effective[r.repo] ?? "send"}
+                        {(data as ProjectsData).effective[r.url ?? r.repo] ?? "send"}
                         {r.neverAuto === true ? " (never-auto)" : ""}
                       </td>
                       <td class="meta">
@@ -628,7 +640,7 @@ export default function Projects({ data }: { data: ProjectsData | SourcesData | 
                             {suggestion.move === "promote" ? (
                               <form method="post" style="display:inline">
                                 <input type="hidden" name="intent" value="promote" />
-                                <input type="hidden" name="repo" value={r.repo} />
+                                <input type="hidden" name="repo" value={r.url ?? r.repo} />
                                 <input type="hidden" name="to" value={suggestion.authority} />
                                 <button class="approve sm" type="submit" disabled={!(data as ProjectsData).canAuto} title={suggestion.why}>
                                   promote to {suggestion.authority}

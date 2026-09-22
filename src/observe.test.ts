@@ -315,3 +315,9 @@ test("P1-4: an improvement is never a regression, and says the numbers anyway", 
   assert.match(r.reasons.join(" "), /inside the thresholds/);
   assert.deepEqual(defaultRegressionThresholds, { errorRateDelta: 0.01, p95Ratio: 1.25, minP95DeltaMs: 100 });
 });
+
+test('qualified telemetry mappings never match another forge, scheme or port',()=>{
+  const target={url:'https://observe.example',token:'synthetic',service:'app',repo:'https://github.com/team/app'};
+  assert.equal(telemetryAppliesTo(target,'https://github.com/team/app.git'),true);
+  for(const other of ['https://forge.example/team/app','http://github.com/team/app','https://github.com:444/team/app','team/app'])assert.equal(telemetryAppliesTo(target,other),false);
+});

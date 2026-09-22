@@ -28,6 +28,37 @@ new code**. Everything below is about making that safe.
 - [ ] **Note the current version**, so rollback has a target:
       `docker ps --format '{{.Names}}'` on the host shows `ship-web-<sha>`.
 
+## Repository identity storage
+
+Projects now use the full clone URL (scheme, host, port and repository path) as
+identity. Same-named repositories on different hosts can have separate policies.
+Ambiguous short names are refused; use the full URL in links, API calls and CLI
+commands. Connect URL-less legacy projects explicitly before launching new work.
+
+The first project read imports `ship_projects` into `ship_projects_v2`, together
+with a transaction marker. File stores snapshot `projects.json` into
+`projects-v2.json` under a lock. The old source remains intact; v2 becomes
+authoritative and deleted projects are never re-imported. Malformed unbound
+legacy records remain inspectable/removable; new writes require valid names.
+
+Stop all old web, worker and direct CLI project writers before the first import.
+Take a consistent backup, restore it into an isolated engine, run
+`scripts/check-project-identity.mjs` with `SHIP_ISOLATED_CHECK=1`, then check
+restart persistence and parked-run preflight. Start matching new web/worker
+images together. Old writers cannot see v2 changes. After accepting new project
+edits, rollback requires reconciliation or a compatible build; restoring an
+older snapshot would lose those edits. Retain both tables/files.
+
+New runs record `repositoryScopeVersion: 2` for memory and index scope. Old
+recorded inputs retain their prior keys and workflow steps. Historical results
+and notes are attributed only when their original run proves the clone origin.
+Unattributed notes remain in Knowledge. Historical spend buckets have no run ID,
+so their missing origin components are not guessed; exact-origin cost-per-merge
+is unavailable when matching legacy spend remains. New spend uses full URLs.
+Use a full URL for global `OBSERVE_REPO`, or an explicit per-project service
+mapping; new runs refuse ambiguous global mappings. Existing parked inputs keep
+their recorded mapping.
+
 ## Intake primary-key storage
 
 New Nucleus intake requests use `ship_tasks_v2`, whose task IDs have an enforced

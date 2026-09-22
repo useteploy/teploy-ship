@@ -11,6 +11,7 @@ import {
   insideWindow,
   mayDo,
   normalizeGovernance,
+  normalizeReviewerRule,
   parseDays,
   reviewersFor,
   validateWindow,
@@ -180,15 +181,15 @@ test("worker sweep: an auto source outside its window parks as propose and claim
 
 // ── reviewers ─────────────────────────────────────────────────────────────
 
-test("reviewer rules are keyed by repo slug and an emptied rule is removed", async () => {
+test("reviewer rules retain forge identity and an emptied qualified rule is removed", async () => {
   const s = await store();
   await s.setReviewers({ repo: "https://git.example.com/Tyler/App.git", users: ["alice", " alice ", "bob"], teams: ["core"] });
   let g = await s.get();
-  assert.deepEqual(g.reviewers, [{ repo: "tyler/app", users: ["alice", "bob"], teams: ["core"] }]);
-  assert.deepEqual(reviewersFor(g.reviewers, "git@git.example.com:tyler/app"), g.reviewers[0]);
+  assert.deepEqual(g.reviewers, [{ repo: "https://git.example.com/tyler/app", users: ["alice", "bob"], teams: ["core"] }]);
+  assert.deepEqual(reviewersFor(g.reviewers, "https://git.example.com/tyler/app"), g.reviewers[0]);
   assert.equal(reviewersFor(g.reviewers, "tyler/other"), null);
 
-  await s.setReviewers({ repo: "tyler/app", users: [], teams: [] });
+  await s.setReviewers({ repo: "https://git.example.com/tyler/app", users: [], teams: [] });
   g = await s.get();
   assert.deepEqual(g.reviewers, []);
 });
@@ -200,7 +201,7 @@ test("enqueueRun materialises the repo's reviewers into the run input, and nothi
   const runtime = {
     kind: "file",
     evidence: { forRepo: async () => null },
-    projects: { forRepo: async () => null },
+    projects: { list: async () => [], forRepo: async () => null },
     governance: s,
     store: {
       append: async (_runId: string, event: { type: string; data?: { input?: Record<string, unknown> } }) => {
@@ -249,4 +250,22 @@ test("file store: corrupt governance throws rather than reading as defaults", as
   const { writeFile } = await import("node:fs/promises");
   await writeFile(join(dir, "governance.json"), "{ not json");
   await assert.rejects(new FileGovernanceStore(dir).get());
+});
+
+test('qualified reviewer rules isolate forges and ambiguous legacy rules fail closed',()=>{
+  const projects=[{repo:'team/app',url:'https://github.com/team/app'},{repo:'team/app',url:'https://forge.example/team/app'}];
+  const legacy={repo:'team/app',users:['legacy-reviewer'],teams:[]};
+  assert.throws(()=>reviewersFor([legacy],projects[0]!.url,projects),/identity conflicts/);
+  const qualified=normalizeReviewerRule({repo:projects[1]!.url,users:['forge-reviewer']});
+  assert.equal(qualified.repo,projects[1]!.url);
+  assert.deepEqual(reviewersFor([legacy,qualified],projects[1]!.url,projects)?.users,['forge-reviewer']);
+  assert.throws(()=>reviewersFor([legacy,qualified],projects[0]!.url,projects),/identity conflicts/);
+});
+
+
+test('legacy reviewer rules cannot follow a registered slug to an unrelated forge',()=>{
+  const rules=[{repo:'team/app',users:['owner'],teams:[]}];
+  const projects=[{repo:'team/app',url:'https://first.example/team/app'}];
+  assert.equal(reviewersFor(rules,projects[0]!.url,projects)?.users[0],'owner');
+  assert.throws(()=>reviewersFor(rules,'https://second.example/team/app',projects),/identity conflicts/);
 });

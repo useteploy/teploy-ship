@@ -2,7 +2,7 @@ import { join } from "node:path";
 
 import type { NucleusPgwire } from "./nucleus-pgwire.js";
 import { readJsonFile, updateJsonFile } from "./file-store.js";
-import { repoKeyOf } from "./durable.js";
+import { canonicalRepositoryURL } from "./project-identity.js";
 import { stateDir } from "./run-store.js";
 
 /**
@@ -24,7 +24,7 @@ export type SpendDimension = "repo" | "actor";
 export interface AttributedSpendEntry {
   kind: string;
   /**
-   * For kind "repo": the origin-scoped repo key (repoKeyOf) — the same key
+   * For kind "repo": the canonical clone URL — the same key
    * the code index and repo memory scope by, NOT the bare owner/name slug.
    * For kind "actor": the stable actor id (see src/actor.ts).
    */
@@ -201,19 +201,11 @@ export class NucleusAttributedSpendStore implements AttributedSpendStore {
  * so the mapping from "a run finished" to "what it should be charged to" is
  * testable without Nucleus or a worker.
  *
- * repo goes through repoKeyOf verbatim — the SAME origin-scoped key the code
- * index and repo memory scope by. Keying on the bare owner/name slug would
- * merge a private mirror's spend into the public repo's, the same namespace
- * collision repoKeyOf exists to prevent. A repo spelling repoKeyOf cannot
- * parse (it takes http/https/file URLs only; the scp-style ssh form throws)
- * omits the dimension rather than throwing: on the settle path a run with
- * cost > 0 has already executed turns, which requires repo-setup to have
- * parsed the URL, so this is belt-and-braces totality — an unattributable
- * run simply gets no repo row, never a rejected settle. actor is meta.actor,
- * the stable id (src/actor.ts): absent on runs enqueued before attribution
- * existed, and then the field is OMITTED rather than recorded as "unknown" —
- * an "unknown" bucket on the spend page would read as a person who doesn't
- * exist, which is the wrong kind of wrong.
+ * New repository buckets use a credential-free full clone URL, retaining
+ * scheme, host, port and path. Historical buckets are retained unchanged:
+ * they have no run identity from which to recover a missing scheme. Invalid
+ * URLs omit the dimension rather than rejecting settlement. Actor is the
+ * stable identity from meta; older unattributed runs omit that dimension.
  */
 export function attributionsFrom(
   meta: { actor?: string } | null,
@@ -224,9 +216,10 @@ export function attributionsFrom(
   const repo = (started?.data as { input?: { repo?: string } } | undefined)?.input?.repo;
   if (typeof repo === "string" && repo !== "") {
     try {
-      out.repo = repoKeyOf(repo);
+      const key=canonicalRepositoryURL(repo);
+      if(key)out.repo=key;
     } catch {
-      // repoKeyOf refuses what it cannot scope; refusing to attribute is the
+      // Refusing to attribute an invalid URL is the
       // honest downgrade, throwing through the settle path is not.
     }
   }
