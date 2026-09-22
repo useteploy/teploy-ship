@@ -141,3 +141,11 @@ test("read-only evidence identifies the checked-out revision without pretending 
   assert.equal(evidence({}, "not-a-revision").sha, undefined);
   assert.equal(evidence({ push: { kind: "pushed", sha: pushed } }, reviewed).sha, pushed);
 });
+
+test("workspace recovery distinguishes recorded validation from assumed retention",async()=>{
+  const {workspaceRecovery}=await import("./workspace.js");
+  const events=[{type:"run-started",at,data:{input:{restoreValidation:1,warm:true}}},{type:"step-completed",name:"merge-snapshot",at,data:{result:"image"}},{type:"step-completed",name:"merge-restore",at,data:{result:{handle:"new"}}}];
+  assert.deepEqual(workspaceRecovery(events),{snapshotAt:at,restoredAt:at,checked:true,warm:true});
+  assert.equal(workspaceRecovery(events.slice(1)).checked,false);
+  assert.equal(workspaceRecovery(events.slice(0,2)).restoredAt,undefined);
+});

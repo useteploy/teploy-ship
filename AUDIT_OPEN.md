@@ -204,3 +204,23 @@ Stable follow-up identities and durable review-parent replacement now cover lost
 responses and interrupted launch publication. See the F06 continuation and upgrade
 notes. Conflicting held intents, generic approval delivery and external outcome
 reconciliation remain open; do not infer full transactionality across the forge.
+
+## 2026-09-22 — recovery, preview identity and workspace inspection
+
+Fixed shared preview worktree/FETCH_HEAD races; new pushed-change previews fetch
+the exact commit and use revision-specific slots. Corrected the legacy regression
+handler that could invoke production rollback after only deploying a preview.
+It now removes the identified preview; historical receipts without that identity
+remain advisory. The standalone rollback helper requires an explicit version.
+
+Added governed accepted-launch recovery UI, bounded/cursor-based inspection and
+identity-preserving retries. Added live read-only tracked workspace changes,
+separate inspection receipts, correct restored-handle attachment and historical
+snapshot/restore evidence. Preview revision/image and recovery detail survive the
+verification projection. Existing event logs are not rewritten.
+
+Remaining: reconcile unknown external effects, resolve permanently conflicting
+accepted intents without overriding decisions, recover warm-volume bytes, enforce
+exclusive writable workspace leases, and bind production promotion to trusted
+target configuration, artifact digest, approval and retained rollback version.
+A successful preview is not evidence that those production guarantees exist.

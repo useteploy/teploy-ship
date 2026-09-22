@@ -30,6 +30,7 @@ declare module "@neutron-build/core" {
     | "/oidc/login"
     | "/policies"
     | "/projects"
+    | "/recovery"
     | "/reviews"
     | "/runs"
     | `/runs/${string}`

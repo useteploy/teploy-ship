@@ -1,8 +1,7 @@
 /**
  * Put a machine-authored fix on a URL a human can open.
  *
- * This is the half of Ship that closes the loop: Devin, Vorflux and OpenHands
- * all stop at the pull request. Ship owns a deployer (`teploy`), so a run can
+ * Ship uses its deployer (`teploy`), so a run can
  * end at "here is the change, and here it is running" instead.
  *
  * WHERE THIS RUNS, AND WHY IT MATTERS. The `teploy` CLI holds the credentials
@@ -21,6 +20,7 @@
  * failure is recorded and reported — never allowed to fail the run. A fix that
  * is correct but could not be previewed is still a fix.
  */
+import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -38,7 +38,7 @@ export type CommandRunner = (argv: string[], opts: { cwd: string; timeoutMs: num
 
 /** What a preview attempt produced. */
 export type PreviewOutcome =
-  | { kind: "deployed"; url: string; image: string; expiresAt?: string; deployedAt?: string }
+  | { kind: "deployed"; url: string; image: string; expiresAt?: string; deployedAt?: string; revision?: string; branch?: string }
   | { kind: "skipped"; reason: string }
   | { kind: "failed"; reason: string };
 
@@ -119,7 +119,7 @@ interface PreviewRow {
  *                                  of it in TypeScript would drift and start
  *                                  reporting URLs that do not exist.
  */
-export async function deployPreview(target: PreviewTarget, branch: string): Promise<PreviewOutcome> {
+export async function deployPreview(target: PreviewTarget, branch: string, revision?: string): Promise<PreviewOutcome> {
   const run = target.run ?? hostRunner();
   const bin = target.bin ?? "teploy";
   const timeoutMs = target.timeoutMs ?? 900_000;
@@ -128,34 +128,31 @@ export async function deployPreview(target: PreviewTarget, branch: string): Prom
 
   try {
     assertGitSafe("branch", branch);
+    if (revision !== undefined && !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(revision)) throw new Error("Preview requires a full commit identity");
   } catch (error) {
     return { kind: "skipped", reason: error instanceof Error ? error.message : String(error) };
   }
 
-  // The branch, in a throwaway worktree, so the image is of the code the pull
-  // request contains.
-  const fetched = await run(["git", "-C", cwd, "fetch", "origin", branch], { cwd, timeoutMs: 120_000 });
-  if (fetched.code !== 0) {
-    return {
-      kind: "failed",
-      reason:
-        `could not fetch ${branch} into the preview checkout: ${tail(fetched.stderr || fetched.stdout)}. ` +
-        `SHIP_PREVIEW_DIR must be a clone of the repository being fixed.`,
-    };
-  }
-  const tree = `${cwd.replace(/\/+$/, "")}/.teploy-ship-preview`;
-  await run(["git", "-C", cwd, "worktree", "remove", "--force", tree], { cwd, timeoutMs: 60_000 });
-  const added = await run(["git", "-C", cwd, "worktree", "add", "--detach", tree, "FETCH_HEAD"], { cwd, timeoutMs: 120_000 });
-  if (added.code !== 0) {
-    return { kind: "failed", reason: `could not create a preview worktree: ${tail(added.stderr || added.stdout)}` };
-  }
-
+  // Each attempt owns its ref and worktree. FETCH_HEAD and a fixed worktree
+  // race across workers and can build or delete another run's checkout.
+  const id = randomUUID();
+  const ref = `refs/ship-previews/${id}`;
+  const tree = `${cwd.replace(/\/+$/, "")}/.teploy-ship-preview-${id}`;
+  let added = false;
   try {
-    return await buildAndDeploy({ run, bin, dest, timeoutMs, tree, branch, target });
+    const fetched = await run(["git", "-C", cwd, "fetch", "--no-write-fetch-head", "origin", `${revision ?? `refs/heads/${branch}`}:${ref}`], { cwd, timeoutMs: 120_000 });
+    if (fetched.code !== 0) return { kind: "failed", reason: `could not fetch ${revision ?? branch} into the preview checkout: ${tail(fetched.stderr || fetched.stdout)}. SHIP_PREVIEW_DIR must be a clone of the repository being fixed.` };
+    const checkout = await run(["git", "-C", cwd, "worktree", "add", "--detach", tree, revision ?? ref], { cwd, timeoutMs: 120_000 });
+    if (checkout.code !== 0) return { kind: "failed", reason: `could not create a preview worktree: ${tail(checkout.stderr || checkout.stdout)}` };
+    added = true;
+    // Different revisions never share a preview slot: recovering an earlier
+    // run must not tear down a later revision's preview.
+    const previewBranch = revision ? `ship-${createHash("sha256").update(branch + "\0" + revision).digest("hex").slice(0,40)}` : branch;
+    const outcome = await buildAndDeploy({ run, bin, dest, timeoutMs, tree, branch: previewBranch, target });
+    return outcome.kind === "deployed" ? { ...outcome, branch: previewBranch, ...(revision ? { revision } : {}) } : outcome;
   } finally {
-    // Always: a worktree left behind makes the next run's `worktree add` fail,
-    // and it sits inside the operator's clone.
-    await run(["git", "-C", cwd, "worktree", "remove", "--force", tree], { cwd, timeoutMs: 60_000 });
+    if (added) await run(["git", "-C", cwd, "worktree", "remove", "--force", tree], { cwd, timeoutMs: 60_000 });
+    await run(["git", "-C", cwd, "update-ref", "-d", ref], { cwd, timeoutMs: 60_000 });
   }
 }
 
@@ -251,33 +248,17 @@ export type RollbackOutcome =
   | { kind: "skipped"; reason: string }
   | { kind: "failed"; reason: string };
 
-/**
- * Put the app back on its previous release (P1-4 / L4).
- *
- * `teploy rollback` with no `--to` starts the previous version's containers (or
- * flips the release symlink for a static app), health-checks, re-routes and
- * stops the current ones — see teploy-cli `internal/cli/rollback.go:22`. No
- * `--app` flag: that variant reads state off a server and requires `--host`,
- * which Ship has no wiring for. The working copy's own `teploy.yml` names the
- * app, which is the same way `deployPreview` above resolves it.
- *
- * REUSES PreviewTarget rather than introducing a RollbackTarget. It is the
- * same fact about the worker — a directory holding a `teploy.yml`, a binary, a
- * destination overlay and a timeout — and the credentials that reach the
- * server are the same ones. A second config with identical fields would be two
- * env blocks to keep in sync and one more way for them to disagree.
- * PRE-DECIDED (2026-08-26); reverses if a deployment ever needs to preview one
- * app and roll back a different one, at which point the field is `dir` and the
- * split is mechanical.
- *
- * Like every command in this file it runs on the WORKER host, never in the
- * agent's sandbox, and never through a shell.
+/** Restore an explicitly named retained release. Never infer "previous": a
+ * repeated recovery could otherwise toggle between two releases. This helper
+ * does not grant authority; preview workflows must only destroy their preview.
+ * Older CLIs that do not support --to fail without a wider fallback.
  */
-export async function rollbackDeploy(target: PreviewTarget): Promise<RollbackOutcome> {
+export async function rollbackDeploy(target: PreviewTarget, version?: string): Promise<RollbackOutcome> {
   const run = target.run ?? hostRunner();
   const bin = target.bin ?? "teploy";
   const dest = target.destination !== undefined ? ["-d", target.destination] : [];
-  const result = await run([bin, "rollback", ...dest], {
+  if (!version || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(version)) return { kind: "skipped", reason: "Rollback requires an explicit retained version; previous is not a stable recovery target" };
+  const result = await run([bin, "rollback", "--to", version, ...dest], {
     cwd: target.dir,
     timeoutMs: target.timeoutMs ?? 900_000,
   });
@@ -311,6 +292,7 @@ export function previewComment(outcome: PreviewOutcome, runId: string): string {
     case "deployed":
       return (
         `Preview: ${outcome.url}\n\nRunning \`${outcome.image}\`` +
+        (outcome.revision ? ` from revision \`${outcome.revision}\`` : "") +
         (outcome.expiresAt !== undefined ? `, expires ${outcome.expiresAt}` : "") +
         `.\nDeployed by Teploy Ship (run ${runId}).`
       );

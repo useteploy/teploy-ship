@@ -151,12 +151,15 @@ export function evidence(facts: Record<string, any>, reviewedHead?: string): Evi
     ["flow", "Browser flow"],
     ["observeWindow", "Telemetry"],
     ["merge", "Merge"],
+    ["rollback", "Recovery"],
   ]) {
     const v = record(facts[key]);
     checks.push({
       name,
       state: typeof v.kind === "string" ? v.kind : "not recorded",
       detail: [
+        key === "preview" && typeof v.revision === "string" ? `Revision ${v.revision}` : undefined,
+        key === "preview" && typeof v.image === "string" ? `Image ${v.image}` : undefined,
         v.command,
         v.script,
         v.reason,
@@ -216,4 +219,13 @@ export function evidence(facts: Record<string, any>, reviewedHead?: string): Evi
     sha:
       record(facts.push).kind === "pushed" ? record(facts.push).sha : typeof reviewedHead === "string" && /^[a-f0-9]{7,64}$/i.test(reviewedHead) ? reviewedHead : undefined,
   };
+}
+
+
+/** Recovery evidence is historical; a recorded snapshot is not a live TTL check. */
+export function workspaceRecovery(events: LogEvent[]): { snapshotAt?: string; restoredAt?: string; checked: boolean; warm: boolean } {
+  const input = record(record(events.find(e => e.type === "run-started")?.data).input);
+  const snapshots = events.filter(e => e.type === "step-completed" && /-snapshot$/.test(e.name ?? ""));
+  const restores = events.filter(e => e.type === "step-completed" && /-restore$/.test(e.name ?? ""));
+  return { snapshotAt: snapshots.at(-1)?.at, restoredAt: restores.at(-1)?.at, checked: restores.length > 0 && input.restoreValidation === 1, warm: input.warm === true };
 }

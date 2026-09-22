@@ -52,7 +52,7 @@ export interface VerificationFacts {
   changeClass?: { class: string; files: number };
   push?: { kind: "pushed"; sha: string } | { kind: "refused" } | { kind: "empty" };
   pr?: { url: string; number: number };
-  preview?: { kind: "deployed"; url: string } | { kind: "skipped" | "failed"; reason: string };
+  preview?: { kind: "deployed"; url: string; revision?: string; image?: string } | { kind: "skipped" | "failed"; reason: string };
   /** The smoke command against the deployed preview (the ladder's preview rung's second half). */
   smoke?: SmokeOutcome;
   /** The screenshot pair the visual rung captured, or why it could not. */
@@ -62,7 +62,7 @@ export interface VerificationFacts {
   /** The observe window after the preview (the ladder's `observe` rung). */
   observeWindow?: ObserveOutcome;
   telemetry?: { kind: "compared"; worse: boolean } | { kind: "disabled" | "insufficient" | "unavailable"; reason: string };
-  rollback?: { kind: string };
+  rollback?: { kind: string; scope?: "preview"; reason?: string; reasons?: string[]; output?: string };
   merge?: MergeFact;
 }
 
@@ -228,7 +228,7 @@ export function verificationSummary(facts: VerificationFacts): string {
   else if (ow?.kind === "worse") not.push(`the observe window (${ow.windowMin}m) judged the preview WORSE and it was torn down: ${ow.reasons.join("; ")}`);
   else if (ow?.kind === "insufficient" || ow?.kind === "unavailable" || ow?.kind === "disabled") not.push(`no observe window (${ow.reason})`);
 
-  if (facts.rollback?.kind === "rolled-back") not.push("the service got worse and was rolled back");
+  if (facts.rollback?.kind === "rolled-back") not.push(facts.rollback.scope === "preview" ? "the preview regressed and was removed; production was not rolled back" : "the service got worse and was rolled back");
   const mg = facts.merge;
   if (mg?.kind === "merged") {
     did.push(mg.via === "auto" ? "merged it under the repo's auto-merge authority" : "merged it on the approved merge decision");
@@ -466,7 +466,7 @@ export function verificationFactsFromEvents(events: WorkflowEvent[]): Verificati
     } else if (s.name === "repo-pr" && r !== undefined && typeof r.url === "string") {
       facts.pr = { url: r.url, number: Number(r.number ?? 0) };
     } else if (s.name === "preview-deploy" && r !== undefined) {
-      if (r.kind === "deployed") facts.preview = { kind: "deployed", url: String(r.url ?? "") };
+      if (r.kind === "deployed") facts.preview = { kind: "deployed", url: String(r.url ?? ""), ...(typeof r.revision === "string" ? { revision: r.revision } : {}), ...(typeof r.image === "string" ? { image: r.image } : {}) };
       else if (r.kind === "skipped" || r.kind === "failed") facts.preview = { kind: r.kind, reason: String(r.reason ?? "") };
     } else if (s.name === "telemetry-check" && r !== undefined) {
       if (r.kind === "compared") {
@@ -477,7 +477,7 @@ export function verificationFactsFromEvents(events: WorkflowEvent[]): Verificati
         facts.telemetry = { kind: r.kind, reason: String(r.reason ?? "") };
       }
     } else if (s.name === "rollback" && r !== undefined && typeof r.kind === "string") {
-      facts.rollback = { kind: r.kind };
+      facts.rollback = { kind: r.kind, ...(r.scope === "preview" ? {scope: "preview" as const} : {}), ...(typeof r.reason === "string" ? {reason:r.reason} : {}), ...(Array.isArray(r.reasons) ? {reasons:r.reasons.map(String)} : {}), ...(typeof r.output === "string" ? {output:r.output} : {}) };
     } else if (s.name === "auto-merge" && r !== undefined) {
       const f = mergeFact(s.result, "auto");
       if (f !== undefined) facts.merge = f;

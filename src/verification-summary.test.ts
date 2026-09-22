@@ -189,3 +189,11 @@ test("browser recording attachments survive the recorded-facts projection", () =
   assert.equal(facts.flow?.kind, "passed");
   if (facts.flow?.kind === "passed") assert.deepEqual(facts.flow.videos, [video]);
 });
+
+test("delivery evidence retains the preview revision and distinguishes preview removal from production rollback",()=>{
+  const revision="a".repeat(40);
+  const facts=verificationFactsFromEvents([step("preview-deploy",{kind:"deployed",url:"https://preview.test",revision,image:"app-build-a"},1),step("rollback",{kind:"rolled-back",scope:"preview",reasons:["Regressed"],output:"Preview removed"},2)]);
+  assert.equal(facts.preview?.kind==="deployed"?facts.preview.revision:null,revision);
+  assert.match(verificationSummary(facts),/preview regressed and was removed/);
+  assert.equal(facts.rollback?.output,"Preview removed");
+});

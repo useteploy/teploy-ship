@@ -14,7 +14,7 @@ import { verificationFactsFromEvents } from "./verification-summary.js";
 export type WorkspaceRequest = {
   id: string;
   runId: string;
-  kind: "forge" | "files" | "file";
+  kind: "forge" | "files" | "file" | "changes";
   path?: string;
   at: string;
   by: string;
@@ -25,6 +25,9 @@ export type WorkspaceReply = {
   error?: string;
   forge?: ForgeState;
   output?: string;
+  kind?: WorkspaceRequest["kind"];
+  path?: string;
+  truncated?: boolean;
 };
 const PREFIX = "SHIP_WORKSPACE_REQUEST_";
 export const requestKey = (runId: string) => PREFIX + runId;
@@ -50,6 +53,13 @@ export async function requestWorkspace(
   };
   await runtime.config.set(requestKey(runId), JSON.stringify(request), by);
   return request;
+}
+/** Keep inspections visible when background forge refreshes finish. */
+export async function workspaceInspection(runtime: Pick<ShipRuntime, "config">, runId: string): Promise<WorkspaceReply | null> {
+  const raw = await runtime.config.get("SHIP_WORKSPACE_INSPECTION_" + runId);
+  if (raw) return JSON.parse(raw);
+  const prior = await workspaceReply(runtime, runId);
+  return prior?.output !== undefined ? prior : null;
 }
 export async function workspaceReply(
   runtime: Pick<ShipRuntime, "config">,
@@ -77,6 +87,14 @@ export async function refreshForgeIfStale(
     if (reply?.id !== pending.id && now - Date.parse(pending.at) < 120000) return;
   }
   await requestWorkspace(runtime, runId, "forge", by);
+}
+/** Fixed read-only command: names of untracked files, tracked edits against HEAD.
+ * Disable configured external helpers: inspecting must never run repository hooks.
+ * Untracked file contents are deliberately not read.
+ */
+export function changesCommand(): string {
+  const git = "git --no-optional-locks --no-pager -c core.fsmonitor=false -c core.untrackedCache=false";
+  return `(${git} status --short --untracked-files=normal --ignore-submodules=all && ${git} diff --no-ext-diff --no-textconv --ignore-submodules=all HEAD --) | head -c 10001`;
 }
 /** Reads tracked files only; git show cannot follow working-tree symlinks or read .env files outside the repository. */
 export function fileCommand(path?: string): string {
@@ -115,7 +133,7 @@ export async function serveWorkspaceRequests(
     const previous = await workspaceReply(runtime, req.runId);
     if (previous?.id === req.id) continue;
     if (++processed > 30) break;
-    const reply: WorkspaceReply = { id: req.id, at: new Date().toISOString() };
+    const reply: WorkspaceReply = { id: req.id, at: new Date().toISOString(), kind: req.kind, ...(req.path ? { path: req.path } : {}) };
     try {
       if (Date.now() - Date.parse(req.at) > 120000)
         throw new Error("Request expired. Refresh to try again.");
@@ -137,7 +155,7 @@ export async function serveWorkspaceRequests(
           pr,
         );
       } else {
-        if (req.kind !== "files" && req.kind !== "file")
+        if (req.kind !== "files" && req.kind !== "file" && req.kind !== "changes")
           throw new Error("Unknown workspace request");
         // Snapshot/restore can replace the original handle. Use the latest recorded creation.
         const handles = events.filter(
@@ -145,18 +163,20 @@ export async function serveWorkspaceRequests(
             e.type === "step-completed" &&
             (e.name === "sandbox" || /-restore$/.test(e.name ?? "")),
         );
-        const handle = (handles.at(-1)?.data as any)?.result;
+        const recorded = (handles.at(-1)?.data as any)?.result;
+        const handle = typeof recorded === "string" ? recorded : recorded?.handle;
         if (typeof handle !== "string")
           throw new Error("Workspace is not available yet");
         const r = await executor
           .attach(handle)
-          .exec(fileCommand(req.kind === "file" ? req.path : undefined), {
+          .exec(req.kind === "changes" ? changesCommand() : fileCommand(req.kind === "file" ? req.path : undefined), {
             timeoutMs: 10000,
           });
         if (r.exitCode !== 0 || r.stderr.includes("fatal:"))
           throw new Error(
             "Workspace or file unavailable. The sandbox may have expired.",
           );
+        reply.truncated = Buffer.byteLength(r.stdout) > 8000;
         reply.output = Buffer.from(safeForDisplay(r.stdout, 10000))
           .subarray(0, 8000)
           .toString("utf8");
@@ -169,6 +189,7 @@ export async function serveWorkspaceRequests(
     }
     // The result id binds it to a request; a newer request cannot consume an older response.
     await runtime.config.set(replyKey(req.runId), JSON.stringify(reply));
+    if (req.kind !== "forge") await runtime.config.set("SHIP_WORKSPACE_INSPECTION_" + req.runId, JSON.stringify(reply));
     if (req.kind === "forge")
       await runtime.config.set(
         "SHIP_FORGE_STATE_" + req.runId,

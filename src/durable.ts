@@ -46,7 +46,7 @@ import {
   workingDiff,
   publishedDiff,
 } from "./git.js";
-import { deployPreview, resolvePreviewTarget, rollbackDeploy, type PreviewOutcome, type PreviewTarget } from "./deploy.js";
+import { deployPreview, resolvePreviewTarget, destroyPreview, type PreviewOutcome, type PreviewTarget } from "./deploy.js";
 import {
   effectiveAuthority,
   ladderGate,
@@ -2551,7 +2551,7 @@ async function publishIfRepoRun(
     // A review follow-up pushed new commits, so any preview is stale and the
     // numbers moved. Refresh both, run the ladder legs over the fresh preview,
     // then amend the same Verification section.
-    const followUpPreview = push.kind === "pushed" ? await previewIfAsked(ctx, config, input, co.branch) : undefined;
+    const followUpPreview = push.kind === "pushed" ? await previewIfAsked(ctx, config, input, co.branch, push.sha) : undefined;
     const legs = await runLadderLegs(ctx, executor, config, input, followUpPreview, co.branch, { baseline, build, tests }, assetSink(ref, token, input.pr, config.artifacts));
     const followUpProof = proofLinks(legs);
     const followUp: Evidence = {
@@ -2633,7 +2633,7 @@ async function publishIfRepoRun(
   // Hoisted into locals rather than left inline in the publishVerification call:
   // the rollback watch (P1-4), the ladder legs and the auto-merge gate (L5)
   // all need to read what these steps produced, and none may re-run them.
-  const preview = await previewIfAsked(ctx, config, input, co.branch);
+  const preview = await previewIfAsked(ctx, config, input, co.branch, push.kind === "pushed" ? push.sha : undefined);
   const telemetry = await telemetryIfAsked(ctx, config, input);
   // The ladder legs (C4 / L4): the smoke against the preview, the visual diff
   // against main, the observe window after it — then the rung list, recorded
@@ -2866,7 +2866,7 @@ type RollbackStep =
   | { kind: "not-deployed"; reason: string }
   | { kind: "healthy"; reasons: string[] }
   | { kind: "would-roll-back"; reasons: string[] }
-  | { kind: "rolled-back"; reasons: string[]; output: string }
+  | { kind: "rolled-back"; reasons: string[]; output: string; scope?: "preview" }
   | { kind: "failed"; reasons: string[]; reason: string };
 
 /**
@@ -2923,12 +2923,16 @@ async function rollbackIfWorse(
       };
     }
     try {
-      const outcome = await rollbackDeploy(config.preview);
-      return outcome.kind === "rolled-back"
-        ? { kind: "rolled-back", reasons: regression.reasons, output: outcome.output }
-        : { kind: "failed", reasons: regression.reasons, reason: outcome.reason };
+      // Old receipts have no immutable preview identity. Do not infer that a
+      // mutable branch still belongs to this deployment, or touch production.
+      if (!preview.branch || !preview.revision) return { kind: "would-roll-back", reasons: [...regression.reasons, "Preview identity was not recorded; inspect it before recovery. Production was not changed by this run."] };
+      const target = resolvePreviewTarget(config.preview, input.verification?.preview?.app);
+      const outcome = await destroyPreview(target, preview.branch);
+      return outcome.kind === "skipped"
+        ? { kind: "rolled-back", scope: "preview", reasons: regression.reasons, output: outcome.reason }
+        : { kind: "failed", reasons: regression.reasons, reason: outcome.kind === "failed" ? outcome.reason : "Unexpected preview recovery response" };
     } catch (error) {
-      // rollbackDeploy is written not to throw; if it ever does, the run must
+      // Preview recovery is written not to throw; if it ever does, the run must
       // still end with its pull request. A rollback that failed is a page for a
       // human, not a failed run.
       return { kind: "failed", reasons: regression.reasons, reason: error instanceof Error ? error.message : String(error) };
@@ -3134,6 +3138,7 @@ async function previewIfAsked(
   config: DurableAgentConfig,
   input: DurableAgentInput,
   branch: string,
+  revision?: string,
 ): Promise<PreviewOutcome | undefined> {
   if (input.preview !== true && input.verification?.preview === undefined) return undefined;
 
@@ -3143,7 +3148,7 @@ async function previewIfAsked(
     }
     const target = resolvePreviewTarget(config.preview, input.verification?.preview?.app);
     try {
-      return await deployPreview(target, branch);
+      return await deployPreview(target, branch, revision);
     } catch (error) {
       // deployPreview is written not to throw; if it ever does, the run must
       // still end with its pull request.

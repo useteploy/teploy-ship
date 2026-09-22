@@ -3700,7 +3700,7 @@ test("P1-4: a worse service after a deploy records what it WOULD roll back, with
   }
 });
 
-test("P1-4: with autoDeploy on, the same evidence actually runs `teploy rollback`", async () => {
+test("P1-4: with autoDeploy on, recovery removes only the immutable preview", async () => {
   const fixture = await repoFixture("p14-act");
   const teploy = scriptedTeploy({ rollback: { code: 0, stdout: "Rolled back to abc1234\n", stderr: "" } });
   const observe = scriptedObserve([[RED_ROW()], [RED_ROW({ error_count: 200, p95_ms: 900 })]]);
@@ -3724,9 +3724,10 @@ test("P1-4: with autoDeploy on, the same evidence actually runs `teploy rollback
     assert.equal(outcome.status, "completed");
     const result = stepResult(await store.load("run-p14-act"), "rollback");
     assert.equal(result?.kind, "rolled-back");
+    assert.ok(!teploy.calls.some(argv => argv[1] === "rollback"), "preview recovery must never roll back production");
     assert.ok(
-      teploy.calls.some((argv) => argv[1] === "rollback"),
-      `teploy rollback was never called: ${JSON.stringify(teploy.calls)}`,
+      teploy.calls.some((argv) => argv[1] === "preview" && argv[2] === "destroy" && argv[3]?.startsWith("ship-")),
+      `preview recovery was never called: ${JSON.stringify(teploy.calls)}`,
     );
   } finally {
     fixture.restore();

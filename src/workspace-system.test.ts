@@ -185,3 +185,39 @@ test("follow-up checkout refuses a PR closed after its UI check", async () => {
   const ref=parseRepoUrl('https://github.com/team/repo');
   await assert.rejects(resolvePr(ref,'token',1,(async()=>Response.json({state:'closed',merged:true,head:{ref:'feature'},base:{ref:'main'}})) as any,true),/no longer open/);
 });
+
+test("live workspace inspection shows tracked edits without invoking repository diff helpers", async () => {
+  const {hostRunner}=await import("./deploy.js");
+  const {writeFile,rm}=await import("node:fs/promises");
+  const {changesCommand}=await import("./workspace-requests.js");
+  const dir=await mkdtemp(join(tmpdir(),"ship-live-diff-"));
+  const run=hostRunner();
+  const exec=async(argv:string[])=>{const r=await run(argv,{cwd:dir,timeoutMs:10000});assert.equal(r.code,0,r.stderr);return r.stdout;};
+  try {
+    await exec(["git","init"]);await exec(["git","config","user.name","Test"]);await exec(["git","config","user.email","test@example.invalid"]);
+    await writeFile(join(dir,"file.txt"),"original\n");await exec(["git","add","file.txt"]);await exec(["git","commit","-m","Initial"]);
+    await exec(["git","config","diff.external","must-not-run"]);
+    await exec(["git","config","core.fsmonitor","must-not-run"]);
+    await writeFile(join(dir,"file.txt"),"edited\n");await writeFile(join(dir,"untracked.txt"),"never-read-this-content");
+    const output=await exec(["sh","-c",changesCommand()]);
+    assert.match(output,/file.txt/);assert.match(output,/\+edited/);assert.match(output,/untracked.txt/);
+    assert.doesNotMatch(output,/never-read-this-content/);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test("background forge refresh cannot replace the last workspace inspection",async()=>{
+  const {workspaceInspection,replyKey}=await import("./workspace-requests.js");
+  const rows=new Map<string,string>([[replyKey("run-test"),JSON.stringify({id:"forge",at:"now",forge:{}})],["SHIP_WORKSPACE_INSPECTION_run-test",JSON.stringify({id:"files",kind:"changes",at:"then",output:"local edits"})]]);
+  const result=await workspaceInspection({config:{get:async(k:string)=>rows.get(k)} as any},"run-test");
+  assert.equal(result?.id,"files");assert.equal(result?.output,"local edits");
+});
+
+test("inspection attaches to the latest restored workspace handle",async()=>{
+  const {serveWorkspaceRequests,requestKey}=await import("./workspace-requests.js");
+  const rows=new Map<string,string>([[requestKey("run-restored"),JSON.stringify({id:"inspect",runId:"run-restored",kind:"changes",at:new Date().toISOString(),by:"test"})]]);
+  const runtime={config:{list:async()=>[...rows.keys()].map(key=>({key})),get:async(key:string)=>rows.get(key),set:async(key:string,value:string)=>{rows.set(key,value);}},projects:{list:async()=>[]},store:{load:async()=>[{type:"run-started",data:{input:{repo:"https://github.com/team/repo"}}},{type:"step-completed",name:"sandbox",data:{result:"expired"}},{type:"step-completed",name:"merge-restore",data:{result:{handle:"restored"}}}]}} as any;
+  let attached="";
+  await serveWorkspaceRequests(runtime,{attach:(handle:string)=>{attached=handle;return {exec:async()=>({exitCode:0,stdout:" M file.txt",stderr:""})};}} as any,{allowlist:"https://github.com/team"});
+  assert.equal(attached,"restored");
+  assert.equal(JSON.parse(rows.get("SHIP_WORKSPACE_INSPECTION_run-restored")!).kind,"changes");
+});

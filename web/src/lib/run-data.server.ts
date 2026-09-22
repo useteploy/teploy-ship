@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { threadHistory, workspaceReply, refreshForgeIfStale } from "./workspace.server.js";
+import { threadHistory, workspaceInspection, refreshForgeIfStale } from "./workspace.server.js";
 import type { WorkspaceReply } from "../../../dist/workspace-requests.js";
-import { conversation, diffSnapshots, evidence } from "./workspace.js";
+import { workspaceRecovery, conversation, diffSnapshots, evidence } from "./workspace.js";
 import type { Message, DiffSnapshot, Evidence } from "./workspace.js";
 import { costUSD, isPricedModel, pendingQuestion, verificationFactsFromEvents } from "./ship.server.js";
 import { typicalDuration } from "./expect.js";
@@ -22,6 +22,7 @@ export interface RunData {
   journey?: string;
   forge: WorkspaceReply | null;
   workspace: WorkspaceReply | null;
+  recovery: ReturnType<typeof workspaceRecovery>;
   ancestors: { runId: string; task: string; messages: Message[] }[];
   view: string;
   messages: Message[];
@@ -172,7 +173,8 @@ export async function runData({ params, request }: { params: { id: string }; req
       userMessage: (started?.data as any)?.input?.userMessage,
       journey: (started?.data as any)?.input?.journey,
       forge: forgeRaw ? JSON.parse(forgeRaw) : null,
-      workspace: await workspaceReply(runtime, runId),
+      workspace: await workspaceInspection(runtime, runId),
+      recovery: workspaceRecovery(events),
       ancestors: history.slice(0,-1).map(h => ({ runId: h.runId, task: h.task, messages: conversation(h.events).slice(-20) })),
       view: ['conversation','review','changes','verification','files','activity'].includes(query.get('view') ?? '') ? query.get('view')! : 'conversation',
       messages: conversation(events),

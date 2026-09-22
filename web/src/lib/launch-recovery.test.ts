@@ -1,0 +1,25 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+process.env.SHIP_WEB_TOKEN="recovery-test-token";
+process.env.SHIP_STORE="file";
+process.env.TEPLOY_SHIP_STATE=mkdtempSync(join(tmpdir(),"ship-recovery-web-"));
+const {action,loader}=await import("../routes/recovery.js");
+const {shipRuntime}=await import("./store.server.js");
+const {signSession,SESSION_COOKIE}=await import("./session.server.js");
+const runtime=await shipRuntime();
+const request=(role:"admin"|"viewer",post=false)=>new Request("http://ship.test/recovery",{method:post?"POST":"GET",headers:{cookie:`${SESSION_COOKIE}=${signSession({user:role,role},"sso")}`},...(post?{body:new URLSearchParams({runId:"run-recovery"})}:{})});
+test("recovery requires current launch authority and publishes the accepted task only once",async()=>{
+  await runtime.governance.setAuthority("approve",{roles:["admin"],users:[]});
+  const at=new Date().toISOString();
+  await runtime.launches!.prepare({runId:"run-recovery",requestHash:"a".repeat(64),started:{v:1,seq:0,type:"run-started",at,data:{workflow:"test",input:{task:"Recover me"}}},meta:{runId:"run-recovery",task:"Recover me",model:"test",status:"queued",createdAt:at,updatedAt:at}});
+  await assert.rejects(loader({request:request("viewer")}),e=>e instanceof Response && e.status===403);
+  assert.equal((await action({request:request("viewer",true)})).status,403);
+  assert.equal((await runtime.store.load("run-recovery")).length,0);
+  assert.equal((await loader({request:request("admin")})).rows[0].summary,"Recover me");
+  for(let i=0;i<2;i++)assert.equal((await action({request:request("admin",true)})).headers.get("location"),"/runs/run-recovery");
+  assert.equal((await runtime.store.load("run-recovery")).length,1);
+  assert.equal((await loader({request:request("admin")})).rows.length,0);
+});

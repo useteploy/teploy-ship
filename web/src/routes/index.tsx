@@ -281,6 +281,7 @@ export default function Inbox({ data }: { data: InboxData }) {
         ))
       )}
 
+      {data.canLaunch && <p class="meta"><a href="/recovery">Inspect pending launch recovery →</a></p>}
       {data.recentRequests.length > 0 && <section><h2 class="section">Recent requests</h2>{data.recentRequests.map(t => <article class="card" key={t.taskId}><b>{t.title}</b><p class="meta">{t.state === "launched" ? "Approved for launch" : "Dismissed"} · {t.requestedBy}</p>{t.runVisible && t.runId && <a href={`/runs/${t.runId}`}>Follow the task and its result →</a>}</article>)}</section>}
       {nothing && data.pendingLaunches.length === 0 && <p class="empty" style="margin-top:28px">Inbox zero. <a href="/runs">See all runs →</a></p>}
       <script dangerouslySetInnerHTML={{ __html: POLL }} />

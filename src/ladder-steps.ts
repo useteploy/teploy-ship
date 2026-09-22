@@ -20,7 +20,7 @@ import pixelmatch from "pixelmatch";
 import { PNG } from "pngjs";
 
 import type { DurableAgentConfig, DurableAgentInput } from "./durable.js";
-import { destroyPreview, type PreviewOutcome } from "./deploy.js";
+import { resolvePreviewTarget, destroyPreview, type PreviewOutcome } from "./deploy.js";
 import { compareHealth, effectiveTelemetryTarget, readServiceHealth, telemetryAppliesTo, telemetryRegression } from "./observe.js";
 import { runTests, testTargetFromInput, type TestOutcome } from "./tests.js";
 import {
@@ -352,7 +352,7 @@ export async function flowIfPresent(
  * A rise past the regression thresholds (observe.ts) is `worse`, and the
  * preview is torn down on the spot — the rollback of a preview Ship itself
  * put up, with the measurement as evidence. Production is never touched here;
- * that is the `rollback` step's business and `autoDeploy`'s authority.
+ * a preview receipt never authorizes a production rollback.
  *
  * The step WAITS for the window to elapse. That is the point of it: "no
  * error-rate change for N minutes" cannot be known sooner.
@@ -401,7 +401,7 @@ export async function observeIfDeclared(
         // destroyPreview's vocabulary, mapped rather than renamed: `skipped`
         // is SUCCESS there ("preview for <branch> destroyed"), `failed` is a
         // destroy that errored.
-        const torn = await destroyPreview(config.preview, branch);
+        const torn = await destroyPreview(resolvePreviewTarget(config.preview, input.verification?.preview?.app), preview.branch ?? branch);
         return {
           kind: "worse",
           windowMin,

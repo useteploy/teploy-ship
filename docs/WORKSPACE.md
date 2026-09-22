@@ -229,3 +229,44 @@ starting; Ship reports that conflict instead of overriding it. Such conflicting
 accepted intents remain held for operator diagnosis; automatic reassignment or
 abandonment is not implemented. This is not an atomic transaction with the forge,
 and does not resolve ambiguous external push/merge outcomes.
+
+## Recovery and live inspection
+
+The Inbox links to **Launch recovery** for people with current launch authority.
+This lists accepted direct, intake and follow-up launches that have not finished
+publication, including corrupt records and replacement-review parents. Pages are
+bounded to 100 entries with a cursor. Retry publishes the original accepted
+intent; it never creates a new task or overrides a competing review decision.
+Permanent conflicts remain held for investigation. Unknown external push, merge,
+deployment and notification outcomes still need their own reconciliation.
+
+**Files → Inspect live changes** reads tracked edits against HEAD and untracked
+file names from the latest recorded workspace, including a restored handle.
+It does not read untracked contents or grant terminal/editor access. Output is
+bounded and redacted, with partial results labelled. It is an observation while
+the agent may still be writing, not a consistent checkpoint. Background PR reads
+no longer replace the displayed inspection. The recovery disclosure shows
+recorded snapshots/restores and repository validation without asserting that a
+snapshot still exists or that warm-volume edits are recoverable.
+
+## Preview revision and recovery boundaries
+
+New pushed-change previews fetch the exact recorded commit into an isolated
+Git ref and worktree. Concurrent builds cannot overwrite FETCH_HEAD or remove
+one another's checkout. The preview slot includes a hash of branch and revision,
+so a later revision gets a different slot. Verification shows the recorded commit
+and image tag. An image tag is not an immutable image digest or a production
+release receipt. Preview slots expire under the configured CLI TTL.
+
+Regression recovery removes that revision's preview; it cannot roll back the
+main app merely because a preview was deployed. Old recovery receipts without
+an immutable preview identity are held for inspection in the legacy rollback
+step. The production rollback helper requires an explicit retained version and
+never falls back to the mutable “previous” release.
+
+Still required for production promotion: independently bind the repository and
+trusted deployment configuration to a destination; capture the exact artifact
+digest, deployed version and retained recovery version; bind an approval to those
+identities; reconcile uncertain CLI outcomes before retrying; verify the deployed
+revision and health, then demonstrate recovery on a scratch target. The UI does
+not yet offer production promotion or a writable workspace takeover.

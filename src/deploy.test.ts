@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { deployPreview, destroyPreview, previewComment, previewTargetFromEnv, resolvePreviewTarget, rollbackDeploy, type CommandResult, type CommandRunner, type PreviewOutcome } from "./deploy.js";
+import { hostRunner, deployPreview, destroyPreview, previewComment, previewTargetFromEnv, resolvePreviewTarget, rollbackDeploy, type CommandResult, type CommandRunner, type PreviewOutcome } from "./deploy.js";
 
 /** A runner that plays scripted results and records every argv it saw. */
 function scriptedRunner(results: Record<string, CommandResult>): {
@@ -53,15 +53,17 @@ test("a preview is built, deployed and reported — and the tag is passed, never
     kind: "deployed",
     url: "https://preview-fix-login.example.com",
     image: "api-build-abc1234",
+    branch: "fix/login",
     expiresAt: "2026-08-20T12:00:00Z",
   });
 
   // The branch is fetched and checked out BEFORE anything is built. Without
   // this the image is of whatever commit the operator's directory sits on, and
   // the PR carries a URL serving code the reviewer never wrote.
-  assert.deepEqual(calls[0], ["git", "-C", "/srv/app", "fetch", "origin", "fix/login"]);
+  assert.deepEqual(calls[0]!.slice(0,6), ["git", "-C", "/srv/app", "fetch", "--no-write-fetch-head", "origin"]);
+  assert.match(calls[0]![6]!, /^refs\/heads\/fix\/login:refs\/ship-previews\//);
   assert.ok(
-    calls.some((c) => c[3] === "worktree" && c[4] === "add" && c.includes("FETCH_HEAD")),
+    calls.some((c) => c[3] === "worktree" && c[4] === "add" && c.some(a => a.startsWith("refs/ship-previews/"))),
     `the fetched branch must be checked out: ${JSON.stringify(calls)}`,
   );
 
@@ -70,7 +72,7 @@ test("a preview is built, deployed and reported — and the tag is passed, never
   assert.deepEqual(calls[buildIdx], ["teploy", "build", "--json"]);
   // ...and it ran in the WORKTREE, not the operator's checkout.
   assert.notEqual(cwds[buildIdx], "/srv/app", "building in the operator's directory builds the wrong commit");
-  assert.match(cwds[buildIdx]!, /\.teploy-ship-preview$/);
+  assert.match(cwds[buildIdx]!, /\.teploy-ship-preview-[a-f0-9-]+$/);
 
   // The worktree is removed afterwards, or the next run cannot create one.
   assert.ok(
@@ -222,15 +224,15 @@ test("P1-4: rollback is `teploy rollback` in the worker's working copy, with the
   // (teploy-cli internal/cli/rollback.go:40), which Ship has no wiring for.
   // The working copy's own teploy.yml names the app, exactly as for a preview.
   const { run, calls, cwds } = scriptedRunner({ rollback: { code: 0, stdout: "Rolled back to abc1234\n", stderr: "" } });
-  const outcome = await rollbackDeploy({ dir: "/srv/app", destination: "staging", run });
+  const outcome = await rollbackDeploy({ dir: "/srv/app", destination: "staging", run }, "abc1234");
   assert.deepEqual(outcome, { kind: "rolled-back", output: "Rolled back to abc1234" });
-  assert.deepEqual(calls, [["teploy", "rollback", "-d", "staging"]]);
+  assert.deepEqual(calls, [["teploy", "rollback", "--to", "abc1234", "-d", "staging"]]);
   assert.deepEqual(cwds, ["/srv/app"]);
 });
 
 test("P1-4: a failed rollback is reported, not thrown — the run still ends with its pull request", async () => {
   const { run } = scriptedRunner({ rollback: { code: 1, stdout: "", stderr: "no previous version to roll back to\n" } });
-  const outcome = await rollbackDeploy({ dir: "/srv/app", run });
+  const outcome = await rollbackDeploy({ dir: "/srv/app", run }, "abc1234");
   assert.equal(outcome.kind, "failed");
   assert.match(outcome.kind === "failed" ? outcome.reason : "", /exit 1.*no previous version/s);
 });
@@ -252,4 +254,48 @@ test("C4: a declared preview app resolves to its own clone under the preview roo
   for (const bad of ["../evil", "..", ".", "-x", "a/b", ""]) {
     assert.deepEqual(resolvePreviewTarget(base, bad), base, `app ${JSON.stringify(bad)} must not become a path`);
   }
+});
+
+
+test("rollback cannot toggle a mutable previous release on retry", async () => {
+  const {run,calls}=scriptedRunner({});
+  for (const version of [undefined, "", "--to=other", "a;touch bad"]) {
+    assert.equal((await rollbackDeploy({dir:"/srv/app",run},version)).kind,"skipped");
+  }
+  assert.equal(calls.length,0);
+});
+
+test("parallel previews build their own exact commits and leave the operator checkout intact", async () => {
+  const dir=await mkdtemp(join(tmpdir(),"ship-preview-race-"));
+  const git=hostRunner();
+  const exec=async (...args:string[])=> {
+    const r=await git(["git",...args],{cwd:dir,timeoutMs:10000});
+    assert.equal(r.code,0,r.stderr); return r.stdout.trim();
+  };
+  try {
+    await exec("init"); await exec("config","user.email","test@example.invalid"); await exec("config","user.name","Test");
+    await writeFile(join(dir,"file"),"one"); await exec("add","file"); await exec("commit","-m","one");
+    const one=await exec("rev-parse","HEAD");
+    await writeFile(join(dir,"file"),"two"); await exec("commit","-am","two");
+    const two=await exec("rev-parse","HEAD"); await exec("remote","add","origin",dir);
+    let entered=0; let release!:()=>void; const barrier=new Promise<void>(resolve=>release=resolve);
+    const heads:string[]=[]; const paths=new Set<string>();
+    const runner:CommandRunner=async (argv,opts)=> {
+      if(argv[0]==="git") return git(argv,opts);
+      if(argv[1]==="build") {
+        paths.add(opts.cwd); entered++; if(entered===2)release(); await barrier;
+        const head=await git(["git","rev-parse","HEAD"],opts); assert.equal(head.code,0); heads.push(head.stdout.trim());
+        return {code:0,stdout:JSON.stringify({image:"app-"+head.stdout.trim()}),stderr:""};
+      }
+      if(argv[2]==="deploy")return {code:0,stdout:"Preview deployed: https://preview.example.invalid",stderr:""};
+      return {code:0,stdout:"[]",stderr:""};
+    };
+    const results=await Promise.all([deployPreview({dir,run:runner},"same/branch",one),deployPreview({dir,run:runner},"same/branch",two)]);
+    assert.ok(results.every(r=>r.kind==="deployed")); assert.equal(paths.size,2);
+    assert.deepEqual(heads.sort(),[one,two].sort()); assert.equal(await exec("rev-parse","HEAD"),two);
+    assert.equal(await exec("for-each-ref","--format=%(refname)","refs/ship-previews/"),"");
+    assert.equal((await exec("worktree","list","--porcelain")).split("worktree ").length,2);
+    assert.notEqual((results[0] as any).branch,(results[1] as any).branch);
+    assert.equal((results[0] as any).revision,one);
+  } finally { await rm(dir,{recursive:true,force:true}); }
 });
