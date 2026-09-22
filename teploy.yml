@@ -146,6 +146,11 @@ accessories:
 
 env:
   NUCLEUS_URL: postgres://nucleus@ship-nucleus:5432/nucleus
+  # The trusted delivery copy (Package B): the clone mounted above. Unset
+  # means the whole approved-delivery execution path is OFF and approvals
+  # are held with the reason. Provisioned 2026-09-22 for the scratch
+  # acceptance target ship-delivery-proof (:7480 on this box).
+  SHIP_DELIVERY_DIR: /srv/ship-delivery/ship-journey-proof
   SHIP_MODEL: anthropic/claude-sonnet-5
   # Codebase indexing (A1): repo runs embed the clone into Nucleus vectors
   # and the agent gets the ```search action. Embeddings ride the gateway's
@@ -263,3 +268,16 @@ env:
 # but the image declares VOLUME /data).
 volumes:
   ship-data: /data
+  # --- Trusted delivery copy (Package B, S14) — see src/delivery.ts -----
+  # The worker executes APPROVED deliveries against this clone of the
+  # repository being delivered: it fetches the merged SHA into a detached
+  # worktree here, builds and deploys from there, and reads the target back
+  # through the same copy's teploy.yml. Deploy credentials (the dedicated
+  # scratch key in /srv/ship-delivery/ssh) stay on the worker and never
+  # enter an agent sandbox. The clone's origin is the forge's own bare repo
+  # bind-mounted read-only — fetching needs no credential and cannot drift
+  # from what the forge actually holds. Both mounts land in web too (volumes
+  # are app-level); web has no code path that reads them.
+  /srv/ship-delivery/ship-journey-proof: /srv/ship-delivery/ship-journey-proof
+  /deployments/forgejo/volumes/data/git/repositories/tyler/ship-journey-proof-20260921.git: /srv/forge-bare/ship-journey-proof.git:ro
+  /srv/ship-delivery/ssh: /home/node/.ssh:ro

@@ -10,9 +10,13 @@
 FROM node:22-slim@sha256:f32b81066cde10a75dbac96646099533316d94bac4150c55da1636e1f0ffdc46
 
 # git: repo runs clone/push inside this container (worker role, local
-# executor path). ca-certificates for https remotes. curl only to fetch the
-# teploy CLI below, then removed — it is not part of the runtime.
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl \
+# executor path). ca-certificates for https remotes. rsync: `teploy build`
+# syncs the build context to the server through a LOCAL rsync binary, so the
+# worker role needs it for preview deploys and delivery execution (found
+# live 2026-09-22: the shipped CLI could not build from inside the image).
+# curl only to fetch the teploy CLI below, then removed — it is not part of
+# the runtime.
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl rsync \
   && rm -rf /var/lib/apt/lists/* \
   && corepack enable
 
