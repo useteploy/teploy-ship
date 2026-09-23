@@ -336,6 +336,17 @@ select option { background: var(--panel); color: var(--text); }
 .notice { margin: 12px 0; }
 /* Tables scroll inside themselves on a narrow screen; the page never does. */
 .table-wrap { overflow-x: auto; }
+@media (min-width: 721px) and (max-width: 920px) {
+  /* Nine nav links + brand + avatar stopped fitting one row when Incidents
+     and Coordination landed (caught by the 18-view re-check at 768). Same
+     treatment the mobile rule below uses: the nav takes its own row and
+     scrolls inside itself — the page never overflows, no link is hidden at
+     desktop widths. */
+  header.top { flex-wrap: wrap; }
+  header.top nav.nav { order: 3; flex-basis: 100%; overflow-x: auto; gap: 2px;
+    scrollbar-width: none; }
+  header.top nav.nav::-webkit-scrollbar { display: none; }
+}
 @media (max-width: 720px) {
   header.top { gap: 12px; padding: 8px 12px; flex-wrap: wrap; }
   header.top nav.nav { order: 3; flex-basis: 100%; overflow-x: auto; gap: 2px;
