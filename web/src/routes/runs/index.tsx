@@ -58,7 +58,7 @@ export default function RunsList({ data }: { data: RunsData | ReviewsData }) {
       <div class="page-heading"><div><h1 class="page">Runs</h1><p class="meta">Follow work from the first step to the pull request.</p></div><a class="button primary" href="/#new-task">New task +</a></div>
       <SubNav items={RUN_VIEWS} current="runs" />
       <div class="run-toolbar">
-        <div class="chips" aria-label="Filter runs by status">{CHIPS.map(c => <a key={c.f} class={c.f === data.status ? "on" : undefined} aria-current={c.f === data.status ? "page" : undefined} href={`/runs?status=${c.f}${data.query ? `&q=${encodeURIComponent(data.query)}` : ""}`}>{c.label} <span class="count">{data.counts[c.f] ?? 0}</span></a>)}</div>
+        <div class="chips" role="group" aria-label="Filter runs by status">{CHIPS.map(c => <a key={c.f} class={c.f === data.status ? "on" : undefined} aria-current={c.f === data.status ? "page" : undefined} href={`/runs?status=${c.f}${data.query ? `&q=${encodeURIComponent(data.query)}` : ""}`}>{c.label} <span class="count">{data.counts[c.f] ?? 0}</span></a>)}</div>
         <form method="get" class="row-actions" role="search"><input type="hidden" name="status" value={data.status} /><input type="search" name="q" aria-label="Search runs" placeholder="Search tasks, run IDs, or models" value={data.query} /><button type="submit">Search</button></form>
       </div>
       <p class="meta">Showing {data.runs.length} of {data.total} runs{data.query ? ` matching “${data.query}”` : ""}. {(data.query || data.status !== "all") && <a href="/runs">Clear filters</a>}</p>

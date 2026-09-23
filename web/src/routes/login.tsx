@@ -86,9 +86,9 @@ export default function Login({ data, actionData }: { data?: Partial<LoginData>;
       )}
       <form method="post">
         <input type="hidden" name="next" value={next} />
-        <input type="text" name="username" placeholder="username" autocomplete="username" autofocus />
-        <input type="password" name="password" placeholder="password" autocomplete="current-password" />
-        {error !== undefined && <p style="color: var(--red)">{error}</p>}
+        <input type="text" name="username" placeholder="username" autocomplete="username" autofocus aria-label="Username" />
+        <input type="password" name="password" placeholder="password" autocomplete="current-password" aria-label="Password" />
+        {error !== undefined && <p style="color: var(--red)" role="alert">{error}</p>}
         <button type="submit">Sign in</button>
       </form>
       <p class="meta" style="margin-top:14px">

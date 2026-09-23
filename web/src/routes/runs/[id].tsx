@@ -394,9 +394,10 @@ export default function RunDetail({ data: initialData }: { data: RunData }) {
             <div class="card attn" style="margin:12px 0">
               <div class="kind" style="margin-bottom:8px">The agent has a question — the run is parked until you answer</div>
               <pre style="white-space:pre-wrap;margin:0 0 8px">{data.question}</pre>
+              {data.takeover.record !== undefined && <TakeoverDecisionWarning record={data.takeover.record} />}
               <form method="post">
                 <input type="hidden" name="eventName" value={data.meta.eventName} />
-                <textarea name="answer" rows={3} style="width:100%;box-sizing:border-box;font:inherit" placeholder="your answer becomes the agent's next observation"></textarea>
+                <textarea name="answer" rows={3} style="width:100%;box-sizing:border-box;font:inherit" placeholder="your answer becomes the agent's next observation" aria-label="Your answer to the agent's question"></textarea>
                 <div class="row-actions" style="margin-top:8px">
                   <button class="approve" type="submit" name="intent" value="answer">
                     Answer
@@ -483,11 +484,13 @@ export default function RunDetail({ data: initialData }: { data: RunData }) {
           {data.meta.eventName === PLAN_EVENT && (
             <div class="card attn" style="margin:12px 0">
               <div class="kind" style="margin-bottom:8px">Plan review — the run is parked until you decide</div>
+              {data.takeover.record !== undefined && <TakeoverDecisionWarning record={data.takeover.record} />}
               <form method="post">
                 {/* Binds this decision to the park being displayed — see the action. */}
                 <input type="hidden" name="eventName" value={data.meta.eventName} />
                 <textarea
                   name="plan"
+                  aria-label="Plan text — edit before approving to redirect the plan"
                   rows={Math.min(14, Math.max(4, (data.plan ?? "").split("\n").length + 1))}
                   style="width:100%;box-sizing:border-box;font:inherit"
                 >
@@ -520,6 +523,9 @@ export default function RunDetail({ data: initialData }: { data: RunData }) {
                   cancel the run.
                 </p>
               )}
+              {data.meta.eventName !== undefined && data.takeover.record !== undefined && (
+                <TakeoverDecisionWarning record={data.takeover.record} />
+              )}
               {data.meta.eventName !== undefined &&
                 data.meta.eventName !== PLAN_EVENT &&
                 data.meta.eventName !== UPGRADE_HOLD_EVENT &&
@@ -543,7 +549,7 @@ export default function RunDetail({ data: initialData }: { data: RunData }) {
           <nav class="settings-nav" aria-label="Run workspace">{['conversation','review','changes','verification','files','activity'].map(view=><a key={view} href={`/runs/${data.runId}?view=${view}`} class={data.view===view?'active':undefined} aria-current={data.view===view?'page':undefined}>{view.charAt(0).toUpperCase()+view.slice(1)}</a>)}</nav>
           {['conversation','review'].includes(data.view) && <div class={data.view === 'review' ? 'run-review-grid' : ''}><div>
             {data.ancestors.map(h => <details class="disclosure"><summary>Earlier: {h.task.slice(0,100)} · {h.runId}</summary><a href={`/runs/${h.runId}`}>Open run</a><Conversation messages={h.messages}/></details>)}
-            <div class="conversation-scroll" tabIndex={0} aria-label="Conversation history"><Conversation messages={data.messages} /></div><div id="reply"><RunComposer data={data}/></div>
+            <div class="conversation-scroll" role="region" tabIndex={0} aria-label="Conversation history"><Conversation messages={data.messages} /></div><div id="reply"><RunComposer data={data}/></div>
           </div>{data.view === 'review' && <aside class="review-evidence"><ForgePanel data={data}/><Changes snapshots={data.snapshots} pr={data.evidence.pr} sha={data.evidence.sha}/><Verification data={data.evidence}/></aside>}</div>}
           {data.view === 'files' && <section><h2 class="section">Repository files</h2><details class="disclosure"><summary>Workspace recovery</summary><p class="meta">{data.recovery?.snapshotAt ? `Last recorded snapshot: ${data.recovery.snapshotAt}. Retention has not been checked.` : "No workspace snapshot is recorded."}</p><p class="meta">{data.recovery?.restoredAt ? `Last restored: ${data.recovery.restoredAt}. ${data.recovery.checked ? "Repository validation passed." : "Repository validation was not recorded for this run."}` : "No workspace restore is recorded."}</p>{data.recovery?.warm && <p class="meta">This run uses a warm volume. Container snapshots do not establish recovery of that volume.</p>}</details><p class="meta">Inspect up to 200 tracked file names and the first 10,000 characters of a file at the workspace’s current HEAD. Inspect live changes to see tracked edits and untracked file names. This is a read-only observation while the agent may still be working. Availability depends on sandbox retention.</p><form method="post" class="row-actions"><button name="intent" value="changes">Inspect live changes</button><button name="intent" value="files">List files</button><input name="path" placeholder="src/example.ts" aria-label="Repository file path"/><button name="intent" value="file">Read file</button></form>{data.workspace && <p class="meta">Last inspection: {data.workspace.kind ?? "file"}{data.workspace.path ? ` · ${data.workspace.path}` : ""} · {data.workspace.at}{data.workspace.truncated ? " · partial output" : ""}</p>}{data.workspace?.error && <p class="notice bad">{data.workspace.error}</p>}{data.workspace?.output !== undefined && <pre class="workspace-file">{data.workspace.output}</pre>}<p class="meta">Requests are handled by the worker; refresh to see the result.</p><a href={`/runs/${data.runId}?view=files`}>Refresh files</a></section>}
 
@@ -740,6 +746,22 @@ function RunComposer({data}: {data: RunData}) {
 }
 
 /**
+ * S12 residual: a held workspace changes what a decision means. Deciding is
+ * safe — driveOne holds execution until handback — but the resumed agent
+ * builds on the holder's edits, not the tree the decision was reviewed
+ * against. Rendered on every decision surface while a lease is live.
+ */
+function TakeoverDecisionWarning({ record }: { record: NonNullable<RunData["takeover"]["record"]> }) {
+  return (
+    <p class="notice warn" role="note">
+      This run's workspace is currently held by {record.holder} until{" "}
+      {record.expiresAt.replace("T", " ").slice(0, 19)} UTC. Deciding now is safe — execution waits
+      for handback — but the agent will resume with the holder's edits in the workspace.
+    </p>
+  );
+}
+
+/**
  * Package C: the workspace takeover card. Pause is the run's own park —
  * takeover is offered exactly there, at a decision boundary the resumed
  * agent consumes. The card renders four states and refuses to guess: an
@@ -753,6 +775,17 @@ function TakeoverCard({ data }: { data: RunData }) {
   const record = t.record;
   if (record === undefined && !t.available && t.history.length === 0) return null;
   const mine = record !== undefined && record.holder === data.viewer;
+  // S12 residual: reconnect honesty. An abandoned lease expires on its own and
+  // the sweep moves it to history (outcome "lapsed") with the edits preserved
+  // on disk. When the VIEWER's own session lapsed within the last hour, say so
+  // instead of silently offering a cold re-acquire. Client-side by design: the
+  // 4s refresh re-renders this as the hour window closes.
+  const lapsed =
+    record === undefined && data.viewer !== null
+      ? t.history.filter(
+          (s) => s.holder === data.viewer && s.outcome === "lapsed" && Date.now() - Date.parse(s.releasedAt) < 3_600_000,
+        ).at(-1)
+      : undefined;
   return <section class="card" style="margin:12px 0">
     <div class="row-actions" style="gap:12px;align-items:center">
       <h2 class="section" style="margin:0">Workspace takeover</h2>
@@ -761,6 +794,11 @@ function TakeoverCard({ data }: { data: RunData }) {
       )}
       {record !== undefined && <span class="meta">until {record.expiresAt.replace("T", " ").slice(0, 19)} UTC — every action renews; an abandoned lease expires on its own</span>}
     </div>
+    {lapsed !== undefined && (
+      <p class="notice warn" role="note">
+        Your last takeover lapsed at {lapsed.releasedAt.replace("T", " ").slice(0, 19)} UTC — edits on disk were preserved; take over again to continue.
+      </p>
+    )}
     {data.takeoverPending && <p class="meta" role="status">Requested — the worker answers within a few seconds. This card refreshes automatically.</p>}
     {t.reply?.error && <p class="notice bad" role="alert">{t.reply.error}</p>}
     {t.reply && t.reply.output !== undefined && (

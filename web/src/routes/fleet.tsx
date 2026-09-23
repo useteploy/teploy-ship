@@ -145,7 +145,7 @@ export default function Fleet({ data }: { data: FleetData | SpendData }) {
           const pct = w.maxConcurrent > 0 ? Math.min(100, (w.activeRuns / w.maxConcurrent) * 100) : 0;
           const full = w.activeRuns >= w.maxConcurrent;
           return (
-            <div key={w.owner} class="card" style={w.online ? "" : "opacity:.55"}>
+            <div key={w.owner} class="card">
               <div class="row-actions" style="flex-wrap:wrap;gap:12px;align-items:center">
                 <span class={`status ${w.online ? "completed" : "failed"}`}>{w.online ? "online" : "stale"}</span>
                 <span style="font-weight:600">{w.host}</span>
@@ -169,7 +169,12 @@ export default function Fleet({ data }: { data: FleetData | SpendData }) {
                 <span class="meta">{w.activeRuns}/{w.maxConcurrent} slots</span>
                 <span class="meta">seen {ago(w.ageMs)}</span>
               </div>
-              <div style="margin-top:8px;height:6px;background:var(--bg);border-radius:4px;overflow:hidden">
+              {/* The card itself is NOT dimmed for an offline worker: opacity
+                  dropped its informational text to 2.4-2.7:1 on the dark
+                  background. The de-emphasis lives on the decorative meter
+                  (exempt from contrast — the "X/Y slots" text carries the
+                  number); the red "stale" chip carries the state. */}
+              <div style={`margin-top:8px;height:6px;background:var(--bg);border-radius:4px;overflow:hidden${w.online ? "" : ";opacity:.55"}`}>
                 <div style={`height:100%;width:${pct}%;background:${full ? "var(--yellow)" : "var(--green)"}`} />
               </div>
               <div class="meta" style="margin-top:8px;font-size:12px">

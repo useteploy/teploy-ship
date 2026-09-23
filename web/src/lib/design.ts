@@ -8,13 +8,22 @@ input, select, textarea { min-width: 0; max-width: 100%; }
 textarea { resize: vertical; }
 input[type=search] { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font: inherit; }
 button:disabled { opacity: .5; cursor: not-allowed; }
+/* Informational status text carries its palette colour (contrast on bg/panel
+   verified >= 4.5:1). Several of these class combinations were used in markup
+   with no rule behind them, so the colour never rendered. Bulletin's banners
+   are deliberately untouched (they colour the border, not the text). */
+.good { color: var(--green); }
+.notice.bad { color: var(--red); }
+.notice.warn { color: var(--yellow); }
+.check-row .bad, .card .bad { color: var(--red); }
+.card .ok { color: var(--green); }
 .button { display: inline-flex; align-items: center; justify-content: center; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); font-size: 12px; white-space: nowrap; }
 .button:hover { border-color: var(--dim); text-decoration: none; }
 button.primary, .button.primary { color: var(--green); border-color: var(--green); }
 .skip-link { position: fixed; top: -60px; left: 12px; z-index: 100; padding: 10px; background: var(--panel); }
 .skip-link:focus { top: 8px; }
 h1.page, .eyebrow, .meta, code, .config-value { overflow-wrap: anywhere; }
-.page-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+.page-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 18px; }
 .page-heading .meta { margin-bottom: 0; }
 .eyebrow { font-size: 12px; color: var(--dim); margin-bottom: 10px; }
 .row-actions { flex-wrap: wrap; }
