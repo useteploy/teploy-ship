@@ -77,6 +77,11 @@ export interface RunData {
     artifactDigest?: string;
     actor?: string;
     reason?: string;
+    /** S15 wired health: healthy/degraded/unknown + why, never silent. */
+    health?: string;
+    healthReason?: string;
+    /** Additive rollback receipts (the operation rides, never a state change). */
+    rollback?: { state: string; actor: string; reason: string; requestedAt: string; finishedAt?: string; evidence?: string };
   };
   deliveryError?: string;
   /** True when this run is a scan, even if it found nothing. */

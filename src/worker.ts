@@ -3,7 +3,7 @@ import { intakeJourney } from "./journeys.js";
 import { sweepWorkflowSchedules, sweepScheduleDigests } from "./workflow-schedules.js";
 import { serveWorkspaceRequests } from "./workspace-requests.js";
 import { loadTakeover } from "./takeover.js";
-import { sweepIncidents } from "./incidents.js";
+import { sweepIncidents, sweepIncidentRecovery, type IncidentRecoveryReader } from "./incidents.js";
 import { launchNext, listCoordinations } from "./coordination.js";
 import { policyFromEnv as workspacePolicyFromEnv } from "./repo-policy.js";
 import { NondeterminismError, completeSleep, executeRunExclusive } from "@neutron-build/workflow";
@@ -20,6 +20,7 @@ import { isAskEvent, pendingQuestion } from "./ask.js";
 import { hostRunner, previewTargetFromEnv, sweepStalePreviewCheckouts } from "./deploy.js";
 import type { CommandRunner } from "./deploy.js";
 import { telemetryTargetFromEnv } from "./observe.js";
+import { readServiceHealth } from "./observe.js";
 import { testTargetFromEnv } from "./tests.js";
 import type { ExecutorProvider, RunUsage, SandboxOverrides } from "./durable.js";
 import { enqueueRun, proposeExternal } from "./runtime.js";
@@ -156,6 +157,36 @@ export interface WorkerOptions {
    */
   maxSteps?: number;
   log?: (line: string) => void;
+}
+
+/**
+ * The observed-recovery loop's health reader (S17 completion): reads ONE
+ * service's RED numbers over the last poll window through the share-token
+ * surface. Built from OBSERVE_URL + OBSERVE_READ_TOKEN only — the service
+ * comes from each incident's own attribution at call time, so unlike
+ * telemetryTargetFromEnv there is no OBSERVE_SERVICE/OBSERVE_REPO floor (and
+ * `repo` is carried as the incident's attributed repo, keeping the
+ * wrong-service lesson recorded on TelemetryTarget.repo honored: the read is
+ * only ever judged against the incident that named the service). Unset env ⇒
+ * undefined ⇒ the sweep leg is inert.
+ */
+function incidentRecoveryReader(env: NodeJS.ProcessEnv = process.env): IncidentRecoveryReader | undefined {
+  const url = (env.OBSERVE_URL ?? "").replace(/\/+$/, "");
+  const token = (env.OBSERVE_READ_TOKEN ?? "").trim();
+  if (url === "" || token === "") return undefined;
+  const windowMs = (Number(env.SHIP_INCIDENT_RECOVERY_POLL_SECONDS) > 0
+    ? Number(env.SHIP_INCIDENT_RECOVERY_POLL_SECONDS)
+    : 60) * 1_000;
+  return (service, metric) => {
+    // Only the error family is watchable (incidents.ts's
+    // recoveryMetricWatchable); the read is generic and the metric decides.
+    void metric;
+    return readServiceHealth(
+      { url, token, service, repo: `incident:${service}` },
+      new Date(Date.now() - windowMs),
+      new Date(),
+    );
+  };
 }
 
 /**
@@ -1663,6 +1694,27 @@ export function startWorker(options: WorkerOptions): {
       // never thrown — an incident store that cannot be read must not stop
       // the queue).
       .then(() => sweepIncidents(options.runtime).catch(e => log(`[worker] incidents sweep: ${e instanceof Error ? e.message : String(e)}`)))
+      // S17 completion: the observed-recovery loop. Watchable incidents (an
+      // observe-sourced alert whose metric the share-token surface answers
+      // for) get their service read every poll tick; healthy for the whole
+      // window flips them to `recovered` with the reads as evidence. Inert
+      // without OBSERVE_URL + OBSERVE_READ_TOKEN (the same wiring the
+      // delivery health verdict uses) — and unlike that leg there is no
+      // OBSERVE_SERVICE/OBSERVE_REPO floor here because the service to read
+      // comes from each incident's own attribution, never from worker env.
+      .then(() => (async () => {
+        const readHealth = incidentRecoveryReader();
+        if (readHealth === undefined) return;
+        const r = await sweepIncidentRecovery(
+          { config: options.runtime.config, readHealth },
+          {
+            ...(Number(process.env.SHIP_INCIDENT_RECOVERY_MINUTES) > 0 ? { windowMinutes: Number(process.env.SHIP_INCIDENT_RECOVERY_MINUTES) } : {}),
+            ...(Number(process.env.SHIP_INCIDENT_RECOVERY_POLL_SECONDS) > 0 ? { pollSeconds: Number(process.env.SHIP_INCIDENT_RECOVERY_POLL_SECONDS) } : {}),
+          },
+        );
+        if (r.recovered > 0) log(`[worker] incidents: ${r.recovered} recovered`);
+        for (const e of r.errors) log(`[worker] incidents recovery: ${e.id}: ${e.error}`);
+      })().catch(e => log(`[worker] incident recovery: ${e instanceof Error ? e.message : String(e)}`)))
       // S18: advance coordinations — launch the next child when its
       // dependency merged, hold on failure. One pass per coordination is
       // cheap; the record's own fencing makes a slow pass harmless.

@@ -83,7 +83,14 @@ export const middleware: MiddlewareFn = async (request, _context, next) => {
   // Ship starts the handshake now, so the operator is already signed in here
   // before anything begins and the exemption bought nothing but a route outside
   // the role gate. Both /connect pages check admin themselves as well.
-  if (path === "/login" || path === "/health" || path.startsWith("/hooks/") || path.startsWith("/bulletin/") || path.startsWith("/oidc/") || path.startsWith("/assets/") || path === "/favicon.ico") {
+  // /api/incidents/intake is the one /api/* exception: it is Observe's
+  // machine POST surface (S17 auto-intake), authenticated by its own
+  // HMAC-SHA256 signature check on every request (web/src/lib/
+  // incident-intake.server.ts) — a shared secret, not a session, because the
+  // sender is Observe's webhook worker, not a browser. Exempting it from the
+  // bearer gate moves the authority to that check; an unsigned or wrongly
+  // signed POST still gets 401 from the route itself.
+  if (path === "/login" || path === "/health" || path.startsWith("/hooks/") || path.startsWith("/bulletin/") || path.startsWith("/oidc/") || path.startsWith("/assets/") || path === "/favicon.ico" || path.startsWith("/api/incidents/intake")) {
     return withSecurityHeaders(await next(), request);
   }
 
