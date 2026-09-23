@@ -22,6 +22,11 @@ import { join } from "node:path";
 import type { NucleusPgwire } from "./nucleus-pgwire.js";
 import { readJsonFile, updateJsonFile } from "./file-store.js";
 import { stateDir } from "./run-store.js";
+import { mayDo } from "./governance.js";
+import type { GovernanceStore } from "./governance.js";
+import type { UserStore } from "./users.js";
+import { DEFAULT_WINDOW_MINUTES, readServiceHealth, telemetryAppliesTo, telemetryTargetFromEnv } from "./observe.js";
+import type { TelemetryTarget } from "./observe.js";
 
 /** What a delivery record holds. Additive only; fields grow, never rename. */
 export interface DeliveryRecord {
@@ -49,10 +54,11 @@ export interface DeliveryRecord {
   reason?: string;
   /**
    * Health honesty (contract Q3): a confirmed delivery carries an explicit
-   * `unknown` unless a telemetry binding exists for the destination —
-   * recorded, never silently omitted, never blocking.
+   * verdict — a real one when an Observe service is bound to the destination
+   * and answers, `unknown` with a reason when none is configured or it could
+   * not be read. Recorded, never silently omitted, never blocking.
    */
-  health?: "unknown";
+  health?: DeliveryHealth;
   healthReason?: string;
   /**
    * Rollback is a SEPARATE recorded operation, never a delivery state
@@ -72,6 +78,14 @@ export interface DeliveryRecord {
 }
 
 export type DeliveryState = "proposed" | "approved" | "executing" | "confirmed" | "unknown" | "failed" | "held";
+
+/**
+ * What a confirmed delivery says about the target it shipped to. `unknown` is
+ * a RECORDED answer ("no service bound", "observe unreachable"), never an
+ * omission; `healthy`/`degraded` are Observe's RED metrics read back over the
+ * window since the delivery — a correlation around a change, not proof of one.
+ */
+export type DeliveryHealth = "unknown" | "healthy" | "degraded";
 
 /** Legal transitions; everything else is a store-level refusal. */
 const ALLOWED: Record<DeliveryState, DeliveryState[]> = {
@@ -101,7 +115,10 @@ export function requiredForTransition(to: DeliveryState): (keyof DeliveryRecord)
     case "approved":
       return ["destination", "recoveryVersion", "actor"];
     case "confirmed":
-      return ["artifactDigest"];
+      // health included on purpose (contract Q3): the store itself refuses a
+      // confirmation that is silent about the target's health, the same way
+      // it refuses one without its artifact identity.
+      return ["artifactDigest", "health"];
     default:
       return [];
   }
@@ -328,6 +345,106 @@ function rollbackRequestRefusal(record: DeliveryRecord): string | null {
 }
 
 /**
+ * The live stores an execution re-resolves an approving actor against (S15,
+ * the contract's "actor's authority revoked between approval and execution →
+ * refuse"): the same governance document the promote route reads through
+ * `may()`, and the account store a local principal's CURRENT role comes from.
+ */
+export interface ApproveAuthoritySources {
+  governance: Pick<GovernanceStore, "get">;
+  users: Pick<UserStore, "get">;
+}
+
+/** What re-resolving the recorded actor established. */
+export type ActorRecheck = { outcome: "pass" } | { outcome: "hold"; reason: string };
+
+/**
+ * Re-resolve the actor an approval records against the CURRENT governance and
+ * account stores, exactly the question `may("approve", principal)` answered
+ * when the approval was given — asked again at execution, because between the
+ * two the actor may have lost the authority (role removed, account deleted,
+ * policy narrowed). Every failure HOLDS; nothing here executes or throws.
+ *
+ * - the record names no actor → hold (an approval that cannot be attributed
+ *   cannot execute);
+ * - `token`, the reserved identity of the SHIP_WEB_TOKEN master credential
+ *   (users.ts), always passes — it is the operator's own hand;
+ * - an unreadable store (either one) → hold naming it: never fail-closed
+ *   silently, never execute on an unreadable check;
+ * - a local account that no longer exists → hold (the approval died with the
+ *   account);
+ * - an SSO principal (`issuer#sub` — "#" cannot appear in a local username)
+ *   cannot have its IdP-asserted role re-read worker-side, so it passes only
+ *   when the CURRENT approve grant names it as a stable id;
+ * - everyone else passes iff `mayDo` says the CURRENT grant still covers
+ *   their role or their named id.
+ */
+export async function recheckApprovingActor(
+  actor: string | undefined,
+  sources: ApproveAuthoritySources | undefined,
+): Promise<ActorRecheck> {
+  if (actor === undefined || actor === "") {
+    return { outcome: "hold", reason: "the record names no approving actor — an approval that cannot be attributed cannot execute" };
+  }
+  if (actor === "token") return { outcome: "pass" };
+  if (sources === undefined) {
+    return {
+      outcome: "hold",
+      reason: `the approving actor ${actor} could not be rechecked: this execution path is not bound to the governance store — wire the sweep's governance and users stores in before approving deliveries`,
+    };
+  }
+  let governance;
+  try {
+    governance = await sources.governance.get();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      outcome: "hold",
+      reason: `governance could not be read to recheck the approving actor ${actor} (${message}) — held rather than executed on an unreadable check`,
+    };
+  }
+  const grant = governance.authority.approve;
+  // An SSO principal's role lives in the IdP's claims per login and cannot be
+  // re-read here; the one authority this install CAN re-check for it is a
+  // named grant, which is why grants carry stable ids.
+  if (actor.includes("#")) {
+    return grant.users.includes(actor)
+      ? { outcome: "pass" }
+      : {
+          outcome: "hold",
+          reason: `${actor} is not a resolvable account and is not named in the current approve grant — an IdP-asserted role cannot be re-read at execution; re-approve under a principal this install can re-check`,
+        };
+  }
+  let user;
+  try {
+    user = await sources.users.get(actor);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      outcome: "hold",
+      reason: `the approving actor ${actor} could not be resolved against the account store (${message}) — held rather than executed on an unreadable check`,
+    };
+  }
+  if (user === null) {
+    return {
+      outcome: "hold",
+      reason: `the approving actor ${actor} no longer exists in the account store — the approval died with the account; re-approve under a current authority`,
+    };
+  }
+  if (mayDo(governance, "approve", { user: actor, role: user.role })) {
+    return { outcome: "pass" };
+  }
+  const roles = grant.roles.join(", ");
+  const users = grant.users.join(", ");
+  return {
+    outcome: "hold",
+    reason:
+      `the approving actor ${actor} (role ${user.role}) no longer holds the approve authority — ` +
+      `the current grant covers roles [${roles === "" ? "none" : roles}] and named users [${users === "" ? "none" : users}]; re-approve under a current authority`,
+  };
+}
+
+/**
  * Execute one approved delivery against the TRUSTED working copy. This is
  * the S14 execution boundary; it runs on the worker host via argv arrays
  * (the deploy.ts discipline — never a shell), and it ACTS only when every
@@ -343,6 +460,8 @@ export async function executeDelivery(
     dir?: string;
     run: (argv: string[], opts: { cwd: string; timeoutMs: number }) => Promise<{ code: number; stdout: string; stderr: string }>;
     now?: () => string;
+    /** The live governance/account stores for the S15 actor recheck. */
+    authority?: ApproveAuthoritySources;
   },
 ): Promise<DeliveryRecord> {
   const now = options.now?.() ?? new Date().toISOString();
@@ -351,6 +470,16 @@ export async function executeDelivery(
     state: "held",
     updatedAt: now,
   });
+  // The revalidation the approval cannot do for itself: its actor's authority
+  // is a fact about NOW, not about approval time. Runs before anything else
+  // because authority outranks infrastructure — and before any command,
+  // because a stale authority must not even read the trusted copy. Same
+  // held-semantics as every other pre-target failure (legal transition,
+  // evidence recorded, re-approval possible).
+  const recheck = await recheckApprovingActor(record.actor, options.authority);
+  if (recheck.outcome === "hold") {
+    return { ...record, ...patch({ reason: recheck.reason }) };
+  }
   if (options.dir === undefined || options.dir === "") {
     return { ...record, ...patch({ reason: "no trusted delivery directory configured (SHIP_DELIVERY_DIR); provision one before approving deliveries" }) };
   }
@@ -451,11 +580,110 @@ export async function executeDelivery(
 
 /** What reading the target back proved. */
 export type ReadBackOutcome =
-  | { outcome: "confirmed"; detail: string }
+  | {
+      outcome: "confirmed";
+      detail: string;
+      /** The health verdict recorded WITH the confirmation (contract Q3). */
+      health: DeliveryHealth;
+      healthReason: string;
+    }
   /** The target is readable and is NOT running the approved delivery. */
   | { outcome: "mismatch"; detail: string }
   /** The target could not be read; the record stays unknown and retries. */
   | { outcome: "unreadable"; detail: string };
+
+/**
+ * The telemetry binding a health verdict is read through (S15, contract Q3):
+ * the worker's Observe wiring — `telemetryTargetFromEnv()`, the same client
+ * the evidence legs use — plus the delivery repo's project record, whose
+ * `observeService` names the service this destination reports as. The
+ * credential stays worker wiring; the SERVICE is a fact about the repo
+ * (effectiveTelemetryTarget's rule, restated).
+ */
+export interface ObserveHealthBinding {
+  /** OBSERVE_URL + OBSERVE_READ_TOKEN (+ default OBSERVE_SERVICE/OBSERVE_REPO). */
+  target?: TelemetryTarget;
+  /** The project record for the delivery's repo, when one exists. */
+  project?: { observeService?: string } | null;
+  now?: Date;
+  /** Injectable for tests; TelemetryTarget.fetch otherwise. */
+  fetch?: typeof globalThis.fetch;
+}
+
+/**
+ * Pre-decided (S15): more than one percentage point of errors in the window
+ * is "degraded" — the same absolute floor defaultRegressionThresholds lays
+ * down for deltas. A starting value, not a measurement; it reverses on the
+ * first verdict an operator disagrees with, which is what building the
+ * observation half first is for.
+ */
+const DEGRADED_ERROR_RATE = 0.01;
+
+/**
+ * The health verdict for a delivery's destination, as a decision tree with
+ * no throwing branch (contract Q3: recorded, never silent, never blocking):
+ *
+ *   project.observeService set  → read THAT service (the project record IS
+ *                                 the attribution); no worker telemetry
+ *                                 wiring to read it with → unknown
+ *                                 "observe unreachable: ..."
+ *   else worker default target, but only when it is ABOUT this repo
+ *   (telemetryAppliesTo — a confident measurement of the wrong service is
+ *   worse than silence) → read it
+ *   else                          → unknown "no observe service configured"
+ *
+ *   read rejected (unreachable, refused, unreadable) → unknown
+ *   "observe unreachable: <why>"
+ *   read answered but the service served nothing    → unknown "no traffic"
+ *   (a verdict off zero requests is noise dressed as evidence)
+ *   otherwise → healthy/degraded against the error floor, with the RED
+ *   numbers stated in the evidence — a measurement, not proof the delivery
+ *   caused anything.
+ */
+export async function observeHealthFor(
+  repo: string,
+  since: string | undefined,
+  binding: ObserveHealthBinding,
+): Promise<{ health: DeliveryHealth; healthReason: string }> {
+  const to = binding.now ?? new Date();
+  const service = binding.project?.observeService?.trim() ?? "";
+  let target: TelemetryTarget | undefined;
+  if (service !== "") {
+    if (binding.target === undefined) {
+      return {
+        health: "unknown",
+        healthReason: `observe unreachable: this worker has no telemetry wiring (OBSERVE_URL/OBSERVE_READ_TOKEN) to read the project's service ${service}`,
+      };
+    }
+    target = { ...binding.target, service, repo };
+  } else if (binding.target !== undefined && telemetryAppliesTo(binding.target, repo)) {
+    target = binding.target;
+  } else {
+    return { health: "unknown", healthReason: "no observe service configured" };
+  }
+  // The window runs from the delivery's receipt (`updatedAt` when it went
+  // `unknown`) to now — the promotion's own aftermath, not an arbitrary
+  // trailing window that would mix pre-deploy traffic into the verdict.
+  const sinceMs = Date.parse(since ?? "");
+  const fromMs = Number.isFinite(sinceMs) ? Math.min(sinceMs, to.getTime()) : to.getTime() - DEFAULT_WINDOW_MINUTES * 60_000;
+  const spanMin = Math.max(1, Math.round((to.getTime() - fromMs) / 60_000));
+  const windowLabel = Number.isFinite(sinceMs) ? `in the ${spanMin} min since the delivery` : `over the last ${spanMin} min`;
+  const read = await readServiceHealth(
+    { ...target, ...(binding.fetch !== undefined ? { fetch: binding.fetch } : {}) },
+    new Date(fromMs),
+    to,
+  );
+  if (read.kind === "rejected") {
+    return { health: "unknown", healthReason: `observe unreachable: ${read.reason}` };
+  }
+  if (read.kind === "absent" || read.health.requests === 0) {
+    return { health: "unknown", healthReason: `observe: no traffic for ${target.service} ${windowLabel} — health unmeasured, not green` };
+  }
+  const measured = `${target.service} served ${read.health.requests} requests, ${read.health.errors} errors (${(read.health.errorRate * 100).toFixed(2)}%), p95 ${Math.round(read.health.p95)}ms ${windowLabel}`;
+  return read.health.errorRate > DEGRADED_ERROR_RATE
+    ? { health: "degraded", healthReason: `observe: degraded — ${measured} (over the ${(DEGRADED_ERROR_RATE * 100).toFixed(2)}% error floor)` }
+    : { health: "healthy", healthReason: `observe: healthy — ${measured}` };
+}
 
 /**
  * Reconcile an `unknown` delivery by READING the target back — never by
@@ -471,6 +699,12 @@ export async function readBackDelivery(
   options: {
     dir?: string;
     run: (argv: string[], opts: { cwd: string; timeoutMs: number }) => Promise<{ code: number; stdout: string; stderr: string }>;
+    /**
+     * The telemetry binding the health verdict is read through. Absent means
+     * the worker's own env wiring (telemetryTargetFromEnv) — no project
+     * override, because the project store is the caller's to hand in.
+     */
+    observe?: ObserveHealthBinding;
   },
 ): Promise<ReadBackOutcome> {
   if (options.dir === undefined || options.dir === "") {
@@ -511,7 +745,17 @@ export async function readBackDelivery(
       detail: `state names ${expected} but the running ${running.length === 0 ? "containers are none" : `container image(s) [${images}]`} — not the approved artifact ${record.artifactDigest}`,
     };
   }
-  return { outcome: "confirmed", detail: `target read back: version ${expected} serving on the approved artifact` };
+  // Confirmed — so the health verdict is read NOW and travels with the
+  // confirmation (contract Q3): recorded, never silent, and never blocking —
+  // every failure inside observeHealthFor comes back an honest `unknown`
+  // with the reason, and the confirmation below stands regardless.
+  const health = await observeHealthFor(record.repo, record.updatedAt, options.observe ?? { target: telemetryTargetFromEnv() });
+  return {
+    outcome: "confirmed",
+    detail: `target read back: version ${expected} serving on the approved artifact`,
+    health: health.health,
+    healthReason: health.healthReason,
+  };
 }
 
 /**
