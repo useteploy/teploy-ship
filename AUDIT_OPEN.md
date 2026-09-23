@@ -227,3 +227,16 @@ accepted intents without overriding decisions, recover warm-volume bytes, enforc
 exclusive writable workspace leases, and bind production promotion to trusted
 target configuration, artifact digest, approval and retained rollback version.
 A successful preview is not evidence that those production guarantees exist.
+
+## 2026-09-22 — S17 incident negative guards (Track D, orchestrator-recorded)
+
+The two S17 negative guards are covered structurally and by unit test, not yet
+by a live seeded incident: (1) wrong-service attribution cannot pass —
+`attributeServiceMatch` (src/incidents.ts) refuses on zero matches, ambiguous
+substring matches, and duplicate exact matches, listing candidates instead of
+guessing; (2) an evidence-free diagnosis does not grade as confident —
+`gradeDiagnosis` steps down claims without line-level citations and forces
+low-confidence diagnoses to report uncertainty and escalation, and the digest
+refuses any run whose recorded input is not `mode:"scan"`. Live seeded-incident
+proof (alert → attribution → diagnosis with a real wrong-hint attempt) remains
+open with the S17 starter.
