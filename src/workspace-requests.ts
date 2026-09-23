@@ -33,6 +33,18 @@ import {
   type TakeoverRecord,
   type TakeoverSession,
 } from "./takeover.js";
+import {
+  TAKEOVER_BROWSER_OPS_LIMIT,
+  TAKEOVER_BROWSER_SCREENSHOT_CAP,
+  TAKEOVER_BROWSER_TIMEOUT_MS,
+  browserOpCommand,
+  browserOpSummary,
+  browserReplyOutput,
+  encodeBrowserAction,
+  parseBrowserAction,
+  parseDriverReply,
+  type BrowserAction,
+} from "./takeover-browser.js";
 export type WorkspaceRequest = {
   id: string;
   runId: string;
@@ -47,6 +59,7 @@ export type WorkspaceRequest = {
     | "takeover-exec"
     | "takeover-read"
     | "takeover-console"
+    | "takeover-browser"
     | "takeover-changes"
     | "takeover-release";
   path?: string;
@@ -58,6 +71,8 @@ export type WorkspaceRequest = {
   reason?: string;
   /** takeover-console: the submitted command. */
   command?: string;
+  /** takeover-browser: the parsed, validated browser action (takeover-browser.ts). */
+  browser?: BrowserAction;
 };
 export type WorkspaceReply = {
   id: string;
@@ -72,6 +87,8 @@ export type WorkspaceReply = {
   running?: boolean;
   /** Takeover ops: the live lease state after the operation. */
   takeover?: { holder: string; generation: number; expiresAt: string };
+  /** takeover-browser: the bounded screenshot (base64) and page state for the BROWSER tab's <img>. */
+  browser?: { image?: string; url?: string; width?: number; height?: number; format?: string };
 };
 const PREFIX = "SHIP_WORKSPACE_REQUEST_";
 const TAKEOVER_KINDS = new Set([
@@ -81,6 +98,7 @@ const TAKEOVER_KINDS = new Set([
   "takeover-exec",
   "takeover-read",
   "takeover-console",
+  "takeover-browser",
   "takeover-changes",
   "takeover-release",
 ]);
@@ -98,7 +116,7 @@ export async function requestWorkspace(
   kind: WorkspaceRequest["kind"],
   by: string,
   path?: string,
-  extra?: { content?: string; reason?: string; command?: string },
+  extra?: { content?: string; reason?: string; command?: string; browser?: string },
 ): Promise<WorkspaceRequest> {
   if (!/^[a-zA-Z0-9_-]{1,100}$/.test(runId) || !(await runtime.loadMeta(runId)))
     throw new Error("Run not found");
@@ -119,6 +137,18 @@ export async function requestWorkspace(
     if (command.length > TAKEOVER_CONSOLE_COMMAND_LIMIT || command.includes("\0"))
       throw new Error(`Console commands are limited to ${TAKEOVER_CONSOLE_COMMAND_LIMIT} characters`);
   }
+  let browser: BrowserAction | undefined;
+  if (kind === "takeover-browser") {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(extra?.browser ?? "");
+    } catch {
+      throw new Error("Invalid browser action.");
+    }
+    const action = parseBrowserAction(parsed);
+    if (!action.ok) throw new Error(action.reason);
+    browser = action.action;
+  }
   if (kind === "takeover-release" && extra?.reason !== undefined && extra.reason.length > 4000)
     throw new Error("Handback note must be under 4000 characters");
   const request: WorkspaceRequest = {
@@ -131,6 +161,7 @@ export async function requestWorkspace(
     ...(content !== undefined ? { content } : {}),
     ...(extra?.reason !== undefined ? { reason: extra.reason } : {}),
     ...(extra?.command !== undefined ? { command: extra.command } : {}),
+    ...(browser !== undefined ? { browser } : {}),
   };
   await runtime.config.set(requestKey(runId), JSON.stringify(request), by);
   return request;
@@ -522,6 +553,47 @@ async function serveTakeoverRequest(
         }
         throw e;
       }
+    } else if (req.kind === "takeover-browser") {
+      // The BROWSER tab: one action per request through the same fenced
+      // execAs as the console. The driver runs inside the sandbox; the
+      // screenshot comes back bounded, and every op is recorded in the
+      // session like a console command. No lease credential leaves this
+      // process, and the dashboard only ever names who asked.
+      const action = parseBrowserAction(req.browser);
+      if (!action.ok) throw new Error(action.reason);
+      try {
+        await renew();
+        const r = await lease.execAs(
+          handle,
+          cred,
+          browserOpCommand(encodeBrowserAction(action.action)),
+          { timeoutMs: TAKEOVER_BROWSER_TIMEOUT_MS, maxOutputBytes: TAKEOVER_BROWSER_SCREENSHOT_CAP + 65_536 },
+        );
+        const driver = parseDriverReply(r);
+        if (!driver.ok) throw new Error(driver.reason);
+        record.browserOps = [...(record.browserOps ?? []), browserOpSummary(action.action)].slice(
+          -TAKEOVER_BROWSER_OPS_LIMIT,
+        );
+        await saveTakeover(runtime.config, record);
+        const summary = browserOpSummary(action.action);
+        reply.output = browserReplyOutput(summary, driver.reply);
+        if (driver.reply.image !== undefined || driver.reply.url !== undefined) {
+          reply.browser = {
+            ...(driver.reply.image !== undefined ? { image: driver.reply.image } : {}),
+            ...(driver.reply.url !== undefined ? { url: driver.reply.url } : {}),
+            ...(driver.reply.width !== undefined ? { width: driver.reply.width } : {}),
+            ...(driver.reply.height !== undefined ? { height: driver.reply.height } : {}),
+            ...(driver.reply.format !== undefined ? { format: driver.reply.format } : {}),
+          };
+        }
+        reply.takeover = { holder: record.holder, generation: record.generation, expiresAt: record.expiresAt };
+      } catch (e) {
+        if (lost(e)) {
+          await lapseTakeover(runtime, executor, record, e instanceof Error ? e.message : String(e));
+          throw new Error("The takeover lease was lost — the browser action did not run under your ownership. Acquire again.");
+        }
+        throw e;
+      }
     } else if (req.kind === "takeover-changes") {
       try {
         await renew();
@@ -546,6 +618,25 @@ async function serveTakeoverRequest(
       } catch {
         diffError = "diff unavailable at handback";
       }
+      // If the BROWSER tab was used, close it under the still-held lease:
+      // the close op wipes the ephemeral profile (cookies, storage) so
+      // nothing browser-shaped survives the session. Best-effort with the
+      // disposition recorded — a failed close is reported, not hidden.
+      let browserNote: string | undefined;
+      if ((record.browserOps?.length ?? 0) > 0) {
+        try {
+          const r = await lease.execAs(
+            handle,
+            cred,
+            browserOpCommand(encodeBrowserAction({ action: "close" })),
+            { timeoutMs: 20_000, maxOutputBytes: 65_536 },
+          );
+          browserNote =
+            r.exitCode === 0 ? "browser closed, profile wiped" : `browser close exited ${r.exitCode}`;
+        } catch (e) {
+          browserNote = `browser close failed: ${(e instanceof Error ? e.message : String(e)).slice(0, 120)}`;
+        }
+      }
       let outcome: "released" | "lapsed" = "released";
       let outcomeReason: string | undefined;
       try {
@@ -556,7 +647,7 @@ async function serveTakeoverRequest(
         outcomeReason = e instanceof Error ? e.message : String(e);
       }
       const evidence = diff !== "" ? diffEvidence(diff) : undefined;
-      const noteParts = [req.reason, diffError, outcomeReason].filter(
+      const noteParts = [req.reason, diffError, outcomeReason, browserNote].filter(
         (x): x is string => typeof x === "string" && x !== "",
       );
       const session: TakeoverSession = {
@@ -566,6 +657,7 @@ async function serveTakeoverRequest(
         outcome,
         pathsWritten: record.pathsWritten,
         execsRun: record.execsRun,
+        ...(record.browserOps !== undefined && record.browserOps.length > 0 ? { browserOps: record.browserOps } : {}),
         ...(evidence !== undefined ? { diffDigest: evidence.digest, diffExcerpt: evidence.excerpt } : {}),
         ...(noteParts.length > 0 ? { note: noteParts.join("; ").slice(0, 4000) } : {}),
       };
@@ -602,6 +694,13 @@ async function lapseTakeover(
   const events = await runtime.store.load(record.runId).catch(() => []);
   const handle = latestSandboxHandle(events);
   if (handle !== undefined) await executor.lease?.release(handle, record.holder, record.generation).catch(() => {});
+  // Honest browser disposition on lapse: there is no live lease to close the
+  // driver under, so the ephemeral profile stays until the container's own
+  // teardown — recorded in the note rather than claimed as cleaned.
+  const note =
+    (record.browserOps?.length ?? 0) > 0
+      ? `${reason.slice(0, 300)}; browser profile left in place — no live lease to close it under; it is container-ephemeral and excluded from the repository`
+      : reason.slice(0, 300);
   await runtime.config.set(takeoverKey(record.runId), "", record.holder);
   await appendTakeoverHistory(runtime.config, record.runId, {
     holder: record.holder,
@@ -610,7 +709,8 @@ async function lapseTakeover(
     outcome: "lapsed",
     pathsWritten: record.pathsWritten,
     execsRun: record.execsRun,
-    note: reason.slice(0, 300),
+    ...(record.browserOps !== undefined && record.browserOps.length > 0 ? { browserOps: record.browserOps } : {}),
+    note,
   });
 }
 

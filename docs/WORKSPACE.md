@@ -108,7 +108,7 @@ lease is held, nothing else can exec or write in that workspace, and a
 decision delivered mid-takeover makes the run wait for handback instead of
 racing the human. The run page shows who holds a workspace and until when.
 
-While you hold a workspace, the takeover card becomes a panel with four tabs.
+While you hold a workspace, the takeover card becomes a panel with five tabs.
 
 **Console** runs one submitted command at a time under the lease and streams
 its output as it arrives (the page polls; there is no persistent connection).
@@ -126,6 +126,29 @@ before, uncommitted. There is no syntax highlighting and no partial-edit
 application. The editor guards unsaved changes when you switch files or hand
 back.
 
+**Browser** drives a real headless Chromium running inside the sandbox — the
+same one the visual and flow rungs use (the node and go sandbox images ship
+Debian Chromium plus a pinned Playwright; the rust image does not, and the
+tab says so honestly instead of failing opaquely). It is screenshot-driven,
+not video and not a live stream: every navigate, click, typed text, key,
+scroll or viewport change re-loads the page at the recorded URL and returns
+one bounded image (about 300 KB; JPEG when a PNG would exceed the cap), which
+the page renders at natural size so click coordinates are viewport
+coordinates. One driver process per action, under the lease's fenced exec:
+continuity comes from an ephemeral profile (cookies, storage) that is
+excluded from the repository, wiped on close and handback, and never persists
+across sessions — no credential storage, by design. The URL bar accepts
+http(s) only (a /path resolves against the current page); `file:`, `about:`,
+`data:` and browser-internal pages are refused with a reason. The browser
+reaches exactly what the sandbox's network tier allows: on a `none` network
+it can only reach services inside the sandbox, which is precisely the
+app-under-test case — the point of the tab is clicking through the app the
+agent built before approving the merge. DOM state does not survive between
+actions (each action re-loads the page); URL, cookie and storage state do.
+Every action renews the lease and is recorded in the session like a console
+command. A lapsed lease cannot close the driver — the profile is left to the
+container's own teardown and the session note says so.
+
 **Changes** shows the working-tree diff against HEAD and refreshes after each
 save. **Handback** records the session — files written, commands run, a digest
 of the diff, the holder's note — and leaves the resumed run a message
@@ -140,8 +163,8 @@ Boundaries, on purpose: a run reviewing a merge cannot be taken over (edits
 there cannot join an already-published PR — request changes instead) and an
 executing run must be steered or parked first. The console runs commands as
 the workspace user inside the sandbox; it is not a shell session and keeps no
-environment between commands. An interactive browser takeover remains future
-work, as does reconnect after lease expiry beyond re-acquiring.
+environment between commands. Reconnect after lease expiry beyond
+re-acquiring remains future work, as does browser DOM state between actions.
 
 Verification is derived from recorded outcomes, never an agent's assertion
 that tests passed. Missing checks say **not recorded**. The page includes test
@@ -176,13 +199,13 @@ patterns and documented capabilities, not measured claims about coding quality.
 
 | Reference | Pattern applied in Ship | Remaining distinction |
 |---|---|---|
-| [Devin session tools](https://docs.devin.ai/work-with-devin/devin-session-tools) | Conversation beside organized changes, verification and execution history; linked follow-ups | Ship does not embed a full IDE or offer direct remote terminal/browser takeover. |
+| [Devin session tools](https://docs.devin.ai/work-with-devin/devin-session-tools) | Conversation beside organized changes, verification and execution history; linked follow-ups | Ship's takeover is worker-mediated (console, editor, screenshot-driven browser), not a direct remote session, and Ship does not embed a full IDE. |
 | [Devin playbooks](https://docs.devin.ai/product-guides/creating-playbooks) | Shared editable workflows, review before launch | Templates support interval schedules through the existing intake policies; no general DAG builder. |
 | [Vorflux](https://vorflux.com/docs) | Project preparation, plan review, visible PR evidence and browser recordings | Setup runs declared preparation commands and independent tests; arbitrary-stack provisioning still requires configuration. |
 | [OpenHands](https://hub.openhands.dev/blog/new-in-agent-canvas-august-2026) | Keep the conversation, recorded changes and review outcome together | No OpenHands engine is embedded; Ship retains its own durable execution and harnesses. |
 | [Sparkles](https://sparkles.dev/) | Simpler team task intake, reusable requests, visible progress and PR handoff | This does not add hosted infrastructure, a large connector marketplace, or new agent harnesses. |
 
-Full interactive IDE/terminal/browser takeover, automatic merge reconciliation,
+Full IDE embedding, automatic merge reconciliation,
 arbitrary-stack environment provisioning, broader connector coverage and a
 controlled head-to-head coding evaluation remain distinct work. Live forge
 reads refresh while the task page is open; they do not automatically merge or rewrite

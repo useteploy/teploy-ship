@@ -116,6 +116,9 @@ continuation across terminal runs, arbitrary-stack auto-provisioning, wider
 connector coverage and measured competitor coding-quality comparisons. This
 change adds interval schedules and forge reads, not automatic merge
 reconciliation or a general workflow graph. See docs/WORKSPACE.md.
+(Partially superseded 2026-09-23: the takeover panel now carries a
+screenshot-driven browser tab — S12 wave 9, src/takeover-browser.ts —
+leaving a full IDE and sandbox continuation as the open items.)
 
 ## 2026-09-21 — journey foundations and simple team requests
 

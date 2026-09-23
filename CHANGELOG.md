@@ -5,6 +5,30 @@ All notable changes to Teploy Ship are recorded here.
 ## [Unreleased]
 
 ### Added
+- **The takeover panel has a BROWSER tab (S12's last surface).** While a
+  lease is held, the operator drives a real headless Chromium running inside
+  the sandbox — the same one the visual and flow rungs use (the node and go
+  images ship it; the rust image does not and the tab says so) — rendered in
+  the dashboard as a screenshot per action. Honest about what it is:
+  screenshot-driven, not video — every navigate/click/type/key/scroll/
+  viewport action re-loads the page at the recorded URL and returns one
+  bounded image (~300 KB cap; JPEG when a PNG would exceed it). The driver
+  (`src/takeover-browser.ts`) is written through the lease as a heredoc and
+  runs one process per action under `execAs`, because the lease exec surface
+  has no persistent stdio session and a background daemon would escape the
+  fence's accounting; continuity comes from an ephemeral profile
+  (`.ship/browser-profile`, excluded from the repository like `.ship/flow-out`)
+  that carries cookies and storage across actions and is wiped on close and
+  handback — no credential persistence, by design. The URL bar accepts
+  http(s) only (`file:`, `about:`, `data:` refused with a reason); a `/path`
+  resolves against the current page client-side. Egress is whatever the
+  sandbox's network tier allows — on `none`, in-sandbox services only, which
+  is the app-under-test case. Every action renews the lease, is recorded in
+  the session record like console commands, and a lapsed lease records the
+  honest disposition (profile left to the container's teardown). Unit tests
+  assert against a fake driver over the same stdio protocol;
+  `scripts/takeover-browser-live-proof.mjs` is the orchestrator's
+  live-chromium proof.
 - **A run shows what it is doing while it does it.** The event log records a
   step when it ends, so between steps the run page showed nothing — minutes
   under a thinking model, and up to thirty minutes for an external harness,

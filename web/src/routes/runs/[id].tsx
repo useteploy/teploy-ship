@@ -24,6 +24,7 @@ import { shipRuntime } from "../../lib/store.server.js";
 import { currentUser } from "../../lib/session.server.js";
 import { may } from "../../lib/authority.server.js";
 import { itemClass, since, took } from "../../lib/timeline.js";
+import { resolveNavUrl, clickPoint } from "../../lib/browser-tab.js";
 
 export const config = { mode: "app" };
 
@@ -81,12 +82,12 @@ export async function action({
   // The worker mediates every operation against the sandbox's lease; this
   // route only records who is asking. Re-checked on every POST, never cached.
   if (
-    ["takeover-acquire", "takeover-renew", "takeover-write", "takeover-exec", "takeover-read", "takeover-console", "takeover-changes", "takeover-release"].includes(intent)
+    ["takeover-acquire", "takeover-renew", "takeover-write", "takeover-exec", "takeover-read", "takeover-console", "takeover-browser", "takeover-changes", "takeover-release"].includes(intent)
   ) {
     if (!(await may("steer", me))) return redirectTo(`/runs/${runId}?denied=steer`);
     const tab = String(form.get("tab") ?? "");
     const back = (query: string): Response =>
-      redirectTo(`/runs/${runId}?takeover=pending${["console", "editor", "changes", "handback"].includes(tab) ? `&tab=${tab}` : ""}${query}`);
+      redirectTo(`/runs/${runId}?takeover=pending${["console", "editor", "browser", "changes", "handback"].includes(tab) ? `&tab=${tab}` : ""}${query}`);
     try {
       const extra =
         intent === "takeover-write"
@@ -95,7 +96,9 @@ export async function action({
             ? { reason: String(form.get("reason") ?? "").trim() || undefined }
             : intent === "takeover-console"
               ? { command: String(form.get("command") ?? "") }
-              : undefined;
+              : intent === "takeover-browser"
+                ? { browser: String(form.get("browser") ?? "") }
+                : undefined;
       await requestWorkspace(
         runtime,
         runId,
@@ -861,15 +864,16 @@ function changedPaths(changesOutput: string | undefined): string[] {
 const PANEL_OUTPUT_LIMIT = 60_000;
 
 /**
- * The holder's workspace panel (S12): CONSOLE / EDITOR / CHANGES / HANDBACK.
- * Pure reorganization of the card's held-by-you surface onto the same mediated
- * ops — every button still POSTs one workspace request the worker fences. The
- * tab rides the URL (?tab=) so a full-page POST lands the operator back where
- * they were; the 4s poll streams console output by re-reading the reply.
+ * The holder's workspace panel (S12): CONSOLE / EDITOR / BROWSER / CHANGES /
+ * HANDBACK. Pure reorganization of the card's held-by-you surface onto the
+ * same mediated ops — every button still POSTs one workspace request the
+ * worker fences. The tab rides the URL (?tab=) so a full-page POST lands the
+ * operator back where they were; the 4s poll streams console output and
+ * browser screenshots by re-reading the reply.
  */
 function TakeoverPanel({ data, record }: { data: RunData; record: NonNullable<RunData["takeover"]["record"]> }) {
   const t = data.takeover;
-  const [tab, setTab] = useState<"console" | "editor" | "changes" | "handback">(data.takeoverTab);
+  const [tab, setTab] = useState<"console" | "editor" | "browser" | "changes" | "handback">(data.takeoverTab);
   const reply = t.reply;
   // ---- Editor state: one file at a time, seeded from takeover-read replies.
   const [editorPath, setEditorPath] = useState("");
@@ -927,7 +931,7 @@ function TakeoverPanel({ data, record }: { data: RunData; record: NonNullable<Ru
   const pickerPaths = [...new Set([...record.pathsWritten, ...changedPaths(reply?.kind === "takeover-changes" ? reply.output : undefined)])];
   return <>
     <div class="row-actions" role="tablist" aria-label="Workspace panel" style="margin-top:10px;gap:6px;flex-wrap:wrap">
-      {(["console", "editor", "changes", "handback"] as const).map((k) => (
+      {(["console", "editor", "browser", "changes", "handback"] as const).map((k) => (
         <button
           type="button"
           key={k}
@@ -984,6 +988,8 @@ function TakeoverPanel({ data, record }: { data: RunData; record: NonNullable<Ru
         )}
       </div>
     )}
+
+    {tab === "browser" && <BrowserTab data={data} record={record} />}
 
     {tab === "editor" && (
       <div style="margin-top:10px">
@@ -1066,6 +1072,158 @@ function TakeoverPanel({ data, record }: { data: RunData; record: NonNullable<Ru
       </div>
     )}
   </>;
+}
+
+/**
+ * The BROWSER tab (S12's last surface): a real headless Chromium running in
+ * the sandbox, rendered here as a screenshot per action. Plain about what it
+ * is — screenshot-driven, not video, not a live stream: every action
+ * re-loads the page at the recorded URL and returns one bounded image,
+ * picked up by the existing 4s reply poll. The image renders at natural
+ * size inside a scrollable box (no CSS scaling), so img-relative click
+ * coordinates ARE viewport coordinates; clickPoint guards the degenerate
+ * sizes anyway. The nav bar resolves /path against the current page
+ * client-side (the worker never guesses a base URL) and refuses non-http(s)
+ * schemes with a reason, mirroring the server's guard.
+ */
+function BrowserTab({ data, record }: { data: RunData; record: NonNullable<RunData["takeover"]["record"]> }) {
+  const t = data.takeover;
+  const reply = t.reply?.kind === "takeover-browser" ? t.reply : undefined;
+  const browser = reply?.browser;
+  const lastUrl = browser?.url;
+  const [nav, setNav] = useState("");
+  const [navError, setNavError] = useState<string | null>(null);
+  const [typeText, setTypeText] = useState("");
+  const [keyName, setKeyName] = useState("Enter");
+  const [vpW, setVpW] = useState(1280);
+  const [vpH, setVpH] = useState(800);
+  const carrier = useRef<HTMLFormElement>(null);
+  const imgRef = useRef<HTMLImageElement>(null);
+  const send = (action: Record<string, unknown>): void => {
+    const field = carrier.current?.querySelector<HTMLInputElement>('input[name="browser"]');
+    if (field) field.value = JSON.stringify(action);
+    // Native submit, not requestSubmit: the submit handler resolves the NAV
+    // URL and would overwrite the action field this just set.
+    carrier.current?.submit();
+  };
+  const go = (e: { preventDefault: () => void }): void => {
+    const resolved = resolveNavUrl(nav, lastUrl);
+    if (!resolved.ok) {
+      e.preventDefault();
+      setNavError(resolved.reason);
+      return;
+    }
+    setNavError(null);
+    const field = carrier.current?.querySelector<HTMLInputElement>('input[name="browser"]');
+    if (field) field.value = JSON.stringify({ action: "navigate", url: resolved.url });
+  };
+  const onImageClick = (e: MouseEvent & { currentTarget: HTMLImageElement }): void => {
+    const img = imgRef.current;
+    if (img === null) return;
+    const p = clickPoint(e.offsetX, e.offsetY, img.clientWidth, img.naturalWidth, img.clientHeight, img.naturalHeight);
+    if (p !== null) send({ action: "click", x: p.x, y: p.y });
+  };
+  const close = (): void => {
+    if (window.confirm("Close the browser session and wipe its profile (cookies, storage)?"))
+      send({ action: "close" });
+  };
+  return <div style="margin-top:10px">
+    <p class="meta" style="margin:0 0 8px">
+      A screenshot-driven view of a real headless Chromium running inside this sandbox — not video, not a
+      live stream. Each action re-loads the page and returns one bounded image. It reaches only what this
+      sandbox's network allows (on a none-tier network: in-sandbox services only — the app under test).
+      No credentials persist: the profile is wiped on close and handback.
+    </p>
+    {/* One form carries every action: hidden intent/tab/browser fields plus the
+        visible controls. Go submits through onSubmit (which resolves the URL);
+        every other control is type=button and submits programmatically via
+        send(), so each action POSTs exactly one mediated takeover-browser
+        request with the action JSON in the hidden field. */}
+    <form method="post" ref={carrier} onSubmit={go}>
+      <input type="hidden" name="intent" value="takeover-browser" />
+      <input type="hidden" name="tab" value="browser" />
+      <input type="hidden" name="browser" value="" />
+      <div class="row-actions" style="gap:8px;flex-wrap:wrap">
+        <input
+          name="browser-nav"
+          value={nav}
+          onInput={(e) => setNav((e.currentTarget as HTMLInputElement).value)}
+          placeholder="http://localhost:3000 or /path"
+          maxLength={2000}
+          aria-label="Browser URL"
+          style="flex:1;min-width:240px"
+        />
+        <button type="submit">Go</button>
+        {lastUrl !== undefined && (
+          <button type="button" class="sm" onClick={() => send({ action: "navigate", url: lastUrl })}>Reload</button>
+        )}
+      </div>
+      <div class="row-actions" style="gap:6px;flex-wrap:wrap;margin-top:8px">
+        <input
+          name="browser-type"
+          value={typeText}
+          onInput={(e) => setTypeText((e.currentTarget as HTMLInputElement).value)}
+          placeholder="text to type at the page"
+          maxLength={2000}
+          aria-label="Text to type"
+          style="min-width:180px"
+        />
+        <button type="button" class="sm" onClick={() => { if (typeText !== "") send({ action: "type", text: typeText }); }}>Type</button>
+        <input
+          name="browser-key"
+          value={keyName}
+          onInput={(e) => setKeyName((e.currentTarget as HTMLInputElement).value)}
+          placeholder="Enter"
+          maxLength={24}
+          aria-label="Key to press"
+          style="width:100px"
+        />
+        <button type="button" class="sm" onClick={() => { const k = keyName.trim(); if (k !== "") send({ action: "key", key: k }); }}>Press key</button>
+        <button type="button" class="sm" onClick={() => send({ action: "scroll", dy: -600 })}>Scroll up</button>
+        <button type="button" class="sm" onClick={() => send({ action: "scroll", dy: 600 })}>Scroll down</button>
+      </div>
+      <div class="row-actions" style="gap:6px;flex-wrap:wrap;margin-top:6px;align-items:baseline">
+        <span class="meta">viewport</span>
+        <input
+          name="browser-vw" type="number" min={240} max={3840} value={vpW}
+          onInput={(e) => setVpW(Number((e.currentTarget as HTMLInputElement).value))}
+          aria-label="Viewport width" style="width:80px"
+        />
+        <span class="meta">x</span>
+        <input
+          name="browser-vh" type="number" min={240} max={4320} value={vpH}
+          onInput={(e) => setVpH(Number((e.currentTarget as HTMLInputElement).value))}
+          aria-label="Viewport height" style="width:80px"
+        />
+        <button type="button" class="sm" onClick={() => send({ action: "viewport", w: vpW, h: vpH })}>Set</button>
+        <button type="button" class="sm" onClick={close}>Close browser</button>
+      </div>
+    </form>
+    {navError !== null && <p class="notice bad" role="alert">{navError}</p>}
+    {reply?.error && <p class="notice bad" role="alert">{reply.error}</p>}
+    {browser?.image !== undefined && (
+      <div style="margin-top:8px;overflow:auto;max-height:520px;border:1px solid var(--line)">
+        <img
+          ref={imgRef}
+          src={`data:image/${browser.format ?? "png"};base64,${browser.image}`}
+          width={browser.width}
+          height={browser.height}
+          alt="Screenshot of the in-sandbox browser"
+          style="display:block;cursor:crosshair"
+          onClick={onImageClick}
+        />
+      </div>
+    )}
+    {reply?.output !== undefined && (
+      <p class="meta" style="margin:6px 0 0">{reply.output}{browser?.image === undefined && " — navigate to a page to see it."}</p>
+    )}
+    {(record.browserOps?.length ?? 0) > 0 && (
+      <details class="disclosure" style="margin-top:8px">
+        <summary>Browser actions this session ({record.browserOps!.length})</summary>
+        {record.browserOps!.map((c, i) => <p class="meta" style="margin:4px 0" key={i}><code>{c}</code></p>)}
+      </details>
+    )}
+  </div>;
 }
 
 /**

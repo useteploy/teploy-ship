@@ -294,9 +294,31 @@ test("requests for runs without a workspace or repo are refused plainly", async 
 /**
  * The S12 panel ops need an executor that actually behaves like the daemon's
  * fenced exec: it answers the editor's bounded base64 read from a virtual
- * file tree, runs console commands (streaming chunks), and records the
- * credential every call arrived with.
+ * file tree, runs console commands (streaming chunks), records the
+ * credential every call arrived with, and answers browser actions with a
+ * FAKE driver speaking the same JSON-over-stdio protocol as the real
+ * in-sandbox Chromium driver (src/takeover-browser.ts). Live-chromium proof
+ * is the orchestrator's script, not this suite — a stub that answers the
+ * protocol is what a unit test can honestly assert against.
  */
+function fakeBrowserDriver(action: Record<string, unknown>): { exitCode: number; stdout: string; stderr: string; timedOut: boolean; truncated: boolean } {
+  const line = (obj: unknown): string => JSON.stringify(obj) + "\n";
+  if (action.action === "navigate") {
+    if (typeof action.url !== "string" || !/^https?:\/\//.test(action.url))
+      return { exitCode: 0, stdout: line({ ok: false, error: "only http(s) URLs are accepted" }), stderr: "", timedOut: false, truncated: false };
+    return {
+      exitCode: 0,
+      stdout: line({ ok: true, action: "navigate", url: action.url, width: 1280, height: 800, format: "png", image: Buffer.from("fake-png").toString("base64") }),
+      stderr: "", timedOut: false, truncated: false,
+    };
+  }
+  if (action.action === "click")
+    return { exitCode: 0, stdout: line({ ok: true, action: "click", url: "http://localhost:8000/clicked", width: 1280, height: 800, format: "png", image: Buffer.from("fake-png-2").toString("base64") }), stderr: "", timedOut: false, truncated: false };
+  if (action.action === "close")
+    return { exitCode: 0, stdout: line({ ok: true, action: "close" }), stderr: "", timedOut: false, truncated: false };
+  return { exitCode: 0, stdout: line({ ok: true, action: String(action.action), url: "http://localhost:8000/", width: 1280, height: 800, format: "png", image: Buffer.from("fake-png-3").toString("base64") }), stderr: "", timedOut: false, truncated: false };
+}
+
 function panelHarness(files: Record<string, string>) {
   const values = new Map<string, string>();
   const replyWrites: { id: string; running?: boolean; output?: string }[] = [];
@@ -346,6 +368,11 @@ function panelHarness(files: Record<string, string>) {
           const stdout = bytes.subarray(0, Number(read[1])).toString("base64");
           return { exitCode: 0, stdout, stderr: "", timedOut: false, truncated: false };
         }
+        const browser = /^exec node \.ship\/browser-driver\.mjs '([A-Za-z0-9+/=]+)'$/.exec(command.split("\n").at(-1) ?? "");
+        if (browser !== null) {
+          const action = JSON.parse(Buffer.from(browser[1], "base64").toString("utf8")) as Record<string, unknown>;
+          return fakeBrowserDriver(action);
+        }
         const consoleCmd = /^echo (.+)$/.exec(command);
         if (consoleCmd !== null) {
           const out = `hello ${consoleCmd[1]}`;
@@ -366,7 +393,7 @@ function panelHarness(files: Record<string, string>) {
   return { runtime, executor, calls, replyWrites, values, replyOf, files };
 }
 
-async function panelRequest(runtime: unknown, kind: string, by: string, path?: string, extra?: { content?: string; command?: string }) {
+async function panelRequest(runtime: unknown, kind: string, by: string, path?: string, extra?: { content?: string; command?: string; browser?: string; reason?: string }) {
   await requestWorkspace(runtime as never, "run-1", kind as never, by, path, extra);
 }
 
@@ -465,4 +492,106 @@ test("a lost lease during a panel read fails honestly instead of serving unowned
   assert.equal(h.values.get(takeoverKey("run-1")), "");
   const history = JSON.parse(h.values.get(takeoverHistoryKey("run-1"))!) as any[];
   assert.equal(history[0].outcome, "lapsed");
+});
+
+test("the browser tab dispatches actions through the fence, bounded, and records every op in the session", async () => {
+  const h = panelHarness({});
+  await panelRequest(h.runtime, "takeover-acquire", "alice");
+  await serveWorkspaceRequests(h.runtime, h.executor, { allowlist: "https://github.com" });
+  await panelRequest(h.runtime, "takeover-browser", "alice", undefined, { browser: JSON.stringify({ action: "navigate", url: "http://localhost:8000/" }) });
+  await serveWorkspaceRequests(h.runtime, h.executor, { allowlist: "https://github.com" });
+  const reply = h.replyOf();
+  assert.equal(reply.kind, "takeover-browser");
+  assert.match(reply.output, /navigate http:\/\/localhost:8000\//);
+  assert.equal(reply.browser.image, Buffer.from("fake-png").toString("base64"));
+  assert.equal(reply.browser.url, "http://localhost:8000/");
+  // fenced: the driver exec carried the holder credential, and the action rode base64 argv
+  const exec = h.calls.find((c) => c.op === "execAs" && c.command.includes("browser-driver.mjs"))!;
+  assert.deepEqual(exec.cred, { owner: "alice", generation: 7 });
+  assert.match(exec.command, /exec node \.ship\/browser-driver\.mjs '[A-Za-z0-9+/=]+'/);
+  // the op is session-recorded like a console command
+  assert.deepEqual(JSON.parse(h.values.get(takeoverKey("run-1"))!).browserOps, ["navigate http://localhost:8000/"]);
+  // a second action appends rather than dedupes — repeated clicks are real history
+  await panelRequest(h.runtime, "takeover-browser", "alice", undefined, { browser: JSON.stringify({ action: "click", x: 40, y: 40 }) });
+  await serveWorkspaceRequests(h.runtime, h.executor, { allowlist: "https://github.com" });
+  assert.equal(h.replyOf().browser.url, "http://localhost:8000/clicked");
+  assert.deepEqual(JSON.parse(h.values.get(takeoverKey("run-1"))!).browserOps, ["navigate http://localhost:8000/", "click 40,40"]);
+});
+
+test("the browser tab is holder-only, and a crafted request is re-validated at serve time", async () => {
+  const h = panelHarness({});
+  await panelRequest(h.runtime, "takeover-acquire", "alice");
+  await serveWorkspaceRequests(h.runtime, h.executor, { allowlist: "https://github.com" });
+  await panelRequest(h.runtime, "takeover-browser", "bob", undefined, { browser: JSON.stringify({ action: "navigate", url: "http://localhost:8000/" }) });
+  await serveWorkspaceRequests(h.runtime, h.executor, { allowlist: "https://github.com" });
+  assert.match(h.replyOf().error, /held by alice/);
+  // request-time guard: file:// never becomes a request at all
+  await assert.rejects(
+    panelRequest(h.runtime, "takeover-browser", "alice", undefined, { browser: JSON.stringify({ action: "navigate", url: "file:///etc/passwd" }) }),
+    /http and https only/,
+  );
+  // defense in depth: a crafted request written straight to the key is refused at serve time, before any exec
+  h.values.set(
+    requestKey("run-1"),
+    JSON.stringify({ id: "r-bad", runId: "run-1", kind: "takeover-browser", at: new Date().toISOString(), by: "alice", browser: { action: "navigate", url: "file:///etc/passwd" } }),
+  );
+  await serveWorkspaceRequests(h.runtime, h.executor, { allowlist: "https://github.com" });
+  assert.match(h.replyOf().error, /http and https only/);
+  assert.equal(
+    h.calls.some((c) => c.op === "execAs" && c.command.includes("browser-driver.mjs")),
+    false,
+    "a refused action never reaches the sandbox",
+  );
+  // an oversized crafted screenshot reply is an honest error, never a trimmed image
+  h.values.set(
+    requestKey("run-1"),
+    JSON.stringify({ id: "r-big", runId: "run-1", kind: "takeover-browser", at: new Date().toISOString(), by: "alice", browser: { action: "navigate", url: "http://localhost:8000/" } }),
+  );
+  const realExecAs = (h.executor as any).lease.execAs;
+  (h.executor as any).lease.execAs = async (_handle: string, cred: unknown, command: string) => {
+    const r = await realExecAs(_handle, cred, command);
+    return { ...r, stdout: JSON.stringify({ ok: true, action: "navigate", image: "A".repeat(400_001) }) + "\n" };
+  };
+  await serveWorkspaceRequests(h.runtime, h.executor, { allowlist: "https://github.com" });
+  assert.match(h.replyOf().error, /cap/);
+});
+
+test("handback closes the browser under the still-held lease and records the disposition", async () => {
+  const h = panelHarness({});
+  await panelRequest(h.runtime, "takeover-acquire", "alice");
+  await serveWorkspaceRequests(h.runtime, h.executor, { allowlist: "https://github.com" });
+  await panelRequest(h.runtime, "takeover-browser", "alice", undefined, { browser: JSON.stringify({ action: "navigate", url: "http://localhost:8000/" }) });
+  await serveWorkspaceRequests(h.runtime, h.executor, { allowlist: "https://github.com" });
+  const steerNotes: string[] = [];
+  (h.runtime as any).steer = { add: async (_runId: string, text: string) => { steerNotes.push(text); } };
+  await panelRequest(h.runtime, "takeover-release", "alice", undefined, { reason: "clicked through the app" });
+  await serveWorkspaceRequests(h.runtime, h.executor, { allowlist: "https://github.com" });
+  assert.match(h.replyOf().output, /Handed back/);
+  // the close op ran as a fenced exec with the close action
+  const closeB64 = Buffer.from(JSON.stringify({ action: "close" })).toString("base64");
+  const close = h.calls.find((c) => c.op === "execAs" && c.command.includes("browser-driver.mjs") && c.command.includes(closeB64))!;
+  assert.deepEqual(close.cred, { owner: "alice", generation: 7 });
+  const history = JSON.parse(h.values.get(takeoverHistoryKey("run-1"))!) as any[];
+  assert.deepEqual(history[0].browserOps, ["navigate http://localhost:8000/"]);
+  assert.match(history[0].note, /browser closed, profile wiped/);
+  // the steer note (handback) tells the resumed agent the browser was used
+  assert.match(steerNotes[0], /Browser actions/);
+});
+
+test("a lapsed lease records the browser profile disposition honestly", async () => {
+  const h = panelHarness({});
+  await panelRequest(h.runtime, "takeover-acquire", "alice");
+  await serveWorkspaceRequests(h.runtime, h.executor, { allowlist: "https://github.com" });
+  await panelRequest(h.runtime, "takeover-browser", "alice", undefined, { browser: JSON.stringify({ action: "navigate", url: "http://localhost:8000/" }) });
+  await serveWorkspaceRequests(h.runtime, h.executor, { allowlist: "https://github.com" });
+  (h.executor as any).lease.renew = async () => {
+    throw new Error("no active generation 7 lease held by \"alice\" on run box-1");
+  };
+  await panelRequest(h.runtime, "takeover-browser", "alice", undefined, { browser: JSON.stringify({ action: "click", x: 1, y: 1 }) });
+  await serveWorkspaceRequests(h.runtime, h.executor, { allowlist: "https://github.com" });
+  assert.match(h.replyOf().error, /lease was lost/);
+  const history = JSON.parse(h.values.get(takeoverHistoryKey("run-1"))!) as any[];
+  assert.equal(history[0].outcome, "lapsed");
+  assert.deepEqual(history[0].browserOps, ["navigate http://localhost:8000/"]);
+  assert.match(history[0].note, /browser profile left in place/);
 });

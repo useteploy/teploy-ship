@@ -112,17 +112,17 @@ export interface RunData {
     available: boolean;
     /** Why not, when available is false and someone might expect otherwise. */
     reason?: string;
-    record?: { holder: string; expiresAt: string; acquiredAt: string; pathsWritten: string[]; execsRun: string[] };
+    record?: { holder: string; expiresAt: string; acquiredAt: string; pathsWritten: string[]; execsRun: string[]; browserOps?: string[] };
     /** The last mediated operation's result (any holder), for the panel. */
-    reply?: { id: string; kind: string; at: string; output?: string; error?: string; truncated?: boolean; running?: boolean; path?: string };
+    reply?: { id: string; kind: string; at: string; output?: string; error?: string; truncated?: boolean; running?: boolean; path?: string; browser?: { image?: string; url?: string; width?: number; height?: number; format?: string } };
     history: TakeoverSession[];
     /** The project's declared tests command — the only exec takeover may run. */
     testsCommand?: string;
   };
   /** ?takeover=pending — a takeover operation was requested; the worker answers within a sweep. */
   takeoverPending: boolean;
-  /** ?tab= — the workspace panel tab the holder had open (console/editor/changes/handback). */
-  takeoverTab: "console" | "editor" | "changes" | "handback";
+  /** ?tab= — the workspace panel tab the holder had open (console/editor/browser/changes/handback). */
+  takeoverTab: "console" | "editor" | "browser" | "changes" | "handback";
   /** The signed-in user's name, so the card can say "held by you". */
   viewer: string | null;
 }
@@ -232,6 +232,17 @@ export async function runData({ params, request }: { params: { id: string }; req
           ...(parsed.error !== undefined ? { error: parsed.error } : {}),
           ...(parsed.truncated !== undefined ? { truncated: parsed.truncated } : {}),
           ...(parsed.running !== undefined ? { running: parsed.running } : {}),
+          ...(parsed.browser !== undefined && typeof parsed.browser === "object" && parsed.browser !== null
+            ? {
+                browser: {
+                  ...(typeof parsed.browser.image === "string" ? { image: parsed.browser.image } : {}),
+                  ...(typeof parsed.browser.url === "string" ? { url: parsed.browser.url } : {}),
+                  ...(typeof parsed.browser.width === "number" ? { width: parsed.browser.width } : {}),
+                  ...(typeof parsed.browser.height === "number" ? { height: parsed.browser.height } : {}),
+                  ...(typeof parsed.browser.format === "string" ? { format: parsed.browser.format } : {}),
+                },
+              }
+            : {}),
         };
       } catch {
         // unreadable reply — omit
@@ -325,6 +336,7 @@ export async function runData({ params, request }: { params: { id: string }; req
                 acquiredAt: takeoverRecord.acquiredAt,
                 pathsWritten: takeoverRecord.pathsWritten,
                 execsRun: takeoverRecord.execsRun,
+                ...(takeoverRecord.browserOps !== undefined ? { browserOps: takeoverRecord.browserOps } : {}),
               },
             }
           : {}),
@@ -333,10 +345,10 @@ export async function runData({ params, request }: { params: { id: string }; req
         ...(typeof testsCommand === "string" && testsCommand !== "" ? { testsCommand } : {}),
       },
       takeoverPending: query.get("takeover") === "pending",
-      takeoverTab: (["console", "editor", "changes", "handback"] as const).includes(
+      takeoverTab: (["console", "editor", "browser", "changes", "handback"] as const).includes(
         (query.get("tab") ?? "console") as "console",
       )
-        ? ((query.get("tab") ?? "console") as "console" | "editor" | "changes" | "handback")
+        ? ((query.get("tab") ?? "console") as "console" | "editor" | "browser" | "changes" | "handback")
         : "console",
       viewer: (await currentUser(request))?.user ?? null,
     };

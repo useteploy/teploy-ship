@@ -50,6 +50,8 @@ export interface TakeoverRecord {
   ttlSec: number;
   pathsWritten: string[];
   execsRun: string[];
+  /** BROWSER tab ops (takeover-browser.ts), most recent last, bounded. */
+  browserOps?: string[];
 }
 
 /** A completed session, kept bounded — the evidence trail of who intervened and what changed. */
@@ -60,6 +62,7 @@ export interface TakeoverSession {
   outcome: "released" | "lapsed";
   pathsWritten: string[];
   execsRun: string[];
+  browserOps?: string[];
   diffDigest?: string;
   diffExcerpt?: string;
   note?: string;
@@ -204,6 +207,11 @@ export function handbackNote(session: TakeoverSession): string {
   ];
   if (session.pathsWritten.length > 0) parts.push(`Files written: ${session.pathsWritten.join(", ")}.`);
   if (session.execsRun.length > 0) parts.push(`Commands run: ${session.execsRun.join("; ")}.`);
+  if (session.browserOps !== undefined && session.browserOps.length > 0) {
+    parts.push(
+      `Browser actions (in-sandbox headless Chromium): ${session.browserOps.length} — ${session.browserOps.slice(0, 5).join("; ")}${session.browserOps.length > 5 ? "; …" : ""}.`,
+    );
+  }
   if (session.diffDigest !== undefined) parts.push(`Working-tree diff digest: ${session.diffDigest}.`);
   if (session.note !== undefined && session.note !== "") parts.push(`Holder's note: ${session.note}`);
   if (session.diffExcerpt !== undefined && session.diffExcerpt !== "") {

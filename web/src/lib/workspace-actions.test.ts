@@ -410,3 +410,34 @@ test("the run page surfaces the panel reply state the worker wrote", async () =>
   assert.equal(data.takeover.reply?.id, "r-1");
   assert.equal(data.takeoverTab, "console");
 });
+
+test("the browser tab: steer authority per POST, action shape recorded, file:// refused, reply surfaced", async () => {
+  const runtime = await shipRuntime();
+  const id = "run-browser-tab";
+  await enqueueRun(runtime, {runId:id,repo:'https://github.com/team/repo',task:'Browser',model:'test',source:'manual',trust:'operator'});
+  const meta = await runtime.loadMeta(id); assert.ok(meta);
+  await runtime.saveMeta({...meta,status:'waiting',eventName:'ship-ask-1'});
+  // no credential: the steer grant is re-checked on every POST
+  const denied = await run.action({params:{id},request:new Request("http://localhost/runs/"+id,{method:"POST",body:new URLSearchParams({intent:"takeover-browser",tab:"browser",browser:JSON.stringify({action:"navigate",url:"http://localhost:8000/"})})})});
+  assert.match(denied.headers.get("location") ?? "", /denied=steer/);
+  // an authorized POST rides the redirect back to the browser tab
+  const res = await run.action({params:{id},request:request("/runs/"+id,{intent:"takeover-browser",tab:"browser",browser:JSON.stringify({action:"navigate",url:"http://localhost:8000/"})})});
+  assert.match(res.headers.get("location") ?? "", /takeover=pending&tab=browser/);
+  const recorded = JSON.parse((await runtime.config.get("SHIP_WORKSPACE_REQUEST_"+id))!);
+  assert.equal(recorded.kind, "takeover-browser");
+  assert.deepEqual(recorded.browser, { action: "navigate", url: "http://localhost:8000/" });
+  assert.equal(typeof recorded.by, "string");
+  // file:// is refused at request time, with the reason on the redirect
+  const refused = await run.action({params:{id},request:request("/runs/"+id,{intent:"takeover-browser",tab:"browser",browser:JSON.stringify({action:"navigate",url:"file:///etc/passwd"})})});
+  assert.match(decodeURIComponent(refused.headers.get("location") ?? ""), /http and https only/);
+  // the worker's browser reply (screenshot + page state) surfaces through the loader
+  await runtime.config.set("SHIP_TAKEOVER_REPLY_"+id, JSON.stringify({
+    id: "r-b1", at: new Date().toISOString(), kind: "takeover-browser",
+    output: "Browser navigate http://localhost:8000/ — http://localhost:8000/ (1280x800, png, 1.2 KB).",
+    browser: { image: "aGVsbG8=", url: "http://localhost:8000/", width: 1280, height: 800, format: "png" },
+  }));
+  const data = await run.loader({params:{id},request:new Request("http://localhost/runs/"+id+"?tab=browser",{})});
+  assert.equal(data.takeoverTab, "browser");
+  assert.equal(data.takeover.reply?.browser?.image, "aGVsbG8=");
+  assert.equal(data.takeover.reply?.browser?.url, "http://localhost:8000/");
+});
