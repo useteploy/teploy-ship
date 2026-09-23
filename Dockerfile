@@ -39,10 +39,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
 # openssh-client in the apt list above. It reads ~/.ssh/known_hosts either
 # way and fails closed when it cannot, so mount one.
 #
-# Needs >= v0.1.27, the first release carrying `teploy build`. Before that the
-# only way to produce a runnable image was `teploy deploy`, which replaces
-# production — exactly what a preview must not do.
-ARG TEPLOY_VERSION=0.1.27
+# Needs >= v0.1.36: host-bind volume keys (the delivery-copy mounts), and
+# the known_hosts mismatch diagnostics. Refreshed from 0.1.27 on 2026-09-22
+# when the delivery execution path made the bundled CLI load-bearing.
+ARG TEPLOY_VERSION=0.1.36
 ARG TARGETARCH
 RUN set -eux; \
     case "${TARGETARCH:-amd64}" in \
