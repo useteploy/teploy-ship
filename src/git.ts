@@ -23,7 +23,20 @@ import type { PublishLimits, PublishScreen } from "./publish-policy.js";
  * Repo-local exclude keeps them out of `git add -A` and out of the status the
  * agent reads.
  */
-export const WORKSPACE_EXCLUDES = [".teploy-agent/", ".ship/flow-out/", ".ship/node_modules/", ".pnpm-store/"] as const;
+export const WORKSPACE_EXCLUDES = [
+  ".teploy-agent/",
+  ".ship/flow-out/",
+  ".ship/node_modules/",
+  ".pnpm-store/",
+  // Takeover browser scratch (takeover-browser.ts): the driver script, its
+  // recorded last URL/viewport, and the ephemeral browser profile. The
+  // browser op also re-applies these idempotently per action, so a run
+  // already in flight before this list grew still keeps them out of the
+  // commit — the profile holds cookies and must never reach a pull request.
+  ".ship/browser-driver.mjs",
+  ".ship/browser-state.json",
+  ".ship/browser-profile/",
+] as const;
 
 /** Shell that appends each exclude once, idempotent on a warm clone. */
 export function excludeCommand(): string {
