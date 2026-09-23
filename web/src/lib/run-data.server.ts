@@ -109,13 +109,15 @@ export interface RunData {
     reason?: string;
     record?: { holder: string; expiresAt: string; acquiredAt: string; pathsWritten: string[]; execsRun: string[] };
     /** The last mediated operation's result (any holder), for the panel. */
-    reply?: { kind: string; at: string; output?: string; error?: string; truncated?: boolean };
+    reply?: { id: string; kind: string; at: string; output?: string; error?: string; truncated?: boolean; running?: boolean; path?: string };
     history: TakeoverSession[];
     /** The project's declared tests command — the only exec takeover may run. */
     testsCommand?: string;
   };
   /** ?takeover=pending — a takeover operation was requested; the worker answers within a sweep. */
   takeoverPending: boolean;
+  /** ?tab= — the workspace panel tab the holder had open (console/editor/changes/handback). */
+  takeoverTab: "console" | "editor" | "changes" | "handback";
   /** The signed-in user's name, so the card can say "held by you". */
   viewer: string | null;
 }
@@ -217,11 +219,14 @@ export async function runData({ params, request }: { params: { id: string }; req
       try {
         const parsed = JSON.parse(takeoverReplyRaw) as WorkspaceReply;
         takeoverReply = {
+          id: parsed.id,
           kind: parsed.kind ?? "",
           at: parsed.at,
+          ...(parsed.path !== undefined ? { path: parsed.path } : {}),
           ...(parsed.output !== undefined ? { output: parsed.output } : {}),
           ...(parsed.error !== undefined ? { error: parsed.error } : {}),
           ...(parsed.truncated !== undefined ? { truncated: parsed.truncated } : {}),
+          ...(parsed.running !== undefined ? { running: parsed.running } : {}),
         };
       } catch {
         // unreadable reply — omit
@@ -323,6 +328,11 @@ export async function runData({ params, request }: { params: { id: string }; req
         ...(typeof testsCommand === "string" && testsCommand !== "" ? { testsCommand } : {}),
       },
       takeoverPending: query.get("takeover") === "pending",
+      takeoverTab: (["console", "editor", "changes", "handback"] as const).includes(
+        (query.get("tab") ?? "console") as "console",
+      )
+        ? ((query.get("tab") ?? "console") as "console" | "editor" | "changes" | "handback")
+        : "console",
       viewer: (await currentUser(request))?.user ?? null,
     };
     span.end("ok", { "run.status": meta?.status ?? "unknown", "run.event_count": events.length });
