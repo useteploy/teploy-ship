@@ -75,6 +75,7 @@ import type { IntakePolicy } from "./intake.js";
 import { NucleusCodeIndex } from "./code-index.js";
 import type { CodeSearch } from "./code-index.js";
 import { startWorker } from "./worker.js";
+import { assembleSupportBundle, defaultDocker } from "./support.js";
 import { costUSD, isPricedModel } from "./pricing.js";
 import { defaultRetryPolicy, withRetry, withCallTimeout, modelTimeoutFromEnv } from "./provider.js";
 import { builtinSuite } from "./tasks.js";
@@ -186,6 +187,10 @@ Usage:
   teploy-ship web                     serve the runs dashboard (browser approve/deny)
       [--port N] [--token <t>]        token also via SHIP_WEB_TOKEN (required)
       [--dev]                         vite dev server instead of the built app
+  teploy-ship support                 assemble a REDACTED diagnostic bundle (see docs/SUPPORT.md)
+      [--out DIR] [--log-lines N]     what a vendor needs: versions, safe config keys,
+      [--days N]                      bounded logs, run-state summaries. Credentials
+                                      never enter it, but skim it before handing it over.
   teploy-ship eval [--suite builtin|hard|extreme|all] [--repeats N] [--json] [--critic] [--settle]
 
 Config: flags > env > ~/.config/teploy-ship/config.json
@@ -2225,6 +2230,47 @@ async function evalCommand(rest: string[]): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// support — S19 redacted diagnostic bundle (all logic in src/support.ts)
+// ---------------------------------------------------------------------------
+
+/**
+ * Thin by design: cli.ts is shared surface, so the command parses its flags,
+ * hands the runtime to the assembler, and prints what came back. The bundle's
+ * invariants (whitelist, gate, bounds) live in src/support.ts where they are
+ * tested.
+ */
+async function supportCommand(rest: string[]): Promise<void> {
+  const args = parseArgs(rest, COMMAND_FLAGS.support);
+  const config = loadConfig();
+  const outDir = (args.flags.out as string | undefined) ?? `ship-support-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  const logLines = numFlag(args.flags["log-lines"], "log-lines", 200, { min: 1, max: 2000, integer: true });
+  const days = args.flags.days !== undefined ? numFlag(args.flags.days, "days", 7, { min: 1, max: 3650, integer: true }) : undefined;
+  const runtime = await makeRuntime(args, config);
+  let result;
+  try {
+    result = await assembleSupportBundle({
+      outDir,
+      logLines,
+      ...(days !== undefined ? { days } : {}),
+      store: runtime,
+      config: { model: config.model, intake: config.intake, maxConcurrentRuns: config.maxConcurrentRuns, nucleusUrl: config.nucleusUrl },
+      docker: defaultDocker(),
+    });
+  } finally {
+    await runtime.close();
+  }
+  const counts = Object.entries(result.redactions).sort((a, b) => b[1] - a[1]);
+  process.stderr.write(`${green("support bundle")} — ${bold(result.dir)}\n`);
+  process.stderr.write(
+    counts.length === 0
+      ? dim("0 redactions (nothing matched a credential pattern)\n")
+      : dim(`${result.redactionTotal} redaction(s): ${counts.map(([kind, n]) => `${kind} ${n}`).join(", ")}\n`),
+  );
+  if (result.tgz !== undefined) process.stderr.write(`${dim(`hand the vendor: ${bold(result.tgz)}`)}\n`);
+  else process.stderr.write(`${yellow("no tar created")} — the bundle directory above is complete; archive it yourself.\n`);
+}
+
+// ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
   const [command, ...rest] = process.argv.slice(2);
@@ -2277,6 +2323,8 @@ async function main(): Promise<void> {
       return workerCommand(rest);
     case "web":
       return webCommand(rest);
+    case "support":
+      return supportCommand(rest);
     case "eval":
       return evalCommand(rest);
     default:

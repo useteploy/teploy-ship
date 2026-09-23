@@ -73,6 +73,7 @@ export const COMMAND_FLAGS: Record<string, FlagSpec> = {
     value: ["secrets", "token", "nucleus-url", "sandbox", "sandbox-token", "sandbox-image", "git-token", "github-token", "model", "allow"],
   },
   web: { boolean: ["dev"], value: ["port", "token", "model"] },
+  support: { value: ["out", "log-lines", "days"] },
   eval: { boolean: ["critic", "settle"], value: ["model", "suite", "repeats"] },
 };
 
