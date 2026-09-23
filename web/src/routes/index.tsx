@@ -6,6 +6,10 @@ import type { WorkflowTemplate } from "../lib/workflows.server.js";
 import { randomUUID } from "node:crypto";
 
 import { deliverEvent, enqueueRun, actorFromPrincipal, intakeActor } from "../lib/ship.server.js";
+// The origin's workItemRef leg (an Akiroo footer in the task body) — same
+// recovery the worker's auto-launch performs, kept identical here so a manual
+// launch records exactly what an automatic one would.
+import { akirooRefFrom } from "../../../dist/akiroo.js";
 import type { RunMeta } from "teploy-ship/runtime";
 import type { IntakeTask } from "teploy-ship/runtime";
 
@@ -134,6 +138,15 @@ export async function action({ request }: { request: Request }): Promise<Respons
         model: defaultModel(),
         source: task.source,
         ...intakeJourney(task.kind),
+        // L7/S16: the manual launch must record what the worker's auto-launch
+        // records — a run without its origin is invisible to the schedule
+        // digest (and to outcome delivery), which is exactly how the first
+        // live due-job proof surfaced this gap.
+        origin: {
+          source: task.source,
+          dedupeKey: task.dedupeKey,
+          ...(akirooRefFrom(task.detail) !== undefined ? { workItemRef: akirooRefFrom(task.detail)! } : {}),
+        },
         // Whoever the payload named, not whoever clicked launch. The clicker
         // authorised it; the requester asked for it, and an audit reader wants
         // the second. A manual task nobody signed falls back to the operator.
