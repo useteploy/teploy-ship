@@ -2,8 +2,10 @@ import {
   workflowSchedules,
   scheduleKey,
   validSchedule,
+  scheduleDigestHistory,
+  DIGEST_LIMIT,
 } from "../lib/schedules.server.js";
-import type { WorkflowSchedule } from "../../../dist/workflow-schedules.js";
+import type { WorkflowSchedule, ScheduleDigestEntry } from "../../../dist/workflow-schedules.js";
 import { randomUUID } from "node:crypto";
 import {
   workflows,
@@ -15,8 +17,17 @@ import { shipRuntime } from "../lib/store.server.js";
 import { currentUser } from "../lib/session.server.js";
 import { may } from "../lib/authority.server.js";
 export const config = { mode: "app" };
+interface DigestRow {
+  runId: string;
+  outcome: string;
+  summary: string;
+  costUSD?: number;
+  at: string;
+}
 interface Data {
   schedules: WorkflowSchedule[];
+  /** Newest-first settled outcomes per schedule id — the delivered digest. */
+  digests: Record<string, DigestRow[]>;
   projects: { repo: string; label: string }[];
   history: { title: string; state: string; runId?: string }[];
   templates: WorkflowTemplate[];
@@ -25,11 +36,28 @@ interface Data {
   error: string | null;
 }
 export async function loader({ request }: { request: Request }): Promise<Data> {
-  const templates = await workflows(await shipRuntime()),
-    q = new URL(request.url).searchParams;
+  const q = new URL(request.url).searchParams;
   const runtime = await shipRuntime();
+  const templates = await workflows(runtime);
+  const schedules = await workflowSchedules(runtime);
+  // What each schedule actually delivered, newest last ~10 occurrences. This
+  // is the digest the worker's sweep records; the page only reads it.
+  const digests: Record<string, DigestRow[]> = {};
+  for (const s of schedules) {
+    digests[s.id] = (await scheduleDigestHistory(runtime, s.id))
+      .slice(-DIGEST_LIMIT)
+      .reverse()
+      .map((e: ScheduleDigestEntry) => ({
+        runId: e.runId,
+        outcome: e.outcome,
+        summary: e.summary,
+        ...(e.costUSD !== undefined ? { costUSD: e.costUSD } : {}),
+        at: e.at,
+      }));
+  }
   return {
-    schedules: await workflowSchedules(runtime),
+    schedules,
+    digests,
     projects: (await runtime.projects.list()).map((p) => ({
       repo: p.url ?? p.repo,
       label: `${p.label ?? p.repo}${p.url ? " · " + new URL(p.url).host : ""}`,
@@ -179,7 +207,8 @@ export default function Workflows({ data }: { data: Data }) {
           Schedules copy the workflow’s current instructions. Each occurrence
           enters the Inbox; existing source and project policies decide whether
           it waits for review or launches automatically. Missed intervals are
-          combined into one occurrence.
+          combined into one occurrence, and each settled occurrence is recorded
+          under the schedule as a delivered digest — outcome, summary and cost.
         </p>
         {data.schedules.map((s) => (
           <article class="workflow-row">
@@ -189,6 +218,25 @@ export default function Workflows({ data }: { data: Data }) {
                 {s.repo} · every {s.everyMinutes / 60} hours ·{" "}
                 {s.enabled ? "enabled" : "paused"}
               </p>
+              {(data.digests[s.id] ?? []).length > 0 && (
+                <details class="disclosure">
+                  <summary>Delivered digest ({data.digests[s.id]!.length})</summary>
+                  <ul>
+                    {data.digests[s.id]!.map((d) => (
+                      <li>
+                        <span class={`status ${d.outcome}`}>{d.outcome}</span>{" "}
+                        <a href={`/runs/${d.runId}`}>
+                          {d.at.slice(0, 16).replace("T", " ")}
+                        </a>{" "}
+                        {d.summary}
+                        {d.costUSD !== undefined
+                          ? ` · $${d.costUSD.toFixed(4)}`
+                          : ""}
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              )}
             </div>
             {data.canEdit && (
               <form method="post">
