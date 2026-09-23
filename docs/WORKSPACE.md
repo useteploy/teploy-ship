@@ -99,6 +99,31 @@ Older runs may have only intermediate critic/attempt snapshots, or none.
 Snapshots retain their step name and time; the forge remains authoritative for
 subsequent PR changes. Large snapshots are partial and marked accordingly.
 
+## Workspace takeover
+
+While a run is parked at a decision — a question, a plan, an approval — an
+operator with steer authority can take exclusive writable ownership of its
+sandbox from the run page. Writes are fenced at the sandbox daemon: while the
+lease is held, nothing else can exec or write in that workspace, and a
+decision delivered mid-takeover makes the run wait for handback instead of
+racing the human. The run page shows who holds a workspace and until when.
+
+What a holder can do: write whole files (up to 200 KB, relative paths inside
+the work tree), run exactly the project's declared tests command, and view the
+working-tree diff. Every operation renews the lease; an abandoned one expires
+on its own (default 30 min, `SHIP_TAKEOVER_TTL_SEC`) and is recorded as
+lapsed. Handing back records the session — files written, commands run, a
+digest of the diff, the holder's note — and leaves the resumed run a message
+describing the edits, so the agent commits the human's work rather than
+building over invisible changes.
+
+Boundaries, on purpose: a run reviewing a merge cannot be taken over (edits
+there cannot join an already-published PR — request changes instead), an
+executing run must be steered or parked first, and arbitrary commands are not
+part of this slice — only the project's tests command runs. Terminal, editor
+and interactive browser surfaces remain future work, as does reconnect after
+lease expiry (re-acquire; edits on disk are preserved).
+
 Verification is derived from recorded outcomes, never an agent's assertion
 that tests passed. Missing checks say **not recorded**. The page includes test
 output, preview/PR links, screenshot attachments and short browser recordings.
