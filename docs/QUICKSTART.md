@@ -38,8 +38,8 @@ piece.
 ## 1. Register the server
 
 ```sh
-teploy server add mybox --host 203.0.113.10 --user root   # or edit ~/.teploy/servers.yml
-teploy setup -s mybox                                     # installs Docker + Caddy if absent
+teploy server add mybox 203.0.113.10 --user root          # or edit ~/.teploy/servers.yml
+teploy setup 203.0.113.10 --name mybox                    # installs Docker + Caddy if absent
 ```
 
 ## 2. Get Ship
