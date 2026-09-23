@@ -9,6 +9,8 @@ import {
   FileDeliveryStore,
   deliveryFromEvents,
   executeDelivery,
+  executeDeliveryRollback,
+  isStaleExecuting,
   readBackDelivery,
   transitionAllowed,
   type DeliveryRecord,
@@ -248,4 +250,178 @@ test("readBackDelivery parses the CLI's real status shape, captured live", async
   };
   const read = await readBackDelivery(unknownRecord(), { dir: "/srv/trusted", run: statusRunner(live) });
   assert.equal(read.outcome, "confirmed");
+});
+
+test("revalidation holds a wrong-target, reverted, or superseded approval; exactly-the-tip proceeds", async () => {
+  const now = "2026-09-22T00:00:00.000Z";
+  const record = { ...base(), state: "executing", updatedAt: now } as DeliveryRecord;
+
+  // Wrong target: the trusted copy's marker names a different repository.
+  const wrongRepo: CommandRunner = async (argv: string[]) => {
+    if (argv[0] === "cat" && argv[1]!.endsWith(".teploy-ship-delivery-repo")) {
+      return { code: 0, stdout: "http://forge.example/Tyler/other.git", stderr: "" };
+    }
+    throw new Error("nothing else should run for a wrong-target delivery");
+  };
+  const wrongTarget = await executeDelivery(record, { dir: "/srv/trusted", run: wrongRepo, now: () => now });
+  assert.equal(wrongTarget.state, "held");
+  assert.match(wrongTarget.reason!, /wrong target/);
+
+  // The git plumbing answers, parameterized by ancestry and tip.
+  const gitFor = (ancestorOk: boolean, tip: string): CommandRunner => {
+    const ok: CommandResult = { code: 0, stdout: "", stderr: "" };
+    return async (argv: string[]) => {
+      if (argv[0] === "cat") return ok; // no marker bound
+      if (argv[1] === "fetch" || argv[1] === "symbolic-ref") {
+        if (argv[1] === "symbolic-ref") return { code: 0, stdout: "refs/remotes/origin/main\n", stderr: "" };
+        return ok;
+      }
+      if (argv[0] === "git" && argv[1] === "rev-parse") return { code: 0, stdout: `${tip}\n`, stderr: "" };
+      if (argv[0] === "git" && argv[1] === "merge-base") {
+        return ancestorOk ? ok : { code: 1, stdout: "", stderr: "" };
+      }
+      if (argv[0] === "git" && argv[1] === "worktree") return ok;
+      if (argv[1] === "build") return { code: 0, stdout: JSON.stringify({ image: "img" }), stderr: "" };
+      if (argv[1] === "deploy") return { code: 0, stdout: "Deployed", stderr: "" };
+      return { code: 1, stdout: "", stderr: "unexpected" };
+    };
+  };
+
+  const reverted = await executeDelivery(record, { dir: "/srv/trusted", run: gitFor(false, "abc123def456"), now: () => now });
+  assert.equal(reverted.state, "held");
+  assert.match(reverted.reason!, /no longer on the default branch/);
+
+  const superseded = await executeDelivery(record, { dir: "/srv/trusted", run: gitFor(true, "fff000fff000"), now: () => now });
+  assert.equal(superseded.state, "held");
+  assert.match(superseded.reason!, /moved past the approved merge/);
+
+  const exact = await executeDelivery(record, { dir: "/srv/trusted", run: gitFor(true, "abc123def456"), now: () => now });
+  assert.equal(exact.state, "unknown", "approval of exactly the tip proceeds to the honest post-deploy state");
+});
+
+test("the rollback executor refuses honestly and verifies by read-back", async () => {
+  const confirmed = { ...unknownRecord(), state: "confirmed" } as DeliveryRecord;
+
+  const unconfigured = await executeDeliveryRollback(confirmed, { run: never });
+  assert.equal(unconfigured.state, "failed");
+  assert.match(unconfigured.evidence!, /SHIP_DELIVERY_DIR/);
+
+  const noRetained = await executeDeliveryRollback({ ...confirmed, recoveryVersion: undefined }, { dir: "/srv/trusted", run: never });
+  assert.equal(noRetained.state, "failed");
+  assert.match(noRetained.evidence!, /no retained recovery version/);
+
+  const refused: CommandRunner = async () => ({ code: 1, stdout: "", stderr: "no such version" });
+  const refusedOut = await executeDeliveryRollback(confirmed, { dir: "/srv/trusted", run: refused });
+  assert.equal(refusedOut.state, "failed");
+  assert.match(refusedOut.evidence!, /no such version/);
+
+  const rollbackOk = (currentHash: string, running = true): CommandRunner => {
+    const calls: string[][] = [];
+    const runner: CommandRunner = async (argv: string[]) => {
+      calls.push(argv);
+      if (argv[1] === "rollback") return { code: 0, stdout: "Rolled back", stderr: "" };
+      if (argv[1] === "status") {
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            state: { current_hash: currentHash },
+            containers: running ? [{ Name: "app", Image: "old", State: "running" }] : [],
+          }),
+          stderr: "",
+        };
+      }
+      return { code: 1, stdout: "", stderr: "unexpected" };
+    };
+    return runner;
+  };
+
+  const done = await executeDeliveryRollback({ ...confirmed, recoveryVersion: "v9" }, { dir: "/srv/trusted", run: rollbackOk("v9") });
+  assert.equal(done.state, "done");
+  assert.match(done.evidence!, /retained version v9 serving/);
+
+  const wrongVersion = await executeDeliveryRollback({ ...confirmed, recoveryVersion: "v9" }, { dir: "/srv/trusted", run: rollbackOk("v8") });
+  assert.equal(wrongVersion.state, "failed");
+  assert.match(wrongVersion.evidence!, /target runs v8/);
+});
+
+test("rollback requests are refused, claimed, and finished through the fence", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ship-delivery-"));
+  const store = new FileDeliveryStore(dir);
+  const record = await store.propose(base());
+
+  await assert.rejects(store.requestRollback(record.id, "op", "why"), /only a confirmed delivery/);
+
+  await store.transition(record.id, "proposed", "approved", { actor: "op", destination: "scratch", recoveryVersion: "v9" });
+  await store.transition(record.id, "approved", "executing", {});
+  await store.transition(record.id, "executing", "unknown", { artifactDigest: "img" });
+  await store.transition(record.id, "unknown", "confirmed", { reason: "read back" });
+
+  // A record confirmed WITHOUT a retained version (operator hand-surgery or
+  // an older record) refuses the rollback — the missing-retained-version
+  // negative the contract demands. Hand-written to the store's file, the
+  // only way such a record can exist.
+  const orphan: DeliveryRecord = {
+    ...base("run-orphan"),
+    destination: "scratch",
+    state: "confirmed",
+    updatedAt: new Date().toISOString(),
+  } as DeliveryRecord;
+  const storeFile = join(dir, "deliveries.json");
+  const existing = JSON.parse(await (await import("node:fs/promises")).readFile(storeFile, "utf8")) as Record<string, DeliveryRecord>;
+  await (await import("node:fs/promises")).writeFile(storeFile, JSON.stringify({ ...existing, [orphan.id]: orphan }));
+  await assert.rejects(store.requestRollback(orphan.id, "op", "why"), /no retained recovery version/);
+
+  const requested = await store.requestRollback(record.id, "op@ship", "regression detected in production");
+  assert.equal(requested.rollback?.state, "requested");
+  assert.equal(requested.rollback?.actor, "op@ship");
+  assert.equal(requested.state, "confirmed", "rollback never changes the delivery state");
+
+  await assert.rejects(store.requestRollback(record.id, "op", "again"), /already/);
+
+  const claimed = await store.claimRollback(record.id);
+  assert.equal(claimed.rollback?.state, "executing");
+  const lostClaim = await store.claimRollback(record.id);
+  assert.equal(lostClaim.rollback?.state, "executing", "the second claimer learns it lost");
+
+  const finished = await store.finishRollback(record.id, {
+    state: "done",
+    actor: "op@ship",
+    reason: "regression detected in production",
+    requestedAt: claimed.rollback!.requestedAt,
+    finishedAt: new Date().toISOString(),
+    evidence: "target read back: retained version v9 serving",
+  });
+  assert.equal(finished.rollback?.state, "done");
+  await assert.rejects(store.requestRollback(record.id, "op", "re-roll"), /already done/);
+
+  // A FAILED rollback can be re-requested.
+  const dir2 = await mkdtemp(join(tmpdir(), "ship-delivery-"));
+  const store2 = new FileDeliveryStore(dir2);
+  const second = await store2.propose(base("run-d3"));
+  await store2.transition(second.id, "proposed", "approved", { actor: "op", destination: "d", recoveryVersion: "v1" });
+  await store2.transition(second.id, "approved", "executing", {});
+  await store2.transition(second.id, "executing", "unknown", { artifactDigest: "img" });
+  await store2.transition(second.id, "unknown", "confirmed", { reason: "read back" });
+  await store2.requestRollback(second.id, "op", "first attempt");
+  await store2.claimRollback(second.id);
+  await store2.finishRollback(second.id, {
+    state: "failed",
+    actor: "op",
+    reason: "first attempt",
+    requestedAt: new Date().toISOString(),
+    finishedAt: new Date().toISOString(),
+    evidence: "rollback refused",
+  });
+  const retried = await store2.requestRollback(second.id, "op", "second attempt after fixing the target");
+  assert.equal(retried.rollback?.state, "requested");
+});
+
+test("isStaleExecuting keys on state and age, above the execution ceiling", () => {
+  const now = Date.parse("2026-09-22T01:00:00.000Z");
+  const fresh = new Date(now - 60_000).toISOString();
+  const executing = { ...unknownRecord(), state: "executing", updatedAt: fresh } as DeliveryRecord;
+  assert.equal(isStaleExecuting(executing, now), false, "fresh executions are left alone");
+  assert.equal(isStaleExecuting({ ...executing, updatedAt: new Date(now - 36 * 60_000).toISOString() }, now), true);
+  assert.equal(isStaleExecuting({ ...unknownRecord(), updatedAt: new Date(now - 36 * 60_000).toISOString() }, now), false, "only executing records");
+  assert.equal(isStaleExecuting({ ...executing, updatedAt: new Date(now - 2 * 60_000).toISOString() }, now, 60_000), true, "the window is configurable for the live proof");
 });

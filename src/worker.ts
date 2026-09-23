@@ -23,7 +23,7 @@ import { enqueueRun, proposeExternal } from "./runtime.js";
 import { changeClassRequired, sweepBulletin } from "./bulletin.js";
 import { parseSandboxUrls } from "./sandbox-pool.js";
 import { attributionsFrom } from "./attributed-spend.js";
-import { deliveryFromEvents, executeDelivery, readBackDelivery } from "./delivery.js";
+import { deliveryFromEvents, executeDelivery, executeDeliveryRollback, isStaleExecuting, readBackDelivery } from "./delivery.js";
 import { intakeActor } from "./actor.js";
 import type { NucleusShipRuntime } from "./runtime.js";
 import type { RunMeta } from "./run-store.js";
@@ -1780,6 +1780,7 @@ export function startWorker(options: WorkerOptions): {
   // anyway is HELD with the reason rather than sitting unexecutable
   // forever — the record always tells the operator what it is waiting for.
   const deliveryDir = process.env.SHIP_DELIVERY_DIR;
+  const deliveryStaleMs = Number(process.env.SHIP_DELIVERY_STALE_MS ?? "") > 0 ? Number(process.env.SHIP_DELIVERY_STALE_MS) : 35 * 60_000;
   const deliveryRunner: CommandRunner = hostRunner();
   const sweepDeliveries = (): Promise<void> => {
     const records = options.runtime.deliveryRecords;
@@ -1803,20 +1804,62 @@ export function startWorker(options: WorkerOptions): {
             );
           return;
         }
+        // Operator-requested rollbacks execute ONE at a time from the
+        // trusted copy, claim-fenced like the delivery itself, and are
+        // verified by reading the target back — never by the command's
+        // exit code alone.
+        const [rollback] = (await records.list(500)).filter((r) => r.rollback?.state === "requested").slice(0, 1);
+        if (rollback !== undefined) {
+          const claimed = await records.claimRollback(rollback.id);
+          if (claimed.rollback?.state !== "executing") return;
+          const outcome = await executeDeliveryRollback(claimed, { dir: deliveryDir, run: deliveryRunner });
+          await records.finishRollback(claimed.id, outcome);
+          log(`[worker] delivery rollback ${claimed.id} → ${outcome.state}: ${outcome.evidence ?? ""}`);
+          return;
+        }
         // Reconcile one unknown delivery by reading the target back: unknown
         // is a promise to verify, not a resting state. Confirmed needs the
         // version AND the artifact on the target; a readable target running
         // something else fails with that evidence; an unreadable one stays
         // unknown and retries on the next sweep.
         const [unknown] = await records.due("unknown", 1);
-        if (unknown === undefined) return;
-        const read = await readBackDelivery(unknown, { dir: deliveryDir, run: deliveryRunner });
-        if (read.outcome === "confirmed") {
-          await records.transition(unknown.id, "unknown", "confirmed", { reason: read.detail });
-          log(`[worker] delivery ${unknown.id} → confirmed`);
-        } else if (read.outcome === "mismatch") {
-          await records.transition(unknown.id, "unknown", "failed", { reason: read.detail });
-          log(`[worker] delivery ${unknown.id} → failed (read-back: ${read.detail})`);
+        if (unknown !== undefined) {
+          const read = await readBackDelivery(unknown, { dir: deliveryDir, run: deliveryRunner });
+          if (read.outcome === "confirmed") {
+            await records.transition(unknown.id, "unknown", "confirmed", {
+              reason: read.detail,
+              // Health honesty (contract Q3): recorded unknown, never silent,
+              // until a telemetry binding exists for the destination.
+              health: "unknown",
+              healthReason: "no telemetry binding for this destination",
+            });
+            log(`[worker] delivery ${unknown.id} → confirmed`);
+          } else if (read.outcome === "mismatch") {
+            await records.transition(unknown.id, "unknown", "failed", { reason: read.detail });
+            log(`[worker] delivery ${unknown.id} → failed (read-back: ${read.detail})`);
+          }
+          return;
+        }
+        // A record stuck in executing past the staleness window is a worker
+        // that died between claim and outcome: read the target back — a
+        // target already on the approved pair confirms, anything else holds
+        // with the evidence so a human can re-approve the retry.
+        const [stuck] = (await records.due("executing", 10)).filter((r) => isStaleExecuting(r, Date.now(), deliveryStaleMs)).slice(0, 1);
+        if (stuck !== undefined) {
+          const read = await readBackDelivery(stuck, { dir: deliveryDir, run: deliveryRunner });
+          if (read.outcome === "confirmed") {
+            await records.transition(stuck.id, "executing", "confirmed", {
+              reason: `stale execution reconciled: ${read.detail}`,
+              health: "unknown",
+              healthReason: "no telemetry binding for this destination",
+            });
+            log(`[worker] delivery ${stuck.id} → confirmed (stale execution reconciled by read-back)`);
+          } else {
+            await records.transition(stuck.id, "executing", "held", {
+              reason: `execution did not complete (worker died or restarted) and the target does not run the approved delivery — re-approve to retry (${read.outcome}: ${read.detail})`,
+            });
+            log(`[worker] delivery ${stuck.id} → held (stale execution reconciled)`);
+          }
         }
       })
       .catch((error) => log(`[worker] delivery sweep: ${error instanceof Error ? error.message : String(error)}`));

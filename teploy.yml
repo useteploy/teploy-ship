@@ -151,6 +151,11 @@ env:
   # are held with the reason. Provisioned 2026-09-22 for the scratch
   # acceptance target ship-delivery-proof (:7480 on this box).
   SHIP_DELIVERY_DIR: /srv/ship-delivery/ship-journey-proof
+  # Stale-execution reconciliation window. Default is 35 min (> the 2x900s
+  # execution ceiling); set to 2 min ONLY for the live fault-injected proofs
+  # (2026-09-22) — restore to default (delete this line) with the final
+  # deploy of the slice.
+  SHIP_DELIVERY_STALE_MS: "120000"
   SHIP_MODEL: anthropic/claude-sonnet-5
   # Codebase indexing (A1): repo runs embed the clone into Nucleus vectors
   # and the agent gets the ```search action. Embeddings ride the gateway's

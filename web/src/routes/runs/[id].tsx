@@ -735,6 +735,8 @@ function DeliveryCard({ data }: { data: RunData }) {
         {d.recoveryVersion && <tr><td class="meta">recovery version</td><td><code>{d.recoveryVersion}</code></td></tr>}
         {d.artifactDigest && <tr><td class="meta">artifact</td><td><code>{d.artifactDigest}</code></td></tr>}
         {d.actor && <tr><td class="meta">approved by</td><td>{d.actor}</td></tr>}
+        {d.health && <tr><td class="meta">health</td><td><span>{d.health}</span>{d.healthReason ? <span class="meta"> — {d.healthReason}</span> : null}</td></tr>}
+        {d.rollback && <tr><td class="meta">rollback</td><td><code>{d.rollback.state}</code> by {d.rollback.actor}{d.rollback.evidence ? <span class="meta"> — {d.rollback.evidence}</span> : null}</td></tr>}
       </tbody>
     </table>
     {d.reason && <p class="meta" style="margin-top:8px">{d.reason}</p>}
@@ -751,6 +753,14 @@ function DeliveryCard({ data }: { data: RunData }) {
       </form>
     )}
     {d.state === "proposed" && !data.canLaunch && <p class="meta">Approving a promotion needs the approve authority.</p>}
+    {d.state === "confirmed" && d.recoveryVersion && (!d.rollback || d.rollback.state === "failed") && data.canLaunch && (
+      <form method="post" action={`/api/runs/${data.runId}/rollback-delivery`} style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;margin-top:12px">
+        <label class="meta" for="rollback-reason">Rollback reason</label>
+        <input id="rollback-reason" name="rollbackReason" required placeholder="the recovery plan being followed" style="min-width:260px"/>
+        <button type="submit" class="sm">Roll back to {d.recoveryVersion}</button>
+        {d.rollback?.state === "failed" && <p class="meta" style="width:100%">Previous rollback attempt failed: {d.rollback.evidence}</p>}
+      </form>
+    )}
     <p class="meta" style="margin-top:8px">Approval records intent against this exact tuple; deployment happens from the worker's trusted working copy and rolls back only to the retained version.</p>
   </section>;
 }

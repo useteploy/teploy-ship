@@ -47,6 +47,26 @@ export interface DeliveryRecord {
   actor?: string;
   policy?: string;
   reason?: string;
+  /**
+   * Health honesty (contract Q3): a confirmed delivery carries an explicit
+   * `unknown` unless a telemetry binding exists for the destination —
+   * recorded, never silently omitted, never blocking.
+   */
+  health?: "unknown";
+  healthReason?: string;
+  /**
+   * Rollback is a SEPARATE recorded operation, never a delivery state
+   * change: `confirmed` stays confirmed; the record shows what was
+   * delivered and that (and why, and by whom) it was rolled back.
+   */
+  rollback?: {
+    state: "requested" | "executing" | "done" | "failed";
+    actor: string;
+    reason: string;
+    requestedAt: string;
+    finishedAt?: string;
+    evidence?: string;
+  };
   state: DeliveryState;
   updatedAt: string;
 }
@@ -103,10 +123,23 @@ export interface DeliveryStore {
     id: string,
     from: DeliveryState,
     to: DeliveryState,
-    patch: Partial<Pick<DeliveryRecord, "actor" | "policy" | "reason" | "destination" | "recoveryVersion" | "artifactDigest" | "configIdentity">>,
+    patch: Partial<
+      Pick<DeliveryRecord, "actor" | "policy" | "reason" | "destination" | "recoveryVersion" | "artifactDigest" | "configIdentity" | "health" | "healthReason">
+    >,
   ): Promise<DeliveryRecord>;
   /** Records in a given state for the worker sweep, bounded. */
   due(state: DeliveryState, limit?: number): Promise<DeliveryRecord[]>;
+  /**
+   * Record an operator's rollback REQUEST (the route's authority boundary):
+   * refuses anything not confirmed, anything without a retained recovery
+   * version, and a rollback already requested or done (a FAILED one may be
+   * re-requested). Fenced like every other move.
+   */
+  requestRollback(id: string, actor: string, reason: string): Promise<DeliveryRecord>;
+  /** Worker claims a requested rollback for execution; returns the winner. */
+  claimRollback(id: string): Promise<DeliveryRecord>;
+  /** Worker records the rollback outcome (done | failed + evidence). */
+  finishRollback(id: string, outcome: NonNullable<DeliveryRecord["rollback"]>): Promise<DeliveryRecord>;
 }
 
 const validate = (record: Partial<DeliveryRecord>): void => {
@@ -205,7 +238,8 @@ export class FileDeliveryStore implements DeliveryStore {
     id: string,
     from: DeliveryState,
     to: DeliveryState,
-    patch: Partial<Pick<DeliveryRecord, "actor" | "policy" | "reason" | "destination" | "recoveryVersion" | "artifactDigest" | "configIdentity">>,
+    patch: Partial<Pick<DeliveryRecord, "actor" | "policy" | "reason" | "destination" | "recoveryVersion" | "artifactDigest" | "configIdentity" | "health" | "healthReason">
+    >,
   ): Promise<DeliveryRecord> {
     if (!transitionAllowed(from, to)) throw new Error(`Delivery ${id} cannot move ${from} → ${to}`);
     let winner: DeliveryRecord | null = null;
@@ -230,6 +264,67 @@ export class FileDeliveryStore implements DeliveryStore {
   async due(state: DeliveryState, limit = 10): Promise<DeliveryRecord[]> {
     return (await this.list(500)).filter((r) => r.state === state).slice(0, limit);
   }
+
+  async requestRollback(id: string, actor: string, reason: string): Promise<DeliveryRecord> {
+    let winner: DeliveryRecord | null = null;
+    await updateJsonFile<Record<string, DeliveryRecord>>(this.#path, {}, (all) => {
+      const current = all[id];
+      if (current === undefined) throw new Error("No delivery record with this identity");
+      const refused = rollbackRequestRefusal(current);
+      if (refused !== null) throw new Error(refused);
+      winner = {
+        ...current,
+        rollback: { state: "requested", actor, reason, requestedAt: new Date().toISOString() },
+      };
+      return { ...all, [id]: winner };
+    });
+    if (winner === null) throw new Error("Rollback request could not be read back");
+    return winner;
+  }
+
+  async claimRollback(id: string): Promise<DeliveryRecord> {
+    let winner: DeliveryRecord | null = null;
+    await updateJsonFile<Record<string, DeliveryRecord>>(this.#path, {}, (all) => {
+      const current = all[id];
+      if (current === undefined) throw new Error("No delivery record with this identity");
+      if (current.rollback?.state !== "requested") {
+        winner = current;
+        return all;
+      }
+      winner = { ...current, rollback: { ...current.rollback, state: "executing" } };
+      return { ...all, [id]: winner };
+    });
+    if (winner === null) throw new Error("Rollback claim could not be read back");
+    return winner;
+  }
+
+  async finishRollback(id: string, outcome: NonNullable<DeliveryRecord["rollback"]>): Promise<DeliveryRecord> {
+    let winner: DeliveryRecord | null = null;
+    await updateJsonFile<Record<string, DeliveryRecord>>(this.#path, {}, (all) => {
+      const current = all[id];
+      if (current === undefined) throw new Error("No delivery record with this identity");
+      if (current.rollback?.state !== "executing") {
+        winner = current;
+        return all;
+      }
+      winner = { ...current, rollback: outcome };
+      return { ...all, [id]: winner };
+    });
+    if (winner === null) throw new Error("Rollback outcome could not be read back");
+    return winner;
+  }
+}
+
+/** The shared refusal rules for recording a rollback request. */
+function rollbackRequestRefusal(record: DeliveryRecord): string | null {
+  if (record.state !== "confirmed") return `only a confirmed delivery can be rolled back (state: ${record.state})`;
+  if (record.recoveryVersion === undefined || record.recoveryVersion === "") {
+    return "this delivery recorded no retained recovery version — rollback needs an explicit target";
+  }
+  if (record.rollback !== undefined && record.rollback.state !== "failed") {
+    return `a rollback is already ${record.rollback.state === "done" ? "done" : record.rollback.state} for this delivery`;
+  }
+  return null;
 }
 
 /**
@@ -265,6 +360,17 @@ export async function executeDelivery(
   const cwd = options.dir;
   const exec = async (argv: string[], timeoutMs = 120_000) => options.run(argv, { cwd, timeoutMs });
 
+  // Wrong-target negative: the operator binds the trusted copy to ONE
+  // canonical repository with a marker file at provisioning time; a
+  // delivery for any other repository must never deploy from this copy.
+  const marker = await exec(["cat", `${cwd.replace(/\/+$/, "")}/.teploy-ship-delivery-repo`], 30_000);
+  if (marker.code === 0) {
+    const bound = marker.stdout.trim();
+    if (bound !== "" && bound !== record.repo) {
+      return { ...record, ...patch({ reason: `wrong target: this trusted copy serves ${bound}, the delivery is for ${record.repo}` }) };
+    }
+  }
+
   // The trusted copy builds EXACTLY the approved bytes: fetch the merged SHA
   // into a detached worktree (never moving an operator's open checkout),
   // build there, and record the digest the forge-independent build produced.
@@ -272,6 +378,33 @@ export async function executeDelivery(
   const fetched = await exec(["git", "fetch", "--no-write-fetch-head", "origin", record.mergedSha], 300_000);
   if (fetched.code !== 0) {
     return { ...record, ...patch({ reason: `could not fetch the merged SHA into the trusted copy: ${(fetched.stderr || fetched.stdout).slice(0, 300)}` }) };
+  }
+  // Stale-approval negative: the approval was recorded against a merge the
+  // forge may have since moved on from. The merged SHA is immutable, but
+  // what main MEANS is not — revalidate it against the default branch tip
+  // before anything touches the target. Held is re-approvable, and the
+  // promote form re-records the recovery version, so held IS the explicit
+  // confirm the contract asks for.
+  const head = await exec(["git", "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], 30_000);
+  if (head.code === 0) {
+    const branch = head.stdout.trim().replace(/^refs\/remotes\/origin\//, "");
+    const branchFetch = await exec(["git", "fetch", "origin", branch], 300_000);
+    if (branchFetch.code === 0) {
+      const tip = await exec(["git", "rev-parse", `origin/${branch}`], 30_000);
+      const ancestor = await exec(["git", "merge-base", "--is-ancestor", record.mergedSha, `origin/${branch}`], 30_000);
+      if (ancestor.code !== 0) {
+        return {
+          ...record,
+          ...patch({ reason: `the merged change is no longer on the default branch ${branch} (reverted or superseded) — this approval is void` }),
+        };
+      }
+      if (tip.code === 0 && tip.stdout.trim() !== record.mergedSha) {
+        return {
+          ...record,
+          ...patch({ reason: `the default branch ${branch} moved past the approved merge after approval — re-approve to confirm and re-record the recovery version` }),
+        };
+      }
+    }
   }
   const checked = await exec(["git", "worktree", "add", "--detach", tree, record.mergedSha]);
   if (checked.code !== 0) {
@@ -381,6 +514,78 @@ export async function readBackDelivery(
   }
   return { outcome: "confirmed", detail: `target read back: version ${expected} serving on the approved artifact` };
 }
+
+/**
+ * Execute one REQUESTED rollback from the trusted copy: `teploy rollback
+ * --to <recoveryVersion>` (argv arrays, never a shell), then READ the
+ * target back — done requires the state's current version to BE the
+ * retained version with a running container. A lost or ambiguous outcome
+ * records failed with the evidence, never a silent success. The recovery
+ * artifact's own digest is not known to this record (it predates the
+ * delivery), so version + a live container is the bar; the evidence string
+ * carries what was seen.
+ */
+export async function executeDeliveryRollback(
+  record: DeliveryRecord,
+  options: {
+    dir?: string;
+    run: (argv: string[], opts: { cwd: string; timeoutMs: number }) => Promise<{ code: number; stdout: string; stderr: string }>;
+    now?: () => string;
+  },
+): Promise<NonNullable<DeliveryRecord["rollback"]>> {
+  const now = options.now?.() ?? new Date().toISOString();
+  const failed = (evidence: string): NonNullable<DeliveryRecord["rollback"]> => ({
+    ...(record.rollback ?? { actor: "", reason: "", requestedAt: now }),
+    state: "failed",
+    finishedAt: now,
+    evidence: evidence.slice(0, 500),
+  });
+  if (options.dir === undefined || options.dir === "") {
+    return failed("no trusted delivery directory configured (SHIP_DELIVERY_DIR); cannot roll back");
+  }
+  if (record.recoveryVersion === undefined || record.recoveryVersion === "") {
+    return failed("this delivery recorded no retained recovery version — rollback needs an explicit target; a redeploy of the known-good revision is a new delivery");
+  }
+  const rolled = await options.run(["teploy", "rollback", "--to", record.recoveryVersion], { cwd: options.dir, timeoutMs: 900_000 });
+  if (rolled.code !== 0) {
+    return failed(`rollback refused (exit ${rolled.code}): ${(rolled.stderr || rolled.stdout).slice(0, 300)}`);
+  }
+  // A returned command is not a verified outcome — read the target back.
+  const read = await options.run(["teploy", "status", "--json"], { cwd: options.dir, timeoutMs: 120_000 });
+  if (read.code !== 0) {
+    return failed(`rollback command completed but the target could not be read back (exit ${read.code}): ${(read.stderr || read.stdout).slice(0, 300)}`);
+  }
+  try {
+    const parsed = JSON.parse(read.stdout.trim()) as { state?: { current_hash?: unknown }; containers?: Array<Record<string, unknown>> };
+    const current = typeof parsed.state?.current_hash === "string" ? parsed.state.current_hash : "";
+    const running = (parsed.containers ?? []).some((c) => c.State === "running");
+    if (current === record.recoveryVersion && running) {
+      return {
+        ...(record.rollback ?? { actor: "", reason: "", requestedAt: now }),
+        state: "done",
+        finishedAt: now,
+        evidence: `target read back: retained version ${record.recoveryVersion} serving`,
+      };
+    }
+    return failed(`target runs ${current === "" ? "(none)" : current} with ${running ? "a live" : "no"} container after rollback — expected ${record.recoveryVersion} serving`);
+  } catch {
+    return failed(`target status was not JSON after rollback: ${read.stdout.slice(0, 300)}`);
+  }
+}
+
+/**
+ * A record stuck in `executing` past the staleness window (default 35 min —
+ * deliberately above the 2×900 s execution ceiling) is a worker that died
+ * between its claim and its outcome. The sweep reads the target back: a
+ * target already on the approved pair confirms (the deploy landed; only the
+ * receipt was lost), anything else holds with the evidence so a human can
+ * re-approve the retry.
+ */
+export function isStaleExecuting(record: DeliveryRecord, nowMs: number, staleMs = 35 * 60_000): boolean {
+  if (record.state !== "executing") return false;
+  const updated = Date.parse(record.updatedAt);
+  return Number.isFinite(updated) && nowMs - updated > staleMs;
+}
 /** Nucleus-backed store over a fresh sibling table (the fleet-store pattern). */
 export class NucleusDeliveryStore implements DeliveryStore {
   #db: NucleusPgwire;
@@ -441,7 +646,8 @@ export class NucleusDeliveryStore implements DeliveryStore {
     id: string,
     from: DeliveryState,
     to: DeliveryState,
-    patch: Partial<Pick<DeliveryRecord, "actor" | "policy" | "reason" | "destination" | "recoveryVersion" | "artifactDigest" | "configIdentity">>,
+    patch: Partial<Pick<DeliveryRecord, "actor" | "policy" | "reason" | "destination" | "recoveryVersion" | "artifactDigest" | "configIdentity" | "health" | "healthReason">
+    >,
   ): Promise<DeliveryRecord> {
     if (!transitionAllowed(from, to)) throw new Error(`Delivery ${id} cannot move ${from} → ${to}`);
     await this.#ensure();
@@ -466,5 +672,63 @@ export class NucleusDeliveryStore implements DeliveryStore {
 
   async due(state: DeliveryState, limit = 10): Promise<DeliveryRecord[]> {
     return (await this.list(500)).filter((r) => r.state === state).slice(0, limit);
+  }
+
+  /** The compare-and-swap every rollback move shares: exactly one mover wins. */
+  async #fencedRollback(
+    id: string,
+    guard: (current: DeliveryRecord) => string | null,
+    apply: (current: DeliveryRecord) => DeliveryRecord,
+  ): Promise<DeliveryRecord> {
+    await this.#ensure();
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const current = await this.get(id);
+      if (current === undefined || current === null) throw new Error("No delivery record with this identity");
+      const refused = guard(current);
+      if (refused !== null) throw new Error(refused);
+      const next = apply(current);
+      const changed = await this.#db.exec("UPDATE ship_delivery SET record = $1 WHERE id = $2 AND record = $3", [
+        JSON.stringify(next),
+        id,
+        JSON.stringify(current),
+      ]);
+      if (changed === 1) return next;
+    }
+    throw new Error("Rollback move lost every race; re-read the record");
+  }
+
+  async requestRollback(id: string, actor: string, reason: string): Promise<DeliveryRecord> {
+    return this.#fencedRollback(
+      id,
+      (current) => rollbackRequestRefusal(current),
+      (current) => ({ ...current, rollback: { state: "requested", actor, reason, requestedAt: new Date().toISOString() } }),
+    );
+  }
+
+  async claimRollback(id: string): Promise<DeliveryRecord> {
+    const claimed = await this.#fencedRollback(
+      id,
+      (current) => (current.rollback?.state === "requested" ? null : `nothing to claim (rollback state: ${current.rollback?.state ?? "none"})`),
+      (current) => ({ ...current, rollback: { ...current.rollback!, state: "executing" } }),
+    ).catch((error: unknown) => {
+      // Another worker claimed first is a normal race, not an error.
+      const message = error instanceof Error ? error.message : String(error);
+      if (/nothing to claim/.test(message)) return this.get(id);
+      throw error;
+    });
+    return claimed ?? (await this.get(id))!;
+  }
+
+  async finishRollback(id: string, outcome: NonNullable<DeliveryRecord["rollback"]>): Promise<DeliveryRecord> {
+    const finished = await this.#fencedRollback(
+      id,
+      (current) => (current.rollback?.state === "executing" ? null : `nothing to finish (rollback state: ${current.rollback?.state ?? "none"})`),
+      (current) => ({ ...current, rollback: outcome }),
+    ).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/nothing to finish/.test(message)) return this.get(id);
+      throw error;
+    });
+    return finished ?? (await this.get(id))!;
   }
 }

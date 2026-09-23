@@ -216,6 +216,9 @@ export async function runData({ params, request }: { params: { id: string }; req
               ...(deliveryRecord.artifactDigest !== undefined ? { artifactDigest: deliveryRecord.artifactDigest } : {}),
               ...(deliveryRecord.actor !== undefined ? { actor: deliveryRecord.actor } : {}),
               ...(deliveryRecord.reason !== undefined ? { reason: deliveryRecord.reason } : {}),
+              ...(deliveryRecord.health !== undefined ? { health: deliveryRecord.health } : {}),
+              ...(deliveryRecord.healthReason !== undefined ? { healthReason: deliveryRecord.healthReason } : {}),
+              ...(deliveryRecord.rollback !== undefined ? { rollback: deliveryRecord.rollback } : {}),
             },
           }
         : {}),
