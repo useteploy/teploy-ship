@@ -6,13 +6,18 @@ import { currentUser } from "../lib/session.server.js";
 import { may } from "../lib/authority.server.js";
 import { redirect } from "../lib/http.server.js";
 import {
+  acceptCheckRisk,
+  coordinationComplete,
   createCoordination,
   launchNext,
   listCoordinations,
   observeCoordination,
+  proposeCheckFixTask,
+  retryCoordinationCheck,
   retryCoordinationChild,
+  rollupCoordinationCost,
 } from "../../../dist/coordination.js";
-import type { CoordinationChild, CoordinationRecord } from "../../../dist/coordination.js";
+import type { CoordinationChild, CoordinationCheckState, CoordinationCost, CoordinationRecord } from "../../../dist/coordination.js";
 
 export const config = { mode: "app" };
 
@@ -29,10 +34,11 @@ interface ChildView {
 }
 
 interface CoordinationData {
-  coordinations: Array<{ record: CoordinationRecord; api: ChildView; client: ChildView }>;
+  coordinations: Array<{ record: CoordinationRecord; api: ChildView; client: ChildView; cost: CoordinationCost; complete: boolean }>;
   canApprove: boolean;
   created: string | null;
   error: string | null;
+  fixProposed: string | null;
   denied: boolean;
   model: string;
 }
@@ -44,17 +50,30 @@ export async function loader({ request }: { request: Request }): Promise<Coordin
   const query = new URL(request.url).searchParams;
   const records = await listCoordinations(runtime);
   // Observe (never launch) so the page shows what actually happened; the
-  // sweep and the retry action are the only things that enqueue.
+  // sweep and the retry action are the only things that enqueue. Cost is
+  // derived on read from the runs' recorded steps — never stored, so it
+  // cannot go stale between a launch and this render.
   const coordinations = [] as CoordinationData["coordinations"];
   for (const record of records) {
     const fresh = await observeCoordination(runtime, record);
+    const cost = await rollupCoordinationCost(runtime, fresh);
     coordinations.push({
       record: fresh,
       api: childView(fresh, "api"),
       client: childView(fresh, "client"),
+      cost,
+      complete: coordinationComplete(fresh),
     });
   }
-  return { coordinations, canApprove, created: query.get("created"), error: query.get("error"), denied: query.get("denied") === "1", model: defaultModel() };
+  return {
+    coordinations,
+    canApprove,
+    created: query.get("created"),
+    error: query.get("error"),
+    fixProposed: query.get("fix-proposed"),
+    denied: query.get("denied") === "1",
+    model: defaultModel(),
+  };
 }
 
 export async function action({ request }: { request: Request }): Promise<Response> {
@@ -88,6 +107,26 @@ export async function action({ request }: { request: Request }): Promise<Respons
       if (which !== "api" && which !== "client") throw new Error("Retry needs the side to retry.");
       await retryCoordinationChild(runtime, id, which);
       return redirect("/coordination");
+    }
+    // The check's human actions. All three decide or commission work over a
+    // verdict the pair is parked on, so they sit under the same approve grant
+    // as create/retry: accept-risk waves drift through, re-run spends a new
+    // check attempt, and the fix task proposes intake work.
+    if (intent === "accept-check") {
+      const id = String(form.get("coordinationId") ?? "");
+      if (me === null) throw new Error("Accepting check risk needs a signed-in account.");
+      await acceptCheckRisk(runtime, id, actorFromPrincipal(me));
+      return redirect("/coordination");
+    }
+    if (intent === "retry-check") {
+      const id = String(form.get("coordinationId") ?? "");
+      await retryCoordinationCheck(runtime, id);
+      return redirect("/coordination");
+    }
+    if (intent === "fix-task") {
+      const id = String(form.get("coordinationId") ?? "");
+      const proposed = await proposeCheckFixTask(runtime, id, me !== null ? actorFromPrincipal(me) : undefined);
+      return redirect(`/coordination?fix-proposed=${encodeURIComponent(proposed.taskId)}`);
     }
     return new Response("Unknown action", { status: 400 });
   } catch (error) {
@@ -131,7 +170,7 @@ function childView(record: CoordinationRecord, which: "api" | "client"): ChildVi
         line:
           which === "api"
             ? `Merged as ${child.anchorSha ?? "an unproven commit"} — that commit is the compatibility anchor for the client change. Delivery approval happens on the Deliveries surface.${run}`
-            : `Merged — the pair landed. Delivery approval happens on the Deliveries surface.${run}`,
+            : `Merged as ${child.mergedSha ?? "an unproven commit"} — the pair now owes its compatibility check before it can be called done. Delivery approval happens on the Deliveries surface.${run}`,
       };
     case "delivered":
       return {
@@ -168,6 +207,24 @@ function statusClass(state: CoordinationChild["state"]): string {
   return "completed";
 }
 
+function checkStatusClass(state: CoordinationCheckState): string {
+  if (state === "incompatible") return "failed";
+  if (state === "uncertain") return "waiting";
+  if (state === "pending") return "queued";
+  if (state === "running") return "running";
+  return "completed";
+}
+
+/**
+ * Spend, per the honesty rule: an unpriced run makes the figure UNKNOWN —
+ * never $0 (spend.ts P5-3). The known dollars still show beside the flag so
+ * a partially-priced pair is not read as either free or fully counted.
+ */
+function costLine(roll: { costUsd: number; unknown: boolean }): string {
+  const known = `$${roll.costUsd.toFixed(4)}`;
+  return roll.unknown ? `${known} known · total unknown (unpriced work included)` : known;
+}
+
 export default function Coordination({ data }: { data: CoordinationData }) {
   return (
     <>
@@ -181,6 +238,11 @@ export default function Coordination({ data }: { data: CoordinationData }) {
       {data.created && (
         <p class="notice good" role="status">
           Coordination started — the API-side run is queued. The client side will start only after it merges.
+        </p>
+      )}
+      {data.fixProposed && (
+        <p class="notice good" role="status">
+          Fix task proposed ({data.fixProposed}) — it waits in the intake queue like any other proposed task.
         </p>
       )}
       {data.error && <p class="notice bad" role="alert">{data.error}</p>}
@@ -199,7 +261,7 @@ export default function Coordination({ data }: { data: CoordinationData }) {
           <form method="post" class="card" style="display:grid;gap:10px">
             <input type="hidden" name="intent" value="create" />
             <label class="meta" for="parentIntent">Parent intent — what the pair is for</label>
-            <textarea id="parentIntent" name="parentIntent" rows="3" required maxLength={20000} placeholder="For example: add the /v2/quotes endpoint and surface it in the app" />
+            <textarea id="parentIntent" name="parentIntent" rows={3} required maxLength={20000} placeholder="For example: add the /v2/quotes endpoint and surface it in the app" />
             <label class="meta" for="apiRepo">API repository (merges first)</label>
             <input id="apiRepo" name="apiRepo" type="text" required placeholder="https://forge.example/team/api.git" />
             <label class="meta" for="clientRepo">Client repository (starts after the API change merges)</label>
@@ -215,11 +277,12 @@ export default function Coordination({ data }: { data: CoordinationData }) {
           <h2 class="section">
             Coordinated changes <span class="count">({data.coordinations.length})</span>
           </h2>
-          {data.coordinations.map(({ record, api, client }) => (
+          {data.coordinations.map(({ record, api, client, cost, complete }) => (
             <article class="card" key={record.id}>
               <div class="row-actions">
                 <strong>{record.parentIntent.length > 120 ? `${record.parentIntent.slice(0, 120)}…` : record.parentIntent}</strong>
                 <span class="spacer" style="flex:1" />
+                {complete && <span class="status completed">complete</span>}
                 <span class="chip">{new Date(record.createdAt).toISOString().slice(0, 16).replace("T", " ")}</span>
               </div>
               <div class="summary-grid" style="margin-top:10px">
@@ -232,6 +295,9 @@ export default function Coordination({ data }: { data: CoordinationData }) {
                     </div>
                     <p class="meta" style="margin:6px 0 0;word-break:break-all">{view.child.repo}</p>
                     <p class="meta" style="margin:6px 0 0">{view.line}</p>
+                    <p class="meta" style="margin:6px 0 0">
+                      Spend: {costLine(view.label === "API" ? cost.api : cost.client)}
+                    </p>
                     {view.retryable && data.canApprove && (
                       <form method="post" class="row-actions" style="margin-top:8px">
                         <input type="hidden" name="intent" value="retry" />
@@ -243,11 +309,70 @@ export default function Coordination({ data }: { data: CoordinationData }) {
                   </div>
                 ))}
               </div>
+              {record.client.clientCheck !== undefined && (
+                <div class="summary-card" style="margin-top:10px;cursor:default">
+                  <div class="row-actions">
+                    <strong>Compatibility check</strong>
+                    <span class={`status ${checkStatusClass(record.client.clientCheck)}`}>{record.client.clientCheck}</span>
+                    {(record.client.checkAttempts ?? 0) > 1 && <span class="meta">attempt {record.client.checkAttempts}</span>}
+                    <span class="spacer" style="flex:1" />
+                    <span class="meta">Spend: {costLine(cost.check)}</span>
+                  </div>
+                  {record.client.checkRunId !== undefined && (
+                    <p class="meta" style="margin:6px 0 0">Run: /runs/{record.client.checkRunId} — read-only scan on the client repo against the API at {record.api.anchorSha ?? "(unproven)"}.</p>
+                  )}
+                  {record.client.integrationTest !== undefined && (
+                    <p class="meta" style="margin:6px 0 0">Integration test: {record.client.integrationTest}</p>
+                  )}
+                  {record.client.clientCheck === "compatible" && record.client.checkVerdict !== undefined && (
+                    <p class="meta" style="margin:6px 0 0">{record.client.checkVerdict.rationale} — the pair's complete shape is reached.</p>
+                  )}
+                  {(record.client.clientCheck === "incompatible" || record.client.clientCheck === "uncertain") && (
+                    <>
+                      <p class="meta" style="margin:6px 0 0">
+                        {record.client.checkVerdict?.rationale ?? "The check reported a verdict a human must decide on."} The pair is held here — nothing else runs until you accept the risk, re-run the check, or open a fix task.
+                      </p>
+                      {record.client.checkVerdict?.findings.map((f) => (
+                        <p class="meta" style="margin:4px 0 0" key={`${f.file}:${f.line ?? ""}:${f.title}`}>
+                          {f.severity} — {f.title} ({f.file}{f.line !== undefined ? `:${f.line}` : ""})
+                        </p>
+                      ))}
+                      {record.client.checkAccepted !== undefined ? (
+                        <p class="meta" style="margin:6px 0 0">Risk accepted by {record.client.checkAccepted.by} at {record.client.checkAccepted.at} — the pair is complete on that decision.</p>
+                      ) : (
+                        data.canApprove && (
+                          <div class="row-actions" style="margin-top:8px;gap:8px">
+                            <form method="post">
+                              <input type="hidden" name="intent" value="accept-check" />
+                              <input type="hidden" name="coordinationId" value={record.id} />
+                              <button type="submit" class="approve sm">Accept risk</button>
+                            </form>
+                            <form method="post">
+                              <input type="hidden" name="intent" value="retry-check" />
+                              <input type="hidden" name="coordinationId" value={record.id} />
+                              <button type="submit" class="approve sm">Re-run check</button>
+                            </form>
+                            <form method="post">
+                              <input type="hidden" name="intent" value="fix-task" />
+                              <input type="hidden" name="coordinationId" value={record.id} />
+                              <button type="submit" class="approve sm">Open a fix task</button>
+                            </form>
+                          </div>
+                        )
+                      )}
+                    </>
+                  )}
+                  {record.client.clientCheck === "running" && (
+                    <p class="meta" style="margin:6px 0 0">In flight — the verdict lands when the scan settles.</p>
+                  )}
+                </div>
+              )}
+              <p class="meta" style="margin:10px 0 0">Total spend: {costLine(cost.total)}</p>
             </article>
           ))}
         </section>
       )}
-      <p class="meta">Ordering is fixed: API first, client second, gated on the API change's merge. A failed API side holds the client; a failed client never rolls back merged API work.</p>
+      <p class="meta">Ordering is fixed: API first, client second, gated on the API change's merge, then a read-only compatibility check gates the pair's completion. A failed API side holds the client; a failed client never rolls back merged API work; an incompatible or uncertain check holds the pair on a human.</p>
     </>
   );
 }
