@@ -375,10 +375,14 @@ solution passes, a wrong one fails). This is where the remaining agent
 quality gets closed: change a prompt or action, run the suite, keep what
 moves the number.
 
-**Honest status:** the machinery is built and tested with scripted
-models; the actual pass rate requires running the suite against a real
-model (API cost + time), which hasn't been done yet. The harness makes
-that a measurement, not a guess.
+**Honest status:** the machinery is tested with scripted models, and the
+product-journey harness has now been exercised end to end: its graders pass
+21/21 out-of-tree against pristine fixtures, and a live ship-adapter canary
+(one read-only scan, real model) passed after an informative first failure —
+the first attempt's record is kept, and the failure was in the grader, not
+the product (records under `evals/product-journeys/results/eval-20260922-*`).
+The builtin suite's pass rate against a real model is still unmeasured
+(API cost + time); the harness makes that a measurement, not a guess.
 
 ## Optional: security scan gate (future, not core)
 
@@ -394,8 +398,10 @@ miss deep logic flaws. Concept salvaged from the archived `penscanai` idea.
 
 M1–M4: the CodeAct loop, durability + action approval, recovery +
 context condensation, and the eval harness + starter benchmark — all on
-the Neutron/Teploy stack, all tested. Next: run the suite against a real
-model for a baseline, then grow the benchmark and tune against it; a
-persistent execution kernel, a structured file-editor action, and
-sandbox snapshots.
+the Neutron/Teploy stack, all tested. The eval harness now has live
+canary receipts (mock + one real-model scan, 2026-09-22); the full
+12-scenario × 3-family baseline and the builtin suite's real-model pass
+rate are the open measurement work, then grow the benchmark and tune
+against it; a persistent execution kernel, a structured file-editor
+action, and sandbox snapshots.
 

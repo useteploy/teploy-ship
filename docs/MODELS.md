@@ -47,7 +47,7 @@ and the rest of this file is about the second one.
 | `glm-5.3` | SWE-bench Lite, seeded 50 of 300, official evaluator | **35/50 resolved — 70.0%, 95% CI roughly 57–81%** | 2026-08-16 |
 | `glm-4.6` | same 50 instances, same harness | 18/50 — 36% | 2026-08-18 |
 | `claude-haiku-4-5` | 9-instance smoke, hand-picked from instances glm-5.3 resolved | 1/9 resolved; **5/9 produced no patch at all**; 4/9 reported `finished` having never edited a file | 2026-08-18 |
-| `claude-sonnet-5` | in-house starter suites (3 and 6 tasks) | saturated — 3/3 and 6/6 | 2026-07-03 |
+| `claude-sonnet-5` | in-house starter suites (3 and 6 tasks) | saturated — 3/3 and 6/6 **(low n: 9 tasks in total across two suites, 2026-07 — a smoke test of the stack, not a capability number)** | 2026-07-03 |
 | `claude-haiku-4-5` | in-house suites (6 and 4 tasks) | 6/6 pass@2 on `hardSuite`, 4/4 on `extremeSuite` | 2026-07-04, 2026-07-07 |
 | any OpenAI-shaped model | — | **never benchmarked.** Routing is implemented; no published number exercises it | — |
 | local runtimes (`ollama/` etc.) | — | **never benchmarked.** Routing and zero-cost accounting implemented | — |

@@ -194,6 +194,10 @@ suite did not fail, it never finished.
 
 ## If it does not work
 
+The four common cases are below; **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)**
+is the consolidated operator guide (worker holds, store blips, known_hosts,
+sandbox TTLs, firewall ports).
+
 **The run sits in `waiting`.** It parked on an approval. `teploy-ship explain
 <run-id>` names what it asked for; approve from the dashboard or with
 `teploy-ship approve <run-id>`.
