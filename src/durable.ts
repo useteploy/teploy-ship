@@ -730,6 +730,31 @@ export interface ExecutorProvider {
    */
   warmInfo?: (handle: string) => Promise<WarmState | null>;
   warmCommit?: (handle: string) => Promise<WarmState | null>;
+  /**
+   * Writable-workspace leases (Package C), present only on a provider whose
+   * daemon implements them (teploy-sandbox 01bd420). The daemon owns the
+   * fence: execs and file writes need the holder's exact owner+generation
+   * while a lease is held, and a grant is refused while exec work is in
+   * flight. Absent means takeover is honestly unavailable on this provider.
+   */
+  lease?: {
+    acquire: (handle: string, owner: string, ttlSec: number) => Promise<{ generation: number; expiresAt: string }>;
+    renew: (handle: string, owner: string, generation: number, ttlSec: number) => Promise<{ expiresAt: string }>;
+    release: (handle: string, owner: string, generation: number) => Promise<void>;
+    /** An exec under the holder's credential — required while the lease is held, including for read-only commands. */
+    execAs: (
+      handle: string,
+      cred: { owner: string; generation: number },
+      command: string,
+      opts?: { timeoutMs?: number; maxOutputBytes?: number },
+    ) => Promise<ExecResult>;
+    writeFileAs: (
+      handle: string,
+      cred: { owner: string; generation: number },
+      path: string,
+      bytes: Uint8Array,
+    ) => Promise<void>;
+  };
 }
 
 export interface DurableAgentConfig {
@@ -3535,6 +3560,75 @@ function liveWiring(
  * the production wiring for durable Ship runs. Handles are
  * "runId" strings; snapshots are daemon image refs.
  */
+/**
+ * The daemon's lease wire (Package C): acquire/renew/release plus the two
+ * fenced operations the daemon requires a credential for — exec and file
+ * write. Problem responses carry the daemon's reason verbatim (a refused
+ * grant names the holder or the in-flight exec), so callers can show why
+ * rather than "conflict".
+ */
+export function sandboxLeaseClient(base: { baseURL: string; token: string; fetch?: typeof globalThis.fetch }): NonNullable<ExecutorProvider["lease"]> {
+  const fetchImpl = base.fetch ?? globalThis.fetch;
+  const call = async <T>(path: string, body: Record<string, unknown>, method: "POST" = "POST"): Promise<T> => {
+    const response = await fetchImpl(`${base.baseURL.replace(/\/+$/, "")}${path}`, {
+      method,
+      headers: { authorization: `Bearer ${base.token}`, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (response.ok) {
+      if (response.status === 204) return undefined as T;
+      const parsed = (await response.json()) as { lease?: { generation?: unknown; expiresAt?: unknown } };
+      const lease = parsed.lease ?? {};
+      return {
+        ...(typeof lease.generation === "number" ? { generation: lease.generation } : {}),
+        ...(typeof lease.expiresAt === "string" ? { expiresAt: lease.expiresAt } : {}),
+      } as T;
+    }
+    let detail = `Sandbox lease call failed with status ${response.status}.`;
+    try {
+      const problem = (await response.json()) as { detail?: unknown };
+      if (typeof problem.detail === "string") detail = problem.detail;
+    } catch {
+      // non-JSON body
+    }
+    throw new Error(detail);
+  };
+  return {
+    acquire: (handle, owner, ttlSec) => call(`/v1/runs/${handle}/lease`, { owner, ttlSec }),
+    renew: (handle, owner, generation, ttlSec) => call(`/v1/runs/${handle}/lease/renew`, { owner, generation, ttlSec }),
+    release: (handle, owner, generation) => call(`/v1/runs/${handle}/lease/release`, { owner, generation }),
+    execAs: (handle, cred, command, opts) =>
+      streamSandboxExec(
+        base,
+        handle,
+        command,
+        { ...(opts ?? {}), lease: cred },
+        () => {},
+      ),
+    writeFileAs: async (handle, cred, path, bytes) => {
+      const query = new URLSearchParams({ owner: cred.owner, generation: String(cred.generation) });
+      const response = await fetchImpl(
+        `${base.baseURL.replace(/\/+$/, "")}/v1/runs/${handle}/files/${path.split("/").map(encodeURIComponent).join("/")}?${query}`,
+        {
+          method: "PUT",
+          headers: { authorization: `Bearer ${base.token}`, "content-type": "application/octet-stream" },
+          body: bytes as BodyInit,
+        },
+      );
+      if (!response.ok) {
+        let detail = `Sandbox file write failed with status ${response.status}.`;
+        try {
+          const problem = (await response.json()) as { detail?: unknown };
+          if (typeof problem.detail === "string") detail = problem.detail;
+        } catch {
+          // non-JSON body
+        }
+        throw new Error(detail);
+      }
+    },
+  };
+}
+
 export function sandboxProvider(options: {
   baseURL: string;
   token: string;
@@ -3590,6 +3684,7 @@ export function sandboxProvider(options: {
     attach(handle: string) {
       return SandboxExecutor.attach(handle, base);
     },
+    lease: sandboxLeaseClient(base),
     execStream(handle, command, opts, onChunk) {
       return streamSandboxExec(base, handle, command, opts, onChunk);
     },
@@ -3709,7 +3804,7 @@ export async function streamSandboxExec(
   base: { baseURL: string; token: string; fetch?: typeof globalThis.fetch },
   handle: string,
   command: string,
-  opts: { timeoutMs?: number; maxOutputBytes?: number },
+  opts: { timeoutMs?: number; maxOutputBytes?: number; lease?: { owner: string; generation: number } },
   onChunk: (stream: "stdout" | "stderr", chunk: string) => void,
 ): Promise<ExecResult> {
   const fetchImpl = base.fetch ?? globalThis.fetch;
@@ -3717,7 +3812,13 @@ export async function streamSandboxExec(
   const response = await fetchImpl(`${base.baseURL.replace(/\/+$/, "")}/v1/runs/${handle}/exec`, {
     method: "POST",
     headers: { authorization: `Bearer ${base.token}`, "content-type": "application/json" },
-    body: JSON.stringify({ cmd: command, timeoutSec }),
+    body: JSON.stringify({
+      cmd: command,
+      timeoutSec,
+      // The lease credential: ignored by a daemon with no lease on this run,
+      // required by one that holds it (Package C). Absent is the agent path.
+      ...(opts.lease !== undefined ? { owner: opts.lease.owner, generation: opts.lease.generation } : {}),
+    }),
   });
   if (!response.ok || response.body === null) {
     let detail = `Sandbox exec failed with status ${response.status}.`;

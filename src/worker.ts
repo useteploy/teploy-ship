@@ -2,6 +2,7 @@ import { recoverLaunches } from "./launch-journal.js";
 import { intakeJourney } from "./journeys.js";
 import { sweepWorkflowSchedules } from "./workflow-schedules.js";
 import { serveWorkspaceRequests } from "./workspace-requests.js";
+import { loadTakeover } from "./takeover.js";
 import { policyFromEnv as workspacePolicyFromEnv } from "./repo-policy.js";
 import { NondeterminismError, completeSleep, executeRunExclusive } from "@neutron-build/workflow";
 import type { RunOutcome, WorkflowEvent } from "@neutron-build/workflow";
@@ -717,6 +718,9 @@ export function startWorker(options: WorkerOptions): {
     ...(src.destroy !== undefined ? { destroy: (handle: string) => src.destroy!(handle) } : {}),
     ...(src.warmInfo !== undefined ? { warmInfo: (handle: string) => src.warmInfo!(handle) } : {}),
     ...(src.warmCommit !== undefined ? { warmCommit: (handle: string) => src.warmCommit!(handle) } : {}),
+    // Leases (Package C): forwarded only when the source can lease, so a
+    // local executor honestly answers "takeover unsupported".
+    ...(src.lease !== undefined ? { lease: src.lease } : {}),
     // The streamed exec behind the live "now" line (live.ts). Forwarded like
     // the rest: dropping it here silently degrades every harness run to
     // "claude starting" for its whole duration — which is exactly what the
@@ -825,6 +829,8 @@ export function startWorker(options: WorkerOptions): {
    * readable as one, and clears the moment the run makes progress.
    */
   const failedAttempts = new Map<string, number>();
+  /** Runs currently held by a workspace takeover — so the hold logs once, not every tick. */
+  const takeoverHoldLogged = new Set<string>();
   const handleError = (runId: string, error: unknown): void => {
     inflight.delete(runId);
     const consecutive = (failedAttempts.get(runId) ?? 0) + 1;
@@ -1249,6 +1255,20 @@ export function startWorker(options: WorkerOptions): {
         await holdForUpgrade(runId, upgradeHoldReason(runId, drift));
         return false;
       }
+      // PACKAGE C — TAKEOVER HOLD. A run whose workspace a human holds (a
+      // live takeover record) is not executable: the agent's execs would be
+      // refused by the sandbox fence mid-turn, which fails the run instead of
+      // pausing it. Skipping here keeps the run due; handback (or lease
+      // expiry) clears the record and the next tick executes it normally.
+      // The daemon fence remains the backstop for every race this check misses.
+      if ((await loadTakeover(options.runtime, runId)) !== null) {
+        if (!takeoverHoldLogged.has(runId)) {
+          takeoverHoldLogged.add(runId);
+          log(`[worker] ${runId} held for workspace takeover — execution waits for handback`);
+        }
+        return false;
+      }
+      takeoverHoldLogged.delete(runId);
       // PER-REPO SERIALIZATION (C7): one active run per repository. Two runs
       // racing on one repo push overlapping branches and force the second PR
       // to rebase onto bytes its verification never saw — the lock makes that

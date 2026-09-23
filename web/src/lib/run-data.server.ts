@@ -1,6 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { threadHistory, workspaceInspection, refreshForgeIfStale } from "./workspace.server.js";
 import type { WorkspaceReply } from "../../../dist/workspace-requests.js";
+import {
+  loadTakeover,
+  mayAcquireTakeover,
+  takeoverHistoryKey,
+  takeoverReplyKey,
+  type TakeoverRecord,
+  type TakeoverSession,
+} from "../../../dist/takeover.js";
 import { workspaceRecovery, conversation, diffSnapshots, evidence } from "./workspace.js";
 import type { Message, DiffSnapshot, Evidence } from "./workspace.js";
 import { costUSD, isPricedModel, pendingQuestion, verificationFactsFromEvents } from "./ship.server.js";
@@ -93,6 +101,23 @@ export interface RunData {
   typical: Typical | null;
   /** When this run was enqueued, for the elapsed line. */
   createdAt?: string;
+  /** Package C: writable-workspace takeover state for this run's sandbox. */
+  takeover: {
+    /** True when the run is parked at a decision the resumed agent consumes, a workspace exists, and no lease is held. */
+    available: boolean;
+    /** Why not, when available is false and someone might expect otherwise. */
+    reason?: string;
+    record?: { holder: string; expiresAt: string; acquiredAt: string; pathsWritten: string[]; execsRun: string[] };
+    /** The last mediated operation's result (any holder), for the panel. */
+    reply?: { kind: string; at: string; output?: string; error?: string; truncated?: boolean };
+    history: TakeoverSession[];
+    /** The project's declared tests command — the only exec takeover may run. */
+    testsCommand?: string;
+  };
+  /** ?takeover=pending — a takeover operation was requested; the worker answers within a sweep. */
+  takeoverPending: boolean;
+  /** The signed-in user's name, so the card can say "held by you". */
+  viewer: string | null;
 }
 
 /**
@@ -182,6 +207,38 @@ export async function runData({ params, request }: { params: { id: string }; req
     }
     const history = await threadHistory(runtime, runId);
     const forgeRaw = await runtime.config.get("SHIP_FORGE_STATE_" + runId);
+    // Package C: the takeover state — live lease record, last mediated
+    // reply, bounded session history. Advisory reads only; the action route
+    // holds the authority and the worker holds the credential.
+    const takeoverRecord = await loadTakeover(runtime, runId).catch(() => null);
+    const takeoverReplyRaw = await runtime.config.get(takeoverReplyKey(runId)).catch(() => undefined);
+    let takeoverReply: RunData["takeover"]["reply"] | undefined;
+    if (takeoverReplyRaw) {
+      try {
+        const parsed = JSON.parse(takeoverReplyRaw) as WorkspaceReply;
+        takeoverReply = {
+          kind: parsed.kind ?? "",
+          at: parsed.at,
+          ...(parsed.output !== undefined ? { output: parsed.output } : {}),
+          ...(parsed.error !== undefined ? { error: parsed.error } : {}),
+          ...(parsed.truncated !== undefined ? { truncated: parsed.truncated } : {}),
+        };
+      } catch {
+        // unreadable reply — omit
+      }
+    }
+    let takeoverHistory: TakeoverSession[] = [];
+    const takeoverHistoryRaw = await runtime.config.get(takeoverHistoryKey(runId)).catch(() => undefined);
+    if (takeoverHistoryRaw) {
+      try {
+        const parsed = JSON.parse(takeoverHistoryRaw) as unknown;
+        if (Array.isArray(parsed)) takeoverHistory = parsed.filter((s): s is TakeoverSession => typeof s?.holder === "string");
+      } catch {
+        // unreadable history — omit
+      }
+    }
+    const takeoverGate = mayAcquireTakeover(meta);
+    const testsCommand = currentProject?.testCommand ?? currentProject?.verification?.tests;
     // The merged change's delivery record (Package B): advisory read for the
     // card; the approve action is the authority boundary, not this loader.
     const deliveryRecord = (await runtime.deliveryRecords?.get(runId).catch(() => null)) ?? null;
@@ -247,6 +304,26 @@ export async function runData({ params, request }: { params: { id: string }; req
       live: live === null ? null : { phase: live.phase, ...(live.turn !== undefined ? { turn: live.turn } : {}), ...(live.detail !== undefined ? { detail: live.detail } : {}), updatedAt: live.updatedAt },
       typical,
       ...(meta?.createdAt !== undefined ? { createdAt: meta.createdAt } : {}),
+      takeover: {
+        available: takeoverRecord === null && takeoverGate.ok,
+        ...(takeoverRecord === null && !takeoverGate.ok ? { reason: takeoverGate.reason } : {}),
+        ...(takeoverRecord !== null
+          ? {
+              record: {
+                holder: takeoverRecord.holder,
+                expiresAt: takeoverRecord.expiresAt,
+                acquiredAt: takeoverRecord.acquiredAt,
+                pathsWritten: takeoverRecord.pathsWritten,
+                execsRun: takeoverRecord.execsRun,
+              },
+            }
+          : {}),
+        ...(takeoverReply !== undefined ? { reply: takeoverReply } : {}),
+        history: takeoverHistory,
+        ...(typeof testsCommand === "string" && testsCommand !== "" ? { testsCommand } : {}),
+      },
+      takeoverPending: query.get("takeover") === "pending",
+      viewer: (await currentUser(request))?.user ?? null,
     };
     span.end("ok", { "run.status": meta?.status ?? "unknown", "run.event_count": events.length });
     return data;

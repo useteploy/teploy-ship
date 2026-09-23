@@ -76,6 +76,34 @@ export async function action({
       return redirectTo(`/runs/${runId}?view=${intent === "forge-refresh" ? "review" : "files"}&pending=1`);
     } catch (e) { return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(e instanceof Error ? e.message : "Request failed")}`); }
   }
+  // Package C: workspace takeover. Intervening in a parked run's workspace is
+  // steering-grade authority — it changes what the resumed agent builds on.
+  // The worker mediates every operation against the sandbox's lease; this
+  // route only records who is asking.
+  if (
+    ["takeover-acquire", "takeover-renew", "takeover-write", "takeover-exec", "takeover-changes", "takeover-release"].includes(intent)
+  ) {
+    if (!(await may("steer", me))) return redirectTo(`/runs/${runId}?denied=steer`);
+    try {
+      const extra =
+        intent === "takeover-write"
+          ? { content: String(form.get("content") ?? "") }
+          : intent === "takeover-release"
+            ? { reason: String(form.get("reason") ?? "").trim() || undefined }
+            : undefined;
+      await requestWorkspace(
+        runtime,
+        runId,
+        intent as "takeover-acquire",
+        me!.user,
+        intent === "takeover-write" ? String(form.get("path") ?? "") || undefined : undefined,
+        extra,
+      );
+      return redirectTo(`/runs/${runId}?takeover=pending`);
+    } catch (e) {
+      return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(e instanceof Error ? e.message : "Takeover request failed")}`);
+    }
+  }
   if (intent === "follow-up") {
     if (!(await may("approve", me))) return redirectTo(`/runs/${runId}?denied=approve`);
     const message = String(form.get("message") ?? "").trim();
@@ -477,6 +505,7 @@ export default function RunDetail({ data: initialData }: { data: RunData }) {
               </form>
             </div>
           )}
+          <TakeoverCard data={data} />
           {(data.meta.eventName !== undefined || active) && (
             <form class="decide" method="post">
               <input type="hidden" name="reason" value="" />
@@ -708,6 +737,97 @@ function RunComposer({data}: {data: RunData}) {
           {(!active || reviewing && data.canSteer) && data.meta.status !== 'cancelling' && data.canLaunch && <form method="post" class="message-composer"><input type="hidden" name="requestId" value={followRequestId}/><input type="hidden" name="eventName" value={followEvent}/>{reviewing && <p class="notice">Request changes on this PR before merging. A change request cancels this run’s pending merge decision and starts a linked run; the PR stays open. Read-only investigations leave the merge decision pending.</p>}<label class="field">Continue this work<textarea name="message" rows={3} required maxLength={12000} placeholder="What should Ship change or investigate next?" /></label>{data.hasPr && <label class="field">Start from<select name="target"><option value="pr">Existing pull request (checked before launch)</option><option value="base">Current default branch</option></select></label>}<label class="field">What should happen next?<select name="journey" value={followJourney} onChange={e => setFollowJourney(e.currentTarget.value)}>{JOURNEYS.map(j => <option value={j.id}>{j.label}</option>)}</select></label>{followJourney === "change" && data.requirePlanReview && <p class="notice">This project requires plan approval before code changes. The native harness is required; merge and deployment permissions remain separate.</p>}{followJourney === "change" && !data.requirePlanReview && (data.planSupported ? <label class="check-field"><input type="checkbox" name="plan" checked={followPlan} onInput={e => setFollowPlan(e.currentTarget.checked)} />Review the plan before code changes</label> : <p class="meta">This project uses an external harness, which starts work immediately. For plan review, select the native harness in Project settings before launching.</p>)}<button type="submit" name="intent" value="follow-up">Start follow-up</button><p class="meta">Keeps the conversation history and starts a fresh sandbox. The existing pull request is checked with the forge before launch. Current project approvals and budgets apply.</p></form>}
 
  </>;
+}
+
+/**
+ * Package C: the workspace takeover card. Pause is the run's own park —
+ * takeover is offered exactly there, at a decision boundary the resumed
+ * agent consumes. The card renders four states and refuses to guess: an
+ * offer (parked, unheld, and you may steer), held-by-you (the editor:
+ * write the project's files, run its declared tests, see the diff, hand
+ * back), held-by-someone-else, and past sessions. Every button is a
+ * worker-mediated lease operation; this page never touches the sandbox.
+ */
+function TakeoverCard({ data }: { data: RunData }) {
+  const t = data.takeover;
+  const record = t.record;
+  if (record === undefined && !t.available && t.history.length === 0) return null;
+  const mine = record !== undefined && record.holder === data.viewer;
+  return <section class="card" style="margin:12px 0">
+    <div class="row-actions" style="gap:12px;align-items:center">
+      <h2 class="section" style="margin:0">Workspace takeover</h2>
+      {record !== undefined && (
+        <span class="status waiting">{mine ? "held by you" : `held by ${record.holder}`}</span>
+      )}
+      {record !== undefined && <span class="meta">until {record.expiresAt.replace("T", " ").slice(0, 19)} UTC — every action renews; an abandoned lease expires on its own</span>}
+    </div>
+    {data.takeoverPending && <p class="meta" role="status">Requested — the worker answers within a few seconds. This card refreshes automatically.</p>}
+    {t.reply?.error && <p class="notice bad" role="alert">{t.reply.error}</p>}
+    {t.reply && t.reply.output !== undefined && (
+      <details class="disclosure" style="margin-top:8px" open={t.reply.output.startsWith("Wrote ") || t.reply.output.startsWith("Handed")}>
+        <summary>Last operation ({t.reply.kind.replace("takeover-", "")}) · {t.reply.at.replace("T", " ").slice(11, 19)} UTC{t.reply.truncated ? " · partial output" : ""}</summary>
+        <pre style="white-space:pre-wrap">{t.reply.output}</pre>
+      </details>
+    )}
+    {record === undefined && t.available && (
+      <form method="post" style="margin-top:8px">
+        <p class="meta" style="margin:0 0 8px">
+          The run is parked. Take exclusive writable ownership of its workspace: edit files, run this
+          project's tests, then hand back — the resumed agent is told exactly what you changed. Nobody
+          else can write while you hold it, and the run waits for your handback.
+        </p>
+        <button type="submit" name="intent" value="takeover-acquire">Take over the workspace</button>
+      </form>
+    )}
+    {record === undefined && !t.available && t.reason && data.canSteer && (
+      <p class="meta" style="margin:8px 0 0">Takeover unavailable: {t.reason}</p>
+    )}
+    {record !== undefined && mine && (
+      <>
+        {record.pathsWritten.length > 0 && (
+          <p class="meta" style="margin:8px 0 0">Files written this session: {record.pathsWritten.join(", ")}</p>
+        )}
+        <form method="post" style="margin-top:10px">
+          <div class="row-actions" style="align-items:flex-start;flex-wrap:wrap;gap:8px">
+            <label class="field" style="flex:1;min-width:220px">Write a file
+              <input name="path" placeholder="src/example.ts" required aria-label="Repository file path" />
+            </label>
+            <textarea name="content" rows={6} maxLength={200000} required style="flex:2;min-width:280px;box-sizing:border-box;font:inherit" placeholder="The file's full new content — the write replaces it. Keep it whole; this slice has no partial edits." aria-label="File content" />
+          </div>
+          <div class="row-actions" style="margin-top:8px">
+            <button type="submit" name="intent" value="takeover-write">Write file</button>
+            {t.testsCommand !== undefined && (
+              <button type="submit" name="intent" value="takeover-exec" title={`runs exactly the project's declared tests command: ${t.testsCommand}`}>Run tests</button>
+            )}
+            <button type="submit" name="intent" value="takeover-changes">Show my changes</button>
+            <button type="submit" name="intent" value="takeover-renew">Keep holding</button>
+          </div>
+        </form>
+        <form method="post" style="margin-top:10px">
+          <label class="field">Handback note (given to the agent with your diff)
+            <input name="reason" placeholder="what you changed and why — optional" aria-label="Handback note" />
+          </label>
+          <div class="row-actions" style="margin-top:8px">
+            <button type="submit" name="intent" value="takeover-release" class="approve">Hand back to the agent</button>
+            <span class="meta">records your diff, releases ownership, and the parked run can proceed</span>
+          </div>
+        </form>
+      </>
+    )}
+    {t.history.length > 0 && (
+      <details class="disclosure" style="margin-top:10px">
+        <summary>Past takeovers ({t.history.length})</summary>
+        {t.history.slice().reverse().map((s, i) => (
+          <p class="meta" style="margin:6px 0" key={i}>
+            {s.holder} · {s.acquiredAt.replace("T", " ").slice(0, 16)} → {s.releasedAt.replace("T", " ").slice(11, 16)} UTC ·{" "}
+            <span class={s.outcome === "released" ? "ok" : "bad"}>{s.outcome}</span> ·{" "}
+            {s.pathsWritten.length} file(s){s.diffDigest !== undefined ? ` · diff ${s.diffDigest}` : ""}
+            {s.note !== undefined && s.note !== "" ? ` · ${s.note}` : ""}
+          </p>
+        ))}
+      </details>
+    )}
+  </section>;
 }
 
 /**

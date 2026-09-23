@@ -154,6 +154,27 @@ export class SandboxPool implements ExecutorProvider {
         return { handle: poolHandle(index, created.handle) };
       };
     }
+
+    // Leases (Package C) route by the handle's tag like everything else.
+    // All-or-nothing for the same reason snapshot is: the takeover path
+    // should not succeed or fail depending on which box a run landed on.
+    if (this.#everyHostLeases()) {
+      const route = (handle: string, what: string) => {
+        const { index, handle: inner } = parsePoolHandle(handle);
+        const host = this.#hosts[index];
+        if (host === undefined || host.provider.lease === undefined) {
+          throw new Error(`no sandbox host ${what} handle ${handle}`);
+        }
+        return host.provider.lease;
+      };
+      this.lease = {
+        acquire: (handle, owner, ttlSec) => route(handle, "to lease").acquire(parsePoolHandle(handle).handle, owner, ttlSec),
+        renew: (handle, owner, generation, ttlSec) => route(handle, "to lease").renew(parsePoolHandle(handle).handle, owner, generation, ttlSec),
+        release: (handle, owner, generation) => route(handle, "to lease").release(parsePoolHandle(handle).handle, owner, generation),
+        execAs: (handle, cred, command, opts) => route(handle, "to lease").execAs(parsePoolHandle(handle).handle, cred, command, opts),
+        writeFileAs: (handle, cred, path, bytes) => route(handle, "to lease").writeFileAs(parsePoolHandle(handle).handle, cred, path, bytes),
+      };
+    }
   }
 
   /** What the Fleet page and the log want to know. */
@@ -294,8 +315,14 @@ export class SandboxPool implements ExecutorProvider {
    */
   snapshot?: (handle: string) => Promise<string>;
   createFrom?: (image: string, overrides?: SandboxOverrides) => Promise<{ handle: string }>;
+  /** Lease operations (Package C), present when every host can lease. */
+  lease?: import("./durable.js").ExecutorProvider["lease"];
 
   #everyHostSnapshots(): boolean {
     return this.#hosts.every((h) => h.provider.snapshot !== undefined && h.provider.createFrom !== undefined);
+  }
+
+  #everyHostLeases(): boolean {
+    return this.#hosts.every((h) => h.provider.lease !== undefined);
   }
 }

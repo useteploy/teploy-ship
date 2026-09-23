@@ -11,13 +11,44 @@ import {
 import { readForgeState, type ForgeState } from "./forge-state.js";
 import { safeForDisplay } from "./redact.js";
 import { verificationFactsFromEvents } from "./verification-summary.js";
+import {
+  TAKEOVER_CONTENT_LIMIT,
+  TAKEOVER_OUTPUT_LIMIT,
+  TAKEOVER_TTL_SEC,
+  appendTakeoverHistory,
+  diffEvidence,
+  handbackNote,
+  latestSandboxHandle,
+  loadTakeover,
+  mayAcquireTakeover,
+  saveTakeover,
+  takeoverPathValid,
+  takeoverKey,
+  takeoverReplyKey,
+  type TakeoverRecord,
+  type TakeoverSession,
+} from "./takeover.js";
 export type WorkspaceRequest = {
   id: string;
   runId: string;
-  kind: "forge" | "files" | "file" | "changes";
+  kind:
+    | "forge"
+    | "files"
+    | "file"
+    | "changes"
+    | "takeover-acquire"
+    | "takeover-renew"
+    | "takeover-write"
+    | "takeover-exec"
+    | "takeover-changes"
+    | "takeover-release";
   path?: string;
   at: string;
   by: string;
+  /** takeover-write: the file's full new content. */
+  content?: string;
+  /** takeover-release: the holder's handback note, recorded with the session. */
+  reason?: string;
 };
 export type WorkspaceReply = {
   id: string;
@@ -28,8 +59,18 @@ export type WorkspaceReply = {
   kind?: WorkspaceRequest["kind"];
   path?: string;
   truncated?: boolean;
+  /** Takeover ops: the live lease state after the operation. */
+  takeover?: { holder: string; generation: number; expiresAt: string };
 };
 const PREFIX = "SHIP_WORKSPACE_REQUEST_";
+const TAKEOVER_KINDS = new Set([
+  "takeover-acquire",
+  "takeover-renew",
+  "takeover-write",
+  "takeover-exec",
+  "takeover-changes",
+  "takeover-release",
+]);
 export const requestKey = (runId: string) => PREFIX + runId;
 export const replyKey = (runId: string) => "SHIP_WORKSPACE_REPLY_" + runId;
 export async function requestWorkspace(
@@ -38,11 +79,20 @@ export async function requestWorkspace(
   kind: WorkspaceRequest["kind"],
   by: string,
   path?: string,
+  extra?: { content?: string; reason?: string },
 ): Promise<WorkspaceRequest> {
   if (!/^[a-zA-Z0-9_-]{1,100}$/.test(runId) || !(await runtime.loadMeta(runId)))
     throw new Error("Run not found");
   if (kind === "file" && (!path || path.length > 500 || path.includes("\0")))
     throw new Error("Choose a file");
+  const content = extra?.content;
+  if (kind === "takeover-write") {
+    if (!path || path.length > 500 || path.includes("\0")) throw new Error("Choose a file to write");
+    if (content === undefined || content.length > TAKEOVER_CONTENT_LIMIT)
+      throw new Error(`File content is required, up to ${TAKEOVER_CONTENT_LIMIT} characters`);
+  }
+  if (kind === "takeover-release" && extra?.reason !== undefined && extra.reason.length > 4000)
+    throw new Error("Handback note must be under 4000 characters");
   const request: WorkspaceRequest = {
     id: randomUUID(),
     runId,
@@ -50,6 +100,8 @@ export async function requestWorkspace(
     at: new Date().toISOString(),
     by,
     ...(path ? { path } : {}),
+    ...(content !== undefined ? { content } : {}),
+    ...(extra?.reason !== undefined ? { reason: extra.reason } : {}),
   };
   await runtime.config.set(requestKey(runId), JSON.stringify(request), by);
   return request;
@@ -125,11 +177,27 @@ export async function serveWorkspaceRequests(
     ...policy,
     projects: [...(policy.projects ?? []), ...projects],
   };
+  await sweepLapsedTakeovers(runtime, executor).catch(() => {});
   let processed = 0;
   for (const entry of requests) {
     const raw = await runtime.config.get(entry.key);
     if (!raw) continue;
     const req = JSON.parse(raw) as WorkspaceRequest;
+    if (TAKEOVER_KINDS.has(req.kind)) {
+      if (++processed > 30) break;
+      // Same id-dedupe as the read-only path: a request key persists until
+      // replaced, so the reply key is what says "already served".
+      const prior = await runtime.config.get(takeoverReplyKey(req.runId));
+      if (prior !== undefined && prior !== null && prior !== "") {
+        try {
+          if ((JSON.parse(prior) as WorkspaceReply).id === req.id) continue;
+        } catch {
+          // unreadable prior reply — serve the request
+        }
+      }
+      await serveTakeoverRequest(runtime, executor, effective, req);
+      continue;
+    }
     const previous = await workspaceReply(runtime, req.runId);
     if (previous?.id === req.id) continue;
     if (++processed > 30) break;
@@ -195,5 +263,251 @@ export async function serveWorkspaceRequests(
         "SHIP_FORGE_STATE_" + req.runId,
         JSON.stringify(reply),
       );
+  }
+}
+
+/**
+ * One mediated takeover operation. The dashboard's request names WHO is
+ * asking (`by`); the lease credential itself never leaves the worker — the
+ * daemon is reached only from here, with the record's holder+generation.
+ * Every result lands on the takeover reply key, separate from the read-only
+ * inspection replies so one surface cannot overwrite the other's state.
+ */
+async function serveTakeoverRequest(
+  runtime: ShipRuntime,
+  executor: ExecutorProvider,
+  policy: RepoPolicyConfig,
+  req: WorkspaceRequest,
+): Promise<void> {
+  const reply: WorkspaceReply = { id: req.id, at: new Date().toISOString(), kind: req.kind, ...(req.path ? { path: req.path } : {}) };
+  const lease = (executor as ExecutorProvider).lease;
+  try {
+    if (Date.now() - Date.parse(req.at) > 120000)
+      throw new Error("Request expired. Refresh to try again.");
+    if (lease === undefined)
+      throw new Error("This sandbox provider does not support workspace takeover.");
+    const events = await runtime.store.load(req.runId);
+    const input = (events.find((e) => e.type === "run-started")?.data as any)?.input;
+    if (!input?.repo) throw new Error("This run has no repository");
+    assertRepoAllowed(input.repo, { trust: "external", config: policy });
+    const handle = latestSandboxHandle(events);
+    if (handle === undefined) throw new Error("Workspace is not available yet");
+
+    if (req.kind === "takeover-acquire") {
+      const meta = await runtime.loadMeta(req.runId);
+      const gate = mayAcquireTakeover(meta);
+      if (!gate.ok) throw new Error(gate.reason);
+      const existing = await loadTakeover(runtime, req.runId);
+      if (existing !== null) {
+        if (existing.holder !== req.by)
+          throw new Error(`Workspace is held by ${existing.holder} until ${existing.expiresAt}.`);
+        reply.takeover = { holder: existing.holder, generation: existing.generation, expiresAt: existing.expiresAt };
+      } else {
+        const ttlSec = Number(process.env.SHIP_TAKEOVER_TTL_SEC) || TAKEOVER_TTL_SEC;
+        const grant = await lease.acquire(handle, req.by, ttlSec);
+        const record: TakeoverRecord = {
+          runId: req.runId,
+          holder: req.by,
+          generation: grant.generation,
+          acquiredAt: new Date().toISOString(),
+          expiresAt: grant.expiresAt,
+          ttlSec,
+          pathsWritten: [],
+          execsRun: [],
+        };
+        await saveTakeover(runtime.config, record);
+        reply.takeover = { holder: record.holder, generation: record.generation, expiresAt: record.expiresAt };
+        reply.output = "Takeover held. Writes are exclusive to you; the run stays parked until handback.";
+      }
+      await runtime.config.set(takeoverReplyKey(req.runId), JSON.stringify(reply));
+      return;
+    }
+
+    // Every operation below is holder-only, on a live record.
+    const record = await loadTakeover(runtime, req.runId);
+    if (record === null) throw new Error("No active takeover. Acquire first.");
+    if (record.holder !== req.by)
+      throw new Error(`Workspace is held by ${record.holder} until ${record.expiresAt}.`);
+    const cred = { owner: record.holder, generation: record.generation };
+    /** Renew before acting, so an active operator keeps the lease; a lost one surfaces immediately. */
+    const renew = async (): Promise<void> => {
+      const { expiresAt } = await lease.renew(handle, cred.owner, cred.generation, record.ttlSec);
+      record.expiresAt = expiresAt;
+    };
+    /** A lease the daemon no longer honours is not held — record the lapse, honestly. */
+    const lost = (e: unknown): boolean => {
+      const message = e instanceof Error ? e.message : String(e);
+      return /no active generation|lease superseded|lease held|not found|no such run/i.test(message);
+    };
+
+    if (req.kind === "takeover-renew") {
+      try {
+        await renew();
+        await saveTakeover(runtime.config, record);
+        reply.takeover = { holder: record.holder, generation: record.generation, expiresAt: record.expiresAt };
+      } catch (e) {
+        await lapseTakeover(runtime, executor, record, e instanceof Error ? e.message : String(e));
+        throw new Error("The takeover lease was lost — it expired or was superseded. Acquire again if you still need it.");
+      }
+    } else if (req.kind === "takeover-write") {
+      const path = takeoverPathValid(req.path);
+      if (!path.ok) throw new Error(path.reason);
+      const target = req.path as string;
+      if (req.content === undefined) throw new Error("File content is required.");
+      try {
+        await renew();
+        await lease.writeFileAs(handle, cred, target, Buffer.from(req.content, "utf8"));
+      } catch (e) {
+        if (lost(e)) {
+          await lapseTakeover(runtime, executor, record, e instanceof Error ? e.message : String(e));
+          throw new Error("The takeover lease was lost before the write — nothing was written. Acquire again.");
+        }
+        throw e;
+      }
+      if (!record.pathsWritten.includes(target)) record.pathsWritten.push(target);
+      await saveTakeover(runtime.config, record);
+      reply.takeover = { holder: record.holder, generation: record.generation, expiresAt: record.expiresAt };
+      reply.output = `Wrote ${target} (${Buffer.byteLength(req.content, "utf8")} bytes). Uncommitted, like every takeover edit.`;
+    } else if (req.kind === "takeover-exec") {
+      const project = await runtime.projects.forRepo(input.repo).catch(() => null);
+      const cmd = project?.testCommand ?? project?.verification?.tests;
+      if (cmd === undefined || cmd === "")
+        throw new Error("This project declares no tests command (Project settings). Arbitrary commands are not part of this slice.");
+      const timeoutMs = project?.testTimeoutMs ?? 300_000;
+      try {
+        await renew();
+        const r = await lease.execAs(handle, cred, cmd, { timeoutMs, maxOutputBytes: 1 << 20 });
+        if (!record.execsRun.includes(cmd)) record.execsRun.push(cmd);
+        await saveTakeover(runtime.config, record);
+        const out = `${r.stdout}\n${r.stderr}`.trim();
+        reply.truncated = out.length > TAKEOVER_OUTPUT_LIMIT;
+        reply.output = safeForDisplay(`$ ${cmd}\nexit ${r.exitCode}${r.timedOut ? " (timed out)" : ""}\n${out}`, TAKEOVER_OUTPUT_LIMIT + 2000);
+        reply.takeover = { holder: record.holder, generation: record.generation, expiresAt: record.expiresAt };
+      } catch (e) {
+        if (lost(e)) {
+          await lapseTakeover(runtime, executor, record, e instanceof Error ? e.message : String(e));
+          throw new Error("The takeover lease was lost — the command did not run under your ownership. Acquire again.");
+        }
+        throw e;
+      }
+    } else if (req.kind === "takeover-changes") {
+      try {
+        await renew();
+        const r = await lease.execAs(handle, cred, changesCommand(), { timeoutMs: 15000 });
+        await saveTakeover(runtime.config, record);
+        reply.truncated = Buffer.byteLength(r.stdout) > TAKEOVER_OUTPUT_LIMIT;
+        reply.output = safeForDisplay(r.stdout, TAKEOVER_OUTPUT_LIMIT + 2000);
+        reply.takeover = { holder: record.holder, generation: record.generation, expiresAt: record.expiresAt };
+      } catch (e) {
+        if (lost(e)) {
+          await lapseTakeover(runtime, executor, record, e instanceof Error ? e.message : String(e));
+          throw new Error("The takeover lease was lost. Acquire again.");
+        }
+        throw e;
+      }
+    } else if (req.kind === "takeover-release") {
+      let diff = "";
+      let diffError: string | undefined;
+      try {
+        const r = await lease.execAs(handle, cred, changesCommand(), { timeoutMs: 15000 });
+        diff = r.stdout;
+      } catch {
+        diffError = "diff unavailable at handback";
+      }
+      let outcome: "released" | "lapsed" = "released";
+      let outcomeReason: string | undefined;
+      try {
+        await lease.release(handle, cred.owner, cred.generation);
+      } catch (e) {
+        // A lease the daemon already dropped was not held — say so.
+        outcome = "lapsed";
+        outcomeReason = e instanceof Error ? e.message : String(e);
+      }
+      const evidence = diff !== "" ? diffEvidence(diff) : undefined;
+      const noteParts = [req.reason, diffError, outcomeReason].filter(
+        (x): x is string => typeof x === "string" && x !== "",
+      );
+      const session: TakeoverSession = {
+        holder: record.holder,
+        acquiredAt: record.acquiredAt,
+        releasedAt: new Date().toISOString(),
+        outcome,
+        pathsWritten: record.pathsWritten,
+        execsRun: record.execsRun,
+        ...(evidence !== undefined ? { diffDigest: evidence.digest, diffExcerpt: evidence.excerpt } : {}),
+        ...(noteParts.length > 0 ? { note: noteParts.join("; ").slice(0, 4000) } : {}),
+      };
+      await runtime.config.set(takeoverKey(req.runId), "", req.by);
+      await appendTakeoverHistory(runtime.config, req.runId, session);
+      // The steer note is the handback the resumed agent reads: what changed,
+      // where, and that nothing is committed. Without it the next turn builds
+      // on top of invisible edits.
+      const meta = await runtime.loadMeta(req.runId);
+      if (mayAcquireTakeover(meta).ok) {
+        await runtime.steer.add(req.runId, handbackNote(session));
+      }
+      reply.output =
+        outcome === "released"
+          ? `Handed back. ${record.pathsWritten.length} file(s) written, ${record.execsRun.length} command(s) run. The resumed run will be told about the edits.`
+          : `Handback recorded, but the lease had already lapsed (${outcomeReason}). Edits on disk are preserved; the resumed run will be told about them.`;
+      if (evidence !== undefined) reply.output += ` Diff digest ${evidence.digest}.`;
+    } else {
+      throw new Error("Unknown takeover request");
+    }
+  } catch (e) {
+    reply.error = safeForDisplay(e instanceof Error ? e.message : String(e), 600);
+  }
+  await runtime.config.set(takeoverReplyKey(req.runId), JSON.stringify(reply));
+}
+
+/** A takeover the daemon no longer honours: clear the live record, keep the evidence. */
+async function lapseTakeover(
+  runtime: ShipRuntime,
+  executor: ExecutorProvider,
+  record: TakeoverRecord,
+  reason: string,
+): Promise<void> {
+  const events = await runtime.store.load(record.runId).catch(() => []);
+  const handle = latestSandboxHandle(events);
+  if (handle !== undefined) await executor.lease?.release(handle, record.holder, record.generation).catch(() => {});
+  await runtime.config.set(takeoverKey(record.runId), "", record.holder);
+  await appendTakeoverHistory(runtime.config, record.runId, {
+    holder: record.holder,
+    acquiredAt: record.acquiredAt,
+    releasedAt: new Date().toISOString(),
+    outcome: "lapsed",
+    pathsWritten: record.pathsWritten,
+    execsRun: record.execsRun,
+    note: reason.slice(0, 300),
+  });
+}
+
+/**
+ * Expired takeovers become history with outcome `lapsed`: the daemon's TTL
+ * ended the lease on its own (that is the revocation path for a browser
+ * abandoned mid-edit), so the record must stop claiming the workspace is
+ * held. Edits on disk are untouched — only the ownership lapsed.
+ */
+export async function sweepLapsedTakeovers(
+  runtime: ShipRuntime,
+  executor: ExecutorProvider,
+  now = Date.now,
+): Promise<void> {
+  for (const entry of await runtime.config.list()) {
+    if (!entry.key.startsWith("SHIP_TAKEOVER_")) continue;
+    const raw = await runtime.config.get(entry.key);
+    if (raw === undefined || raw === null || raw === "") continue;
+    let record: TakeoverRecord | null = null;
+    try {
+      const parsed = JSON.parse(raw) as TakeoverRecord;
+      if (typeof parsed.holder === "string" && typeof parsed.generation === "number" && typeof parsed.expiresAt === "string")
+        record = parsed;
+    } catch {
+      record = null;
+    }
+    if (record === null) continue; // reply/history keys live nearby; they are not records
+    if (Date.parse(record.expiresAt) > now()) continue;
+    const runId = entry.key.slice("SHIP_TAKEOVER_".length);
+    await lapseTakeover(runtime, executor, { ...record, runId }, "lease expired");
   }
 }
