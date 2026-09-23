@@ -267,8 +267,10 @@ test("revalidation holds a wrong-target, reverted, or superseded approval; exact
   assert.equal(wrongTarget.state, "held");
   assert.match(wrongTarget.reason!, /wrong target/);
 
-  // The git plumbing answers, parameterized by ancestry and tip.
-  const gitFor = (ancestorOk: boolean, tip: string): CommandRunner => {
+  // The git plumbing answers, parameterized by whether main serves the
+  // approved bytes (tree equality — a squash-merge forge lands the same
+  // bytes under a new sha, so ancestry is the wrong predicate).
+  const gitFor = (treesEqual: boolean): CommandRunner => {
     const ok: CommandResult = { code: 0, stdout: "", stderr: "" };
     return async (argv: string[]) => {
       if (argv[0] === "cat") return ok; // no marker bound
@@ -276,9 +278,8 @@ test("revalidation holds a wrong-target, reverted, or superseded approval; exact
         if (argv[1] === "symbolic-ref") return { code: 0, stdout: "refs/remotes/origin/main\n", stderr: "" };
         return ok;
       }
-      if (argv[0] === "git" && argv[1] === "rev-parse") return { code: 0, stdout: `${tip}\n`, stderr: "" };
-      if (argv[0] === "git" && argv[1] === "merge-base") {
-        return ancestorOk ? ok : { code: 1, stdout: "", stderr: "" };
+      if (argv[0] === "git" && argv[1] === "diff") {
+        return treesEqual ? ok : { code: 1, stdout: "", stderr: "" };
       }
       if (argv[0] === "git" && argv[1] === "worktree") return ok;
       if (argv[1] === "build") return { code: 0, stdout: JSON.stringify({ image: "img" }), stderr: "" };
@@ -287,16 +288,12 @@ test("revalidation holds a wrong-target, reverted, or superseded approval; exact
     };
   };
 
-  const reverted = await executeDelivery(record, { dir: "/srv/trusted", run: gitFor(false, "abc123def456"), now: () => now });
+  const reverted = await executeDelivery(record, { dir: "/srv/trusted", run: gitFor(false), now: () => now });
   assert.equal(reverted.state, "held");
-  assert.match(reverted.reason!, /no longer on the default branch/);
+  assert.match(reverted.reason!, /no longer serves the approved bytes/);
 
-  const superseded = await executeDelivery(record, { dir: "/srv/trusted", run: gitFor(true, "fff000fff000"), now: () => now });
-  assert.equal(superseded.state, "held");
-  assert.match(superseded.reason!, /moved past the approved merge/);
-
-  const exact = await executeDelivery(record, { dir: "/srv/trusted", run: gitFor(true, "abc123def456"), now: () => now });
-  assert.equal(exact.state, "unknown", "approval of exactly the tip proceeds to the honest post-deploy state");
+  const fresh = await executeDelivery(record, { dir: "/srv/trusted", run: gitFor(true), now: () => now });
+  assert.equal(fresh.state, "unknown", "main serving the approved bytes proceeds — squash-merged or not — to the honest post-deploy state");
 });
 
 test("the rollback executor refuses honestly and verifies by read-back", async () => {

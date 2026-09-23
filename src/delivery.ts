@@ -382,26 +382,25 @@ export async function executeDelivery(
   // Stale-approval negative: the approval was recorded against a merge the
   // forge may have since moved on from. The merged SHA is immutable, but
   // what main MEANS is not — revalidate it against the default branch tip
-  // before anything touches the target. Held is re-approvable, and the
-  // promote form re-records the recovery version, so held IS the explicit
-  // confirm the contract asks for.
+  // before anything touches the target. The check is TREE equality, not
+  // ancestry: a squash-merge forge (Forgejo's default) lands the PR's BYTES
+  // as a new commit whose parents do not include the PR head, so
+  // merge-base --is-ancestor would void every fresh delivery on such a
+  // forge — found live in the first stale-approval proof. Identical trees
+  // means main serves exactly the approved bytes however they got there;
+  // different trees means reverted, superseded, or merged differently.
+  // Held is re-approvable, and the promote form re-records the recovery
+  // version, so held IS the explicit confirm the contract asks for.
   const head = await exec(["git", "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], 30_000);
   if (head.code === 0) {
     const branch = head.stdout.trim().replace(/^refs\/remotes\/origin\//, "");
     const branchFetch = await exec(["git", "fetch", "origin", branch], 300_000);
     if (branchFetch.code === 0) {
-      const tip = await exec(["git", "rev-parse", `origin/${branch}`], 30_000);
-      const ancestor = await exec(["git", "merge-base", "--is-ancestor", record.mergedSha, `origin/${branch}`], 30_000);
-      if (ancestor.code !== 0) {
+      const same = await exec(["git", "diff", "--quiet", record.mergedSha, `origin/${branch}`], 30_000);
+      if (same.code !== 0) {
         return {
           ...record,
-          ...patch({ reason: `the merged change is no longer on the default branch ${branch} (reverted or superseded) — this approval is void` }),
-        };
-      }
-      if (tip.code === 0 && tip.stdout.trim() !== record.mergedSha) {
-        return {
-          ...record,
-          ...patch({ reason: `the default branch ${branch} moved past the approved merge after approval — re-approve to confirm and re-record the recovery version` }),
+          ...patch({ reason: `the default branch ${branch} no longer serves the approved bytes (reverted, superseded, or merged differently) — re-approve deliberately` }),
         };
       }
     }

@@ -1,0 +1,69 @@
+{
+  "scenarioId": "pj-s-question",
+  "grader": "graders/pj-s-question.mjs",
+  "pass": true,
+  "reasons": [],
+  "evidence": [
+    {
+      "kind": "structural",
+      "check": "work tree unchanged",
+      "value": {
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "unchanged": [
+          "about.html",
+          "index.html",
+          "styles.css"
+        ]
+      }
+    },
+    {
+      "kind": "transcript",
+      "check": "every cited file:line:string occurrence exists verbatim in the fixture",
+      "value": {
+        "citations": 7,
+        "ok": true
+      }
+    },
+    {
+      "kind": "transcript",
+      "check": "cited Tideline lines exactly cover the fixture occurrences (independent count)",
+      "value": {
+        "independent": [
+          "about.html:15",
+          "about.html:20",
+          "about.html:6",
+          "index.html:15",
+          "index.html:20",
+          "index.html:6"
+        ],
+        "cited": [
+          "about.html:15",
+          "about.html:20",
+          "about.html:6",
+          "index.html:15",
+          "index.html:20",
+          "index.html:6"
+        ],
+        "missing": [],
+        "extra": []
+      }
+    },
+    {
+      "kind": "transcript",
+      "check": "the home-page tagline line is cited",
+      "value": {
+        "taglineLines": [
+          16
+        ],
+        "cited": true
+      }
+    },
+    {
+      "kind": "adapter-reported",
+      "check": "no PR opened",
+      "value": true
+    }
+  ]
+}
