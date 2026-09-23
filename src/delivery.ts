@@ -744,7 +744,7 @@ export async function readBackDelivery(
   // reported 16a4e9a114f0 while the artifact tag named it). Resolve an
   // ID-form image through the same trusted-copy channel and accept the
   // artifact among the image's RepoTags.
-  const imageIsArtifact = async (image: unknown): Promise<boolean> => {
+  const imageIsArtifact = async (image: unknown, execServer: string): Promise<boolean> => {
     const name = typeof image === "string" ? image : "";
     if (name === "") return false;
     if (name === record.artifactDigest) return true;
@@ -753,10 +753,10 @@ export async function readBackDelivery(
     // socket — the daemon lives on the deployment host. `teploy exec`
     // carries the query over the same SSH channel the deploy used, from
     // the trusted copy (whose teploy.yml names the server).
+    if (execServer === "") return false;
     const inspect = await options.run(
       [
-        "teploy", "exec",
-        ...(typeof parsed.server === "string" && parsed.server !== "" ? [parsed.server] : []),
+        "teploy", "exec", execServer,
         "--", "docker", "image", "inspect", "--format", "{{json .RepoTags}}", name,
       ],
       { cwd: options.dir!, timeoutMs: 60_000 },
@@ -780,8 +780,20 @@ export async function readBackDelivery(
     }
   };
   let onArtifact = false;
+  // `teploy exec` needs the SERVER as teploy.yml spells it (a raw IP in the
+  // trusted copy), not the display name the status JSON reports — exec by
+  // the display name fails DNS inside the worker. One line, read plainly:
+  // this is not yaml parsing, it is the field teploy itself connects with.
+  let execServer = typeof parsed.server === "string" && parsed.server !== "" ? parsed.server : "";
+  try {
+    const yml = await import("node:fs/promises").then((fs) => fs.readFile(`${options.dir}/teploy.yml`, "utf8"));
+    const m = /^server:\s*(\S+)\s*$/m.exec(yml);
+    if (m !== null) execServer = m[1];
+  } catch {
+    // no teploy.yml legible — keep the status-derived name and let exec fail
+  }
   for (const c of running) {
-    if (await imageIsArtifact(c.Image)) { onArtifact = true; break; }
+    if (await imageIsArtifact(c.Image, execServer)) { onArtifact = true; break; }
   }
   if (!onArtifact) {
     const images = running.map((c) => String(c.Image)).join(", ");
