@@ -243,3 +243,29 @@ low-confidence diagnoses to report uncertainty and escalation, and the digest
 refuses any run whose recorded input is not `mode:"scan"`. Live seeded-incident
 proof (alert → attribution → diagnosis with a real wrong-hint attempt) remains
 open with the S17 starter.
+
+## 2026-09-23 — wave 9 live findings (open)
+
+- **Browser-takeover screenshots must not ride the runtime config store.**
+  The BROWSER tab writes its base64 screenshot (up to ~400KB) into the
+  takeover reply on `ship_runtime_config` — a store whose own header says
+  it is "deliberately small and NOT a general settings bag". Nucleus
+  correctly refuses the oversized row ("row too large for inline
+  storage"); the reply write fails, the pending request retries forever
+  (worker log spam every tick), and the lapse sweep never clears the
+  stuck record. Found live on b1f8107; the request/record keys were
+  cleared manually. FIX: screenshots belong in the run's artifact store
+  with only a reference in the reply. Console/editor/ops-recording are
+  unaffected and live-proven.
+- **readBackDelivery image comparison could not match ID-form images**
+  (commit-pinned deploys report the bare ID) and its error path read
+  lowercase `c.image`, printing "[undefined]". Fixed in
+  d0e1d58-sha-pending (this wave): ID resolution via docker image inspect
+  RepoTags + corrected evidence string; pinned by tests. Found live: a
+  succeeded deployment failed its read-back.
+- **Park-snapshot restore starvation (suspected, unproven):** run-af29bf4e
+  faulted at the merge step ("sandbox no longer available") while the
+  row-too-large error storm was hammering the workspace-request sweep leg
+  every tick — the park snapshot/restore for its approve-merge resume
+  never took. Re-enqueued cleanly (run-77de2a06). If it recurs, the
+  suspect is the sweep-leg coupling, not the snapshot machinery itself.

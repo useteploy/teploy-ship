@@ -239,6 +239,33 @@ test("readBackDelivery confirms only on the version AND the artifact, and never 
   assert.equal(wrongImage.outcome, "mismatch");
   assert.match(wrongImage.detail, /not the approved artifact/);
 
+  // ID-form Image: the commit-pinned deploy path creates containers that
+  // report the bare image ID, not the build tag. Found live 2026-09-23 —
+  // a succeeded deployment failed its read-back. The ID resolves to the
+  // artifact through `docker image inspect`'s RepoTags → confirmed.
+  const idRunner: CommandRunner = async (argv) => {
+    if (argv[0] === "docker" && argv[5] === "16a4e9a114f0") {
+      return { code: 0, stdout: JSON.stringify(["ship-delivery-abc123:latest"]), stderr: "" };
+    }
+    return { code: 0, stdout: JSON.stringify(status("abc123d", [{ Image: "16a4e9a114f0", State: "running" }])), stderr: "" };
+  };
+  const byId = await readBackDelivery(unknownRecord(), { dir: "/srv/trusted", run: idRunner, observe: {} });
+  assert.equal(byId.outcome, "confirmed");
+
+  // An ID that resolves to SOME OTHER image's tags → still a mismatch, and
+  // the evidence names what actually runs (capitalized Image — the old code
+  // read `c.image` and printed "[undefined]").
+  const wrongIdRunner: CommandRunner = async (argv) => {
+    if (argv[0] === "docker" && argv[5] === "16a4e9a114f0") {
+      return { code: 0, stdout: JSON.stringify(["something-else:latest"]), stderr: "" };
+    }
+    return { code: 0, stdout: JSON.stringify(status("abc123d", [{ Image: "16a4e9a114f0", State: "running" }])), stderr: "" };
+  };
+  const wrongId = await readBackDelivery(unknownRecord(), { dir: "/srv/trusted", run: wrongIdRunner, observe: {} });
+  assert.equal(wrongId.outcome, "mismatch");
+  assert.match(wrongId.detail, /\[16a4e9a114f0\]/);
+  assert.doesNotMatch(wrongId.detail, /\[undefined\]/);
+
   // Version matches but nothing is running → mismatch, not confirmed.
   const stopped = await readBackDelivery(unknownRecord(), {
     dir: "/srv/trusted",

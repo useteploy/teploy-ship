@@ -737,9 +737,37 @@ export async function readBackDelivery(
       detail: `the target runs version ${current === "" ? "(none)" : current}, not the approved ${expected} — the deployment did not take effect`,
     };
   }
-  const onArtifact = running.some((c) => c.Image === record.artifactDigest);
+  // A container created by image ID — which is what the CLI's commit-pinned
+  // deploy path produces — reports the bare ID in `Image`, not the build tag
+  // the artifact was recorded as. String equality alone would fail a
+  // deployment that succeeded (found live 2026-09-23: the running container
+  // reported 16a4e9a114f0 while the artifact tag named it). Resolve an
+  // ID-form image through the same trusted-copy channel and accept the
+  // artifact among the image's RepoTags.
+  const imageIsArtifact = async (image: unknown): Promise<boolean> => {
+    const name = typeof image === "string" ? image : "";
+    if (name === "") return false;
+    if (name === record.artifactDigest) return true;
+    if (!/^(sha256:)?[0-9a-f]{12,64}$/i.test(name)) return false;
+    const inspect = await options.run(
+      ["docker", "image", "inspect", "--format", "{{json .RepoTags}}", name],
+      { cwd: options.dir!, timeoutMs: 30_000 },
+    );
+    if (inspect.code !== 0) return false;
+    try {
+      const tags = JSON.parse(inspect.stdout.trim()) as unknown;
+      if (!Array.isArray(tags)) return false;
+      return tags.some((t) => typeof t === "string" && (t === record.artifactDigest || t.startsWith(`${record.artifactDigest}:`)));
+    } catch {
+      return false;
+    }
+  };
+  let onArtifact = false;
+  for (const c of running) {
+    if (await imageIsArtifact(c.Image)) { onArtifact = true; break; }
+  }
   if (!onArtifact) {
-    const images = running.map((c) => String(c.image)).join(", ");
+    const images = running.map((c) => String(c.Image)).join(", ");
     return {
       outcome: "mismatch",
       detail: `state names ${expected} but the running ${running.length === 0 ? "containers are none" : `container image(s) [${images}]`} — not the approved artifact ${record.artifactDigest}`,
