@@ -23,8 +23,10 @@ new code**. Everything below is about making that safe.
       it belongs in the deploy script, not in your memory. See §3 and §3a.
 - [ ] **Check for in-flight runs**: `teploy-ship runs`. Anything not in a
       terminal state will be resumed by the new worker. See §3.
-- [ ] **Back up the store if it is Nucleus.** Ship's entire history — every
-      run's event log, which is also its audit record — lives there.
+- [ ] **Back up the store if it is Nucleus** — [BACKUP.md](BACKUP.md) is the
+      procedure: coordinated stop, `scripts/ship-backup.sh backup`, verify,
+      rehearse. Ship's entire history — every run's event log, which is also
+      its audit record — lives there.
 - [ ] **Note the current version**, so rollback has a target:
       `docker ps --format '{{.Names}}'` on the host shows `ship-web-<sha>`.
 
