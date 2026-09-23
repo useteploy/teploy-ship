@@ -30,6 +30,10 @@ export async function loader({ request }: { request: Request }): Promise<{ nav: 
 const NAV_LINKS = [
   { href: "/", label: "Inbox", match: [] as string[] },
   { href: "/runs", label: "Runs", match: ["/reviews"] },
+  // The attention queue: what needs a human, nothing that merely happened.
+  { href: "/attention", label: "Attention", match: [] as string[] },
+  { href: "/incidents", label: "Incidents", match: [] as string[] },
+  { href: "/coordination", label: "Coordination", match: [] as string[] },
   { href: "/projects", label: "Projects", match: ["/sources", "/knowledge", "/bulletin-admin", "/workflows", "/setup"] },
   { href: "/fleet", label: "Fleet", match: ["/spend"] },
   { href: "/settings", label: "Settings", match: ["/policies", "/users"] },
@@ -311,7 +315,7 @@ button.deny { color: var(--red); border-color: var(--red); }
 .turn-meta .bad { color: var(--red); }
 .turn-thought { color: var(--dim); border-bottom: 1px solid var(--border); }
 .meta { color: var(--dim); font-size: 12px; margin: 4px 0 14px; }
-.decide { display: flex; gap: 10px; margin: 14px 0; }
+.decide { display: flex; gap: 10px; margin: 14px 0; flex-wrap: wrap; }
 .login { max-width: 380px; margin: 12vh auto; }
 .login input { width: 100%; margin: 10px 0; background: var(--panel); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px; padding: 10px; font: inherit; }
@@ -482,6 +486,9 @@ export default function Layout({ children, data }: { children: ComponentChildren
   return (
     <>
       <style dangerouslySetInnerHTML={{ __html: CSS + DESIGN_CSS }} />
+      {/* First in the DOM so it is the first tab stop; :focus brings it on
+          screen (see .skip-link in DESIGN_CSS). */}
+      <a class="skip-link" href="#main-content">Skip to content</a>
       <header class="top">
         <div class="brand-group">
         <a href="/" class="brand">Teploy</a>
@@ -523,7 +530,6 @@ export default function Layout({ children, data }: { children: ComponentChildren
       </header>
       <script dangerouslySetInnerHTML={{ __html: NAV_PROGRESS }} />
       <script dangerouslySetInnerHTML={{ __html: SHIP_LIVE }} />
-      <a class="skip-link" href="#main-content">Skip to content</a>
       <main id="main-content">{children}</main>
     </>
   );

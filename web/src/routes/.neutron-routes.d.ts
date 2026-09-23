@@ -13,10 +13,12 @@ declare module "@neutron-build/core" {
     | `/api/runs/${string}/rollback-delivery`
     | `/api/runs/${string}/workspace`
     | "/api/runs/scan"
+    | "/attention"
     | "/bulletin-admin"
     | `/bulletin/${string}`
     | "/connect"
     | "/connect/return"
+    | "/coordination"
     | "/events"
     | "/fleet"
     | "/health"
@@ -25,6 +27,7 @@ declare module "@neutron-build/core" {
     | "/hooks/linear"
     | "/hooks/observe"
     | "/hooks/slack"
+    | "/incidents"
     | "/knowledge"
     | "/login"
     | "/logout"

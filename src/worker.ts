@@ -1,8 +1,10 @@
 import { recoverLaunches } from "./launch-journal.js";
 import { intakeJourney } from "./journeys.js";
-import { sweepWorkflowSchedules } from "./workflow-schedules.js";
+import { sweepWorkflowSchedules, sweepScheduleDigests } from "./workflow-schedules.js";
 import { serveWorkspaceRequests } from "./workspace-requests.js";
 import { loadTakeover } from "./takeover.js";
+import { sweepIncidents } from "./incidents.js";
+import { launchNext, listCoordinations } from "./coordination.js";
 import { policyFromEnv as workspacePolicyFromEnv } from "./repo-policy.js";
 import { NondeterminismError, completeSleep, executeRunExclusive } from "@neutron-build/workflow";
 import type { RunOutcome, WorkflowEvent } from "@neutron-build/workflow";
@@ -1653,9 +1655,26 @@ export function startWorker(options: WorkerOptions): {
     if (sweepChain !== null) return;
     sweepChain = sweep()
       .then(() => sweepWorkflowSchedules(options.runtime).catch(e => log(`[worker] workflow schedules: ${e instanceof Error ? e.message : String(e)}`)))
+      .then(() => sweepScheduleDigests(options.runtime, { log }).catch(e => log(`[worker] schedule digests: ${e instanceof Error ? e.message : String(e)}`)))
       .then(() => akirooSweep())
       .then(() => bulletinSweep())
       .then(() => holdSweep())
+      // S17: settle incident diagnoses whose scan runs finished (logged,
+      // never thrown — an incident store that cannot be read must not stop
+      // the queue).
+      .then(() => sweepIncidents(options.runtime).catch(e => log(`[worker] incidents sweep: ${e instanceof Error ? e.message : String(e)}`)))
+      // S18: advance coordinations — launch the next child when its
+      // dependency merged, hold on failure. One pass per coordination is
+      // cheap; the record's own fencing makes a slow pass harmless.
+      .then(() => (async () => {
+        for (const c of await listCoordinations(options.runtime)) {
+          try {
+            await launchNext(options.runtime, c.id);
+          } catch (e) {
+            log(`[worker] coordination ${c.id}: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+      })().catch(e => log(`[worker] coordination sweep: ${e instanceof Error ? e.message : String(e)}`)))
       .then(() => serveWorkspaceRequests(options.runtime, executor, { ...workspacePolicyFromEnv(), ...options.repoPolicy, ...(options.gitToken !== undefined ? { gitToken: options.gitToken } : {}), ...(options.githubToken !== undefined ? { githubToken: options.githubToken } : {}) }).catch(e => log(`[worker] workspace request: ${e instanceof Error ? e.message : String(e)}`)))
       .then(() => retryNotifications())
       .catch((error) => log(`[worker] intake sweep: ${error instanceof Error ? error.message : String(error)}`))
@@ -1802,6 +1821,20 @@ export function startWorker(options: WorkerOptions): {
   const deliveryDir = process.env.SHIP_DELIVERY_DIR;
   const deliveryStaleMs = Number(process.env.SHIP_DELIVERY_STALE_MS ?? "") > 0 ? Number(process.env.SHIP_DELIVERY_STALE_MS) : 35 * 60_000;
   const deliveryRunner: CommandRunner = hostRunner();
+  /**
+   * The telemetry binding a delivery's health verdict reads through: the
+   * worker's env target plus the PROJECT's declared Observe service when the
+   * record's repo has one (the per-repo attribution D1 exists for — a wrong
+   * service's metrics are worse than silence).
+   */
+  const observeBindingFor = async (record: { repo?: string }): Promise<{ observe: import("./delivery.js").ObserveHealthBinding }> => ({
+    observe: {
+      target: telemetryTargetFromEnv(),
+      ...(record.repo !== undefined
+        ? { project: await options.runtime.projects.forRepo(record.repo).catch(() => null) }
+        : {}),
+    },
+  });
   const sweepDeliveries = (): Promise<void> => {
     const records = options.runtime.deliveryRecords;
     if (records === undefined) return Promise.resolve();
@@ -1811,7 +1844,13 @@ export function startWorker(options: WorkerOptions): {
         if (approved !== undefined) {
           const claimed = await records.transition(approved.id, "approved", "executing", {});
           if (claimed.state !== "executing") return; // another worker claimed it first
-          const outcome = await executeDelivery(claimed, { dir: deliveryDir, run: deliveryRunner });
+          const outcome = await executeDelivery(claimed, {
+            dir: deliveryDir,
+            run: deliveryRunner,
+            // S15: the approving actor's authority is rechecked against the
+            // LIVE stores at execution — an approval cannot outlive its grant.
+            authority: { governance: options.runtime.governance, users: options.runtime.users },
+          });
           const to = outcome.state === "held" ? "held" : "unknown";
           await records
             .transition(claimed.id, "executing", to, {
@@ -1844,16 +1883,17 @@ export function startWorker(options: WorkerOptions): {
         // unknown and retries on the next sweep.
         const [unknown] = await records.due("unknown", 1);
         if (unknown !== undefined) {
-          const read = await readBackDelivery(unknown, { dir: deliveryDir, run: deliveryRunner });
+          const read = await readBackDelivery(unknown, { dir: deliveryDir, run: deliveryRunner, ...(await observeBindingFor(unknown)) });
           if (read.outcome === "confirmed") {
             await records.transition(unknown.id, "unknown", "confirmed", {
               reason: read.detail,
-              // Health honesty (contract Q3): recorded unknown, never silent,
-              // until a telemetry binding exists for the destination.
-              health: "unknown",
-              healthReason: "no telemetry binding for this destination",
+              // Health honesty (contract Q3): a real verdict when the
+              // destination has telemetry, an honest unknown with its reason
+              // when it does not — never silent, never blocking.
+              health: read.health,
+              healthReason: read.healthReason,
             });
-            log(`[worker] delivery ${unknown.id} → confirmed`);
+            log(`[worker] delivery ${unknown.id} → confirmed (health: ${read.health})`);
           } else if (read.outcome === "mismatch") {
             await records.transition(unknown.id, "unknown", "failed", { reason: read.detail });
             log(`[worker] delivery ${unknown.id} → failed (read-back: ${read.detail})`);
@@ -1866,12 +1906,12 @@ export function startWorker(options: WorkerOptions): {
         // with the evidence so a human can re-approve the retry.
         const [stuck] = (await records.due("executing", 10)).filter((r) => isStaleExecuting(r, Date.now(), deliveryStaleMs)).slice(0, 1);
         if (stuck !== undefined) {
-          const read = await readBackDelivery(stuck, { dir: deliveryDir, run: deliveryRunner });
+          const read = await readBackDelivery(stuck, { dir: deliveryDir, run: deliveryRunner, ...(await observeBindingFor(stuck)) });
           if (read.outcome === "confirmed") {
             await records.transition(stuck.id, "executing", "confirmed", {
               reason: `stale execution reconciled: ${read.detail}`,
-              health: "unknown",
-              healthReason: "no telemetry binding for this destination",
+              health: read.health,
+              healthReason: read.healthReason,
             });
             log(`[worker] delivery ${stuck.id} → confirmed (stale execution reconciled by read-back)`);
           } else {
