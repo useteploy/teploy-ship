@@ -1,0 +1,18 @@
+{
+  "runId": "eval-20260922-3",
+  "adapter": "mock",
+  "startedAt": "2026-09-23T02:02:13.015Z",
+  "completedAt": "2026-09-23T02:02:13.037Z",
+  "scenarios": [
+    {
+      "id": "pj-s-question",
+      "pass": true,
+      "latencyMs": 0,
+      "result": "eval-20260922-3/pj-s-question/result.json"
+    }
+  ],
+  "totals": {
+    "pass": 1,
+    "fail": 0
+  }
+}

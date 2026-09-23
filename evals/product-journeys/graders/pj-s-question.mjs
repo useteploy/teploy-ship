@@ -19,6 +19,38 @@ import * as lib from './lib.mjs';
 // own demand — and unknown files are rejected by the caller of this match.
 const CITATION = /([A-Za-z0-9_.-]+\.[A-Za-z0-9]+)\s*[,:]\s*(?:line\s+)?(\d+)\s*[,:]\s*"([^"]*)"/g;
 
+// A ship SCAN answers in the product's own findings shape, not inline prose
+// — the scan contract is structured output (title/severity/file/line/detail
+// with the exact string backticked in detail), and no task prompt can
+// override a product format. Those findings carry the same verifiable
+// file:line:string triple, so they are citations here too, extracted with
+// the SAME downstream verification (re-opened files, verbatim containment,
+// independent coverage). Found live by the first ship-adapter canary
+// (2026-09-22): a correct scan failed a grader that understood only one
+// answer syntax.
+function findingsCitations(transcript) {
+  const out = [];
+  const blocks = [...transcript.matchAll(/FINDINGS_JSON\s*(\[[\s\S]*?\])\s*(?:\n|$)/g)];
+  for (const block of blocks) {
+    let parsed;
+    try {
+      parsed = JSON.parse(block[1]);
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(parsed)) continue;
+    for (const f of parsed) {
+      if (typeof f?.file !== 'string' || !Number.isInteger(f?.line)) continue;
+      // The exact string is the first backticked segment of detail (the
+      // scan's documented "Exact current string: `...`" convention).
+      const backticked = typeof f.detail === 'string' ? f.detail.match(/`([^`]+)`/) : null;
+      if (backticked === null) continue;
+      out.push({ file: f.file, line: f.line, str: backticked[1] });
+    }
+  }
+  return out;
+}
+
 function fixtureLines(fixture) {
   const files = new Map();
   for (const rel of lib.walkFiles(fixture)) {
@@ -62,11 +94,14 @@ export async function grade({ workDir, fixture, transcriptPath, summary }) {
   }
 
   const files = fixtureLines(fixture);
-  const citations = [...transcript.matchAll(CITATION)].map(m => ({ file: m[1], line: Number(m[2]), str: m[3] }));
+  const citations = [
+    ...[...transcript.matchAll(CITATION)].map(m => ({ file: m[1], line: Number(m[2]), str: m[3] })),
+    ...findingsCitations(transcript),
+  ];
 
   let citationsOk = true;
   if (citations.length === 0) {
-    reasons.push('the transcript cites nothing in a checkable form — each occurrence needs file, line number and the quoted exact string, e.g. index.html:6:"Tideline Woodworks" or about.html, line 15: "Tideline Woodworks"');
+    reasons.push('the transcript cites nothing in a checkable form — each occurrence needs file, line number and the quoted exact string, e.g. index.html:6:"Tideline Woodworks", about.html, line 15: "Tideline Woodworks", or a FINDINGS_JSON entry with file/line and the exact string backticked in detail');
     citationsOk = false;
   }
   const citedTideline = new Set();

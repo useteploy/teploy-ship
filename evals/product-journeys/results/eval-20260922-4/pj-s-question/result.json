@@ -1,0 +1,96 @@
+{
+  "scenarioId": "pj-s-question",
+  "family": "small-site",
+  "runId": "eval-20260922-4",
+  "harnessRevision": "f3800189715f5c49972d98a37554d1b52b193cdc",
+  "fixtureRevision": "sha256:54aa415a72c85b5e2cb91895bcd9c07bb9263893b626ff391b37abbe6c3e7e98",
+  "adapter": "ship",
+  "firstAttempt": {
+    "pass": true,
+    "graderReasons": [],
+    "endedBy": "agent"
+  },
+  "eventualSuccess": {
+    "pass": true
+  },
+  "interventions": [],
+  "latencyMs": 77953,
+  "cost": {
+    "status": "unknown",
+    "reason": "no gateway telemetry wired into this harness slice; cost is never guessed"
+  },
+  "verifiedEvidence": [
+    {
+      "check": "work tree unchanged",
+      "value": {
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "unchanged": [
+          "about.html",
+          "index.html",
+          "styles.css"
+        ]
+      }
+    },
+    {
+      "check": "every cited file:line:string occurrence exists verbatim in the fixture",
+      "value": {
+        "citations": 16,
+        "ok": true
+      }
+    },
+    {
+      "check": "cited Tideline lines exactly cover the fixture occurrences (independent count)",
+      "value": {
+        "independent": [
+          "about.html:15",
+          "about.html:20",
+          "about.html:6",
+          "index.html:15",
+          "index.html:20",
+          "index.html:6"
+        ],
+        "cited": [
+          "about.html:15",
+          "about.html:20",
+          "about.html:6",
+          "index.html:15",
+          "index.html:20",
+          "index.html:6"
+        ],
+        "missing": [],
+        "extra": []
+      }
+    },
+    {
+      "check": "the home-page tagline line is cited",
+      "value": {
+        "taglineLines": [
+          16
+        ],
+        "cited": true
+      }
+    },
+    {
+      "check": "no PR opened",
+      "value": true
+    }
+  ],
+  "claimedEvidence": [
+    {
+      "claim": "The repo is a 3-file static site (index.html, about.html, styles.css); these are the only files, so the scan is exhaustive. The home-page tagline lives in index.html line 16 as a <p class=\"tagline\"> whose text is \"Furniture made on the coast\"; the only styling is the .tagline rule at styles.css line 18. The word \"Tideline\" appears exactly 6 times (grep -i found no case variants), 3 in each HTML page: the <title> (line 6), the <h1> (line 15), and the footer (line 20) — both footers and both h1s are identical strings. In about.html the title line reads \"About — Tideline Woodworks\" with an em dash. Nothing was changed.\n\nFINDINGS_JSON\n[\n  {\"title\": \"home-page tagline text: \\\"Furniture made on the coast\\\"\", \"severity\": \"low\", \"file\": \"index.html\", \"line\": 16, \"detail\": \"Exact current line (byte-verified, no trailing whitespace): `    <p class=\\\"tagline\\\">Furniture made on the coast</p>`. The visible tagline string is \\\"Furniture made on the coast\\\", carried by the element with class=\\\"tagline\\\". This is the only tagline markup in the site; about.html has none.\", \"fix\": \"n/a — read-only scan, nothing changed\"},\n  {\"title\": \"tagline styling selector .tagline\", \"severity\": \"low\", \"file\": \"styles.css\", \"line\": 18, \"detail\": \"Exact current line: `.tagline {` (rule spans lines 18-20 and sets only `font-style: italic;`). It is the style hook for the index.html line 16 paragraph, so any tagline restyle must touch this rule.\", \"fix\": \"n/a — read-only scan, nothing changed\"},\n  {\"title\": \"\\\"Tideline\\\" in home page <title>\", \"severity\": \"low\", \"file\": \"index.html\", \"line\": 6, \"detail\": \"Exact current line: `  <title>Tideline Woodworks</title>` (browser tab / SEO title of the home page).\", \"fix\": \"n/a — read-only scan, nothing changed\"},\n  {\"title\": \"\\\"Tideline\\\" in home page <h1>\", \"severity\": \"low\", \"file\": \"index.html\", \"line\": 15, \"detail\": \"Exact current line: `    <h1>Tideline Woodworks</h1>` (visible page heading, immediately above the tagline paragraph).\", \"fix\": \"n/a — read-only scan, nothing changed\"},\n  {\"title\": \"\\\"Tideline\\\" in home page footer\", \"severity\": \"low\", \"file\": \"index.html\", \"line\": 20, \"detail\": \"Exact current line: `    <p>Tideline Woodworks — Bear Harbor, California</p>` — note the em dash (U+2014) before \\\"Bear Harbor\\\", not a hyphen.\", \"fix\": \"n/a — read-only scan, nothing changed\"},\n  {\"title\": \"\\\"Tideline\\\" in about page <title>\", \"severity\": \"low\", \"file\": \"about.html\", \"line\": 6, \"detail\": \"Exact current line: `  <title>About — Tideline Woodworks</title>` — em dash (U+2014) after \\\"About\\\".\", \"fix\": \"n/a — read-only scan, nothing changed\"},\n  {\"title\": \"\\\"Tideline\\\" in about page <h1>\", \"severity\": \"low\", \"file\": \"about.html\", \"line\": 15, \"detail\": \"Exact current line: `    <h1>Tideline Woodworks</h1>` — identical string to index.html line 15, so a rename touches both.\", \"fix\": \"n/a — read-only scan, nothing changed\"},\n  {\"title\": \"\\\"Tideline\\\" in about page footer\", \"severity\": \"low\", \"file\": \"about.html\", \"line\": 20, \"detail\": \"Exact current line: `    <p>Tideline Woodworks — Bear Harbor, California</p>` — identical string to index.html line 20 (em dash U+2014). The word \\\"Tideline\\\" appears nowhere in styles.css and in no other file in the repository.\", \"fix\": \"n/a — read-only scan, nothing changed\"}\n]",
+      "verdict": "unverified"
+    }
+  ],
+  "artifacts": [
+    "preserve/transcript.txt",
+    "artifacts/grader-output.json"
+  ],
+  "preserve": {
+    "dir": "preserve/"
+  },
+  "probesApplied": [],
+  "gradedAt": "2026-09-23T02:03:36.827Z",
+  "startedAt": "2026-09-23T02:02:18.854Z"
+}

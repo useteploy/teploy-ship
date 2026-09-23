@@ -1,0 +1,23 @@
+JOURNEY pj-s-question — mock agent transcript (canned; no model was invoked)
+
+Question: where exactly does the home-page tagline live, and everywhere the
+word "Tideline" appears? Answer with file, line number and the exact current
+string for each occurrence. Change nothing.
+
+The tagline lives on the home page, styled by the .tagline rule in
+styles.css (which itself never says "Tideline"):
+
+  index.html:16:"Furniture made on the coast"
+
+"Tideline" appears in exactly 6 places — 3 on the home page, 3 on the about
+page; it appears in no other file:
+
+  index.html:6:"Tideline Woodworks"    (home <title>)
+  index.html:15:"Tideline Woodworks"   (hero <h1>)
+  index.html:20:"Tideline Woodworks"   (footer byline)
+  about.html:6:"Tideline Woodworks"    (about <title>, after "About — ")
+  about.html:15:"Tideline Woodworks"   (section <h1>)
+  about.html:20:"Tideline Woodworks"   (footer byline)
+
+Verified by re-reading both files line by line. Nothing was changed, no
+branch was created and no pull request was opened.
