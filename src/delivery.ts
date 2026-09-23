@@ -718,7 +718,7 @@ export async function readBackDelivery(
   if (read.code !== 0) {
     return { outcome: "unreadable", detail: `target status could not be read (exit ${read.code}): ${(read.stderr || read.stdout).slice(0, 300)}` };
   }
-  let parsed: { state?: { current_hash?: unknown }; containers?: Array<Record<string, unknown>> };
+  let parsed: { state?: { current_hash?: unknown }; server?: unknown; containers?: Array<Record<string, unknown>> };
   try {
     parsed = JSON.parse(read.stdout.trim()) as typeof parsed;
   } catch {
@@ -749,15 +749,32 @@ export async function readBackDelivery(
     if (name === "") return false;
     if (name === record.artifactDigest) return true;
     if (!/^(sha256:)?[0-9a-f]{12,64}$/i.test(name)) return false;
+    // The runner executes inside the worker, where there is no docker
+    // socket — the daemon lives on the deployment host. `teploy exec`
+    // carries the query over the same SSH channel the deploy used, from
+    // the trusted copy (whose teploy.yml names the server).
     const inspect = await options.run(
-      ["docker", "image", "inspect", "--format", "{{json .RepoTags}}", name],
-      { cwd: options.dir!, timeoutMs: 30_000 },
+      [
+        "teploy", "exec",
+        ...(typeof parsed.server === "string" && parsed.server !== "" ? [parsed.server] : []),
+        "--", "docker", "image", "inspect", "--format", "{{json .RepoTags}}", name,
+      ],
+      { cwd: options.dir!, timeoutMs: 60_000 },
     );
     if (inspect.code !== 0) return false;
     try {
-      const tags = JSON.parse(inspect.stdout.trim()) as unknown;
-      if (!Array.isArray(tags)) return false;
-      return tags.some((t) => typeof t === "string" && (t === record.artifactDigest || t.startsWith(`${record.artifactDigest}:`)));
+      // `teploy exec` may echo the command line before the output; the
+      // reply we want is the LAST JSON array on stdout.
+      const lines = inspect.stdout.trim().split("\n");
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const trimmed = lines[i].trim();
+        if (!trimmed.startsWith("[")) continue;
+        const tags = JSON.parse(trimmed) as unknown;
+        if (Array.isArray(tags)) {
+          return tags.some((t) => typeof t === "string" && (t === record.artifactDigest || t.startsWith(`${record.artifactDigest}:`)));
+        }
+      }
+      return false;
     } catch {
       return false;
     }
