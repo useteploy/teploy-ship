@@ -7,6 +7,8 @@ import { redirect } from "../lib/http.server.js";
 import {
   INCIDENT_ALERT_MAX,
   attributeIncident,
+  authorizeRemediation,
+  closeIncident,
   createIncident,
   diagnoseIncident,
   listIncidents,
@@ -21,17 +23,23 @@ import { may } from "../lib/authority.server.js";
 export const config = { mode: "app" };
 
 /**
- * S17 starter — the incident list, read-only end to end.
+ * S17 — the incident list: read-only diagnosis end to end, plus the two
+ * operator decisions that close the loop.
  *
  * Login-gated by the layout middleware (this path is on no exemption list).
- * Creating, attributing and diagnosing additionally take the steer grant
- * (`may("steer", me)`), the same authority the run page's interventions use:
- * all three launch or steer agent work, and a viewer may read but not commission.
+ * Creating, attributing, diagnosing and closing take the steer grant
+ * (`may("steer", me)`) — the same authority the run page's interventions and
+ * workspace takeover use (runs/[id].tsx gates every takeover-* intent on
+ * steer: intervening is steering-grade). Authorizing remediation takes steer
+ * OR approve — no new grant is invented, and an approver is at least
+ * steering-grade by policy construction.
  *
  * Diagnosis runs are `mode: "scan"` runs — the read-only guarantee lives in
- * the enqueue/loop/publish gates (see src/incidents.ts's header for the exact
- * locations), not on this page. This page renders findings and the bounded
- * proposal; it offers no remediation and no delivery, by design.
+ * the enqueue/loop/publish gates (see src/incidents.ts's header). The
+ * remediation run this page can authorize is a REAL change run on the
+ * attributed repo, confined by its task to the diagnosed scope; the
+ * plan-review floor applies to it exactly as to any other enqueue. The page
+ * links runs and renders outcomes; it couples nothing to delivery state.
  */
 export async function loader({ request }: { request: Request }): Promise<IncidentsData> {
   const runtime = await shipRuntime();
@@ -40,14 +48,17 @@ export async function loader({ request }: { request: Request }): Promise<Inciden
   // worker's own leg (see the integration note in src/incidents.ts) remains
   // the designated driver.
   await sweepIncidents({ config: runtime.config, store: runtime.store });
-  const [incidents, canSteer] = await Promise.all([
+  const me = await currentUser(request);
+  const [incidents, canSteer, canApprove] = await Promise.all([
     listIncidents(runtime.config),
-    may("steer", await currentUser(request)),
+    may("steer", me),
+    may("approve", me),
   ]);
   const query = new URL(request.url).searchParams;
   return {
     incidents,
     canSteer,
+    canAuthorize: canSteer || canApprove,
     error: query.get("error"),
     notice: query.get("notice"),
   };
@@ -56,16 +67,20 @@ export async function loader({ request }: { request: Request }): Promise<Inciden
 export interface IncidentsData {
   incidents: IncidentRecord[];
   canSteer: boolean;
+  canAuthorize: boolean;
   error: string | null;
   notice: string | null;
 }
 
 export async function action({ request }: { request: Request }): Promise<Response> {
   const me = await currentUser(request);
-  if (!(await may("steer", me))) return new Response("Not permitted", { status: 403 });
-  const runtime = await shipRuntime();
   const form = await request.formData();
   const intent = String(form.get("intent") ?? "");
+  // Authorize takes steer-or-approve (see the loader note); every other
+  // action on this page is steering-grade, as it was in the starter.
+  const gated = intent === "authorize" ? await may("steer", me) || await may("approve", me) : await may("steer", me);
+  if (!gated) return new Response("Not permitted", { status: 403 });
+  const runtime = await shipRuntime();
   const id = String(form.get("id") ?? "");
   try {
     if (intent === "create") {
@@ -96,6 +111,31 @@ export async function action({ request }: { request: Request }): Promise<Respons
       );
       return redirect(`/incidents?notice=${encodeURIComponent(`Diagnosis run ${record.diagnosisRunId ?? ""} queued on ${record.attribution?.repo ?? "the attributed repo"}`)}`);
     }
+    if (intent === "authorize") {
+      const result = await authorizeRemediation(
+        {
+          config: runtime.config,
+          enqueue: (options) => enqueueRun(runtime, options),
+          model: defaultModel(),
+          ...(me !== null ? { actor: actorFromPrincipal(me) } : {}),
+        },
+        id,
+      );
+      const target = result.record.attribution?.repo ?? "the attributed repo";
+      return redirect(
+        `/incidents?notice=${encodeURIComponent(
+          result.queued
+            ? `Remediation run ${result.record.remediationRunId} queued on ${target} — a real change run, scoped to the diagnosis`
+            : `Remediation run ${result.record.remediationRunId} already exists for this incident`,
+        )}`,
+      );
+    }
+    if (intent === "close") {
+      const reason = String(form.get("reason") ?? "").trim();
+      if (me === null) return new Response("Not permitted", { status: 403 });
+      await closeIncident({ config: runtime.config }, id, { by: me.user, ...(reason !== "" ? { reason } : {}) });
+      return redirect(`/incidents?notice=${encodeURIComponent("Incident closed — nothing automatic will move it again")}`);
+    }
     return redirect("/incidents?error=Unknown+action");
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
@@ -110,6 +150,11 @@ const STATUS_CLASS: Record<IncidentStatus, string> = {
   diagnosing: "queued",
   diagnosed: "completed",
   "diagnosis-failed": "failed",
+  recovered: "completed",
+  remediating: "queued",
+  remediated: "completed",
+  "remediation-failed": "failed",
+  closed: "",
 };
 
 function when(iso: string): string {
@@ -138,7 +183,7 @@ function Finding({ finding }: { finding: IncidentFinding }) {
   );
 }
 
-function Diagnosis({ incident, canSteer }: { incident: IncidentRecord; canSteer: boolean }) {
+function Diagnosis({ incident, canAuthorize }: { incident: IncidentRecord; canAuthorize: boolean }) {
   if (incident.status === "diagnosing" && incident.diagnosisRunId !== undefined) {
     return (
       <p style="margin:8px 0 0">
@@ -155,7 +200,7 @@ function Diagnosis({ incident, canSteer }: { incident: IncidentRecord; canSteer:
           {incident.diagnosisRunId !== undefined && (
             <p class="meta" style="margin:0 0 6px">The failed run and its transcript remain at <a href={`/runs/${encodeURIComponent(incident.diagnosisRunId)}`}>{incident.diagnosisRunId}</a>.</p>
           )}
-          {canSteer && (
+          {canAuthorize && (
             <form method="post">
               <input type="hidden" name="intent" value="diagnose" />
               <input type="hidden" name="id" value={incident.id} />
@@ -168,6 +213,12 @@ function Diagnosis({ incident, canSteer }: { incident: IncidentRecord; canSteer:
     return null;
   }
   const u = diagnosis.uncertainty;
+  const remediable =
+    canAuthorize &&
+    (incident.status === "diagnosed" || incident.status === "recovered") &&
+    diagnosis.confidence !== "low" &&
+    diagnosis.proposalFiles.length > 0 &&
+    incident.remediationRunId === undefined;
   return (
     <div style="margin:8px 0 0">
       <p style="margin:0 0 6px">
@@ -198,7 +249,95 @@ function Diagnosis({ incident, canSteer }: { incident: IncidentRecord; canSteer:
           Bounded proposal scope (files a fix would touch; nothing is implemented): {diagnosis.proposalFiles.join(", ")}
         </p>
       )}
+      {remediable && (
+        <form method="post" style="margin:8px 0 0">
+          <input type="hidden" name="intent" value="authorize" />
+          <input type="hidden" name="id" value={incident.id} />
+          <button type="submit">Authorize remediation</button>
+          <p class="meta" style="margin:6px 0 0">
+            Queues a real change run on the attributed repo, scoped to the diagnosed files. The plan-review floor applies if the project requires one.
+          </p>
+        </form>
+      )}
     </div>
+  );
+}
+
+function Recovery({ incident }: { incident: IncidentRecord }) {
+  const r = incident.recovery;
+  if (r === undefined) return null;
+  if (r.unsupported !== undefined) {
+    return <p class="meta" style="margin:6px 0 0">Observed recovery not watching: {r.unsupported}.</p>;
+  }
+  if (incident.status === "recovered" && r.recoveredAt !== undefined) {
+    return (
+      <p class="meta" style="margin:6px 0 0">
+        Recovered {when(r.recoveredAt)} — the signal was back within bounds for {r.windowMinutes} consecutive minutes
+        {r.recoveries !== undefined && r.recoveries > 1 ? ` (recovered ${r.recoveries} times)` : ""}. Evidence kept below.
+      </p>
+    );
+  }
+  const parts: string[] = [];
+  if (r.streak.length > 0) parts.push(`${r.streak.length} consecutive healthy read(s)`);
+  if (r.lastUnhealthy !== undefined) parts.push(`last reset by an unhealthy read at ${when(r.lastUnhealthy.at)} (value ${r.lastUnhealthy.value})`);
+  if (r.lastFailure !== undefined) parts.push(`last read failed at ${when(r.lastFailure.at)}: ${r.lastFailure.reason}`);
+  return (
+    <div style="margin:6px 0 0">
+      <p class="meta" style="margin:0">
+        Watching for recovery: {r.metric} back within bounds for {r.windowMinutes} consecutive minutes.
+        {parts.length > 0 ? ` ${parts.join("; ")}.` : ""}
+      </p>
+      {(r.streak.length > 0 || (r.evidence?.length ?? 0) > 0) && (
+        <details class="disclosure" style="margin:4px 0">
+          <summary>Healthy reads ({r.streak.length > 0 ? "current streak" : "recovery evidence"})</summary>
+          <table class="runs" style="margin:0">
+            <thead><tr><th>At</th><th>{r.metric}</th></tr></thead>
+            <tbody>
+              {(r.streak.length > 0 ? r.streak : r.evidence!).map((read, i) => (
+                <tr key={i}><td>{when(read.at)}</td><td>{read.value}{read.absent ? " (service absent — nothing served)" : ""}</td></tr>
+              ))}
+            </tbody>
+          </table>
+        </details>
+      )}
+    </div>
+  );
+}
+
+function Remediation({ incident }: { incident: IncidentRecord }) {
+  const rem = incident.remediation;
+  if (rem === undefined) return null;
+  const outcome = rem.outcome;
+  return (
+    <div style="margin:6px 0 0">
+      <p style="margin:0">
+        Remediation run <a href={`/runs/${encodeURIComponent(rem.runId)}`}>{rem.runId}</a>{" "}
+        {outcome === undefined
+          ? incident.status === "remediating" ? "is in flight on the attributed repo." : "."
+          : outcome.kind === "remediated"
+            ? <span class="chip ok">remediated {when(outcome.at)}</span>
+            : <span class="chip bad">remediation failed {when(outcome.at)}</span>}
+        <span class="meta"> — authorized by {rem.authorizedBy} {when(rem.authorizedAt)}</span>
+      </p>
+      {outcome !== undefined && outcome.reason !== "" && <p class="meta" style="margin:4px 0 0">Outcome: {outcome.reason}.</p>}
+      <p class="meta" style="margin:4px 0 0">The incident tracks this run; if it merges, the delivery machinery owns what ships next.</p>
+    </div>
+  );
+}
+
+/** The per-incident action row: diagnose (attributed), close (anything not closed). */
+function IncidentActions({ incident, canSteer }: { incident: IncidentRecord; canSteer: boolean }) {
+  if (!canSteer || incident.status === "closed") return null;
+  return (
+    <form method="post" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:8px">
+      <input type="hidden" name="intent" value="close" />
+      <input type="hidden" name="id" value={incident.id} />
+      <div class="field" style="flex:1;min-width:200px">
+        <label for={`close-${incident.id}`}>Close this incident (reason, optional)</label>
+        <input id={`close-${incident.id}`} name="reason" type="text" placeholder="why it is being closed by hand" />
+      </div>
+      <button type="submit" class="sm">Close</button>
+    </form>
   );
 }
 
@@ -208,7 +347,7 @@ export default function Incidents({ data }: { data: IncidentsData }) {
       <div class="page-heading">
         <div>
           <h1 class="page">Incidents</h1>
-          <p class="meta">Alert, attributed repository, read-only diagnosis with a bounded fix proposal. Nothing is remediated or delivered from here.</p>
+          <p class="meta">Alert, attributed repository, read-only diagnosis with a bounded fix proposal. Remediation only by an explicit authorize; observed recovery closes the loop on its own evidence.</p>
         </div>
         <a href="/">Back to Inbox</a>
       </div>
@@ -242,9 +381,22 @@ export default function Incidents({ data }: { data: IncidentsData }) {
             <StatusChip incident={incident} />
             <code>{incident.id}</code>
             <span class="meta">{when(incident.createdAt)}</span>
+            {incident.source === "observe" && <span class="chip">observe</span>}
+            {incident.observe !== undefined && (
+              <span class="meta">
+                {incident.observe.alertCount} firing(s){incident.reopens !== undefined ? `, reopened ${incident.reopens}x` : ""},
+                last seen {when(incident.observe.lastSeenAt)}
+              </span>
+            )}
             {incident.serviceHint !== undefined && <span class="chip">hint: {incident.serviceHint}</span>}
           </p>
           <pre style="margin:0 0 8px;white-space:pre-wrap;word-break:break-word">{incident.alertText}</pre>
+          {incident.observe?.raw !== undefined && (
+            <details class="disclosure" style="margin:0 0 8px">
+              <summary>The raw Observe alert (redacted, bounded)</summary>
+              <pre style="margin:0;white-space:pre-wrap;word-break:break-word">{incident.observe.raw}</pre>
+            </details>
+          )}
 
           {incident.attribution !== undefined ? (
             <p style="margin:0 0 6px">
@@ -268,7 +420,15 @@ export default function Incidents({ data }: { data: IncidentsData }) {
             </div>
           ) : null}
 
-          <Diagnosis incident={incident} canSteer={data.canSteer} />
+          <Diagnosis incident={incident} canAuthorize={data.canAuthorize} />
+          <Recovery incident={incident} />
+          <Remediation incident={incident} />
+
+          {incident.status === "closed" && incident.closed !== undefined && (
+            <p class="meta" style="margin:6px 0 0">
+              Closed by {incident.closed.by} {when(incident.closed.at)}{incident.closed.reason !== "" ? ` — ${incident.closed.reason}` : ""}. Terminal: no automatic path moves it.
+            </p>
+          )}
 
           {data.canSteer && (incident.status === "new" || incident.status === "needs-attribution") && (
             <form method="post" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:8px">
@@ -288,10 +448,11 @@ export default function Incidents({ data }: { data: IncidentsData }) {
               <button type="submit">Start read-only diagnosis</button>
             </form>
           )}
+          <IncidentActions incident={incident} canSteer={data.canSteer} />
         </article>
       ))}
       {data.incidents.length > 0 && (
-        <p class="meta">Diagnosis runs are read-only scans: no branch is pushed, no pull request is opened, no fix is implemented. Turning a proposal into a change is a separate, explicitly authorized request.</p>
+        <p class="meta">Diagnosis runs are read-only scans: no branch is pushed, no pull request is opened, no fix is implemented. A remediation run only starts by an explicit authorize above, scoped to the diagnosis.</p>
       )}
     </>
   );
