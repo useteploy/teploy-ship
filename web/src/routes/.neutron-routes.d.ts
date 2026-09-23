@@ -6,6 +6,7 @@ declare module "@neutron-build/core" {
     | "/account"
     | `/api/artifacts/${string}`
     | "/api/bulletin/sweep"
+    | "/api/incidents/intake"
     | "/api/policies"
     | `/api/runs/${string}/decide`
     | `/api/runs/${string}/findings`
