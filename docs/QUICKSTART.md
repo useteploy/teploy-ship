@@ -11,7 +11,11 @@ to see the loop work.
 
 - A Linux box you can `ssh` into, with Docker. Ship brings up three containers
   (web, worker, and a Nucleus store) and idles at roughly 200 MB.
-- The `teploy` CLI on your machine: `brew install useteploy/tap/teploy`.
+- The `teploy` CLI on your machine: `brew install useteploy/tap/teploy`
+  (macOS). On Linux, take the binary from a
+  [release](https://github.com/useteploy/teploy-cli/releases/latest)
+  (`teploy_linux_amd64.tar.gz`; verify against the release's `checksums.txt`)
+  and put it on your PATH.
 - An Anthropic API key. Any supported model works; this uses the default.
 - A git token for the repository you want Ship to work in — a Forgejo access
   token or a GitHub PAT with `repo` scope.
@@ -38,8 +42,8 @@ piece.
 ## 1. Register the server
 
 ```sh
-teploy server add mybox --host 203.0.113.10 --user root   # or edit ~/.teploy/servers.yml
-teploy setup -s mybox                                     # installs Docker + Caddy if absent
+teploy server add mybox 203.0.113.10 --user root          # or edit ~/.teploy/servers.yml
+teploy setup 203.0.113.10 --name mybox                    # installs Docker + Caddy if absent
 ```
 
 ## 2. Get Ship
