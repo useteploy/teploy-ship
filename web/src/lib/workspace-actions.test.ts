@@ -344,7 +344,7 @@ test("project settings cannot persist or echo a credential-bearing clone URL",as
 
 
 test('guided connection binds an unbound project without resetting policies and same-named forges stay separate',async()=>{
-  const runtime=await shipRuntime();
+  const runtime = await shipRuntime();
   await runtime.projects.set({repo:'identity-setup/app',autoMerge:false,autoDeploy:false,requirePlanReview:true,neverAuto:true,testCommand:'make check'});
   const first='https://first.setup.invalid/identity-setup/app',second='https://second.setup.invalid/identity-setup/app';
   const connected=await setup.action({request:request('/setup',{url:first,tests:'ignored'})});
@@ -357,4 +357,56 @@ test('guided connection binds an unbound project without resetting policies and 
   assert.equal(page.selected?.testCommand,'pnpm test');
   assert.equal((await runtime.projects.forRepo(first))?.testCommand,'make check');
   await assert.rejects(runtime.projects.forRepo('identity-setup/app'),/identity conflicts/);
+});
+
+test("takeover panel ops require steer authority per request and carry the operator's name", async () => {
+  const runtime = await shipRuntime();
+  const id = "run-panel-auth";
+  await enqueueRun(runtime, {runId:id,repo:'https://github.com/team/repo',task:'Panel',model:'test',source:'manual',trust:'operator'});
+  const meta = await runtime.loadMeta(id); assert.ok(meta);
+  await runtime.saveMeta({...meta,status:'waiting',eventName:'ship-ask-1'});
+  // no credential: the steer grant is re-checked on every POST, never cached in the page
+  for (const intent of ["takeover-console", "takeover-read", "takeover-write"]) {
+    const denied = await run.action({params:{id},request:new Request("http://localhost/runs/"+id,{method:"POST",body:new URLSearchParams({intent, path:"src/a.ts", command:"echo hi", content:"x"})})});
+    assert.match(denied.headers.get("location") ?? "", /denied=steer/, intent);
+  }
+  const res = await run.action({params:{id},request:request("/runs/"+id,{intent:"takeover-console",command:"echo hi",tab:"console"})});
+  assert.match(res.headers.get("location") ?? "", /takeover=pending&tab=console/);
+  const recorded = JSON.parse((await runtime.config.get("SHIP_WORKSPACE_REQUEST_"+id))!);
+  assert.equal(recorded.kind, "takeover-console");
+  assert.equal(recorded.command, "echo hi");
+  assert.equal(typeof recorded.by, "string");
+});
+
+test("takeover panel bounds: command cap and read path are refused at request time", async () => {
+  const runtime = await shipRuntime();
+  const id = "run-panel-bounds";
+  await enqueueRun(runtime, {runId:id,repo:'https://github.com/team/repo',task:'Bounds',model:'test',source:'manual',trust:'operator'});
+  const meta = await runtime.loadMeta(id); assert.ok(meta);
+  await runtime.saveMeta({...meta,status:'waiting',eventName:'ship-ask-1'});
+  const long = await run.action({params:{id},request:request("/runs/"+id,{intent:"takeover-console",command:"x".repeat(2001)})});
+  assert.match(decodeURIComponent(long.headers.get("location") ?? ""), /limited to 2000 characters/);
+  const read = await run.action({params:{id},request:request("/runs/"+id,{intent:"takeover-read",path:"src/a.ts",tab:"editor"})});
+  assert.match(read.headers.get("location") ?? "", /takeover=pending&tab=editor/);
+  const recorded = JSON.parse((await runtime.config.get("SHIP_WORKSPACE_REQUEST_"+id))!);
+  assert.equal(recorded.kind, "takeover-read");
+  assert.equal(recorded.path, "src/a.ts");
+  // an unknown tab never rides the redirect back into the URL
+  const weird = await run.action({params:{id},request:request("/runs/"+id,{intent:"takeover-changes",tab:"attacks"})});
+  assert.equal((weird.headers.get("location") ?? "").includes("tab="), false);
+});
+
+test("the run page surfaces the panel reply state the worker wrote", async () => {
+  const runtime = await shipRuntime();
+  const id = "run-panel-surface";
+  await enqueueRun(runtime, {runId:id,repo:'https://github.com/team/repo',task:'Surface',model:'test',source:'manual',trust:'operator'});
+  const meta = await runtime.loadMeta(id); assert.ok(meta);
+  await runtime.saveMeta({...meta,status:'waiting',eventName:'ship-ask-1'});
+  await runtime.config.set("SHIP_TAKEOVER_REPLY_"+id, JSON.stringify({
+    id: "r-1", at: new Date().toISOString(), kind: "takeover-console", running: true, output: "$ echo hi\n…",
+  }));
+  const data = await run.loader({params:{id},request:request("/runs/"+id,{})});
+  assert.equal(data.takeover.reply?.running, true);
+  assert.equal(data.takeover.reply?.id, "r-1");
+  assert.equal(data.takeoverTab, "console");
 });

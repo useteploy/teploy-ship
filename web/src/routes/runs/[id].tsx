@@ -4,7 +4,7 @@ import { JOURNEYS, parseJourney, journeyOptions } from "teploy-ship/journeys";
 import { RichText } from "../../views/rich-text.js";
 import { runData } from "../../lib/run-data.server.js";
 import type { RunData } from "../../lib/run-data.server.js";
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { freshForge, requestWorkspace, threadHistory } from "../../lib/workspace.server.js";
 import { submissionIdentity } from "../../lib/submission.server.js";
 import { Conversation, Changes, Verification } from "../../views/workspace.js";
@@ -79,27 +79,32 @@ export async function action({
   // Package C: workspace takeover. Intervening in a parked run's workspace is
   // steering-grade authority — it changes what the resumed agent builds on.
   // The worker mediates every operation against the sandbox's lease; this
-  // route only records who is asking.
+  // route only records who is asking. Re-checked on every POST, never cached.
   if (
-    ["takeover-acquire", "takeover-renew", "takeover-write", "takeover-exec", "takeover-changes", "takeover-release"].includes(intent)
+    ["takeover-acquire", "takeover-renew", "takeover-write", "takeover-exec", "takeover-read", "takeover-console", "takeover-changes", "takeover-release"].includes(intent)
   ) {
     if (!(await may("steer", me))) return redirectTo(`/runs/${runId}?denied=steer`);
+    const tab = String(form.get("tab") ?? "");
+    const back = (query: string): Response =>
+      redirectTo(`/runs/${runId}?takeover=pending${["console", "editor", "changes", "handback"].includes(tab) ? `&tab=${tab}` : ""}${query}`);
     try {
       const extra =
         intent === "takeover-write"
           ? { content: String(form.get("content") ?? "") }
           : intent === "takeover-release"
             ? { reason: String(form.get("reason") ?? "").trim() || undefined }
-            : undefined;
+            : intent === "takeover-console"
+              ? { command: String(form.get("command") ?? "") }
+              : undefined;
       await requestWorkspace(
         runtime,
         runId,
         intent as "takeover-acquire",
         me!.user,
-        intent === "takeover-write" ? String(form.get("path") ?? "") || undefined : undefined,
+        intent === "takeover-write" || intent === "takeover-read" ? String(form.get("path") ?? "") || undefined : undefined,
         extra,
       );
-      return redirectTo(`/runs/${runId}?takeover=pending`);
+      return back("");
     } catch (e) {
       return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(e instanceof Error ? e.message : "Takeover request failed")}`);
     }
@@ -765,10 +770,10 @@ function TakeoverDecisionWarning({ record }: { record: NonNullable<RunData["take
  * Package C: the workspace takeover card. Pause is the run's own park —
  * takeover is offered exactly there, at a decision boundary the resumed
  * agent consumes. The card renders four states and refuses to guess: an
- * offer (parked, unheld, and you may steer), held-by-you (the editor:
- * write the project's files, run its declared tests, see the diff, hand
- * back), held-by-someone-else, and past sessions. Every button is a
- * worker-mediated lease operation; this page never touches the sandbox.
+ * offer (parked, unheld, and you may steer), held-by-you (the workspace
+ * panel: console, editor, changes, handback), held-by-someone-else, and
+ * past sessions. Every button is a worker-mediated lease operation; this
+ * page never touches the sandbox.
  */
 function TakeoverCard({ data }: { data: RunData }) {
   const t = data.takeover;
@@ -800,8 +805,8 @@ function TakeoverCard({ data }: { data: RunData }) {
       </p>
     )}
     {data.takeoverPending && <p class="meta" role="status">Requested — the worker answers within a few seconds. This card refreshes automatically.</p>}
-    {t.reply?.error && <p class="notice bad" role="alert">{t.reply.error}</p>}
-    {t.reply && t.reply.output !== undefined && (
+    {!mine && t.reply?.error && <p class="notice bad" role="alert">{t.reply.error}</p>}
+    {!mine && t.reply && t.reply.output !== undefined && (
       <details class="disclosure" style="margin-top:8px" open={t.reply.output.startsWith("Wrote ") || t.reply.output.startsWith("Handed")}>
         <summary>Last operation ({t.reply.kind.replace("takeover-", "")}) · {t.reply.at.replace("T", " ").slice(11, 19)} UTC{t.reply.truncated ? " · partial output" : ""}</summary>
         <pre style="white-space:pre-wrap">{t.reply.output}</pre>
@@ -810,8 +815,8 @@ function TakeoverCard({ data }: { data: RunData }) {
     {record === undefined && t.available && (
       <form method="post" style="margin-top:8px">
         <p class="meta" style="margin:0 0 8px">
-          The run is parked. Take exclusive writable ownership of its workspace: edit files, run this
-          project's tests, then hand back — the resumed agent is told exactly what you changed. Nobody
+          The run is parked. Take exclusive writable ownership of its workspace: edit files, run commands,
+          then hand back — the resumed agent is told exactly what you changed. Nobody
           else can write while you hold it, and the run waits for your handback.
         </p>
         <button type="submit" name="intent" value="takeover-acquire">Take over the workspace</button>
@@ -820,38 +825,7 @@ function TakeoverCard({ data }: { data: RunData }) {
     {record === undefined && !t.available && t.reason && data.canSteer && (
       <p class="meta" style="margin:8px 0 0">Takeover unavailable: {t.reason}</p>
     )}
-    {record !== undefined && mine && (
-      <>
-        {record.pathsWritten.length > 0 && (
-          <p class="meta" style="margin:8px 0 0">Files written this session: {record.pathsWritten.join(", ")}</p>
-        )}
-        <form method="post" style="margin-top:10px">
-          <div class="row-actions" style="align-items:flex-start;flex-wrap:wrap;gap:8px">
-            <label class="field" style="flex:1;min-width:220px">Write a file
-              <input name="path" placeholder="src/example.ts" required aria-label="Repository file path" />
-            </label>
-            <textarea name="content" rows={6} maxLength={200000} required style="flex:2;min-width:280px;box-sizing:border-box;font:inherit" placeholder="The file's full new content — the write replaces it. Keep it whole; this slice has no partial edits." aria-label="File content" />
-          </div>
-          <div class="row-actions" style="margin-top:8px">
-            <button type="submit" name="intent" value="takeover-write">Write file</button>
-            {t.testsCommand !== undefined && (
-              <button type="submit" name="intent" value="takeover-exec" title={`runs exactly the project's declared tests command: ${t.testsCommand}`}>Run tests</button>
-            )}
-            <button type="submit" name="intent" value="takeover-changes">Show my changes</button>
-            <button type="submit" name="intent" value="takeover-renew">Keep holding</button>
-          </div>
-        </form>
-        <form method="post" style="margin-top:10px">
-          <label class="field">Handback note (given to the agent with your diff)
-            <input name="reason" placeholder="what you changed and why — optional" aria-label="Handback note" />
-          </label>
-          <div class="row-actions" style="margin-top:8px">
-            <button type="submit" name="intent" value="takeover-release" class="approve">Hand back to the agent</button>
-            <span class="meta">records your diff, releases ownership, and the parked run can proceed</span>
-          </div>
-        </form>
-      </>
-    )}
+    {record !== undefined && mine && <TakeoverPanel data={data} record={record} />}
     {t.history.length > 0 && (
       <details class="disclosure" style="margin-top:10px">
         <summary>Past takeovers ({t.history.length})</summary>
@@ -866,6 +840,232 @@ function TakeoverCard({ data }: { data: RunData }) {
       </details>
     )}
   </section>;
+}
+
+/** Paths out of a `git status --short` listing (the CHANGES tab's output), for the editor's picker. */
+function changedPaths(changesOutput: string | undefined): string[] {
+  if (changesOutput === undefined) return [];
+  const paths: string[] = [];
+  for (const line of changesOutput.split("\n")) {
+    if (line.startsWith("diff --git ")) break; // the diff body is not a listing
+    if (line.length <= 3 || line[2] !== " " || !/[MADRCU?]/.test(line.slice(0, 2))) continue;
+    let p = line.slice(3);
+    const arrow = p.indexOf(" -> ");
+    if (arrow !== -1) p = p.slice(arrow + 4); // renames: the destination is what exists to edit
+    if (p !== "" && !paths.includes(p)) paths.push(p);
+  }
+  return paths.slice(0, 50);
+}
+
+/** What the panel renders client-side is bounded too — the server caps output, this caps the DOM. */
+const PANEL_OUTPUT_LIMIT = 60_000;
+
+/**
+ * The holder's workspace panel (S12): CONSOLE / EDITOR / CHANGES / HANDBACK.
+ * Pure reorganization of the card's held-by-you surface onto the same mediated
+ * ops — every button still POSTs one workspace request the worker fences. The
+ * tab rides the URL (?tab=) so a full-page POST lands the operator back where
+ * they were; the 4s poll streams console output by re-reading the reply.
+ */
+function TakeoverPanel({ data, record }: { data: RunData; record: NonNullable<RunData["takeover"]["record"]> }) {
+  const t = data.takeover;
+  const [tab, setTab] = useState<"console" | "editor" | "changes" | "handback">(data.takeoverTab);
+  const reply = t.reply;
+  // ---- Editor state: one file at a time, seeded from takeover-read replies.
+  const [editorPath, setEditorPath] = useState("");
+  const [editorContent, setEditorContent] = useState("");
+  const [savedContent, setSavedContent] = useState("");
+  const seededRef = useRef("");
+  const readReply = reply?.kind === "takeover-read" ? reply : undefined;
+  useEffect(() => {
+    if (readReply !== undefined && readReply.id !== seededRef.current) {
+      seededRef.current = readReply.id;
+      if (readReply.path !== undefined && readReply.output !== undefined) {
+        setEditorPath(readReply.path);
+        setEditorContent(readReply.output);
+        setSavedContent(readReply.output);
+      }
+    }
+  }, [readReply?.id]);
+  const dirty = editorContent !== savedContent;
+  const guardUnsaved = (e: { preventDefault: () => void }): void => {
+    if (dirty && !window.confirm(`Discard unsaved changes to ${editorPath}?`)) e.preventDefault();
+  };
+  // ---- After a save lands: re-open the file (editor continuity, verifies the
+  // write), and once the content is back, refresh the diff. Sequential on
+  // purpose — one request key, one op in flight at a time.
+  const postOp = (fields: Record<string, string>): void => {
+    void fetch(location.pathname, {
+      method: "POST",
+      redirect: "manual",
+      body: new URLSearchParams(fields),
+    }).catch(() => {});
+  };
+  const afterWriteRef = useRef("");
+  const afterReadRef = useRef("");
+  useEffect(() => {
+    if (reply?.kind === "takeover-write" && reply.id !== afterWriteRef.current) {
+      afterWriteRef.current = reply.id;
+      if (!dirty && reply.path !== undefined) postOp({ intent: "takeover-read", tab: "editor", path: reply.path });
+    }
+    if (reply?.kind === "takeover-read" && reply.id !== afterReadRef.current) {
+      afterReadRef.current = reply.id;
+      if (reply.error === undefined) postOp({ intent: "takeover-changes", tab });
+    }
+  }, [reply?.id, reply?.kind]);
+  const consoleRunning = reply?.kind === "takeover-console" && reply.running === true;
+  const consoleOut = reply?.kind === "takeover-console" && reply.output !== undefined
+    ? reply.output.slice(-PANEL_OUTPUT_LIMIT)
+    : undefined;
+  const openForm = useRef<HTMLFormElement>(null);
+  const openFile = (path: string): void => {
+    if (dirty && !window.confirm(`Discard unsaved changes to ${editorPath}?`)) return;
+    const field = openForm.current?.querySelector<HTMLInputElement>('input[name="path"]');
+    if (field) field.value = path;
+    openForm.current?.requestSubmit();
+  };
+  const pickerPaths = [...new Set([...record.pathsWritten, ...changedPaths(reply?.kind === "takeover-changes" ? reply.output : undefined)])];
+  return <>
+    <div class="row-actions" role="tablist" aria-label="Workspace panel" style="margin-top:10px;gap:6px;flex-wrap:wrap">
+      {(["console", "editor", "changes", "handback"] as const).map((k) => (
+        <button
+          type="button"
+          key={k}
+          role="tab"
+          aria-selected={tab === k ? "true" : "false"}
+          onClick={() => setTab(k)}
+          style={tab === k ? { fontWeight: "bold" } : undefined}
+        >
+          {k.toUpperCase()}
+        </button>
+      ))}
+      <form method="post" style="margin-left:auto">
+        <input type="hidden" name="tab" value={tab} />
+        <button type="submit" name="intent" value="takeover-renew" class="sm">Keep holding</button>
+      </form>
+    </div>
+
+    {tab === "console" && (
+      <div style="margin-top:10px">
+        <p class="meta" style="margin:0 0 8px">
+          A submitted-command console — one command at a time, output streamed as it runs, bounded. No
+          interactive stdin, no TTY: commands that read input cannot be answered here.
+        </p>
+        {t.testsCommand !== undefined && (
+          <form method="post">
+            <input type="hidden" name="tab" value="console" />
+            <p class="meta" style="margin:0 0 6px">Declared tests command: <code>{t.testsCommand}</code></p>
+            <button type="submit" name="intent" value="takeover-exec" disabled={consoleRunning}>Run tests</button>
+          </form>
+        )}
+        <form method="post" class="row-actions" style="margin-top:8px;gap:8px">
+          <input type="hidden" name="tab" value="console" />
+          <input
+            name="command"
+            placeholder="pnpm test -- src/foo"
+            maxLength={2000}
+            required
+            style="flex:1;min-width:240px"
+            aria-label="Console command"
+            disabled={consoleRunning}
+          />
+          <button type="submit" name="intent" value="takeover-console" disabled={consoleRunning}>Run</button>
+        </form>
+        {reply?.kind === "takeover-console" && reply.error && <p class="notice bad" role="alert">{reply.error}</p>}
+        {consoleOut !== undefined && (
+          <pre aria-label="Console output" style="white-space:pre-wrap;margin:8px 0 0;max-height:340px;overflow:auto">{consoleOut}{consoleRunning ? "\n…" : ""}</pre>
+        )}
+        {reply?.kind === "takeover-console" && reply.truncated && !reply.running && <p class="meta">Output truncated — only the tail is kept.</p>}
+        {record.execsRun.length > 0 && (
+          <details class="disclosure" style="margin-top:8px">
+            <summary>Commands run this session ({record.execsRun.length})</summary>
+            {record.execsRun.map((c, i) => <p class="meta" style="margin:4px 0" key={i}><code>{c}</code></p>)}
+          </details>
+        )}
+      </div>
+    )}
+
+    {tab === "editor" && (
+      <div style="margin-top:10px">
+        <p class="meta" style="margin:0 0 8px">
+          Whole-file editor: opens one text file (bounded, no syntax highlighting), saves replace the
+          entire file — the same fenced write as before, uncommitted like every takeover edit.
+        </p>
+        <form method="post" class="row-actions" style="gap:8px;flex-wrap:wrap" ref={openForm} onSubmit={guardUnsaved}>
+          <input type="hidden" name="tab" value="editor" />
+          <input name="path" placeholder="src/example.ts" required aria-label="Repository file path" style="min-width:220px" />
+          <button type="submit" name="intent" value="takeover-read">Open</button>
+          {pickerPaths.length > 0 && (
+            <span class="row-actions" style="gap:6px;flex-wrap:wrap">
+              {pickerPaths.map((p) => (
+                <button type="button" class="sm" key={p} title="Open this file" onClick={() => openFile(p)}>{p}</button>
+              ))}
+            </span>
+          )}
+        </form>
+        {readReply?.error && <p class="notice bad" role="alert">{readReply.error}</p>}
+        {editorPath !== "" && (
+          <form method="post" style="margin-top:8px" onSubmit={(e) => { if (editorContent.trim() === "") e.preventDefault(); }}>
+            <input type="hidden" name="tab" value="editor" />
+            <input type="hidden" name="path" value={editorPath} />
+            <div class="row-actions" style="gap:8px;align-items:baseline">
+              <code>{editorPath}</code>
+              {dirty && <span class="meta">unsaved changes</span>}
+              {reply?.kind === "takeover-write" && reply.path === editorPath && !dirty && <span class="ok">saved</span>}
+            </div>
+            <textarea
+              name="content"
+              value={editorContent}
+              onInput={(e) => setEditorContent((e.currentTarget as HTMLTextAreaElement).value)}
+              rows={Math.min(24, Math.max(6, editorContent.split("\n").length + 1))}
+              maxLength={200000}
+              spellcheck={false}
+              aria-label={`Content of ${editorPath}`}
+              style="width:100%;box-sizing:border-box;margin-top:6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:inherit"
+            />
+            <div class="row-actions" style="margin-top:8px">
+              <button type="submit" name="intent" value="takeover-write">Save file</button>
+              <span class="meta">replaces the whole file — keep it whole; this slice has no partial edits</span>
+            </div>
+          </form>
+        )}
+      </div>
+    )}
+
+    {tab === "changes" && (
+      <div style="margin-top:10px">
+        <form method="post">
+          <input type="hidden" name="tab" value="changes" />
+          <button type="submit" name="intent" value="takeover-changes">Show my changes</button>
+        </form>
+        {reply?.kind === "takeover-changes" && reply.error && <p class="notice bad" role="alert">{reply.error}</p>}
+        {reply?.kind === "takeover-changes" && reply.output !== undefined && (
+          <details class="disclosure" style="margin-top:8px" open>
+            <summary>Working-tree changes · {reply.at.replace("T", " ").slice(11, 19)} UTC{reply.truncated ? " · partial output" : ""}</summary>
+            <pre style="white-space:pre-wrap">{reply.output.slice(-PANEL_OUTPUT_LIMIT)}</pre>
+          </details>
+        )}
+      </div>
+    )}
+
+    {tab === "handback" && (
+      <div style="margin-top:10px">
+        {record.pathsWritten.length > 0 && (
+          <p class="meta" style="margin:0 0 8px">Files written this session: {record.pathsWritten.join(", ")}</p>
+        )}
+        <form method="post" onSubmit={guardUnsaved}>
+          <input type="hidden" name="tab" value="handback" />
+          <label class="field">Handback note (given to the agent with your diff)
+            <input name="reason" placeholder="what you changed and why — optional" aria-label="Handback note" />
+          </label>
+          <div class="row-actions" style="margin-top:8px">
+            <button type="submit" name="intent" value="takeover-release" class="approve">Hand back to the agent</button>
+            <span class="meta">records your diff, releases ownership, and the parked run can proceed</span>
+          </div>
+        </form>
+      </div>
+    )}
+  </>;
 }
 
 /**

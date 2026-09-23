@@ -108,21 +108,40 @@ lease is held, nothing else can exec or write in that workspace, and a
 decision delivered mid-takeover makes the run wait for handback instead of
 racing the human. The run page shows who holds a workspace and until when.
 
-What a holder can do: write whole files (up to 200 KB, relative paths inside
-the work tree), run exactly the project's declared tests command, and view the
-working-tree diff. Every operation renews the lease; an abandoned one expires
-on its own (default 30 min, `SHIP_TAKEOVER_TTL_SEC`) and is recorded as
-lapsed. Handing back records the session — files written, commands run, a
-digest of the diff, the holder's note — and leaves the resumed run a message
+While you hold a workspace, the takeover card becomes a panel with four tabs.
+
+**Console** runs one submitted command at a time under the lease and streams
+its output as it arrives (the page polls; there is no persistent connection).
+It is a console, not a terminal: no interactive stdin, no TTY emulation — a
+program that asks a question gets no answer. Commands are capped at 2,000
+characters and two minutes; output is bounded to its tail and redacted. The
+project's declared tests command keeps its own button. Every command is
+recorded in the session and named to the resumed agent.
+
+**Editor** opens one text file at a time from the changed-files list or a
+typed path. Reads are bounded (200,000 characters — the same cap as writes, so
+what opens can save), binary files are refused, and paths outside the work
+tree are rejected. Saving replaces the whole file — the same fenced write as
+before, uncommitted. There is no syntax highlighting and no partial-edit
+application. The editor guards unsaved changes when you switch files or hand
+back.
+
+**Changes** shows the working-tree diff against HEAD and refreshes after each
+save. **Handback** records the session — files written, commands run, a digest
+of the diff, the holder's note — and leaves the resumed run a message
 describing the edits, so the agent commits the human's work rather than
 building over invisible changes.
 
+Every operation renews the lease; an abandoned one expires on its own (default
+30 min, `SHIP_TAKEOVER_TTL_SEC`) and is recorded as lapsed, with edits on disk
+preserved — re-acquire to continue.
+
 Boundaries, on purpose: a run reviewing a merge cannot be taken over (edits
-there cannot join an already-published PR — request changes instead), an
-executing run must be steered or parked first, and arbitrary commands are not
-part of this slice — only the project's tests command runs. Terminal, editor
-and interactive browser surfaces remain future work, as does reconnect after
-lease expiry (re-acquire; edits on disk are preserved).
+there cannot join an already-published PR — request changes instead) and an
+executing run must be steered or parked first. The console runs commands as
+the workspace user inside the sandbox; it is not a shell session and keeps no
+environment between commands. An interactive browser takeover remains future
+work, as does reconnect after lease expiry beyond re-acquiring.
 
 Verification is derived from recorded outcomes, never an agent's assertion
 that tests passed. Missing checks say **not recorded**. The page includes test

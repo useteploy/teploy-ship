@@ -747,6 +747,8 @@ export interface ExecutorProvider {
       cred: { owner: string; generation: number },
       command: string,
       opts?: { timeoutMs?: number; maxOutputBytes?: number },
+      /** Streamed output as it happens, when the provider can (the console panel). Absent means output arrives at exit. */
+      onChunk?: (stream: "stdout" | "stderr", chunk: string) => void,
     ) => Promise<ExecResult>;
     writeFileAs: (
       handle: string,
@@ -3597,13 +3599,13 @@ export function sandboxLeaseClient(base: { baseURL: string; token: string; fetch
     acquire: (handle, owner, ttlSec) => call(`/v1/runs/${handle}/lease`, { owner, ttlSec }),
     renew: (handle, owner, generation, ttlSec) => call(`/v1/runs/${handle}/lease/renew`, { owner, generation, ttlSec }),
     release: (handle, owner, generation) => call(`/v1/runs/${handle}/lease/release`, { owner, generation }),
-    execAs: (handle, cred, command, opts) =>
+    execAs: (handle, cred, command, opts, onChunk) =>
       streamSandboxExec(
         base,
         handle,
         command,
         { ...(opts ?? {}), lease: cred },
-        () => {},
+        onChunk ?? (() => {}),
       ),
     writeFileAs: async (handle, cred, path, bytes) => {
       const query = new URLSearchParams({ owner: cred.owner, generation: String(cred.generation) });

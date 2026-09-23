@@ -1,4 +1,9 @@
-/** Worker-side, read-only requests. Dashboard never receives worker credentials. */
+/**
+ * Worker-side workspace requests: the read-only inspections and every mediated
+ * takeover operation (lease-fenced, renewed on use). The dashboard never
+ * receives worker or sandbox credentials — it names WHO asks (`by`), and the
+ * lease credential stays in this process.
+ */
 import { randomUUID } from "node:crypto";
 import type { ShipRuntime } from "./runtime.js";
 import type { ExecutorProvider } from "./durable.js";
@@ -40,6 +45,8 @@ export type WorkspaceRequest = {
     | "takeover-renew"
     | "takeover-write"
     | "takeover-exec"
+    | "takeover-read"
+    | "takeover-console"
     | "takeover-changes"
     | "takeover-release";
   path?: string;
@@ -49,6 +56,8 @@ export type WorkspaceRequest = {
   content?: string;
   /** takeover-release: the holder's handback note, recorded with the session. */
   reason?: string;
+  /** takeover-console: the submitted command. */
+  command?: string;
 };
 export type WorkspaceReply = {
   id: string;
@@ -59,6 +68,8 @@ export type WorkspaceReply = {
   kind?: WorkspaceRequest["kind"];
   path?: string;
   truncated?: boolean;
+  /** takeover-console: true while the command still runs (progressive reply writes). */
+  running?: boolean;
   /** Takeover ops: the live lease state after the operation. */
   takeover?: { holder: string; generation: number; expiresAt: string };
 };
@@ -68,18 +79,26 @@ const TAKEOVER_KINDS = new Set([
   "takeover-renew",
   "takeover-write",
   "takeover-exec",
+  "takeover-read",
+  "takeover-console",
   "takeover-changes",
   "takeover-release",
 ]);
 export const requestKey = (runId: string) => PREFIX + runId;
 export const replyKey = (runId: string) => "SHIP_WORKSPACE_REPLY_" + runId;
+
+/** A submitted console command is one line of intent, not a pasted script. */
+export const TAKEOVER_CONSOLE_COMMAND_LIMIT = 2000;
+/** Console commands are bounded the same way every takeover exec is. */
+export const TAKEOVER_CONSOLE_TIMEOUT_MS = 120_000;
+
 export async function requestWorkspace(
   runtime: Pick<ShipRuntime, "config" | "loadMeta">,
   runId: string,
   kind: WorkspaceRequest["kind"],
   by: string,
   path?: string,
-  extra?: { content?: string; reason?: string },
+  extra?: { content?: string; reason?: string; command?: string },
 ): Promise<WorkspaceRequest> {
   if (!/^[a-zA-Z0-9_-]{1,100}$/.test(runId) || !(await runtime.loadMeta(runId)))
     throw new Error("Run not found");
@@ -90,6 +109,15 @@ export async function requestWorkspace(
     if (!path || path.length > 500 || path.includes("\0")) throw new Error("Choose a file to write");
     if (content === undefined || content.length > TAKEOVER_CONTENT_LIMIT)
       throw new Error(`File content is required, up to ${TAKEOVER_CONTENT_LIMIT} characters`);
+  }
+  if (kind === "takeover-read" && (!path || path.length > 500 || path.includes("\0")))
+    throw new Error("Choose a file to open");
+  if (kind === "takeover-console") {
+    const command = extra?.command;
+    if (command === undefined || command.trim() === "")
+      throw new Error("Enter a command to run");
+    if (command.length > TAKEOVER_CONSOLE_COMMAND_LIMIT || command.includes("\0"))
+      throw new Error(`Console commands are limited to ${TAKEOVER_CONSOLE_COMMAND_LIMIT} characters`);
   }
   if (kind === "takeover-release" && extra?.reason !== undefined && extra.reason.length > 4000)
     throw new Error("Handback note must be under 4000 characters");
@@ -102,6 +130,7 @@ export async function requestWorkspace(
     ...(path ? { path } : {}),
     ...(content !== undefined ? { content } : {}),
     ...(extra?.reason !== undefined ? { reason: extra.reason } : {}),
+    ...(extra?.command !== undefined ? { command: extra.command } : {}),
   };
   await runtime.config.set(requestKey(runId), JSON.stringify(request), by);
   return request;
@@ -161,6 +190,21 @@ export function fileCommand(path?: string): string {
     throw new Error("Invalid repository path");
   const quote = (s: string) => "'" + s.replace(/'/g, "'\\''") + "'";
   return `git --no-pager show --no-ext-diff --no-textconv ${quote("HEAD:" + path)} | head -c 10000`;
+}
+/**
+ * The editor's bounded read, run under the lease credential (a held workspace
+ * refuses unfenced reads, so execAs is the ONLY read surface it has). base64
+ * carries the bytes intact through the exec's text frames; one byte past the
+ * cap is requested so an over-limit file is detected, not silently shortened.
+ * The `./` prefix keeps a dash-leading name an argument, not an option.
+ */
+export function takeoverReadCommand(path: string): string {
+  const quote = (s: string) => "'" + s.replace(/'/g, "'\\''") + "'";
+  return `head -c ${TAKEOVER_CONTENT_LIMIT + 1} ${quote("./" + path)} | base64 | tr -d '\\n'`;
+}
+/** Console scrollback keeps the TAIL — the head of a long run is what a bounded buffer can spare. */
+export function tailKeep(text: string, max: number): string {
+  return text.length <= max ? text : text.slice(-max);
 }
 export async function serveWorkspaceRequests(
   runtime: ShipRuntime,
@@ -382,6 +426,94 @@ async function serveTakeoverRequest(
         const out = `${r.stdout}\n${r.stderr}`.trim();
         reply.truncated = out.length > TAKEOVER_OUTPUT_LIMIT;
         reply.output = safeForDisplay(`$ ${cmd}\nexit ${r.exitCode}${r.timedOut ? " (timed out)" : ""}\n${out}`, TAKEOVER_OUTPUT_LIMIT + 2000);
+        reply.takeover = { holder: record.holder, generation: record.generation, expiresAt: record.expiresAt };
+      } catch (e) {
+        if (lost(e)) {
+          await lapseTakeover(runtime, executor, record, e instanceof Error ? e.message : String(e));
+          throw new Error("The takeover lease was lost — the command did not run under your ownership. Acquire again.");
+        }
+        throw e;
+      }
+    } else if (req.kind === "takeover-read") {
+      // The editor's read. Bounded to the write cap so whatever opens can
+      // save, refused when binary, and carried VERBATIM (no redaction pass —
+      // this content round-trips back through takeover-write, and a rewritten
+      // secret would be persisted as the file's new content).
+      const path = takeoverPathValid(req.path);
+      if (!path.ok) throw new Error(path.reason);
+      const target = req.path as string;
+      try {
+        await renew();
+        const r = await lease.execAs(handle, cred, takeoverReadCommand(target), { timeoutMs: 15000 });
+        if (r.exitCode !== 0 || r.stdout === "")
+          throw new Error("Could not read that file — check the path exists in the workspace.");
+        const bytes = Buffer.from(r.stdout.replace(/\s+/g, ""), "base64");
+        if (bytes.length > TAKEOVER_CONTENT_LIMIT)
+          throw new Error(`File is larger than the ${TAKEOVER_CONTENT_LIMIT}-character edit cap.`);
+        if (bytes.includes(0))
+          throw new Error("That looks like a binary file; the editor opens text only.");
+        reply.output = bytes.toString("utf8");
+        reply.takeover = { holder: record.holder, generation: record.generation, expiresAt: record.expiresAt };
+      } catch (e) {
+        if (lost(e)) {
+          await lapseTakeover(runtime, executor, record, e instanceof Error ? e.message : String(e));
+          throw new Error("The takeover lease was lost. Acquire again.");
+        }
+        throw e;
+      }
+    } else if (req.kind === "takeover-console") {
+      // The console: one submitted command at a time, fenced like every
+      // takeover exec. Output streams the way the Now card's does — chunks
+      // land on the reply key as they arrive, and the dashboard's existing
+      // poll picks them up; there is no PTY and no stdin behind this.
+      const command = req.command;
+      if (command === undefined || command.trim() === "" || command.length > TAKEOVER_CONSOLE_COMMAND_LIMIT)
+        throw new Error(`Console command is required, up to ${TAKEOVER_CONSOLE_COMMAND_LIMIT} characters.`);
+      let buffered = "";
+      let dropped = false;
+      let lastFlush = 0;
+      const keep = TAKEOVER_OUTPUT_LIMIT + 2000;
+      const flush = (force = false): void => {
+        const now = Date.now();
+        if (!force && now - lastFlush < 1000) return;
+        lastFlush = now;
+        void runtime.config
+          .set(
+            takeoverReplyKey(req.runId),
+            JSON.stringify({
+              ...reply,
+              at: new Date().toISOString(),
+              running: true,
+              output: safeForDisplay(tailKeep(buffered, TAKEOVER_OUTPUT_LIMIT), TAKEOVER_OUTPUT_LIMIT + 200),
+              truncated: dropped,
+            }),
+          )
+          .catch(() => {});
+      };
+      try {
+        await renew();
+        flush(true);
+        const r = await lease.execAs(
+          handle,
+          cred,
+          command,
+          { timeoutMs: TAKEOVER_CONSOLE_TIMEOUT_MS, maxOutputBytes: 1 << 20 },
+          (_stream, chunk) => {
+            buffered += chunk;
+            if (buffered.length > keep) {
+              buffered = buffered.slice(-keep);
+              dropped = true;
+            }
+            flush();
+          },
+        );
+        if (!record.execsRun.includes(command)) record.execsRun.push(command);
+        await saveTakeover(runtime.config, record);
+        reply.truncated = dropped || r.truncated;
+        reply.output = safeForDisplay(
+          `$ ${command}\nexit ${r.exitCode}${r.timedOut ? " (timed out)" : ""}\n${tailKeep(buffered, TAKEOVER_OUTPUT_LIMIT)}`,
+          TAKEOVER_OUTPUT_LIMIT + 2000,
+        );
         reply.takeover = { holder: record.holder, generation: record.generation, expiresAt: record.expiresAt };
       } catch (e) {
         if (lost(e)) {
