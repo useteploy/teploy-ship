@@ -7,7 +7,7 @@ import { upsertByKey } from "./upsert.js";
 export interface Artifact {
   id: string;
   name: string;
-  mime: "image/png" | "video/webm";
+  mime: "image/png" | "image/jpeg" | "video/webm";
   data: string;
   bytes: number;
 }
@@ -24,12 +24,14 @@ function artifact(name: string, bytes: Uint8Array): Artifact {
   const webm = Buffer.from(bytes.subarray(0, 4)).equals(
     Buffer.from([26, 69, 223, 163]),
   );
-  if (!png && !webm)
-    throw new Error("Only PNG images and WebM recordings are supported");
+  // The takeover BROWSER tab falls back to JPEG when a PNG would exceed its cap.
+  const jpeg = Buffer.from(bytes.subarray(0, 3)).equals(Buffer.from([255, 216, 255]));
+  if (!png && !webm && !jpeg)
+    throw new Error("Only PNG/JPEG images and WebM recordings are supported");
   return {
     id: createHash("sha256").update(bytes).digest("hex"),
     name: name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120),
-    mime: png ? "image/png" : "video/webm",
+    mime: png ? "image/png" : jpeg ? "image/jpeg" : "video/webm",
     data: Buffer.from(bytes).toString("base64"),
     bytes: bytes.length,
   };

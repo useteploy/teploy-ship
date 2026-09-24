@@ -1201,11 +1201,11 @@ function BrowserTab({ data, record }: { data: RunData; record: NonNullable<RunDa
     </form>
     {navError !== null && <p class="notice bad" role="alert">{navError}</p>}
     {reply?.error && <p class="notice bad" role="alert">{reply.error}</p>}
-    {browser?.image !== undefined && (
+    {browser?.artifact !== undefined && (
       <div style="margin-top:8px;overflow:auto;max-height:520px;border:1px solid var(--line)">
         <img
           ref={imgRef}
-          src={`data:image/${browser.format ?? "png"};base64,${browser.image}`}
+          src={`/api/artifacts/${browser.artifact}`}
           width={browser.width}
           height={browser.height}
           alt="Screenshot of the in-sandbox browser"
@@ -1215,7 +1215,7 @@ function BrowserTab({ data, record }: { data: RunData; record: NonNullable<RunDa
       </div>
     )}
     {reply?.output !== undefined && (
-      <p class="meta" style="margin:6px 0 0">{reply.output}{browser?.image === undefined && " — navigate to a page to see it."}</p>
+      <p class="meta" style="margin:6px 0 0">{reply.output}{browser?.artifact === undefined && " — navigate to a page to see it."}</p>
     )}
     {(record.browserOps?.length ?? 0) > 0 && (
       <details class="disclosure" style="margin-top:8px">

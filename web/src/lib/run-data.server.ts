@@ -114,7 +114,7 @@ export interface RunData {
     reason?: string;
     record?: { holder: string; expiresAt: string; acquiredAt: string; pathsWritten: string[]; execsRun: string[]; browserOps?: string[] };
     /** The last mediated operation's result (any holder), for the panel. */
-    reply?: { id: string; kind: string; at: string; output?: string; error?: string; truncated?: boolean; running?: boolean; path?: string; browser?: { image?: string; url?: string; width?: number; height?: number; format?: string } };
+    reply?: { id: string; kind: string; at: string; output?: string; error?: string; truncated?: boolean; running?: boolean; path?: string; browser?: { artifact?: string; url?: string; width?: number; height?: number; format?: string } };
     history: TakeoverSession[];
     /** The project's declared tests command — the only exec takeover may run. */
     testsCommand?: string;
@@ -235,7 +235,9 @@ export async function runData({ params, request }: { params: { id: string }; req
           ...(parsed.browser !== undefined && typeof parsed.browser === "object" && parsed.browser !== null
             ? {
                 browser: {
-                  ...(typeof parsed.browser.image === "string" ? { image: parsed.browser.image } : {}),
+                  // A reference into the artifact store (served by the authenticated
+                  // /api/artifacts route), never inline image bytes.
+                  ...(typeof parsed.browser.artifact === "string" && /^[a-f0-9]{64}$/.test(parsed.browser.artifact) ? { artifact: parsed.browser.artifact } : {}),
                   ...(typeof parsed.browser.url === "string" ? { url: parsed.browser.url } : {}),
                   ...(typeof parsed.browser.width === "number" ? { width: parsed.browser.width } : {}),
                   ...(typeof parsed.browser.height === "number" ? { height: parsed.browser.height } : {}),

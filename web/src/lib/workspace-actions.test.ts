@@ -434,10 +434,18 @@ test("the browser tab: steer authority per POST, action shape recorded, file:// 
   await runtime.config.set("SHIP_TAKEOVER_REPLY_"+id, JSON.stringify({
     id: "r-b1", at: new Date().toISOString(), kind: "takeover-browser",
     output: "Browser navigate http://localhost:8000/ — http://localhost:8000/ (1280x800, png, 1.2 KB).",
-    browser: { image: "aGVsbG8=", url: "http://localhost:8000/", width: 1280, height: 800, format: "png" },
+    browser: { artifact: "a".repeat(64), url: "http://localhost:8000/", width: 1280, height: 800, format: "png" },
   }));
   const data = await run.loader({params:{id},request:new Request("http://localhost/runs/"+id+"?tab=browser",{})});
   assert.equal(data.takeoverTab, "browser");
-  assert.equal(data.takeover.reply?.browser?.image, "aGVsbG8=");
+  // only a well-formed artifact reference survives the loader; the screenshot itself never rides the reply
+  assert.equal(data.takeover.reply?.browser?.artifact, "a".repeat(64));
+  assert.equal((data.takeover.reply?.browser as Record<string, unknown> | undefined)?.image, undefined);
+  await runtime.config.set("SHIP_TAKEOVER_REPLY_"+id, JSON.stringify({
+    id: "r-b2", at: new Date().toISOString(), kind: "takeover-browser", output: "x",
+    browser: { artifact: "../../etc/passwd", image: "aGVsbG8=" },
+  }));
+  const hostile = await run.loader({params:{id},request:new Request("http://localhost/runs/"+id+"?tab=browser",{})});
+  assert.equal(hostile.takeover.reply?.browser?.artifact, undefined, "a malformed reference is dropped, not rendered into a URL");
   assert.equal(data.takeover.reply?.browser?.url, "http://localhost:8000/");
 });
