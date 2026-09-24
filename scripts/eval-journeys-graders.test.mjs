@@ -6,7 +6,7 @@
 // baseline does.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cpSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -59,6 +59,22 @@ test('pj-s-question: single-quoted prose citations verify verbatim, and a wrong 
     assert.ok(r.reasons.some(x => x.includes('does not contain')));
     const pushed = await w.grade(w.transcript(good), { prOpened: false, pushed: true });
     assert.equal(pushed.pass, false, 'a push on a read-only question fails');
+  } finally { w.cleanup(); }
+});
+
+test('pj-s-question: the live table answer is verified, and wrong table strings or line numbers fail', async () => {
+  const w = await world('pj-s-question');
+  try {
+    const path = preserved(13, 'pj-s-question');
+    const good = await w.grade(path);
+    assert.equal(good.pass, true, good.reasons.join('\n'));
+    const text = readFileSync(path, 'utf8');
+    const wrong = text.replaceAll('<title>Tideline Woodworks</title>', '<title>Imaginary Company</title>');
+    assert.equal((await w.grade(w.transcript(wrong))).pass, false);
+    const wrongLine = text.replaceAll('| index.html | 6 |', '| index.html | 600 |');
+    const r = await w.grade(w.transcript(wrongLine));
+    assert.equal(r.pass, false);
+    assert.ok(r.reasons.some(x => x.includes('past the end')));
   } finally { w.cleanup(); }
 });
 

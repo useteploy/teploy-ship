@@ -1,0 +1,141 @@
+{
+  "scenarioId": "pj-s-question",
+  "family": "small-site",
+  "runId": "eval-20260924-13",
+  "harnessRevision": "a057d0398a82cabb9cf57757e960fb18f42b7304",
+  "fixtureRevision": "sha256:54aa415a72c85b5e2cb91895bcd9c07bb9263893b626ff391b37abbe6c3e7e98",
+  "adapter": "ship",
+  "outcome": "fail",
+  "firstAttempt": {
+    "pass": false,
+    "graderReasons": [
+      "the transcript cites nothing in a checkable form — each occurrence needs file, line number and the quoted exact string, e.g. index.html:6:\"Tideline Woodworks\", about.html, line 15: \"Tideline Woodworks\", or a FINDINGS_JSON entry with file/line and the exact string backticked in detail",
+      "Tideline coverage mismatch: independent=[\"about.html:15\",\"about.html:20\",\"about.html:6\",\"index.html:15\",\"index.html:20\",\"index.html:6\"] cited=[]",
+      "the tagline line (index.html:16) is not cited"
+    ],
+    "endedBy": "agent"
+  },
+  "eventualSuccess": {
+    "pass": false
+  },
+  "interventions": [],
+  "rescue": {
+    "needed": false,
+    "provided": false,
+    "notes": []
+  },
+  "latencyMs": 42351,
+  "cost": {
+    "status": "priced",
+    "amount": 0.011814,
+    "currency": "USD",
+    "source": "Ship run ledger (workspace API costUSD), summed over this attempt's runs"
+  },
+  "verifiedEvidence": [
+    {
+      "check": "work tree unchanged",
+      "value": {
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "unchanged": [
+          "about.html",
+          "index.html",
+          "styles.css"
+        ]
+      }
+    },
+    {
+      "check": "every cited file:line:string occurrence exists verbatim in the fixture",
+      "value": {
+        "citations": 0,
+        "ok": false
+      }
+    },
+    {
+      "check": "cited Tideline lines exactly cover the fixture occurrences (independent count)",
+      "value": {
+        "independent": [
+          "about.html:15",
+          "about.html:20",
+          "about.html:6",
+          "index.html:15",
+          "index.html:20",
+          "index.html:6"
+        ],
+        "cited": [],
+        "missing": [
+          "about.html:15",
+          "about.html:20",
+          "about.html:6",
+          "index.html:15",
+          "index.html:20",
+          "index.html:6"
+        ],
+        "extra": []
+      }
+    },
+    {
+      "check": "the home-page tagline line is cited",
+      "value": {
+        "taglineLines": [
+          16
+        ],
+        "cited": false
+      }
+    },
+    {
+      "check": "no PR opened, nothing pushed",
+      "value": {
+        "prOpened": false,
+        "pushed": false
+      }
+    }
+  ],
+  "claimedEvidence": [
+    {
+      "claim": "**Direct answer**\n\n- **Home-page tagline:** `index.html`, line 16 — the string is `Furniture made on the coast`, held in a `<p class=\"tagline\">` element. Its styling lives separately at `styles.css` line 18 (the `.tagline {` rule, which applies italics).\n- **\"Tideline\" occurrences:** exactly 6, all as part of the phrase `Tideline Woodworks`, split between the two pages:\n  - `index.html` line 6 (page title), line 15 (H1 heading), line 20 (footer)\n  - `about.html` line 6 (page title), line 15 (H1 heading), line 20 (footer)\n\nNothing was edited; this was a read-only investigation (verified: `git status --porcelain` empty afterwards).\n\n**Supporting details**\n\n| File | Line | Exact current string |\n|---|---|---|\n| index.html | 6 | `<title>Tideline Woodworks</title>` (visible text: `Tideline Woodworks`) |\n| index.html | 15 | `<h1>Tideline Woodworks</h1>` (visible text: `Tideline Woodworks`) |\n| index.html | 16 | `<p class=\"tagline\">Furniture made on the coast</p>` (visible text: `Furniture made on the coast`) — **the tagline** |\n| index.html | 20 | `<p>Tideline Woodworks — Bear Harbor, California</p>` (dash is an em dash, U+2014) |\n| about.html | 6 | `<title>About — Tideline Woodworks</title>` |\n| about.html | 15 | `<h1>Tideline Woodworks</h1>` |\n| about.html | 20 | `<p>Tideline Woodworks — Bear Harbor, California</p>` |\n| styles.css | 18 | `.tagline {` — opens the 3-line rule (`font-style: italic;`) that styles the tagline; no \"Tideline\" text here |\n\nMethod and limits: every count and line number comes from direct observation — `cat -n` on each file plus a recursive, case-insensitive `grep -rni` over all non-`.git` files, which returned exactly the six \"Tideline\" lines and two \"tagline\" lines listed. The repository contains only these three files (index.html, about.html, styles.css), so the enumeration is complete. This is a static site with no build step, tests, or scripts, so nothing was executed to confirm rendering; all findings come from reading the source, not from a browser or test run. Mild uncertainty: \"tagline\" is labeled only by the `class=\"tagline\"` attribute on `index.html:16`, so that element (not the line-17 description sentence) is treated as the tagline based on the class name and its italic styling.\n\nFINDINGS_JSON []",
+      "verdict": "unverified"
+    }
+  ],
+  "artifacts": [
+    "preserve/transcript.txt",
+    "artifacts/grader-output.json"
+  ],
+  "preserve": {
+    "dir": "preserve/"
+  },
+  "probesApplied": [],
+  "gradedAt": "2026-09-24T20:19:21.475Z",
+  "startedAt": "2026-09-24T20:18:39.105Z",
+  "ship": {
+    "shipRuns": [
+      {
+        "role": "scenario",
+        "runId": "run-request-4f18b2f32681b9396ae2d7618614679453944b219f683682ac0762c42c3cd1bc",
+        "journey": "investigate",
+        "status": "completed",
+        "latencyMs": 42009,
+        "costUSD": 0.011814,
+        "costPriced": true,
+        "pr": null
+      }
+    ],
+    "fixtureRepo": {
+      "url": "http://100.108.123.49:49152/Tyler/ship-eval-small-site",
+      "head": "eab3c41e06482456b2d6e8d6f61ef90502106457",
+      "ref": "refs/heads/main",
+      "treeMatchesFixture": true,
+      "mainAfter": "eab3c41e06482456b2d6e8d6f61ef90502106457",
+      "mainMoved": false
+    },
+    "captured": {
+      "sha": null,
+      "source": "none"
+    },
+    "disposition": [],
+    "pollRetries": 0,
+    "journey": "investigate",
+    "intake": "request"
+  }
+}

@@ -1,0 +1,73 @@
+{
+  "originalResultSha256": "b18b58a519f53799c6db92b42b33a06828333ba36d3162f687ef8376cfa9653b",
+  "graderSha256": "80ddda9ce9a1f28491e4308e4dfb3fc4ba35a73cdeb03d9ad80886031a89955f",
+  "reason": "Recognize Markdown citation tables; exact-string and coverage checks unchanged. No model rerun.",
+  "pass": true,
+  "reasons": [],
+  "evidence": [
+    {
+      "kind": "structural",
+      "check": "work tree unchanged",
+      "value": {
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "unchanged": [
+          "about.html",
+          "index.html",
+          "styles.css"
+        ]
+      }
+    },
+    {
+      "kind": "transcript",
+      "check": "every cited file:line:string occurrence exists verbatim in the fixture",
+      "value": {
+        "citations": 24,
+        "ok": true
+      }
+    },
+    {
+      "kind": "transcript",
+      "check": "cited Tideline lines exactly cover the fixture occurrences (independent count)",
+      "value": {
+        "independent": [
+          "about.html:15",
+          "about.html:20",
+          "about.html:6",
+          "index.html:15",
+          "index.html:20",
+          "index.html:6"
+        ],
+        "cited": [
+          "about.html:15",
+          "about.html:20",
+          "about.html:6",
+          "index.html:15",
+          "index.html:20",
+          "index.html:6"
+        ],
+        "missing": [],
+        "extra": []
+      }
+    },
+    {
+      "kind": "transcript",
+      "check": "the home-page tagline line is cited",
+      "value": {
+        "taglineLines": [
+          16
+        ],
+        "cited": true
+      }
+    },
+    {
+      "kind": "adapter-reported",
+      "check": "no PR opened, nothing pushed",
+      "value": {
+        "prOpened": false,
+        "pushed": false
+      }
+    }
+  ]
+}

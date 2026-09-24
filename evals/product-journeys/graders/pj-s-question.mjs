@@ -74,6 +74,14 @@ function fixtureLines(fixture) {
   return files;
 }
 
+// The question journey can answer with a Markdown evidence table. Each row
+// still supplies the same file, line, and exact quoted string; the verifier
+// below checks it against the fixture rather than trusting the table.
+function tableCitations(transcript) {
+  const rows = /^\s*\|\s*`?([A-Za-z0-9_.-]+\.[A-Za-z0-9]+)`?\s*\|\s*(\d+)\s*\|\s*`([^`]+)`[^\n]*\|\s*$/gm;
+  return [...transcript.matchAll(rows)].map(m => ({ file: m[1], line: Number(m[2]), str: m[3] }));
+}
+
 function linesContaining(files, needle) {
   const hits = new Set();
   for (const [rel, lines] of files) {
@@ -112,6 +120,7 @@ export async function grade({ workDir, fixture, scenario, transcriptPath, summar
   const citations = [
     ...[...transcript.matchAll(CITATION)].map(m => ({ file: m[1], line: Number(m[2]), str: m[3] ?? m[4] ?? m[5] })),
     ...findingsCitations(transcript),
+    ...tableCitations(transcript),
   ];
 
   let citationsOk = true;
