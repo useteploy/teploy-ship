@@ -246,7 +246,7 @@ test("readBackDelivery confirms only on the version AND the artifact, and never 
   // confirmed.
   const idRunner: CommandRunner = async (argv) => {
     if (argv[0] === "teploy" && argv[1] === "exec") {
-      return { code: 0, stdout: `docker image inspect --format …\n${JSON.stringify(["ship-delivery-abc123:latest"])}`, stderr: "" };
+      return { code: 0, stdout: JSON.stringify([{ RepoTags: ["ship-delivery-abc123:latest"] }]), stderr: "" };
     }
     return { code: 0, stdout: JSON.stringify({ ...status("abc123d", [{ Image: "16a4e9a114f0", State: "running" }]), server: "infra-home" }), stderr: "" };
   };
@@ -258,7 +258,7 @@ test("readBackDelivery confirms only on the version AND the artifact, and never 
   // read `c.image` and printed "[undefined]").
   const wrongIdRunner: CommandRunner = async (argv) => {
     if (argv[0] === "teploy" && argv[1] === "exec") {
-      return { code: 0, stdout: JSON.stringify(["something-else:latest"]), stderr: "" };
+      return { code: 0, stdout: JSON.stringify([{ RepoTags: ["something-else:latest"] }]), stderr: "" };
     }
     return { code: 0, stdout: JSON.stringify({ ...status("abc123d", [{ Image: "16a4e9a114f0", State: "running" }]), server: "infra-home" }), stderr: "" };
   };

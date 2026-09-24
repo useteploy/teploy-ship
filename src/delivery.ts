@@ -754,27 +754,20 @@ export async function readBackDelivery(
     // carries the query over the same SSH channel the deploy used, from
     // the trusted copy (whose teploy.yml names the server).
     if (execServer === "") return false;
+    // No --format template: teploy exec round-trips the remote shell and a
+    // Go template with spaces does not survive it ("unclosed action").
+    // Plain inspect returns the full JSON document; RepoTags is in there.
     const inspect = await options.run(
-      [
-        "teploy", "exec", execServer,
-        "--", "docker", "image", "inspect", "--format", "{{json .RepoTags}}", name,
-      ],
+      ["teploy", "exec", execServer, "--", "docker", "image", "inspect", name],
       { cwd: options.dir!, timeoutMs: 60_000 },
     );
     if (inspect.code !== 0) return false;
     try {
-      // `teploy exec` may echo the command line before the output; the
-      // reply we want is the LAST JSON array on stdout.
-      const lines = inspect.stdout.trim().split("\n");
-      for (let i = lines.length - 1; i >= 0; i--) {
-        const trimmed = lines[i].trim();
-        if (!trimmed.startsWith("[")) continue;
-        const tags = JSON.parse(trimmed) as unknown;
-        if (Array.isArray(tags)) {
-          return tags.some((t) => typeof t === "string" && (t === record.artifactDigest || t.startsWith(`${record.artifactDigest}:`)));
-        }
-      }
-      return false;
+      const docs = JSON.parse(inspect.stdout.trim()) as unknown;
+      if (!Array.isArray(docs) || docs.length === 0) return false;
+      const tags = (docs[0] as { RepoTags?: unknown }).RepoTags;
+      if (!Array.isArray(tags)) return false;
+      return tags.some((t) => typeof t === "string" && (t === record.artifactDigest || t.startsWith(`${record.artifactDigest}:`)));
     } catch {
       return false;
     }
