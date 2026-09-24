@@ -65,6 +65,7 @@ import { spliceVerification, verificationSection, type Evidence } from "./verifi
 import { shortHash, warmClient, warmSlugOf, type WarmState } from "./warm.js";
 import { mergeFact, verificationSummary, type VerificationFacts } from "./verification-summary.js";
 import { preExisting, runTests, testComment, testTargetFromInput, testsFailedNudge, type TestOutcome, type TestTarget } from "./tests.js";
+import { detectFromWorkspace } from "./test-detect.js";
 import { refusalMessage, warningMessage } from "./publish-policy.js";
 import type { RepoCheckout, RepoRef } from "./git.js";
 import { assertRepoAllowed, credentialFor, policyFromEnv } from "./repo-policy.js";
@@ -3418,9 +3419,18 @@ async function runSuite(
     // Per-repo first: one worker serving many repos runs each repo's own
     // suite. The env default remains for repos with no entry and for runs
     // enqueued before per-repo evidence existed.
-    const target = testTargetFromInput(input) ?? config.tests;
+    //
+    // Between the two: the repo's own tree, read off this checkout (F16) —
+    // the enqueue could not read it when it lacked forge credentials, which is
+    // the normal case for a CLI enqueue from an operator's shell. The command
+    // this picks is part of the step's recorded outcome, so a replay does not
+    // re-detect. Repo runs only: a keyed workspace has no repository root.
+    const target =
+      testTargetFromInput(input) ??
+      (input.repo !== undefined ? await detectFromWorkspace(executor) : undefined) ??
+      config.tests;
     if (target === undefined) {
-      return { kind: "disabled", reason: "no test command configured for this repo or worker" };
+      return { kind: "disabled", reason: "no test command configured for this repo or worker, and none detected in its checkout" };
     }
     return await runTests(executor, target);
   });

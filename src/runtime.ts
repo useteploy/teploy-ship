@@ -73,6 +73,7 @@ import type { RepoTrust } from "./repo-policy.js";
 import type { RecoveryTuning } from "./durable.js";
 import type { ProposeInput as IntakeProposeInput, IntakeTask as IntakeTaskType } from "./intake.js";
 import { FileEventStore, RunMetaStore } from "./run-store.js";
+import { askEnv, readDeploymentAsks } from "./deployment-asks.js";
 import type { RunMeta } from "./run-store.js";
 
 export type { RunMeta } from "./run-store.js";
@@ -858,6 +859,15 @@ function envCount(name: string, env: NodeJS.ProcessEnv = process.env): number | 
  * is how surfaces that must never run the agent in-process (the web UI)
  * commission work.
  */
+/** What an enqueue resolved about its test evidence. */
+export interface EnqueueReport {
+  /** The run will run the project's suite (the ask is in its input). */
+  tests: boolean;
+  /** The command recorded at enqueue; absent = the worker resolves it from its checkout. */
+  testCommand?: string;
+  testCommandSource?: "project" | "detected";
+}
+
 export async function enqueueRun(
   runtime: ShipRuntime,
   options: {
@@ -1022,7 +1032,7 @@ export async function enqueueRun(
      */
     trust?: RepoTrust;
   },
-): Promise<void> {
+): Promise<EnqueueReport | undefined> {
   const journey = options.journey === undefined ? undefined : parseJourney(options.journey);
   const requestHash = options.requestIdentity ?? launchRequestHash(options);
   if (!/^[a-f0-9]{64}$/.test(requestHash)) throw new Error("Invalid request identity");
@@ -1030,7 +1040,7 @@ export async function enqueueRun(
   if (accepted) {
     assertSameLaunch(accepted, requestHash);
     await runtime.launches!.publish(accepted);
-    return;
+    return undefined;
   }
   if (options.reviewParent && (options.reviewParent !== options.parentRunId || !runtime.launches)) throw new Error("Review replacement requires a journal and matching parent");
   const taskRoot = options.parentRunId === undefined ? options.runId : await taskRootRunId(runtime.store, options.parentRunId);
@@ -1108,21 +1118,25 @@ export async function enqueueRun(
   // limits are copied into the input so the run boots the image the log was
   // written under, whatever the worker's SHIP_SANDBOX_IMAGE says today.
   const project = options.repo !== undefined ? await runtime.projects.forRepo(options.repo) : null;
+  // The evidence asks below read the enqueueing process's env, falling back
+  // to what the deployment's worker published (deployment-asks.ts, F9): a CLI
+  // enqueue from an operator's shell otherwise records no ask at all.
+  const asks = askEnv(await readDeploymentAsks(runtime.config));
   // Deploy the pushed branch to a preview environment and link it on the PR.
   // Opt-in for the same reason as the three above: it adds recorded steps, so
   // turning it on must never change how an already-enqueued run replays. The
   // executing worker's config decides whether a preview can actually happen —
   // this only records that the run asked. A project that declares a preview
   // rung (C4) asks by that declaration.
-  const preview = scan ? undefined : (options.preview ?? (envFlag("SHIP_PREVIEW") || project?.verification?.preview !== undefined ? true : undefined));
+  const preview = scan ? undefined : (options.preview ?? (envFlag("SHIP_PREVIEW", asks) || project?.verification?.preview !== undefined ? true : undefined));
   // Read the affected service's telemetry around the change. Same opt-in shape.
-  const telemetry = scan ? undefined : (options.telemetry ?? (evidence?.observeService !== undefined || envFlag("SHIP_TELEMETRY") ? true : undefined));
+  const telemetry = scan ? undefined : (options.telemetry ?? (evidence?.observeService !== undefined || envFlag("SHIP_TELEMETRY", asks) ? true : undefined));
   const globalObserveRepo=process.env.OBSERVE_REPO?.trim();
   if(telemetry===true&&evidence?.observeService===undefined&&options.repo&&globalObserveRepo&&!canonicalRepositoryURL(globalObserveRepo)&&repoSlug(globalObserveRepo)===repoSlug(options.repo)) {
     throw new Error("The Observe repository mapping needs a full credential-free clone URL. Set OBSERVE_REPO or configure Observe on this project before starting work.");
   }
   // Run the project's suite after the agent stops. Same opt-in shape.
-  const tests = scan ? undefined : (options.tests ?? (evidence?.testCommand !== undefined || envFlag("SHIP_TESTS") ? true : undefined));
+  const tests = scan ? undefined : (options.tests ?? (evidence?.testCommand !== undefined || envFlag("SHIP_TESTS", asks) ? true : undefined));
   // On by default wherever the suite itself is on, with an env off-switch —
   // the same shape as requireEdit above. Without a baseline, "Tests: FAILED"
   // cannot separate a regression from inherited breakage, and without the
@@ -1430,10 +1444,16 @@ export async function enqueueRun(
     createdAt: now,
     updatedAt: now,
   };
+  // What the enqueuing surface can say back about the evidence it asked for —
+  // the CLI prints it, because a silent "no suite will run" is how F9 hid.
+  const report: EnqueueReport = {
+    tests: tests === true,
+    ...(testTarget !== undefined ? { testCommand: testTarget.command, testCommandSource: testTarget.source } : {}),
+  };
   if (runtime.launches) {
     const intent = await runtime.launches.prepare({runId:options.runId,requestHash,started,meta,...(options.reviewParent ? {reviewParent:options.reviewParent} : {})});
     await runtime.launches.publish(intent);
-    return;
+    return report;
   }
   await runtime.store.append(options.runId, started);
   await runtime.saveMeta(meta);
@@ -1448,4 +1468,5 @@ export async function enqueueRun(
       { status: "wake" } as unknown as RunOutcome,
     );
   }
+  return report;
 }

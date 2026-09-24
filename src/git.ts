@@ -129,10 +129,22 @@ export function authenticatedUrl(ref: RepoRef, token: string): string {
   return url.toString();
 }
 
+/** Strip userinfo from every URL in a string: the clone URL carries the token. */
+function redactUrls(text: string): string {
+  return text.replace(/\/\/[^@/\s'"]+@/g, "//***@");
+}
+
 async function git(executor: AgentExecutor, command: string, timeoutMs = 120_000): Promise<string> {
   const result = await executor.exec(command, { timeoutMs });
-  if (result.exitCode !== 0) {
-    throw new Error(`git step failed (exit ${result.exitCode}): ${command.replace(/\/\/[^@/]+@/g, "//***@")}\n${result.stderr.slice(0, 2000)}`);
+  if (result.exitCode !== 0 || result.timedOut === true) {
+    // The clone and the fetch run `2>&1` so a failure's words land in STDOUT;
+    // reading stderr alone made every one of them "exit 128" with nothing
+    // after it (fresh-machine F17: an egress denial and a dead token were
+    // indistinguishable). Keep the tail of whichever stream has the words.
+    const said = (result.stderr ?? "").trim() !== "" ? result.stderr : (result.stdout ?? "");
+    const tail = said.trim().split("\n").slice(-15).join("\n").slice(-2000);
+    const timedOut = result.timedOut === true ? ` — timed out after ${Math.round(timeoutMs / 1000)}s` : "";
+    throw new Error(`git step failed (exit ${result.exitCode}${timedOut}): ${redactUrls(command)}\n${redactUrls(tail)}`);
   }
   return result.stdout.trim();
 }

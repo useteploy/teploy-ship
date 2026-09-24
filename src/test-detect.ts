@@ -223,3 +223,42 @@ export async function resolveTestTarget(
     source: "detected",
   };
 }
+
+/**
+ * The same detection, read off the run's own CHECKOUT (fresh-machine F16).
+ *
+ * Enqueue-time detection reads the forge API with the enqueueing process's
+ * credentials — which a CLI on an operator's laptop usually does not hold, so
+ * it silently gave up and the run was recorded with no command. The worker
+ * then fell straight to SHIP_TEST_COMMAND, blank on a stranger's install, and
+ * the suite the run had ASKED for reported "no test command configured".
+ *
+ * This runs INSIDE the recorded `tests` step (durable.ts runSuite), so the
+ * replay argument above still holds: the command the step chose is part of its
+ * recorded outcome, and a replay reads that outcome instead of re-detecting.
+ * It only answers when the input carries no command — an explicit entry, or a
+ * command detected at enqueue, always wins. SHIP_TEST_DETECT=0 on the worker
+ * turns it off, exactly as it turns enqueue detection off.
+ *
+ * Reads four root files through the executor, never throws.
+ */
+export async function detectFromWorkspace(
+  executor: { exec(command: string, options?: { timeoutMs?: number }): Promise<{ exitCode: number; stdout: string }> },
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<TestTarget | undefined> {
+  if (/^(0|false|no|off)$/i.test((env.SHIP_TEST_DETECT ?? "").trim())) return undefined;
+  try {
+    const listing = await executor.exec("ls -A1", { timeoutMs: 30_000 });
+    if (listing.exitCode !== 0) return undefined;
+    const names = listing.stdout.split("\n").map((n) => n.trim()).filter((n) => n !== "");
+    const tree: RepoTree = { names };
+    for (const f of CONTENT_FILES) {
+      if (!names.includes(f.path)) continue;
+      const read = await executor.exec(`head -c 262144 ${f.path}`, { timeoutMs: 30_000 });
+      if (read.exitCode === 0) tree[f.key] = read.stdout;
+    }
+    return testTargetFromTree(tree);
+  } catch {
+    return undefined;
+  }
+}

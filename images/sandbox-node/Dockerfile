@@ -17,8 +17,10 @@ FROM ${NODE_BASE}
 # git: the run clones inside this container. python3 + build-essential: enough
 # repos have a native dependency whose install script needs node-gyp that
 # leaving them out turns "tests: not run" into the common case.
+# python3-pytest: detection's `python3 -m pytest -q` must be runnable on the
+# stock images (fresh-machine F10; see sandbox-go/Dockerfile).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl git python3 build-essential \
+      ca-certificates curl git python3 python3-pytest build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # pnpm pinned through corepack. Not `npm i -g pnpm`: corepack is what a repo's

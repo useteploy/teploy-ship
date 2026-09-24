@@ -191,6 +191,47 @@ function tail(text: string, lines = 40): string {
 }
 
 /**
+ * Did the suite fail to START because its runner is not in the image?
+ *
+ * Fresh-machine finding F10 (run-136c07d4): detection turned a root
+ * `pytest.ini` into `python3 -m pytest -q`, the stock sandbox image carried
+ * python3 but not pytest, and the pull request said `Tests: FAILED` — then,
+ * because the baseline had "failed" the same way, captioned it "already
+ * failing on the base branch … pre-existing breakage". Nothing was tested and
+ * the repository was blamed for the image. A suite that could not be run is
+ * "not run" (see the catch below and the timeout case), and these are the two
+ * shapes of that which arrive as an ordinary non-zero exit:
+ *
+ *   - exit 127: the shell could not find the command at all (`go: not found`,
+ *     `pnpm: command not found`);
+ *   - `python -m <module>` answered `No module named <module>` — python itself
+ *     ran; the runner it was asked to start does not exist. Only the module
+ *     the COMMAND names: a test that fails importing its own dependency is a
+ *     real failure and stays one.
+ *
+ * Returns the reason for the "not run" line, or undefined for a real failure.
+ */
+export function missingRunner(command: string, exitCode: number, output: string): string | undefined {
+  if (exitCode === 127) {
+    const said = /(?:^|\n)[^\n]*(?:command not found|: not found)[^\n]*/.exec(output)?.[0]?.trim();
+    return (
+      `the test runner is not installed in this run's image (exit 127${said !== undefined ? `: ${said.slice(0, 160)}` : ""}). ` +
+      "Pick an image that carries it for this repo (Projects page, or `teploy-ship project set <repo> --image …`), or set its --test-command"
+    );
+  }
+  for (const m of command.matchAll(/\bpython[\d.]*\s+-m\s+([A-Za-z_][\w.]*)/g)) {
+    const module = m[1]!;
+    if (new RegExp(`No module named '?${module.replace(/\./g, "\\.")}'?(?:\\s|$)`).test(output)) {
+      return (
+        `\`${module}\` is not installed in this run's image (No module named ${module}). ` +
+        "Pick an image that carries it for this repo (Projects page), or set a --test-command the image can run"
+      );
+    }
+  }
+  return undefined;
+}
+
+/**
  * Run the suite in the run's own workspace.
  *
  * `elapsed` is passed in rather than read from a clock so the caller can record
@@ -217,6 +258,8 @@ export async function runTests(
       };
     }
     if (result.exitCode === 0) return { kind: "passed", command: target.command, durationMs };
+    const missing = missingRunner(target.command, result.exitCode, `${result.stdout ?? ""}\n${result.stderr ?? ""}`);
+    if (missing !== undefined) return { kind: "errored", command: target.command, reason: missing };
     return {
       kind: "failed",
       command: target.command,

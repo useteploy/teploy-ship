@@ -44,8 +44,11 @@ RUN set -eux; \
 
 # ca-certificates + git: the run clones inside this container. python3: repos
 # whose suites shell out to it. curl: the same, and harness installers.
+# python3-pytest: test detection (src/tests.ts) turns a root pytest.ini,
+# conftest.py, tox.ini or [tool.pytest] into `python3 -m pytest -q`, and an
+# image without pytest made that promise unrunnable (fresh-machine F10).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl git python3 \
+      ca-certificates curl git python3 python3-pytest \
     && rm -rf /var/lib/apt/lists/*
 
 # The declared harnesses, BAKED — never installed at run time.

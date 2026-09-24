@@ -22,7 +22,8 @@ import type { RunOutcome } from "@neutron-build/workflow";
 import { ArgError, COMMAND_FLAGS, enumFlag, numberFlag, parseArgs } from "./args.js";
 import { DEFAULT_NETWORK_TIER, NETWORK_TIER_HELP, parseNetworkTier, resolveNetworkTier, splitEgressAllow, wireNetwork } from "./egress.js";
 import type { NetworkTier } from "./egress.js";
-import { explainRun } from "./explain.js";
+import { enqueueTestsLine, publishDeploymentAsks } from "./deployment-asks.js";
+import { explainRun, withWorkers } from "./explain.js";
 import {
   UPGRADE_HOLD_EVENT,
   WORKFLOW_STEPS,
@@ -69,7 +70,7 @@ import { cliActor, formatActor, actorFromMeta } from "./actor.js";
 import { AUTHORITY_ACTIONS, GLOBAL_WINDOW, autoAllowedNow, formatWindow, parseDays, windowFor } from "./governance.js";
 import type { AuthorityAction } from "./governance.js";
 import { repoSlug } from "./observe.js";
-import type { NucleusShipRuntime, ShipRuntime } from "./runtime.js";
+import type { EnqueueReport, NucleusShipRuntime, ShipRuntime } from "./runtime.js";
 import type { Project } from "./projects.js";
 import type { IntakePolicy } from "./intake.js";
 import { NucleusCodeIndex } from "./code-index.js";
@@ -106,7 +107,10 @@ Usage:
       [--scan]                        read-only: report findings on the run, never
                                       push. Editing is refused in the loop and the
                                       publish gate does not run.
-  teploy-ship evidence set <repo>     per-repo evidence: the suite command and the
+      [--tests]                       run the repo's suite and put the result on
+                                      the PR (default: SHIP_TESTS here, else the
+                                      ask the deployment's worker published)
+  teploy-ship evidence set <repo>    per-repo evidence: the suite command and the
       [--test-command "<cmd>"]        Observe service that belong to ONE repo, so
       [--test-timeout-ms N]           one worker can serve many repos (resolved at
       [--observe-service <svc>]       enqueue; a flag omitted clears its field)
@@ -649,7 +653,11 @@ function resolveSandbox(args: ReturnType<typeof parseArgs>, config: Config): San
   if (url === undefined || url === "") return undefined;
   const token = (args.flags["sandbox-token"] as string) ?? process.env.SHIP_SANDBOX_TOKEN ?? config.sandboxToken;
   if (token === undefined || token === "") {
-    fail("a sandbox URL is set but no token — use --sandbox-token, SHIP_SANDBOX_TOKEN, or sandboxToken in config");
+    fail(
+      "a sandbox URL is set but no token — use --sandbox-token, SHIP_SANDBOX_TOKEN, or sandboxToken in config " +
+        "(or unset SHIP_SANDBOX_URL to run without a sandbox). A deployed worker exits here and docker restarts it, " +
+        "so runs stay queued until this is fixed — see docs/TROUBLESHOOTING.md",
+    );
   }
   const image = (args.flags["sandbox-image"] as string) ?? process.env.SHIP_SANDBOX_IMAGE ?? config.sandboxImage ?? "python:3.12-slim";
   // Validated, not cast: an unrecognised value used to reach the sandbox
@@ -1206,7 +1214,10 @@ async function explainCommand(rest: string[]): Promise<void> {
   const runtime = await makeRuntime(args, loadConfig());
   try {
     const events = await runtime.store.load(runId);
-    const explanation = explainRun(events);
+    // The fleet registry says whether any worker is alive to move the run
+    // (F15). Best effort: an unreadable registry leaves the log's own answer.
+    const workers = await runtime.fleet.list().catch(() => null);
+    const explanation = workers === null ? explainRun(events) : withWorkers(explainRun(events), events, workers);
     if (args.flags.json === true) {
       process.stdout.write(`${JSON.stringify(explanation, null, 2)}\n`);
       return;
@@ -1259,8 +1270,9 @@ async function enqueueCommand(rest: string[]): Promise<void> {
 
   const runtime = await makeRuntime(args, config);
   const runId = `run-${randomUUID().slice(0, 8)}`;
+  let report: EnqueueReport | undefined;
   try {
-    await enqueueRun(runtime, {
+    report = await enqueueRun(runtime, {
       runId,
       task,
       model: resolveModelId(args.flags.model, process.env, config.model),
@@ -1271,6 +1283,7 @@ async function enqueueCommand(rest: string[]): Promise<void> {
       ...(args.flags.plan === true ? { plan: true } : {}),
       ...(args.flags.critic === true ? { critic: true } : {}),
       ...(args.flags.settle === true ? { settle: true } : {}),
+      ...(args.flags.tests === true ? { tests: true } : {}),
       // Scan mode (D3/L2): read the repo and report findings, never push.
       // The refusal lives in the executor, not in the prompt — see durable.ts.
       ...(args.flags.scan === true ? { mode: "scan" as const } : {}),
@@ -1280,10 +1293,11 @@ async function enqueueCommand(rest: string[]): Promise<void> {
   }
 
   if (args.flags.json === true) {
-    process.stdout.write(`${JSON.stringify({ runId, task, repo: repoUrl ?? null })}\n`);
+    process.stdout.write(`${JSON.stringify({ runId, task, repo: repoUrl ?? null, ...(report !== undefined ? { evidence: report } : {}) })}\n`);
     return;
   }
   process.stderr.write(`${green("queued")} ${bold(runId)}\n`);
+  if (repoUrl !== undefined && report !== undefined && args.flags.scan !== true) process.stderr.write(`${enqueueTestsLine(report)}\n`);
   process.stderr.write(`${dim("A worker picks it up on its next tick. Watch it with:")}\n`);
   process.stderr.write(`  teploy-ship runs\n  teploy-ship explain ${runId}\n`);
 }
@@ -1964,6 +1978,12 @@ async function workerCommand(rest: string[]): Promise<void> {
 
   const runtime = await makeRuntime(args, config);
   if (runtime.kind !== "nucleus") fail("worker needs --store nucleus");
+  // So a CLI enqueue from an operator's shell inherits this deployment's
+  // evidence asks (deployment-asks.ts, F9). Best effort: a store blip here
+  // must not keep the worker from starting.
+  await publishDeploymentAsks(runtime.config).catch((error: unknown) => {
+    process.stderr.write(`${yellow("warning:")} could not publish the deployment's evidence asks: ${error instanceof Error ? error.message : String(error)}\n`);
+  });
   const modelId = resolveModelId(args.flags.model, process.env, config.model);
   const gitToken = (args.flags["git-token"] as string) ?? process.env.SHIP_GIT_TOKEN ?? config.gitToken;
   const githubToken = process.env.SHIP_GITHUB_TOKEN ?? config.githubToken;
