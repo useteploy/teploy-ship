@@ -38,6 +38,10 @@
 #   --git-token <t>          forge deploy token       (or $SHIP_GIT_TOKEN)
 #   --github-token <t>       github PAT               (or $SHIP_GITHUB_TOKEN)
 #   --anthropic-key <k>      model key                (or $ANTHROPIC_API_KEY)
+#   --model-url <url>        an Anthropic-COMPATIBLE endpoint instead of
+#                            Anthropic (e.g. https://api.z.ai/api/anthropic);
+#                            the key becomes AI_GATEWAY_KEY and --model is
+#                            sent verbatim (e.g. --model glm-5.3)
 #   --allow <origins>        SHIP_REPO_ALLOWLIST, comma separated
 #   --model <id>             SHIP_MODEL (default anthropic/claude-sonnet-5)
 #   --skip-images            do not build the sandbox images
@@ -60,6 +64,7 @@ export_only=""
 git_token="${SHIP_GIT_TOKEN:-}"
 github_token="${SHIP_GITHUB_TOKEN:-}"
 model_key="${ANTHROPIC_API_KEY:-}"
+model_url=""
 allowlist="${SHIP_REPO_ALLOWLIST:-}"
 model="${SHIP_MODEL:-anthropic/claude-sonnet-5}"
 skip_images=0
@@ -75,6 +80,7 @@ while [ $# -gt 0 ]; do
     --git-token) git_token="${2:?}"; shift 2 ;;
     --github-token) github_token="${2:?}"; shift 2 ;;
     --anthropic-key) model_key="${2:?}"; shift 2 ;;
+    --model-url) model_url="${2:?}"; shift 2 ;;
     --allow) allowlist="${2:?}"; shift 2 ;;
     --model) model="${2:?}"; shift 2 ;;
     --skip-images) skip_images=1; shift ;;
@@ -229,9 +235,15 @@ for key in SHIP_WEB_TOKEN SHIP_SESSION_SECRET SHIP_WEBHOOK_SECRET; do
 done
 if [ -n "${git_token}" ]; then sec_put SHIP_GIT_TOKEN "${git_token}"; fi
 if [ -n "${github_token}" ]; then sec_put SHIP_GITHUB_TOKEN "${github_token}"; fi
-if [ -n "${model_key}" ]; then sec_put ANTHROPIC_API_KEY "${model_key}"; fi
+# An Anthropic-compatible endpoint takes the key as AI_GATEWAY_KEY: Ship's
+# direct Anthropic path always calls api.anthropic.com (ANTHROPIC_BASE_URL is
+# not read), so the endpoint is wired the gateway way — verified against z.ai
+# by the fresh-machine passes (2026-09-23/24).
+model_secret="ANTHROPIC_API_KEY"
+if [ -n "${model_url}" ]; then model_secret="AI_GATEWAY_KEY"; fi
+if [ -n "${model_key}" ]; then sec_put "${model_secret}" "${model_key}"; fi
 ask SHIP_GIT_TOKEN "forge deploy token (Forgejo/Gitea access token, or a GitHub PAT)"
-ask ANTHROPIC_API_KEY "model API key (sk-ant-...)"
+ask "${model_secret}" "model API key"
 
 umask 077
 {
@@ -274,6 +286,14 @@ else
 fi
 
 image="node:22"
+# The images are what the sandbox DAEMON boots; without one nothing uses them,
+# and on a cold box they are most of the install's wall clock (the 2026-09-24
+# fresh-machine rerun measured it). Built when the daemon is there; re-run this
+# after installing it, exactly as the note above says.
+if [ -z "${sandbox_url}" ] && [ "${skip_images}" -eq 0 ]; then
+  note "skipping the sandbox images: no daemon to boot them (re-run after installing it)"
+  skip_images=1
+fi
 if [ "${skip_images}" -eq 0 ]; then
   say "building sandbox images on ${host}"
   # The images must exist on the machine whose docker daemon creates run
@@ -313,7 +333,14 @@ say "writing teploy.install.yml"
   # directly with ANTHROPIC_API_KEY" (src/cli.ts:314-318), and an empty
   # OBSERVE_URL turns the telemetry leg off rather than putting a stranger's
   # pull requests next to Tyler's metrics.
-  echo "  AI_GATEWAY_URL: \"\""
+  if [ -n "${model_url}" ]; then
+    echo "  AI_GATEWAY_URL: \"${model_url}\""
+    # The endpoint receives the id verbatim; this prefix makes Ship speak
+    # Anthropic's wire to it (src/model-id.ts usesAnthropicWire).
+    echo "  SHIP_ANTHROPIC_WIRE_PREFIXES: \"${model}\""
+  else
+    echo "  AI_GATEWAY_URL: \"\""
+  fi
   echo "  SHIP_EMBED_MODEL: \"\""
   echo "  OBSERVE_URL: \"\""
   echo "  OBSERVE_SERVICE: \"\""

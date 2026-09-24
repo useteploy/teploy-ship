@@ -19,6 +19,15 @@ worker unsure of its policy launches nothing, deliberately (auto-launch
 especially). Fix the store or the network between them; the worker recovers on
 its next tick, no restart needed.
 
+**The run never starts, and `docker ps -a` shows the worker `Restarting`.**
+The worker exits at boot on a configuration check and docker restarts it
+forever; runs stay queued. `docker logs ship-worker-<sha>` names the check —
+on a fresh install usually `a sandbox URL is set but no token`
+(`SHIP_SANDBOX_URL` without `SHIP_SANDBOX_TOKEN`: set the token with
+`teploy secret set`, or drop the URL to run without a sandbox). `teploy-ship
+explain <run-id>` says so too: it reads the worker heartbeats and reports
+"no worker is alive" instead of "still running" (fresh-machine pass F15).
+
 **`repository not allowed` on enqueue or launch.**
 The origin is not in `SHIP_REPO_ALLOWLIST` / `SHIP_GIT_TOKENS`. This is the
 guard working: the URL in a webhook or issue body is attacker-controlled, and
@@ -27,7 +36,10 @@ full origin→token entry) and redeploy.
 
 **The pull request has no Verification section.**
 The worker is wired for none of the evidence legs, and adds nothing to the
-body rather than printing "not tested" on every PR. Check `SHIP_TESTS=1`, and
+body rather than printing "not tested" on every PR. `teploy-ship enqueue`
+prints a `tests:` line saying whether the run asked; a CLI enqueue inherits
+the ask the deployment's worker published at boot, and `--tests` asks
+explicitly. Check `SHIP_TESTS=1` on the deployment, and
 that the repo has a test command — detection needs one of `package.json`
 `scripts.test`, a Makefile `test:` target, `go.mod`, `Cargo.toml` or pytest
 config at the root — else set one on the Projects page
@@ -129,8 +141,13 @@ These are the ports a deployment actually needs (full reasoning in DEPLOY.md):
   VPN/tailnet: `ufw allow from 100.64.0.0/10 to any port 7460`.
 - `7439` — the sandbox daemon, from the teploy app network only:
   `ufw allow from 172.18.0.0/16 to any port 7439 proto tcp`.
-- `7443` — the sandbox egress proxy, from the sandbox network only:
-  `ufw allow from 172.31.99.0/24 to any port 7443 proto tcp`.
+- The sandbox egress proxy, from the sandbox network only. Current daemons
+  start a **per-run proxy on an ephemeral port** on the egress bridge's
+  gateway (not a fixed 7443), so allow the subnet, not one port:
+  `ufw allow from 172.31.99.0/24`. With `teploy setup`'s UFW active and this
+  rule missing, every sandbox network call hangs with no error and the run
+  fails at `repo-setup`; `teploy-ship explain` reports it as "could not reach
+  the forge" (fresh-machine pass F12/F17).
 
 **A run's command fails with `network blocked: <host>`.**
 The sandbox egress allowlist refused the host — the run's timeline row and
