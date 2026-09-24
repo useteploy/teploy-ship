@@ -10,7 +10,7 @@ import type { WorkflowContext, WorkflowEvent } from "@neutron-build/workflow";
 
 import type { DurableAgentConfig, DurableAgentInput } from "./durable.js";
 import type { CommandRunner, PreviewTarget } from "./deploy.js";
-import { buildIfDeclared, comparePngs, flowIfPresent, mainUrlOf, observeIfDeclared, recordLadder, smokeIfDeclared, visualIfDeclared } from "./ladder-steps.js";
+import { buildIfDeclared, comparePngs, flowIfPresent, mainUrlOf, observeIfDeclared, recordLadder, resolveMainUrl, smokeIfDeclared, visualIfDeclared } from "./ladder-steps.js";
 import { PNG } from "pngjs";
 import type { ServiceHealth } from "./observe.js";
 
@@ -115,7 +115,38 @@ test("mainUrlOf: a preview-<branch>.<domain> URL yields main; anything else is h
   assert.equal(mainUrlOf("not a url"), null);
 });
 
+test("resolveMainUrl: explicit config wins; an overridden (tailnet sslip.io) base never derives main from the preview host", () => {
+  const tailnet = { kind: "deployed" as const, url: "http://preview-ship-abc-1a2b3c4d.100.101.102.103.sslip.io", image: "i", previewBase: "100.101.102.103.sslip.io" };
+  // Stripping the first label would yield the TARGET's address, not main.
+  assert.equal(mainUrlOf(tailnet.url), "http://100.101.102.103.sslip.io/", "the naive derivation is exactly the bug being pinned");
+  const skipped = resolveMainUrl(tailnet);
+  assert.ok("reason" in skipped);
+  if ("reason" in skipped) {
+    assert.match(skipped.reason, /overridden base domain \(100\.101\.102\.103\.sslip\.io\)/);
+    assert.match(skipped.reason, /SHIP_PREVIEW_MAIN_URL/);
+  }
+  assert.deepEqual(resolveMainUrl({ ...tailnet, mainUrl: "https://site.example.com/" }), { url: "https://site.example.com/" });
+  // Default mode (and every outcome recorded before this field existed): unchanged.
+  assert.deepEqual(resolveMainUrl({ kind: "deployed", url: "https://preview-ship-abc.site.example.com/", image: "i" }), { url: "https://site.example.com/" });
+  assert.deepEqual(resolveMainUrl({ kind: "deployed", url: "https://example.com/", image: "i" }), { reason: "could not derive main's URL from https://example.com/" });
+});
+
 // --- visual ------------------------------------------------------------------
+
+test("visual: a tailnet preview with no configured main skips with the reason before touching the sandbox", async () => {
+  const { ctx } = fakeCtx();
+  let execs = 0;
+  const exec = { exec: async () => { execs += 1; return { exitCode: 0, stdout: "", stderr: "", timedOut: false }; } } as unknown as AgentExecutor;
+  const outcome = await visualIfDeclared(ctx, exec, { ...BASE_INPUT, verification: { visual: true } }, {
+    kind: "deployed",
+    url: "http://preview-ship-abc-1a2b3c4d.100.101.102.103.sslip.io",
+    image: "i",
+    previewBase: "100.101.102.103.sslip.io",
+  });
+  assert.equal(outcome?.kind, "skipped");
+  if (outcome?.kind === "skipped") assert.match(outcome.reason, /cannot be derived from the preview host/);
+  assert.equal(execs, 0, "no browser probe, no screenshot of the wrong host");
+});
 
 test("visual: skipped with the reason when the sandbox image has no browser — and the rung holds on it", async () => {
   const { ctx } = fakeCtx();

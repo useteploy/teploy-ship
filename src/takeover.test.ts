@@ -15,7 +15,21 @@ import {
   takeoverReplyKey,
   type TakeoverRecord,
 } from "./takeover.js";
-import { requestKey, requestWorkspace, serveWorkspaceRequests, TAKEOVER_CONSOLE_COMMAND_LIMIT } from "./workspace-requests.js";
+import {
+  REPLY_WRITE_ATTEMPTS,
+  WORKSPACE_ROW_BYTES_LIMIT,
+  fitReply,
+  requestKey,
+  requestWorkspace,
+  serveWorkspaceRequests,
+  sweepLapsedTakeovers,
+  TAKEOVER_CONSOLE_COMMAND_LIMIT,
+  type PendingReply,
+} from "./workspace-requests.js";
+import { FileArtifacts, type ArtifactStore } from "./artifacts.js";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const ASK = { status: "waiting", eventName: "ship-ask-1" };
 const MERGE_PARK = { status: "waiting", eventName: "approve-merge" };
@@ -301,6 +315,10 @@ test("requests for runs without a workspace or repo are refused plainly", async 
  * is the orchestrator's script, not this suite — a stub that answers the
  * protocol is what a unit test can honestly assert against.
  */
+/** A real PNG signature + payload: the artifact store sniffs magic bytes, so a fake image must look like one. */
+const PNG_MAGIC = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+const fakePng = (tag: string): string => Buffer.concat([PNG_MAGIC, Buffer.from(tag)]).toString("base64");
+
 function fakeBrowserDriver(action: Record<string, unknown>): { exitCode: number; stdout: string; stderr: string; timedOut: boolean; truncated: boolean } {
   const line = (obj: unknown): string => JSON.stringify(obj) + "\n";
   if (action.action === "navigate") {
@@ -308,19 +326,20 @@ function fakeBrowserDriver(action: Record<string, unknown>): { exitCode: number;
       return { exitCode: 0, stdout: line({ ok: false, error: "only http(s) URLs are accepted" }), stderr: "", timedOut: false, truncated: false };
     return {
       exitCode: 0,
-      stdout: line({ ok: true, action: "navigate", url: action.url, width: 1280, height: 800, format: "png", image: Buffer.from("fake-png").toString("base64") }),
+      stdout: line({ ok: true, action: "navigate", url: action.url, width: 1280, height: 800, format: "png", image: fakePng("fake-png") }),
       stderr: "", timedOut: false, truncated: false,
     };
   }
   if (action.action === "click")
-    return { exitCode: 0, stdout: line({ ok: true, action: "click", url: "http://localhost:8000/clicked", width: 1280, height: 800, format: "png", image: Buffer.from("fake-png-2").toString("base64") }), stderr: "", timedOut: false, truncated: false };
+    return { exitCode: 0, stdout: line({ ok: true, action: "click", url: "http://localhost:8000/clicked", width: 1280, height: 800, format: "png", image: fakePng("fake-png-2") }), stderr: "", timedOut: false, truncated: false };
   if (action.action === "close")
     return { exitCode: 0, stdout: line({ ok: true, action: "close" }), stderr: "", timedOut: false, truncated: false };
-  return { exitCode: 0, stdout: line({ ok: true, action: String(action.action), url: "http://localhost:8000/", width: 1280, height: 800, format: "png", image: Buffer.from("fake-png-3").toString("base64") }), stderr: "", timedOut: false, truncated: false };
+  return { exitCode: 0, stdout: line({ ok: true, action: String(action.action), url: "http://localhost:8000/", width: 1280, height: 800, format: "png", image: fakePng("fake-png-3") }), stderr: "", timedOut: false, truncated: false };
 }
 
 function panelHarness(files: Record<string, string>) {
   const values = new Map<string, string>();
+  const artifacts: ArtifactStore = new FileArtifacts(mkdtempSync(join(tmpdir(), "takeover-artifacts-")));
   const replyWrites: { id: string; running?: boolean; output?: string }[] = [];
   const calls: { op: string; cred: unknown; command: string }[] = [];
   const runtime = {
@@ -329,13 +348,14 @@ function panelHarness(files: Record<string, string>) {
       get: async (k: string) => values.get(k),
       set: async (k: string, v: string) => {
         values.set(k, v);
-        if (k === takeoverReplyKey("run-1")) {
+        if (k === takeoverReplyKey("run-1") && v !== "") {
           const parsed = JSON.parse(v) as { id: string; running?: boolean; output?: string };
           replyWrites.push({ id: parsed.id, ...(parsed.running !== undefined ? { running: parsed.running } : {}), ...(parsed.output !== undefined ? { output: parsed.output } : {}) });
         }
       },
     },
     loadMeta: async () => ASK,
+    artifacts,
     projects: { list: async () => [], forRepo: async () => ({ testCommand: "pnpm test" }) },
     store: {
       load: async () => [
@@ -390,7 +410,7 @@ function panelHarness(files: Record<string, string>) {
     },
   } as never;
   const replyOf = (): any => JSON.parse(values.get(takeoverReplyKey("run-1")) ?? "null");
-  return { runtime, executor, calls, replyWrites, values, replyOf, files };
+  return { runtime, executor, calls, replyWrites, values, replyOf, files, artifacts };
 }
 
 async function panelRequest(runtime: unknown, kind: string, by: string, path?: string, extra?: { content?: string; command?: string; browser?: string; reason?: string }) {
@@ -503,7 +523,12 @@ test("the browser tab dispatches actions through the fence, bounded, and records
   const reply = h.replyOf();
   assert.equal(reply.kind, "takeover-browser");
   assert.match(reply.output, /navigate http:\/\/localhost:8000\//);
-  assert.equal(reply.browser.image, Buffer.from("fake-png").toString("base64"));
+  // the picture rides the artifact store; the reply carries only its id
+  assert.equal(reply.browser.image, undefined);
+  assert.match(reply.browser.artifact, /^[a-f0-9]{64}$/);
+  const stored = await h.artifacts.get(reply.browser.artifact);
+  assert.equal(stored?.mime, "image/png");
+  assert.equal(stored?.data, fakePng("fake-png"), "the reference round-trips to the exact screenshot");
   assert.equal(reply.browser.url, "http://localhost:8000/");
   // fenced: the driver exec carried the holder credential, and the action rode base64 argv
   const exec = h.calls.find((c) => c.op === "execAs" && c.command.includes("browser-driver.mjs"))!;
@@ -594,4 +619,180 @@ test("a lapsed lease records the browser profile disposition honestly", async ()
   assert.equal(history[0].outcome, "lapsed");
   assert.deepEqual(history[0].browserOps, ["navigate http://localhost:8000/"]);
   assert.match(history[0].note, /browser profile left in place/);
+});
+
+// --- 2026-09-23 wave-9 live defect: an unstorable reply re-served forever ---
+
+const browserExecs = (h: ReturnType<typeof panelHarness>): number =>
+  h.calls.filter((c) => c.op === "execAs" && c.command.includes("browser-driver.mjs")).length;
+
+test("a large screenshot never touches the config store — only its reference does", async () => {
+  const h = panelHarness({});
+  const big = Buffer.concat([PNG_MAGIC, Buffer.alloc(290_000, 7)]).toString("base64"); // ~387K chars, under the driver cap
+  const configWrites: string[] = [];
+  const realSet = (h.runtime as any).config.set;
+  (h.runtime as any).config.set = async (k: string, v: string) => {
+    configWrites.push(v);
+    return realSet(k, v);
+  };
+  const realExecAs = (h.executor as any).lease.execAs;
+  (h.executor as any).lease.execAs = async (handle: string, cred: unknown, command: string, o?: unknown, cb?: unknown) => {
+    const r = await realExecAs(handle, cred, command, o, cb);
+    if (!command.includes("browser-driver.mjs")) return r;
+    return { ...r, stdout: JSON.stringify({ ok: true, action: "navigate", url: "http://localhost:8000/", width: 1280, height: 800, format: "png", image: big }) + "\n" };
+  };
+  await panelRequest(h.runtime, "takeover-acquire", "alice");
+  await serveWorkspaceRequests(h.runtime, h.executor, { allowlist: "https://github.com" });
+  await panelRequest(h.runtime, "takeover-browser", "alice", undefined, { browser: JSON.stringify({ action: "navigate", url: "http://localhost:8000/" }) });
+  await serveWorkspaceRequests(h.runtime, h.executor, { allowlist: "https://github.com" });
+  for (const v of configWrites) assert.ok(Buffer.byteLength(v) <= WORKSPACE_ROW_BYTES_LIMIT, `config row of ${Buffer.byteLength(v)} bytes`);
+  const reply = h.replyOf();
+  assert.equal(reply.error, undefined);
+  assert.equal((await h.artifacts.get(reply.browser.artifact))?.data, big, "the reference round-trips");
+  assert.equal(reply.browser.bytes, 290_008);
+});
+
+test("a failed screenshot store is an error on the reply, not a retried action", async () => {
+  const h = panelHarness({});
+  (h.runtime as any).artifacts = { put: async () => { throw new Error("I/O error: disk full"); }, get: async () => null };
+  await panelRequest(h.runtime, "takeover-acquire", "alice");
+  await serveWorkspaceRequests(h.runtime, h.executor, { allowlist: "https://github.com" });
+  await panelRequest(h.runtime, "takeover-browser", "alice", undefined, { browser: JSON.stringify({ action: "click", x: 3, y: 4 }) });
+  await serveWorkspaceRequests(h.runtime, h.executor, { allowlist: "https://github.com" });
+  assert.match(h.replyOf().error, /action ran, but its screenshot could not be stored \(I\/O error: disk full\)/);
+  // the op happened and is on the session record; the takeover was not lapsed
+  assert.deepEqual(JSON.parse(h.values.get(takeoverKey("run-1"))!).browserOps, ["click 3,4"]);
+  await serveWorkspaceRequests(h.runtime, h.executor, { allowlist: "https://github.com" });
+  await serveWorkspaceRequests(h.runtime, h.executor, { allowlist: "https://github.com" });
+  assert.equal(browserExecs(h), 1, "served once; later ticks see the reply and never re-click");
+});
+
+test("a reply whose write permanently fails is retried a bounded number of times, never re-executed, then recorded terminally", async () => {
+  const h = panelHarness({});
+  await panelRequest(h.runtime, "takeover-acquire", "alice");
+  await serveWorkspaceRequests(h.runtime, h.executor, { allowlist: "https://github.com" });
+  const ledger = new Map<string, PendingReply>();
+  const realSet = (h.runtime as any).config.set;
+  // The live shape: every write of the browser reply is refused.
+  (h.runtime as any).config.set = async (k: string, v: string) => {
+    if (k === takeoverReplyKey("run-1") && v.includes('"kind":"takeover-browser"') && !v.includes("could not be stored after"))
+      throw new Error("I/O error: row too large for inline storage");
+    return realSet(k, v);
+  };
+  await panelRequest(h.runtime, "takeover-browser", "alice", undefined, { browser: JSON.stringify({ action: "click", x: 1, y: 2 }) });
+  const errors: string[] = [];
+  for (let tick = 0; tick < REPLY_WRITE_ATTEMPTS + 3; tick++) {
+    await serveWorkspaceRequests(h.runtime, h.executor, { allowlist: "https://github.com" }, ledger).catch((e: Error) => errors.push(e.message));
+  }
+  assert.equal(browserExecs(h), 1, "the action ran exactly once — retries re-deliver, they do not re-click");
+  assert.equal(errors.length, REPLY_WRITE_ATTEMPTS, "bounded: one error per attempt, then silence");
+  assert.match(errors.at(-1)!, /abandoned after 3 attempts; failure recorded/);
+  const terminal = h.replyOf();
+  assert.match(terminal.error, /could not be stored after 3 attempts \(I\/O error: row too large/);
+  assert.equal(ledger.size, 0);
+});
+
+test("when even the terminal record cannot be stored, the request is cleared so it stops being served", async () => {
+  const h = panelHarness({});
+  await panelRequest(h.runtime, "takeover-acquire", "alice");
+  await serveWorkspaceRequests(h.runtime, h.executor, { allowlist: "https://github.com" });
+  const realSet = (h.runtime as any).config.set;
+  (h.runtime as any).config.set = async (k: string, v: string) => {
+    if (k === takeoverReplyKey("run-1") && v !== "") throw new Error("I/O error: failed to insert into fresh page");
+    return realSet(k, v);
+  };
+  await panelRequest(h.runtime, "takeover-browser", "alice", undefined, { browser: JSON.stringify({ action: "click", x: 1, y: 2 }) });
+  const errors: string[] = [];
+  const ledger = new Map<string, PendingReply>();
+  for (let tick = 0; tick < REPLY_WRITE_ATTEMPTS + 3; tick++) {
+    await serveWorkspaceRequests(h.runtime, h.executor, { allowlist: "https://github.com" }, ledger).catch((e: Error) => errors.push(e.message));
+  }
+  assert.equal(errors.length, REPLY_WRITE_ATTEMPTS);
+  assert.match(errors.at(-1)!, /could not be recorded either; request SHIP_WORKSPACE_REQUEST_run-1 cleared/);
+  assert.equal(h.values.get(requestKey("run-1")), "", "the poisoned request is gone");
+  assert.equal(browserExecs(h), 1);
+});
+
+test("one run's permanently failing reply does not starve another run's request in the same tick", async () => {
+  const values = new Map<string, string>();
+  const served: string[] = [];
+  const runtime = {
+    config: {
+      list: async () => [...values.keys()].map((key) => ({ key })),
+      get: async (k: string) => values.get(k),
+      set: async (k: string, v: string) => {
+        if (k === "SHIP_WORKSPACE_REPLY_run-a" && v !== "") throw new Error("I/O error: row too large for inline storage");
+        values.set(k, v);
+      },
+    },
+    loadMeta: async () => ASK,
+    projects: { list: async () => [] },
+    store: {
+      load: async () => [
+        { type: "run-started", data: { input: { repo: "https://github.com/team/repo" } } },
+        { type: "step-completed", name: "sandbox", data: { result: "box" } },
+      ],
+    },
+  } as never;
+  const executor = {
+    attach: (handle: string) => ({
+      exec: async () => {
+        served.push(handle);
+        return { exitCode: 0, stdout: "a.ts", stderr: "", timedOut: false, truncated: false };
+      },
+    }),
+  } as never;
+  await requestWorkspace(runtime, "run-a", "files", "alice");
+  await requestWorkspace(runtime, "run-b", "files", "alice");
+  // run-a sorts first: its failure must not stop run-b in the SAME tick
+  await assert.rejects(serveWorkspaceRequests(runtime, executor, { allowlist: "https://github.com" }, new Map()), /run-a/);
+  assert.equal(JSON.parse(values.get("SHIP_WORKSPACE_REPLY_run-b")!).output, "a.ts");
+});
+
+test("the lapse sweep isolates records: an unreadable one does not stop an expired one from lapsing", async () => {
+  const values = new Map<string, string>([
+    ["SHIP_TAKEOVER_run-bad", "{}"],
+    ["SHIP_TAKEOVER_run-old", JSON.stringify({ holder: "alice", generation: 1, expiresAt: new Date(0).toISOString(), acquiredAt: new Date(0).toISOString(), ttlSec: 60, pathsWritten: [], execsRun: [] })],
+    ["SHIP_TAKEOVER_REPLY_run-old", "not json at all"],
+  ]);
+  const runtime = {
+    config: {
+      list: async () => [...values.keys()].sort().map((key) => ({ key })),
+      get: async (k: string) => {
+        if (k === "SHIP_TAKEOVER_run-bad") throw new Error("I/O error: page checksum");
+        if (k.startsWith("SHIP_TAKEOVER_REPLY_")) throw new Error("reply rows must not be read by the lapse sweep");
+        return values.get(k);
+      },
+      set: async (k: string, v: string) => void values.set(k, v),
+    },
+    store: { load: async () => [] },
+  } as never;
+  const failures = await sweepLapsedTakeovers(runtime, {} as never);
+  assert.deepEqual(failures, ["SHIP_TAKEOVER_run-bad: I/O error: page checksum"]);
+  assert.equal(values.get("SHIP_TAKEOVER_run-old"), "", "the expired record still lapsed");
+  assert.equal(JSON.parse(values.get(takeoverHistoryKey("run-old"))!)[0].outcome, "lapsed");
+});
+
+test("fitReply: console output is trimmed under the row bound; an oversized editor read is refused, never shortened", () => {
+  const at = new Date().toISOString();
+  const escapes = '"\\\n'.repeat(5000); // 15000 chars that JSON-escape to 30000 bytes
+  const fitted = fitReply({ id: "r", at, kind: "takeover-console", output: escapes + "TAIL" });
+  assert.ok(Buffer.byteLength(JSON.stringify(fitted)) <= WORKSPACE_ROW_BYTES_LIMIT);
+  assert.equal(fitted.truncated, true);
+  assert.ok(fitted.output!.endsWith("TAIL"), "console keeps the tail");
+  const read = fitReply({ id: "r", at, kind: "takeover-read", output: "y".repeat(20_000) });
+  assert.equal(read.output, undefined);
+  assert.match(read.error!, /too large to open in the editor/);
+  const small = { id: "r", at, kind: "takeover-console" as const, output: "ok" };
+  assert.equal(fitReply(small), small);
+});
+
+test("a request too large for its row is refused at request time, with a reason", async () => {
+  const values = new Map<string, string>();
+  const runtime = { config: { set: async (k: string, v: string) => void values.set(k, v) }, loadMeta: async () => ASK } as never;
+  await assert.rejects(
+    requestWorkspace(runtime, "run-1", "takeover-write", "alice", "big.txt", { content: "z".repeat(20_000) }),
+    /too large to send through the workspace request store/,
+  );
+  assert.equal(values.size, 0);
 });

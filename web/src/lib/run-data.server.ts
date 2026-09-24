@@ -9,8 +9,10 @@ import {
   type TakeoverRecord,
   type TakeoverSession,
 } from "../../../dist/takeover.js";
-import { workspaceRecovery, conversation, diffSnapshots, evidence } from "./workspace.js";
-import type { Message, DiffSnapshot, Evidence } from "./workspace.js";
+import { workspaceRecovery, conversation, diffSnapshots, evidence, previewPanel } from "./workspace.js";
+import type { Message, DiffSnapshot, Evidence, PreviewPanel } from "./workspace.js";
+import { publicOrigin } from "./oidc.server.js";
+import { previewFrameBase } from "./preview-frame.server.js";
 import { costUSD, isPricedModel, pendingQuestion, verificationFactsFromEvents } from "./ship.server.js";
 import { typicalDuration } from "./expect.js";
 import type { Typical } from "./expect.js";
@@ -36,6 +38,8 @@ export interface RunData {
   messages: Message[];
   snapshots: DiffSnapshot[];
   evidence: Evidence;
+  /** The run page's preview panel state, decided server-side (expiry uses the server clock). */
+  previewPanel: PreviewPanel;
   parentRunId?: string;
   taskRootRunId?: string;
   canSteer: boolean;
@@ -114,7 +118,7 @@ export interface RunData {
     reason?: string;
     record?: { holder: string; expiresAt: string; acquiredAt: string; pathsWritten: string[]; execsRun: string[]; browserOps?: string[] };
     /** The last mediated operation's result (any holder), for the panel. */
-    reply?: { id: string; kind: string; at: string; output?: string; error?: string; truncated?: boolean; running?: boolean; path?: string; browser?: { image?: string; url?: string; width?: number; height?: number; format?: string } };
+    reply?: { id: string; kind: string; at: string; output?: string; error?: string; truncated?: boolean; running?: boolean; path?: string; browser?: { artifact?: string; url?: string; width?: number; height?: number; format?: string } };
     history: TakeoverSession[];
     /** The project's declared tests command — the only exec takeover may run. */
     testsCommand?: string;
@@ -235,7 +239,9 @@ export async function runData({ params, request }: { params: { id: string }; req
           ...(parsed.browser !== undefined && typeof parsed.browser === "object" && parsed.browser !== null
             ? {
                 browser: {
-                  ...(typeof parsed.browser.image === "string" ? { image: parsed.browser.image } : {}),
+                  // A reference into the artifact store (served by the authenticated
+                  // /api/artifacts route), never inline image bytes.
+                  ...(typeof parsed.browser.artifact === "string" && /^[a-f0-9]{64}$/.test(parsed.browser.artifact) ? { artifact: parsed.browser.artifact } : {}),
                   ...(typeof parsed.browser.url === "string" ? { url: parsed.browser.url } : {}),
                   ...(typeof parsed.browser.width === "number" ? { width: parsed.browser.width } : {}),
                   ...(typeof parsed.browser.height === "number" ? { height: parsed.browser.height } : {}),
@@ -274,6 +280,7 @@ export async function runData({ params, request }: { params: { id: string }; req
       messages: conversation(events),
       snapshots: diffSnapshots(events),
       evidence: evidence(facts, reviewedHead),
+      previewPanel: previewPanel(events, facts, { executing, now: Date.now(), dashboardOrigin: publicOrigin(request), frameBase: previewFrameBase() }),
       hasPr: facts.pr !== undefined || typeof (started?.data as any)?.input?.pr === "number",
       parentRunId: typeof (started?.data as any)?.input?.parentRunId === 'string' ? (started?.data as any).input.parentRunId : undefined,
       taskRootRunId: typeof (started?.data as any)?.taskRootRunId === 'string' ? (started?.data as any).taskRootRunId : undefined,

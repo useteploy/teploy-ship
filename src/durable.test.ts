@@ -9,7 +9,7 @@ import { LocalExecutor } from "@neutron-build/agents";
 import type { AgentExecutor } from "@neutron-build/agents";
 import { MemoryEventStore, cancelRun, deliverEvent, executeRun } from "@neutron-build/workflow";
 
-import { CHANGE_EVENT, MERGE_EVENT, PLAN_EVENT, approvalEvent, askEvent, durableAgent } from "./durable.js";
+import { CHANGE_EVENT, MERGE_EVENT, PLAN_EVENT, approvalEvent, askEvent, durableAgent, livenessProbeTarget } from "./durable.js";
 import type { CommandRunner, PreviewTarget } from "./deploy.js";
 import type { TelemetryTarget } from "./observe.js";
 import { ladderRungsFromEvents } from "./ladder.js";
@@ -275,6 +275,115 @@ test("snapshot-capable providers snapshot before parking and restore after — s
   const { usage: u3, ...out3 } = done.output as Record<string, unknown>;
   assert.deepEqual(out3, { status: "finished", summary: didParagraph("Cleaned after restore"), agentSummary: "Cleaned after restore.", turns: 4 });
   assert.equal(removed, true, "the approved action ran in the RESTORED workspace");
+});
+
+// run-af29bf4e, 2026-09-23: a plan park restored into a new container and
+// disposed the original; the NEXT park's resume replayed from the top and the
+// C5 liveness probe checked the disposed original, failing a healthy run two
+// seconds after its approval. The probe must check the container the run will
+// use next — or none, when the replay is about to restore from a snapshot.
+function reapingIsolatedProvider(): { provider: ExecutorProvider; probes: string[]; ran: string[] } {
+  const images = new Map<string, true>();
+  const live = new Set<string>();
+  const probes: string[] = [];
+  const ran: string[] = [];
+  let counter = 0;
+  const provider: ExecutorProvider = {
+    isolated: true,
+    async create() {
+      const handle = `ws-${counter++}`;
+      live.add(handle);
+      return { handle };
+    },
+    attach: (handle: string): AgentExecutor => ({
+      async exec(cmd) {
+        if (cmd === "true") probes.push(handle);
+        if (!live.has(handle)) throw new Error(`run not found: ${handle}`);
+        if (cmd !== "true") ran.push(`${handle}: ${cmd}`);
+        return { exitCode: 0, stdout: "", stderr: "", timedOut: false, truncated: false };
+      },
+      async putFile() {},
+      async getFile() {
+        return new Uint8Array();
+      },
+      async destroy() {},
+    }),
+    async snapshot(handle) {
+      if (!live.has(handle)) throw new Error("cannot snapshot a reaped workspace");
+      const image = `snap-${counter++}`;
+      images.set(image, true);
+      return image;
+    },
+    async createFrom(image) {
+      if (!images.has(image)) throw new Error(`no such image ${image}`);
+      const handle = `ws-${counter++}`;
+      live.add(handle);
+      return { handle };
+    },
+    async destroy(handle) {
+      live.delete(handle);
+    },
+  };
+  return { provider, probes, ran };
+}
+
+test("a second park's resume survives the first park's disposed container (C5 probes the latest handle)", async () => {
+  const { model } = reactiveModel([
+    "1. Clean the build\n2. Finish", // the plan
+    "```bash\nrm -rf build/\n```", // dangerous → approval park (second snapshot park)
+    (obs) => (obs.includes("exit 0") ? "```finish\nCleaned after two parks.\n```" : "```bash\necho hmm\n```"),
+    (obs) => (obs.includes("Before finishing") ? "```bash\nls\n```" : "```bash\necho hmm\n```"),
+    (obs) => (obs.includes("exit 0") ? "```finish\nCleaned after two parks.\n```" : "```bash\necho hmm\n```"),
+  ]);
+  const { provider, probes, ran } = reapingIsolatedProvider();
+  const store = new MemoryEventStore();
+  const wf = durableAgent({ model, executor: provider, approveAction: defaultApprovalPolicy, loadEvents: (id) => store.load(id) });
+
+  const planParked = await executeRun({ workflow: wf, runId: "run-two-parks", store, input: { task: "clean", plan: true } });
+  assert.equal(planParked.status, "waiting");
+  assert.equal(planParked.eventName, PLAN_EVENT);
+  await deliverEvent(store, "run-two-parks", PLAN_EVENT, { approved: true });
+  const actionParked = await executeRun({ workflow: wf, runId: "run-two-parks", store });
+  assert.equal(actionParked.status, "waiting", "parked again, on the dangerous action");
+  assert.equal(actionParked.eventName, approvalEvent(0));
+
+  await deliverEvent(store, "run-two-parks", approvalEvent(0), { approved: true });
+  const done = await executeRun({ workflow: wf, runId: "run-two-parks", store });
+  assert.equal(done.status, "completed", String(done.error?.detail ?? ""));
+  assert.equal((done.output as { agentSummary: string }).agentSummary, "Cleaned after two parks.");
+  // First execution probes the fresh sandbox; both resumes replay into a
+  // pending restore, so there is nothing live to probe until it happens.
+  assert.deepEqual(probes, ["ws-0"], "the disposed original is never probed after its successor exists");
+  assert.ok(ran.some((line) => /rm -rf build/.test(line) && !line.startsWith("ws-0")), "the approved action ran in a restored container");
+});
+
+test("without the log reader the probe keeps its old target — the regression the reader fixes", async () => {
+  const { model } = reactiveModel([
+    "1. Clean the build\n2. Finish",
+    "```bash\nrm -rf build/\n```",
+    "```finish\nnever\n```",
+  ]);
+  const { provider } = reapingIsolatedProvider();
+  const store = new MemoryEventStore();
+  const wf = durableAgent({ model, executor: provider, approveAction: defaultApprovalPolicy });
+  await executeRun({ workflow: wf, runId: "run-old-probe", store, input: { task: "clean", plan: true } });
+  await deliverEvent(store, "run-old-probe", PLAN_EVENT, { approved: true });
+  await executeRun({ workflow: wf, runId: "run-old-probe", store });
+  await deliverEvent(store, "run-old-probe", approvalEvent(0), { approved: true });
+  const failed = await executeRun({ workflow: wf, runId: "run-old-probe", store });
+  assert.equal(failed.status, "failed");
+  assert.match(String(failed.error?.detail ?? ""), /\(ws-0\) is no longer available/);
+});
+
+test("livenessProbeTarget: latest main handle, restore-pending after a snapshot, attempts ignored", () => {
+  const done = (name: string, result: unknown) => ({ type: "step-completed", name, data: { result } });
+  assert.equal(livenessProbeTarget([]), undefined);
+  assert.deepEqual(livenessProbeTarget([done("sandbox", "a")]), { probe: "a" });
+  assert.deepEqual(livenessProbeTarget([done("sandbox", "a"), done("plan-snapshot", "img"), { type: "event-waiting", name: "plan-approval" }]), { restorePending: true });
+  assert.deepEqual(livenessProbeTarget([done("sandbox", "a"), done("plan-snapshot", "img"), done("plan-restore", "b")]), { probe: "b" });
+  assert.deepEqual(livenessProbeTarget([done("sandbox", "a"), done("plan-restore", "b"), done("merge-snapshot", "img2")]), { restorePending: true });
+  assert.deepEqual(livenessProbeTarget([done("sandbox", "a"), done("turn-3-restore", { handle: "c" })]), { probe: "c" });
+  assert.deepEqual(livenessProbeTarget([done("sandbox", "a"), done("attempt-1-sandbox", "x"), done("attempt-1-plan-restore", "y")]), { probe: "a" });
 });
 
 test("auto-safe actions never park", async () => {

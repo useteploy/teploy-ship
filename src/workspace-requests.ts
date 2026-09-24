@@ -44,6 +44,7 @@ import {
   parseBrowserAction,
   parseDriverReply,
   type BrowserAction,
+  type BrowserDriverReply,
 } from "./takeover-browser.js";
 export type WorkspaceRequest = {
   id: string;
@@ -87,8 +88,13 @@ export type WorkspaceReply = {
   running?: boolean;
   /** Takeover ops: the live lease state after the operation. */
   takeover?: { holder: string; generation: number; expiresAt: string };
-  /** takeover-browser: the bounded screenshot (base64) and page state for the BROWSER tab's <img>. */
-  browser?: { image?: string; url?: string; width?: number; height?: number; format?: string };
+  /**
+   * takeover-browser: page state plus a REFERENCE to the screenshot. The image
+   * itself lives in the run's artifact store (served by the authenticated
+   * /api/artifacts/<id> route) — never inline here: this reply is a
+   * ship_runtime_config row, and Nucleus refuses rows past ~16 KiB.
+   */
+  browser?: { artifact?: string; url?: string; width?: number; height?: number; format?: string; bytes?: number };
 };
 const PREFIX = "SHIP_WORKSPACE_REQUEST_";
 const TAKEOVER_KINDS = new Set([
@@ -104,6 +110,94 @@ const TAKEOVER_KINDS = new Set([
 ]);
 export const requestKey = (runId: string) => PREFIX + runId;
 export const replyKey = (runId: string) => "SHIP_WORKSPACE_REPLY_" + runId;
+
+/**
+ * The largest JSON value (bytes) written to one workspace request or reply
+ * row. These rows live in ship_runtime_config, and Nucleus refuses an inline
+ * row past ~16 KiB ("row too large for inline storage"); a refused UPDATE of
+ * an existing row also leaves that row in a state where the next UPDATE loses
+ * it (logged in UPSTREAM_BUGS.md, 2026-09-23). Everything written here is
+ * fitted under this bound first, so no reply can poison its own key.
+ */
+export const WORKSPACE_ROW_BYTES_LIMIT = 14_000;
+/** A reply whose store write fails is re-tried this many times (never re-executed), then recorded as a terminal failure. */
+export const REPLY_WRITE_ATTEMPTS = 3;
+
+const rowBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
+
+/**
+ * Fit a reply under WORKSPACE_ROW_BYTES_LIMIT. Display output is trimmed
+ * (tail for console/exec, head otherwise) and marked truncated; the editor's
+ * read is REFUSED instead — its content round-trips into a write, and a
+ * shortened file saved back would be silent data loss.
+ */
+export function fitReply(reply: WorkspaceReply): WorkspaceReply {
+  const size = rowBytes(reply);
+  if (size <= WORKSPACE_ROW_BYTES_LIMIT) return reply;
+  const bare: WorkspaceReply = {
+    id: reply.id,
+    at: reply.at,
+    ...(reply.kind !== undefined ? { kind: reply.kind } : {}),
+    ...(reply.path !== undefined ? { path: reply.path } : {}),
+    ...(reply.takeover !== undefined ? { takeover: reply.takeover } : {}),
+  };
+  if (reply.kind === "takeover-read" && reply.error === undefined) {
+    return {
+      ...bare,
+      error: `That file is too large to open in the editor (${size} bytes through the reply store, which carries about ${WORKSPACE_ROW_BYTES_LIMIT}). Nothing was opened; edit it from the console.`,
+    };
+  }
+  if (typeof reply.output === "string" && reply.output !== "") {
+    const tail = reply.kind === "takeover-console" || reply.kind === "takeover-exec";
+    let output = reply.output;
+    for (let i = 0; i < 12 && output !== ""; i++) {
+      const over = rowBytes({ ...reply, output, truncated: true });
+      if (over <= WORKSPACE_ROW_BYTES_LIMIT) break;
+      const keep = Math.floor(output.length * (WORKSPACE_ROW_BYTES_LIMIT / over) * 0.95);
+      output = tail ? output.slice(output.length - keep) : output.slice(0, keep);
+    }
+    const trimmed: WorkspaceReply = { ...reply, output, truncated: true };
+    if (rowBytes(trimmed) <= WORKSPACE_ROW_BYTES_LIMIT) return trimmed;
+  }
+  return { ...bare, error: `The result was too large to store (${size} bytes; the reply store carries about ${WORKSPACE_ROW_BYTES_LIMIT}).` };
+}
+
+/**
+ * Store a browser screenshot in the run's artifact store and return its id.
+ * A missing store or a failed write is an ERROR on the reply — the action
+ * ran, only its picture was not kept — never a retry of the action.
+ */
+async function storeScreenshot(
+  runtime: Pick<ShipRuntime, "artifacts">,
+  runId: string,
+  image: string,
+  format: string | undefined,
+): Promise<{ id: string; bytes: number }> {
+  if (runtime.artifacts === undefined)
+    throw new Error("The browser action ran, but this install has no artifact store to keep its screenshot in.");
+  const bytes = Buffer.from(image, "base64");
+  try {
+    const id = await runtime.artifacts.put(`takeover-${runId}-${Date.now()}.${format === "jpeg" ? "jpg" : "png"}`, bytes);
+    return { id, bytes: bytes.length };
+  } catch (e) {
+    throw new Error(
+      `The browser action ran, but its screenshot could not be stored (${(e instanceof Error ? e.message : String(e)).slice(0, 200)}). Take another action to refresh it.`,
+    );
+  }
+}
+
+/** A reply computed but not yet stored: re-delivered on later ticks, never re-executed. */
+export type PendingReply = {
+  id: string;
+  runId: string;
+  kind: WorkspaceRequest["kind"];
+  requestKey: string;
+  /** Rows to write, the served-marker LAST (a partial delivery must not read as served). */
+  writes: { key: string; reply: WorkspaceReply }[];
+  attempts: number;
+};
+/** Per-worker-process ledger of undelivered replies (a restart forgets it; the 120 s request expiry then bounds the re-serve). */
+const undeliveredReplies = new Map<string, PendingReply>();
 
 /** A submitted console command is one line of intent, not a pasted script. */
 export const TAKEOVER_CONSOLE_COMMAND_LIMIT = 2000;
@@ -163,6 +257,10 @@ export async function requestWorkspace(
     ...(extra?.command !== undefined ? { command: extra.command } : {}),
     ...(browser !== undefined ? { browser } : {}),
   };
+  if (rowBytes(request) > WORKSPACE_ROW_BYTES_LIMIT)
+    throw new Error(
+      `That is too large to send through the workspace request store (${rowBytes(request)} bytes; it carries about ${WORKSPACE_ROW_BYTES_LIMIT}). Edit large files from the console.`,
+    );
   await runtime.config.set(requestKey(runId), JSON.stringify(request), by);
   return request;
 }
@@ -241,6 +339,7 @@ export async function serveWorkspaceRequests(
   runtime: ShipRuntime,
   executor: ExecutorProvider,
   policy: RepoPolicyConfig = policyFromEnv(),
+  ledger: Map<string, PendingReply> = undeliveredReplies,
 ): Promise<void> {
   const requests = (await runtime.config.list()).filter((k) =>
     k.key.startsWith(PREFIX),
@@ -252,93 +351,184 @@ export async function serveWorkspaceRequests(
     ...policy,
     projects: [...(policy.projects ?? []), ...projects],
   };
-  await sweepLapsedTakeovers(runtime, executor).catch(() => {});
+  // Every leg and every request is isolated: one record that cannot be read,
+  // served or stored is reported and skipped, never allowed to stop the
+  // records after it in the same tick (the 2026-09-23 storm was one
+  // unstorable reply re-served every tick). Failures surface as ONE thrown
+  // summary at the end, which the worker logs.
+  const failures: string[] = [];
+  for (const e of await sweepLapsedTakeovers(runtime, executor)) failures.push(e);
   let processed = 0;
   for (const entry of requests) {
-    const raw = await runtime.config.get(entry.key);
-    if (!raw) continue;
-    const req = JSON.parse(raw) as WorkspaceRequest;
-    if (TAKEOVER_KINDS.has(req.kind)) {
-      if (++processed > 30) break;
-      // Same id-dedupe as the read-only path: a request key persists until
-      // replaced, so the reply key is what says "already served".
-      const prior = await runtime.config.get(takeoverReplyKey(req.runId));
+    try {
+      const raw = await runtime.config.get(entry.key);
+      if (!raw) continue;
+      let req: WorkspaceRequest;
+      try {
+        req = JSON.parse(raw) as WorkspaceRequest;
+      } catch {
+        // An unreadable request can never be served; clearing it is the only
+        // way it stops being read every tick.
+        await runtime.config.set(entry.key, "");
+        failures.push(`${entry.key}: unreadable request cleared`);
+        continue;
+      }
+      const takeover = TAKEOVER_KINDS.has(req.kind);
+      // A request key persists until replaced, so the reply key is what says
+      // "already served" — the same id-dedupe on both surfaces.
+      const markerKey = takeover ? takeoverReplyKey(req.runId) : replyKey(req.runId);
+      const prior = await runtime.config.get(markerKey);
       if (prior !== undefined && prior !== null && prior !== "") {
         try {
-          if ((JSON.parse(prior) as WorkspaceReply).id === req.id) continue;
+          if ((JSON.parse(prior) as WorkspaceReply).id === req.id) {
+            ledger.delete(req.id);
+            continue;
+          }
         } catch {
           // unreadable prior reply — serve the request
         }
       }
-      await serveTakeoverRequest(runtime, executor, effective, req);
-      continue;
-    }
-    const previous = await workspaceReply(runtime, req.runId);
-    if (previous?.id === req.id) continue;
-    if (++processed > 30) break;
-    const reply: WorkspaceReply = { id: req.id, at: new Date().toISOString(), kind: req.kind, ...(req.path ? { path: req.path } : {}) };
-    try {
-      if (Date.now() - Date.parse(req.at) > 120000)
-        throw new Error("Request expired. Refresh to try again.");
-      const events = await runtime.store.load(req.runId);
-      const input = (events.find((e) => e.type === "run-started")?.data as any)
-        ?.input;
-      if (!input?.repo) throw new Error("This run has no repository");
-      const ref = assertRepoAllowed(input.repo, {
-        trust: "external",
-        config: effective,
-      });
-      if (req.kind === "forge") {
-        const facts = verificationFactsFromEvents(events);
-        const pr = facts.pr?.number ?? input.pr;
-        if (!pr) throw new Error("No pull request has been published yet");
-        reply.forge = await readForgeState(
-          ref,
-          credentialFor(ref, effective),
-          pr,
-        );
-      } else {
-        if (req.kind !== "files" && req.kind !== "file" && req.kind !== "changes")
-          throw new Error("Unknown workspace request");
-        // Snapshot/restore can replace the original handle. Use the latest recorded creation.
-        const handles = events.filter(
-          (e) =>
-            e.type === "step-completed" &&
-            (e.name === "sandbox" || /-restore$/.test(e.name ?? "")),
-        );
-        const recorded = (handles.at(-1)?.data as any)?.result;
-        const handle = typeof recorded === "string" ? recorded : recorded?.handle;
-        if (typeof handle !== "string")
-          throw new Error("Workspace is not available yet");
-        const r = await executor
-          .attach(handle)
-          .exec(req.kind === "changes" ? changesCommand() : fileCommand(req.kind === "file" ? req.path : undefined), {
-            timeoutMs: 10000,
-          });
-        if (r.exitCode !== 0 || r.stderr.includes("fatal:"))
-          throw new Error(
-            "Workspace or file unavailable. The sandbox may have expired.",
-          );
-        reply.truncated = Buffer.byteLength(r.stdout) > 8000;
-        reply.output = Buffer.from(safeForDisplay(r.stdout, 10000))
-          .subarray(0, 8000)
-          .toString("utf8");
+      if (++processed > 30) break;
+      // Served but not yet stored: deliver again, never re-execute. A browser
+      // click or console command run twice because its reply write failed is
+      // a second action nobody asked for — and each re-run renewed the lease,
+      // which is why the stuck takeover never lapsed.
+      const pending = ledger.get(req.id);
+      if (pending !== undefined) {
+        await deliverReply(runtime, pending, ledger);
+        continue;
       }
+      const writes: PendingReply["writes"] = [];
+      if (takeover) {
+        writes.push({ key: markerKey, reply: await serveTakeoverRequest(runtime, executor, effective, req) });
+      } else {
+        const reply = await serveReadOnlyRequest(runtime, executor, effective, req);
+        if (req.kind === "forge") writes.push({ key: "SHIP_FORGE_STATE_" + req.runId, reply });
+        else writes.push({ key: "SHIP_WORKSPACE_INSPECTION_" + req.runId, reply });
+        // The result id binds it to a request; a newer request cannot consume an older response.
+        writes.push({ key: markerKey, reply });
+      }
+      await deliverReply(runtime, { id: req.id, runId: req.runId, kind: req.kind, requestKey: entry.key, writes, attempts: 0 }, ledger);
     } catch (e) {
-      reply.error = safeForDisplay(
-        e instanceof Error ? e.message : String(e),
-        600,
-      );
+      failures.push(`${entry.key}: ${e instanceof Error ? e.message : String(e)}`);
     }
-    // The result id binds it to a request; a newer request cannot consume an older response.
-    await runtime.config.set(replyKey(req.runId), JSON.stringify(reply));
-    if (req.kind !== "forge") await runtime.config.set("SHIP_WORKSPACE_INSPECTION_" + req.runId, JSON.stringify(reply));
-    if (req.kind === "forge")
-      await runtime.config.set(
-        "SHIP_FORGE_STATE_" + req.runId,
-        JSON.stringify(reply),
-      );
   }
+  if (failures.length > 0) throw new Error(failures.join("; ").slice(0, 2000));
+}
+
+/**
+ * Store a computed reply: fitted under the row bound, re-tried on later ticks
+ * up to REPLY_WRITE_ATTEMPTS, then TERMINAL — a small failure reply takes the
+ * marker key (cleared first, which is what recovers a row a refused write
+ * left unwritable), and if even that cannot be stored the request itself is
+ * cleared so it is never served again. Bounded either way: one poisoned
+ * record can no longer hammer every tick.
+ */
+async function deliverReply(
+  runtime: Pick<ShipRuntime, "config">,
+  pending: PendingReply,
+  ledger: Map<string, PendingReply>,
+): Promise<void> {
+  try {
+    for (const w of pending.writes) await runtime.config.set(w.key, JSON.stringify(fitReply(w.reply)));
+    ledger.delete(pending.id);
+    return;
+  } catch (e) {
+    const reason = (e instanceof Error ? e.message : String(e)).slice(0, 300);
+    pending.attempts += 1;
+    if (pending.attempts < REPLY_WRITE_ATTEMPTS) {
+      ledger.set(pending.id, pending);
+      throw new Error(`reply ${pending.id} not stored (attempt ${pending.attempts}/${REPLY_WRITE_ATTEMPTS}): ${reason}`);
+    }
+    ledger.delete(pending.id);
+    const marker = pending.writes.at(-1)!.key;
+    const failure: WorkspaceReply = {
+      id: pending.id,
+      at: new Date().toISOString(),
+      kind: pending.kind,
+      error: safeForDisplay(
+        `This request was served, but its result could not be stored after ${REPLY_WRITE_ATTEMPTS} attempts (${reason}). Check the workspace before repeating it.`,
+        600,
+      ),
+    };
+    const recorded = await runtime.config
+      .set(marker, "")
+      .then(() => runtime.config.set(marker, JSON.stringify(failure)))
+      .then(
+        () => true,
+        () => false,
+      );
+    if (recorded)
+      throw new Error(`reply ${pending.id} abandoned after ${REPLY_WRITE_ATTEMPTS} attempts; failure recorded on ${marker}: ${reason}`);
+    await runtime.config.set(pending.requestKey, "").catch(() => {});
+    throw new Error(
+      `reply ${pending.id} abandoned after ${REPLY_WRITE_ATTEMPTS} attempts and the failure could not be recorded either; request ${pending.requestKey} cleared: ${reason}`,
+    );
+  }
+}
+
+/** The read-only inspections: forge state, file list, one file, changes. */
+async function serveReadOnlyRequest(
+  runtime: ShipRuntime,
+  executor: ExecutorProvider,
+  effective: RepoPolicyConfig,
+  req: WorkspaceRequest,
+): Promise<WorkspaceReply> {
+  const reply: WorkspaceReply = { id: req.id, at: new Date().toISOString(), kind: req.kind, ...(req.path ? { path: req.path } : {}) };
+  try {
+    if (Date.now() - Date.parse(req.at) > 120000)
+      throw new Error("Request expired. Refresh to try again.");
+    const events = await runtime.store.load(req.runId);
+    const input = (events.find((e) => e.type === "run-started")?.data as any)
+      ?.input;
+    if (!input?.repo) throw new Error("This run has no repository");
+    const ref = assertRepoAllowed(input.repo, {
+      trust: "external",
+      config: effective,
+    });
+    if (req.kind === "forge") {
+      const facts = verificationFactsFromEvents(events);
+      const pr = facts.pr?.number ?? input.pr;
+      if (!pr) throw new Error("No pull request has been published yet");
+      reply.forge = await readForgeState(
+        ref,
+        credentialFor(ref, effective),
+        pr,
+      );
+    } else {
+      if (req.kind !== "files" && req.kind !== "file" && req.kind !== "changes")
+        throw new Error("Unknown workspace request");
+      // Snapshot/restore can replace the original handle. Use the latest recorded creation.
+      const handles = events.filter(
+        (e) =>
+          e.type === "step-completed" &&
+          (e.name === "sandbox" || /-restore$/.test(e.name ?? "")),
+      );
+      const recorded = (handles.at(-1)?.data as any)?.result;
+      const handle = typeof recorded === "string" ? recorded : recorded?.handle;
+      if (typeof handle !== "string")
+        throw new Error("Workspace is not available yet");
+      const r = await executor
+        .attach(handle)
+        .exec(req.kind === "changes" ? changesCommand() : fileCommand(req.kind === "file" ? req.path : undefined), {
+          timeoutMs: 10000,
+        });
+      if (r.exitCode !== 0 || r.stderr.includes("fatal:"))
+        throw new Error(
+          "Workspace or file unavailable. The sandbox may have expired.",
+        );
+      reply.truncated = Buffer.byteLength(r.stdout) > 8000;
+      reply.output = Buffer.from(safeForDisplay(r.stdout, 10000))
+        .subarray(0, 8000)
+        .toString("utf8");
+    }
+  } catch (e) {
+    reply.error = safeForDisplay(
+      e instanceof Error ? e.message : String(e),
+      600,
+    );
+  }
+  return reply;
 }
 
 /**
@@ -353,7 +543,7 @@ async function serveTakeoverRequest(
   executor: ExecutorProvider,
   policy: RepoPolicyConfig,
   req: WorkspaceRequest,
-): Promise<void> {
+): Promise<WorkspaceReply> {
   const reply: WorkspaceReply = { id: req.id, at: new Date().toISOString(), kind: req.kind, ...(req.path ? { path: req.path } : {}) };
   const lease = (executor as ExecutorProvider).lease;
   try {
@@ -394,8 +584,7 @@ async function serveTakeoverRequest(
         reply.takeover = { holder: record.holder, generation: record.generation, expiresAt: record.expiresAt };
         reply.output = "Takeover held. Writes are exclusive to you; the run stays parked until handback.";
       }
-      await runtime.config.set(takeoverReplyKey(req.runId), JSON.stringify(reply));
-      return;
+      return reply;
     }
 
     // Every operation below is holder-only, on a live record.
@@ -511,13 +700,15 @@ async function serveTakeoverRequest(
         void runtime.config
           .set(
             takeoverReplyKey(req.runId),
-            JSON.stringify({
-              ...reply,
-              at: new Date().toISOString(),
-              running: true,
-              output: safeForDisplay(tailKeep(buffered, TAKEOVER_OUTPUT_LIMIT), TAKEOVER_OUTPUT_LIMIT + 200),
-              truncated: dropped,
-            }),
+            JSON.stringify(
+              fitReply({
+                ...reply,
+                at: new Date().toISOString(),
+                running: true,
+                output: safeForDisplay(tailKeep(buffered, TAKEOVER_OUTPUT_LIMIT), TAKEOVER_OUTPUT_LIMIT + 200),
+                truncated: dropped,
+              }),
+            ),
           )
           .catch(() => {});
       };
@@ -561,6 +752,7 @@ async function serveTakeoverRequest(
       // process, and the dashboard only ever names who asked.
       const action = parseBrowserAction(req.browser);
       if (!action.ok) throw new Error(action.reason);
+      let driverReply: BrowserDriverReply;
       try {
         await renew();
         const r = await lease.execAs(
@@ -571,28 +763,38 @@ async function serveTakeoverRequest(
         );
         const driver = parseDriverReply(r);
         if (!driver.ok) throw new Error(driver.reason);
+        driverReply = driver.reply;
         record.browserOps = [...(record.browserOps ?? []), browserOpSummary(action.action)].slice(
           -TAKEOVER_BROWSER_OPS_LIMIT,
         );
         await saveTakeover(runtime.config, record);
-        const summary = browserOpSummary(action.action);
-        reply.output = browserReplyOutput(summary, driver.reply);
-        if (driver.reply.image !== undefined || driver.reply.url !== undefined) {
-          reply.browser = {
-            ...(driver.reply.image !== undefined ? { image: driver.reply.image } : {}),
-            ...(driver.reply.url !== undefined ? { url: driver.reply.url } : {}),
-            ...(driver.reply.width !== undefined ? { width: driver.reply.width } : {}),
-            ...(driver.reply.height !== undefined ? { height: driver.reply.height } : {}),
-            ...(driver.reply.format !== undefined ? { format: driver.reply.format } : {}),
-          };
-        }
-        reply.takeover = { holder: record.holder, generation: record.generation, expiresAt: record.expiresAt };
       } catch (e) {
         if (lost(e)) {
           await lapseTakeover(runtime, executor, record, e instanceof Error ? e.message : String(e));
           throw new Error("The takeover lease was lost — the browser action did not run under your ownership. Acquire again.");
         }
         throw e;
+      }
+      reply.takeover = { holder: record.holder, generation: record.generation, expiresAt: record.expiresAt };
+      // The picture rides the artifact store and the reply carries only its
+      // id: this reply is a ship_runtime_config row, and a ~400 KB base64
+      // screenshot inline is what Nucleus refused on 2026-09-23. Stored
+      // OUTSIDE the lease-loss handling above (a storage error is not a lost
+      // lease), after the op is recorded — a failure here is reported as
+      // what it is, never a retry of the action.
+      const shot =
+        driverReply.image !== undefined
+          ? await storeScreenshot(runtime, req.runId, driverReply.image, driverReply.format)
+          : undefined;
+      reply.output = browserReplyOutput(browserOpSummary(action.action), driverReply);
+      if (shot !== undefined || driverReply.url !== undefined) {
+        reply.browser = {
+          ...(shot !== undefined ? { artifact: shot.id, bytes: shot.bytes } : {}),
+          ...(driverReply.url !== undefined ? { url: driverReply.url } : {}),
+          ...(driverReply.width !== undefined ? { width: driverReply.width } : {}),
+          ...(driverReply.height !== undefined ? { height: driverReply.height } : {}),
+          ...(driverReply.format !== undefined ? { format: driverReply.format } : {}),
+        };
       }
     } else if (req.kind === "takeover-changes") {
       try {
@@ -681,7 +883,7 @@ async function serveTakeoverRequest(
   } catch (e) {
     reply.error = safeForDisplay(e instanceof Error ? e.message : String(e), 600);
   }
-  await runtime.config.set(takeoverReplyKey(req.runId), JSON.stringify(reply));
+  return reply;
 }
 
 /** A takeover the daemon no longer honours: clear the live record, keep the evidence. */
@@ -719,27 +921,46 @@ async function lapseTakeover(
  * ended the lease on its own (that is the revocation path for a browser
  * abandoned mid-edit), so the record must stop claiming the workspace is
  * held. Edits on disk are untouched — only the ownership lapsed.
+ *
+ * Per-record isolation: a record that cannot be read or lapsed is reported
+ * (returned) and skipped, never allowed to stop the records after it.
  */
 export async function sweepLapsedTakeovers(
   runtime: ShipRuntime,
   executor: ExecutorProvider,
   now = Date.now,
-): Promise<void> {
-  for (const entry of await runtime.config.list()) {
-    if (!entry.key.startsWith("SHIP_TAKEOVER_")) continue;
-    const raw = await runtime.config.get(entry.key);
-    if (raw === undefined || raw === null || raw === "") continue;
-    let record: TakeoverRecord | null = null;
-    try {
-      const parsed = JSON.parse(raw) as TakeoverRecord;
-      if (typeof parsed.holder === "string" && typeof parsed.generation === "number" && typeof parsed.expiresAt === "string")
-        record = parsed;
-    } catch {
-      record = null;
-    }
-    if (record === null) continue; // reply/history keys live nearby; they are not records
-    if (Date.parse(record.expiresAt) > now()) continue;
-    const runId = entry.key.slice("SHIP_TAKEOVER_".length);
-    await lapseTakeover(runtime, executor, { ...record, runId }, "lease expired");
+): Promise<string[]> {
+  const failures: string[] = [];
+  let entries: { key: string }[];
+  try {
+    entries = await runtime.config.list();
+  } catch (e) {
+    return [`takeover sweep: ${e instanceof Error ? e.message : String(e)}`];
   }
+  for (const entry of entries) {
+    // Only live lease records: reply/history keys share the prefix, and
+    // reading a (possibly unreadable) reply row here is what let one poisoned
+    // reply stall the sweep.
+    if (!entry.key.startsWith("SHIP_TAKEOVER_")) continue;
+    if (entry.key.startsWith("SHIP_TAKEOVER_REPLY_") || entry.key.startsWith("SHIP_TAKEOVER_HISTORY_")) continue;
+    try {
+      const raw = await runtime.config.get(entry.key);
+      if (raw === undefined || raw === null || raw === "") continue;
+      let record: TakeoverRecord | null = null;
+      try {
+        const parsed = JSON.parse(raw) as TakeoverRecord;
+        if (typeof parsed.holder === "string" && typeof parsed.generation === "number" && typeof parsed.expiresAt === "string")
+          record = parsed;
+      } catch {
+        record = null;
+      }
+      if (record === null) continue;
+      if (Date.parse(record.expiresAt) > now()) continue;
+      const runId = entry.key.slice("SHIP_TAKEOVER_".length);
+      await lapseTakeover(runtime, executor, { ...record, runId }, "lease expired");
+    } catch (e) {
+      failures.push(`${entry.key}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  return failures;
 }

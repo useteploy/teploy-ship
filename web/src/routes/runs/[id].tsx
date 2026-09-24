@@ -558,12 +558,12 @@ export default function RunDetail({ data: initialData }: { data: RunData }) {
           {['conversation','review'].includes(data.view) && <div class={data.view === 'review' ? 'run-review-grid' : ''}><div>
             {data.ancestors.map(h => <details class="disclosure"><summary>Earlier: {h.task.slice(0,100)} · {h.runId}</summary><a href={`/runs/${h.runId}`}>Open run</a><Conversation messages={h.messages}/></details>)}
             <div class="conversation-scroll" role="region" tabIndex={0} aria-label="Conversation history"><Conversation messages={data.messages} /></div><div id="reply"><RunComposer data={data}/></div>
-          </div>{data.view === 'review' && <aside class="review-evidence"><ForgePanel data={data}/><Changes snapshots={data.snapshots} pr={data.evidence.pr} sha={data.evidence.sha}/><Verification data={data.evidence}/></aside>}</div>}
+          </div>{data.view === 'review' && <aside class="review-evidence"><ForgePanel data={data}/><Changes snapshots={data.snapshots} pr={data.evidence.pr} sha={data.evidence.sha}/><Verification data={data.evidence} preview={data.previewPanel}/></aside>}</div>}
           {data.view === 'files' && <section><h2 class="section">Repository files</h2><details class="disclosure"><summary>Workspace recovery</summary><p class="meta">{data.recovery?.snapshotAt ? `Last recorded snapshot: ${data.recovery.snapshotAt}. Retention has not been checked.` : "No workspace snapshot is recorded."}</p><p class="meta">{data.recovery?.restoredAt ? `Last restored: ${data.recovery.restoredAt}. ${data.recovery.checked ? "Repository validation passed." : "Repository validation was not recorded for this run."}` : "No workspace restore is recorded."}</p>{data.recovery?.warm && <p class="meta">This run uses a warm volume. Container snapshots do not establish recovery of that volume.</p>}</details><p class="meta">Inspect up to 200 tracked file names and the first 10,000 characters of a file at the workspace’s current HEAD. Inspect live changes to see tracked edits and untracked file names. This is a read-only observation while the agent may still be working. Availability depends on sandbox retention.</p><form method="post" class="row-actions"><button name="intent" value="changes">Inspect live changes</button><button name="intent" value="files">List files</button><input name="path" placeholder="src/example.ts" aria-label="Repository file path"/><button name="intent" value="file">Read file</button></form>{data.workspace && <p class="meta">Last inspection: {data.workspace.kind ?? "file"}{data.workspace.path ? ` · ${data.workspace.path}` : ""} · {data.workspace.at}{data.workspace.truncated ? " · partial output" : ""}</p>}{data.workspace?.error && <p class="notice bad">{data.workspace.error}</p>}{data.workspace?.output !== undefined && <pre class="workspace-file">{data.workspace.output}</pre>}<p class="meta">Requests are handled by the worker; refresh to see the result.</p><a href={`/runs/${data.runId}?view=files`}>Refresh files</a></section>}
 
           {data.view === 'changes' && <ForgePanel data={data}/>}
           {data.view === 'changes' && <Changes snapshots={data.snapshots} pr={data.evidence.pr} sha={data.evidence.sha} />}
-          {data.view === 'verification' && <Verification data={data.evidence} />}
+          {data.view === 'verification' && <Verification data={data.evidence} preview={data.previewPanel} />}
           {data.delivery && data.view === 'verification' && <DeliveryCard data={data} />}
           {data.view === 'activity' && <>
           <h2 class="section">Run activity</h2>
@@ -1201,11 +1201,11 @@ function BrowserTab({ data, record }: { data: RunData; record: NonNullable<RunDa
     </form>
     {navError !== null && <p class="notice bad" role="alert">{navError}</p>}
     {reply?.error && <p class="notice bad" role="alert">{reply.error}</p>}
-    {browser?.image !== undefined && (
+    {browser?.artifact !== undefined && (
       <div style="margin-top:8px;overflow:auto;max-height:520px;border:1px solid var(--line)">
         <img
           ref={imgRef}
-          src={`data:image/${browser.format ?? "png"};base64,${browser.image}`}
+          src={`/api/artifacts/${browser.artifact}`}
           width={browser.width}
           height={browser.height}
           alt="Screenshot of the in-sandbox browser"
@@ -1215,7 +1215,7 @@ function BrowserTab({ data, record }: { data: RunData; record: NonNullable<RunDa
       </div>
     )}
     {reply?.output !== undefined && (
-      <p class="meta" style="margin:6px 0 0">{reply.output}{browser?.image === undefined && " — navigate to a page to see it."}</p>
+      <p class="meta" style="margin:6px 0 0">{reply.output}{browser?.artifact === undefined && " — navigate to a page to see it."}</p>
     )}
     {(record.browserOps?.length ?? 0) > 0 && (
       <details class="disclosure" style="margin-top:8px">

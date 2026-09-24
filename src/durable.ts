@@ -872,6 +872,53 @@ export interface DurableAgentConfig {
    * step, only what a step returns, and replay returns the recorded text.
    */
   maxOutputTokens?: number;
+  /**
+   * This run's own event log, read (never written) by the C5 liveness probe so
+   * it checks the container the run will actually use next — the latest
+   * recorded `sandbox`/`*-restore` handle — rather than the first one. Absent
+   * keeps the old behaviour (probe the `sandbox` handle). A store read, not a
+   * step: it decides nothing about the step sequence.
+   */
+  loadEvents?: (runId: string) => Promise<readonly { type: string; name?: string; data?: unknown }[]>;
+}
+
+/**
+ * Which container the C5 liveness probe must check on this (re)play.
+ *
+ * Every resume after a park replays the workflow from the top, and the first
+ * recorded handle is the `sandbox` step's. A park that snapshots and restores
+ * DISPOSES that container once its successor exists, so probing it on the
+ * next resume fails a healthy run — run-af29bf4e (2026-09-23) parked for its
+ * plan (restore to a new container, original disposed), then parked for the
+ * merge, and the approve-merge resume died on "the sandbox this run recorded
+ * is no longer available" two seconds after the approval, before the replay
+ * ever reached merge-restore. The container the run will next touch is the
+ * LATEST main-workspace handle; and when a snapshot was recorded after it
+ * with no restore yet, the replay is about to restore from that snapshot, so
+ * there is nothing live to probe at all.
+ *
+ * Main-workspace names only: `attempt-N-*` groups own their containers.
+ */
+export function livenessProbeTarget(
+  events: readonly { type: string; name?: string; data?: unknown }[],
+): { probe: string } | { restorePending: true } | undefined {
+  let latest: string | undefined;
+  let snapshotAfter = false;
+  for (const e of events) {
+    if (e.type !== "step-completed" || e.name === undefined) continue;
+    if (e.name === "sandbox" || /^(plan|merge|turn-\d+)-restore$/.test(e.name)) {
+      const result = (e.data as { result?: unknown } | undefined)?.result;
+      const handle = typeof result === "string" ? result : (result as { handle?: unknown } | undefined)?.handle;
+      if (typeof handle === "string") {
+        latest = handle;
+        snapshotAfter = false;
+      }
+    } else if (/^(plan|merge|turn-\d+)-snapshot$/.test(e.name) && latest !== undefined) {
+      snapshotAfter = true;
+    }
+  }
+  if (latest === undefined) return undefined;
+  return snapshotAfter ? { restorePending: true } : { probe: latest };
 }
 
 export { CHANGE_EVENT, MERGE_EVENT, PLAN_EVENT } from "./plan.js";
@@ -1016,13 +1063,27 @@ export function durableAgent(
       // Setup-only replay can finish from recorded checks after its workspace
       // was released. Unfinished commands still fail if the sandbox is gone.
       if (config.executor.isolated === true && input.environmentCheckOnly !== true) {
-        const alive = await executor.exec("true", { timeoutMs: 15_000 }).then(
-          (r) => r.exitCode === 0,
-          () => false,
-        );
+        // Probe the container the run will use next, not the first one it
+        // ever had (see livenessProbeTarget). An unreadable log falls back to
+        // the recorded `sandbox` handle, which is the old behaviour.
+        const target =
+          config.loadEvents === undefined
+            ? undefined
+            : await config.loadEvents(ctx.runId).then(livenessProbeTarget, () => undefined);
+        const probed = target !== undefined && "probe" in target ? target.probe : handle;
+        const alive =
+          target !== undefined && "restorePending" in target
+            ? true
+            : await config.executor
+                .attach(probed)
+                .exec("true", { timeoutMs: 15_000 })
+                .then(
+                  (r) => r.exitCode === 0,
+                  () => false,
+                );
         if (!alive) {
           throw new Error(
-            `the sandbox this run recorded (${handle}) is no longer available — it has almost certainly outlived its TTL ` +
+            `the sandbox this run recorded (${probed}) is no longer available — it has almost certainly outlived its TTL ` +
               `(SHIP_SANDBOX_TTL_SEC). A durable run replays its recorded container rather than creating a new one, and ` +
               `there is no snapshot to restore from unless the run parked for an approval. Re-enqueue the task; the run's ` +
               `log is intact and explains what it had done.`,

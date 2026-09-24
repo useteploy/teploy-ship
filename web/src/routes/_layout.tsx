@@ -1,4 +1,6 @@
 import { DESIGN_CSS } from "../lib/design.js";
+import { dashboardCsp } from "../lib/csp.js";
+import { previewFrameBase } from "../lib/preview-frame.server.js";
 import type { ComponentChildren } from "preact";
 import faviconUrl from "../favicon.svg?url";
 import type { MiddlewareFn } from "@neutron-build/core";
@@ -162,26 +164,14 @@ export const middleware: MiddlewareFn = async (request, _context, next) => {
  * decision this surface should be making rather than inheriting.
  *
  * The CSP allows inline styles and scripts because the app ships both (the live
- * updater and the inline stylesheet); it still forbids loading anything from
- * another origin, which is the part that matters for a self-hosted console.
+ * updater and the inline stylesheet); it still forbids loading script, style
+ * or connections from another origin, which is the part that matters for a
+ * self-hosted console. The one framed origin is the configured tailnet
+ * preview base, for the run page's preview panel — see lib/csp.ts.
  */
 function withSecurityHeaders(response: Response, request: Request): Response {
   const headers = new Headers(response.headers);
-  headers.set(
-    "content-security-policy",
-    [
-      "default-src 'self'",
-      "base-uri 'self'",
-      "form-action 'self'",
-      "frame-ancestors 'none'",
-      "object-src 'none'",
-      "img-src 'self' data: https: http:",
-      "media-src 'self' https: http:",
-      "style-src 'self' 'unsafe-inline'",
-      "script-src 'self' 'unsafe-inline'",
-      "connect-src 'self'",
-    ].join("; "),
-  );
+  headers.set("content-security-policy", dashboardCsp(previewFrameBase()));
   headers.set("x-content-type-options", "nosniff");
   headers.set("x-frame-options", "DENY");
   // Plain-HTTP browsers may send Origin: null under no-referrer. Keep the

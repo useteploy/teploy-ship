@@ -43,3 +43,14 @@ test("artifacts require authentication and support bounded video byte ranges", a
   assert.equal((await response(id, true, "bytes=99-")).status, 416);
   assert.equal((await response("../secret")).status, 404);
 });
+
+test("takeover screenshots (PNG or the JPEG fallback) are served through the same authenticated route", async () => {
+  const runtime = await shipRuntime();
+  const jpeg = Buffer.from([255, 216, 255, 224, 0, 16, 74, 70, 73, 70]);
+  const id = await runtime.artifacts!.put("takeover-run-1.jpg", jpeg);
+  assert.equal((await response(id, false)).status, 401);
+  const ok = await response(id);
+  assert.equal(ok.status, 200);
+  assert.equal(ok.headers.get("content-type"), "image/jpeg");
+  assert.deepEqual(Buffer.from(await ok.arrayBuffer()), jpeg);
+});
