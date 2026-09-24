@@ -457,3 +457,17 @@ The earlier BROWSER-display live-proof TODO above is superseded by the
 2026-09-24 live-ops receipt: image storage, authenticated retrieval and the
 rendered image reference were confirmed on `b06a1f0`. The combined two-park
 resume proof remains pending.
+
+
+## 2026-09-24 — browser keyboard focus across per-action restarts
+
+The maintained live browser proof exposed lost focus: click → type → Enter
+never submitted the form, although captures/navigation worked. The driver's
+intentional per-action reload preserves site storage but lost the active
+control. Fixed locally by restoring a bounded selector/selection and scroll
+on the same URL without replaying clicks; navigation clears the saved focus.
+The DOM still reloads each action, as the panel states. The driver now refreshes
+on every operation so existing sessions receive fixes. Real Chromium proof
+passed all actions after the fix; before/after logs are under evals/receipts.
+Rollout pending. The live proof script also now uses sandboxProvider and
+artifact-backed screenshots rather than its stale SDK/inline-image wiring.

@@ -1,4 +1,4 @@
-# Quickstart — first pull request in about ten minutes
+# Quickstart — your first tested pull request
 
 This is the shortest honest path from nothing to *a pull request Ship opened,
 carrying the test result that proves it*. It skips the gateway, the sandbox
@@ -51,7 +51,7 @@ project on the dashboard. Skip to step 5.
 Measured on a clean box (2026-09-24, one 2-cpu container as laptop and
 server): `install.sh` took 18 minutes, 13.6 of them building the sandbox
 images it now skips without a daemon; the first run on a small repository
-took under a minute from enqueue to pull request. The image-less install has
+took under a minute from enqueue to pull request. The install without sandbox images has
 not been timed end to end yet.
 
 The rest of this page is the same thing by hand, for when you want to see each

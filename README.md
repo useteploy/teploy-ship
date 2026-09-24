@@ -49,7 +49,8 @@ TTLs too. Config defaults live in `~/.config/teploy-ship/config.json`
 
 Clean VM to a working Ship: provisions the server, generates the secrets that
 should never be shared between installs, asks for the two only you can supply,
-builds the sandbox images on the server, deploys. Around ten minutes.
+builds Ship and deploys. It builds sandbox images only when a sandbox daemon
+is installed. See the quickstart for measured timings.
 
 A second box joins the Ship you already have rather than becoming another one:
 
@@ -66,7 +67,7 @@ unless all of them answered. It never fetches credentials over the network; you
 carry them in the bundle, and the reasoning is in `src/join.ts`.
 
 **First time? [docs/QUICKSTART.md](docs/QUICKSTART.md)** — nothing to a pull
-request that carries its test result, in about ten minutes, skipping everything
+request that carries its test result, skipping everything
 you do not need to see the loop work.
 
 The full bring-up — dashboard + worker + Nucleus via one `teploy

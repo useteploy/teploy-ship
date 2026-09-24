@@ -4,9 +4,9 @@
 #   ./install.sh --host 203.0.113.10 --user root mybox
 #
 # In order: provisions the server (teploy setup), collects secrets — generating
-# the ones it can, asking for the two it cannot — builds the sandbox images ON
-# the server from images/, builds Ship, and deploys. Ten minutes on a cold box,
-# most of it the sandbox image.
+# the ones it can, asking for the two it cannot — builds Ship and deploys.
+# Sandbox images are built only when a daemon is installed. See QUICKSTART
+# for measured timings; the latest minimal path still needs a clean timed pass.
 #
 # Moving to a SECOND host — the thing that was impossible before this script,
 # because Ship's secrets lived only in teploy's age store on one server and

@@ -221,7 +221,7 @@ if (kind === "close") {
 
 let state = { url: undefined, width: 1280, height: 800 };
 try { state = Object.assign(state, JSON.parse(readFileSync(STATE_FILE, "utf8"))); } catch {}
-if (kind === "navigate") state.url = action.url;
+if (kind === "navigate") { state.url = action.url; delete state.focus; delete state.scroll; }
 if (state.url === undefined || !isHttp(state.url)) fail("navigate to an http(s) URL first");
 if (kind === "viewport") { state.width = action.w; state.height = action.h; }
 
@@ -251,17 +251,48 @@ try {
   const page = context.pages()[0] ?? (await context.newPage());
   await page.goto(state.url, { timeout: 20000, waitUntil: "load" });
   await page.waitForTimeout(250);
+  // A fresh Chromium page loses focus even when the site's own storage
+  // restores its fields. Restore focus without replaying a click (which could
+  // submit a form or navigate twice), and only on the same URL.
+  if (kind !== "navigate" && page.url() === state.url) {
+    await page.evaluate(({ focus, scroll }) => {
+      if (scroll) window.scrollTo(scroll.x, scroll.y);
+      if (!focus || typeof focus.selector !== "string") return;
+      const element = document.querySelector(focus.selector);
+      if (!element || element.tagName !== focus.tag || element.getAttribute("name") !== focus.name) return;
+      element.focus({ preventScroll: true });
+      if (typeof focus.start === "number" && typeof element.setSelectionRange === "function") {
+        try { element.setSelectionRange(focus.start, focus.end); } catch {}
+      }
+    }, { focus: state.focus, scroll: state.scroll });
+  }
   if (kind === "click") await page.mouse.click(action.x, action.y);
   else if (kind === "type") await page.keyboard.type(action.text);
   else if (kind === "key") await page.keyboard.press(action.key);
   else if (kind === "scroll") await page.mouse.wheel(0, action.dy);
+  await page.waitForTimeout(250);
+  const continuity = await page.evaluate(() => {
+    const element = document.activeElement;
+    const scroll = { x: window.scrollX, y: window.scrollY };
+    if (!element || element === document.body || element === document.documentElement) return { scroll };
+    const parts = [];
+    for (let node = element; node && node !== document.documentElement && parts.length < 32; node = node.parentElement) {
+      if (node.id) { parts.unshift("#" + CSS.escape(node.id)); break; }
+      const index = [...node.parentElement.children].indexOf(node) + 1;
+      parts.unshift(node.tagName.toLowerCase() + ":nth-child(" + index + ")");
+    }
+    const selector = parts.join(" > ");
+    if (selector.length > 2000) return { scroll };
+    return { scroll, focus: { selector, tag: element.tagName, name: element.getAttribute("name"),
+      start: element.selectionStart, end: element.selectionEnd } };
+  });
   let image = await page.screenshot({ type: "png" });
   let format = "png";
   if (image.length * 4 > CAP * 3) { image = await page.screenshot({ type: "jpeg", quality: 60 }); format = "jpeg"; }
   const b64 = image.toString("base64");
   if (b64.length > CAP) fail("screenshot exceeds the " + CAP + "-character cap even as JPEG - narrow the viewport");
   state.url = page.url();
-  writeFileSync(STATE_FILE, JSON.stringify({ url: state.url, width: state.width, height: state.height }));
+  writeFileSync(STATE_FILE, JSON.stringify({ url: state.url, width: state.width, height: state.height, ...continuity }));
   reply({ ok: true, action: kind, url: state.url, width: state.width, height: state.height, format, image: b64 });
 } catch (e) {
   fail(e instanceof Error ? e.message : String(e));
@@ -280,8 +311,8 @@ export const BROWSER_EXCLUDES = [
 /**
  * The fenced exec command for one browser action: ensure the browser scratch
  * is excluded from the repository (same mechanism as .ship/flow-out — without
- * it the profile lands in git status and the pushed commit), write the driver
- * if missing (quoted heredoc — no shell interpolation of the source), then run
+ * it the profile lands in git status and the pushed commit), write the current driver
+ * (so a live session picks up fixes) (quoted heredoc — no shell interpolation of the source), then run
  * it with the base64 action as argv. The action rides argv, never the shell
  * command string, so typed text cannot inject.
  */
@@ -292,7 +323,7 @@ export function browserOpCommand(actionB64: string): string {
   return [
     "mkdir -p .ship",
     `${exclude} || true`,
-    "[ -f .ship/browser-driver.mjs ] || cat > .ship/browser-driver.mjs <<'SHIP_BROWSER_DRIVER_EOF'",
+    "cat > .ship/browser-driver.mjs <<'SHIP_BROWSER_DRIVER_EOF'",
     BROWSER_DRIVER_SOURCE.replace(/\n+$/, ""),
     "SHIP_BROWSER_DRIVER_EOF",
     `exec node .ship/browser-driver.mjs '${actionB64}'`,

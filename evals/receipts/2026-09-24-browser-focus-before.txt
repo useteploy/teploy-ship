@@ -1,0 +1,19 @@
+sandbox 01M3AK340PWE12YZXS5F8PAZ3F on image ship-sandbox-harness:dev
+ok - fixture site written and serving inside the sandbox
+run browser-proof-mug0dyi6 parked at plan approval
+ok - lease acquired through the mediated path
+ok - navigate returns the page URL
+ok - new screenshot carries its retention deadline
+ok - a real PNG screenshot came back (6165 bytes)
+ok - default viewport is 1280x800
+ok - click on the link moved the URL (http://localhost:8000/page2.html)
+ok - the form page loads
+FAIL: typed text persisted via the profile and submitted (http://localhost:8000/echo.html)
+ok - scroll still returns a screenshot
+ok - viewport change applied
+ok - handback recorded
+ok - session outcome released
+ok - browser ops recorded in the session (8)
+ok - close disposition recorded at handback
+ok - profile wiped on close
+LIVE PROOF FAILED

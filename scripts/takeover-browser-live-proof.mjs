@@ -42,7 +42,7 @@ const scratch = mkdtempSync(join(tmpdir(), "ship-browser-proof-"));
 process.env.TEPLOY_SHIP_STATE = join(scratch, "state");
 process.env.SHIP_STORE = "file";
 
-const { SandboxExecutor } = await import("@neutron-build/agents");
+const { sandboxProvider } = await import("../dist/durable.js");
 const { fileRuntime } = await import("../dist/runtime.js");
 const { PLAN_EVENT } = await import("../dist/plan.js");
 const { requestWorkspace, serveWorkspaceRequests } = await import("../dist/workspace-requests.js");
@@ -58,10 +58,10 @@ const image = process.env.SHIP_SANDBOX_IMAGE ?? "ship-sandbox-node:dev";
 const PROOF_REPO = "https://github.com/teploy/browser-live-proof";
 
 const runtime = fileRuntime();
-const executor = await SandboxExecutor.start({
+const executor = sandboxProvider({
   baseURL: url,
   token,
-  create: { image, network: "none" }, // the app-under-test case: in-sandbox only
+  image, network: "none", ttlSec: 900, // the app-under-test case: in-sandbox only
 });
 const runId = `browser-proof-${Date.now().toString(36)}`;
 const assert = (claim, what) => {
@@ -82,8 +82,9 @@ async function op(kind, extra) {
 }
 const browser = (action) => op("takeover-browser", { browser: JSON.stringify(action) });
 
+let handle;
 try {
-  const { handle } = await executor.create({});
+  ({ handle } = await executor.create({}));
   console.log(`sandbox ${handle} on image ${image}`);
   const site = await executor.attach(handle).exec(
     [
@@ -130,7 +131,9 @@ try {
 
   const page1 = await browser({ action: "navigate", url: "http://localhost:8000/" });
   assert(page1.browser?.url === "http://localhost:8000/", "navigate returns the page URL");
-  const png = Buffer.from(page1.browser?.image ?? "", "base64");
+  const capture = page1.browser?.artifact ? await runtime.artifacts.get(page1.browser.artifact) : null;
+  const png = Buffer.from(capture?.data ?? "", "base64");
+  assert(typeof capture?.expiresAt === "string", "new screenshot carries its retention deadline");
   assert(png.length > 8 && png[0] === 0x89 && png[1] === 0x50 && png[2] === 0x4e && png[3] === 0x47, `a real PNG screenshot came back (${png.length} bytes)`);
   assert((page1.browser?.width ?? 0) === 1280 && (page1.browser?.height ?? 0) === 800, "default viewport is 1280x800");
 
@@ -148,7 +151,7 @@ try {
   const submitted = await browser({ action: "key", key: "Enter" });
   assert((submitted.browser?.url ?? "").includes("q=hello"), `typed text persisted via the profile and submitted (${submitted.browser?.url})`);
   const scrolled = await browser({ action: "scroll", dy: 400 });
-  assert(scrolled.browser?.image !== undefined, "scroll still returns a screenshot");
+  assert(scrolled.browser?.artifact !== undefined, "scroll still returns a screenshot");
   const resized = await browser({ action: "viewport", w: 800, h: 600 });
   assert(resized.browser?.width === 800 && resized.browser?.height === 600, "viewport change applied");
 
@@ -162,9 +165,9 @@ try {
   const post = await executor.attach(handle).exec("ls /work/.ship/ 2>/dev/null; test ! -d /work/.ship/browser-profile && echo PROFILE_GONE", { timeoutMs: 15_000 });
   assert(post.stdout.includes("PROFILE_GONE"), "profile wiped on close");
 
-  if (!keep) await executor.destroy?.(handle).catch(() => {});
   console.log(process.exitCode === 1 ? "LIVE PROOF FAILED" : "LIVE PROOF PASSED");
 } finally {
+  if (!keep && handle) await executor.destroy?.(handle).catch(() => {});
   await runtime.close().catch(() => {});
   if (!keep) rmSync(scratch, { recursive: true, force: true });
   else console.log(`kept: sandbox + state under ${scratch}`);
