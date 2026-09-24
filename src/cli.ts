@@ -704,6 +704,26 @@ function warnIfUnsandboxed(sandboxConfigured: boolean, env: NodeJS.ProcessEnv = 
   );
 }
 
+/**
+ * Without a sandbox, run workspaces live under the state directory — so a
+ * worker that cannot write it fails every run at its first step. teploy
+ * bind-mounts `ship-data` from a host directory it creates root-owned while
+ * the image runs as uid 1000; the 2026-09-24 fresh-machine rerun hit exactly
+ * that. Said at boot, with the fix, rather than discovered per run.
+ */
+function warnIfStateUnwritable(): void {
+  const dir = join(stateDir(), "workspaces");
+  try {
+    mkdirSync(dir, { recursive: true });
+  } catch (error) {
+    process.stderr.write(
+      `${yellow("warning:")} cannot write ${dir} (${error instanceof Error ? error.message : String(error)}) — every run will fail ` +
+        `at its first step. This process runs as uid ${process.getuid?.() ?? "?"}; on a teploy deploy, ` +
+        `\`chown 1000:1000 /deployments/ship/volumes/ship-data\` on the server (install.sh does it).\n`,
+    );
+  }
+}
+
 async function makeExecutor(
   args: ReturnType<typeof parseArgs>,
   config: Config,
@@ -1976,6 +1996,7 @@ async function workerCommand(rest: string[]): Promise<void> {
       : undefined;
   const usingSandbox = resolveSandbox(args, config) !== undefined;
   warnIfUnsandboxed(usingSandbox);
+  if (!usingSandbox) warnIfStateUnwritable();
 
   const runtime = await makeRuntime(args, config);
   if (runtime.kind !== "nucleus") fail("worker needs --store nucleus");

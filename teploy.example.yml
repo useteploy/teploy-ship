@@ -62,7 +62,7 @@ env:
   # Run the repo's suite after the agent stops and put the result on the PR.
   # The command is detected from the repo (package.json test script, Makefile
   # test:, go.mod, Cargo.toml, pytest config). Without a sandbox daemon the
-  # suite runs inside the worker container, which carries node/npm/pnpm and
+  # suite runs inside the worker container, which carries node, npm and
   # git only — a Go or Python suite reports "not run" until you add the
   # sandbox daemon and its images (docs/DEPLOY.md, sandbox).
   SHIP_TESTS: "1"

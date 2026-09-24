@@ -350,6 +350,8 @@ say "writing teploy.install.yml"
   # worker-wide command that is wrong for every repo but one is no longer the
   # default. An explicit per-repo entry still wins over both.
   echo "  SHIP_TEST_COMMAND: \"\""
+  # The maintainer's trusted-delivery clone (teploy.yml): off on a new box.
+  echo "  SHIP_DELIVERY_DIR: \"\""
   echo "  SHIP_TESTS: \"1\""
   echo "  SHIP_MODEL: \"${model}\""
   echo "  SHIP_SANDBOX_IMAGE: \"${image}\""
@@ -369,6 +371,13 @@ if [ -n "${allowlist}" ]; then args+=("SHIP_REPO_ALLOWLIST=${allowlist}"); fi
 if [ -n "${SHIP_PUBLIC_URL:-}" ]; then args+=("SHIP_PUBLIC_URL=${SHIP_PUBLIC_URL}"); fi
 tp secret set "${args[@]}" > /dev/null
 note "${#args[@]} secrets set"
+
+# teploy creates the `ship-data` volume's host directory owned by root, and
+# the image runs as uid 1000 (node): without a sandbox daemon the worker's run
+# workspaces live there, and every run died at its first step with EACCES
+# (fresh-machine rerun, 2026-09-24). Create it with the right owner first.
+remote 'd=/deployments/ship/volumes/ship-data; if [ "$(id -u)" = 0 ]; then mkdir -p "$d" && chown 1000:1000 "$d"; else sudo -n mkdir -p "$d" && sudo -n chown 1000:1000 "$d"; fi' \
+  || note "WARNING: could not chown /deployments/ship/volumes/ship-data to 1000:1000 — do it yourself before the first run"
 
 say "deploying"
 tp deploy -d install

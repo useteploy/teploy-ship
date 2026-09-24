@@ -103,7 +103,7 @@ export async function action({ request }: { request: Request }): Promise<Respons
       const record = await diagnoseIncident(
         {
           config: runtime.config,
-          enqueue: (options) => enqueueRun(runtime, options),
+          enqueue: async (options) => { await enqueueRun(runtime, options); },
           model: defaultModel(),
           ...(me !== null ? { actor: actorFromPrincipal(me) } : {}),
         },
@@ -115,7 +115,7 @@ export async function action({ request }: { request: Request }): Promise<Respons
       const result = await authorizeRemediation(
         {
           config: runtime.config,
-          enqueue: (options) => enqueueRun(runtime, options),
+          enqueue: async (options) => { await enqueueRun(runtime, options); },
           model: defaultModel(),
           ...(me !== null ? { actor: actorFromPrincipal(me) } : {}),
         },

@@ -118,6 +118,13 @@ test("F17: explain names the cause family for egress, credential, missing repo a
     assert.match(e.nextStep, next);
     assert.doesNotMatch(e.nextStep, /fault in Ship/, "the old framing blamed Ship for the network");
   }
+  // Live shape (run-e59ba5b9, 2026-09-24 rerun): run-failed carries the error
+  // JSON-encoded, newlines escaped. The quote must be git's line, not the blob.
+  const encoded = JSON.stringify({ message: fail("remote: Not found.\nfatal: repository 'http://forge.example/tyler/missing.git/' not found") });
+  const live = diagnoseGitFailure(encoded);
+  assert.equal(live?.kind, "not-found");
+  assert.match(live!.cause, /\("fatal: repository '.*' not found"\)/);
+  assert.doesNotMatch(live!.cause, /git clone --depth/);
   assert.equal(diagnoseGitFailure("boom"), undefined, "not a git failure, no diagnosis");
   assert.equal(diagnoseGitFailure("git step failed (exit 128): git clone x\n")?.kind, "unknown");
 });
@@ -151,4 +158,14 @@ test("F15: ended and parked runs are left alone — neither needs a worker", () 
   assert.deepEqual(withWorkers(explainRun(done), done, [], now), explainRun(done));
   const parked = [started(), ev("step-completed", "sandbox"), ev("event-waiting", "turn-1-approval")];
   assert.deepEqual(withWorkers(explainRun(parked), parked, [], now), explainRun(parked));
+});
+
+// --- Rerun finding (2026-09-24): the no-sandbox path's /data ownership --------
+
+test("rerun: a run that died on EACCES under /data names the chown, not 'a fault in Ship'", () => {
+  const error = `{"message":"Step \\"sandbox\\" failed: EACCES: permission denied, mkdir '/data/workspaces/run-4bbf3e33'"}`;
+  const e = explainRun([started(), ev("run-failed", undefined, { error })]);
+  assert.match(e.headline, /cannot write its state directory/);
+  assert.match(e.nextStep, /chown 1000:1000 \/deployments\/ship\/volumes\/ship-data/);
+  assert.doesNotMatch(e.nextStep, /fault in Ship/);
 });

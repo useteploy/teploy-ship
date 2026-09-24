@@ -16,9 +16,18 @@ to see the loop work.
   [release](https://github.com/useteploy/teploy-cli/releases/latest)
   (`teploy_linux_amd64.tar.gz`; verify against the release's `checksums.txt`)
   and put it on your PATH.
-- An Anthropic API key. Any supported model works; this uses the default.
+- Node 22, pnpm 10 and git on the machine you run the install from — Ship's
+  `dist/` and `web/dist/` are built there, not on the server
+  (`corepack enable && corepack prepare pnpm@10 --activate`).
+- A model key. An Anthropic API key works as-is. A key for an
+  Anthropic-COMPATIBLE endpoint (z.ai's GLM route) works too, wired
+  differently — see "Model keys that are not Anthropic's" below.
 - A git token for the repository you want Ship to work in — a Forgejo access
   token or a GitHub PAT with `repo` scope.
+- `ssh` to the server working from this machine, with the server's keys in
+  `known_hosts` for **every** key type: teploy may negotiate ECDSA where your
+  own `ssh` used ED25519, and refuses the mismatch. `ssh-keyscan <server-ip>
+  >> ~/.ssh/known_hosts` (no `-t`) covers it.
 
 ---
 
@@ -26,13 +35,22 @@ to see the loop work.
 
 ```sh
 git clone <your-ship-remote> teploy-ship && cd teploy-ship
-./install.sh --host 203.0.113.10 --user root mybox
+./install.sh --host 203.0.113.10 --user root --allow https://github.com/your-org mybox
+# an Anthropic-compatible endpoint instead of Anthropic:
+#   ./install.sh ... --model-url https://api.z.ai/api/anthropic --model glm-5.3 mybox
 ```
 
 It provisions the server, generates `SHIP_WEB_TOKEN` / `SHIP_SESSION_SECRET` /
 `SHIP_WEBHOOK_SECRET`, asks for the two values only you can supply (a forge
-token and a model key), builds the sandbox images on the server, builds Ship,
-and deploys. Skip to step 5.
+token and a model key), builds Ship, and deploys. It builds the sandbox images
+only when a sandbox daemon is installed — nothing else uses them, and they were
+three quarters of the install's wall clock. `--allow` is the forge origin your
+token may be sent to; without it every repository is refused until you add a
+project on the dashboard. Skip to step 5.
+
+Measured on a clean box (2026-09-24, both Ship processes and the store on one
+2-cpu container): about 5 minutes for `install.sh` without images (18 with
+them), then under a minute for the first run on a small repository.
 
 The rest of this page is the same thing by hand, for when you want to see each
 piece.
@@ -58,8 +76,19 @@ pnpm install && pnpm run build
 than building from source on the server, so a missing `web/dist` fails the
 deploy rather than degrading it.
 
-Point `teploy.yml` at your server — change `server: smoke` to `server: mybox`,
-and `user:` to your ssh user.
+Then make the config yours — **from `teploy.example.yml`, not the repo's own
+`teploy.yml`**, which is the maintainer's production shape (gateway, sandbox
+host, host-bind mounts; stripping it by hand is ~13 edits and the first one
+missed crash-loops the worker):
+
+```sh
+cp teploy.example.yml teploy.yml     # then change the lines marked CHANGE
+teploy validate                      # parses it and checks the server
+```
+
+The example is the minimal shape: web, worker and the Nucleus store, tests on,
+no sandbox. The 2026-09-24 rerun deployed it with only the CHANGE lines edited
+and got a verified pull request from it.
 
 ## 3. Set the secrets
 
@@ -76,21 +105,34 @@ teploy secret set \
 
 Keep `SHIP_WEB_TOKEN` — it is your dashboard login.
 
-Two things to get right before `teploy deploy`:
+### Model keys that are not Anthropic's
 
-- **Start from `teploy.example.yml`, not the repo's own `teploy.yml`.** The
-  checked-in config is the maintainer's production shape (gateway, sandbox
-  host, scoped mounts); the by-hand path needs ~13 edits to strip it, and the
-  first missing one crash-loops the worker (`sandbox URL set but no token`).
-  `cp teploy.example.yml teploy.yml` and fill in the marked lines — the
-  example file IS the minimal shape, kept honest by the fresh-machine pass.
-  `./install.sh` does all of this for you.
-- **Model wiring depends on where the key is from.** An Anthropic key works
-  with `ANTHROPIC_API_KEY` alone. An Anthropic-COMPATIBLE endpoint (z.ai's
-  route) uses the gateway-style pair instead: `AI_GATEWAY_URL` +
-  `AI_GATEWAY_KEY` (= the endpoint key) and `SHIP_MODEL` — the exact working
-  shape is in `docs/MODELS.md` §2a; plain `ANTHROPIC_BASE_URL` is not read
-  by the adapter (found by the fresh-machine pass, 2026-09-23).
+An Anthropic key needs `ANTHROPIC_API_KEY` and nothing else. For an
+Anthropic-compatible endpoint, set the key as `AI_GATEWAY_KEY` instead and put
+these in `teploy.yml`'s `env:` (the example carries them commented out):
+
+```yaml
+AI_GATEWAY_URL: https://api.z.ai/api/anthropic
+SHIP_MODEL: glm-5.3                    # UNPREFIXED: the endpoint gets it verbatim
+SHIP_ANTHROPIC_WIRE_PREFIXES: glm      # speak Anthropic's wire to ids starting glm
+```
+
+Verified live on 2026-09-23 and 2026-09-24. `ANTHROPIC_BASE_URL` is **not**
+read — setting it sends your key to api.anthropic.com (`invalid x-api-key`) —
+and `SHIP_MODEL: anthropic/glm-5.3` reaches z.ai as `anthropic/glm-5.3`
+(`Unknown Model`). `install.sh --model-url` writes exactly this shape.
+
+### One server-side step
+
+teploy creates the `ship-data` volume's host directory owned by root, and
+Ship's image runs as uid 1000. Without a sandbox daemon every run's workspace
+lives there, so every run would die at its first step (`EACCES … /data`):
+
+```sh
+ssh root@203.0.113.10 'mkdir -p /deployments/ship/volumes/ship-data && chown 1000:1000 /deployments/ship/volumes/ship-data'
+```
+
+`install.sh` does this for you; the worker warns at boot if it was missed.
 
 ## 4. Deploy
 
@@ -115,26 +157,30 @@ The dashboard is the natural first surface: open `http://<server>:7460`, sign
 in with `SHIP_WEB_TOKEN`, and compose the task on the Inbox — the project,
 its settings and its approvals are all right there.
 
-From a terminal, the same ask is one command — run it FROM THE DEPLOYMENT
-(`docker exec -it ship-worker-<sha> teploy-ship enqueue … --store nucleus`)
-or wherever your CLI shares the deployment's store:
+From a terminal, the same ask is one command, run INSIDE the worker
+container — it has the deployment's store, token and settings, and the image's
+entrypoint is `node /app/dist/cli.js` (there is no `teploy-ship` on its PATH):
 
 ```sh
-teploy-ship enqueue "The failing test in parser_test.go describes the bug. Fix it." \
-  --repo https://github.com/your-org/your-repo
+ssh root@203.0.113.10 'docker exec $(docker ps -qf name=ship-worker) node /app/dist/cli.js \
+  enqueue "The failing test in parser_test.go describes the bug. Fix it." \
+  --repo https://github.com/your-org/your-repo --store nucleus'
 ```
 
-A bare `enqueue` on your laptop writes to the CLI's LOCAL file store — the
-deployment's worker never sees it, and nothing bridges the two (the
-fresh-machine pass hit exactly this: runs queued, nothing picking them up).
-`teploy-ship runs --store nucleus` (with the deployment's `NUCLEUS_URL`) or
-the dashboard is the truth.
+It answers with the run id and a `tests:` line saying which suite the run will
+run (or that it will run none, and why). A bare `teploy-ship enqueue` on your
+laptop writes to the CLI's LOCAL file store — the deployment's worker never
+sees it. The store is not published outside the server's docker network, on
+purpose; `--store nucleus --nucleus-url …` from elsewhere needs a route to it
+(a second worker does this — `teploy-ship join`), and such an enqueue inherits
+the evidence asks the deployment's worker published at boot.
 
-That queues a durable run. A worker picks it up within a few seconds:
+That queues a durable run. A worker picks it up within a few seconds; the
+same `docker exec … node /app/dist/cli.js` prefix runs these:
 
 ```sh
-teploy-ship runs                    # what exists, and its state
-teploy-ship explain <run-id>        # what happened, and what to do about it
+teploy-ship runs --store nucleus                  # what exists, and its state
+teploy-ship explain <run-id> --store nucleus      # what happened, and what to do about it
 ```
 
 `explain` is the one to reach for when a run does not do what you expected. It
@@ -152,8 +198,15 @@ suite itself, after the agent stops and before the push**, and puts the result
 in the pull request body. The agent's own account of its testing is not used —
 models get that wrong, which is why the check exists.
 
+`teploy.example.yml` and `install.sh` already set `SHIP_TESTS=1`; the first
+run above carries a Verification section when the repo's suite can run where
+the run executes. Without a sandbox daemon that is the worker container, which
+has node, npm and git and nothing else: a JavaScript suite runs, a Go or Python
+suite reports "not run" (never "failed") until the sandbox daemon and its
+images are in (`docs/DEPLOY.md` — the sandbox daemon). To turn it on by hand:
+
 ```sh
-teploy secret set SHIP_TESTS=1 SHIP_TEST_COMMAND="go test ./..."
+teploy secret set SHIP_TESTS=1
 teploy deploy
 ```
 
@@ -226,9 +279,13 @@ sandbox TTLs, firewall ports).
 <run-id>` names what it asked for; approve from the dashboard or with
 `teploy-ship approve <run-id>`.
 
-**The run never starts.** The worker fails closed when it cannot reach its
-store: `docker logs ship-worker-<sha>` shows `tick failed (store unreachable?)`.
-A worker unsure of its policy launches nothing, deliberately.
+**The run never starts.** `teploy-ship explain <run-id>` says whether any
+worker is alive. Two causes: the worker is up but cannot reach its store
+(`docker logs ship-worker-<sha>` shows `tick failed (store unreachable?)` — a
+worker unsure of its policy launches nothing, deliberately), or the worker
+exits at boot and docker restarts it forever (`docker ps -a` shows
+`Restarting`; the log names the check, usually `a sandbox URL is set but no
+token`).
 
 **"repository not allowed".** `SHIP_REPO_ALLOWLIST` does not cover the origin
 you passed. This is the guard working, not a bug.

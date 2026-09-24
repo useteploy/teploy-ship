@@ -150,9 +150,12 @@ const GIT_NETWORK =
  */
 export function diagnoseGitFailure(error: string): GitDiagnosis | undefined {
   if (!/git step failed \(exit/.test(error)) return undefined;
+  // A run-failed error arrives JSON-encoded, its newlines escaped, so split on
+  // both forms — quoting the whole blob would quote the command, not git.
+  const lines = error.split(/\n|\\n/);
   const quote = (re: RegExp): string => {
-    const line = error.split("\n").find((l) => re.test(l));
-    return line !== undefined ? ` ("${brief(line, 120)}")` : "";
+    const line = lines.find((l) => re.test(l));
+    return line !== undefined ? ` ("${brief(line.replace(/\\"/g, '"').replace(/["}]+$/, ""), 120)}")` : "";
   };
   const refusal = detectEgressRefusal(error);
   if (refusal !== null) {
@@ -182,7 +185,7 @@ export function diagnoseGitFailure(error: string): GitDiagnosis | undefined {
         "Test the forge from where the run executes, not from your shell. Inside a sandbox, git goes through the run's egress proxy on the sandbox bridge's gateway on a per-run port; a host firewall (teploy setup enables UFW) that drops traffic from the sandbox subnet makes every clone hang until this timeout — allow the subnet (docs/TROUBLESHOOTING.md, firewall). Otherwise check DNS and that the forge is up.",
     };
   }
-  const said = error.split("\n").slice(1).join(" ").trim();
+  const said = lines.slice(1).join(" ").replace(/["}]+$/, "").trim();
   return {
     kind: "unknown",
     cause: said !== "" ? `git said: ${brief(said, 200)}` : "git exited non-zero and printed nothing.",
@@ -268,6 +271,25 @@ function explainDigest(d: Digest): RunExplanation {
       stoppedAt: gitFailure.cause,
       nextStep: gitFailure.next,
       evidence: [...evidence, `git: ${gitFailure.kind}`],
+      needsAttention: true,
+    };
+  }
+
+  // 2b. The worker could not write its own state directory — the no-sandbox
+  // path's workspaces live there. Found by the 2026-09-24 fresh-machine rerun:
+  // teploy bind-mounts the `ship-data` volume from a host directory it creates
+  // root-owned, the image runs as uid 1000, and every run died at `sandbox`
+  // with EACCES under a headline that blamed Ship.
+  const stateFault = d.failedOutright ?? d.failedStep?.error ?? "";
+  if (d.status === undefined && /EACCES[^\n]*'\/data\b/.test(stateFault)) {
+    return {
+      headline: "The worker cannot write its state directory (/data).",
+      tried,
+      stoppedAt: `The workspace could not be created: ${brief(stateFault)}`,
+      nextStep:
+        "The image runs as uid 1000, and teploy creates the `ship-data` volume's host directory owned by root. On the server: " +
+        "`chown 1000:1000 /deployments/ship/volumes/ship-data` (install.sh does this for you), then enqueue the task again.",
+      evidence,
       needsAttention: true,
     };
   }

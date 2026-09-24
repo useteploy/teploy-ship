@@ -93,6 +93,26 @@ figures above were taken with `thinking 32768` on the benchmark harness,
 which the product path never sent — another way the 70% describes a
 configuration the product did not run.
 
+## 2b. Wiring an Anthropic-compatible endpoint (z.ai), checked 2026-09-24
+
+The direct path (`anthropic/<id>` with no `AI_GATEWAY_URL`) always calls
+api.anthropic.com; `ANTHROPIC_BASE_URL` is not read. An Anthropic-compatible
+endpoint is therefore wired the gateway way, with the endpoint standing in for
+the gateway:
+
+```yaml
+env:
+  AI_GATEWAY_URL: https://api.z.ai/api/anthropic
+  SHIP_MODEL: glm-5.3                    # unprefixed: sent verbatim
+  SHIP_ANTHROPIC_WIRE_PREFIXES: glm      # model ids that speak Anthropic's wire
+# secret: AI_GATEWAY_KEY=<the endpoint's key>
+```
+
+`SHIP_MODEL: zai/glm-5.3` is for teploy-gateway, which translates the prefix;
+a raw endpoint answers `Unknown Model` to any prefixed id. Verified by the
+fresh-machine passes (run-b986b39b on 2026-09-23, run-9aa532d0 on 2026-09-24).
+`install.sh --model-url <url> --model <id>` writes this shape.
+
 ## 3. The known limitation, named plainly
 
 Ship's prompt and nudges were written and tuned while only ever being observed
