@@ -3,6 +3,32 @@
 #   docker run … teploy-ship worker   (executes durable runs)
 # Built by deploy/build-image.sh.
 #
+# The teploy CLI, built from a pinned SOURCE COMMIT (see the runtime stage for
+# why the image carries it at all).
+#
+# Why source, not the release download this used to be: the tailnet preview
+# mode (the 2026-09-24 preview ruling — `preview deploy --base-domain/--http-only/
+# --allow-ip`, advertised as the `preview-exposure` capability) landed in
+# teploy-cli de73a22, and no release carries it yet (latest v0.1.37). Ship
+# refuses a tailnet preview on a CLI without the capability, so a release pin
+# would leave SHIP_PREVIEW_TAILNET_IP unusable. Cutting a CLI release is the
+# owner's call, not a Ship deploy's — so the pin is a full commit SHA on the
+# public GitHub main, which is as content-addressed as a checksum, and the
+# build proves the capability before the image can exist.
+#
+# Go back to the checksum-verified release download (git history of this
+# file, pre-L8) once a release at or after TEPLOY_COMMIT exists.
+FROM golang:1.26-bookworm@sha256:a688600ca24f8a4d3ca77f95b0dd40704a9fc787c826660eb7ba0b641b8b175d AS teploy-cli
+ARG TEPLOY_COMMIT=006032680a7dd0d065da90153a63e6793b1f62e1
+ARG TEPLOY_VERSION_LABEL=0.1.37-next.0060326
+RUN set -eux; \
+    git clone --quiet --filter=blob:none --no-checkout https://github.com/useteploy/teploy-cli /src; \
+    cd /src; \
+    git checkout --quiet --detach "${TEPLOY_COMMIT}"; \
+    test "$(git rev-parse HEAD)" = "${TEPLOY_COMMIT}"; \
+    CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${TEPLOY_VERSION_LABEL}" -o /out/teploy ./cmd/teploy; \
+    /out/teploy version --json | grep -q '"preview-exposure"'
+
 # Pinned by digest, not by tag. `node:22-slim` moves, so two builds of the same
 # commit produced different images and "what CI tested" was only loosely
 # related to "what production runs". Refresh deliberately:
@@ -15,9 +41,8 @@ FROM node:22-slim@sha256:f32b81066cde10a75dbac96646099533316d94bac4150c55da1636e
 # out to `ssh` for its transport (the CLI's own SSH is Go-native, but the
 # rsync path is not), so the worker role needs both for preview deploys and
 # delivery execution (found live 2026-09-22: the shipped CLI could not build
-# from inside the image). curl only to fetch the teploy CLI below, then
-# removed — it is not part of the runtime.
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl rsync openssh-client \
+# from inside the image).
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates rsync openssh-client \
   && rm -rf /var/lib/apt/lists/* \
   && corepack enable
 
@@ -39,32 +64,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
 # openssh-client in the apt list above. It reads ~/.ssh/known_hosts either
 # way and fails closed when it cannot, so mount one.
 #
-# Needs >= v0.1.36: host-bind volume keys (the delivery-copy mounts), and
-# the known_hosts mismatch diagnostics. Refreshed from 0.1.27 on 2026-09-22
-# when the delivery execution path made the bundled CLI load-bearing.
-ARG TEPLOY_VERSION=0.1.36
-ARG TARGETARCH
-RUN set -eux; \
-    case "${TARGETARCH:-amd64}" in \
-      amd64) arch=amd64 ;; \
-      arm64) arch=arm64 ;; \
-      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
-    esac; \
-    base="https://github.com/useteploy/teploy-cli/releases/download/v${TEPLOY_VERSION}"; \
-    cd /tmp; \
-    curl -fsSL -o teploy.tar.gz "${base}/teploy_linux_${arch}.tar.gz"; \
-    curl -fsSL -o checksums.txt "${base}/checksums.txt"; \
-    # Verify before extracting, not after — the CLI's own install docs were
-    # changed to do this for the same reason (26dab76).
-    grep " teploy_linux_${arch}.tar.gz\$" checksums.txt | sed "s|  .*|  teploy.tar.gz|" | sha256sum -c -; \
-    tar -xzf teploy.tar.gz teploy; \
-    install -m 0755 teploy /usr/local/bin/teploy; \
-    rm -f teploy.tar.gz checksums.txt teploy; \
-    # Prove the binary runs here rather than discovering it at deploy time —
-    # a release binary that could not start inside a slim base is a mistake
-    # this stack has shipped before.
-    teploy version; \
-    apt-get purge -y --auto-remove curl
+# Needs >= v0.1.36 (host-bind volume keys for the delivery-copy mounts, the
+# known_hosts mismatch diagnostics) and, for tailnet previews, the
+# `preview-exposure` capability — which is why it is built from source in the
+# `teploy-cli` stage above rather than downloaded from a release.
+COPY --from=teploy-cli /out/teploy /usr/local/bin/teploy
+# Prove the binary runs here rather than discovering it at deploy time — a
+# binary that could not start inside a slim base is a mistake this stack has
+# shipped before.
+RUN teploy version --json
 
 WORKDIR /app
 

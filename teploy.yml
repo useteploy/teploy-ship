@@ -264,6 +264,30 @@ env:
   # saw "p95 up 2653ms" under a change that could not have caused it.
   OBSERVE_REPO: tyler/fylun
 
+  # --- Tailnet previews (the 2026-09-24 preview ruling) -------------------
+  # SHIP_PREVIEW_DIR is a preview ROOT: one clone per declared preview app at
+  # <dir>/<app> (resolvePreviewTarget in src/deploy.ts), origin = the forge's
+  # bare repo bind-mounted read-only below, the same shape as the delivery copy.
+  # SHIP_PREVIEW_TAILNET_IP is the preview TARGET's tailnet IPv4. It implies
+  # base `<ip>.sslip.io` + plain HTTP + a 100.64.0.0/10 allowlist, so a preview
+  # answers at http://preview-<slug>-<hex8>.100.107.192.39.sslip.io and the
+  # same Host header sent to any non-tailnet address gets 403. It is app-level
+  # env, so the web process gets it too — that is what lets the run page's CSP
+  # frame the preview (without it the panel only links out).
+  #
+  # The target is compute-1, NOT this box. A preview runs unreviewed
+  # model-authored code, and every container here shares the `teploy` docker
+  # network with ship-nucleus (NUCLEUS_ALLOW_NO_AUTH): a preview on infra-home
+  # could write this store directly, approvals included. compute-1 already runs
+  # model-authored code (the sandboxes), and nothing else answers :80 there.
+  # Its Caddy publishes :80 through iptables DNAT, so the allowlist sees the
+  # real client address (measured 2026-09-24: tailnet 200, LAN address 403).
+  SHIP_PREVIEW_DIR: /srv/ship-preview
+  SHIP_PREVIEW_TAILNET_IP: 100.107.192.39
+  # Main's URL per preview app, for the visual rung (tailnet mode cannot derive
+  # it from the preview host).
+  SHIP_PREVIEW_MAIN_URL: ship-preview-proof=http://100.107.192.39/
+
 # Durable state for the worker's file paths (nucleus mode needs little,
 # but the image declares VOLUME /data).
 volumes:
@@ -272,12 +296,20 @@ volumes:
   # The worker executes APPROVED deliveries against this clone of the
   # repository being delivered: it fetches the merged SHA into a detached
   # worktree here, builds and deploys from there, and reads the target back
-  # through the same copy's teploy.yml. Deploy credentials (the dedicated
-  # scratch key in /srv/ship-delivery/ssh) stay on the worker and never
+  # through the same copy's teploy.yml. Deploy credentials (the worker's key
+  # in /srv/ship-delivery/ssh) stay on the worker and never
   # enter an agent sandbox. The clone's origin is the forge's own bare repo
   # bind-mounted read-only — fetching needs no credential and cannot drift
   # from what the forge actually holds. Both mounts land in web too (volumes
   # are app-level); web has no code path that reads them.
   /srv/ship-delivery/ship-journey-proof: /srv/ship-delivery/ship-journey-proof
   /deployments/forgejo/volumes/data/git/repositories/tyler/ship-journey-proof-20260921.git: /srv/forge-bare/ship-journey-proof.git:ro
+  # --- Preview root (tailnet previews, see env above) -------------------
+  /srv/ship-preview: /srv/ship-preview
+  /deployments/forgejo/volumes/data/git/repositories/tyler/ship-preview-proof.git: /srv/forge-bare/ship-preview-proof.git:ro
+  # The worker's ONE SSH identity (the CLI reads ~/.ssh/id_ed25519) plus
+  # known_hosts for every target it deploys to. Rotated 2026-09-24 (L8): the
+  # wave-9 delivery scratch key was retired (authorized nowhere); the current
+  # key is authorized on compute-1 for previews only. A delivery test against
+  # another target authorizes this key there and revokes it after.
   /srv/ship-delivery/ssh: /home/node/.ssh:ro
