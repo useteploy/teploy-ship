@@ -8,7 +8,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   loadManifest, validateManifest, buildDryRun, parseArgs, spendGateDecision,
-  EXIT, PROBES, SCENARIO_TYPES
+  EXIT, PROBES, SCENARIO_TYPES, outcomeOf
 } from './eval-journeys-lib.mjs';
 
 const repoRoot = resolve(fileURLToPath(import.meta.url), '..', '..');
@@ -36,6 +36,28 @@ test('the real manifest covers all 12 S02 types once, across 3 families, with bo
   assert.ok(negatives.every(n => typeof n.trap === 'string' && n.trap.length > 0));
   const applied = new Set(manifest.scenarios.flatMap(s => s.probes));
   assert.deepEqual([...applied].sort(), [...PROBES].sort());
+});
+
+test('ship blocks: every scenario names a journey matching its shape; same-pr setup is complete', async () => {
+  const manifest = await realManifest();
+  const bad = structuredClone(manifest);
+  bad.scenarios.find(s => s.id === 'pj-s-question').ship.journey = 'change';
+  bad.scenarios.find(s => s.id === 'pj-s-copy').ship = undefined;
+  delete bad.scenarios.find(s => s.id === 'pj-c-same-pr').ship.setup.reviewTask;
+  bad.scenarios.find(s => s.id === 'pj-c-same-pr').ship.setup.prPatch = 'patches/nope.patch';
+  const { errors } = await validateManifest(bad, { repoRoot, graderDir });
+  assert.ok(errors.some(e => e.includes('pj-s-question: ship.journey change does not match a read-only scenario')), errors.join('\n'));
+  assert.ok(errors.some(e => e.includes('pj-s-copy: ship.journey must be one of')));
+  assert.ok(errors.some(e => e.includes('pj-c-same-pr: ship.setup.reviewTask is required')));
+  assert.ok(errors.some(e => e.includes('pj-c-same-pr: ship.setup.prPatch missing in the fixture')));
+});
+
+test('outcomeOf keeps pass, fail, unknown and harness-error apart', () => {
+  assert.equal(outcomeOf({ pass: true, reasons: [], endedBy: 'agent' }), 'pass');
+  assert.equal(outcomeOf({ pass: false, reasons: ['not-wired: x', 'not-wired: y'], endedBy: 'agent' }), 'unknown');
+  assert.equal(outcomeOf({ pass: false, reasons: ['not-wired: x', 'README wrong'], endedBy: 'agent' }), 'fail');
+  assert.equal(outcomeOf({ pass: false, reasons: [], endedBy: 'agent' }), 'fail');
+  assert.equal(outcomeOf({ pass: false, reasons: ['not-wired: x'], endedBy: 'harness-error' }), 'harness-error');
 });
 
 test('duplicate scenario ids are rejected', async () => {
@@ -106,8 +128,9 @@ test('argument parsing: unknown flag, relative grader dir, missing values', () =
   assert.ok(parseArgs(['--scenario']).errors.some(e => e.includes('requires a value')));
   assert.deepEqual(parseArgs(['--list']).mode, 'list');
   assert.deepEqual(parseArgs(['--scenario', 'pj-s-copy', '--dry-run']), {
-    mode: 'scenario', scenario: 'pj-s-copy', dryRun: true, graderDir: null, authorizeSpend: false,
-    adapter: 'mock', fixtureRoot: null, resultsRoot: null, shipRepo: null, errors: []
+    mode: 'scenario', scenario: 'pj-s-copy', scenarios: ['pj-s-copy'], dryRun: true, graderDir: null, authorizeSpend: false,
+    adapter: 'mock', fixtureRoot: null, resultsRoot: null, shipRepo: null, shipRepos: null,
+    shipIntake: 'request', repeat: 1, errors: []
   });
   assert.deepEqual(parseArgs(['--scenario', 'pj-s-copy', '--adapter', 'ship', '--ship-repo', 'https://forge/tyler/canary']).adapter, 'ship');
   assert.ok(parseArgs(['--adapter', 'telepathy']).errors.some(e => e.includes('unknown adapter')));

@@ -10,17 +10,24 @@
 //   node scripts/eval-journeys.mjs --list
 //   node scripts/eval-journeys.mjs --manifest [--grader-dir /abs/path]
 //   node scripts/eval-journeys.mjs --scenario <id> --dry-run
-//   node scripts/eval-journeys.mjs --scenario <id> --i-authorize-spend \
-//     [--adapter mock|ship] [--fixture-root <dir>] [--results-root <dir>] \
-//     [--grader-dir /abs/path] [--ship-repo <url>]
+//   node scripts/eval-journeys.mjs --scenario <id>[,<id>...|all] --i-authorize-spend \
+//     [--adapter mock|ship] [--repeat N] [--fixture-root <dir>] [--results-root <dir>] \
+//     [--grader-dir /abs/path] [--ship-repos /abs/repos.json] [--ship-repo <url>] \
+//     [--ship-intake request|scan]
+//
+// Several scenarios (or `all`) run sequentially into ONE eval run id per
+// repeat; `--repeat N` makes N such run ids. A scenario that could not be
+// executed is reported as not-run in the batch summary, distinct from a
+// recorded failure.
 import { join, resolve } from 'node:path';
-import { rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   repoRootFrom, loadManifest, validateManifest, buildDryRun,
-  parseArgs, spendGateDecision, createMockAdapter, createShipAdapter,
-  runScenario, AdapterRefusal, EXIT
+  parseArgs, spendGateDecision, createMockAdapter,
+  runScenario, nextRunId, AdapterRefusal, EXIT
 } from './eval-journeys-lib.mjs';
+import { createShipAdapter } from './eval-journeys-ship.mjs';
 
 const repoRoot = repoRootFrom(fileURLToPath(import.meta.url));
 const args = parseArgs(process.argv.slice(2));
@@ -67,9 +74,12 @@ if (args.mode === 'manifest') {
   die('runner: manifest invalid:\n  ' + errors.join('\n  '), EXIT.USAGE);
 }
 
-const scenario = manifest.scenarios.find(s => s.id === args.scenario);
-if (!scenario) {
-  die(`runner: unknown scenario ${args.scenario}; use --list`, EXIT.USAGE);
+const wanted = args.scenarios.length === 1 && args.scenarios[0] === 'all' ? manifest.scenarios.map(s => s.id) : args.scenarios;
+const scenarios = [];
+for (const id of wanted) {
+  const found = manifest.scenarios.find(s => s.id === id);
+  if (!found) die(`runner: unknown scenario ${id}; use --list`, EXIT.USAGE);
+  scenarios.push(found);
 }
 
 const gate = spendGateDecision(args);
@@ -78,7 +88,7 @@ if (gate.action === 'refuse') {
 }
 
 if (gate.action === 'dry-run') {
-  const plan = buildDryRun(manifest, scenario);
+  const plan = buildDryRun(manifest, scenarios[0]);
   console.log(JSON.stringify(plan, null, 2));
   console.error('runner: dry-run only — proved the wiring, ran nothing.');
   process.exit(EXIT.OK);
@@ -92,22 +102,49 @@ let adapter;
 if (args.adapter === 'mock') {
   adapter = createMockAdapter({ repoRoot });
 } else if (args.adapter === 'ship') {
-  adapter = createShipAdapter({ repo: args.shipRepo });
+  // A real agent run must never be graded by graders it could have read.
+  if (!args.graderDir) die('runner: the ship adapter requires --grader-dir /abs/path (graders copied out of the checkout)', EXIT.USAGE);
+  let repos = null;
+  if (args.shipRepos) {
+    try { repos = JSON.parse(readFileSync(args.shipRepos, 'utf8')); } catch (err) { die(`runner: cannot read --ship-repos: ${err.message}`, EXIT.USAGE); }
+  }
+  adapter = createShipAdapter({ repo: args.shipRepo, repos, intake: args.shipIntake });
 } else {
   die(`runner: unknown adapter ${args.adapter}`, EXIT.USAGE);
 }
 
-let execution;
-try {
-  execution = await runScenario({ repoRoot, manifest, scenario, adapter, graderDir, fixtureRoot, resultsRoot });
-} catch (err) {
-  if (err instanceof AdapterRefusal) die(err.message, EXIT.ADAPTER_REFUSED);
-  die(`runner: execution failed before recording: ${err.message}`, EXIT.USAGE);
+const batch = [];
+for (let r = 0; r < args.repeat; r++) {
+  const runId = nextRunId(resultsRoot);
+  const notRun = [];
+  for (const scenario of scenarios) {
+    let execution;
+    try {
+      execution = await runScenario({ repoRoot, manifest, scenario, adapter, graderDir, fixtureRoot, resultsRoot, runId });
+    } catch (err) {
+      const why = err instanceof AdapterRefusal ? err.message : `execution failed before recording: ${err.message}`;
+      console.error(`runner: ${scenario.id} NOT RUN — ${why}`);
+      notRun.push({ id: scenario.id, reason: why });
+      if (scenarios.length === 1) die(why, err instanceof AdapterRefusal ? EXIT.ADAPTER_REFUSED : EXIT.USAGE);
+      continue;
+    }
+    const { record, outDir } = execution;
+    rmSync(execution.workDir, { recursive: true, force: true });
+    const cost = record.cost.status === 'priced' ? `$${record.cost.amount}` : 'unknown';
+    console.error(`runner: ${runId} ${record.scenarioId} adapter=${record.adapter} outcome=${record.outcome} endedBy=${record.firstAttempt.endedBy} latencyMs=${record.latencyMs} cost=${cost} rescueNeeded=${record.rescue.needed}`);
+    console.error(`runner: record ${join(outDir, 'result.json')} — transcript preserved under ${join(outDir, 'preserve')}`);
+    if (scenarios.length === 1 && args.repeat === 1) console.log(JSON.stringify(record, null, 2));
+  }
+  if (notRun.length > 0) {
+    const summaryPath = join(resultsRoot, runId, 'summary.json');
+    const rollup = existsSync(summaryPath) ? JSON.parse(readFileSync(summaryPath, 'utf8')) : { runId, adapter: adapter.name, scenarios: [], totals: {} };
+    rollup.notRun = notRun;
+    mkdirSync(join(resultsRoot, runId), { recursive: true });
+    writeFileSync(summaryPath, JSON.stringify(rollup, null, 2) + '\n');
+  }
+  batch.push({ runId, notRun });
 }
-
-const { record, outDir } = execution;
-rmSync(execution.workDir, { recursive: true, force: true });
-console.error(`runner: scenario ${record.scenarioId} adapter=${record.adapter} pass=${record.firstAttempt.pass} endedBy=${record.firstAttempt.endedBy} latencyMs=${record.latencyMs} cost=${record.cost.status}`);
-console.error(`runner: record ${join(outDir, 'result.json')} — transcript preserved under ${join(outDir, 'preserve')}`);
-console.log(JSON.stringify(record, null, 2));
+if (scenarios.length > 1 || args.repeat > 1) {
+  console.log(JSON.stringify({ batch, scenarios: scenarios.map(s => s.id) }, null, 2));
+}
 process.exit(EXIT.OK);

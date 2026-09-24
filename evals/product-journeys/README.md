@@ -7,17 +7,18 @@ graders under `graders/`; results land under `results/`.
 
 **Status — read before quoting anything here:**
 
-- **No baseline numbers exist.** Nothing has run against a model. There
-  is no pass rate, no latency figure, no cost figure for any scenario below.
-- **Fixtures are minimal scaffolds.** Three static files; a zero-dependency
-  Node API with seeded defects; a small Python service with a deliberately
-  false README claim. They are instruments, not products.
-- **Execution is wired, gated, and mock-validated only.** The runner's real
-  execution path (staging, agent adapter, grading, result records) is
-  complete in code but refuses to run without `--i-authorize-spend`, and the
-  ship adapter separately refuses without its env contract. Everything so
-  far is validated against the mock adapter — the first live run is the
-  orchestrator's canary, one scenario, never a batch (see "Execution").
+- **A partial live baseline exists**, preserved in `results/eval-20260924-1..11`:
+  question, plan and review runs only. It is not a twelve-scenario baseline.
+  Historical records keep their original grades; new grader tests also check
+  the saved transcripts without changing those records.
+- **The adapter supports change requests and same-PR revisions.** It uses the
+  product's request forms, checks fixture identity, captures the PR tree for
+  independent grading, and denies merge requests after capture. The new
+  request path is locally tested; a live canary is required before a batch.
+- **Plan and review graders now read the transcript.** Review checks are
+  lexical and retain matching evidence; they are not semantic proof.
+- **Recovery and permissions probes remain separate work.** A manifest entry
+  does not mean a probe ran; result records report `probesApplied` explicitly.
 
 ## The 12 scenarios
 
@@ -151,24 +152,34 @@ Adapters (`--adapter`, default `mock`):
   | `SHIP_WEB_TOKEN` | bearer token (`Authorization: Bearer ...`) |
   | `SHIP_JOURNEY_REPO` | the fixture repo Ship will read (or pass `--ship-repo <url>`) |
 
-  Intake is the existing bearer-token request API
-  (`POST /api/runs/scan` with `{repo, task, source: "product-journey"}`),
-  status and transcript come from `GET /api/runs/<id>/workspace` polled to a
-  terminal status. The scan intake is read-only by construction — it cannot
-  open pull requests — so the ship adapter is only correct for read-only
-  scenarios until a change-capable intake exists. **The ship adapter has
-  never been exercised against a live instance**; it is covered by unit
-  tests with a mocked fetch only. The orchestrator runs the first REAL
-  canary (one scenario: `pj-s-question`) before any batch, per the repo's
-  canary rule. The `pj-s-question` grader verifies citations in a
-  machine-checkable form (`index.html:6:"Tideline Woodworks"`, separators
-  tolerated, quoted exact string required) — a canary that answers in pure
-  prose without quoting the strings will correctly fail.
+  The default intake submits the dashboard's `new-run` form with a stable
+  request ID; same-PR revisions use its `follow-up` form. Workspace reads
+  retry transient network failures. Form retries reuse the same request ID.
+  `--ship-intake scan` retains the old read-only path; scan submissions are
+  never retried because a lost response could otherwise launch duplicate runs.
 
-**Cost is honestly unknown.** Every record carries
-`cost: {status: "unknown", reason: ...}` — no gateway telemetry is wired
-into this harness slice, and cost is never guessed (schema allows
-`priced|unknown`). Latency and adapter name are recorded per run.
+  Every repository must be a scratch fixture named `ship-eval-*`. The main
+  tree must match the local fixture before launch. For multiple families,
+  pass `--ship-repos /absolute/repos.json` containing a family-to-URL map
+  (or set `SHIP_JOURNEY_REPOS` to that JSON). The same-PR scenario uses the
+  separate `same-pr` key and needs `SHIP_JOURNEY_FORGE_TOKEN` plus an
+  `eval-seed` tag: its setup resets that scratch repository's main and opens
+  a temporary PR. Never point it at a repository containing real work.
+
+  The harness captures the PR head, then denies the merge; it never approves
+  a merge or another action. Other approval parks remain pending for a person
+  and stop the attempt with a run ID. Clarification asks are declined without
+  supplying an answer and recorded as interventions. Unexpected changes to
+  main or mismatched PR revisions fail the evaluation.
+
+  Copy graders outside the checkout and pass `--grader-dir /absolute/graders`.
+  Start with one scenario before using `--scenario all` or `--repeat 3`.
+  The change adapter and nine change scenarios still need live validation;
+  unit tests are not that receipt.
+
+**Cost comes from Ship's run ledger when priced.** Otherwise it stays
+`unknown`; no estimate is substituted. Setup and scenario runs are summed,
+with their IDs preserved in the result. Latency includes queueing.
 
 ## Results
 

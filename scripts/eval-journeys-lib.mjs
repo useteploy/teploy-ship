@@ -33,6 +33,24 @@ export const EXIT = { OK: 0, USAGE: 1, SPEND_REFUSED: 2, ADAPTER_REFUSED: 3 };
 
 export const ADAPTERS = ['mock', 'ship'];
 
+// Ship's own request types (src/journeys.ts): the adapter launches each
+// scenario as the journey a person would pick in the composer.
+export const SHIP_JOURNEYS = ['change', 'investigate', 'plan', 'review'];
+
+// A record's outcome keeps four states apart. `unknown` is a grade the
+// harness could not perform (every failing reason is not-wired); it is never
+// counted as a failure or a pass. Scenarios that were not executed have no
+// record at all and are reported as not-run by the batch summary.
+export const OUTCOMES = ['pass', 'fail', 'unknown', 'harness-error'];
+
+export function outcomeOf({ pass, reasons, endedBy }) {
+  if (endedBy === 'harness-error') return 'harness-error';
+  if (pass) return 'pass';
+  const list = reasons ?? [];
+  if (list.length > 0 && list.every(r => String(r).startsWith('not-wired:'))) return 'unknown';
+  return 'fail';
+}
+
 export function repoRootFrom(scriptPath) {
   return resolve(scriptPath, '..', '..');
 }
@@ -78,6 +96,21 @@ export async function validateManifest(manifest, { repoRoot, graderDir }) {
     }
     if (!s.taskPrompt || typeof s.taskPrompt !== 'string') errors.push(`${s.id}: missing taskPrompt`);
     if (!s.expects?.mustNotInclude || s.expects.mustNotInclude.length === 0) errors.push(`${s.id}: expects.mustNotInclude must be non-empty`);
+
+    const journey = s.ship?.journey;
+    if (!SHIP_JOURNEYS.includes(journey)) errors.push(`${s.id}: ship.journey must be one of ${SHIP_JOURNEYS.join(', ')}`);
+    const readOnly = ['question', 'plan', 'independent-review'].includes(s.type);
+    if (journey !== undefined && readOnly !== (journey !== 'change')) errors.push(`${s.id}: ship.journey ${journey} does not match a ${readOnly ? 'read-only' : 'change'} scenario`);
+    if (s.ship?.setup !== undefined) {
+      const st = s.ship.setup;
+      if (st.kind !== 'same-pr') errors.push(`${s.id}: unknown ship.setup.kind ${JSON.stringify(st.kind)}`);
+      for (const k of ['prPatch', 'mainPatch', 'prTitle', 'mainTitle', 'reviewTask']) {
+        if (typeof st[k] !== 'string' || st[k] === '') errors.push(`${s.id}: ship.setup.${k} is required`);
+      }
+      for (const k of ['prPatch', 'mainPatch']) {
+        if (typeof st[k] === 'string' && family && !existsSync(join(repoRoot, family.fixture, st[k]))) errors.push(`${s.id}: ship.setup.${k} missing in the fixture: ${st[k]}`);
+      }
+    }
 
     if (s.grader) {
       const graderPath = join(graderDir, s.grader.replace(/^graders\//, ''));
@@ -155,6 +188,7 @@ export function buildDryRun(manifest, scenario) {
     checks: scenario.checks,
     probes: scenario.probes,
     grader: scenario.grader,
+    ship: scenario.ship ?? null,
     expects: scenario.expects,
     notExecuted: 'runner: dry-run only — no model, no server, no spend'
   };
@@ -162,8 +196,9 @@ export function buildDryRun(manifest, scenario) {
 
 export function parseArgs(argv) {
   const args = {
-    mode: null, scenario: null, dryRun: false, graderDir: null, authorizeSpend: false,
-    adapter: 'mock', fixtureRoot: null, resultsRoot: null, shipRepo: null, errors: []
+    mode: null, scenario: null, scenarios: [], dryRun: false, graderDir: null, authorizeSpend: false,
+    adapter: 'mock', fixtureRoot: null, resultsRoot: null, shipRepo: null, shipRepos: null,
+    shipIntake: 'request', repeat: 1, errors: []
   };
   let i = 0;
   function value(flag) {
@@ -189,11 +224,25 @@ export function parseArgs(argv) {
     } else if (a === '--fixture-root') args.fixtureRoot = value('--fixture-root');
     else if (a === '--results-root') args.resultsRoot = value('--results-root');
     else if (a === '--ship-repo') args.shipRepo = value('--ship-repo');
-    else {
+    else if (a === '--ship-repos') {
+      const next = value('--ship-repos');
+      if (next && !isAbsolute(next)) args.errors.push(`--ship-repos must be an absolute path, got ${next}`);
+      else if (next) args.shipRepos = next;
+    } else if (a === '--ship-intake') {
+      const next = value('--ship-intake');
+      if (next && !['request', 'scan'].includes(next)) args.errors.push(`unknown --ship-intake ${next} (known: request, scan)`);
+      else if (next) args.shipIntake = next;
+    } else if (a === '--repeat') {
+      const next = Number(value('--repeat'));
+      if (!Number.isInteger(next) || next < 1 || next > 10) args.errors.push('--repeat must be an integer from 1 to 10');
+      else args.repeat = next;
+    } else {
       args.errors.push(`unknown argument: ${a}`);
     }
   }
+  if (args.scenario) args.scenarios = args.scenario.split(',').map(x => x.trim()).filter(Boolean);
   if (args.mode === null && args.scenario) args.mode = 'scenario';
+  if (args.dryRun && args.scenarios.length > 1) args.errors.push('--dry-run takes a single scenario');
   if (args.mode === null && args.errors.length === 0) {
     args.errors.push('nothing to do: pass --list, --manifest, or --scenario <id> [--dry-run]');
   }
@@ -333,124 +382,15 @@ export function createMockAdapter({ repoRoot } = {}) {
       mkdirSync(dir, { recursive: true });
       const transcriptPath = join(dir, 'transcript.txt');
       writeFileSync(transcriptPath, transcript);
-      return { transcriptPath, summary: { prOpened: false, ...summary } };
+      return { transcriptPath, summary: { prOpened: false, pushed: false, ...summary } };
     }
   };
 }
 
 // ── ship adapter ─────────────────────────────────────────────────────────
-// Thin HTTP client against a Ship instance. Intake is the bearer-token
-// request API the nightly cron uses (web/src/routes/api/runs/scan.tsx):
-//   POST $SHIP_URL/api/runs/scan  {repo, task, source}  -> 202 {run}
-// Run status and transcript come from the workspace API
-// (web/src/routes/api/runs/[id]/workspace.tsx):
-//   GET $SHIP_URL/api/runs/<id>/workspace -> {meta:{status}, steps, messages, outcome}
-// The scan intake is read-only by construction, so this adapter cannot open
-// PRs — the first live canary must therefore be a read-only scenario
-// (pj-s-question). Never exercised against a real instance in this slice;
-// covered only by unit tests with a mocked fetch.
-
-export const SHIP_ENV_CONTRACT = ['SHIP_URL', 'SHIP_WEB_TOKEN', 'SHIP_JOURNEY_REPO'];
-
-export function missingShipEnv(env) {
-  return SHIP_ENV_CONTRACT.filter(k => !String(env?.[k] ?? '').trim());
-}
-
-function defaultSleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
-}
-
-export function renderShipTranscript(data) {
-  const lines = [];
-  lines.push(`Ship run ${data?.runId ?? '?'} — status ${data?.meta?.status ?? 'unknown'}`);
-  if (data?.meta?.task) lines.push(`Task: ${data.meta.task}`);
-  const steps = Array.isArray(data?.steps) ? data.steps : [];
-  if (steps.length > 0) {
-    lines.push('Steps:');
-    for (const s of steps) lines.push(`  ${s.at ?? ''} ${s.name ?? '?'}${s.failed ? ' (FAILED)' : ''} — ${s.summary ?? ''}`.replace(/\s+$/,''));
-  }
-  const messages = Array.isArray(data?.messages) ? data.messages : [];
-  if (messages.length > 0) {
-    lines.push('Messages:');
-    for (const m of messages) lines.push(`  ${m.role ?? '?'}: ${String(m.text ?? '').trim()}`);
-  }
-  if (data?.outcome && Object.keys(data.outcome).length > 0) lines.push(`Outcome: ${JSON.stringify(data.outcome)}`);
-  return lines.join('\n') + '\n';
-}
-
-export function createShipAdapter({
-  env = process.env, fetchImpl = globalThis.fetch.bind(globalThis), sleep = defaultSleep,
-  repo = null, pollIntervalMs = 5000, timeoutMs = 30 * 60 * 1000
-} = {}) {
-  return {
-    name: 'ship',
-    async runTask({ scenario, transcriptDir }) {
-      const missing = missingShipEnv(env);
-      const repoUrl = repo ?? String(env.SHIP_JOURNEY_REPO ?? '').trim();
-      if (missing.includes('SHIP_URL') || missing.includes('SHIP_WEB_TOKEN')) {
-        throw new AdapterRefusal('SHIP_URL and SHIP_WEB_TOKEN must both be set (and the run must pass --i-authorize-spend, which the runner enforces before this point)');
-      }
-      if (!repoUrl) {
-        throw new AdapterRefusal('SHIP_JOURNEY_REPO (the fixture repo Ship will read) must be set, or pass --ship-repo <url>');
-      }
-      const base = String(env.SHIP_URL).trim().replace(/\/+$/, '');
-      const token = String(env.SHIP_WEB_TOKEN).trim();
-      const auth = { authorization: `Bearer ${token}` };
-
-      let runId;
-      try {
-        const res = await fetchImpl(`${base}/api/runs/scan`, {
-          method: 'POST',
-          headers: { ...auth, 'content-type': 'application/json' },
-          body: JSON.stringify({ repo: repoUrl, task: scenario.taskPrompt, source: 'product-journey' })
-        });
-        const intakeText = await res.text();
-        if (res.status !== 202) {
-          throw new ShipRunError(`intake rejected: HTTP ${res.status} ${intakeText.slice(0, 500)}`);
-        }
-        runId = JSON.parse(intakeText).run;
-        if (!runId) throw new ShipRunError(`intake returned 202 without a run id: ${intakeText.slice(0, 500)}`);
-      } catch (err) {
-        if (err instanceof ShipRunError) throw err;
-        throw new ShipRunError(`intake request failed: ${err.message}`);
-      }
-
-      const deadline = Date.now() + timeoutMs;
-      let data = null;
-      for (;;) {
-        await sleep(pollIntervalMs);
-        let res;
-        try {
-          res = await fetchImpl(`${base}/api/runs/${runId}/workspace`, { headers: auth });
-        } catch (err) {
-          throw new ShipRunError(`workspace poll failed for ${runId}: ${err.message}`);
-        }
-        if (res.status !== 200) {
-          throw new ShipRunError(`workspace poll for ${runId} returned HTTP ${res.status}: ${(await res.text()).slice(0, 500)}`);
-        }
-        data = await res.json();
-        const status = data?.meta?.status;
-        if (status === 'completed' || status === 'failed' || status === 'cancelled') break;
-        if (Date.now() >= deadline) throw new ShipRunError(`workspace poll for ${runId} timed out after ${timeoutMs}ms (last status: ${status})`);
-      }
-
-      const dir = transcriptDir ?? mkdtempSync(join(tmpdir(), 'pj-ship-'));
-      mkdirSync(dir, { recursive: true });
-      const transcriptPath = join(dir, 'transcript.txt');
-      writeFileSync(transcriptPath, renderShipTranscript(data));
-      return {
-        transcriptPath,
-        summary: {
-          prOpened: false,
-          runId,
-          status: data?.meta?.status ?? 'unknown',
-          prNote: 'scan intake is read-only and cannot open pull requests',
-          claims: typeof data?.outcome?.summary === 'string' && data.outcome.summary !== '' ? [data.outcome.summary] : []
-        }
-      };
-    }
-  };
-}
+// Lives in eval-journeys-ship.mjs (HTTP against a real Ship, forge access for
+// the worked tree). It imports AdapterRefusal, ShipRunError and hashTree from
+// here; nothing here imports it back.
 
 // ── revisions, run ids, records ──────────────────────────────────────────
 
@@ -543,13 +483,13 @@ export function schemaValidationErrors(value, schema, at = '$') {
 
 // ── the executor ─────────────────────────────────────────────────────────
 
-export async function runScenario({ repoRoot, manifest, scenario, adapter, graderDir, fixtureRoot, resultsRoot }) {
+export async function runScenario({ repoRoot, manifest, scenario, adapter, graderDir, fixtureRoot, resultsRoot, runId: fixedRunId = null }) {
   const family = manifest.families[scenario.family];
   const fixtureDir = join(fixtureRoot, basename(family.fixture));
   if (!existsSync(fixtureDir)) {
     throw new Error(`fixture directory missing for ${scenario.family}: ${fixtureDir}`);
   }
-  const runId = nextRunId(resultsRoot);
+  const runId = fixedRunId ?? nextRunId(resultsRoot);
   const outDir = join(resultsRoot, runId, scenario.id);
   const preserveDir = join(outDir, 'preserve');
   const artifactsDir = join(outDir, 'artifacts');
@@ -565,7 +505,7 @@ export async function runScenario({ repoRoot, manifest, scenario, adapter, grade
   let adapterError = null;
   const t0 = Date.now();
   try {
-    const result = await adapter.runTask({ scenario, fixtureDir, workDir, transcriptDir });
+    const result = await adapter.runTask({ scenario, fixtureDir, workDir, transcriptDir, attemptId: `${runId}-${scenario.id}` });
     transcriptPath = result.transcriptPath;
     summary = result.summary ?? {};
   } catch (err) {
@@ -601,6 +541,16 @@ export async function runScenario({ repoRoot, manifest, scenario, adapter, grade
       evidence: graded.evidence
     };
   }
+  // A correct-looking patch does not excuse an unauthorized merge or grading
+  // a different revision from the one the run actually produced.
+  if (summary.fixtureRepo?.mainMoved === true) {
+    graded.pass = false;
+    graded.reasons.push('fixture main moved during the run; evaluation never authorizes merges');
+  }
+  if (summary.captured?.expected && summary.captured.sha !== summary.captured.expected) {
+    graded.pass = false;
+    graded.reasons.push('captured PR revision does not match the run evidence');
+  }
 
   mkdirSync(preserveDir, { recursive: true });
   mkdirSync(artifactsDir, { recursive: true });
@@ -617,6 +567,17 @@ export async function runScenario({ repoRoot, manifest, scenario, adapter, grade
   writeFileSync(join(artifactsDir, 'grader-output.json'), JSON.stringify(graderOutput, null, 2) + '\n');
 
   const claims = Array.isArray(summary.claims) ? summary.claims : [];
+  const interventions = Array.isArray(summary.interventions) ? summary.interventions : [];
+  const outcome = outcomeOf({ pass: graded.pass, reasons: graded.reasons, endedBy });
+  // Rescue = information a person supplied to get the task done. The
+  // baseline never supplies it (asks are declined), so `provided` is false by
+  // construction; `needed` records that the run asked for it.
+  const asked = interventions.filter(i => i.kind === 'clarification');
+  const rescue = {
+    needed: asked.length > 0,
+    provided: interventions.some(i => i.kind === 'rescue'),
+    notes: asked.map(i => i.note)
+  };
   const record = {
     scenarioId: scenario.id,
     family: scenario.family,
@@ -624,11 +585,15 @@ export async function runScenario({ repoRoot, manifest, scenario, adapter, grade
     harnessRevision: gitHead(repoRoot),
     fixtureRevision: hashTree(fixtureDir),
     adapter: adapter.name,
+    outcome,
     firstAttempt: { pass: graded.pass, graderReasons: graded.reasons, endedBy },
-    eventualSuccess: { pass: graded.pass && endedBy === 'agent' },
-    interventions: [],
+    eventualSuccess: { pass: graded.pass && endedBy === 'agent' && !rescue.provided },
+    interventions,
+    rescue,
     latencyMs,
-    cost: { status: 'unknown', reason: 'no gateway telemetry wired into this harness slice; cost is never guessed' },
+    cost: summary.cost?.status === 'priced' || summary.cost?.status === 'unknown'
+      ? summary.cost
+      : { status: 'unknown', reason: adapterError !== null ? `adapter failed before reporting cost: ${adapterError.message}` : 'the adapter reported no cost; cost is never guessed' },
     verifiedEvidence: (graded.evidence ?? []).map(e => ({ check: e.check ?? e.kind ?? 'check', value: e.value })),
     claimedEvidence: claims.map(c => ({ claim: String(c), verdict: 'unverified' })),
     artifacts: ['preserve/transcript.txt', 'artifacts/grader-output.json'],
@@ -637,6 +602,9 @@ export async function runScenario({ repoRoot, manifest, scenario, adapter, grade
     gradedAt: new Date().toISOString(),
     startedAt
   };
+  for (const key of ['shipRuns', 'fixtureRepo', 'captured', 'samePr', 'disposition', 'pollRetries', 'journey', 'intake']) {
+    if (summary[key] !== undefined) (record.ship ??= {})[key] = summary[key];
+  }
   const schema = await readJson(join(repoRoot, 'evals', 'product-journeys', 'results', 'schema.json'));
   const schemaErrors = schemaValidationErrors(record, schema);
   if (schemaErrors.length > 0) {
@@ -645,16 +613,18 @@ export async function runScenario({ repoRoot, manifest, scenario, adapter, grade
   writeFileSync(join(outDir, 'result.json'), JSON.stringify(record, null, 2) + '\n');
 
   const summaryPath = join(resultsRoot, runId, 'summary.json');
-  let rollup = { runId, adapter: adapter.name, startedAt, completedAt: record.gradedAt, scenarios: [], totals: { pass: 0, fail: 0 } };
+  let rollup = { runId, adapter: adapter.name, startedAt, completedAt: record.gradedAt, scenarios: [], totals: {} };
   if (existsSync(summaryPath)) {
     try { rollup = JSON.parse(readFileSync(summaryPath, 'utf8')); } catch { /* keep fresh rollup */ }
   }
   rollup.scenarios = rollup.scenarios.filter(s => s.id !== scenario.id);
-  rollup.scenarios.push({ id: scenario.id, pass: record.firstAttempt.pass, latencyMs, result: `${runId}/${scenario.id}/result.json` });
-  rollup.totals = {
-    pass: rollup.scenarios.filter(s => s.pass).length,
-    fail: rollup.scenarios.filter(s => !s.pass).length
-  };
+  rollup.scenarios.push({
+    id: scenario.id, outcome, pass: record.firstAttempt.pass, latencyMs,
+    costUSD: record.cost.status === 'priced' ? record.cost.amount : null,
+    rescueNeeded: rescue.needed, interventions: interventions.length,
+    result: `${runId}/${scenario.id}/result.json`
+  });
+  rollup.totals = Object.fromEntries(OUTCOMES.map(o => [o, rollup.scenarios.filter(s => (s.outcome ?? (s.pass ? 'pass' : 'fail')) === o).length]));
   rollup.completedAt = record.gradedAt;
   writeFileSync(summaryPath, JSON.stringify(rollup, null, 2) + '\n');
 
