@@ -1,0 +1,45 @@
+{
+  "scenarioId": "pj-c-scheduled-job",
+  "grader": "graders/pj-c-scheduled-job.mjs",
+  "pass": true,
+  "reasons": [],
+  "evidence": [
+    {
+      "kind": "structural",
+      "check": "jobs/expire_sessions.py exists",
+      "value": true
+    },
+    {
+      "kind": "run",
+      "check": "job run 1 exit code",
+      "value": {
+        "code": 0,
+        "err": ""
+      }
+    },
+    {
+      "kind": "probe",
+      "check": "expired removed, 24h-live kept, bookmarks intact",
+      "value": {
+        "sessions": [
+          "sess-fresh",
+          "sess-recent"
+        ],
+        "bookmarks": 1
+      }
+    },
+    {
+      "kind": "probe",
+      "check": "second run leaves the store byte-identical",
+      "value": {
+        "code": 0,
+        "idempotent": true
+      }
+    },
+    {
+      "kind": "probe",
+      "check": "missing store exits 0",
+      "value": 0
+    }
+  ]
+}

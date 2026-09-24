@@ -1,0 +1,1 @@
+HARNESS ERROR: adapter threw before producing a transcript: run-request-d8af5ac9f0cb4414f4498dc5007da398331605217d727a387f7eceabb4b3248a requires a human decision on change-approval; left pending without approval

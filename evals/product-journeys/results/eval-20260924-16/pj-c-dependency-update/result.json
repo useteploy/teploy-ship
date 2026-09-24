@@ -1,0 +1,113 @@
+{
+  "scenarioId": "pj-c-dependency-update",
+  "family": "unfamiliar-service",
+  "runId": "eval-20260924-16",
+  "harnessRevision": "2b13447ecba278679ee060ba37e87ec8baa2e861",
+  "fixtureRevision": "sha256:c5746d3d433f20e2732f66f99147638977570f314bd07b4bdb29cc2830907963",
+  "adapter": "ship",
+  "outcome": "pass",
+  "firstAttempt": {
+    "pass": true,
+    "graderReasons": [],
+    "endedBy": "agent"
+  },
+  "eventualSuccess": {
+    "pass": true
+  },
+  "interventions": [],
+  "rescue": {
+    "needed": false,
+    "provided": false,
+    "notes": []
+  },
+  "latencyMs": 148858,
+  "cost": {
+    "status": "priced",
+    "amount": 0.036995,
+    "currency": "USD",
+    "source": "Ship run ledger (workspace API costUSD), summed over this attempt's runs"
+  },
+  "verifiedEvidence": [
+    {
+      "check": "requirements.txt allows markdown 4.x",
+      "value": {
+        "line": "markdown>=3.5,<5",
+        "allows4": true
+      }
+    },
+    {
+      "check": "3.x markdown.markdown call shape works",
+      "value": {
+        "code": 0,
+        "out": "three-ok"
+      }
+    },
+    {
+      "check": "4.x markdown.render call shape works",
+      "value": {
+        "code": 0,
+        "out": "four-ok"
+      }
+    },
+    {
+      "check": "no-package fallback intact",
+      "value": {
+        "code": 0,
+        "out": "fallback-ok"
+      }
+    },
+    {
+      "check": "suite passes offline in the worked tree",
+      "value": 0
+    }
+  ],
+  "claimedEvidence": [
+    {
+      "claim": "What I did: Verified with a single command: the pin is >=3.5,<5, render_description handles markdown 4.x render()/3.x markdown()/and the no-package fallback, the 3 new tests exist, and the suite passes 9/9 offline (markdown confirmed absent); changed 3 files (classified trivial); pushed 139fd8bf14; opened pull request #1; the merge was denied and the pull request closed (S02 eval harness: graded; scratch fixtures are never merged). What I verified: the suite passed on the base branch before any edit (`python3 -m unittest discover -s tests`); the suite passed over the published tree (`python3 -m unittest discover -s tests`, 1s). What I could not verify: telemetry (this run is not on tyler/fylun, which is the repo OBSERVE_SERVICE=fylun-web is built from).",
+      "verdict": "unverified"
+    }
+  ],
+  "artifacts": [
+    "preserve/transcript.txt",
+    "artifacts/grader-output.json"
+  ],
+  "preserve": {
+    "dir": "preserve/"
+  },
+  "probesApplied": [],
+  "gradedAt": "2026-09-24T21:04:47.333Z",
+  "startedAt": "2026-09-24T21:02:17.676Z",
+  "ship": {
+    "shipRuns": [
+      {
+        "role": "scenario",
+        "runId": "run-request-23f54bdc241b0871c68f00006cad2c161fc1f57a1f79308a3614ba82763ef24e",
+        "journey": "change",
+        "status": "completed",
+        "latencyMs": 148485,
+        "costUSD": 0.036995200000000006,
+        "costPriced": true,
+        "pr": "http://100.108.123.49:49152/Tyler/ship-eval-unfamiliar-service/pulls/1"
+      }
+    ],
+    "fixtureRepo": {
+      "url": "http://100.108.123.49:49152/Tyler/ship-eval-unfamiliar-service",
+      "head": "a1f466005d0cf8d23615787fb9b7757704c6a4a0",
+      "ref": "refs/heads/main",
+      "treeMatchesFixture": true,
+      "mainAfter": "a1f466005d0cf8d23615787fb9b7757704c6a4a0",
+      "mainMoved": false
+    },
+    "captured": {
+      "sha": "139fd8bf147437d1479e5279bf08f475e9a4b2c6",
+      "source": "PR #1 head",
+      "expected": "139fd8bf147437d1479e5279bf08f475e9a4b2c6"
+    },
+    "disposition": [
+      "run-request-23f54bdc241b0871c68f00006cad2c161fc1f57a1f79308a3614ba82763ef24e: merge denied after capture (Ship closes the PR)"
+    ],
+    "pollRetries": 0,
+    "journey": "change",
+    "intake": "request"
+  }
+}

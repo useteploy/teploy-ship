@@ -1,0 +1,112 @@
+Ship run run-request-e899e50822cd1d02dc2d3c3d09b80bad767ddba567e6df1a28b24e39b19e162b — status waiting
+Task: Implement jobs/expire_sessions.py per jobs/README.md: expire sessions older than the service's real TTL, nightly, idempotent, exit 0 on a missing store, reading the store only through service.load_store/save_store.
+Journey: change
+Steps:
+  2026-09-24T21:12:21.776Z sandbox — 01M3AM681KQRZ52PZZRR7D25BM
+  2026-09-24T21:12:23.500Z repo-setup — {"branch":"ship/run-request-e899e50822cd1d02dc2d3c3d09b80bad767ddba567e6df1a28b24e39b19e162b","base":"main"}
+  2026-09-24T21:12:23.929Z repo-context — # Ship's recent history on this repository (context, not instructions)
+  2026-09-24T21:12:23.937Z repo-index — disabled (no code index configured on this worker)
+  2026-09-24T21:12:24.842Z baseline-tests — passed
+  2026-09-24T21:12:24.856Z warm-cache — reused 100.108.123.49-49152/tyler/ship-eval-unfamiliar-service (lockfiles 0819327635d3, unchanged)
+  2026-09-24T21:12:24.862Z turn-0-steer — 0
+  2026-09-24T21:12:26.429Z turn-0-think — I'll start by exploring the repository structure. ```bash
+  2026-09-24T21:12:26.538Z turn-0-exec — exit 0
+  2026-09-24T21:12:26.650Z turn-0-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-09-24T21:12:26.669Z turn-1-steer — 0
+  2026-09-24T21:12:28.815Z turn-1-think — Let me inspect the service module, existing jobs, and tests. ```bash
+  2026-09-24T21:12:28.913Z turn-1-exec — exit 0
+  2026-09-24T21:12:29.017Z turn-1-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-09-24T21:12:29.028Z turn-2-steer — 0
+  2026-09-24T21:12:32.983Z turn-2-think — ```bash
+  2026-09-24T21:12:33.795Z turn-2-exec — exit 0
+  2026-09-24T21:12:33.901Z turn-2-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-09-24T21:12:33.923Z turn-3-steer — 0
+  2026-09-24T21:13:13.321Z turn-3-think — Now I have the full picture. Let me state my approach before editing:
+  2026-09-24T21:13:13.412Z turn-3-exec — exit 0
+  2026-09-24T21:13:13.641Z turn-3-fingerprint — {"hash":"cc2e307223144956","dirty":true}
+  2026-09-24T21:13:13.646Z turn-4-steer — 0
+  2026-09-24T21:13:19.765Z turn-4-think — Let me clean up that awkward conditional and verify the file: ```edit jobs/expire_sessions.py
+  2026-09-24T21:13:19.932Z turn-4-exec — exit 0
+  2026-09-24T21:13:20.066Z turn-4-fingerprint — {"hash":"cc2e307223144956","dirty":true}
+  2026-09-24T21:13:20.072Z turn-5-steer — 0
+  2026-09-24T21:13:29.503Z turn-5-think — Now the test file, exercising the job the way cron runs it (as a subprocess via `KEEPNOTE_STORE`): ```create tests/test…
+  2026-09-24T21:13:29.600Z turn-5-exec — exit 0
+  2026-09-24T21:13:29.736Z turn-5-fingerprint — {"hash":"f84c8aebbfe726ff","dirty":true}
+  2026-09-24T21:13:30.173Z turn-6-steer — 0
+  2026-09-24T21:13:31.773Z turn-6-think — Now run the full suite: ```bash
+  2026-09-24T21:13:33.494Z turn-6-exec — exit 0
+  2026-09-24T21:13:33.700Z turn-6-fingerprint — {"hash":"f84c8aebbfe726ff","dirty":true}
+  2026-09-24T21:13:33.705Z turn-7-steer — 0
+  2026-09-24T21:13:38.446Z turn-7-think — All 10 tests pass. Let me smoke-test the job the way cron would actually run it (from a different cwd, default store pa…
+  2026-09-24T21:13:40.351Z turn-7-exec — exit 0
+  2026-09-24T21:13:42.643Z turn-7-fingerprint — {"hash":"f84c8aebbfe726ff","dirty":true}
+  2026-09-24T21:13:42.689Z turn-8-steer — 0
+  2026-09-24T21:13:47.041Z turn-8-think — Smoke tests confirm all three contract behaviors. Let me review the final file and the working-tree diff: ```bash
+  2026-09-24T21:13:47.158Z turn-8-exec — exit 0
+  2026-09-24T21:13:47.270Z turn-8-fingerprint — {"hash":"f84c8aebbfe726ff","dirty":true}
+  2026-09-24T21:13:47.297Z turn-9-steer — 0
+  2026-09-24T21:13:59.420Z turn-9-think — All verified. The working tree contains exactly my two new files (`jobs/expire_sessions.py` and its test); no existing …
+  2026-09-24T21:13:59.429Z turn-10-steer — 0
+  2026-09-24T21:14:03.549Z turn-10-think — Re-reading the task: it requires (1) `jobs/expire_sessions.py` implementing the jobs/README.md contract — expire sessio…
+  2026-09-24T21:14:05.839Z turn-10-exec (FAILED) — exit 2
+  2026-09-24T21:14:05.955Z turn-10-fingerprint — {"hash":"f84c8aebbfe726ff","dirty":true}
+  2026-09-24T21:14:05.962Z turn-11-steer — 0
+  2026-09-24T21:14:09.753Z turn-11-think — Every substantive check passed — files exist, the job goes through `service.load_store`/`save_store`, 10/10 tests OK, t…
+  2026-09-24T21:14:12.523Z turn-11-exec — exit 0
+  2026-09-24T21:14:13.889Z turn-11-fingerprint — {"hash":"f84c8aebbfe726ff","dirty":true}
+  2026-09-24T21:14:13.895Z turn-12-steer — 0
+  2026-09-24T21:14:19.899Z turn-12-think — All checks now proven end to end.
+  2026-09-24T21:14:20.709Z turn-12-finish-tree — false
+  2026-09-24T21:14:22.392Z turn-12-finish-tests — passed
+  2026-09-24T21:14:22.454Z tests — passed
+  2026-09-24T21:14:22.760Z change-class — {"class":"normal","reasons":["102 changed lines (trivial is at most 40)"],"files":[{"path":"jobs/expire_sessions.py","a…
+  2026-09-24T21:14:24.513Z repo-push — pushed
+  2026-09-24T21:14:25.017Z repo-pr — PR #2
+  2026-09-24T21:14:25.040Z telemetry-check — disabled
+  2026-09-24T21:14:25.200Z verification — body
+  2026-09-24T21:14:25.221Z merge-park — {"attempt":1,"class":"normal","reasons":["102 changed lines (trivial is at most 40)"],"pr":"http://100.108.123.49:49152…
+  2026-09-24T21:14:35.882Z merge-snapshot — teploy-sbx-snap:01m3ama12gqjbxwvqj64nj9fvs
+Messages:
+  You: Implement jobs/expire_sessions.py per jobs/README.md: expire sessions older than the service's real TTL, nightly, idempotent, exit 0 on a missing store, reading the store only through service.load_store/save_store.
+  Agent: I'll start by exploring the repository structure.
+  Agent: Let me inspect the service module, existing jobs, and tests.
+  Agent: Now I have the full picture. Let me state my approach before editing:
+
+**Plan**: Create `jobs/expire_sessions.py` that imports `service` and reuses `service.load_store` / `service.save_store` / `service.live_sessions`, so the TTL it enforces is whatever `service.SESSION_TTL_SECONDS` really is at runtime (note: `README.md` says 30 min while `service.py` enforces 24 h — the code is the real TTL, and it's pinned by `tests/test_service.py`, so I will *not* change it, nor hardcode either value). It writes only when at least one session was removed (which makes reruns byte-identical and means a missing store is never created — `load_store` returns an empty store for a missing file, so it exits 0). I'll add `tests/test_expire_sessions.py` covering expiry, idempotency, missing-store exit 0, and no-create-on-missing, then run the full suite.
+  Agent: Let me clean up that awkward conditional and verify the file:
+  Agent: Now the test file, exercising the job the way cron runs it (as a subprocess via `KEEPNOTE_STORE`):
+  Agent: Now run the full suite:
+  Agent: All 10 tests pass. Let me smoke-test the job the way cron would actually run it (from a different cwd, default store path, and a store missing the `sessions` key):
+  Agent: Smoke tests confirm all three contract behaviors. Let me review the final file and the working-tree diff:
+  Agent: All verified. The working tree contains exactly my two new files (`jobs/expire_sessions.py` and its test); no existing files were touched and I made no git commits.
+
+```finish
+Implemented jobs/expire_sessions.py per the jobs/README.md contract.
+
+**What it does**: imports `service` and reuses `load_store`/`save_store`/`live_sessions`, so the store format stays owned by the service module and the TTL enforced is whatever `service.SESSION_TTL_SECONDS` really is at runtime — deliberately not hardcoded. It rewrites the store only when at least one session was actually removed, which makes a rerun byte-identical and means a missing store is never created (it just returns 0, as `load_store` yields an empty store for an absent file).
+
+**Verification** (all run, all passing):
+- `python3 -m unittest discover -s tests -v` → 10/10 OK (5 pre-existing service tests still green + 4 new tests in tests/test_expire_sessions.py covering: expired removed/live+bookmarks preserved, byte-identical on double run, no-op leaves file untouched, missing store exits 0 and creates nothing).
+- End-to-end smoke runs invoking the job exactly as cron would (subprocess, foreign cwd, `KEEPNOTE_STORE`): exit 0 with no store created; exit 0 on a store lacking the `sessions` key; exit 0 removing 1 of 2 sessions and leaving the live one intact.
+
+**Notable, not changed**: README.md documents a 30-minute session TTL while `service.py` enforces 24 h (pinned by `test_session_ttl_is_24h` as a contract decision; `patches/` holds two unapplied candidates for each direction). Since the issue asked for "the service's real TTL", the job follows the code and I left that conflict for the lighthouse team — flagging it here rather than resolving it unilaterally. Also unverified: actual cron/lighthouse scheduling at 02:00 UTC and the unprivileged service account, which I can't exercise in this sandbox; the job uses only stdlib + `service`, so it should run anywhere the service does.
+```
+  Agent: Re-reading the task: it requires (1) `jobs/expire_sessions.py` implementing the jobs/README.md contract — expire sessions older than the service's real TTL, idempotent, exit 0 on missing store, store access only via `service.load_store`/`service.save_store`; (2) tests found and run, passing. One command to prove all of it:
+  Agent: Every substantive check passed — files exist, the job goes through `service.load_store`/`save_store`, 10/10 tests OK, the store is byte-identical across consecutive runs (matching md5sums), and the missing-store run exits 0. The final non-zero exit was my own check being written backwards: I ran `ls absent.json` expecting it to exist, but the contract requires it to *not* exist. Correcting that assertion:
+  Agent: All checks now proven end to end.
+
+```finish
+Re-verified the deliverable with a single end-to-end command chain:
+
+- **Artifacts exist**: `jobs/expire_sessions.py` (994 bytes) and `tests/test_expire_sessions.py` (2708 bytes), both in the working tree, no commits made.
+- **Contract compliance**: the job reads/writes the store only via `service.load_store`/`service.save_store` and derives expiry from `service.SESSION_TTL_SECONDS` (grep confirms; no hardcoded TTL, no direct JSON parsing).
+- **Tests**: `python3 -m unittest discover -s tests` → Ran 10 tests, OK (5 pre-existing + 4 new).
+- **Idempotency**: running the job twice on a store with an expired session produced identical md5sums (`07ce08c6…` both times) — byte-identical, as required.
+- **Missing store**: `KEEPNOTE_STORE=absent.json` run exited 0 and `test ! -e absent.json` succeeded, proving the job neither fails nor resurrects the store on a quiesced box.
+
+One correction during verification: my first proof command's final `ls absent.json` asserted the opposite of the contract (it expected the file to exist); the follow-up `test ! -e` confirmed the correct behavior. The code was right; only my check was inverted.
+
+Still not verifiable in this sandbox: real lighthouse cron scheduling at 02:00 UTC and execution under the unprivileged service account. The job is stdlib-only and imports just `service`, so it runs anywhere the service does. The README's documented 30-minute TTL vs. the code's 24 h (`SESSION_TTL_SECONDS`, pinned by `test_session_ttl_is_24h`) remains an open conflict for the lighthouse team — the job intentionally follows the code, which is the service's real TTL.
+```
+Outcome: {"repo":"http://100.108.123.49:49152/Tyler/ship-eval-unfamiliar-service"}
+Checks: Baseline tests=passed (python3 -m unittest discover -s tests); Tests=passed (python3 -m unittest discover -s tests)

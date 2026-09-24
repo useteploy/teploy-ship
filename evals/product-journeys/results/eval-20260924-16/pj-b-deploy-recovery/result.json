@@ -1,0 +1,100 @@
+{
+  "scenarioId": "pj-b-deploy-recovery",
+  "family": "ui-api-db",
+  "runId": "eval-20260924-16",
+  "harnessRevision": "2b13447ecba278679ee060ba37e87ec8baa2e861",
+  "fixtureRevision": "sha256:d52d22eff8f12e8d2c02bc69200bc34b8d8dfbd8ef87400cefaf53f58e2b6886",
+  "adapter": "ship",
+  "outcome": "pass",
+  "firstAttempt": {
+    "pass": true,
+    "graderReasons": [],
+    "endedBy": "agent"
+  },
+  "eventualSuccess": {
+    "pass": true
+  },
+  "interventions": [],
+  "rescue": {
+    "needed": false,
+    "provided": false,
+    "notes": []
+  },
+  "latencyMs": 363884,
+  "cost": {
+    "status": "priced",
+    "amount": 0.127478,
+    "currency": "USD",
+    "source": "Ship run ledger (workspace API costUSD), summed over this attempt's runs"
+  },
+  "verifiedEvidence": [
+    {
+      "check": "deploy.sh on clean checkout of fixed head",
+      "value": {
+        "code": 0,
+        "tail": "{\"applied\":[\"001_deploy_sentinel.sql\"],\"pending\":[]}\nlistening 8901\n== deploy 3/3: health check ==\ndeploy OK\n"
+      }
+    },
+    {
+      "check": "second deploy run",
+      "value": 0
+    },
+    {
+      "check": "deploy.sh still checks /health for 200",
+      "value": true
+    },
+    {
+      "check": "deploy.sh still runs the smoke tests",
+      "value": true
+    }
+  ],
+  "claimedEvidence": [
+    {
+      "claim": "What I did: Re-verified everything end-to-end; all checks pass; changed 2 files (classified normal); pushed a1157674ab; opened pull request #3; the merge was denied and the pull request closed (S02 eval harness: graded; scratch fixtures are never merged). What I verified: the suite was already failing on the base branch (exit 1) before any edit. What I could not verify: the suite fails the same way it did on the base branch (exit 1), which is inherited breakage, not this change; telemetry (this run is not on tyler/fylun, which is the repo OBSERVE_SERVICE=fylun-web is built from).",
+      "verdict": "unverified"
+    }
+  ],
+  "artifacts": [
+    "preserve/transcript.txt",
+    "artifacts/grader-output.json"
+  ],
+  "preserve": {
+    "dir": "preserve/"
+  },
+  "probesApplied": [],
+  "gradedAt": "2026-09-24T21:02:17.674Z",
+  "startedAt": "2026-09-24T20:56:11.419Z",
+  "ship": {
+    "shipRuns": [
+      {
+        "role": "scenario",
+        "runId": "run-request-fa73f841bbc8a3537ce70e500802616c876456784c25cab672b322ec74687d0b",
+        "journey": "change",
+        "status": "completed",
+        "latencyMs": 363386,
+        "costUSD": 0.12747840000000002,
+        "costPriced": true,
+        "pr": "http://100.108.123.49:49152/Tyler/ship-eval-ui-api-db/pulls/3"
+      }
+    ],
+    "fixtureRepo": {
+      "url": "http://100.108.123.49:49152/Tyler/ship-eval-ui-api-db",
+      "head": "ea8408b7e178ed3f81f20519165fa86f6e9bdc13",
+      "ref": "refs/heads/main",
+      "treeMatchesFixture": true,
+      "mainAfter": "ea8408b7e178ed3f81f20519165fa86f6e9bdc13",
+      "mainMoved": false
+    },
+    "captured": {
+      "sha": "a1157674abdbc1a574c71121628034cd232e313b",
+      "source": "PR #3 head",
+      "expected": "a1157674abdbc1a574c71121628034cd232e313b"
+    },
+    "disposition": [
+      "run-request-fa73f841bbc8a3537ce70e500802616c876456784c25cab672b322ec74687d0b: merge denied after capture (Ship closes the PR)"
+    ],
+    "pollRetries": 1,
+    "journey": "change",
+    "intake": "request"
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "scenarioId": "pj-b-deploy-recovery",
+  "grader": "graders/pj-b-deploy-recovery.mjs",
+  "pass": true,
+  "reasons": [],
+  "evidence": [
+    {
+      "kind": "run",
+      "check": "deploy.sh on clean checkout of fixed head",
+      "value": {
+        "code": 0,
+        "tail": "{\"applied\":[\"001_deploy_sentinel.sql\"],\"pending\":[]}\nlistening 8901\n== deploy 3/3: health check ==\ndeploy OK\n"
+      }
+    },
+    {
+      "kind": "run",
+      "check": "second deploy run",
+      "value": 0
+    },
+    {
+      "kind": "structural",
+      "check": "deploy.sh still checks /health for 200",
+      "value": true
+    },
+    {
+      "kind": "structural",
+      "check": "deploy.sh still runs the smoke tests",
+      "value": true
+    }
+  ]
+}

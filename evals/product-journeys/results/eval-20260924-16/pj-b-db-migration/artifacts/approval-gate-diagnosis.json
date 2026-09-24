@@ -1,0 +1,40 @@
+{
+  "resultSha256": "ecd4f16c2a9843f6fd094fd238a7d381835c74e8c76cf342a12e7503ac1a4965",
+  "originalGradePreserved": true,
+  "runId": "run-request-d8af5ac9f0cb4414f4498dc5007da398331605217d727a387f7eceabb4b3248a",
+  "event": "change-approval",
+  "reason": "The additive SQLite migration matches the sensitive migration path rule. The harness intentionally refuses automatic change approval. No PR tree was captured; grader checks ran on the pristine fixture, not on the pending change, and are not a verdict on that implementation.",
+  "changeClass": {
+    "class": "serious",
+    "reasons": [
+      "migrations/002_add_pinned_flag.sql matches the sensitive path rule **/migrations/**"
+    ],
+    "files": [
+      {
+        "path": "README.md",
+        "added": 3,
+        "deleted": 3,
+        "isDelete": false
+      },
+      {
+        "path": "migrations/002_add_pinned_flag.sql",
+        "added": 3,
+        "deleted": 0,
+        "isDelete": false
+      },
+      {
+        "path": "server.mjs",
+        "added": 15,
+        "deleted": 3,
+        "isDelete": false
+      },
+      {
+        "path": "tests/pinned.test.mjs",
+        "added": 79,
+        "deleted": 0,
+        "isDelete": false
+      }
+    ]
+  },
+  "disposition": "left waiting; no approval or merge fired"
+}

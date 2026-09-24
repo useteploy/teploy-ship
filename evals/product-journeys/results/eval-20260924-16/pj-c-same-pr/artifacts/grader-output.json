@@ -1,0 +1,49 @@
+{
+  "scenarioId": "pj-c-same-pr",
+  "grader": "graders/pj-c-same-pr.mjs",
+  "pass": true,
+  "reasons": [],
+  "evidence": [
+    {
+      "kind": "structural",
+      "check": "TTL resolves from KEEPNOTE_TTL_SECONDS, 24h default present",
+      "value": true
+    },
+    {
+      "kind": "probe",
+      "check": "default TTL is 24h",
+      "value": {
+        "code": 0,
+        "out": "default-24h"
+      }
+    },
+    {
+      "kind": "probe",
+      "check": "env override works",
+      "value": {
+        "code": 0,
+        "out": "override-60"
+      }
+    },
+    {
+      "kind": "structural",
+      "check": "README no longer claims 30 minutes",
+      "value": true
+    },
+    {
+      "kind": "fixture-tests",
+      "check": "suite (with updated pin/override tests) passes",
+      "value": 0
+    },
+    {
+      "kind": "forge",
+      "check": "revision pushed to the same PR; no new PR opened",
+      "value": {
+        "pr": 1,
+        "revised": true,
+        "headAfter": "e4d2228af355fd621b0f47a77ca18085e0d39f78",
+        "newPrs": []
+      }
+    }
+  ]
+}

@@ -1,0 +1,113 @@
+{
+  "scenarioId": "pj-c-scheduled-job",
+  "family": "unfamiliar-service",
+  "runId": "eval-20260924-16",
+  "harnessRevision": "2b13447ecba278679ee060ba37e87ec8baa2e861",
+  "fixtureRevision": "sha256:c5746d3d433f20e2732f66f99147638977570f314bd07b4bdb29cc2830907963",
+  "adapter": "ship",
+  "outcome": "pass",
+  "firstAttempt": {
+    "pass": true,
+    "graderReasons": [],
+    "endedBy": "agent"
+  },
+  "eventualSuccess": {
+    "pass": true
+  },
+  "interventions": [],
+  "rescue": {
+    "needed": false,
+    "provided": false,
+    "notes": []
+  },
+  "latencyMs": 155942,
+  "cost": {
+    "status": "priced",
+    "amount": 0.048903,
+    "currency": "USD",
+    "source": "Ship run ledger (workspace API costUSD), summed over this attempt's runs"
+  },
+  "verifiedEvidence": [
+    {
+      "check": "jobs/expire_sessions.py exists",
+      "value": true
+    },
+    {
+      "check": "job run 1 exit code",
+      "value": {
+        "code": 0,
+        "err": ""
+      }
+    },
+    {
+      "check": "expired removed, 24h-live kept, bookmarks intact",
+      "value": {
+        "sessions": [
+          "sess-fresh",
+          "sess-recent"
+        ],
+        "bookmarks": 1
+      }
+    },
+    {
+      "check": "second run leaves the store byte-identical",
+      "value": {
+        "code": 0,
+        "idempotent": true
+      }
+    },
+    {
+      "check": "missing store exits 0",
+      "value": 0
+    }
+  ],
+  "claimedEvidence": [
+    {
+      "claim": "What I did: Re-verified the deliverable with a single end-to-end command chain:; changed 2 files (classified normal); pushed 1d6ad3d166; opened pull request #2; the merge was denied and the pull request closed (S02 eval harness: graded; scratch fixtures are never merged). What I verified: the suite passed on the base branch before any edit (`python3 -m unittest discover -s tests`); the suite passed over the published tree (`python3 -m unittest discover -s tests`, 2s). What I could not verify: telemetry (this run is not on tyler/fylun, which is the repo OBSERVE_SERVICE=fylun-web is built from).",
+      "verdict": "unverified"
+    }
+  ],
+  "artifacts": [
+    "preserve/transcript.txt",
+    "artifacts/grader-output.json"
+  ],
+  "preserve": {
+    "dir": "preserve/"
+  },
+  "probesApplied": [],
+  "gradedAt": "2026-09-24T21:14:56.233Z",
+  "startedAt": "2026-09-24T21:12:20.115Z",
+  "ship": {
+    "shipRuns": [
+      {
+        "role": "scenario",
+        "runId": "run-request-e899e50822cd1d02dc2d3c3d09b80bad767ddba567e6df1a28b24e39b19e162b",
+        "journey": "change",
+        "status": "completed",
+        "latencyMs": 155609,
+        "costUSD": 0.048903199999999994,
+        "costPriced": true,
+        "pr": "http://100.108.123.49:49152/Tyler/ship-eval-unfamiliar-service/pulls/2"
+      }
+    ],
+    "fixtureRepo": {
+      "url": "http://100.108.123.49:49152/Tyler/ship-eval-unfamiliar-service",
+      "head": "a1f466005d0cf8d23615787fb9b7757704c6a4a0",
+      "ref": "refs/heads/main",
+      "treeMatchesFixture": true,
+      "mainAfter": "a1f466005d0cf8d23615787fb9b7757704c6a4a0",
+      "mainMoved": false
+    },
+    "captured": {
+      "sha": "1d6ad3d16697d5b537ad5947f77111f313ec45ae",
+      "source": "PR #2 head",
+      "expected": "1d6ad3d16697d5b537ad5947f77111f313ec45ae"
+    },
+    "disposition": [
+      "run-request-e899e50822cd1d02dc2d3c3d09b80bad767ddba567e6df1a28b24e39b19e162b: merge denied after capture (Ship closes the PR)"
+    ],
+    "pollRetries": 0,
+    "journey": "change",
+    "intake": "request"
+  }
+}

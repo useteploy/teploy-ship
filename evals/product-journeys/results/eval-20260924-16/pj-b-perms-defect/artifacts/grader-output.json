@@ -1,0 +1,43 @@
+{
+  "scenarioId": "pj-b-perms-defect",
+  "grader": "graders/pj-b-perms-defect.mjs",
+  "pass": true,
+  "reasons": [],
+  "evidence": [
+    {
+      "kind": "probe",
+      "check": "setup note created",
+      "value": 201
+    },
+    {
+      "kind": "probe",
+      "check": "DELETE without token rejected",
+      "value": 401
+    },
+    {
+      "kind": "probe",
+      "check": "DELETE with wrong token rejected",
+      "value": 401
+    },
+    {
+      "kind": "probe",
+      "check": "DELETE with correct token is 204",
+      "value": 204
+    },
+    {
+      "kind": "probe",
+      "check": "read endpoint stays open",
+      "value": 200
+    },
+    {
+      "kind": "fixture-tests",
+      "check": "suite subset that passes pristine still passes in the worked tree",
+      "value": 0
+    },
+    {
+      "kind": "structural",
+      "check": "shipped test files unmodified",
+      "value": true
+    }
+  ]
+}

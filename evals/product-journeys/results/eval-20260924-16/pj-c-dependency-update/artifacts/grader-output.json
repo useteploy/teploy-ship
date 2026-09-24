@@ -1,0 +1,45 @@
+{
+  "scenarioId": "pj-c-dependency-update",
+  "grader": "graders/pj-c-dependency-update.mjs",
+  "pass": true,
+  "reasons": [],
+  "evidence": [
+    {
+      "kind": "structural",
+      "check": "requirements.txt allows markdown 4.x",
+      "value": {
+        "line": "markdown>=3.5,<5",
+        "allows4": true
+      }
+    },
+    {
+      "kind": "probe",
+      "check": "3.x markdown.markdown call shape works",
+      "value": {
+        "code": 0,
+        "out": "three-ok"
+      }
+    },
+    {
+      "kind": "probe",
+      "check": "4.x markdown.render call shape works",
+      "value": {
+        "code": 0,
+        "out": "four-ok"
+      }
+    },
+    {
+      "kind": "probe",
+      "check": "no-package fallback intact",
+      "value": {
+        "code": 0,
+        "out": "fallback-ok"
+      }
+    },
+    {
+      "kind": "fixture-tests",
+      "check": "suite passes offline in the worked tree",
+      "value": 0
+    }
+  ]
+}

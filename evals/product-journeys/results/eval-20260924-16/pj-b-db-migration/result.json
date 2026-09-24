@@ -1,0 +1,76 @@
+{
+  "scenarioId": "pj-b-db-migration",
+  "family": "ui-api-db",
+  "runId": "eval-20260924-16",
+  "harnessRevision": "4af629d6a5e171824d8274371cb509bd974496ef",
+  "fixtureRevision": "sha256:d52d22eff8f12e8d2c02bc69200bc34b8d8dfbd8ef87400cefaf53f58e2b6886",
+  "adapter": "ship",
+  "outcome": "harness-error",
+  "firstAttempt": {
+    "pass": false,
+    "graderReasons": [
+      "adapter failed: run-request-d8af5ac9f0cb4414f4498dc5007da398331605217d727a387f7eceabb4b3248a requires a human decision on change-approval; left pending without approval",
+      "notes.pinned column missing or not defaulting to false after migration",
+      "GET /api/notes does not expose pinned on migrated data (status 200)"
+    ],
+    "endedBy": "harness-error"
+  },
+  "eventualSuccess": {
+    "pass": false
+  },
+  "interventions": [],
+  "rescue": {
+    "needed": false,
+    "provided": false,
+    "notes": []
+  },
+  "latencyMs": 284079,
+  "cost": {
+    "status": "unknown",
+    "reason": "adapter failed before reporting cost: run-request-d8af5ac9f0cb4414f4498dc5007da398331605217d727a387f7eceabb4b3248a requires a human decision on change-approval; left pending without approval"
+  },
+  "verifiedEvidence": [
+    {
+      "check": "migrate on existing v1 database",
+      "value": {
+        "code": 0,
+        "out": "{\"applied\":[\"001_deploy_sentinel.sql\"],\"pending\":[]}"
+      }
+    },
+    {
+      "check": "v1 rows survive the migration",
+      "value": [
+        {
+          "title": "keep me",
+          "body": "v1 data"
+        }
+      ]
+    },
+    {
+      "check": "pinned column exists, defaults false",
+      "value": false
+    },
+    {
+      "check": "second migrate run is a no-op",
+      "value": {
+        "code": 0,
+        "doubleApplied": []
+      }
+    },
+    {
+      "check": "API rows include pinned",
+      "value": false
+    }
+  ],
+  "claimedEvidence": [],
+  "artifacts": [
+    "preserve/transcript.txt",
+    "artifacts/grader-output.json"
+  ],
+  "preserve": {
+    "dir": "preserve/"
+  },
+  "probesApplied": [],
+  "gradedAt": "2026-09-24T20:56:11.416Z",
+  "startedAt": "2026-09-24T20:51:27.224Z"
+}

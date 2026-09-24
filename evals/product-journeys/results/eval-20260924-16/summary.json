@@ -1,0 +1,84 @@
+{
+  "runId": "eval-20260924-16",
+  "adapter": "ship",
+  "startedAt": "2026-09-24T20:44:12.444Z",
+  "completedAt": "2026-09-24T21:14:56.233Z",
+  "scenarios": [
+    {
+      "id": "pj-s-feature",
+      "outcome": "pass",
+      "pass": true,
+      "latencyMs": 239402,
+      "costUSD": 0.045616,
+      "rescueNeeded": true,
+      "interventions": 1,
+      "result": "eval-20260924-16/pj-s-feature/result.json"
+    },
+    {
+      "id": "pj-b-perms-defect",
+      "outcome": "pass",
+      "pass": true,
+      "latencyMs": 194978,
+      "costUSD": 0.055486,
+      "rescueNeeded": false,
+      "interventions": 0,
+      "result": "eval-20260924-16/pj-b-perms-defect/result.json"
+    },
+    {
+      "id": "pj-b-db-migration",
+      "outcome": "harness-error",
+      "pass": false,
+      "latencyMs": 284079,
+      "costUSD": null,
+      "rescueNeeded": false,
+      "interventions": 0,
+      "result": "eval-20260924-16/pj-b-db-migration/result.json"
+    },
+    {
+      "id": "pj-b-deploy-recovery",
+      "outcome": "pass",
+      "pass": true,
+      "latencyMs": 363884,
+      "costUSD": 0.127478,
+      "rescueNeeded": false,
+      "interventions": 0,
+      "result": "eval-20260924-16/pj-b-deploy-recovery/result.json"
+    },
+    {
+      "id": "pj-c-dependency-update",
+      "outcome": "pass",
+      "pass": true,
+      "latencyMs": 148858,
+      "costUSD": 0.036995,
+      "rescueNeeded": false,
+      "interventions": 0,
+      "result": "eval-20260924-16/pj-c-dependency-update/result.json"
+    },
+    {
+      "id": "pj-c-same-pr",
+      "outcome": "pass",
+      "pass": true,
+      "latencyMs": 451931,
+      "costUSD": 0.121049,
+      "rescueNeeded": false,
+      "interventions": 0,
+      "result": "eval-20260924-16/pj-c-same-pr/result.json"
+    },
+    {
+      "id": "pj-c-scheduled-job",
+      "outcome": "pass",
+      "pass": true,
+      "latencyMs": 155942,
+      "costUSD": 0.048903,
+      "rescueNeeded": false,
+      "interventions": 0,
+      "result": "eval-20260924-16/pj-c-scheduled-job/result.json"
+    }
+  ],
+  "totals": {
+    "pass": 6,
+    "fail": 0,
+    "unknown": 0,
+    "harness-error": 1
+  }
+}

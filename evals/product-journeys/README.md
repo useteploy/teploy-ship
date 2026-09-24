@@ -13,6 +13,11 @@ graders under `graders/`; results land under `results/`.
   It is not a twelve-scenario baseline.
   Historical records keep their original grades; new grader tests also check
   the saved transcripts without changing those records.
+- **All twelve scenarios now have a request-path attempt.** [The combined
+  sweep report](2026-09-24-request-sweep.md) distinguishes nine direct passes,
+  the question's supplementary passing regrade, the review's lexical failure,
+  and the migration's approval stop/safe closure. This is not the repeated
+  baseline or a recovery-probe sign-off.
 - **The adapter supports change requests and same-PR revisions.** It uses the
   product's request forms, checks fixture identity, captures the PR tree for
   independent grading, and denies merge requests after capture. The new

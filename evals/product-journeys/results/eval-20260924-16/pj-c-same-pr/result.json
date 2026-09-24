@@ -1,0 +1,138 @@
+{
+  "scenarioId": "pj-c-same-pr",
+  "family": "unfamiliar-service",
+  "runId": "eval-20260924-16",
+  "harnessRevision": "2b13447ecba278679ee060ba37e87ec8baa2e861",
+  "fixtureRevision": "sha256:c5746d3d433f20e2732f66f99147638977570f314bd07b4bdb29cc2830907963",
+  "adapter": "ship",
+  "outcome": "pass",
+  "firstAttempt": {
+    "pass": true,
+    "graderReasons": [],
+    "endedBy": "agent"
+  },
+  "eventualSuccess": {
+    "pass": true
+  },
+  "interventions": [],
+  "rescue": {
+    "needed": false,
+    "provided": false,
+    "notes": []
+  },
+  "latencyMs": 451931,
+  "cost": {
+    "status": "priced",
+    "amount": 0.121049,
+    "currency": "USD",
+    "source": "Ship run ledger (workspace API costUSD), summed over this attempt's runs"
+  },
+  "verifiedEvidence": [
+    {
+      "check": "TTL resolves from KEEPNOTE_TTL_SECONDS, 24h default present",
+      "value": true
+    },
+    {
+      "check": "default TTL is 24h",
+      "value": {
+        "code": 0,
+        "out": "default-24h"
+      }
+    },
+    {
+      "check": "env override works",
+      "value": {
+        "code": 0,
+        "out": "override-60"
+      }
+    },
+    {
+      "check": "README no longer claims 30 minutes",
+      "value": true
+    },
+    {
+      "check": "suite (with updated pin/override tests) passes",
+      "value": 0
+    },
+    {
+      "check": "revision pushed to the same PR; no new PR opened",
+      "value": {
+        "pr": 1,
+        "revised": true,
+        "headAfter": "e4d2228af355fd621b0f47a77ca18085e0d39f78",
+        "newPrs": []
+      }
+    }
+  ],
+  "claimedEvidence": [
+    {
+      "claim": "What I did: Verified all four required artifacts and the test run, as asked; changed 3 files (classified trivial); pushed e4d2228af3. What I verified: the suite was already failing on the base branch (exit 1) before any edit; the suite passed over the published tree (`python3 -m unittest discover -s tests`, 1s). What I could not verify: nothing outstanding.",
+      "verdict": "unverified"
+    }
+  ],
+  "artifacts": [
+    "preserve/transcript.txt",
+    "artifacts/grader-output.json"
+  ],
+  "preserve": {
+    "dir": "preserve/"
+  },
+  "probesApplied": [],
+  "gradedAt": "2026-09-24T21:12:20.111Z",
+  "startedAt": "2026-09-24T21:04:47.342Z",
+  "ship": {
+    "shipRuns": [
+      {
+        "role": "setup-review",
+        "runId": "run-request-9f191821fa60133560ec6e0dbf1ccafc4dcf4dd3f1ef82179522850521fb7b51",
+        "journey": "review",
+        "status": "completed",
+        "latencyMs": 193250,
+        "costUSD": 0.045613600000000004,
+        "costPriced": true,
+        "pr": null
+      },
+      {
+        "role": "scenario",
+        "runId": "run-request-a369b28a02eba78c1bd2b9da096de0a7f0b72a7a7fb1e82d67fb2a3ff6e67dfb",
+        "journey": "change",
+        "status": "completed",
+        "latencyMs": 256347,
+        "costUSD": 0.0754358,
+        "costPriced": true,
+        "pr": "http://100.108.123.49:49152/Tyler/ship-eval-same-pr/pulls/1"
+      }
+    ],
+    "fixtureRepo": {
+      "url": "http://100.108.123.49:49152/Tyler/ship-eval-same-pr",
+      "head": "f2938d0ee805fceec843f7c61908259c49c80571",
+      "ref": "refs/tags/eval-seed",
+      "treeMatchesFixture": true,
+      "movedMainTo": "f906dc2c008a28181afa32b917a068b86974cf70",
+      "mainAfter": "f906dc2c008a28181afa32b917a068b86974cf70",
+      "mainMoved": false
+    },
+    "captured": {
+      "sha": "e4d2228af355fd621b0f47a77ca18085e0d39f78",
+      "source": "PR #1 head"
+    },
+    "samePr": {
+      "prNumber": 1,
+      "prUrl": "http://100.108.123.49:49152/Tyler/ship-eval-same-pr/pulls/1",
+      "branch": "eval/pr-eval-20260924-16-pj-c-same-pr",
+      "setupHead": "49e4be55539a2f43bf7674abe6b76c02372dc574",
+      "mainHead": "f906dc2c008a28181afa32b917a068b86974cf70",
+      "seed": "f2938d0ee805fceec843f7c61908259c49c80571",
+      "headAfter": "e4d2228af355fd621b0f47a77ca18085e0d39f78",
+      "revised": true,
+      "runPr": "http://100.108.123.49:49152/Tyler/ship-eval-same-pr/pulls/1",
+      "newPrs": []
+    },
+    "disposition": [
+      "PR #1 closed after capture"
+    ],
+    "pollRetries": 2,
+    "journey": "change",
+    "intake": "request"
+  }
+}

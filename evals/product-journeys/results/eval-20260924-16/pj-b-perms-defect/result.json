@@ -1,0 +1,109 @@
+{
+  "scenarioId": "pj-b-perms-defect",
+  "family": "ui-api-db",
+  "runId": "eval-20260924-16",
+  "harnessRevision": "4af629d6a5e171824d8274371cb509bd974496ef",
+  "fixtureRevision": "sha256:d52d22eff8f12e8d2c02bc69200bc34b8d8dfbd8ef87400cefaf53f58e2b6886",
+  "adapter": "ship",
+  "outcome": "pass",
+  "firstAttempt": {
+    "pass": true,
+    "graderReasons": [],
+    "endedBy": "agent"
+  },
+  "eventualSuccess": {
+    "pass": true
+  },
+  "interventions": [],
+  "rescue": {
+    "needed": false,
+    "provided": false,
+    "notes": []
+  },
+  "latencyMs": 194978,
+  "cost": {
+    "status": "priced",
+    "amount": 0.055486,
+    "currency": "USD",
+    "source": "Ship run ledger (workspace API costUSD), summed over this attempt's runs"
+  },
+  "verifiedEvidence": [
+    {
+      "check": "setup note created",
+      "value": 201
+    },
+    {
+      "check": "DELETE without token rejected",
+      "value": 401
+    },
+    {
+      "check": "DELETE with wrong token rejected",
+      "value": 401
+    },
+    {
+      "check": "DELETE with correct token is 204",
+      "value": 204
+    },
+    {
+      "check": "read endpoint stays open",
+      "value": 200
+    },
+    {
+      "check": "suite subset that passes pristine still passes in the worked tree",
+      "value": 0
+    },
+    {
+      "check": "shipped test files unmodified",
+      "value": true
+    }
+  ],
+  "claimedEvidence": [
+    {
+      "claim": "What I did: Verified end-to-end: `server.mjs` line 61–63 contains the new admin-token gate (401 before the DELETE runs), `tests/admin-delete.test.mjs` exists (2309 bytes), and the full suite runs 5 tests with 4 passing — including the new \"DELETE /api…; changed 2 files (classified normal); pushed a1d3899bfb; opened pull request #2; the merge was denied and the pull request closed (S02 eval harness: graded; scratch fixtures are never merged). What I verified: the suite was already failing on the base branch (exit 1) before any edit. What I could not verify: the suite fails the same way it did on the base branch (exit 1), which is inherited breakage, not this change; telemetry (this run is not on tyler/fylun, which is the repo OBSERVE_SERVICE=fylun-web is built from).",
+      "verdict": "unverified"
+    }
+  ],
+  "artifacts": [
+    "preserve/transcript.txt",
+    "artifacts/grader-output.json"
+  ],
+  "preserve": {
+    "dir": "preserve/"
+  },
+  "probesApplied": [],
+  "gradedAt": "2026-09-24T20:51:27.218Z",
+  "startedAt": "2026-09-24T20:48:11.898Z",
+  "ship": {
+    "shipRuns": [
+      {
+        "role": "scenario",
+        "runId": "run-request-100daec2b51dc68c9038f5f01bebdf9848b06000ea43910dba907d344c8700fd",
+        "journey": "change",
+        "status": "completed",
+        "latencyMs": 194500,
+        "costUSD": 0.0554862,
+        "costPriced": true,
+        "pr": "http://100.108.123.49:49152/Tyler/ship-eval-ui-api-db/pulls/2"
+      }
+    ],
+    "fixtureRepo": {
+      "url": "http://100.108.123.49:49152/Tyler/ship-eval-ui-api-db",
+      "head": "ea8408b7e178ed3f81f20519165fa86f6e9bdc13",
+      "ref": "refs/heads/main",
+      "treeMatchesFixture": true,
+      "mainAfter": "ea8408b7e178ed3f81f20519165fa86f6e9bdc13",
+      "mainMoved": false
+    },
+    "captured": {
+      "sha": "a1d3899bfb446d6e576fe051d256f802a598698f",
+      "source": "PR #2 head",
+      "expected": "a1d3899bfb446d6e576fe051d256f802a598698f"
+    },
+    "disposition": [
+      "run-request-100daec2b51dc68c9038f5f01bebdf9848b06000ea43910dba907d344c8700fd: merge denied after capture (Ship closes the PR)"
+    ],
+    "pollRetries": 0,
+    "journey": "change",
+    "intake": "request"
+  }
+}

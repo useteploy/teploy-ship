@@ -323,11 +323,12 @@ open with the S17 starter.
   (content-addressed, up to ~300 KB) in `ship_artifacts`, which has no GC.
   Needs a retention rule (e.g. drop takeover screenshots at handback/lapse
   or after N days).
-  **2026-09-24: implemented locally**, seven-day retention for new takeover
+  **2026-09-24: deployed as 2b13447**, seven-day retention for new takeover
   screenshots with separate identities and expiry records. Legacy/permanent
   artifacts are preserved even when their bytes equal an expired screenshot.
   A separate real Nucleus proof passed round-trip, expiry, complete chunk
-  deletion and preservation of permanent/newer identical images. Rollout pending.
+  deletion and preservation of permanent/newer identical images. The built
+  production image passed the full real Chromium proof before rollout.
 - **Live proof pending.** The artifact-backed BROWSER display and the
   two-park resume are unit-pinned only; the next live pass should run
   `enqueue --plan` -> takeover with a browser navigate -> approve-merge
@@ -464,10 +465,10 @@ resume proof remains pending.
 The maintained live browser proof exposed lost focus: click → type → Enter
 never submitted the form, although captures/navigation worked. The driver's
 intentional per-action reload preserves site storage but lost the active
-control. Fixed locally by restoring a bounded selector/selection and scroll
+control. Fixed and deployed as 2b13447 by restoring a bounded selector/selection and scroll
 on the same URL without replaying clicks; navigation clears the saved focus.
 The DOM still reloads each action, as the panel states. The driver now refreshes
 on every operation so existing sessions receive fixes. Real Chromium proof
 passed all actions after the fix; before/after logs are under evals/receipts.
-Rollout pending. The live proof script also now uses sandboxProvider and
+The live proof script also now uses sandboxProvider and
 artifact-backed screenshots rather than its stale SDK/inline-image wiring.

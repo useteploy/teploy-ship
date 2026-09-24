@@ -1,0 +1,110 @@
+{
+  "scenarioId": "pj-s-feature",
+  "family": "small-site",
+  "runId": "eval-20260924-16",
+  "harnessRevision": "7c42d613e8b7e933348ea352022113eeeda46a71",
+  "fixtureRevision": "sha256:54aa415a72c85b5e2cb91895bcd9c07bb9263893b626ff391b37abbe6c3e7e98",
+  "adapter": "ship",
+  "outcome": "pass",
+  "firstAttempt": {
+    "pass": true,
+    "graderReasons": [],
+    "endedBy": "agent"
+  },
+  "eventualSuccess": {
+    "pass": true
+  },
+  "interventions": [
+    {
+      "kind": "clarification",
+      "at": "2026-09-24T20:45:34.299Z",
+      "by": "harness",
+      "note": "run-request-99ddbb0f3e54d521cef87d697cd881cbd5c21ca09ebbf08f5f681e6fd5e7222a asked; declined without an answer (no-rescue baseline): The repo has no workshop street address or opening hours anywhere (only \"Bear Harbor, California\" and \"Workshop tours run Saturdays\"). Should I (a) use specifics you provide, or (b) build the page now from what the repo supports — address shown as \"Bear Harbor, California\" with clearly marked placeholders for the street address, and hours derived from the Saturday tours line?"
+    }
+  ],
+  "rescue": {
+    "needed": true,
+    "provided": false,
+    "notes": [
+      "run-request-99ddbb0f3e54d521cef87d697cd881cbd5c21ca09ebbf08f5f681e6fd5e7222a asked; declined without an answer (no-rescue baseline): The repo has no workshop street address or opening hours anywhere (only \"Bear Harbor, California\" and \"Workshop tours run Saturdays\"). Should I (a) use specifics you provide, or (b) build the page now from what the repo supports — address shown as \"Bear Harbor, California\" with clearly marked placeholders for the street address, and hours derived from the Saturday tours line?"
+    ]
+  },
+  "latencyMs": 239402,
+  "cost": {
+    "status": "priced",
+    "amount": 0.045616,
+    "currency": "USD",
+    "source": "Ship run ledger (workspace API costUSD), summed over this attempt's runs"
+  },
+  "verifiedEvidence": [
+    {
+      "check": "contact.html exists",
+      "value": true
+    },
+    {
+      "check": "contact.html links stylesheet, has address and hours",
+      "value": true
+    },
+    {
+      "check": "index.html nav links contact.html",
+      "value": true
+    },
+    {
+      "check": "about.html nav links contact.html",
+      "value": true
+    },
+    {
+      "check": "all internal links resolve",
+      "value": []
+    }
+  ],
+  "claimedEvidence": [
+    {
+      "claim": "What I did: All three artifacts are now proven to exist and be correct, re-verified after re-reading the task:; changed 3 files (classified trivial); pushed 4f195fa068; opened pull request #3; the merge was denied and the pull request closed (S02 eval harness: graded; scratch fixtures are never merged). What I verified: the suite passed on the base branch before any edit (`python3 -c '\"\"\"Basic verification command for the scratch static-site project.\"\"\"\nfrom html.parser import HTMLParser\nfrom pathlib import Path\nfrom urllib.parse import unquote, urlsplit\n\n\nclass Page(HTMLParser):\n    def __init__(self):\n        super().__init__()\n        self.tags = []\n        self.links = []\n\n    def handle_starttag(self, tag, attrs):\n        self.tags.append(tag)\n        self.links.extend(value for key, value in attrs if key == \"href\" and value)\n\n\npages = sorted(Path(\".\").glob(\"*.html\"))\nassert {\"index.html\", \"about.html\"} <= {p.name for p in pages}, \"missing site pages\"\nfor path in pages:\n    page = Page()\n    page.feed(path.read_text())\n    assert page.tags.count(\"title\") == 1, f\"{path}: expected one title\"\n    assert page.tags.count(\"h1\") == 1, f\"{path}: expected one heading\"\n    for link in page.links:\n        url = urlsplit(link)\n        if not url.scheme and not url.netloc and url.path:\n            target = Path(unquote(url.path).lstrip(\"/\"))\n            assert target.is_file(), f\"{path}: missing linked file {link}\"\nprint(f\"Verified {len(pages)} HTML pages and their local links\")\n'`); the suite passed over the published tree (`python3 -c '\"\"\"Basic verification command for the scratch static-site project.\"\"\"\nfrom html.parser import HTMLParser\nfrom pathlib import Path\nfrom urllib.parse import unquote, urlsplit\n\n\nclass Page(HTMLParser):\n    def __init__(self):\n        super().__init__()\n        self.tags = []\n        self.links = []\n\n    def handle_starttag(self, tag, attrs):\n        self.tags.append(tag)\n        self.links.extend(value for key, value in attrs if key == \"href\"…",
+      "verdict": "unverified"
+    }
+  ],
+  "artifacts": [
+    "preserve/transcript.txt",
+    "artifacts/grader-output.json"
+  ],
+  "preserve": {
+    "dir": "preserve/"
+  },
+  "probesApplied": [],
+  "gradedAt": "2026-09-24T20:48:11.890Z",
+  "startedAt": "2026-09-24T20:44:12.444Z",
+  "ship": {
+    "shipRuns": [
+      {
+        "role": "scenario",
+        "runId": "run-request-99ddbb0f3e54d521cef87d697cd881cbd5c21ca09ebbf08f5f681e6fd5e7222a",
+        "journey": "change",
+        "status": "completed",
+        "latencyMs": 239101,
+        "costUSD": 0.045615600000000006,
+        "costPriced": true,
+        "pr": "http://100.108.123.49:49152/Tyler/ship-eval-small-site/pulls/3"
+      }
+    ],
+    "fixtureRepo": {
+      "url": "http://100.108.123.49:49152/Tyler/ship-eval-small-site",
+      "head": "eab3c41e06482456b2d6e8d6f61ef90502106457",
+      "ref": "refs/heads/main",
+      "treeMatchesFixture": true,
+      "mainAfter": "eab3c41e06482456b2d6e8d6f61ef90502106457",
+      "mainMoved": false
+    },
+    "captured": {
+      "sha": "4f195fa0686fd4d80ecd5e5faf4d45b038c438ff",
+      "source": "PR #3 head",
+      "expected": "4f195fa0686fd4d80ecd5e5faf4d45b038c438ff"
+    },
+    "disposition": [
+      "run-request-99ddbb0f3e54d521cef87d697cd881cbd5c21ca09ebbf08f5f681e6fd5e7222a: merge denied after capture (Ship closes the PR)"
+    ],
+    "pollRetries": 0,
+    "journey": "change",
+    "intake": "request"
+  }
+}

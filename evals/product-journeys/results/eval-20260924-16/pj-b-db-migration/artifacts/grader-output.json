@@ -1,0 +1,48 @@
+{
+  "scenarioId": "pj-b-db-migration",
+  "grader": "graders/pj-b-db-migration.mjs",
+  "pass": false,
+  "reasons": [
+    "adapter failed: run-request-d8af5ac9f0cb4414f4498dc5007da398331605217d727a387f7eceabb4b3248a requires a human decision on change-approval; left pending without approval",
+    "notes.pinned column missing or not defaulting to false after migration",
+    "GET /api/notes does not expose pinned on migrated data (status 200)"
+  ],
+  "evidence": [
+    {
+      "kind": "run",
+      "check": "migrate on existing v1 database",
+      "value": {
+        "code": 0,
+        "out": "{\"applied\":[\"001_deploy_sentinel.sql\"],\"pending\":[]}"
+      }
+    },
+    {
+      "kind": "probe",
+      "check": "v1 rows survive the migration",
+      "value": [
+        {
+          "title": "keep me",
+          "body": "v1 data"
+        }
+      ]
+    },
+    {
+      "kind": "probe",
+      "check": "pinned column exists, defaults false",
+      "value": false
+    },
+    {
+      "kind": "run",
+      "check": "second migrate run is a no-op",
+      "value": {
+        "code": 0,
+        "doubleApplied": []
+      }
+    },
+    {
+      "kind": "probe",
+      "check": "API rows include pinned",
+      "value": false
+    }
+  ]
+}
