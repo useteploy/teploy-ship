@@ -1,6 +1,6 @@
 import type { ActionArgs } from "@neutron-build/core";
 
-import { actorFromPrincipal } from "../../../../lib/ship.server.js";
+import { actorFromPrincipal, approveDelivery } from "../../../../lib/ship.server.js";
 import { currentUser } from "../../../../lib/session.server.js";
 import { may } from "../../../../lib/authority.server.js";
 import { shipRuntime } from "../../../../lib/store.server.js";
@@ -17,7 +17,9 @@ export const config = { mode: "app" };
  * record tells the loser what won).
  *
  * Approving records an intent with an explicit destination and retained
- * recovery version; it deploys NOTHING by itself. The worker's delivery
+ * recovery version; it deploys NOTHING by itself. A held or failed delivery
+ * is re-approved through this same boundary (approveDelivery), re-recording
+ * both under the operator's eye. The worker's delivery
  * sweep executes approved records against the trusted working copy, and
  * only when one is configured — otherwise the approval is held with the
  * reason, visibly, until it is.
@@ -60,11 +62,10 @@ export async function action({ request, params }: ActionArgs): Promise<Response>
     );
   }
   try {
-    const record = await runtime.deliveryRecords.transition(runId, "proposed", "approved", {
+    const record = await approveDelivery(runtime.deliveryRecords, runId, {
       destination,
       recoveryVersion,
       actor: actorFromPrincipal(principal).id,
-      policy: "operator-approval",
       ...(reason !== "" ? { reason } : {}),
     });
     if (record.state !== "approved") {

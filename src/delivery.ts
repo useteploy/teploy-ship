@@ -27,6 +27,7 @@ import type { GovernanceStore } from "./governance.js";
 import type { UserStore } from "./users.js";
 import { DEFAULT_WINDOW_MINUTES, readServiceHealth, telemetryAppliesTo, telemetryTargetFromEnv } from "./observe.js";
 import type { TelemetryTarget } from "./observe.js";
+import { repositoryKeyFold } from "./repository-reference.js";
 
 /** What a delivery record holds. Additive only; fields grow, never rename. */
 export interface DeliveryRecord {
@@ -107,6 +108,43 @@ const ALLOWED: Record<DeliveryState, DeliveryState[]> = {
 
 export function transitionAllowed(from: DeliveryState, to: DeliveryState): boolean {
   return ALLOWED[from]?.includes(to) === true;
+}
+
+/**
+ * The states an operator approval may move a record OUT of: the first
+ * approval (proposed) and the re-approval every held/failed reason asks for
+ * ("re-approve to retry", "re-approve deliberately"). Before this the promote
+ * route only knew `proposed`, so a held or failed delivery could be re-approved
+ * by store surgery alone.
+ */
+export const APPROVABLE_STATES: readonly DeliveryState[] = ["proposed", "held", "failed"];
+
+/**
+ * Record an operator's approval (the promote route's authority boundary has
+ * already checked the grant): moves the record from whichever approvable
+ * state it is in NOW, fenced on that state, re-recording the destination and
+ * the retained recovery version under the operator's eye. A record in any
+ * other state is returned unchanged — the caller reports what won.
+ */
+export async function approveDelivery(
+  store: Pick<DeliveryStore, "get" | "transition">,
+  id: string,
+  approval: { destination: string; recoveryVersion: string; actor: string; reason?: string },
+): Promise<DeliveryRecord> {
+  const current = await store.get(id);
+  if (current === null) throw new Error("No delivery record with this identity");
+  if (!APPROVABLE_STATES.includes(current.state)) return current;
+  const again = current.state !== "proposed";
+  const reason = approval.reason !== undefined && approval.reason !== ""
+    ? approval.reason
+    : again ? `re-approved after ${current.state}: ${current.reason ?? "no reason recorded"}` : undefined;
+  return store.transition(id, current.state, "approved", {
+    destination: approval.destination,
+    recoveryVersion: approval.recoveryVersion,
+    actor: approval.actor,
+    policy: again ? "operator-reapproval" : "operator-approval",
+    ...(reason !== undefined ? { reason } : {}),
+  });
 }
 
 /** The fields each state requires before the transition may be recorded. */
@@ -495,7 +533,10 @@ export async function executeDelivery(
   const marker = await exec(["cat", `${cwd.replace(/\/+$/, "")}/.teploy-ship-delivery-repo`], 30_000);
   if (marker.code === 0) {
     const bound = marker.stdout.trim();
-    if (bound !== "" && bound !== record.repo) {
+    // Compared under the repository case rule (S01-3): an operator who writes
+    // the forge's display spelling (`Tyler/app`) names the same repository
+    // as the record's canonical key, and must not hold a correct delivery.
+    if (bound !== "" && repositoryKeyFold(bound) !== repositoryKeyFold(record.repo)) {
       return { ...record, ...patch({ reason: `wrong target: this trusted copy serves ${bound}, the delivery is for ${record.repo}` }) };
     }
   }
@@ -524,15 +565,51 @@ export async function executeDelivery(
   if (head.code === 0) {
     const branch = head.stdout.trim().replace(/^refs\/remotes\/origin\//, "");
     const branchFetch = await exec(["git", "fetch", "origin", branch], 300_000);
-    if (branchFetch.code === 0) {
-      const same = await exec(["git", "diff", "--quiet", record.mergedSha, `origin/${branch}`], 30_000);
-      if (same.code !== 0) {
-        return {
-          ...record,
-          ...patch({ reason: `the default branch ${branch} no longer serves the approved bytes (reverted, superseded, or merged differently) — re-approve deliberately` }),
-        };
-      }
+    // A default branch that resolved but could not be fetched is a failed
+    // CHECK, not an absent one: proceeding would deploy on a revalidation
+    // that never ran (the unresolvable-HEAD case above stays the documented
+    // back-compat skip).
+    if (branchFetch.code !== 0) {
+      return {
+        ...record,
+        ...patch({ reason: `could not fetch the default branch ${branch} to revalidate the approval: ${(branchFetch.stderr || branchFetch.stdout).slice(0, 300)}` }),
+      };
     }
+    const same = await exec(["git", "diff", "--quiet", record.mergedSha, `origin/${branch}`], 30_000);
+    if (same.code !== 0) {
+      return {
+        ...record,
+        ...patch({ reason: `the default branch ${branch} no longer serves the approved bytes (reverted, superseded, or merged differently) — re-approve deliberately` }),
+      };
+    }
+  }
+  // The retained recovery version is operator-typed at approval; a rollback
+  // later goes exactly there and its read-back only compares against that
+  // same value — so a mistyped version would "roll back" to the wrong
+  // release and verify as done. Read what the destination runs NOW: a
+  // readable target on some other version holds before anything is built.
+  // A target with no deployment yet (or unreadable here) proceeds — the
+  // deploy is the authority on reachability — and the receipt says the
+  // recovery version went unverified.
+  let recoveryVerified = false;
+  const prior = await exec(["teploy", "status", "--json"], 120_000);
+  if (prior.code === 0) {
+    let serving = "";
+    try {
+      const parsed = JSON.parse(prior.stdout.trim()) as { state?: { current_hash?: unknown } };
+      if (typeof parsed.state?.current_hash === "string") serving = parsed.state.current_hash;
+    } catch {
+      // unparseable: treated as unverified, below
+    }
+    if (serving !== "" && serving !== record.recoveryVersion) {
+      return {
+        ...record,
+        ...patch({
+          reason: `the destination runs ${serving}, not the recorded recovery version ${record.recoveryVersion ?? "(none)"} — a rollback would not return it to what it ran before; re-approve with the version actually serving`,
+        }),
+      };
+    }
+    recoveryVerified = serving !== "";
   }
   const checked = await exec(["git", "worktree", "add", "--detach", tree, record.mergedSha]);
   if (checked.code !== 0) {
@@ -560,9 +637,16 @@ export async function executeDelivery(
   );
   await exec(["git", "worktree", "remove", "--force", tree]).catch(() => undefined);
   if (deployed.code !== 0) {
+    // NOT held: held means "never touched the target", and a deploy command
+    // that exited non-zero may already have swapped containers (a timeout
+    // after the switch is the classic case). The honest state is unknown —
+    // the read-back sweep then confirms what landed or fails with what runs.
     return {
       ...record,
-      ...patch({ reason: `deployment refused (exit ${deployed.code}): ${(deployed.stderr || deployed.stdout).slice(0, 300)}`, artifactDigest: image }),
+      artifactDigest: image,
+      state: "unknown",
+      updatedAt: now,
+      reason: `deployment command failed (exit ${deployed.code}): ${(deployed.stderr || deployed.stdout).slice(0, 300)} — the target may have changed; reading it back before deciding`,
     };
   }
   // A returned command is not a verified outcome: the deploy may succeed and
@@ -574,7 +658,7 @@ export async function executeDelivery(
     artifactDigest: image,
     state: "unknown",
     updatedAt: now,
-    reason: "deployment command completed; target state not yet read back",
+    reason: `deployment command completed; target state not yet read back${recoveryVerified ? "" : " (recovery version unverified: the target's prior version could not be read)"}`,
   };
 }
 
@@ -744,16 +828,22 @@ export async function readBackDelivery(
   // reported 16a4e9a114f0 while the artifact tag named it). Resolve an
   // ID-form image through the same trusted-copy channel and accept the
   // artifact among the image's RepoTags.
-  const imageIsArtifact = async (image: unknown, execServer: string): Promise<boolean> => {
+  // Three answers, not two: an ID-form image this worker could not RESOLVE
+  // (exec refused, unparseable inspect, no server to ask) is a lost read, not
+  // evidence the target runs something else. Answering "no" there turned an
+  // unreadable target into a `failed` delivery — the opposite of this
+  // function's contract (unknown never fails on a lost read); the wave-9 live
+  // pass recorded exactly that on each iteration before the exec path worked.
+  const imageIsArtifact = async (image: unknown, execServer: string): Promise<"yes" | "no" | "unresolved"> => {
     const name = typeof image === "string" ? image : "";
-    if (name === "") return false;
-    if (name === record.artifactDigest) return true;
-    if (!/^(sha256:)?[0-9a-f]{12,64}$/i.test(name)) return false;
+    if (name === "") return "no";
+    if (name === record.artifactDigest) return "yes";
+    if (!/^(sha256:)?[0-9a-f]{12,64}$/i.test(name)) return "no";
     // The runner executes inside the worker, where there is no docker
     // socket — the daemon lives on the deployment host. `teploy exec`
     // carries the query over the same SSH channel the deploy used, from
     // the trusted copy (whose teploy.yml names the server).
-    if (execServer === "") return false;
+    if (execServer === "") return "unresolved";
     // No --format template: teploy exec round-trips the remote shell and a
     // Go template with spaces does not survive it ("unclosed action").
     // Plain inspect returns the full JSON document; RepoTags is in there.
@@ -761,15 +851,15 @@ export async function readBackDelivery(
       ["teploy", "exec", execServer, "--", "docker", "image", "inspect", name],
       { cwd: options.dir!, timeoutMs: 60_000 },
     );
-    if (inspect.code !== 0) return false;
+    if (inspect.code !== 0) return "unresolved";
     try {
       const docs = JSON.parse(inspect.stdout.trim()) as unknown;
-      if (!Array.isArray(docs) || docs.length === 0) return false;
+      if (!Array.isArray(docs) || docs.length === 0) return "unresolved";
       const tags = (docs[0] as { RepoTags?: unknown }).RepoTags;
-      if (!Array.isArray(tags)) return false;
-      return tags.some((t) => typeof t === "string" && (t === record.artifactDigest || t.startsWith(`${record.artifactDigest}:`)));
+      if (!Array.isArray(tags)) return "no";
+      return tags.some((t) => typeof t === "string" && (t === record.artifactDigest || t.startsWith(`${record.artifactDigest}:`))) ? "yes" : "no";
     } catch {
-      return false;
+      return "unresolved";
     }
   };
   let onArtifact = false;
@@ -780,13 +870,23 @@ export async function readBackDelivery(
   let execServer = typeof parsed.server === "string" && parsed.server !== "" ? parsed.server : "";
   try {
     const yml = await import("node:fs/promises").then((fs) => fs.readFile(`${options.dir}/teploy.yml`, "utf8"));
-    const m = /^server:\s*(\S+)\s*$/m.exec(yml);
-    if (m !== null) execServer = m[1];
+    // Optional YAML quotes are not part of the address.
+    const m = /^server:\s*(["']?)([^\s"']+)\1\s*$/m.exec(yml);
+    if (m !== null) execServer = m[2]!;
   } catch {
     // no teploy.yml legible — keep the status-derived name and let exec fail
   }
+  const unresolved: string[] = [];
   for (const c of running) {
-    if (await imageIsArtifact(c.Image, execServer)) { onArtifact = true; break; }
+    const answer = await imageIsArtifact(c.Image, execServer);
+    if (answer === "yes") { onArtifact = true; break; }
+    if (answer === "unresolved") unresolved.push(String(c.Image));
+  }
+  if (!onArtifact && unresolved.length > 0) {
+    return {
+      outcome: "unreadable",
+      detail: `state names ${expected} but running image(s) [${unresolved.join(", ")}] could not be resolved to tags through teploy exec${execServer === "" ? " (no server to ask)" : ` on ${execServer}`} — retrying rather than failing on a lost read`,
+    };
   }
   if (!onArtifact) {
     const images = running.map((c) => String(c.Image)).join(", ");
@@ -817,6 +917,17 @@ export async function readBackDelivery(
  * artifact's own digest is not known to this record (it predates the
  * delivery), so version + a live container is the bar; the evidence string
  * carries what was seen.
+ *
+ * Two checks run before the command, at ACTION time (delta audit of the
+ * bf835ab delivery path, 2026-09-23):
+ * - the requester's approve authority is re-resolved against the live stores
+ *   (the same S15 recheck a delivery gets) — a request cannot outlive its
+ *   grant any more than an approval can;
+ * - the target must still run THIS delivery. `rollback --to <recovery>` on a
+ *   target that has since received a newer delivery would silently undo
+ *   that one too, while its record stayed `confirmed`. A target already on
+ *   the recovery version records done (an earlier attempt landed and lost
+ *   its receipt); an unreadable target refuses — never act on an unread one.
  */
 export async function executeDeliveryRollback(
   record: DeliveryRecord,
@@ -824,6 +935,8 @@ export async function executeDeliveryRollback(
     dir?: string;
     run: (argv: string[], opts: { cwd: string; timeoutMs: number }) => Promise<{ code: number; stdout: string; stderr: string }>;
     now?: () => string;
+    /** The live governance/account stores for the requester recheck. */
+    authority?: ApproveAuthoritySources;
   },
 ): Promise<NonNullable<DeliveryRecord["rollback"]>> {
   const now = options.now?.() ?? new Date().toISOString();
@@ -838,6 +951,37 @@ export async function executeDeliveryRollback(
   }
   if (record.recoveryVersion === undefined || record.recoveryVersion === "") {
     return failed("this delivery recorded no retained recovery version — rollback needs an explicit target; a redeploy of the known-good revision is a new delivery");
+  }
+  const recheck = await recheckApprovingActor(record.rollback?.actor, options.authority);
+  if (recheck.outcome === "hold") {
+    return failed(`rollback requester recheck: ${recheck.reason}`);
+  }
+  const before = await options.run(["teploy", "status", "--json"], { cwd: options.dir, timeoutMs: 120_000 });
+  if (before.code !== 0) {
+    return failed(`the target could not be read before rollback (exit ${before.code}): ${(before.stderr || before.stdout).slice(0, 300)} — refusing to act on an unread target`);
+  }
+  let serving = "";
+  let live = false;
+  try {
+    const parsed = JSON.parse(before.stdout.trim()) as { state?: { current_hash?: unknown }; containers?: Array<Record<string, unknown>> };
+    serving = typeof parsed.state?.current_hash === "string" ? parsed.state.current_hash : "";
+    live = (parsed.containers ?? []).some((c) => c.State === "running");
+  } catch {
+    return failed(`target status was not JSON before rollback: ${before.stdout.slice(0, 300)}`);
+  }
+  if (serving === record.recoveryVersion && live) {
+    return {
+      ...(record.rollback ?? { actor: "", reason: "", requestedAt: now }),
+      state: "done",
+      finishedAt: now,
+      evidence: `target read back: retained version ${record.recoveryVersion} serving (already — no rollback command was needed)`,
+    };
+  }
+  const delivered = record.mergedSha?.slice(0, 7) ?? "";
+  if (delivered === "" || serving !== delivered) {
+    return failed(
+      `the target runs ${serving === "" ? "(none)" : serving}, not this delivery's ${delivered === "" ? "(unknown version)" : delivered} — rolling back to ${record.recoveryVersion} would also undo whatever replaced it; roll back the delivery that is serving`,
+    );
   }
   const rolled = await options.run(["teploy", "rollback", "--to", record.recoveryVersion], { cwd: options.dir, timeoutMs: 900_000 });
   if (rolled.code !== 0) {

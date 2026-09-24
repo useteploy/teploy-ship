@@ -320,3 +320,111 @@ open with the S17 starter.
   two-park resume are unit-pinned only; the next live pass should run
   `enqueue --plan` -> takeover with a browser navigate -> approve-merge
   and see both the screenshot and the merge.
+
+## 2026-09-23 — S01 lane: case twins (S01-3) and delta audit of the delivery/promote path
+
+**S01-3 — CLOSED.** The fresh audit's premise ("Forgejo repo names are
+case-sensitive") was checked live and is false: Forgejo 14.0.5
+(gitea-1.22.0) answered `Tyler/teploy-ship`, `tyler/teploy-ship` and
+`TYLER/Teploy-Ship` with ONE repository id (68), and smart-HTTP served each;
+Gitea/Forgejo key owners and repositories on their lower-cased names, so case
+twins cannot both exist on one instance. GitHub is case-insensitive too. The
+rule (src/repository-reference.ts header): http(s) forge paths fold case
+(already true for `canonicalRepositoryURL`, now documented and pinned);
+`file:` paths never fold; scheme never folds (F03 stands). Remaining
+unfolded consumers now fold: the C7 per-repo lock (`repoLockKey` — `Tyler/app`
+and `tyler/app` runs could previously execute concurrently on one repo),
+repo memory (records land canonical; reads gather every stored twin spelling,
+v1 `host/Owner/name` keys included, still gated by the recorded-run proof),
+incident remediation's wrong-repo guard, and the trusted-copy marker compare.
+Existing stored twins are DETECTED, never merged: `scripts/check-case-twins.mjs`
+(read-only SELECTs over projects v1/v2, memory, repo stats, spend buckets,
+legacy evidence, reviewer rules; JSON receipt; exit 1 when twins exist).
+Not run against the live store from this lane (no live-state access); run it
+before/after the deploy that carries this change and keep the receipt.
+Upgrade note: during a rolling deploy an old worker keys the C7 lock with the
+owner's case and a new one lower-case, so a mixed-case repo can briefly run
+two at once across the two builds — same exposure as before the fix, gone
+once all workers upgrade.
+
+**Delta audit of bf835ab delivery/promote + wave-9 read-back (6a5a69b,
+b64deee, 12f0d85, 3beb210) — FIXED, each pinned in src/delivery.test.ts
+("delta audit: …" tests + the rewritten rollback-executor test):**
+
+1. *Deploy failure recorded `held`* (delivery.ts executeDelivery, deploy
+   branch). Held means "never touched the target", but a non-zero `teploy
+   deploy` (timeout after the container swap) may have changed it. Now
+   `unknown` + artifact identity, so the read-back sweep decides.
+2. *Unresolvable ID-form image failed the delivery* (readBackDelivery
+   `imageIsArtifact`). exec refused / unparseable inspect / no server
+   answered "not the artifact" → `mismatch` → `failed` — a lost read
+   recorded as a verdict, contrary to the function's contract. Now
+   tri-state; unresolved → `unreadable` (stays unknown, retries). Also:
+   quoted `server:` lines in teploy.yml are unquoted before exec.
+3. *Default-branch fetch failure skipped revalidation* (executeDelivery,
+   stale-approval block). A resolved-but-unfetchable default branch silently
+   deployed on a check that never ran; now held with the git error.
+   Unresolvable origin/HEAD keeps the documented back-compat skip.
+4. *Recovery version never verified* — the operator types it; rollback goes
+   exactly there and its read-back only compares against the same value, so
+   a typo would "roll back" to the wrong release and verify done. Execution
+   now reads the destination first: a readable target on another version
+   holds ("re-approve with the version actually serving"); an empty/unreadable
+   target proceeds and the receipt says the recovery version is unverified.
+5. *Rollback could undo a newer delivery* (executeDeliveryRollback). Record A
+   confirmed, then B delivered; rolling A back ran `rollback --to A.recovery`,
+   silently undoing B while B stayed `confirmed`. Now the target must be
+   serving THIS delivery's version; already-on-recovery → done without a
+   command (lost-receipt case); unreadable target → refused.
+6. *Rollback requester not rechecked at action time.* Approvals got the S15
+   actor recheck; rollback requests did not. Now the same
+   `recheckApprovingActor` runs against the live stores before the target is
+   read (worker wires governance/users in).
+7. *No product path to re-approve held/failed deliveries.* Every held reason
+   says "re-approve", but the promote route only moved `proposed`; wave-9
+   re-approvals were store surgery. `approveDelivery` moves
+   proposed|held|failed → approved fenced on the current state, re-records
+   destination + recovery version, policy `operator-reapproval`; the run page
+   offers the form in those states.
+8. *Marker compare was case-exact* — now under the S01-3 rule.
+9. Stale-executing reconciliation reason said "target does not run the
+   approved delivery" even when the target was merely unreadable; wording now
+   follows the read-back outcome.
+
+**Delta audit — RECORDED, not fixed (owner: ship, S14/S15 continuation):**
+
+- **(Medium) `destination` is recorded but never enforced**
+  (src/delivery.ts:46; promote.tsx:49). The executor deploys wherever the
+  trusted copy's teploy.yml points; the approval's destination string is
+  never compared with `teploy status --json`'s `app`/`server`. An approval
+  for "staging" executes against whatever the copy targets. Fix needs a
+  destination grammar (live proofs used ":7480") before it can be enforced.
+- **(Medium) `configIdentity` is never populated** (src/delivery.ts:52). The
+  contract tuple names trusted config identity; nothing records a digest of
+  the trusted copy's teploy.yml at execution, so a config edit between two
+  deliveries is invisible in the receipts.
+- **(Low) A stuck rollback `executing` has no reconciliation**
+  (src/worker.ts:1924 claims; no stale sweep). A worker death mid-rollback
+  leaves `rollback.state = executing` forever; the route refuses a new
+  request. Needs the same stale-window read-back the delivery has.
+- **(Low) `unknown` has no escalation** (src/worker.ts:1943). An
+  unreadable target retries every minute indefinitely with no age signal on
+  the run page.
+- **(Low) Sweep visibility is bounded by recency** (src/delivery.ts:319 and
+  :1110 `due` = newest-500 list then filter; worker.ts:1924 the same). An old
+  approved/requested record behind 500 newer ones is never picked up.
+- **(Info) Version identity is a 7-char SHA prefix** (src/delivery.ts:800,
+  mirrors the CLI's `--version` short hash). Collision is theoretical; the
+  artifact half of the pair still has to match.
+- **(Info) A trusted copy with no marker executes** (src/delivery.ts:534) —
+  documented back-compat; provisioning the marker is an operator step.
+
+**Dependency re-triage (2026-09-23, vs current manifests):** `pnpm audit`
+root and web: no known vulnerabilities. The frozen production lockfiles
+(deploy/package-lock.ship.json, deploy/package-lock.web.json) under
+`npm audit --package-lock-only`: 0 vulnerabilities. GitHub Dependabot on
+useteploy/teploy-ship: 18 alerts total, all `fixed` (latest batch
+2026-09-21: hono, devalue, js-yaml, browserslist, baseline-browser-mapping);
+0 open. Resolved versions confirmed in both lock sets (hono 4.13.5, devalue
+5.9.2, js-yaml 3.15.2, browserslist 4.28.7, postcss 8.5.26/8.5.28, nanoid
+6.0.1). No bump needed; nothing to record as open.

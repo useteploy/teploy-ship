@@ -644,13 +644,26 @@ test("C7: repoLockKeyOf reads the repo off the run's own log, normalised, and ex
 
   assert.equal(
     repoLockKeyOf(started({ task: "t", repo: "https://git.example.com/Tyler/app.git" })),
-    "git.example.com/Tyler/app",
+    "git.example.com/tyler/app",
     "every surface that names the same repo contends on the same key",
   );
   assert.equal(
     repoLockKeyOf(started({ task: "t", repo: "http://git.example.com/Tyler/app" })),
-    "git.example.com/Tyler/app",
+    "git.example.com/tyler/app",
     "scheme and .git suffix do not split one repository into two queues",
+  );
+  // S01-3: GitHub and Forgejo resolve owner/name case-insensitively, so a
+  // webhook's `Tyler/app` and an operator's `tyler/app` are ONE repository —
+  // two queues for it would let both runs push overlapping branches at once.
+  assert.equal(
+    repoLockKeyOf(started({ task: "t", repo: "https://GIT.example.com/TYLER/App" })),
+    repoLockKeyOf(started({ task: "t", repo: "https://git.example.com/tyler/app.git" })),
+    "case twins of one forge repository contend on one key",
+  );
+  assert.notEqual(
+    repoLockKeyOf(started({ task: "t", repo: "file:///srv/mirrors/Team/App" })),
+    repoLockKeyOf(started({ task: "t", repo: "file:///srv/mirrors/team/app" })),
+    "file: paths are case-sensitive and never fold",
   );
   assert.equal(repoLockKeyOf(started({ task: "t" })), undefined, "a workspace run contends over nothing");
   assert.equal(
