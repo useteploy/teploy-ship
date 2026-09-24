@@ -7,6 +7,7 @@ import { taskRootRunId } from "./task-session.js";
 import { FileLaunchJournal, NucleusLaunchJournal, assertSameLaunch, launchRequestHash, type LaunchJournal } from "./launch-journal.js";
 import { parseJourney, journeyInstruction, type Journey } from "./journeys.js";
 import { FileArtifacts, NucleusArtifacts, type ArtifactStore } from "./artifacts.js";
+import { FileWorkspaceContent, NucleusWorkspaceContent, type WorkspaceContentStore } from "./workspace-content.js";
 import type { RunOrigin } from "./notify.js";
 import { resolveTestTarget } from "./test-detect.js";
 import {
@@ -379,6 +380,7 @@ export interface ShipRuntime {
    */
   config: RuntimeConfigStore;
   artifacts?: ArtifactStore;
+  workspaceContent?: WorkspaceContentStore;
   /**
    * Handshakes THIS Ship started, with the PKCE verifier for each. The control
    * that closes the phish: a /connect/return that names no row here is refused.
@@ -450,6 +452,7 @@ export function fileRuntime(): ShipRuntime {
     evidence: new ProjectEvidenceStore(projects, new FileEvidenceStore()),
     config: new FileRuntimeConfig(),
     artifacts: new FileArtifacts(),
+    workspaceContent: new FileWorkspaceContent(),
     connectRequests: new FileConnectRequests(),
     akirooCursor: new FileAkirooCursor(),
     governance: new FileGovernanceStore(),
@@ -571,6 +574,7 @@ export async function nucleusRuntime(
     evidence: new ProjectEvidenceStore(projects, new NucleusEvidenceStore(db)),
     config: new NucleusRuntimeConfig(db),
     artifacts: new NucleusArtifacts(db),
+    workspaceContent: new NucleusWorkspaceContent(db),
     connectRequests: new NucleusConnectRequests(db),
     akirooCursor: new NucleusAkirooCursor(db),
     governance: new NucleusGovernanceStore(db),

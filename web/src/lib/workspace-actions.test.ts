@@ -449,3 +449,19 @@ test("the browser tab: steer authority per POST, action shape recorded, file:// 
   assert.equal(hostile.takeover.reply?.browser?.artifact, undefined, "a malformed reference is dropped, not rendered into a URL");
   assert.equal(data.takeover.reply?.browser?.url, "http://localhost:8000/");
 });
+
+test("the editor loader resolves full content and fails closed for a foreign reference", async () => {
+  const runtime = await shipRuntime();
+  const id = "run-editor-content";
+  await enqueueRun(runtime, {runId:id,repo:'https://github.com/team/repo',task:'Editor',model:'test',source:'manual',trust:'operator'});
+  const content = 'é"\n'.repeat(30_000);
+  await runtime.workspaceContent!.put(id, "large-read", content);
+  const reply = { id: "large-read", at: new Date().toISOString(), kind: "takeover-read", contentStored: true };
+  await runtime.config.set("SHIP_TAKEOVER_REPLY_" + id, JSON.stringify(reply));
+  const data = await run.loader({params:{id},request:request("/runs/"+id,{})});
+  assert.equal(data.takeover.reply?.output, content);
+  await runtime.config.set("SHIP_TAKEOVER_REPLY_" + id, JSON.stringify({ ...reply, id: "missing-read" }));
+  const missing = await run.loader({params:{id},request:request("/runs/"+id,{})});
+  assert.equal(missing.takeover.reply?.output, undefined);
+  assert.match(missing.takeover.reply?.error ?? "", /missing/);
+});

@@ -21,13 +21,17 @@ import {
   fitReply,
   requestKey,
   requestWorkspace,
+  resolveEditorReply,
+  takeoverReadCommand,
   serveWorkspaceRequests,
   sweepLapsedTakeovers,
   TAKEOVER_CONSOLE_COMMAND_LIMIT,
   type PendingReply,
 } from "./workspace-requests.js";
+import { FileWorkspaceContent } from "./workspace-content.js";
+import { execFileSync } from "node:child_process";
 import { FileArtifacts, type ArtifactStore } from "./artifacts.js";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -356,6 +360,7 @@ function panelHarness(files: Record<string, string>) {
     },
     loadMeta: async () => ASK,
     artifacts,
+    workspaceContent: new FileWorkspaceContent(mkdtempSync(join(tmpdir(), "takeover-content-"))),
     projects: { list: async () => [], forRepo: async () => ({ testCommand: "pnpm test" }) },
     store: {
       load: async () => [
@@ -381,10 +386,11 @@ function panelHarness(files: Record<string, string>) {
         onChunk?: (stream: "stdout" | "stderr", chunk: string) => void,
       ) => {
         calls.push({ op: "execAs", cred, command });
-        const read = /^head -c (\d+) '\.\/(.*)' \| base64 \| tr -d/.exec(command);
+        const decodedCommand = command.startsWith("bash -o pipefail -c ") ? command.slice(21, -1).replaceAll("'\\''", "'") : command;
+        const read = /^head -c (\d+) '\.\/(.*)' \| base64 \| tr -d/.exec(decodedCommand);
         if (read !== null) {
           const bytes = Buffer.from(files[read[2]] ?? "", "utf8");
-          if (bytes.length === 0) return { exitCode: 1, stdout: "", stderr: "no such file", timedOut: false, truncated: false };
+          if (!(read[2] in files)) return { exitCode: 1, stdout: "", stderr: "no such file", timedOut: false, truncated: false };
           const stdout = bytes.subarray(0, Number(read[1])).toString("base64");
           return { exitCode: 0, stdout, stderr: "", timedOut: false, truncated: false };
         }
@@ -795,4 +801,59 @@ test("a request too large for its row is refused at request time, with a reason"
     /too large to send through the workspace request store/,
   );
   assert.equal(values.size, 0);
+});
+
+
+test("large editor files round-trip outside the config row with exact UTF-8 bytes", async () => {
+  const content = '\"é\n'.repeat(20000);
+  const h = panelHarness({ "large.txt": content });
+  await panelRequest(h.runtime, "takeover-acquire", "alice");
+  await serveWorkspaceRequests(h.runtime, h.executor, { allowlist: "https://github.com" });
+  await panelRequest(h.runtime, "takeover-read", "alice", "large.txt");
+  await serveWorkspaceRequests(h.runtime, h.executor, { allowlist: "https://github.com" });
+  assert.equal(h.replyOf().contentStored, true);
+  const resolved = await resolveEditorReply(h.runtime, "run-1", h.replyOf());
+  assert.equal(resolved.output, content);
+  const foreign = await resolveEditorReply(h.runtime, "run-2", h.replyOf());
+  assert.match(foreign.error!, /missing/);
+  assert.equal(foreign.output, undefined);
+  const edited = content + "edited\n";
+  await panelRequest(h.runtime, "takeover-write", "alice", "large.txt", { content: edited });
+  for (const value of h.values.values()) assert.ok(Buffer.byteLength(value) <= WORKSPACE_ROW_BYTES_LIMIT);
+  await serveWorkspaceRequests(h.runtime, h.executor, { allowlist: "https://github.com" });
+  assert.equal(h.replyOf().error, undefined);
+  assert.equal(h.files["large.txt"], edited);
+});
+
+test("editor read command distinguishes empty files from failed reads", () => {
+  assert.equal(execFileSync("bash", ["-c", takeoverReadCommand("package.json")], { encoding: "utf8" }), Buffer.from(readFileSync("package.json")).toString("base64"));
+  assert.throws(() => execFileSync("bash", ["-c", takeoverReadCommand("does-not-exist-editor-proof")], { stdio: "pipe" }));
+  const dir = mkdtempSync(join(tmpdir(), "editor-shell-"));
+  try {
+    writeFileSync(join(dir, "empty"), "");
+    writeFileSync(join(dir, "large"), "é".repeat(100000));
+    assert.equal(execFileSync("bash", ["-c", takeoverReadCommand("empty")], { cwd: dir, encoding: "utf8" }), "");
+    const encoded = execFileSync("bash", ["-c", takeoverReadCommand("large")], { cwd: dir, encoding: "utf8" });
+    assert.equal(Buffer.from(encoded, "base64").toString(), "é".repeat(100000));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+
+test("missing stored edits and truncated reads never become writable content", async () => {
+  const h = panelHarness({ "a.txt": "keep" });
+  await panelRequest(h.runtime, "takeover-acquire", "alice");
+  await serveWorkspaceRequests(h.runtime, h.executor, { allowlist: "https://github.com" });
+  await panelRequest(h.runtime, "takeover-write", "alice", "a.txt", { content: "new" });
+  const pending = JSON.parse(h.values.get(requestKey("run-1"))!);
+  delete pending.content;
+  pending.contentStored = true;
+  h.values.set(requestKey("run-1"), JSON.stringify(pending));
+  await serveWorkspaceRequests(h.runtime, h.executor, { allowlist: "https://github.com" });
+  assert.match(h.replyOf().error, /missing/);
+  assert.equal(h.files["a.txt"], "keep");
+  (h.executor as any).lease.execAs = async () => ({ exitCode: 0, stdout: Buffer.from("partial").toString("base64"), stderr: "", timedOut: false, truncated: true });
+  await panelRequest(h.runtime, "takeover-read", "alice", "a.txt");
+  await serveWorkspaceRequests(h.runtime, h.executor, { allowlist: "https://github.com" });
+  assert.match(h.replyOf().error, /Could not read/);
+  assert.equal(h.replyOf().output, undefined);
 });

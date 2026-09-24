@@ -1,0 +1,35 @@
+{
+  "scenarioId": "pj-b-api-defect",
+  "grader": "graders/pj-b-api-defect.mjs",
+  "pass": true,
+  "reasons": [],
+  "evidence": [
+    {
+      "kind": "probe",
+      "check": "first create is 201",
+      "value": 201
+    },
+    {
+      "kind": "probe",
+      "check": "duplicate title status",
+      "value": 409
+    },
+    {
+      "kind": "probe",
+      "check": "duplicate title body",
+      "value": {
+        "error": "duplicate title: same title"
+      }
+    },
+    {
+      "kind": "fixture-tests",
+      "check": "shipped suite passes in the worked tree",
+      "value": 0
+    },
+    {
+      "kind": "structural",
+      "check": "shipped test files unmodified",
+      "value": true
+    }
+  ]
+}

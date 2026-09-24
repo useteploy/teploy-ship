@@ -1,0 +1,44 @@
+{
+  "runId": "eval-20260924-15",
+  "adapter": "ship",
+  "startedAt": "2026-09-24T20:27:12.955Z",
+  "completedAt": "2026-09-24T20:36:51.564Z",
+  "scenarios": [
+    {
+      "id": "pj-s-plan",
+      "outcome": "pass",
+      "pass": true,
+      "latencyMs": 66489,
+      "costUSD": 0.02073,
+      "rescueNeeded": false,
+      "interventions": 0,
+      "result": "eval-20260924-15/pj-s-plan/result.json"
+    },
+    {
+      "id": "pj-c-review",
+      "outcome": "fail",
+      "pass": false,
+      "latencyMs": 140762,
+      "costUSD": 0.03728,
+      "rescueNeeded": false,
+      "interventions": 0,
+      "result": "eval-20260924-15/pj-c-review/result.json"
+    },
+    {
+      "id": "pj-b-api-defect",
+      "outcome": "pass",
+      "pass": true,
+      "latencyMs": 371030,
+      "costUSD": 0.055162,
+      "rescueNeeded": false,
+      "interventions": 0,
+      "result": "eval-20260924-15/pj-b-api-defect/result.json"
+    }
+  ],
+  "totals": {
+    "pass": 2,
+    "fail": 1,
+    "unknown": 0,
+    "harness-error": 0
+  }
+}

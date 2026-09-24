@@ -1,0 +1,109 @@
+{
+  "scenarioId": "pj-s-plan",
+  "family": "small-site",
+  "runId": "eval-20260924-15",
+  "harnessRevision": "57c8faec4a788da20a40854d2e301f0c9e1f5fbc",
+  "fixtureRevision": "sha256:54aa415a72c85b5e2cb91895bcd9c07bb9263893b626ff391b37abbe6c3e7e98",
+  "adapter": "ship",
+  "outcome": "pass",
+  "firstAttempt": {
+    "pass": true,
+    "graderReasons": [],
+    "endedBy": "agent"
+  },
+  "eventualSuccess": {
+    "pass": true
+  },
+  "interventions": [],
+  "rescue": {
+    "needed": false,
+    "provided": false,
+    "notes": []
+  },
+  "latencyMs": 66489,
+  "cost": {
+    "status": "priced",
+    "amount": 0.02073,
+    "currency": "USD",
+    "source": "Ship run ledger (workspace API costUSD), summed over this attempt's runs"
+  },
+  "verifiedEvidence": [
+    {
+      "check": "work tree unchanged",
+      "value": {
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "unchanged": [
+          "about.html",
+          "index.html",
+          "styles.css"
+        ]
+      }
+    },
+    {
+      "check": "plan references index.html and styles.css",
+      "value": {
+        "index.html": true,
+        "styles.css": true
+      }
+    },
+    {
+      "check": "plan addresses the gallery",
+      "value": true
+    },
+    {
+      "check": "no PR opened, nothing pushed",
+      "value": {
+        "prOpened": false,
+        "pushed": false
+      }
+    }
+  ],
+  "claimedEvidence": [
+    {
+      "claim": "## Plan: Gallery section on the home page (three photo cards under the hero)\n\n### Current state (observed evidence)\n\n- Repository is exactly three tracked files: `index.html` (602 B), `about.html` (572 B), `styles.css` (249 B); `git ls-files` confirms, and `find` shows no other files. No build tooling, no package manager, no JS.\n- There is **no explicit hero element**. `grep -niE \"hero|gallery|<img|figure|srcset\"` returns nothing. The \"hero\" is implicit: `index.html` lines 14–18 — `<main>` containing `<h1>Tideline Woodworks</h1>`, `<p class=\"tagline\">`, and one intro `<p>`.\n- `styles.css` has four rules (body, `nav a`, footer, `.tagline`). `body` is centered at `max-width: 40rem`, and there is **no grid or flex anywhere** — this would be the first layout primitive added to the site.\n- **No images exist anywhere in the repo**, and there is no assets directory.\n\nNote on uncertainty: the session history mentions a prior \"Our story\" nav rename and an `API.md`, neither of which exists in this tree (nav still reads \"Home / About\" on both pages, and the file list is three entries). The observed state is what this plan targets; the history notes appear to describe a different snapshot and were not treated as current.\n\n### Assumptions\n\n1. \"Under the hero\" means immediately after the intro paragraph at `index.html:17`, still inside `<main>` and above `<footer>`.\n2. Scope is `index.html` + `styles.css` only; `about.html` is untouched.\n3. Three cards = three static photos, not a carousel or lightbox. No JavaScript.\n4. The site stays a plain static site — no build step, no dependencies.\n\n### Open questions (need your answer before any implementation)\n\n- **Where do the photos come from?** This is the only blocking question. Options: (a) you supply three files committed to a new `images/` directory; (b) hotlink remote URLs; (c) temporary local SVG placeholders. I recommend (a) or (c) — hotlinks break silently and leak visitor requests to third parties.\n- **Captions?** One line per photo (default: `<figcaption>` with product/place names consistent with the driftwood-tables copy).\n- **Should the gallery stay inside the 40rem column or go full-bleed?** See tradeoffs.\n\n### Proposed steps (not executed)\n\n1. **Markup** — in `index.html`, after line 17, add `<section class=\"gallery\" aria-labelledby=\"gallery-heading\">` containing an `<h2>` (correct level under the existing `<h1>`) and a `<ul>` of three `<li><figure><img ...><figcaption>…</figcaption></figure></li>` items. Each `<img>` gets `src`, `alt`, `width`, `height`, and `loading=\"lazy\"`.\n2. **Styles** — append to `styles.css`: `.gallery ul { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 1rem; list-style: none; padding: 0; }` plus `img { width: 100%; height: auto; display: block; }`. The `auto-fit`/`minmax` combination collapses to one column on narrow phones with no separate media query.\n3. **Assets** — add the three photos under `images/` (or placeholders) at a sensible size (~1200px wide, JPEG/WebP), with `width`/`height` attributes matching the intrinsic size.\n4. **Verification** — the acceptance checks below.\n\n### Tradeoffs, in plain language\n\n- **Grid vs. flexbox:** grid with `auto-fit` makes the 3→1 responsive collapse automatic; flexbox would need a media query to reflow. Grid is the smaller change for the same result.\n- **Stay in the 40rem column vs. break out full-bleed:** staying inside is ~15 lines of CSS and preserves the site's narrow, book-like feel — but three cards share ~37rem (about 11rem each), which is small for photos. Full-bleed (negative-margin breakout, or moving the section outside the body's max-width) makes photos shine but touches the page's core layout rule for the first time — the riskier edit in a 249-byte stylesheet. Start in-column; widen only if cards look cramped.\n- **Local files vs. remote image URLs:** local files grow the repo with binaries (it currently has none) but are self-contained and permanent; remote URLs keep the repo tiny but add a failure mode outside your control.\n- **`width`/`height` attributes:** costs one attribute pair per image, prevents layout shift while photos load. No downside.\n\n### Acceptance criteria\n\n- `index.html` contains exactly one gallery section placed between the intro `<p>` and `</main>`; `grep -c 'class=\"gallery\"' index.html` → 1.\n- `grep -c '<figure>' index.html` → 3 and `grep -c '<img' index.html` → 3; every `<img>` has non-empty `alt`, `width`, and `height`.\n- The gallery heading is an `<h2>` appearing after the `<h1>` — heading order stays sequential.\n- `styles.css` gains gallery rules only; the four existing rules stay byte-identical (`git diff` shows additions, no deletions).\n- `about.html` unchanged: `git diff --stat` lists only `index.html`, `styles.css`, and (if authorized) new `images/*` files.\n- Browser check at a wide and a ~375px viewport: three cards side by side on desktop, stacked on mobile, no horizontal scrollbar.\n- No JavaScript, no new dependencies, no build step introduced.\n\nPer the request, nothing was implemented, no tracked files were modified, and no PR was opened — the working tree is clean and the branch is byte-identical to `main`. Implementation awaits your explicit authorization, ideally with an answer to the photo-source question above.\n\nFINDINGS_JSON []",
+      "verdict": "unverified"
+    }
+  ],
+  "artifacts": [
+    "preserve/transcript.txt",
+    "artifacts/grader-output.json"
+  ],
+  "preserve": {
+    "dir": "preserve/"
+  },
+  "probesApplied": [],
+  "gradedAt": "2026-09-24T20:28:19.467Z",
+  "startedAt": "2026-09-24T20:27:12.955Z",
+  "ship": {
+    "shipRuns": [
+      {
+        "role": "scenario",
+        "runId": "run-request-00b0ccd57ba8d1b8b3f5abb80a5761620ed362041df0817efb404777674a41c6",
+        "journey": "plan",
+        "status": "completed",
+        "latencyMs": 66059,
+        "costUSD": 0.020730400000000003,
+        "costPriced": true,
+        "pr": null
+      }
+    ],
+    "fixtureRepo": {
+      "url": "http://100.108.123.49:49152/Tyler/ship-eval-small-site",
+      "head": "eab3c41e06482456b2d6e8d6f61ef90502106457",
+      "ref": "refs/heads/main",
+      "treeMatchesFixture": true,
+      "mainAfter": "eab3c41e06482456b2d6e8d6f61ef90502106457",
+      "mainMoved": false
+    },
+    "captured": {
+      "sha": null,
+      "source": "none"
+    },
+    "disposition": [],
+    "pollRetries": 0,
+    "journey": "plan",
+    "intake": "request"
+  }
+}

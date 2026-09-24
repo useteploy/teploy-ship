@@ -1,0 +1,8 @@
+{
+  "resultSha256": "8c9f63c7854661cc1b2b2f1da43c6973394be84bbb07e21dd5d8ec01d97b22e4",
+  "originalGradePreserved": true,
+  "assessment": "Lexical grader limitation: the answer states README.md:10 claims inactivity expiry but the code uses creation time, states sliding-window semantics remain unimplemented, and blocks merge. It does not use a required false-word in the same sentence as README. This is not recorded as a passing grade.",
+  "missingCheck": [
+    "the review never states that the README claim is false \u2014 it leaves the README as possible ground truth"
+  ]
+}

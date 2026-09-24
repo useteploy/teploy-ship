@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { threadHistory, workspaceInspection, refreshForgeIfStale } from "./workspace.server.js";
 import type { WorkspaceReply } from "../../../dist/workspace-requests.js";
+import { resolveEditorReply } from "../../../dist/workspace-requests.js";
 import {
   loadTakeover,
   mayAcquireTakeover,
@@ -226,7 +227,7 @@ export async function runData({ params, request }: { params: { id: string }; req
     let takeoverReply: RunData["takeover"]["reply"] | undefined;
     if (takeoverReplyRaw) {
       try {
-        const parsed = JSON.parse(takeoverReplyRaw) as WorkspaceReply;
+        const parsed = await resolveEditorReply(runtime, runId, JSON.parse(takeoverReplyRaw) as WorkspaceReply);
         takeoverReply = {
           id: parsed.id,
           kind: parsed.kind ?? "",

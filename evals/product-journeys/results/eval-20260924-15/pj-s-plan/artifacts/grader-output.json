@@ -1,0 +1,43 @@
+{
+  "scenarioId": "pj-s-plan",
+  "grader": "graders/pj-s-plan.mjs",
+  "pass": true,
+  "reasons": [],
+  "evidence": [
+    {
+      "kind": "structural",
+      "check": "work tree unchanged",
+      "value": {
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "unchanged": [
+          "about.html",
+          "index.html",
+          "styles.css"
+        ]
+      }
+    },
+    {
+      "kind": "transcript",
+      "check": "plan references index.html and styles.css",
+      "value": {
+        "index.html": true,
+        "styles.css": true
+      }
+    },
+    {
+      "kind": "transcript",
+      "check": "plan addresses the gallery",
+      "value": true
+    },
+    {
+      "kind": "adapter-reported",
+      "check": "no PR opened, nothing pushed",
+      "value": {
+        "prOpened": false,
+        "pushed": false
+      }
+    }
+  ]
+}

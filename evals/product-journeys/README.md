@@ -8,13 +8,16 @@ graders under `graders/`; results land under `results/`.
 **Status — read before quoting anything here:**
 
 - **A partial live baseline exists**, preserved in `results/eval-20260924-1..11`:
-  question, plan and review runs only. It is not a twelve-scenario baseline.
+  question, plan and review runs only. New request-path runs `12..15` add
+  deployed-parser canaries, a passing copy change and a passing API fix.
+  It is not a twelve-scenario baseline.
   Historical records keep their original grades; new grader tests also check
   the saved transcripts without changing those records.
 - **The adapter supports change requests and same-PR revisions.** It uses the
   product's request forms, checks fixture identity, captures the PR tree for
   independent grading, and denies merge requests after capture. The new
-  request path is locally tested; a live canary is required before a batch.
+  request path passed live question, copy and API canaries; broader
+  scenario coverage is still in progress.
 - **Plan and review graders now read the transcript.** Review checks are
   lexical and retain matching evidence; they are not semantic proof.
 - **Recovery and permissions probes remain separate work.** A manifest entry

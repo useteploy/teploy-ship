@@ -6,6 +6,7 @@
  */
 import { randomUUID } from "node:crypto";
 import type { ShipRuntime } from "./runtime.js";
+import { WORKSPACE_CONTENT_BYTES } from "./workspace-content.js";
 import type { ExecutorProvider } from "./durable.js";
 import {
   assertRepoAllowed,
@@ -68,6 +69,7 @@ export type WorkspaceRequest = {
   by: string;
   /** takeover-write: the file's full new content. */
   content?: string;
+  contentStored?: boolean;
   /** takeover-release: the holder's handback note, recorded with the session. */
   reason?: string;
   /** takeover-console: the submitted command. */
@@ -81,6 +83,7 @@ export type WorkspaceReply = {
   error?: string;
   forge?: ForgeState;
   output?: string;
+  contentStored?: boolean;
   kind?: WorkspaceRequest["kind"];
   path?: string;
   truncated?: boolean;
@@ -205,7 +208,7 @@ export const TAKEOVER_CONSOLE_COMMAND_LIMIT = 2000;
 export const TAKEOVER_CONSOLE_TIMEOUT_MS = 120_000;
 
 export async function requestWorkspace(
-  runtime: Pick<ShipRuntime, "config" | "loadMeta">,
+  runtime: Pick<ShipRuntime, "config" | "loadMeta" | "workspaceContent">,
   runId: string,
   kind: WorkspaceRequest["kind"],
   by: string,
@@ -221,6 +224,8 @@ export async function requestWorkspace(
     if (!path || path.length > 500 || path.includes("\0")) throw new Error("Choose a file to write");
     if (content === undefined || content.length > TAKEOVER_CONTENT_LIMIT)
       throw new Error(`File content is required, up to ${TAKEOVER_CONTENT_LIMIT} characters`);
+    if (Buffer.byteLength(content, "utf8") > WORKSPACE_CONTENT_BYTES)
+      throw new Error(`File content is limited to ${WORKSPACE_CONTENT_BYTES} UTF-8 bytes`);
   }
   if (kind === "takeover-read" && (!path || path.length > 500 || path.includes("\0")))
     throw new Error("Choose a file to open");
@@ -257,12 +262,30 @@ export async function requestWorkspace(
     ...(extra?.command !== undefined ? { command: extra.command } : {}),
     ...(browser !== undefined ? { browser } : {}),
   };
+  if (rowBytes(request) > WORKSPACE_ROW_BYTES_LIMIT && kind === "takeover-write" && runtime.workspaceContent) {
+    await runtime.workspaceContent.put(runId, request.id, content!);
+    delete request.content;
+    request.contentStored = true;
+  }
   if (rowBytes(request) > WORKSPACE_ROW_BYTES_LIMIT)
     throw new Error(
       `That is too large to send through the workspace request store (${rowBytes(request)} bytes; it carries about ${WORKSPACE_ROW_BYTES_LIMIT}). Edit large files from the console.`,
     );
   await runtime.config.set(requestKey(runId), JSON.stringify(request), by);
   return request;
+}
+
+/** Rehydrate only editor replies, through the same authenticated run surface. */
+export async function resolveEditorReply(
+  runtime: Pick<ShipRuntime, "workspaceContent">, runId: string, reply: WorkspaceReply,
+): Promise<WorkspaceReply> {
+  if (reply.kind !== "takeover-read" || !reply.contentStored || reply.error) return reply;
+  try {
+    if (!runtime.workspaceContent) throw new Error("This install cannot retrieve editor content; open the file from the console");
+    return { ...reply, output: await runtime.workspaceContent.get(runId, reply.id) };
+  } catch (e) {
+    return { ...reply, output: undefined, error: e instanceof Error ? e.message : String(e) };
+  }
 }
 /** Keep inspections visible when background forge refreshes finish. */
 export async function workspaceInspection(runtime: Pick<ShipRuntime, "config">, runId: string): Promise<WorkspaceReply | null> {
@@ -329,12 +352,14 @@ export function fileCommand(path?: string): string {
  */
 export function takeoverReadCommand(path: string): string {
   const quote = (s: string) => "'" + s.replace(/'/g, "'\\''") + "'";
-  return `head -c ${TAKEOVER_CONTENT_LIMIT + 1} ${quote("./" + path)} | base64 | tr -d '\\n'`;
+  const command = `head -c ${TAKEOVER_CONTENT_LIMIT + 1} ${quote("./" + path)} | base64 | tr -d '\\n'`;
+  return `bash -o pipefail -c ${quote(command)}`;
 }
 /** Console scrollback keeps the TAIL — the head of a long run is what a bounded buffer can spare. */
 export function tailKeep(text: string, max: number): string {
   return text.length <= max ? text : text.slice(-max);
 }
+const contentPruneAt = new WeakMap<object, number>();
 export async function serveWorkspaceRequests(
   runtime: ShipRuntime,
   executor: ExecutorProvider,
@@ -357,6 +382,11 @@ export async function serveWorkspaceRequests(
   // unstorable reply re-served every tick). Failures surface as ONE thrown
   // summary at the end, which the worker logs.
   const failures: string[] = [];
+  if (runtime.workspaceContent && Date.now() >= (contentPruneAt.get(runtime.workspaceContent) ?? 0)) {
+    contentPruneAt.set(runtime.workspaceContent, Date.now() + 60 * 60 * 1000);
+    try { await runtime.workspaceContent.prune(); }
+    catch (e) { failures.push(`editor content cleanup: ${e instanceof Error ? e.message : String(e)}`); }
+  }
   for (const e of await sweepLapsedTakeovers(runtime, executor)) failures.push(e);
   let processed = 0;
   for (const entry of requests) {
@@ -617,10 +647,14 @@ async function serveTakeoverRequest(
       const path = takeoverPathValid(req.path);
       if (!path.ok) throw new Error(path.reason);
       const target = req.path as string;
-      if (req.content === undefined) throw new Error("File content is required.");
+      const content = req.contentStored
+        ? await runtime.workspaceContent?.get(req.runId, req.id)
+        : req.content;
+      if (content === undefined) throw new Error("File content is required.");
+      if (Buffer.byteLength(content, "utf8") > WORKSPACE_CONTENT_BYTES) throw new Error("File content exceeds the editor limit.");
       try {
         await renew();
-        await lease.writeFileAs(handle, cred, target, Buffer.from(req.content, "utf8"));
+        await lease.writeFileAs(handle, cred, target, Buffer.from(content, "utf8"));
       } catch (e) {
         if (lost(e)) {
           await lapseTakeover(runtime, executor, record, e instanceof Error ? e.message : String(e));
@@ -631,7 +665,7 @@ async function serveTakeoverRequest(
       if (!record.pathsWritten.includes(target)) record.pathsWritten.push(target);
       await saveTakeover(runtime.config, record);
       reply.takeover = { holder: record.holder, generation: record.generation, expiresAt: record.expiresAt };
-      reply.output = `Wrote ${target} (${Buffer.byteLength(req.content, "utf8")} bytes). Uncommitted, like every takeover edit.`;
+      reply.output = `Wrote ${target} (${Buffer.byteLength(content, "utf8")} bytes). Uncommitted, like every takeover edit.`;
     } else if (req.kind === "takeover-exec") {
       const project = await runtime.projects.forRepo(input.repo).catch(() => null);
       const cmd = project?.testCommand ?? project?.verification?.tests;
@@ -664,16 +698,21 @@ async function serveTakeoverRequest(
       const target = req.path as string;
       try {
         await renew();
-        const r = await lease.execAs(handle, cred, takeoverReadCommand(target), { timeoutMs: 15000 });
-        if (r.exitCode !== 0 || r.stdout === "")
+        const r = await lease.execAs(handle, cred, takeoverReadCommand(target), { timeoutMs: 15000, maxOutputBytes: 300_000 });
+        if (r.exitCode !== 0 || r.timedOut || r.truncated)
           throw new Error("Could not read that file — check the path exists in the workspace.");
         const bytes = Buffer.from(r.stdout.replace(/\s+/g, ""), "base64");
         if (bytes.length > TAKEOVER_CONTENT_LIMIT)
-          throw new Error(`File is larger than the ${TAKEOVER_CONTENT_LIMIT}-character edit cap.`);
+          throw new Error(`File is larger than the ${TAKEOVER_CONTENT_LIMIT}-byte edit cap.`);
         if (bytes.includes(0))
           throw new Error("That looks like a binary file; the editor opens text only.");
-        reply.output = bytes.toString("utf8");
+        reply.output = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
         reply.takeover = { holder: record.holder, generation: record.generation, expiresAt: record.expiresAt };
+        if (rowBytes(reply) > WORKSPACE_ROW_BYTES_LIMIT && runtime.workspaceContent) {
+          await runtime.workspaceContent.put(req.runId, req.id, reply.output);
+          delete reply.output;
+          reply.contentStored = true;
+        }
       } catch (e) {
         if (lost(e)) {
           await lapseTakeover(runtime, executor, record, e instanceof Error ? e.message : String(e));

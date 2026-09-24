@@ -312,6 +312,11 @@ open with the S17 starter.
   `ship_runtime_config` row. Before `f7987c5` a larger file poisoned the
   key; now it is refused with a reason ("edit it from the console"). A real
   fix needs a chunked carrier (artifact-style) for text content.
+  **2026-09-24: fixed locally**, using a private run/request-scoped store,
+  8 KB chunks, SHA-256 integrity, 200,000 UTF-8 byte cap and 24h expiry.
+  A separate real Nucleus v1.1.1 image passed the full 200 KB round-trip,
+  cross-run/missing-chunk refusal, empty-file and expiry-prune checks.
+  Production editor rollout/read-back is still pending.
 - **Screenshot retention.** Every browser action stores one screenshot
   (content-addressed, up to ~300 KB) in `ship_artifacts`, which has no GC.
   Needs a retention rule (e.g. drop takeover screenshots at handback/lapse
@@ -437,7 +442,9 @@ correctly refused a blank `cmd`, but Ship treated this as a fatal execution
 error. `src/actions.ts` now returns `invalid` for empty shell/Python actions,
 so the existing correction loop asks for a properly formatted command.
 Regression tests cover the recorded shape and correction through the agent
-loop. This fix is local, not deployed or live-reverified.
+loop. Deployed as `a057d03` on 2026-09-24; the read-only question
+canary and subsequent copy/API change canaries completed live. Original
+results and any supplementary regrades remain preserved.
 
 The earlier BROWSER-display live-proof TODO above is superseded by the
 2026-09-24 live-ops receipt: image storage, authenticated retrieval and the

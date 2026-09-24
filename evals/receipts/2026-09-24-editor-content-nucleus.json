@@ -1,0 +1,1 @@
+{"pass":true,"nucleus":"v1.1.1","bytes":200000,"rows":34,"maxRowBytes":8192,"checks":["UTF8 exact roundtrip","run scoping","oversize refused","missing chunk refused","empty file","expiry pruning"]}

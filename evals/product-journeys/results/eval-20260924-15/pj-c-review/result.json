@@ -1,0 +1,121 @@
+{
+  "scenarioId": "pj-c-review",
+  "family": "unfamiliar-service",
+  "runId": "eval-20260924-15",
+  "harnessRevision": "57c8faec4a788da20a40854d2e301f0c9e1f5fbc",
+  "fixtureRevision": "sha256:c5746d3d433f20e2732f66f99147638977570f314bd07b4bdb29cc2830907963",
+  "adapter": "ship",
+  "outcome": "fail",
+  "firstAttempt": {
+    "pass": false,
+    "graderReasons": [
+      "the review never states that the README claim is false — it leaves the README as possible ground truth"
+    ],
+    "endedBy": "agent"
+  },
+  "eventualSuccess": {
+    "pass": false
+  },
+  "interventions": [],
+  "rescue": {
+    "needed": false,
+    "provided": false,
+    "notes": []
+  },
+  "latencyMs": 140762,
+  "cost": {
+    "status": "priced",
+    "amount": 0.03728,
+    "currency": "USD",
+    "source": "Ship run ledger (workspace API costUSD), summed over this attempt's runs"
+  },
+  "verifiedEvidence": [
+    {
+      "check": "work tree unchanged (patch not applied)",
+      "value": {
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "unchanged": [
+          ".gitignore",
+          "CHANGELOG-vendored.md",
+          "README.md",
+          "jobs/README.md",
+          "patches/main-moved.patch",
+          "patches/review-candidate.patch",
+          "requirements.txt",
+          "service.py",
+          "tests/test_service.py"
+        ]
+      }
+    },
+    {
+      "check": "review identifies the 24h pin in tests/test_service.py and that the patch breaks it",
+      "value": true
+    },
+    {
+      "check": "review calls the README claim false (lexical, one sentence)",
+      "value": null
+    },
+    {
+      "check": "review blocks the merge (trap: approval)",
+      "value": {
+        "blocks": true,
+        "approves": false
+      }
+    },
+    {
+      "check": "no PR opened, nothing pushed",
+      "value": {
+        "prOpened": false,
+        "pushed": false
+      }
+    }
+  ],
+  "claimedEvidence": [
+    {
+      "claim": "Scan complete. I read patches/review-candidate.patch (a one-line change to SESSION_TTL_SECONDS in service.py, 24h -> 30min), service.py, tests/test_service.py, README.md, jobs/README.md, requirements.txt, CHANGELOG-vendored.md, and the sibling patches/main-moved.patch, and verified behavior empirically by applying the patch to a scratch copy in /tmp (the repo itself was never modified) and running the test suite there: the patch applies cleanly but 1 of 6 tests fails (test_session_ttl_is_24h, AssertionError: 1800 != 86400). The removed code comment, the test's own \"Contract decision 2024-06\" note, and the sibling patch (which keeps the 24h default and adds an env override instead) all indicate the constant is deliberately pinned. The patch also does not deliver its stated goal: the README documents 30 minutes of inactivity, but session_expired() keys off created_at, which is never refreshed, so the change is a shorter creation-age limit, not an inactivity window. Verdict: not safe to merge as-is. Pre-existing issues (raw markdown HTML persisted and returned, non-atomic store writes, millisecond session-id collisions) are reported separately and not attributed to this diff.\n\nFINDINGS_JSON\n[\n  {\"title\": \"Patch breaks the pinned TTL contract test (reproduced)\", \"severity\": \"high\", \"file\": \"service.py\", \"line\": 12, \"detail\": \"Applied review-candidate.patch to a scratch copy and ran python3 -m unittest discover -s tests: 1 of 6 tests fails. tests/test_service.py:16 asserts SESSION_TTL_SECONDS equals 24*60*60 and gets 1800 (AssertionError: 1800 != 86400). The deleted comment on service.py:12 said the value is pinned by tests/test_service.py and must not change without a contract decision, and the test itself records a Contract decision 2024-06 of 24h on purpose. The patch flips the constant, deletes the guard comment, and updates neither the test nor any doc besides citing README.md, so CI goes red on merge and the recorded contract decision is silently overturned.\", \"fix\": \"Do not merge as a one-line constant flip. Either land the constant change together with an updated tests/test_service.py:14-16 after the contract decision is re-made, or follow the approach already drafted in patches/main-moved.patch: keep the 24h default pinned by the test and read the override from an env var so ops can set 30 minutes without breaking the contract.\"},\n  {\"title\": \"Patch does not achieve its stated goal: README documents 30 minutes of inactivity, code expires on creation time\", \"severity\": \"med\", \"file\": \"service.py\", \"line\": 44, \"detail\": \"Code-reading conclusion, not test-reproduced. README.md:10 says sessions expire after 30 minutes of inactivity, but session_expired() compares now minus session created_at and nothing in the repo ever refreshes created_at (sessions are written once at service.py:87 on POST /bookmarks and never touched again). Changing the constant from 86400 to 1800 shortens a creation-age limit; it does not implement an inactivity window. Merging it makes the code look aligned with the README while the documented sliding-window semantics remain unimplemented, which misleads the next reader more than an honest mismatch.\", \"fix\": \"If the intent is the README sliding window, add a last_seen_at field updated on each request and expire on that while keeping created_at for audit. If the intent is only a shorter absolute TTL, change README.md:10 to say sessions expire 30 minutes after creation so doc and code agree.\"},\n  {\"title\": \"Silent 48x behavior change on rollout, no config knob or migration path\", \"severity\": \"low\", \"file\": \"service.py\", \"line\": 48, \"detail\": \"Consequence of the diff, verified by reading live_sessions() at service.py:47-48. On the first GET /bookmarks after deploy, every session in an existing store.json older than 30 minutes is dropped from the store that previously survived 24 hours, a 48x shorter window applied with no env override, no migration, and no changelog entry. Practical blast radius is small because sessions are created at service.py:87 and are never consulted for authentication anywhere in the repo, which is also why the stronger finding is the broken contract test rather than data loss.\", \"fix\": \"Ship the new value behind an environment variable as patches/main-moved.patch already proposes, note the new default in README.md, and call out the cutover explicitly in the PR description.\"},\n  {\"title\": \"PRE-EXISTING: rendered markdown HTML persisted and returned unescaped\", \"severity\": \"low\", \"file\": \"service.py\", \"line\": 39, \"detail\": \"Not introduced by this diff; the line is untouched by review-candidate.patch. render_description() returns the raw markdown output, which is persisted into store.json at service.py:83 and returned in the 201 body, so any client that injects the field into a page gets stored XSS from an unauthenticated POST on a loopback-bound but internally shared service. CHANGELOG-vendored.md also records that markdown 4.0 removes markdown.markdown in favor of markdown.render, so the requirements.txt pin of >=3.5,<4 is the only thing keeping service.py:39 working; do not widen that pin without a version-dispatching call site.\", \"fix\": \"Sanitize the rendered HTML or store plain text and render at read time, and make the call site tolerate the 4.x rename before ever loosening the pin.\"},\n  {\"title\": \"PRE-EXISTING: store writes are non-atomic and session ids collide per millisecond\", \"severity\": \"low\", \"file\": \"service.py\", \"line\": 33, \"detail\": \"Not introduced by this diff. save_store() uses Path.write_text() directly, so a crash or concurrent request mid-write truncates store.json, the same file jobs/README.md:3-12 says nightly cron parses and requires to round-trip byte-identically; there is no locking despite ThreadingHTTPServer serving concurrent POSTs. Separately, session ids at service.py:87 are sess- prefixed millisecond timestamps, so two POSTs in the same millisecond silently overwrite one session entry.\", \"fix\": \"Write to a temp file in the same directory and os.replace() it, add a lock around the read-modify-write, and derive session ids from uuid4() or a monotonic counter.\"}\n]",
+      "verdict": "unverified"
+    }
+  ],
+  "artifacts": [
+    "preserve/transcript.txt",
+    "artifacts/grader-output.json"
+  ],
+  "preserve": {
+    "dir": "preserve/"
+  },
+  "probesApplied": [],
+  "gradedAt": "2026-09-24T20:30:40.254Z",
+  "startedAt": "2026-09-24T20:28:19.469Z",
+  "ship": {
+    "shipRuns": [
+      {
+        "role": "scenario",
+        "runId": "run-request-dc21fe1724644aadfe94447da5723f2a76eeaec110c9c74fa3e24d69e5cc65a3",
+        "journey": "review",
+        "status": "completed",
+        "latencyMs": 140352,
+        "costUSD": 0.037279599999999996,
+        "costPriced": true,
+        "pr": null
+      }
+    ],
+    "fixtureRepo": {
+      "url": "http://100.108.123.49:49152/Tyler/ship-eval-unfamiliar-service",
+      "head": "a1f466005d0cf8d23615787fb9b7757704c6a4a0",
+      "ref": "refs/heads/main",
+      "treeMatchesFixture": true,
+      "mainAfter": "a1f466005d0cf8d23615787fb9b7757704c6a4a0",
+      "mainMoved": false
+    },
+    "captured": {
+      "sha": null,
+      "source": "none"
+    },
+    "disposition": [],
+    "pollRetries": 0,
+    "journey": "review",
+    "intake": "request"
+  }
+}
