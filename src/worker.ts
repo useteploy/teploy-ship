@@ -779,6 +779,9 @@ export function startWorker(options: WorkerOptions): {
     ...(options.githubToken !== undefined ? { githubToken: options.githubToken } : {}),
     ...(options.repoPolicy !== undefined ? { repoPolicy: options.repoPolicy } : {}),
     artifacts: options.runtime.artifacts,
+    // The C5 liveness probe reads the run's own log to check the container
+    // the run will use next (durable.ts livenessProbeTarget).
+    loadEvents: (runId) => options.runtime.store.load(runId),
     repoMemory: options.runtime.memory,
     projects: options.runtime.projects,
     steer: options.runtime.steer,
