@@ -4,7 +4,7 @@
   "private": true,
   "description": "Teploy Ship \u2014 Teploy's coding agent: a CodeAct brain on the Neutron primitives. Issues in, PRs out, self-hosted.",
   "author": "Tyler",
-  "license": "MIT",
+  "license": "FSL-1.1-MIT",
   "type": "module",
   "bin": {
     "teploy-ship": "./dist/cli.js"
