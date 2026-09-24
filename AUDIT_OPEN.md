@@ -244,28 +244,79 @@ refuses any run whose recorded input is not `mode:"scan"`. Live seeded-incident
 proof (alert → attribution → diagnosis with a real wrong-hint attempt) remains
 open with the S17 starter.
 
-## 2026-09-23 — wave 9 live findings (open)
+## 2026-09-23 — wave 9 live findings (resolved 2026-09-24, lane L3; remaining items open below)
 
-- **Browser-takeover screenshots must not ride the runtime config store.**
-  The BROWSER tab writes its base64 screenshot (up to ~400KB) into the
-  takeover reply on `ship_runtime_config` — a store whose own header says
-  it is "deliberately small and NOT a general settings bag". Nucleus
-  correctly refuses the oversized row ("row too large for inline
-  storage"); the reply write fails, the pending request retries forever
-  (worker log spam every tick), and the lapse sweep never clears the
-  stuck record. Found live on b1f8107; the request/record keys were
-  cleared manually. FIX: screenshots belong in the run's artifact store
-  with only a reference in the reply. Console/editor/ops-recording are
-  unaffected and live-proven.
-- **readBackDelivery image comparison could not match ID-form images**
-  (commit-pinned deploys report the bare ID) and its error path read
-  lowercase `c.image`, printing "[undefined]". Fixed in
-  d0e1d58-sha-pending (this wave): ID resolution via docker image inspect
-  RepoTags + corrected evidence string; pinned by tests. Found live: a
-  succeeded deployment failed its read-back.
-- **Park-snapshot restore starvation (suspected, unproven):** run-af29bf4e
-  faulted at the merge step ("sandbox no longer available") while the
-  row-too-large error storm was hammering the workspace-request sweep leg
-  every tick — the park snapshot/restore for its approve-merge resume
-  never took. Re-enqueued cleanly (run-77de2a06). If it recurs, the
-  suspect is the sweep-leg coupling, not the snapshot machinery itself.
+### Resolved
+
+- **Browser-takeover screenshots must not ride the runtime config store —
+  RESOLVED `f7987c5`.** The BROWSER tab wrote its base64 screenshot (up to
+  ~400KB) into the takeover reply on `ship_runtime_config`; Nucleus refused
+  the row, the request was re-served every tick (re-running the action and
+  renewing the lease, which is why the takeover never lapsed) until the keys
+  were cleared by hand. Now: the screenshot is stored in the run artifact
+  store (PNG, plus the driver's JPEG fallback, now accepted) and the reply
+  carries only `{artifact, bytes}`; the web tab renders the authenticated
+  `/api/artifacts/<id>` route and drops malformed references. A failed or
+  absent artifact store is an error on the reply ("the action ran; its
+  screenshot could not be stored"), never a retried action. Pinned in
+  `src/takeover.test.ts` (large screenshot never touches the config store,
+  reference round-trips, failed store surfaces once and is not re-clicked)
+  and `web/src/lib/artifacts.test.ts` / `workspace-actions.test.ts`.
+  Also closed in the same commit: the note at line ~110 ("workspace replies
+  are bounded to fit the same store") was not true for takeover replies —
+  every request/reply row is now fitted under `WORKSPACE_ROW_BYTES_LIMIT`
+  (14 KB).
+- **A reply write that permanently fails is bounded — RESOLVED `f7987c5`.**
+  Delivery is separated from execution: an unstorable reply is re-delivered
+  (never re-executed) up to `REPLY_WRITE_ATTEMPTS` (3), then a terminal
+  failure reply takes the marker key (cleared first — that recovers a row a
+  refused UPDATE left unwritable); if even that cannot be stored, the
+  request key is cleared. One error line per attempt, then silence. Per-
+  request isolation in `serveWorkspaceRequests` and per-record isolation in
+  `sweepLapsedTakeovers` (which no longer reads reply/history rows). Pinned:
+  bounded-then-terminal, terminal-unstorable-clears-request, one run's
+  poisoned reply does not starve another run's request in the same tick,
+  lapse sweep survives an unreadable record.
+- **Park-snapshot restore "starvation" — DISPROVEN as starvation; real
+  defect found and RESOLVED `4d4d524`.** Evidence (worker log of
+  `ship-worker-b1f8107` + run-af29bf4e's event log, read-only): the
+  row-too-large storm ended 21:55:16; plan approved 21:57:45; plan-restore
+  created `01M384CV…` and disposed the original `01M382JM…`; merge park
+  22:00:18; approve-merge 22:01:57; picked up 22:01:59.23 and failed 43 ms
+  later with "the sandbox this run recorded (01M382JM…) is no longer
+  available". The C5 liveness probe checked the `sandbox` step's ORIGINAL
+  handle on every replay — disposed by the first park's restore — before
+  the replay could reach merge-restore. Deterministic for any run with two
+  sequential snapshot parks (plan + merge, plan + action approval, ask +
+  merge), and for a single snapshot park that outlives the container TTL.
+  The probe now reads the run's own log (`DurableAgentConfig.loadEvents`,
+  wired in worker and cli) and checks the latest main-workspace handle, or
+  nothing when a restore is pending. No step added. Pinned in
+  `src/durable.test.ts` (two-park run completes; the old probe target
+  reproduces the exact live error; `livenessProbeTarget` unit cases). The
+  sweep legs were checked for coupling anyway: each leg in the worker tick
+  already had its own `.catch`, and the durable drive loop is separate from
+  the sweep chain — the only coupling was per-request inside the workspace
+  leg, fixed above.
+- **readBackDelivery image comparison could not match ID-form images** —
+  fixed in 6a5a69b/b64deee/3beb210 (receipted in the ninth-wave record).
+
+### Still open
+
+- **Nucleus: a refused oversized UPDATE leaves the row so the next UPDATE
+  loses it** — reproduced on the v1.1.1 fixture, logged in
+  `_internal/UPSTREAM_BUGS.md` (2026-09-24). Upstream-owned; Ship now never
+  issues the oversized write and recovers a trapped key by DELETE-then-write.
+- **Editor content above ~13 KB.** `TAKEOVER_CONTENT_LIMIT` says 200,000
+  characters, but the editor's read reply and write request both ride one
+  `ship_runtime_config` row. Before `f7987c5` a larger file poisoned the
+  key; now it is refused with a reason ("edit it from the console"). A real
+  fix needs a chunked carrier (artifact-style) for text content.
+- **Screenshot retention.** Every browser action stores one screenshot
+  (content-addressed, up to ~300 KB) in `ship_artifacts`, which has no GC.
+  Needs a retention rule (e.g. drop takeover screenshots at handback/lapse
+  or after N days).
+- **Live proof pending.** The artifact-backed BROWSER display and the
+  two-park resume are unit-pinned only; the next live pass should run
+  `enqueue --plan` -> takeover with a browser navigate -> approve-merge
+  and see both the screenshot and the merge.
