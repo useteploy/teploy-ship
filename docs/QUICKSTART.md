@@ -48,9 +48,11 @@ three quarters of the install's wall clock. `--allow` is the forge origin your
 token may be sent to; without it every repository is refused until you add a
 project on the dashboard. Skip to step 5.
 
-Measured on a clean box (2026-09-24, both Ship processes and the store on one
-2-cpu container): about 5 minutes for `install.sh` without images (18 with
-them), then under a minute for the first run on a small repository.
+Measured on a clean box (2026-09-24, one 2-cpu container as laptop and
+server): `install.sh` took 18 minutes, 13.6 of them building the sandbox
+images it now skips without a daemon; the first run on a small repository
+took under a minute from enqueue to pull request. The image-less install has
+not been timed end to end yet.
 
 The rest of this page is the same thing by hand, for when you want to see each
 piece.
