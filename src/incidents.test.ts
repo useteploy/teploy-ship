@@ -918,6 +918,13 @@ test("REMEDIATION WRONG-REPO/SCAN GUARDS: a linked run that scanned or edited an
   const wrong = await digestIncidentRemediation({ config, store }, elsewhere, { now });
   assert.ok(wrong.changed && wrong.record.status === "remediation-failed");
   assert.match(wrong.changed ? wrong.record.remediation?.outcome?.reason ?? "" : "", /not the attributed/);
+
+  // S01-3: the same repository spelled in another case (a project URL
+  // re-cased between attribution and remediation) is not "another repo".
+  const recased = await stagedIncident(config);
+  await authorizeRemediation({ config, enqueue: async (o) => { runs.set(o.runId, remediationRunEvents({ repo: "https://git.example.com/Tyler/Web" })); }, model: "m", now, newRunId: () => "run-rem-recased" }, recased);
+  const recasedResult = await digestIncidentRemediation({ config, store }, recased, { now });
+  assert.ok(recasedResult.changed && recasedResult.record.status === "remediated", "a case twin of the attributed repo digests normally");
 });
 
 // ------------------------------------------------------------------ replay

@@ -13,7 +13,8 @@ import type { ModelAdapter } from "@neutron-build/ai";
 import { createHash, randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 
-import { durableAgent, repoKeyOf } from "./durable.js";
+import { durableAgent } from "./durable.js";
+import { repoLockKey } from "./repository-scope.js";
 import { resolveApprovalPolicy } from "./approval.js";
 import { externalAdapters } from "./harness-external.js";
 import { isAskEvent, pendingQuestion } from "./ask.js";
@@ -572,7 +573,8 @@ export async function retrying<T>(
  * it cannot touch the shared mutable surface (the repo's branches) the lock
  * exists to protect, and holding a read-only audit behind a fix run would
  * delay it for nothing. A repo URL the parser refuses still serialises on its
- * raw form; the lock key only has to be consistent, not canonical.
+ * raw form; the lock key only has to be consistent, not canonical. Forge
+ * spellings that differ only by case share one key (S01-3, repoLockKey).
  */
 export function repoLockKeyOf(events: readonly WorkflowEvent[]): string | undefined {
   const started = events.find((e) => e.type === "run-started");
@@ -581,7 +583,7 @@ export function repoLockKeyOf(events: readonly WorkflowEvent[]): string | undefi
   if (repo === undefined || repo === "") return undefined;
   if (input?.mode === "scan") return undefined;
   try {
-    return repoKeyOf(repo);
+    return repoLockKey(repo);
   } catch {
     return repo;
   }
@@ -1923,7 +1925,12 @@ export function startWorker(options: WorkerOptions): {
         if (rollback !== undefined) {
           const claimed = await records.claimRollback(rollback.id);
           if (claimed.rollback?.state !== "executing") return;
-          const outcome = await executeDeliveryRollback(claimed, { dir: deliveryDir, run: deliveryRunner });
+          const outcome = await executeDeliveryRollback(claimed, {
+            dir: deliveryDir,
+            run: deliveryRunner,
+            // The requester's authority is rechecked at action time, like an approval's.
+            authority: { governance: options.runtime.governance, users: options.runtime.users },
+          });
           await records.finishRollback(claimed.id, outcome);
           log(`[worker] delivery rollback ${claimed.id} → ${outcome.state}: ${outcome.evidence ?? ""}`);
           return;
@@ -1968,7 +1975,7 @@ export function startWorker(options: WorkerOptions): {
             log(`[worker] delivery ${stuck.id} → confirmed (stale execution reconciled by read-back)`);
           } else {
             await records.transition(stuck.id, "executing", "held", {
-              reason: `execution did not complete (worker died or restarted) and the target does not run the approved delivery — re-approve to retry (${read.outcome}: ${read.detail})`,
+              reason: `execution did not complete (worker died or restarted) and ${read.outcome === "unreadable" ? "the target could not be read back" : "the target does not run the approved delivery"} — re-approve to retry (${read.outcome}: ${read.detail})`,
             });
             log(`[worker] delivery ${stuck.id} → held (stale execution reconciled)`);
           }
