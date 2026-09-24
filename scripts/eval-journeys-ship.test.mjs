@@ -137,7 +137,7 @@ test('change scenario end to end: request intake, poll retry (d), merge park, PR
         journey: 'change', messages: [{ role: 'Agent', text: 'Renamed the nav label.' }],
         outcome: { pr: `${REPOS['small-site']}/pulls/2`, summary: 'renamed' },
         evidence: { sha: 'pr-head-sha', checks: [] },
-        costUSD: 0.0421, costPriced: true, costUnpriced: false
+        costUSD: denied ? 0.0421 : 0, costPriced: true, costUnpriced: false
       });
     }
     if (url.endsWith('/api/runs/run-request-abc/decide')) {
@@ -165,6 +165,7 @@ test('change scenario end to end: request intake, poll retry (d), merge park, PR
     assert.equal(record.ship.fixtureRepo.mainMoved, false);
     assert.match(record.ship.disposition[0], /merge denied after capture/);
     assert.equal(record.ship.shipRuns[0].role, 'scenario');
+    assert.equal(record.ship.shipRuns.length, 1, 'settlement updates the same run, without double-counting cost');
     assert.deepEqual(schemaValidationErrors(record, schema), []);
     assert.ok(forge.calls.some(c => c[0] === 'materialize' && c[1] === 'refs/pull/2/head'));
     rmSync(workDir, { recursive: true, force: true });

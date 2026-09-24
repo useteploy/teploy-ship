@@ -1,0 +1,24 @@
+{
+  "runId": "eval-20260924-14",
+  "adapter": "ship",
+  "startedAt": "2026-09-24T20:22:12.274Z",
+  "completedAt": "2026-09-24T20:25:18.466Z",
+  "scenarios": [
+    {
+      "id": "pj-s-copy",
+      "outcome": "pass",
+      "pass": true,
+      "latencyMs": 186169,
+      "costUSD": 0,
+      "rescueNeeded": false,
+      "interventions": 0,
+      "result": "eval-20260924-14/pj-s-copy/result.json"
+    }
+  ],
+  "totals": {
+    "pass": 1,
+    "fail": 0,
+    "unknown": 0,
+    "harness-error": 0
+  }
+}

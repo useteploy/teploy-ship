@@ -1,0 +1,9 @@
+{
+  "run": "run-request-d5652752994abbbb81d99c0b9430a417503f54d68fee2827ed017be8f23c9dae",
+  "status": "completed",
+  "costUSD": 0.0367178,
+  "costPriced": true,
+  "costUnpriced": false,
+  "readAt": "2026-09-24T20:27:02.656Z",
+  "reason": "Original harness record sampled cost at the merge park, before terminal usage existed. Original result retained."
+}

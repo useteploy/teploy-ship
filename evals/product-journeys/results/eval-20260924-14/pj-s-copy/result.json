@@ -1,0 +1,111 @@
+{
+  "scenarioId": "pj-s-copy",
+  "family": "small-site",
+  "runId": "eval-20260924-14",
+  "harnessRevision": "565d2ab0ce952d5406d1d9a624c78725f2b9c228",
+  "fixtureRevision": "sha256:54aa415a72c85b5e2cb91895bcd9c07bb9263893b626ff391b37abbe6c3e7e98",
+  "adapter": "ship",
+  "outcome": "pass",
+  "firstAttempt": {
+    "pass": true,
+    "graderReasons": [],
+    "endedBy": "agent"
+  },
+  "eventualSuccess": {
+    "pass": true
+  },
+  "interventions": [],
+  "rescue": {
+    "needed": false,
+    "provided": false,
+    "notes": []
+  },
+  "latencyMs": 186169,
+  "cost": {
+    "status": "priced",
+    "amount": 0,
+    "currency": "USD",
+    "source": "Ship run ledger (workspace API costUSD), summed over this attempt's runs"
+  },
+  "verifiedEvidence": [
+    {
+      "check": "navs show \"Our story\", no \"About\" nav label remains",
+      "value": true
+    },
+    {
+      "check": "about.html title exact",
+      "value": "Our story — Tideline Woodworks"
+    },
+    {
+      "check": "index.html title untouched",
+      "value": "Tideline Woodworks"
+    },
+    {
+      "check": "styles.css byte-identical",
+      "value": true
+    },
+    {
+      "check": "diff confined to index.html and about.html",
+      "value": {
+        "added": [],
+        "removed": [],
+        "changed": [
+          "about.html",
+          "index.html"
+        ],
+        "unchanged": [
+          "styles.css"
+        ]
+      }
+    }
+  ],
+  "claimedEvidence": [
+    {
+      "claim": "What I did: The edit is already made and now proven by execution:; changed 2 files (classified trivial); pushed 6510d7df53; opened pull request #2; the merge was denied and the pull request closed (S02 eval harness: graded; scratch fixtures are never merged). What I verified: the suite passed on the base branch before any edit (`python3 -c '\"\"\"Basic verification command for the scratch static-site project.\"\"\"\nfrom html.parser import HTMLParser\nfrom pathlib import Path\nfrom urllib.parse import unquote, urlsplit\n\n\nclass Page(HTMLParser):\n    def __init__(self):\n        super().__init__()\n        self.tags = []\n        self.links = []\n\n    def handle_starttag(self, tag, attrs):\n        self.tags.append(tag)\n        self.links.extend(value for key, value in attrs if key == \"href\" and value)\n\n\npages = sorted(Path(\".\").glob(\"*.html\"))\nassert {\"index.html\", \"about.html\"} <= {p.name for p in pages}, \"missing site pages\"\nfor path in pages:\n    page = Page()\n    page.feed(path.read_text())\n    assert page.tags.count(\"title\") == 1, f\"{path}: expected one title\"\n    assert page.tags.count(\"h1\") == 1, f\"{path}: expected one heading\"\n    for link in page.links:\n        url = urlsplit(link)\n        if not url.scheme and not url.netloc and url.path:\n            target = Path(unquote(url.path).lstrip(\"/\"))\n            assert target.is_file(), f\"{path}: missing linked file {link}\"\nprint(f\"Verified {len(pages)} HTML pages and their local links\")\n'`); the suite passed over the published tree (`python3 -c '\"\"\"Basic verification command for the scratch static-site project.\"\"\"\nfrom html.parser import HTMLParser\nfrom pathlib import Path\nfrom urllib.parse import unquote, urlsplit\n\n\nclass Page(HTMLParser):\n    def __init__(self):\n        super().__init__()\n        self.tags = []\n        self.links = []\n\n    def handle_starttag(self, tag, attrs):\n        self.tags.append(tag)\n        self.links.extend(value for key, value in attrs if key == \"href\" and value)\n\n\npages = sorted(Path(\".\").glob(\"…",
+      "verdict": "unverified"
+    }
+  ],
+  "artifacts": [
+    "preserve/transcript.txt",
+    "artifacts/grader-output.json"
+  ],
+  "preserve": {
+    "dir": "preserve/"
+  },
+  "probesApplied": [],
+  "gradedAt": "2026-09-24T20:25:18.466Z",
+  "startedAt": "2026-09-24T20:22:12.274Z",
+  "ship": {
+    "shipRuns": [
+      {
+        "role": "scenario",
+        "runId": "run-request-d5652752994abbbb81d99c0b9430a417503f54d68fee2827ed017be8f23c9dae",
+        "journey": "change",
+        "status": "waiting",
+        "latencyMs": 159509,
+        "costUSD": 0,
+        "costPriced": true,
+        "pr": null
+      }
+    ],
+    "fixtureRepo": {
+      "url": "http://100.108.123.49:49152/Tyler/ship-eval-small-site",
+      "head": "eab3c41e06482456b2d6e8d6f61ef90502106457",
+      "ref": "refs/heads/main",
+      "treeMatchesFixture": true,
+      "mainAfter": "eab3c41e06482456b2d6e8d6f61ef90502106457",
+      "mainMoved": false
+    },
+    "captured": {
+      "sha": "6510d7df53557a5884e1ea173ca24446ce0c4804",
+      "source": "PR #2 head",
+      "expected": "6510d7df53557a5884e1ea173ca24446ce0c4804"
+    },
+    "disposition": [
+      "run-request-d5652752994abbbb81d99c0b9430a417503f54d68fee2827ed017be8f23c9dae: merge denied after capture (Ship closes the PR)"
+    ],
+    "pollRetries": 0,
+    "journey": "change",
+    "intake": "request"
+  }
+}

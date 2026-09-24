@@ -382,13 +382,16 @@ export function createShipAdapter({
       }
 
       function record(role, runId, data, t0) {
-        shipRuns.push({
+        const result = {
           role, runId, journey: data?.journey ?? null, status: data?.meta?.status ?? 'unknown',
           latencyMs: Date.now() - t0,
           costUSD: typeof data?.costUSD === 'number' ? data.costUSD : null,
-          costPriced: data?.costPriced === true && data?.costUnpriced !== true,
+          costPriced: TERMINAL.has(data?.meta?.status) && data?.costPriced === true && data?.costUnpriced !== true,
           pr: data?.outcome?.pr ?? null
-        });
+        };
+        const index = shipRuns.findIndex(r => r.runId === runId);
+        if (index < 0) shipRuns.push(result);
+        else shipRuns[index] = result;
       }
 
       const transcripts = [];
@@ -453,6 +456,13 @@ export function createShipAdapter({
         if (child.parkedAtMerge) {
           await decide(finalRunId, MERGE_EVENT, false, 'S02 eval harness: graded; scratch fixtures are never merged');
           disposition.push(`${finalRunId}: merge denied after capture`);
+          try {
+            const settled = await awaitRun(finalRunId, { stopAtMerge: false, limitMs: settleTimeoutMs });
+            finalData = settled.data;
+            record('scenario', finalRunId, settled.data, tc);
+          } catch (err) {
+            disposition.push(`denial did not settle: ${err.message}`);
+          }
         }
         try {
           await f.closePr(repoUrl, samePr.prNumber);
@@ -481,6 +491,7 @@ export function createShipAdapter({
           try {
             const settled = await awaitRun(finalRunId, { stopAtMerge: false, limitMs: settleTimeoutMs });
             finalData = settled.data;
+            record('scenario', finalRunId, settled.data, t0);
           } catch (err) {
             disposition.push(`denial did not settle: ${err.message}`);
           }
