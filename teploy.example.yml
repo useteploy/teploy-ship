@@ -47,3 +47,12 @@ processes:
     # the worker runs everything on the host container — fine for a first
     # verified PR on a private box, and docs/DEPLOY.md §sandbox is the
     # next step up (default-deny egress, leased workspaces).
+    #
+    # Previews (optional, docs/DEPLOY.md SHIP_PREVIEW_*): a clone of the app
+    # being fixed at SHIP_PREVIEW_DIR, plus — for tailnet-only previews, the
+    # default shape for a tailnet dashboard — the deploy target's tailnet IP:
+    #   SHIP_PREVIEW_DIR: /srv/app-clone
+    #   SHIP_PREVIEW_TAILNET_IP: 100.x.y.z   # previews at http://preview-*.100.x.y.z.sslip.io,
+    #                                        # HTTP, reachable only from 100.64.0.0/10;
+    #                                        # set it on `web` too, so the run page may frame them
+    #   SHIP_PREVIEW_MAIN_URL: https://app.example.com   # main, for the visual diff

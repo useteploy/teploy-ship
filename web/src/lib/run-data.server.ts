@@ -9,8 +9,10 @@ import {
   type TakeoverRecord,
   type TakeoverSession,
 } from "../../../dist/takeover.js";
-import { workspaceRecovery, conversation, diffSnapshots, evidence } from "./workspace.js";
-import type { Message, DiffSnapshot, Evidence } from "./workspace.js";
+import { workspaceRecovery, conversation, diffSnapshots, evidence, previewPanel } from "./workspace.js";
+import type { Message, DiffSnapshot, Evidence, PreviewPanel } from "./workspace.js";
+import { publicOrigin } from "./oidc.server.js";
+import { previewFrameBase } from "./preview-frame.server.js";
 import { costUSD, isPricedModel, pendingQuestion, verificationFactsFromEvents } from "./ship.server.js";
 import { typicalDuration } from "./expect.js";
 import type { Typical } from "./expect.js";
@@ -36,6 +38,8 @@ export interface RunData {
   messages: Message[];
   snapshots: DiffSnapshot[];
   evidence: Evidence;
+  /** The run page's preview panel state, decided server-side (expiry uses the server clock). */
+  previewPanel: PreviewPanel;
   parentRunId?: string;
   taskRootRunId?: string;
   canSteer: boolean;
@@ -274,6 +278,7 @@ export async function runData({ params, request }: { params: { id: string }; req
       messages: conversation(events),
       snapshots: diffSnapshots(events),
       evidence: evidence(facts, reviewedHead),
+      previewPanel: previewPanel(events, facts, { executing, now: Date.now(), dashboardOrigin: publicOrigin(request), frameBase: previewFrameBase() }),
       hasPr: facts.pr !== undefined || typeof (started?.data as any)?.input?.pr === "number",
       parentRunId: typeof (started?.data as any)?.input?.parentRunId === 'string' ? (started?.data as any).input.parentRunId : undefined,
       taskRootRunId: typeof (started?.data as any)?.taskRootRunId === 'string' ? (started?.data as any).taskRootRunId : undefined,

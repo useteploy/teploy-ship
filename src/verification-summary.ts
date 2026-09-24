@@ -52,7 +52,7 @@ export interface VerificationFacts {
   changeClass?: { class: string; files: number };
   push?: { kind: "pushed"; sha: string } | { kind: "refused" } | { kind: "empty" };
   pr?: { url: string; number: number };
-  preview?: { kind: "deployed"; url: string; revision?: string; image?: string } | { kind: "skipped" | "failed"; reason: string };
+  preview?: { kind: "deployed"; url: string; revision?: string; image?: string; expiresAt?: string } | { kind: "skipped" | "failed"; reason: string };
   /** The smoke command against the deployed preview (the ladder's preview rung's second half). */
   smoke?: SmokeOutcome;
   /** The screenshot pair the visual rung captured, or why it could not. */
@@ -472,7 +472,7 @@ export function verificationFactsFromEvents(events: WorkflowEvent[]): Verificati
     } else if (s.name === "repo-pr" && r !== undefined && typeof r.url === "string") {
       facts.pr = { url: r.url, number: Number(r.number ?? 0) };
     } else if (s.name === "preview-deploy" && r !== undefined) {
-      if (r.kind === "deployed") facts.preview = { kind: "deployed", url: String(r.url ?? ""), ...(typeof r.revision === "string" ? { revision: r.revision } : {}), ...(typeof r.image === "string" ? { image: r.image } : {}) };
+      if (r.kind === "deployed") facts.preview = { kind: "deployed", url: String(r.url ?? ""), ...(typeof r.revision === "string" ? { revision: r.revision } : {}), ...(typeof r.image === "string" ? { image: r.image } : {}), ...(typeof r.expiresAt === "string" ? { expiresAt: r.expiresAt } : {}) };
       else if (r.kind === "skipped" || r.kind === "failed") facts.preview = { kind: r.kind, reason: String(r.reason ?? "") };
     } else if (s.name === "telemetry-check" && r !== undefined) {
       if (r.kind === "compared") {

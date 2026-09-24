@@ -387,3 +387,138 @@ test("A.6: the sweep leaves a clone with no leftovers alone and reports nothing 
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// --- Tailnet previews (DELEGATED_DECISIONS_2026-09-23 §10) -------------------
+
+const TAILNET_DEPLOY: CommandResult = {
+  code: 0,
+  stdout: `  Preview deployed: http://preview-fix-login-1a2b3c4d.100.101.102.103.sslip.io\n`,
+  stderr: "",
+};
+const TAILNET_LIST: CommandResult = {
+  code: 0,
+  stdout: JSON.stringify([
+    {
+      branch: "fix/login",
+      domain: "preview-fix-login-1a2b3c4d.100.101.102.103.sslip.io",
+      url: "http://preview-fix-login-1a2b3c4d.100.101.102.103.sslip.io",
+      expires_at: "2026-09-25T12:00:00Z",
+    },
+  ]),
+  stderr: "",
+};
+
+const EXPOSURE_VERSION: CommandResult = {
+  code: 0,
+  stdout: JSON.stringify({ capabilities: ["preview-blue-green", "preview-canonical-id", "preview-exposure"], machine_interface: 2, version: "v0.2.0" }),
+  stderr: "",
+};
+
+test("tailnet mode: one IP implies sslip.io base, plain HTTP and the tailnet allowlist — all three or none", () => {
+  const target = previewTargetFromEnv({ SHIP_PREVIEW_DIR: "/srv/app", SHIP_PREVIEW_TAILNET_IP: " 100.101.102.103 " });
+  assert.deepEqual(target, {
+    dir: "/srv/app",
+    baseDomain: "100.101.102.103.sslip.io",
+    httpOnly: true,
+    allowIps: ["100.64.0.0/10"],
+  });
+  // Unset: the target is byte-identical to before tailnet mode existed.
+  assert.deepEqual(previewTargetFromEnv({ SHIP_PREVIEW_DIR: "/srv/app", SHIP_PREVIEW_TAILNET_IP: "" }), { dir: "/srv/app" });
+});
+
+test("tailnet mode: an address outside 100.64.0.0/10 refuses the preview instead of falling back to a public route", async () => {
+  for (const bad of ["192.168.1.5", "100.128.0.1", "100.63.255.255", "100.101.102.300", "tailnet", "100.101.102"]) {
+    const target = previewTargetFromEnv({ SHIP_PREVIEW_DIR: "/srv/app", SHIP_PREVIEW_TAILNET_IP: bad });
+    assert.ok(target !== undefined, "a bad setting is not the feature switched off");
+    assert.equal(target.baseDomain, undefined);
+    assert.match(target.invalid ?? "", /not a tailnet IPv4 address/, `${bad} must be refused`);
+    const { run, calls } = scriptedRunner({ build: OK_BUILD, "preview deploy": OK_DEPLOY, "preview list": OK_LIST });
+    const outcome = await deployPreview({ ...target, run }, "fix/login");
+    assert.equal(outcome.kind, "failed");
+    assert.match((outcome as { reason: string }).reason, /SHIP_PREVIEW_TAILNET_IP/);
+    assert.equal(calls.length, 0, "nothing is fetched, built or deployed under a refused route");
+  }
+  for (const edge of ["100.64.0.0", "100.127.255.255"]) {
+    assert.equal(previewTargetFromEnv({ SHIP_PREVIEW_DIR: "/srv/app", SHIP_PREVIEW_TAILNET_IP: edge })?.invalid, undefined, `${edge} is inside the range`);
+  }
+});
+
+test("tailnet mode: the route flags reach `teploy preview deploy` and the list row's own http URL is reported", async () => {
+  const target = previewTargetFromEnv({ SHIP_PREVIEW_DIR: "/srv/app", SHIP_PREVIEW_TAILNET_IP: "100.101.102.103", SHIP_PREVIEW_DESTINATION: "staging" })!;
+  const { run, calls } = scriptedRunner({ version: EXPOSURE_VERSION, build: OK_BUILD, "preview deploy": TAILNET_DEPLOY, "preview list": TAILNET_LIST });
+  const outcome = await deployPreview({ ...target, run }, "fix/login");
+  const teploy = calls.filter((c) => c[0] === "teploy").map((c) => c.slice(1, 3).join(" "));
+  assert.deepEqual(teploy.slice(0, 2), ["version --json", "build --json"], "the capability is checked before the slow build");
+  assert.deepEqual(calls.find((c) => c[1] === "preview" && c[2] === "deploy"), [
+    "teploy", "preview", "deploy", "fix/login",
+    "--ttl", "24h",
+    "--image", "api-build-abc1234",
+    "--base-domain", "100.101.102.103.sslip.io",
+    "--http-only",
+    "--allow-ip", "100.64.0.0/10",
+    "-d", "staging",
+  ]);
+  assert.equal(outcome.kind, "deployed");
+  const deployed = outcome as Extract<PreviewOutcome, { kind: "deployed" }>;
+  assert.equal(deployed.url, "http://preview-fix-login-1a2b3c4d.100.101.102.103.sslip.io", "the scheme comes from the CLI, not assumed https");
+  assert.equal(deployed.previewBase, "100.101.102.103.sslip.io", "recorded so the visual rung does not derive main from it");
+  assert.equal(deployed.expiresAt, "2026-09-25T12:00:00Z");
+});
+
+test("list rows: `url` wins when it is http(s); otherwise https://domain, so older CLIs keep working", async () => {
+  const rows = (row: Record<string, string>): CommandResult => ({ code: 0, stdout: JSON.stringify([{ branch: "fix/login", ...row }]), stderr: "" });
+  const cases: Array<[Record<string, string>, string]> = [
+    [{ domain: "preview-fix-login.example.com" }, "https://preview-fix-login.example.com"],
+    [{ domain: "preview-fix-login.example.com", url: "http://preview-fix-login.example.com" }, "http://preview-fix-login.example.com"],
+    [{ domain: "preview-fix-login.example.com", url: "javascript:alert(1)" }, "https://preview-fix-login.example.com"],
+    [{ domain: "preview-fix-login.example.com", url: "" }, "https://preview-fix-login.example.com"],
+    [{ url: "http://preview-fix-login.example.com" }, "http://preview-fix-login.example.com"],
+  ];
+  for (const [row, want] of cases) {
+    const { run } = scriptedRunner({ build: OK_BUILD, "preview deploy": { code: 0, stdout: "", stderr: "" }, "preview list": rows(row) });
+    const outcome = await deployPreview({ dir: "/srv/app", run }, "fix/login");
+    assert.equal((outcome as { url?: string }).url, want, JSON.stringify(row));
+    assert.equal((outcome as { previewBase?: string }).previewBase, undefined, "default mode records no base override");
+  }
+});
+
+test("SHIP_PREVIEW_MAIN_URL: one URL, or app=url entries resolved per app; a bad entry refuses rather than guesses", async () => {
+  assert.deepEqual(previewTargetFromEnv({ SHIP_PREVIEW_DIR: "/srv/app", SHIP_PREVIEW_MAIN_URL: "https://site.example.com" }), {
+    dir: "/srv/app",
+    mainUrl: "https://site.example.com/",
+  });
+  const root = await mkdtemp(join(tmpdir(), "ship-preview-main-"));
+  await mkdir(join(root, "site"), { recursive: true });
+  const target = previewTargetFromEnv({ SHIP_PREVIEW_DIR: root, SHIP_PREVIEW_MAIN_URL: "site=https://site.example.com, docs=https://docs.example.com/, https://fallback.example.com" })!;
+  assert.equal(resolvePreviewTarget(target, "site").mainUrl, "https://site.example.com/");
+  assert.equal(resolvePreviewTarget(target, "docs").mainUrl, "https://docs.example.com/", "keyed by app name even without a per-app clone");
+  assert.equal(resolvePreviewTarget(target, "other").mainUrl, "https://fallback.example.com/");
+  const bad = previewTargetFromEnv({ SHIP_PREVIEW_DIR: "/srv/app", SHIP_PREVIEW_MAIN_URL: "site=ftp://x" })!;
+  assert.match(bad.invalid ?? "", /SHIP_PREVIEW_MAIN_URL/);
+
+  const { run } = scriptedRunner({ build: OK_BUILD, "preview deploy": OK_DEPLOY, "preview list": OK_LIST });
+  const outcome = await deployPreview({ ...resolvePreviewTarget(target, "site"), run }, "fix/login");
+  assert.equal((outcome as { mainUrl?: string }).mainUrl, "https://site.example.com/", "recorded with the outcome for the visual rung");
+});
+
+test("tailnet mode: a CLI that does not advertise preview-exposure is refused before anything is built", async () => {
+  const target = previewTargetFromEnv({ SHIP_PREVIEW_DIR: "/srv/app", SHIP_PREVIEW_TAILNET_IP: "100.101.102.103" })!;
+  const older: CommandResult[] = [
+    { code: 0, stdout: JSON.stringify({ capabilities: ["preview-blue-green", "preview-canonical-id"], machine_interface: 2 }), stderr: "" },
+    { code: 1, stdout: "", stderr: "Error: unknown flag: --json" },
+    { code: 0, stdout: "teploy v0.1.27\n", stderr: "" },
+  ];
+  for (const version of older) {
+    const { run, calls } = scriptedRunner({ version, build: OK_BUILD, "preview deploy": TAILNET_DEPLOY, "preview list": TAILNET_LIST });
+    const outcome = await deployPreview({ ...target, run }, "fix/login");
+    assert.equal(outcome.kind, "failed");
+    assert.match((outcome as { reason: string }).reason, /does not advertise the preview-exposure capability/);
+    assert.ok(!calls.some((c) => c[1] === "build" || c[1] === "preview"), `nothing built or deployed: ${JSON.stringify(calls)}`);
+  }
+});
+
+test("default mode never asks the CLI for its version: the argv sequence is unchanged", async () => {
+  const { run, calls } = scriptedRunner({ build: OK_BUILD, "preview deploy": OK_DEPLOY, "preview list": OK_LIST });
+  await deployPreview({ dir: "/srv/app", run }, "fix/login");
+  assert.deepEqual(calls.filter((c) => c[0] === "teploy").map((c) => c[1]), ["build", "preview", "preview"]);
+});

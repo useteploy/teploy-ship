@@ -160,6 +160,24 @@ export function mainUrlOf(previewUrl: string): string | null {
   return `${url.protocol}//${labels.slice(1).join(".")}/`;
 }
 
+/**
+ * Main's URL for the visual rung, from what the preview step RECORDED (so a
+ * replay reads the same answer): explicit config wins; with an overridden
+ * preview base domain there is nothing to derive from — stripping the first
+ * label of `preview-x.100.64.1.2.sslip.io` yields the TARGET's address, not
+ * main — so the rung skips and says why; otherwise mainUrlOf, as before.
+ */
+export function resolveMainUrl(preview: Extract<PreviewOutcome, { kind: "deployed" }>): { url: string } | { reason: string } {
+  if (preview.mainUrl !== undefined) return { url: preview.mainUrl };
+  if (preview.previewBase !== undefined) {
+    return {
+      reason: `the preview was deployed under an overridden base domain (${preview.previewBase}), so main's URL cannot be derived from the preview host; set SHIP_PREVIEW_MAIN_URL on the worker to compare against main`,
+    };
+  }
+  const derived = mainUrlOf(preview.url);
+  return derived !== null ? { url: derived } : { reason: `could not derive main's URL from ${preview.url}` };
+}
+
 const BROWSERS = ["chromium", "chromium-browser", "google-chrome", "google-chrome-stable"];
 
 /**
@@ -195,8 +213,9 @@ export async function visualIfDeclared(
     if (preview?.kind !== "deployed") {
       return { kind: "skipped", reason: preview === undefined ? "no preview was deployed" : `no preview to screenshot (${preview.kind}: ${preview.reason})` };
     }
-    const main = mainUrlOf(preview.url);
-    if (main === null) return { kind: "skipped", reason: `could not derive main's URL from ${preview.url}` };
+    const resolved = resolveMainUrl(preview);
+    if ("reason" in resolved) return { kind: "skipped", reason: resolved.reason };
+    const main = resolved.url;
     try {
       const probe = await executor.exec(`for b in ${BROWSERS.join(" ")}; do if command -v "$b" >/dev/null 2>&1; then command -v "$b"; exit 0; fi; done; exit 3`, {
         timeoutMs: 30_000,

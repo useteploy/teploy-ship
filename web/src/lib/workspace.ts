@@ -1,4 +1,5 @@
 import { transcriptTurn } from "../../../dist/actions.js";
+import { frameAllowed } from "./csp.js";
 /** Read-only projections of recorded work. Never infer a passing check from agent prose. */
 export interface LogEvent {
   type: string;
@@ -228,4 +229,73 @@ export function workspaceRecovery(events: LogEvent[]): { snapshotAt?: string; re
   const snapshots = events.filter(e => e.type === "step-completed" && /-snapshot$/.test(e.name ?? ""));
   const restores = events.filter(e => e.type === "step-completed" && /-restore$/.test(e.name ?? ""));
   return { snapshotAt: snapshots.at(-1)?.at, restoredAt: restores.at(-1)?.at, checked: restores.length > 0 && input.restoreValidation === 1, warm: input.warm === true };
+}
+
+/**
+ * What the run page's preview panel shows (DELEGATED_DECISIONS_2026-09-23
+ * §10). Read from recorded steps only; `now` decides expiry against the TTL
+ * the CLI reported. The panel frames the preview's OWN hostname — never a
+ * dashboard path — so agent-written code never runs on the dashboard origin.
+ */
+export type PreviewPanel =
+  | { state: "none" }
+  | { state: "deploying" }
+  | { state: "not-deployed"; reason: string }
+  | { state: "failed"; reason: string }
+  | { state: "deployed"; url: string; expiresAt?: string; blocked?: string }
+  | { state: "expired"; url: string; expiresAt: string }
+  | { state: "removed"; url: string; reason: string };
+
+export function previewPanel(
+  events: LogEvent[],
+  facts: Record<string, any>,
+  opts: { executing: boolean; now: number; dashboardOrigin: string; frameBase?: string },
+): PreviewPanel {
+  const input = record(record(events.find((e) => e.type === "run-started")?.data).input);
+  const declared = input.preview === true || record(input.verification).preview !== undefined;
+  const p = record(facts.preview);
+  if (p.kind === undefined) {
+    if (!declared) return { state: "none" };
+    return opts.executing
+      ? { state: "deploying" }
+      : { state: "not-deployed", reason: "The run ended before a preview was deployed." };
+  }
+  if (p.kind === "failed") return { state: "failed", reason: String(p.reason ?? "") };
+  if (p.kind !== "deployed") return { state: "not-deployed", reason: String(p.reason ?? "") };
+  const url = safeLink(p.url);
+  if (url === undefined || url.startsWith("/")) {
+    return { state: "failed", reason: "The preview step recorded a URL this page will not open." };
+  }
+  const observed = record(facts.observeWindow);
+  const rollback = record(facts.rollback);
+  if (observed.kind === "worse" && record(observed.rollback).kind === "rolled-back") {
+    return { state: "removed", url, reason: "The observe window judged the preview worse and tore it down." };
+  }
+  if (rollback.kind === "rolled-back" && rollback.scope === "preview") {
+    return { state: "removed", url, reason: "The preview regressed and was removed by recovery." };
+  }
+  const expiresAt = typeof p.expiresAt === "string" && !Number.isNaN(Date.parse(p.expiresAt)) ? p.expiresAt : undefined;
+  if (expiresAt !== undefined && Date.parse(expiresAt) <= opts.now) return { state: "expired", url, expiresAt };
+  let dashboard = opts.dashboardOrigin;
+  try {
+    dashboard = new URL(opts.dashboardOrigin).origin;
+  } catch {
+    // Compare as given.
+  }
+  const blocked =
+    new URL(url).origin === dashboard
+      ? "The preview shares this dashboard's origin, so it is not framed here: code in it would run with your session. Open it in a tab."
+      : !frameAllowed(url, opts.frameBase)
+        ? opts.frameBase === undefined
+          ? "This dashboard frames only tailnet previews, and SHIP_PREVIEW_TAILNET_IP is not set on its web process. Open it in a tab."
+          : `This dashboard frames only previews under ${opts.frameBase}, and this one is not. Open it in a tab.`
+      : opts.dashboardOrigin.startsWith("https:") && url.startsWith("http:")
+        ? "This dashboard is served over HTTPS and the preview over HTTP, so the browser would block the frame as mixed content. Open it in a tab."
+        : undefined;
+  return {
+    state: "deployed",
+    url,
+    ...(expiresAt !== undefined ? { expiresAt } : {}),
+    ...(blocked !== undefined ? { blocked } : {}),
+  };
 }
