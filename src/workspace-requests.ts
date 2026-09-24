@@ -180,7 +180,9 @@ async function storeScreenshot(
     throw new Error("The browser action ran, but this install has no artifact store to keep its screenshot in.");
   const bytes = Buffer.from(image, "base64");
   try {
-    const id = await runtime.artifacts.put(`takeover-${runId}-${Date.now()}.${format === "jpeg" ? "jpg" : "png"}`, bytes);
+    const store = runtime.artifacts;
+    const put = store.putTemporary ?? store.put;
+    const id = await put.call(store, `takeover-${runId}-${Date.now()}.${format === "jpeg" ? "jpg" : "png"}`, bytes);
     return { id, bytes: bytes.length };
   } catch (e) {
     throw new Error(
@@ -386,6 +388,11 @@ export async function serveWorkspaceRequests(
     contentPruneAt.set(runtime.workspaceContent, Date.now() + 60 * 60 * 1000);
     try { await runtime.workspaceContent.prune(); }
     catch (e) { failures.push(`editor content cleanup: ${e instanceof Error ? e.message : String(e)}`); }
+  }
+  if (runtime.artifacts?.pruneExpired && Date.now() >= (contentPruneAt.get(runtime.artifacts) ?? 0)) {
+    contentPruneAt.set(runtime.artifacts, Date.now() + 60 * 60 * 1000);
+    try { await runtime.artifacts.pruneExpired(); }
+    catch (e) { failures.push(`screenshot cleanup: ${e instanceof Error ? e.message : String(e)}`); }
   }
   for (const e of await sweepLapsedTakeovers(runtime, executor)) failures.push(e);
   let processed = 0;

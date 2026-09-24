@@ -1,4 +1,5 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { readdir, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { readJsonFile, writeJsonFile } from "./file-store.js";
 import { stateDir } from "./run-store.js";
@@ -14,6 +15,8 @@ export interface Artifact {
 export interface ArtifactStore {
   put(name: string, bytes: Uint8Array): Promise<string>;
   get(id: string): Promise<Artifact | null>;
+  putTemporary?(name: string, bytes: Uint8Array): Promise<string>;
+  pruneExpired?(): Promise<void>;
 }
 function artifact(name: string, bytes: Uint8Array): Artifact {
   if (bytes.length > 4 * 1024 * 1024 || !bytes.length)
@@ -36,6 +39,17 @@ function artifact(name: string, bytes: Uint8Array): Artifact {
     bytes: bytes.length,
   };
 }
+export const SCREENSHOT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+type StoredArtifact = Artifact & { digest?: string; expiresAt?: string };
+function temporary(name: string, bytes: Uint8Array): StoredArtifact {
+  const a = artifact(name, bytes);
+  // A distinct identity prevents expiry from deleting a permanent artifact
+  // with identical pixels, or a newer capture with a different expiry.
+  return { ...a, digest: a.id,
+    id: createHash("sha256").update(randomUUID()).update(a.id).digest("hex"),
+    expiresAt: new Date(Date.now() + SCREENSHOT_RETENTION_MS).toISOString() };
+}
+const expired = (a: StoredArtifact) => a.expiresAt !== undefined && Date.parse(a.expiresAt) <= Date.now();
 const validId = (id: string) => /^[a-f0-9]{64}$/.test(id);
 export class FileArtifacts implements ArtifactStore {
   constructor(private dir = join(stateDir(), "artifacts")) {}
@@ -44,15 +58,31 @@ export class FileArtifacts implements ArtifactStore {
     await writeJsonFile(join(this.dir, a.id + ".json"), a);
     return a.id;
   }
+  async putTemporary(name: string, bytes: Uint8Array): Promise<string> {
+    const a = temporary(name, bytes);
+    await writeJsonFile(join(this.dir, a.id + ".json"), a);
+    return a.id;
+  }
   async get(id: string): Promise<Artifact | null> {
-    return validId(id)
-      ? readJsonFile(join(this.dir, id + ".json"), null)
-      : null;
+    if (!validId(id)) return null;
+    const a = await readJsonFile<StoredArtifact | null>(join(this.dir, id + ".json"), null);
+    return a && !expired(a) ? a : null;
+  }
+  async pruneExpired(): Promise<void> {
+    let files: string[];
+    try { files = await readdir(this.dir); }
+    catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return; throw e; }
+    for (const file of files) {
+      if (!/^[a-f0-9]{64}\.json$/.test(file)) continue;
+      const a = await readJsonFile<StoredArtifact | null>(join(this.dir, file), null);
+      if (a && expired(a)) await unlink(join(this.dir, file));
+    }
   }
 }
 /** Dedicated table; 8 KiB chunks fit Nucleus’s 16 KiB inline row limit. Manifest is written last. */
 export class NucleusArtifacts implements ArtifactStore {
   private ready: Promise<unknown> | undefined;
+  private expiryReady?: Promise<unknown>;
   constructor(private db: NucleusPgwire) {}
   private async ensure() {
     await (this.ready ??= this.db
@@ -63,6 +93,11 @@ export class NucleusArtifacts implements ArtifactStore {
         this.ready = undefined;
         throw e;
       }));
+  }
+  private async ensureExpiry() {
+    await this.ensure();
+    await (this.expiryReady ??= this.db.query("CREATE TABLE IF NOT EXISTS ship_artifact_expiry (artifact_id TEXT, expires_at TEXT, chunks TEXT)")
+      .catch(e => { this.expiryReady = undefined; throw e; }));
   }
   private async write(key: string, value: string) {
     await upsertByKey(this.db, {
@@ -93,7 +128,9 @@ export class NucleusArtifacts implements ArtifactStore {
       : null;
   }
   async put(name: string, bytes: Uint8Array): Promise<string> {
-    const a = artifact(name, bytes);
+    return this.store(artifact(name, bytes));
+  }
+  private async store(a: StoredArtifact): Promise<string> {
     await this.ensure();
     const size = 8192,
       chunks = Math.ceil(a.data.length / size);
@@ -102,12 +139,34 @@ export class NucleusArtifacts implements ArtifactStore {
     await this.write(a.id, JSON.stringify({ ...a, data: "", chunks }));
     return a.id;
   }
+  async putTemporary(name: string, bytes: Uint8Array): Promise<string> {
+    const a = temporary(name, bytes);
+    await this.ensureExpiry();
+    // Index first so even a partial chunk write can be collected later.
+    await this.db.query("INSERT INTO ship_artifact_expiry (artifact_id, expires_at, chunks) VALUES ($1, $2, $3)",
+      [a.id, a.expiresAt, String(Math.ceil(a.data.length / 8192))]);
+    return this.store(a);
+  }
+  async pruneExpired(): Promise<void> {
+    await this.ensureExpiry();
+    const rows = await this.db.query("SELECT artifact_id, chunks FROM ship_artifact_expiry WHERE expires_at < $1", [new Date().toISOString()]);
+    for (const row of rows) {
+      const id = String(row.artifact_id), chunks = Number(row.chunks);
+      if (!validId(id) || !Number.isInteger(chunks) || chunks < 1 || chunks > 683)
+        throw new Error("Invalid temporary artifact expiry record");
+      for (let i = 0; i < chunks; i++)
+        await this.db.query("DELETE FROM ship_artifacts WHERE artifact_key = $1", [`${id}:${i}`]);
+      await this.db.query("DELETE FROM ship_artifacts WHERE artifact_key = $1", [id]);
+      await this.db.query("DELETE FROM ship_artifact_expiry WHERE artifact_id = $1", [id]);
+    }
+  }
   async get(id: string): Promise<Artifact | null> {
     if (!validId(id)) return null;
     await this.ensure();
     const raw = await this.read(id);
     if (!raw) return null;
-    const a = JSON.parse(raw) as Artifact & { chunks: number };
+    const a = JSON.parse(raw) as StoredArtifact & { chunks: number };
+    if (expired(a)) return null;
     if (!Number.isInteger(a.chunks) || a.chunks < 1 || a.chunks > 683)
       throw new Error("Invalid artifact manifest");
     let data = "";
@@ -119,7 +178,7 @@ export class NucleusArtifacts implements ArtifactStore {
     const bytes = Buffer.from(data, "base64");
     if (
       bytes.length !== a.bytes ||
-      createHash("sha256").update(bytes).digest("hex") !== id
+      createHash("sha256").update(bytes).digest("hex") !== (a.digest ?? id)
     )
       throw new Error("Artifact integrity check failed");
     return { ...a, data };

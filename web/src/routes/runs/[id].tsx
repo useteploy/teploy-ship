@@ -1199,6 +1199,7 @@ function BrowserTab({ data, record }: { data: RunData; record: NonNullable<RunDa
         <button type="button" class="sm" onClick={close}>Close browser</button>
       </div>
     </form>
+    <p class="meta">New screenshots are kept for 7 days.</p>
     {navError !== null && <p class="notice bad" role="alert">{navError}</p>}
     {reply?.error && <p class="notice bad" role="alert">{reply.error}</p>}
     {browser?.artifact !== undefined && (

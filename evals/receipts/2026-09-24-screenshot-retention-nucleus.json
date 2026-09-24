@@ -1,0 +1,1 @@
+{"pass":true,"nucleusImage":"v1.1.1","bytes":200008,"checks":["temporary full roundtrip","independent identity","expiry hidden on read","expired chunks and manifest deleted","permanent identical image preserved","newer identical capture preserved","expiry index cleaned"]}

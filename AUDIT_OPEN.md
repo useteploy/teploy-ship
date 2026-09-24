@@ -323,6 +323,11 @@ open with the S17 starter.
   (content-addressed, up to ~300 KB) in `ship_artifacts`, which has no GC.
   Needs a retention rule (e.g. drop takeover screenshots at handback/lapse
   or after N days).
+  **2026-09-24: implemented locally**, seven-day retention for new takeover
+  screenshots with separate identities and expiry records. Legacy/permanent
+  artifacts are preserved even when their bytes equal an expired screenshot.
+  A separate real Nucleus proof passed round-trip, expiry, complete chunk
+  deletion and preservation of permanent/newer identical images. Rollout pending.
 - **Live proof pending.** The artifact-backed BROWSER display and the
   two-park resume are unit-pinned only; the next live pass should run
   `enqueue --plan` -> takeover with a browser navigate -> approve-merge
