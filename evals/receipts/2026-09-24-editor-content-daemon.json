@@ -1,0 +1,1 @@
+{"pass":true,"bytes":200000,"checks":["real daemon","lease-fenced write","lease-fenced exact read","empty file","bounded config rows","handback"],"scope":"isolated file-backed run; no model or production run"}

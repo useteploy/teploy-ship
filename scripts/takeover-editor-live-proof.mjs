@@ -8,15 +8,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 const scratch = mkdtempSync(join(tmpdir(), 'ship-editor-proof-'));
 process.env.TEPLOY_SHIP_STATE = join(scratch, 'state');
-const { SandboxExecutor } = await import('@neutron-build/agents');
+const { sandboxProvider } = await import('../dist/durable.js');
 const { fileRuntime } = await import('../dist/runtime.js');
 const { PLAN_EVENT } = await import('../dist/plan.js');
 const { requestWorkspace, serveWorkspaceRequests, resolveEditorReply } = await import('../dist/workspace-requests.js');
 const { takeoverReplyKey } = await import('../dist/takeover.js');
 const runtime = fileRuntime();
-const executor = await SandboxExecutor.start({
+const executor = sandboxProvider({
   baseURL: process.env.SHIP_SANDBOX_URL, token: process.env.SHIP_SANDBOX_TOKEN,
-  create: { image: process.env.SHIP_SANDBOX_IMAGE ?? 'ship-sandbox-node:dev', network: 'none' },
+  image: process.env.SHIP_SANDBOX_IMAGE ?? 'ship-sandbox-node:dev', network: 'none', ttlSec: 900,
 });
 const runId = 'editor-proof-' + Date.now().toString(36);
 const repo = 'https://github.com/teploy/editor-live-proof';
