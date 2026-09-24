@@ -1,4 +1,5 @@
 import type { ParsedFindings, ScanFinding } from "./findings.js";
+import { repositoryKeyFold } from "./repository-reference.js";
 
 /**
  * S17 starter — attributed incident investigation, READ-ONLY.
@@ -1334,8 +1335,11 @@ export async function digestIncidentRemediation(
   if (input?.mode === "scan") {
     return settle("remediation-failed", `the linked run ${record.remediationRunId} is a read-only scan — a scan cannot remediate`);
   }
+  // Compared under the repository case rule (S01-3): a project URL re-spelled
+  // in another case between attribution and remediation is the same repo.
+  const sameRepo = (a: string, b: string | undefined): boolean => b !== undefined && repositoryKeyFold(a) === repositoryKeyFold(b);
   if (input?.repo !== undefined && record.attribution !== undefined &&
-      input.repo !== record.attribution.repoUrl && input.repo !== record.attribution.repo) {
+      !sameRepo(input.repo, record.attribution.repoUrl) && !sameRepo(input.repo, record.attribution.repo)) {
     return settle("remediation-failed", `the linked run ${record.remediationRunId} recorded repo ${input.repo}, not the attributed ${record.attribution.repo}`);
   }
   const terminal = events.find((e) => e.type === "run-completed" || e.type === "run-failed" || e.type === "run-cancelled");

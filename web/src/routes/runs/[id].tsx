@@ -1257,7 +1257,7 @@ function DeliveryCard({ data }: { data: RunData }) {
     </table>
     {d.reason && <p class="meta" style="margin-top:8px">{d.reason}</p>}
     {data.deliveryError && <p class="notice bad" role="alert">{data.deliveryError}</p>}
-    {d.state === "proposed" && data.canLaunch && (
+    {(d.state === "proposed" || d.state === "held" || d.state === "failed") && data.canLaunch && (
       <form method="post" action={`/api/runs/${data.runId}/promote`} style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;margin-top:12px">
         <label class="meta" for="delivery-destination">Destination</label>
         <input id="delivery-destination" name="destination" required placeholder="e.g. scratch-infra-home-7471" style="min-width:220px"/>
@@ -1265,10 +1265,10 @@ function DeliveryCard({ data }: { data: RunData }) {
         <input id="delivery-recovery" name="recoveryVersion" required placeholder="current version to roll back to" style="min-width:220px"/>
         <label class="meta" for="delivery-reason">Reason</label>
         <input id="delivery-reason" name="reason" placeholder="why this promotion" style="min-width:220px"/>
-        <button type="submit" class="sm">Approve promotion</button>
+        <button type="submit" class="sm">{d.state === "proposed" ? "Approve promotion" : "Re-approve promotion"}</button>
       </form>
     )}
-    {d.state === "proposed" && !data.canLaunch && <p class="meta">Approving a promotion needs the approve authority.</p>}
+    {(d.state === "proposed" || d.state === "held" || d.state === "failed") && !data.canLaunch && <p class="meta">Approving a promotion needs the approve authority.</p>}
     {d.state === "confirmed" && d.recoveryVersion && (!d.rollback || d.rollback.state === "failed") && data.canLaunch && (
       <form method="post" action={`/api/runs/${data.runId}/rollback-delivery`} style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;margin-top:12px">
         <label class="meta" for="rollback-reason">Rollback reason</label>
