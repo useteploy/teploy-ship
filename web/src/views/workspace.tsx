@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "preact/hooks";
 import { RichText } from "./rich-text.js";
 import { safeLink, splitDiff } from "../lib/workspace.js";
-import type { Message, DiffSnapshot, Evidence } from "../lib/workspace.js";
+import type { Message, DiffSnapshot, Evidence, PreviewPanel } from "../lib/workspace.js";
 export function Conversation({ messages, expanded = false }: { messages: Message[]; expanded?: boolean }) {
   const root = useRef<HTMLElement>(null);
   const previousHeight = useRef<number | null>(null);
@@ -99,7 +99,76 @@ export function Changes({
     </section>
   );
 }
-export function Verification({ data }: { data: Evidence }) {
+const stamp = (at: string) => at.replace("T", " ").slice(0, 16) + " UTC";
+
+/**
+ * The run's preview (DELEGATED_DECISIONS_2026-09-23 §10): a frame of the
+ * preview's OWN hostname plus a link to open it in a tab. Never a dashboard
+ * path — agent-written code must not run on this origin.
+ */
+export function PreviewPanelView({ panel }: { panel: PreviewPanel }) {
+  return (
+    <section class="preview-panel" aria-labelledby="preview-panel-heading">
+      <h2 class="section" id="preview-panel-heading">Preview</h2>
+      {panel.state === "none" && (
+        <p class="meta">
+          No preview was declared for this run. Declare a preview app on the{" "}
+          <a href="/projects">project</a> to get one.
+        </p>
+      )}
+      {panel.state === "deploying" && (
+        <p class="meta" role="status">
+          Not deployed yet. The preview deploys after the change is pushed;
+          refresh this page to check.
+        </p>
+      )}
+      {panel.state === "not-deployed" && <p class="meta">No preview: {panel.reason}</p>}
+      {panel.state === "failed" && <p class="notice bad">Preview deploy failed: {panel.reason}</p>}
+      {panel.state === "expired" && (
+        <p class="meta">
+          Expired {stamp(panel.expiresAt)}. Expired previews are removed, so{" "}
+          <code>{panel.url}</code> no longer serves this change.
+        </p>
+      )}
+      {panel.state === "removed" && (
+        <p class="meta">
+          Removed: {panel.reason} <code>{panel.url}</code> no longer serves this change.
+        </p>
+      )}
+      {panel.state === "deployed" && (
+        <>
+          <div class="preview-bar">
+            <a class="button" href={panel.url} target="_blank" rel="noopener noreferrer">
+              Open preview in a new tab ↗
+            </a>
+            <span class="meta">
+              {panel.expiresAt !== undefined ? `Expires ${stamp(panel.expiresAt)}` : "Expiry not recorded"}
+            </span>
+          </div>
+          <p class="meta">
+            Sign-in and OAuth flows need the full page: use the tab. If the
+            frame stays blank, the app may refuse to be framed or this browser
+            cannot reach the preview's network.
+          </p>
+          {panel.blocked !== undefined ? (
+            <p class="notice warn">{panel.blocked}</p>
+          ) : (
+            <iframe
+              class="preview-frame"
+              src={panel.url}
+              title="Live preview of this run's change"
+              loading="lazy"
+              referrerPolicy="no-referrer"
+              sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
+            />
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+export function Verification({ data, preview }: { data: Evidence; preview?: PreviewPanel }) {
   return (
     <section>
       <h2 class="section">Verification</h2>
@@ -107,8 +176,9 @@ export function Verification({ data }: { data: Evidence }) {
         Recorded checks for this run. “Not recorded” means no evidence is
         available; it does not mean passed.
       </p>
+      {preview !== undefined && <PreviewPanelView panel={preview} />}
       <div class="evidence-actions">
-        {data.preview && (
+        {preview === undefined && data.preview && (
           <a
             class="button"
             href={data.preview}

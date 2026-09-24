@@ -95,6 +95,10 @@ table.runs td { padding-top: 10px; padding-bottom: 10px; }
 .diff-remove { color: var(--red); background: #f851490d; }
 .diff-hunk { color: var(--blue); }
 .evidence-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 16px 0; }
+.preview-panel { margin: 16px 0 24px; }
+.preview-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin: 12px 0; }
+.preview-bar .meta { margin: 0; }
+.preview-frame { display: block; width: 100%; height: 70vh; min-height: 420px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); }
 .check-row { display: grid; grid-template-columns: 150px 120px minmax(0,1fr); gap: 14px; padding: 14px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
 .check-row b { font-weight: 500; }
 .check-row > div { overflow-wrap: anywhere; }
@@ -136,6 +140,7 @@ table.runs td { padding-top: 10px; padding-bottom: 10px; }
   .check-row { grid-template-columns: 1fr 1fr; }
   .check-row > div { grid-column: 1 / -1; }
   .evidence-gallery { grid-template-columns: 1fr; }
+  .preview-frame { height: 60vh; min-height: 320px; }
   .workflow-row { flex-direction: column; }
 
   .page-heading { gap: 12px; }

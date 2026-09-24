@@ -149,7 +149,23 @@ export type CommandRunner = (argv: string[], opts: { cwd: string; timeoutMs: num
 
 /** What a preview attempt produced. */
 export type PreviewOutcome =
-  | { kind: "deployed"; url: string; image: string; expiresAt?: string; deployedAt?: string; revision?: string; branch?: string }
+  | {
+      kind: "deployed";
+      url: string;
+      image: string;
+      expiresAt?: string;
+      deployedAt?: string;
+      revision?: string;
+      branch?: string;
+      /**
+       * The base domain the preview was deployed under when the worker
+       * overrode it (tailnet mode). Recorded so the visual rung knows the
+       * preview host no longer shares a parent domain with main.
+       */
+      previewBase?: string;
+      /** Main's URL from explicit config (SHIP_PREVIEW_MAIN_URL), when set. */
+      mainUrl?: string;
+    }
   | { kind: "skipped"; reason: string }
   | { kind: "failed"; reason: string };
 
@@ -169,6 +185,24 @@ export interface PreviewTarget {
   destination?: string;
   /** Per-command ceiling. A server-side image build is the slow step. */
   timeoutMs?: number;
+  /**
+   * Route options for `teploy preview deploy`. Absent = the CLI's defaults
+   * (the app's own domain, automatic HTTPS, no gate), argv unchanged.
+   * previewTargetFromEnv sets all three together from SHIP_PREVIEW_TAILNET_IP.
+   */
+  baseDomain?: string;
+  httpOnly?: boolean;
+  allowIps?: string[];
+  /** Main's URL for the visual rung, when explicitly configured. */
+  mainUrl?: string;
+  /** Per-app overrides of `mainUrl`, applied by resolvePreviewTarget. */
+  mainUrlByApp?: Record<string, string>;
+  /**
+   * Why this target's preview configuration is unusable. Set instead of
+   * falling back: a tailnet setting that failed to parse must not silently
+   * become a public HTTPS preview with no gate.
+   */
+  invalid?: string;
   /** Override the runner (tests). */
   run?: CommandRunner;
 }
@@ -199,7 +233,22 @@ function tail(text: string, lines = 6): string {
 interface PreviewRow {
   branch?: string;
   domain?: string;
+  /** The URL with its real scheme (newer CLIs). Absent on older ones. */
+  url?: string;
   expires_at?: string;
+}
+
+/** The row's URL: its own `url` when it carries an http(s) one, else https://domain (CLIs before `url`). */
+function rowUrl(row: PreviewRow): string | undefined {
+  if (typeof row.url === "string" && row.url !== "") {
+    try {
+      const u = new URL(row.url);
+      if (u.protocol === "http:" || u.protocol === "https:") return row.url;
+    } catch {
+      // Fall through to the domain.
+    }
+  }
+  return typeof row.domain === "string" && row.domain !== "" ? `https://${row.domain}` : undefined;
 }
 
 /**
@@ -237,6 +286,7 @@ export async function deployPreview(target: PreviewTarget, branch: string, revis
   const cwd = target.dir;
   const dest = target.destination !== undefined ? ["-d", target.destination] : [];
 
+  if (target.invalid !== undefined) return { kind: "failed", reason: target.invalid };
   try {
     assertGitSafe("branch", branch);
     if (revision !== undefined && !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(revision)) throw new Error("Preview requires a full commit identity");
@@ -283,6 +333,20 @@ async function buildAndDeploy(opts: {
   // the same teploy.yml.
   const cwd = opts.tree;
 
+  // Route options only when configured: the default argv is exactly what it
+  // was before tailnet mode existed, so a CLI without these flags keeps working.
+  const route = [
+    ...(target.baseDomain !== undefined ? ["--base-domain", target.baseDomain] : []),
+    ...(target.httpOnly === true ? ["--http-only"] : []),
+    ...(target.allowIps ?? []).flatMap((cidr) => ["--allow-ip", cidr]),
+  ];
+  // A CLI that predates the route flags must be refused BEFORE the slow build,
+  // by what it advertises rather than by an "unknown flag" after the fact.
+  if (route.length > 0) {
+    const refusal = await exposureRefusal(run, bin, cwd);
+    if (refusal !== undefined) return { kind: "failed", reason: refusal };
+  }
+
   const built = await run([bin, "build", "--json", ...dest], { cwd, timeoutMs });
   if (built.code !== 0) {
     return { kind: "failed", reason: `teploy build failed (exit ${built.code}): ${tail(built.stderr || built.stdout)}` };
@@ -300,7 +364,7 @@ async function buildAndDeploy(opts: {
   }
 
   const deployed = await run(
-    [bin, "preview", "deploy", branch, "--ttl", target.ttl ?? "24h", "--image", image, ...dest],
+    [bin, "preview", "deploy", branch, "--ttl", target.ttl ?? "24h", "--image", image, ...route, ...dest],
     { cwd, timeoutMs },
   );
   // Stamped once the CLI returned: the observe window (ladder-steps.ts) is
@@ -310,18 +374,26 @@ async function buildAndDeploy(opts: {
     return { kind: "failed", reason: `teploy preview deploy failed (exit ${deployed.code}): ${tail(deployed.stderr || deployed.stdout)}` };
   }
 
+  // What the visual rung needs to know about main, recorded with the outcome
+  // so a replay reads the same answer (ladder-steps.ts resolveMainUrl).
+  const about = {
+    ...(target.baseDomain !== undefined ? { previewBase: target.baseDomain } : {}),
+    ...(target.mainUrl !== undefined ? { mainUrl: target.mainUrl } : {}),
+  };
   const listed = await run([bin, "preview", "list", "--json", ...dest], { cwd, timeoutMs: 60_000 });
   if (listed.code === 0) {
     try {
       const rows = JSON.parse(listed.stdout.trim()) as PreviewRow[];
       const row = Array.isArray(rows) ? rows.find((r) => r.branch === branch) : undefined;
-      if (row?.domain !== undefined && row.domain !== "") {
+      const url = row !== undefined ? rowUrl(row) : undefined;
+      if (row !== undefined && url !== undefined) {
         return {
           kind: "deployed",
-          url: `https://${row.domain}`,
+          url,
           image,
           ...(typeof row.expires_at === "string" ? { expiresAt: row.expires_at } : {}),
           deployedAt,
+          ...about,
         };
       }
     } catch {
@@ -333,8 +405,29 @@ async function buildAndDeploy(opts: {
   // `preview list` is unavailable or does not carry this branch — the preview
   // itself succeeded, so reporting no URL would be worse than reporting this.
   const printed = /Preview deployed:\s*(https?:\/\/\S+)/.exec(deployed.stdout);
-  if (printed !== null) return { kind: "deployed", url: printed[1]!, image, deployedAt };
+  if (printed !== null) return { kind: "deployed", url: printed[1]!, image, deployedAt, ...about };
   return { kind: "failed", reason: `preview deployed but no URL could be established: ${tail(deployed.stdout)}` };
+}
+
+/** The `teploy version --json` capability token for the preview route flags. */
+export const PREVIEW_EXPOSURE_CAPABILITY = "preview-exposure";
+
+/** Why this CLI cannot take the route flags, or undefined when it advertises them. */
+async function exposureRefusal(run: CommandRunner, bin: string, cwd: string): Promise<string | undefined> {
+  const version = await run([bin, "version", "--json"], { cwd, timeoutMs: 60_000 });
+  let capabilities: unknown;
+  try {
+    capabilities = (JSON.parse(version.stdout.trim()) as { capabilities?: unknown }).capabilities;
+  } catch {
+    capabilities = undefined;
+  }
+  if (version.code === 0 && Array.isArray(capabilities) && capabilities.includes(PREVIEW_EXPOSURE_CAPABILITY)) return undefined;
+  return (
+    `the teploy CLI (${bin}) does not advertise the ${PREVIEW_EXPOSURE_CAPABILITY} capability in \`teploy version --json\`, ` +
+    `so it cannot deploy a tailnet preview (--base-domain/--http-only/--allow-ip); upgrade the CLI on this worker. ` +
+    `Nothing was built or deployed` +
+    (version.code !== 0 ? ` (version exited ${version.code}: ${tail(version.stderr || version.stdout, 2)})` : "")
+  );
 }
 
 /**
@@ -349,8 +442,12 @@ async function buildAndDeploy(opts: {
  */
 export function resolvePreviewTarget(target: PreviewTarget, app: string | undefined): PreviewTarget {
   if (app === undefined || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(app)) return target;
+  // Main's URL is keyed by app name, independent of the directory layout: a
+  // per-app entry wins over the worker-wide default.
+  const mainUrl = target.mainUrlByApp?.[app];
+  const withMain = mainUrl !== undefined ? { ...target, mainUrl } : target;
   const dir = join(target.dir, app);
-  return existsSync(dir) && statSync(dir).isDirectory() ? { ...target, dir } : target;
+  return existsSync(dir) && statSync(dir).isDirectory() ? { ...withMain, dir } : withMain;
 }
 
 /** What a rollback attempt produced. Non-zero exit is data, like everywhere else here. */
@@ -433,11 +530,86 @@ export function previewTargetFromEnv(env: NodeJS.ProcessEnv = process.env): Prev
   const ttl = (env.SHIP_PREVIEW_TTL ?? "").trim();
   const destination = (env.SHIP_PREVIEW_DESTINATION ?? "").trim();
   const timeout = Number(env.SHIP_PREVIEW_TIMEOUT_MS);
+  const tailnet = tailnetRoute((env.SHIP_PREVIEW_TAILNET_IP ?? "").trim());
+  const main = mainUrls((env.SHIP_PREVIEW_MAIN_URL ?? "").trim());
+  const invalid = [tailnet.invalid, main.invalid].filter((r): r is string => r !== undefined);
   return {
     dir,
     ...(bin !== "" ? { bin } : {}),
     ...(ttl !== "" ? { ttl } : {}),
     ...(destination !== "" ? { destination } : {}),
     ...(Number.isFinite(timeout) && timeout > 0 ? { timeoutMs: timeout } : {}),
+    ...tailnet.route,
+    ...main.urls,
+    ...(invalid.length > 0 ? { invalid: invalid.join("; ") } : {}),
+  };
+}
+
+/** Tailscale's address range (CGNAT). Preview routes admit only this. */
+export const TAILNET_CIDR = "100.64.0.0/10";
+
+/**
+ * Tailnet mode (DELEGATED_DECISIONS_2026-09-23 §10): one setting, the deploy
+ * target's tailnet IPv4, implies all three route options together — base
+ * domain `<ip>.sslip.io` (resolves publicly to a 100.x address, so no DNS
+ * records and no certificates), plain HTTP (the dashboard is HTTP, so the
+ * frame is not mixed content), and the tailnet allowlist (so the Host header
+ * sent to the target's PUBLIC address is refused). One knob rather than
+ * three, because the three are only safe together: an sslip.io host without
+ * the allowlist is a public, unauthenticated HTTP preview.
+ */
+function tailnetRoute(ip: string): { route: Pick<PreviewTarget, "baseDomain" | "httpOnly" | "allowIps">; invalid?: string } {
+  if (ip === "") return { route: {} };
+  const baseDomain = tailnetBaseDomain(ip);
+  if (baseDomain === undefined) {
+    return {
+      route: {},
+      invalid: `SHIP_PREVIEW_TAILNET_IP=${JSON.stringify(ip)} is not a tailnet IPv4 address (${TAILNET_CIDR}); refusing to deploy a preview rather than fall back to a public route`,
+    };
+  }
+  return { route: { baseDomain, httpOnly: true, allowIps: [TAILNET_CIDR] } };
+}
+
+/**
+ * `<ip>.sslip.io` for a tailnet IPv4 (inside 100.64.0.0/10), else undefined.
+ * The one derivation of the preview base: the worker deploys under it and the
+ * dashboard's CSP frames only it (web/src/lib/preview-frame.server.ts).
+ */
+export function tailnetBaseDomain(ip: string): string | undefined {
+  const octets = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip.trim())?.slice(1).map(Number);
+  const ok = octets !== undefined && octets.every((o) => o <= 255) && octets[0] === 100 && octets[1]! >= 64 && octets[1]! <= 127;
+  return ok ? `${octets!.join(".")}.sslip.io` : undefined;
+}
+
+/**
+ * SHIP_PREVIEW_MAIN_URL: main's URL for the visual rung. Either one URL (a
+ * worker that previews one app) or comma-separated `app=url` entries (a
+ * preview root with one clone per app); a bare URL among entries is the
+ * default for apps not named.
+ */
+function mainUrls(raw: string): { urls: Pick<PreviewTarget, "mainUrl" | "mainUrlByApp">; invalid?: string } {
+  if (raw === "") return { urls: {} };
+  const byApp: Record<string, string> = {};
+  let fallback: string | undefined;
+  for (const part of raw.split(",").map((p) => p.trim()).filter((p) => p !== "")) {
+    const eq = /^([A-Za-z0-9][A-Za-z0-9._-]*)=(.+)$/.exec(part);
+    const url = eq !== null ? eq[2]!.trim() : part;
+    let parsed: URL | undefined;
+    try {
+      parsed = new URL(url);
+    } catch {
+      parsed = undefined;
+    }
+    if (parsed === undefined || (parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.username !== "" || parsed.password !== "") {
+      return { urls: {}, invalid: `SHIP_PREVIEW_MAIN_URL entry ${JSON.stringify(part)} is not an http(s) URL` };
+    }
+    if (eq !== null) byApp[eq[1]!] = parsed.href;
+    else fallback = parsed.href;
+  }
+  return {
+    urls: {
+      ...(fallback !== undefined ? { mainUrl: fallback } : {}),
+      ...(Object.keys(byApp).length > 0 ? { mainUrlByApp: byApp } : {}),
+    },
   };
 }
