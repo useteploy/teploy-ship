@@ -1,0 +1,49 @@
+# Minimal self-hosted Ship — the stranger's teploy.yml.
+#
+# The repository's own teploy.yml is the MAINTAINER's production config
+# (gateway, sandbox host, mounts, dozens of scoped secrets). Starting from it
+# by hand means discovering ~13 required edits the hard way — the
+# fresh-machine pass of 2026-09-23 measured exactly that, with a worker that
+# crash-loops on the first one (`sandbox URL set but no token`). Copy THIS
+# file to teploy.yml and fill in the four marked lines; everything else is a
+# working minimal shape.
+#
+# `./install.sh --host <ip> --user root <name>` does all of this for you —
+# this file exists for the by-hand path (QUICKSTART steps 2-4) and as the
+# reference for what "minimal" actually means.
+app: ship
+# The box you registered in step 1 (raw IP or a servers.yml name).
+server: 203.0.113.10
+user: root
+
+# One published web process, no domain, no Caddy — the private/tailnet shape.
+# Firewall the port (QUICKSTART step 4).
+ingress: host
+
+# AMD64 only today — see docs/DEPLOY.md "Supported platforms and forges".
+platform: linux/amd64
+
+processes:
+  web:
+    command: web
+    ports:
+      - "7460:7460"
+    env:
+      # --- the four lines you fill in yourself ---
+      # SHIP_WEB_TOKEN / SHIP_SESSION_SECRET / SHIP_WEBHOOK_SECRET: set with
+      #   `teploy secret set` (QUICKSTART step 3) — never in this file.
+      # Model: the ANTHROPIC_API_KEY secret (step 3). An Anthropic key works
+      # with that alone. An Anthropic-COMPATIBLE endpoint (z.ai's route) uses
+      # the gateway-style pair instead — AI_GATEWAY_URL + AI_GATEWAY_KEY
+      # (= the endpoint key) + SHIP_MODEL (e.g. glm-5.3) — verified by the
+      # fresh-machine pass 2026-09-23; plain ANTHROPIC_BASE_URL is NOT read
+      # by the adapter. docs/MODELS.md §2a.
+      # Repos: SHIP_GIT_TOKEN carries no host of its own — without
+      #   SHIP_REPO_ALLOWLIST every repository URL is refused, deliberately.
+      SHIP_REPO_ALLOWLIST: https://github.com/your-org
+  worker:
+    command: worker
+    # No SHIP_SANDBOX_* here on the minimal shape: without a sandbox daemon
+    # the worker runs everything on the host container — fine for a first
+    # verified PR on a private box, and docs/DEPLOY.md §sandbox is the
+    # next step up (default-deny egress, leased workspaces).

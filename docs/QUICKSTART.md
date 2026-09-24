@@ -76,15 +76,21 @@ teploy secret set \
 
 Keep `SHIP_WEB_TOKEN` — it is your dashboard login.
 
-Two edits to `teploy.yml` for this minimal shape:
+Two things to get right before `teploy deploy`:
 
-- **Delete `AI_GATEWAY_URL`.** With it set, Ship routes model calls through
-  teploy-gateway; without it, it calls Anthropic directly with the key above.
-- **Set `SHIP_REPO_ALLOWLIST`** to the origins Ship may clone from, e.g.
-  `https://github.com/your-org`. `SHIP_GIT_TOKEN` carries no host of its own,
-  so without an allowlist a repository URL is **refused** rather than handed
-  the token. That is deliberate: the URL in a webhook or an issue body is
-  attacker-controlled.
+- **Start from `teploy.example.yml`, not the repo's own `teploy.yml`.** The
+  checked-in config is the maintainer's production shape (gateway, sandbox
+  host, scoped mounts); the by-hand path needs ~13 edits to strip it, and the
+  first missing one crash-loops the worker (`sandbox URL set but no token`).
+  `cp teploy.example.yml teploy.yml` and fill in the marked lines — the
+  example file IS the minimal shape, kept honest by the fresh-machine pass.
+  `./install.sh` does all of this for you.
+- **Model wiring depends on where the key is from.** An Anthropic key works
+  with `ANTHROPIC_API_KEY` alone. An Anthropic-COMPATIBLE endpoint (z.ai's
+  route) uses the gateway-style pair instead: `AI_GATEWAY_URL` +
+  `AI_GATEWAY_KEY` (= the endpoint key) and `SHIP_MODEL` — the exact working
+  shape is in `docs/MODELS.md` §2a; plain `ANTHROPIC_BASE_URL` is not read
+  by the adapter (found by the fresh-machine pass, 2026-09-23).
 
 ## 4. Deploy
 
@@ -105,10 +111,24 @@ ufw allow from 100.64.0.0/10 to any port 7460   # Tailscale-only, for example
 
 ## 5. Give it something to do
 
+The dashboard is the natural first surface: open `http://<server>:7460`, sign
+in with `SHIP_WEB_TOKEN`, and compose the task on the Inbox — the project,
+its settings and its approvals are all right there.
+
+From a terminal, the same ask is one command — run it FROM THE DEPLOYMENT
+(`docker exec -it ship-worker-<sha> teploy-ship enqueue … --store nucleus`)
+or wherever your CLI shares the deployment's store:
+
 ```sh
 teploy-ship enqueue "The failing test in parser_test.go describes the bug. Fix it." \
   --repo https://github.com/your-org/your-repo
 ```
+
+A bare `enqueue` on your laptop writes to the CLI's LOCAL file store — the
+deployment's worker never sees it, and nothing bridges the two (the
+fresh-machine pass hit exactly this: runs queued, nothing picking them up).
+`teploy-ship runs --store nucleus` (with the deployment's `NUCLEUS_URL`) or
+the dashboard is the truth.
 
 That queues a durable run. A worker picks it up within a few seconds:
 
