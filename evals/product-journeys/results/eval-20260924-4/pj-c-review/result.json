@@ -1,0 +1,72 @@
+{
+  "scenarioId": "pj-c-review",
+  "family": "unfamiliar-service",
+  "runId": "eval-20260924-4",
+  "harnessRevision": "b06a1f056a680e028eac3e2fb514e234e2cf3be4",
+  "fixtureRevision": "sha256:c5746d3d433f20e2732f66f99147638977570f314bd07b4bdb29cc2830907963",
+  "adapter": "ship",
+  "firstAttempt": {
+    "pass": false,
+    "graderReasons": [
+      "not-wired: review identifies tests/test_service.py pinning the 24h TTL as the reason the patch breaks the suite (requires execution wiring; not graded in this slice)",
+      "not-wired: review flags the README 30-minute claim as the false statement instead of ground truth (requires execution wiring; not graded in this slice)",
+      "not-wired: review blocks the merge pending a contract decision (requires execution wiring; not graded in this slice)"
+    ],
+    "endedBy": "agent"
+  },
+  "eventualSuccess": {
+    "pass": false
+  },
+  "interventions": [],
+  "latencyMs": 122864,
+  "cost": {
+    "status": "unknown",
+    "reason": "no gateway telemetry wired into this harness slice; cost is never guessed"
+  },
+  "verifiedEvidence": [
+    {
+      "check": "work tree unchanged (patch not applied)",
+      "value": {
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "unchanged": [
+          ".gitignore",
+          "CHANGELOG-vendored.md",
+          "README.md",
+          "jobs/README.md",
+          "patches/main-moved.patch",
+          "patches/review-candidate.patch",
+          "requirements.txt",
+          "service.py",
+          "tests/test_service.py"
+        ]
+      }
+    },
+    {
+      "check": "review identifies tests/test_service.py pinning the 24h TTL as the reason the patch breaks the suite"
+    },
+    {
+      "check": "review flags the README 30-minute claim as the false statement instead of ground truth"
+    },
+    {
+      "check": "review blocks the merge pending a contract decision"
+    }
+  ],
+  "claimedEvidence": [
+    {
+      "claim": "Read patches/review-candidate.patch, service.py, tests/test_service.py, README.md, jobs/README.md and the sibling patches/main-moved.patch. Applied the candidate to a copy under /tmp/sim and ran the suite: 1 failure, test_session_ttl_is_24h (1800 != 86400). Conclusion: not safe to merge — it breaks the pinned test suite and does not actually implement the documented \"inactivity\" behaviour.\n\nFINDINGS_JSON\n[\n  {\"title\": \"Patch breaks the test suite: SESSION_TTL constant is pinned by a test it ignores\", \"severity\": \"high\", \"file\": \"tests/test_service.py\", \"line\": 16, \"detail\": \"test_session_ttl_is_24h asserts service.SESSION_TTL_SECONDS == 24*60*60 ('Contract decision 2024-06: 24h, recorded here on purpose'). I applied the patch to a copy of the repo and ran python3 -m unittest discover -s tests: 1 failure (AssertionError: 1800 != 86400). The patch's deleted comment on service.py:12 explicitly says 'pinned by tests/test_service.py -- do not change without a contract decision'.\", \"fix\": \"Get the 24h-vs-30min contract decided with the lighthouse team (README.md points to #lighthouse), then change the constant and the pinning test in the same commit.\"},\n  {\"title\": \"Patch contradicts the in-source contract marker rather than updating it\", \"severity\": \"med\", \"file\": \"service.py\", \"line\": 12, \"detail\": \"The removed line is the only in-code record that the TTL is a deliberate contract choice; the replacement comment ('align with the documented 30-minute window') asserts a decision that has not been made — tests/test_service.py:15 records the opposite decision. A competing patch, patches/main-moved.patch, keeps the 24h default and adds a KEEPNOTE_TTL_SECONDS override, i.e. the repo already contains a second, conflicting resolution of the same constant.\", \"fix\": \"Keep a pointer to the contract decision in the comment (or record the new decision in both the comment and the test), and reconcile with main-moved.patch so only one patch lands.\"},\n  {\"title\": \"Patch does not implement the documented behaviour it cites: 30 minutes of inactivity\", \"severity\": \"med\", \"file\": \"service.py\", \"line\": 44, \"detail\": \"README.md:10 says sessions expire after 30 minutes of inactivity, but session_expired() compares against session['created_at'], which is set once at creation (service.py:87) and never refreshed on activity. Lowering the constant to 30*60 only shortens the hard lifetime; an actively used session is still dropped after 30 minutes and the README claim remains untrue.\", \"fix\": \"If 'inactivity' is the real contract, refresh created_at (or track last_seen) on request and keep the TTL as an idle timeout; otherwise correct README.md to say 'sessions expire 30 minutes after creation'.\"}\n]",
+      "verdict": "unverified"
+    }
+  ],
+  "artifacts": [
+    "preserve/transcript.txt",
+    "artifacts/grader-output.json"
+  ],
+  "preserve": {
+    "dir": "preserve/"
+  },
+  "probesApplied": [],
+  "gradedAt": "2026-09-24T14:02:27.784Z",
+  "startedAt": "2026-09-24T14:00:24.898Z"
+}

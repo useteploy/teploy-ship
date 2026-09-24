@@ -1,0 +1,18 @@
+{
+  "runId": "eval-20260924-6",
+  "adapter": "ship",
+  "startedAt": "2026-09-24T18:57:22.865Z",
+  "completedAt": "2026-09-24T18:58:41.044Z",
+  "scenarios": [
+    {
+      "id": "pj-s-plan",
+      "pass": false,
+      "latencyMs": 78157,
+      "result": "eval-20260924-6/pj-s-plan/result.json"
+    }
+  ],
+  "totals": {
+    "pass": 0,
+    "fail": 1
+  }
+}

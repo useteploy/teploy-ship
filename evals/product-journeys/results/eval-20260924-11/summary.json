@@ -1,0 +1,18 @@
+{
+  "runId": "eval-20260924-11",
+  "adapter": "ship",
+  "startedAt": "2026-09-24T19:10:39.601Z",
+  "completedAt": "2026-09-24T19:12:39.924Z",
+  "scenarios": [
+    {
+      "id": "pj-c-review",
+      "pass": false,
+      "latencyMs": 120301,
+      "result": "eval-20260924-11/pj-c-review/result.json"
+    }
+  ],
+  "totals": {
+    "pass": 0,
+    "fail": 1
+  }
+}

@@ -1,0 +1,96 @@
+{
+  "scenarioId": "pj-s-question",
+  "family": "small-site",
+  "runId": "eval-20260924-2",
+  "harnessRevision": "b06a1f056a680e028eac3e2fb514e234e2cf3be4",
+  "fixtureRevision": "sha256:54aa415a72c85b5e2cb91895bcd9c07bb9263893b626ff391b37abbe6c3e7e98",
+  "adapter": "ship",
+  "firstAttempt": {
+    "pass": true,
+    "graderReasons": [],
+    "endedBy": "agent"
+  },
+  "eventualSuccess": {
+    "pass": true
+  },
+  "interventions": [],
+  "latencyMs": 42540,
+  "cost": {
+    "status": "unknown",
+    "reason": "no gateway telemetry wired into this harness slice; cost is never guessed"
+  },
+  "verifiedEvidence": [
+    {
+      "check": "work tree unchanged",
+      "value": {
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "unchanged": [
+          "about.html",
+          "index.html",
+          "styles.css"
+        ]
+      }
+    },
+    {
+      "check": "every cited file:line:string occurrence exists verbatim in the fixture",
+      "value": {
+        "citations": 14,
+        "ok": true
+      }
+    },
+    {
+      "check": "cited Tideline lines exactly cover the fixture occurrences (independent count)",
+      "value": {
+        "independent": [
+          "about.html:15",
+          "about.html:20",
+          "about.html:6",
+          "index.html:15",
+          "index.html:20",
+          "index.html:6"
+        ],
+        "cited": [
+          "about.html:15",
+          "about.html:20",
+          "about.html:6",
+          "index.html:15",
+          "index.html:20",
+          "index.html:6"
+        ],
+        "missing": [],
+        "extra": []
+      }
+    },
+    {
+      "check": "the home-page tagline line is cited",
+      "value": {
+        "taglineLines": [
+          16
+        ],
+        "cited": true
+      }
+    },
+    {
+      "check": "no PR opened",
+      "value": true
+    }
+  ],
+  "claimedEvidence": [
+    {
+      "claim": "Read-only scan of a 3-file static site (index.html, about.html, styles.css), verified with line-numbered reads plus case-insensitive grep across the working tree and all git refs. Located the home-page tagline (index.html:16) and every occurrence of \"Tideline\" (6 total, in index.html and about.html only; none in styles.css, none case-variant, none in history beyond the single seed commit). The API.md referenced in the run context does not exist on any ref in this repo.\n\nFINDINGS_JSON\n[\n  {\"title\": \"Home-page tagline text lives at index.html line 16\", \"severity\": \"low\", \"file\": \"index.html\", \"line\": 16, \"detail\": \"Exact line: `    <p class=\\\"tagline\\\">Furniture made on the coast</p>`. This is the only element carrying the visible tagline copy on the home page; it is styled by the `.tagline { font-style: italic; }` rule at styles.css:18-20. No other file contains tagline text.\", \"fix\": \"To change the tagline copy, edit this line only; to restyle it, edit the .tagline rule in styles.css:18\"},\n  {\"title\": \"\\\"Tideline\\\" occurrence 1 of 6 — index.html title tag\", \"severity\": \"low\", \"file\": \"index.html\", \"line\": 6, \"detail\": \"Exact string: `  <title>Tideline Woodworks</title>` — browser tab / search-result title for the home page.\", \"fix\": \"n/a (location report; no change made)\"},\n  {\"title\": \"\\\"Tideline\\\" occurrence 2 of 6 — index.html main heading\", \"severity\": \"low\", \"file\": \"index.html\", \"line\": 15, \"detail\": \"Exact string: `    <h1>Tideline Woodworks</h1>` — visible page heading immediately above the tagline paragraph at line 16.\", \"fix\": \"n/a (location report; no change made)\"},\n  {\"title\": \"\\\"Tideline\\\" occurrence 3 of 6 — index.html footer\", \"severity\": \"low\", \"file\": \"index.html\", \"line\": 20, \"detail\": \"Exact string: `    <p>Tideline Woodworks — Bear Harbor, California</p>` — footer byline, uses an em dash (U+2014), byte-identical to about.html:20.\", \"fix\": \"n/a (location report; no change made)\"},\n  {\"title\": \"\\\"Tideline\\\" occurrence 4 of 6 — about.html title tag\", \"severity\": \"low\", \"file\": \"about.html\", \"line\": 6, \"detail\": \"Exact string: `  <title>About — Tideline Woodworks</title>` — tab title for the About page; the word appears after an em dash (U+2014).\", \"fix\": \"n/a (location report; no change made)\"},\n  {\"title\": \"\\\"Tideline\\\" occurrence 5 of 6 — about.html main heading\", \"severity\": \"low\", \"file\": \"about.html\", \"line\": 15, \"detail\": \"Exact string: `    <h1>Tideline Woodworks</h1>` — duplicated site heading; about.html has no tagline paragraph, unlike index.html.\", \"fix\": \"n/a (location report; no change made)\"},\n  {\"title\": \"\\\"Tideline\\\" occurrence 6 of 6 — about.html footer\", \"severity\": \"low\", \"file\": \"about.html\", \"line\": 20, \"detail\": \"Exact string: `    <p>Tideline Woodworks — Bear Harbor, California</p>` — identical footer line to index.html:20, so any rename must touch both files to stay consistent.\", \"fix\": \"n/a (location report; no change made)\"}\n]",
+      "verdict": "unverified"
+    }
+  ],
+  "artifacts": [
+    "preserve/transcript.txt",
+    "artifacts/grader-output.json"
+  ],
+  "preserve": {
+    "dir": "preserve/"
+  },
+  "probesApplied": [],
+  "gradedAt": "2026-09-24T13:58:07.976Z",
+  "startedAt": "2026-09-24T13:57:25.415Z"
+}

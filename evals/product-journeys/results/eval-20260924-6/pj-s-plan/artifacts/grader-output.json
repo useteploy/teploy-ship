@@ -1,0 +1,33 @@
+{
+  "scenarioId": "pj-s-plan",
+  "grader": "graders/pj-s-plan.mjs",
+  "pass": false,
+  "reasons": [
+    "not-wired: plan artifact references index.html and styles.css (requires execution wiring; not graded in this slice)",
+    "not-wired: no PR opened (requires execution wiring; not graded in this slice)"
+  ],
+  "evidence": [
+    {
+      "kind": "structural",
+      "check": "work tree unchanged",
+      "value": {
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "unchanged": [
+          "about.html",
+          "index.html",
+          "styles.css"
+        ]
+      }
+    },
+    {
+      "kind": "not-wired",
+      "check": "plan artifact references index.html and styles.css"
+    },
+    {
+      "kind": "not-wired",
+      "check": "no PR opened"
+    }
+  ]
+}

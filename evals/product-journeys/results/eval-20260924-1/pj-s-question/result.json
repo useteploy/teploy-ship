@@ -1,0 +1,100 @@
+{
+  "scenarioId": "pj-s-question",
+  "family": "small-site",
+  "runId": "eval-20260924-1",
+  "harnessRevision": "b06a1f056a680e028eac3e2fb514e234e2cf3be4",
+  "fixtureRevision": "sha256:54aa415a72c85b5e2cb91895bcd9c07bb9263893b626ff391b37abbe6c3e7e98",
+  "adapter": "ship",
+  "firstAttempt": {
+    "pass": false,
+    "graderReasons": [
+      "the transcript cites nothing in a checkable form — each occurrence needs file, line number and the quoted exact string, e.g. index.html:6:\"Tideline Woodworks\", about.html, line 15: \"Tideline Woodworks\", or a FINDINGS_JSON entry with file/line and the exact string backticked in detail",
+      "Tideline coverage mismatch: independent=[\"about.html:15\",\"about.html:20\",\"about.html:6\",\"index.html:15\",\"index.html:20\",\"index.html:6\"] cited=[]",
+      "the tagline line (index.html:16) is not cited"
+    ],
+    "endedBy": "agent"
+  },
+  "eventualSuccess": {
+    "pass": false
+  },
+  "interventions": [],
+  "latencyMs": 65409,
+  "cost": {
+    "status": "unknown",
+    "reason": "no gateway telemetry wired into this harness slice; cost is never guessed"
+  },
+  "verifiedEvidence": [
+    {
+      "check": "work tree unchanged",
+      "value": {
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "unchanged": [
+          "about.html",
+          "index.html",
+          "styles.css"
+        ]
+      }
+    },
+    {
+      "check": "every cited file:line:string occurrence exists verbatim in the fixture",
+      "value": {
+        "citations": 0,
+        "ok": false
+      }
+    },
+    {
+      "check": "cited Tideline lines exactly cover the fixture occurrences (independent count)",
+      "value": {
+        "independent": [
+          "about.html:15",
+          "about.html:20",
+          "about.html:6",
+          "index.html:15",
+          "index.html:20",
+          "index.html:6"
+        ],
+        "cited": [],
+        "missing": [
+          "about.html:15",
+          "about.html:20",
+          "about.html:6",
+          "index.html:15",
+          "index.html:20",
+          "index.html:6"
+        ],
+        "extra": []
+      }
+    },
+    {
+      "check": "the home-page tagline line is cited",
+      "value": {
+        "taglineLines": [
+          16
+        ],
+        "cited": false
+      }
+    },
+    {
+      "check": "no PR opened",
+      "value": true
+    }
+  ],
+  "claimedEvidence": [
+    {
+      "claim": "Scanned the whole repository: a 3-file static site (index.html, about.html, styles.css) with no other files, no hidden files, and no tracked/untracked content in any branch beyond these three. The working tree is byte-identical to `main` (commit eab3c41), so nothing appears only in history or on another branch. Note: the context mentioned an API.md added by an earlier run — it does not exist in this working tree.\n\nAnswers:\n- The home-page tagline lives at index.html line 16, as the text of `<p class=\"tagline\">Furniture made on the coast</p>`; its styling rule is styles.css line 18 (`.tagline { font-style: italic; }`). It appears nowhere else.\n- \"Tideline\" appears exactly 6 times: index.html lines 6, 15, 20 and about.html lines 6, 15, 20 (always as \"Tideline Woodworks\"). A case-insensitive grep confirms there are no other spellings or occurrences.\n\nFINDINGS_JSON\n[\n  {\"title\": \"Home-page tagline location: index.html line 16\", \"severity\": \"low\", \"file\": \"index.html\", \"line\": 16, \"detail\": \"The tagline is the text of the only element with class=\\\"tagline\\\": '<p class=\\\"tagline\\\">Furniture made on the coast</p>'. The string 'Furniture made on the coast' occurs nowhere else in the repo.\", \"fix\": \"n/a — informational; read-only scan, nothing changed\"},\n  {\"title\": \"Tagline styling rule: styles.css line 18\", \"severity\": \"low\", \"file\": \"styles.css\", \"line\": 18, \"detail\": \"The selector '.tagline {' at line 18 opens the rule '{ font-style: italic; }' (line 19) that styles the home-page tagline; it is the only other reference to 'tagline' in the codebase.\", \"fix\": \"n/a — informational; read-only scan, nothing changed\"},\n  {\"title\": \"\\\"Tideline\\\" #1 — index.html title tag, line 6\", \"severity\": \"low\", \"file\": \"index.html\", \"line\": 6, \"detail\": \"Exact string: '  <title>Tideline Woodworks</title>' (browser tab / page title of the home page).\", \"fix\": \"n/a — informational; read-only scan, nothing changed\"},\n  {\"title\": \"\\\"Tideline\\\" #2 — index.html h1, line 15\", \"severity\": \"low\", \"file\": \"index.html\", \"line\": 15, \"detail\": \"Exact string: '    <h1>Tideline Woodworks</h1>' (visible heading in <main> of the home page).\", \"fix\": \"n/a — informational; read-only scan, nothing changed\"},\n  {\"title\": \"\\\"Tideline\\\" #3 — index.html footer, line 20\", \"severity\": \"low\", \"file\": \"index.html\", \"line\": 20, \"detail\": \"Exact string: '    <p>Tideline Woodworks — Bear Harbor, California</p>' (footer of the home page; note the em dash U+2014).\", \"fix\": \"n/a — informational; read-only scan, nothing changed\"},\n  {\"title\": \"\\\"Tideline\\\" #4 — about.html title tag, line 6\", \"severity\": \"low\", \"file\": \"about.html\", \"line\": 6, \"detail\": \"Exact string: '  <title>About — Tideline Woodworks</title>' (page title of the About page; em dash U+2014).\", \"fix\": \"n/a — informational; read-only scan, nothing changed\"},\n  {\"title\": \"\\\"Tideline\\\" #5 — about.html h1, line 15\", \"severity\": \"low\", \"file\": \"about.html\", \"line\": 15, \"detail\": \"Exact string: '    <h1>Tideline Woodworks</h1>' (visible heading in <main> of the About page).\", \"fix\": \"n/a — informational; read-only scan, nothing changed\"},\n  {\"title\": \"\\\"Tideline\\\" #6 — about.html footer, line 20\", \"severity\": \"low\", \"file\": \"about.html\", \"line\": 20, \"detail\": \"Exact string: '    <p>Tideline Woodworks — Bear Harbor, California</p>' (footer of the About page; em dash U+2014). Case-insensitive grep over the entire tree (excluding .git) returns exactly these six lines and no others.\", \"fix\": \"n/a — informational; read-only scan, nothing changed\"}\n]",
+      "verdict": "unverified"
+    }
+  ],
+  "artifacts": [
+    "preserve/transcript.txt",
+    "artifacts/grader-output.json"
+  ],
+  "preserve": {
+    "dir": "preserve/"
+  },
+  "probesApplied": [],
+  "gradedAt": "2026-09-24T13:56:56.288Z",
+  "startedAt": "2026-09-24T13:55:50.853Z"
+}

@@ -1,0 +1,62 @@
+{
+  "scenarioId": "pj-s-plan",
+  "family": "small-site",
+  "runId": "eval-20260924-3",
+  "harnessRevision": "b06a1f056a680e028eac3e2fb514e234e2cf3be4",
+  "fixtureRevision": "sha256:54aa415a72c85b5e2cb91895bcd9c07bb9263893b626ff391b37abbe6c3e7e98",
+  "adapter": "ship",
+  "firstAttempt": {
+    "pass": false,
+    "graderReasons": [
+      "not-wired: plan artifact references index.html and styles.css (requires execution wiring; not graded in this slice)",
+      "not-wired: no PR opened (requires execution wiring; not graded in this slice)"
+    ],
+    "endedBy": "agent"
+  },
+  "eventualSuccess": {
+    "pass": false
+  },
+  "interventions": [],
+  "latencyMs": 136840,
+  "cost": {
+    "status": "unknown",
+    "reason": "no gateway telemetry wired into this harness slice; cost is never guessed"
+  },
+  "verifiedEvidence": [
+    {
+      "check": "work tree unchanged",
+      "value": {
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "unchanged": [
+          "about.html",
+          "index.html",
+          "styles.css"
+        ]
+      }
+    },
+    {
+      "check": "plan artifact references index.html and styles.css"
+    },
+    {
+      "check": "no PR opened"
+    }
+  ],
+  "claimedEvidence": [
+    {
+      "claim": "Read-only scan of the 3-file static site (index.html, about.html, styles.css; one commit, no images anywhere in git history). The task was plan-only: nothing was implemented, edited, or pushed. Plan summary: resolve the hero ambiguity first (lines 15-17 of index.html are the de-facto hero; no hero class/header/section exists), insert the gallery after line 17 before </main>, source three licensed photos into a new photos/ dir, add net-new grid CSS (styles.css has no flex/grid/media queries), and accept or explicitly break out of the 40rem container. Verified findings below.\n\nFINDINGS_JSON\n[\n  {\"title\": \"no image assets exist in the repo or its entire history — the three photos must be sourced from outside\", \"severity\": \"high\", \"file\": \"index.html\", \"line\": 17, \"detail\": \"The working tree contains exactly three files (index.html, about.html, styles.css) and `git cat-file --batch-all-objects` shows only those three blobs ever committed. A 'three photo cards' gallery is unimplementable as specified without importing new binaries, which also raises sourcing/licensing and repo-size decisions (no LFS, no .gitattributes).\", \"fix\": \"plan step: obtain three licensed photos, commit them under photos/ at roughly 200KB each, and reference them with relative paths\"},\n  {\"title\": \"the home page has no hero element — 'under the hero' has no anchor in the markup\", \"severity\": \"med\", \"file\": \"index.html\", \"line\": 15, \"detail\": \"index.html lines 14-18 contain only <main>, <h1>, <p class=\\\"tagline\\\"> and one <p>. A case-insensitive grep across the repo for hero|gallery|card|<img|<figure returns nothing, and there is no <header> or <section>. The insertion point must be defined by convention: after line 17 (the intro paragraph), before </main> on line 18, optionally promoting lines 15-17 into <section class=\\\"hero\\\">.\", \"fix\": \"decide explicitly whether to wrap lines 15-17 in a hero section or treat them as the hero as-is, then insert the gallery immediately after\"},\n  {\"title\": \"styles.css contains no layout primitives — responsive card CSS must be authored from scratch\", \"severity\": \"med\", \"file\": \"styles.css\", \"line\": 1, \"detail\": \"The whole stylesheet is 19 lines covering only body, nav a, footer and .tagline. There is no flex, no grid, and no @media query anywhere, so a three-across card row plus its mobile fallback is net-new CSS with no existing pattern to follow.\", \"fix\": \"add .gallery as display:grid with repeat(auto-fit, minmax(10rem, 1fr)) so stacking on narrow screens needs no media query; also zero out figure margins and set img { width:100%; height:auto; display:block }\"},\n  {\"title\": \"body max-width of 40rem caps a 3-across row at roughly 11-12rem per card\", \"severity\": \"low\", \"file\": \"styles.css\", \"line\": 4, \"detail\": \"body { margin: 0 auto; max-width: 40rem; padding: 1rem } (lines 3-5) leaves about 38rem of content width; minus two 1rem gaps that is roughly 12rem per photo card at desktop. Photos will read small unless the gallery is allowed to break out of the container.\", \"fix\": \"either accept narrow cards or have the plan state a break-out technique; do not silently widen body, which would reflow both pages\"},\n  {\"title\": \"no build system, includes or CI — the gallery must be hand-inlined and verified manually\", \"severity\": \"low\", \"file\": \"index.html\", \"line\": 10, \"detail\": \"The repo is plain static HTML with no package.json, CI config or templating (find shows only the three page files). The nav and footer are already duplicated verbatim between index.html lines 10-13/19-21 and about.html lines 10-13/19-21, so the new section increases hand-maintained markup and nothing will catch a typo or a broken image path automatically.\", \"fix\": \"verify by opening index.html directly at desktop and 360px widths and confirming the three image paths resolve and about.html is unchanged\"}\n]",
+      "verdict": "unverified"
+    }
+  ],
+  "artifacts": [
+    "preserve/transcript.txt",
+    "artifacts/grader-output.json"
+  ],
+  "preserve": {
+    "dir": "preserve/"
+  },
+  "probesApplied": [],
+  "gradedAt": "2026-09-24T14:00:24.867Z",
+  "startedAt": "2026-09-24T13:58:08.008Z"
+}

@@ -1,0 +1,72 @@
+{
+  "scenarioId": "pj-c-review",
+  "family": "unfamiliar-service",
+  "runId": "eval-20260924-11",
+  "harnessRevision": "445618b60ec087af02f4fefea7183f5c5e0db08c",
+  "fixtureRevision": "sha256:c5746d3d433f20e2732f66f99147638977570f314bd07b4bdb29cc2830907963",
+  "adapter": "ship",
+  "firstAttempt": {
+    "pass": false,
+    "graderReasons": [
+      "not-wired: review identifies tests/test_service.py pinning the 24h TTL as the reason the patch breaks the suite (requires execution wiring; not graded in this slice)",
+      "not-wired: review flags the README 30-minute claim as the false statement instead of ground truth (requires execution wiring; not graded in this slice)",
+      "not-wired: review blocks the merge pending a contract decision (requires execution wiring; not graded in this slice)"
+    ],
+    "endedBy": "agent"
+  },
+  "eventualSuccess": {
+    "pass": false
+  },
+  "interventions": [],
+  "latencyMs": 120301,
+  "cost": {
+    "status": "unknown",
+    "reason": "no gateway telemetry wired into this harness slice; cost is never guessed"
+  },
+  "verifiedEvidence": [
+    {
+      "check": "work tree unchanged (patch not applied)",
+      "value": {
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "unchanged": [
+          ".gitignore",
+          "CHANGELOG-vendored.md",
+          "README.md",
+          "jobs/README.md",
+          "patches/main-moved.patch",
+          "patches/review-candidate.patch",
+          "requirements.txt",
+          "service.py",
+          "tests/test_service.py"
+        ]
+      }
+    },
+    {
+      "check": "review identifies tests/test_service.py pinning the 24h TTL as the reason the patch breaks the suite"
+    },
+    {
+      "check": "review flags the README 30-minute claim as the false statement instead of ground truth"
+    },
+    {
+      "check": "review blocks the merge pending a contract decision"
+    }
+  ],
+  "claimedEvidence": [
+    {
+      "claim": "Reviewed patches/review-candidate.patch read-only against service.py, tests, README and jobs contract; verified behaviour by applying it to a scratch copy and running the suite. Not safe to merge as-is: it breaks a deliberately pinned contract test, and its stated rationale (align with the documented inactivity window) is not actually achieved by the change.\n\nFINDINGS_JSON\n[\n  {\"title\": \"patch breaks the pinned TTL contract test; suite fails on merge\", \"severity\": \"high\", \"file\": \"service.py\", \"line\": 12, \"detail\": \"patches/review-candidate.patch changes SESSION_TTL_SECONDS from 24*60*60 to 30*60 but leaves tests/test_service.py:14-16 (test_session_ttl_is_24h, 'Contract decision 2024-06: 24h, recorded here on purpose') untouched. Applied in a scratch copy, `python3 -m unittest discover -s tests` fails with 'AssertionError: 1800 != 86400' (1 failure). The replaced comment on this line explicitly said 'pinned by tests/test_service.py -- do not change without a contract decision', and the test records that the 24h value was a deliberate contract decision.\", \"fix\": \"Do not merge unilaterally. Get the contract decision changed with the lighthouse team, then update service.py, tests/test_service.py:14-16 and README.md in the same change; alternatively adopt patches/main-moved.patch, which keeps the 24h default pinned and adds a KEEPNOTE_TTL_SECONDS ops override.\"},\n  {\"title\": \"patch's stated rationale is inaccurate: TTL is creation-age, not inactivity\", \"severity\": \"med\", \"file\": \"service.py\", \"line\": 44, \"detail\": \"session_expired() compares now - session['created_at'] against SESSION_TTL_SECONDS, and nothing in the codebase ever refreshes a session (no last_used/touch/refresh logic; sessions are only created at POST /bookmarks, line 87, and pruned at GET, line 68). So setting the constant to 30*60 yields '30 minutes after creation', not the '30 minutes of inactivity' the README documents and the patch claims to align with. The doc/code discrepancy survives the patch in a different form.\", \"fix\": \"Either track a last_activity timestamp and expire on that, or correct README.md:10 to say sessions expire 30 minutes after creation.\"},\n  {\"title\": \"pre-existing conflict between README and code/tests is the actual root cause\", \"severity\": \"low\", \"file\": \"README.md\", \"line\": 10, \"detail\": \"README states 'Sessions expire after 30 minutes of inactivity' while service.py:12 and tests/test_service.py:16 encode 24h from creation, each side claiming authority (README says direct questions to #lighthouse before changing anything; the test says the 24h was a recorded contract decision). The patch picks the README side silently instead of resolving the conflict, which is why it cannot merge cleanly.\", \"fix\": \"Resolve the contradiction explicitly with the owning team and record the outcome in both README.md and tests/test_service.py in one commit.\"},\n  {\"title\": \"TTL change has no auth effect; sessions are never validated\", \"severity\": \"low\", \"file\": \"service.py\", \"line\": 66, \"detail\": \"GET /bookmarks (line 66) and POST /bookmarks (line 72) perform no session or credential check; sessions are bookkeeping entries written into store.json and pruned by live_sessions(). So shortening the TTL neither tightens nor loosens access control, and the only observable effect is faster pruning of sess-* keys from the store file. jobs/ contains no *.py consumers, and the patch does not touch the store format the nightly jobs depend on, so no job breakage.\", \"fix\": \"If the 30-minute window is meant as a security control, sessions must actually gate requests; otherwise describe the field as bookkeeping in the README.\"}\n]",
+      "verdict": "unverified"
+    }
+  ],
+  "artifacts": [
+    "preserve/transcript.txt",
+    "artifacts/grader-output.json"
+  ],
+  "preserve": {
+    "dir": "preserve/"
+  },
+  "probesApplied": [],
+  "gradedAt": "2026-09-24T19:12:39.924Z",
+  "startedAt": "2026-09-24T19:10:39.601Z"
+}

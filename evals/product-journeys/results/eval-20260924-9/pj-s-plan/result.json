@@ -1,0 +1,62 @@
+{
+  "scenarioId": "pj-s-plan",
+  "family": "small-site",
+  "runId": "eval-20260924-9",
+  "harnessRevision": "b06a1f056a680e028eac3e2fb514e234e2cf3be4",
+  "fixtureRevision": "sha256:54aa415a72c85b5e2cb91895bcd9c07bb9263893b626ff391b37abbe6c3e7e98",
+  "adapter": "ship",
+  "firstAttempt": {
+    "pass": false,
+    "graderReasons": [
+      "not-wired: plan artifact references index.html and styles.css (requires execution wiring; not graded in this slice)",
+      "not-wired: no PR opened (requires execution wiring; not graded in this slice)"
+    ],
+    "endedBy": "agent"
+  },
+  "eventualSuccess": {
+    "pass": false
+  },
+  "interventions": [],
+  "latencyMs": 145755,
+  "cost": {
+    "status": "unknown",
+    "reason": "no gateway telemetry wired into this harness slice; cost is never guessed"
+  },
+  "verifiedEvidence": [
+    {
+      "check": "work tree unchanged",
+      "value": {
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "unchanged": [
+          "about.html",
+          "index.html",
+          "styles.css"
+        ]
+      }
+    },
+    {
+      "check": "plan artifact references index.html and styles.css"
+    },
+    {
+      "check": "no PR opened"
+    }
+  ],
+  "claimedEvidence": [
+    {
+      "claim": "Scanned the entire repository: 3 tracked files (index.html, about.html, styles.css), one commit, two ship branches both identical to main, and the full working tree including hidden files. No build system, no CI, no JS, no images, no gallery markup anywhere. Since the task is plan-only, the findings below are the verified constraints any future gallery implementation must respect, not defects I fixed.\n\nKey verified facts: the home page hero is index.html lines 15-17 (h1, .tagline, one driftwood paragraph) inside a <main> that closes on line 18 — that is the natural slot for three photo cards; styles.css (20 lines total) contains only body/nav/footer/.tagline rules with no flex or grid anywhere; and the repo contains zero image files and zero <img>/src= attributes, so the \"photos\" for the cards do not exist yet and must be sourced before implementation. Everything below was confirmed by direct reading with line numbers.\n\nFINDINGS_JSON\n[\n  {\"title\": \"No image assets exist for the three photo cards\", \"severity\": \"med\", \"file\": \"index.html\", \"line\": 17, \"detail\": \"Verified across git ls-files, the full history of commit eab3c41, both ship branches, and the working tree: zero image files and zero <img>/src= attributes anywhere. A gallery of three photo cards has nothing to render; the plan must decide between committing an images/ directory (binary weight in a 3-file repo) or external URLs (third-party/broken-link risk) before any markup is written.\", \"fix\": \"Decide the image source first: plan an images/ directory with three optimized files (e.g. images/table-1.jpg) referenced relatively, and capture the chosen filenames in the plan.\"},\n  {\"title\": \"styles.css has no layout primitive for a three-card row\", \"severity\": \"med\", \"file\": \"styles.css\", \"line\": 12, \"detail\": \"The stylesheet ends at line 20 and contains only body (1-6), nav a (8-10), footer (12-16), and .tagline (18-20) rules — no display:flex or display:grid anywhere. Without a new grid/flex rule the three cards will stack full-width vertically, which is not the intended 'three photo cards under the hero' layout.\", \"fix\": \"Plan a .gallery { display:grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; } rule plus a single-column media-query fallback for narrow viewports, appended after the existing .tagline rule.\"},\n  {\"title\": \"Insertion point for the gallery section\", \"severity\": \"low\", \"file\": \"index.html\", \"line\": 18, \"detail\": \"<main> spans lines 14-18 and holds only the hero (h1 line 15, .tagline line 16, paragraph line 17). There is no existing section, aside, or figure to extend, so the gallery is a new block inserted between line 17 and the closing </main> on line 18 — no other edits to index.html are needed.\", \"fix\": \"Plan a <section class=\\\"gallery\\\"> with three cards inserted immediately after line 17, before </main> on line 18.\"},\n  {\"title\": \"40rem content column constrains three side-by-side cards\", \"severity\": \"low\", \"file\": \"styles.css\", \"line\": 4, \"detail\": \"body is capped at max-width: 40rem (line 4) with 1rem padding (line 5), so three equal columns get roughly 12rem each at the widest breakpoint. That is workable for small thumbnails but cramped for photo cards; the plan should explicitly choose between keeping 40rem (compact cards) and widening the gallery container.\", \"fix\": \"Either accept ~12rem cards, or plan .gallery { max-width: none } / a wider body rule scoped to the home page; record the choice in the plan.\"},\n  {\"title\": \"No image accessibility or loading convention exists yet\", \"severity\": \"low\", \"file\": \"index.html\", \"line\": 15, \"detail\": \"The site has no images at all, so there is no established pattern for alt text or lazy loading; the gallery will introduce the first <img> elements. Since the cards sit below the hero fold, omitting loading=\\\"lazy\\\" would make all three photos block the initial page load of an otherwise ultra-light static page.\", \"fix\": \"Plan semantic <figure>/<figcaption> per card with descriptive alt text and loading=\\\"lazy\\\" decoding=\\\"async\\\" on each <img>.\"},\n  {\"title\": \"Page chrome is duplicated by hand across the two pages\", \"severity\": \"low\", \"file\": \"about.html\", \"line\": 10, \"detail\": \"The nav (about.html lines 10-13 mirror index.html lines 10-13) and footer (about.html lines 17-19 mirror index.html 19-21) are copy-pasted verbatim, and the repo has no templating, includes, JS, or build step (verified: no package.json, Makefile, or scripts anywhere). The gallery adds a third page-specific block under this model; acceptable at this size, but the plan should not assume any shared-component mechanism exists.\", \"fix\": \"Keep the change scoped to index.html and styles.css only; do not plan a templating or build introduction for a single-section addition.\"}\n]",
+      "verdict": "unverified"
+    }
+  ],
+  "artifacts": [
+    "preserve/transcript.txt",
+    "artifacts/grader-output.json"
+  ],
+  "preserve": {
+    "dir": "preserve/"
+  },
+  "probesApplied": [],
+  "gradedAt": "2026-09-24T19:08:23.422Z",
+  "startedAt": "2026-09-24T19:05:57.648Z"
+}

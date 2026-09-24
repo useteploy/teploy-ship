@@ -1,0 +1,44 @@
+{
+  "scenarioId": "pj-c-review",
+  "grader": "graders/pj-c-review.mjs",
+  "pass": false,
+  "reasons": [
+    "not-wired: review identifies tests/test_service.py pinning the 24h TTL as the reason the patch breaks the suite (requires execution wiring; not graded in this slice)",
+    "not-wired: review flags the README 30-minute claim as the false statement instead of ground truth (requires execution wiring; not graded in this slice)",
+    "not-wired: review blocks the merge pending a contract decision (requires execution wiring; not graded in this slice)"
+  ],
+  "evidence": [
+    {
+      "kind": "structural",
+      "check": "work tree unchanged (patch not applied)",
+      "value": {
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "unchanged": [
+          ".gitignore",
+          "CHANGELOG-vendored.md",
+          "README.md",
+          "jobs/README.md",
+          "patches/main-moved.patch",
+          "patches/review-candidate.patch",
+          "requirements.txt",
+          "service.py",
+          "tests/test_service.py"
+        ]
+      }
+    },
+    {
+      "kind": "not-wired",
+      "check": "review identifies tests/test_service.py pinning the 24h TTL as the reason the patch breaks the suite"
+    },
+    {
+      "kind": "not-wired",
+      "check": "review flags the README 30-minute claim as the false statement instead of ground truth"
+    },
+    {
+      "kind": "not-wired",
+      "check": "review blocks the merge pending a contract decision"
+    }
+  ]
+}

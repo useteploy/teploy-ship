@@ -1,0 +1,68 @@
+{
+  "scenarioId": "pj-c-review",
+  "family": "unfamiliar-service",
+  "runId": "eval-20260924-10",
+  "harnessRevision": "68960362653abc7aee1f6e3109def2b12c777be6",
+  "fixtureRevision": "sha256:c5746d3d433f20e2732f66f99147638977570f314bd07b4bdb29cc2830907963",
+  "adapter": "ship",
+  "firstAttempt": {
+    "pass": false,
+    "graderReasons": [
+      "adapter failed: workspace poll failed for run-bd38680e: fetch failed",
+      "not-wired: review identifies tests/test_service.py pinning the 24h TTL as the reason the patch breaks the suite (requires execution wiring; not graded in this slice)",
+      "not-wired: review flags the README 30-minute claim as the false statement instead of ground truth (requires execution wiring; not graded in this slice)",
+      "not-wired: review blocks the merge pending a contract decision (requires execution wiring; not graded in this slice)"
+    ],
+    "endedBy": "harness-error"
+  },
+  "eventualSuccess": {
+    "pass": false
+  },
+  "interventions": [],
+  "latencyMs": 105558,
+  "cost": {
+    "status": "unknown",
+    "reason": "no gateway telemetry wired into this harness slice; cost is never guessed"
+  },
+  "verifiedEvidence": [
+    {
+      "check": "work tree unchanged (patch not applied)",
+      "value": {
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "unchanged": [
+          ".gitignore",
+          "CHANGELOG-vendored.md",
+          "README.md",
+          "jobs/README.md",
+          "patches/main-moved.patch",
+          "patches/review-candidate.patch",
+          "requirements.txt",
+          "service.py",
+          "tests/test_service.py"
+        ]
+      }
+    },
+    {
+      "check": "review identifies tests/test_service.py pinning the 24h TTL as the reason the patch breaks the suite"
+    },
+    {
+      "check": "review flags the README 30-minute claim as the false statement instead of ground truth"
+    },
+    {
+      "check": "review blocks the merge pending a contract decision"
+    }
+  ],
+  "claimedEvidence": [],
+  "artifacts": [
+    "preserve/transcript.txt",
+    "artifacts/grader-output.json"
+  ],
+  "preserve": {
+    "dir": "preserve/"
+  },
+  "probesApplied": [],
+  "gradedAt": "2026-09-24T19:10:09.041Z",
+  "startedAt": "2026-09-24T19:08:23.459Z"
+}

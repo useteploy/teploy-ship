@@ -1,0 +1,62 @@
+{
+  "scenarioId": "pj-s-plan",
+  "family": "small-site",
+  "runId": "eval-20260924-6",
+  "harnessRevision": "b06a1f056a680e028eac3e2fb514e234e2cf3be4",
+  "fixtureRevision": "sha256:54aa415a72c85b5e2cb91895bcd9c07bb9263893b626ff391b37abbe6c3e7e98",
+  "adapter": "ship",
+  "firstAttempt": {
+    "pass": false,
+    "graderReasons": [
+      "not-wired: plan artifact references index.html and styles.css (requires execution wiring; not graded in this slice)",
+      "not-wired: no PR opened (requires execution wiring; not graded in this slice)"
+    ],
+    "endedBy": "agent"
+  },
+  "eventualSuccess": {
+    "pass": false
+  },
+  "interventions": [],
+  "latencyMs": 78157,
+  "cost": {
+    "status": "unknown",
+    "reason": "no gateway telemetry wired into this harness slice; cost is never guessed"
+  },
+  "verifiedEvidence": [
+    {
+      "check": "work tree unchanged",
+      "value": {
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "unchanged": [
+          "about.html",
+          "index.html",
+          "styles.css"
+        ]
+      }
+    },
+    {
+      "check": "plan artifact references index.html and styles.css"
+    },
+    {
+      "check": "no PR opened"
+    }
+  ],
+  "claimedEvidence": [
+    {
+      "claim": "Scanned the whole repository (3 files, 1 commit; both local branches identical to origin/main) plus the git history. It is a hand-written static site — index.html, about.html, styles.css — with no image assets, no build tooling, no templating, no CI/deploy config. Four planning-relevant gaps for adding three photo cards under the hero; no code defects, since there is no code.\n\nFINDINGS_JSON\n[\n  {\"title\": \"index.html has no hero element, so 'under the hero' has no anchor\", \"severity\": \"med\", \"file\": \"index.html\", \"line\": 14, \"detail\": \"The home page is a bare main element (lines 14-18) containing an h1, a .tagline p, and one body p. Nothing is marked 'hero': grep for hero/gallery/figure/img across all files returns no matches. The plan must first define the hero — most naturally wrapping lines 15-17 in a section with class hero — otherwise the gallery insertion point is ambiguous.\", \"fix\": \"Add an explicit first plan step: mark index.html lines 15-17 as the hero, then place the gallery section immediately after it, before the footer.\"},\n  {\"title\": \"No images or image directory exist anywhere in the repository\", \"severity\": \"med\", \"file\": \"index.html\", \"line\": 14, \"detail\": \"git ls-files on every branch and on origin/main returns exactly about.html, index.html, styles.css. There is no assets/, images/, or img/ directory, and the only external reference in either page is the relative stylesheet link (line 7). Three photo cards therefore need three new image files plus a directory convention and alt text, none of which the repo has precedent for.\", \"fix\": \"The plan must specify a new images/ directory, the three filenames, their source (owner-supplied vs licensed placeholders), and required alt attributes for accessibility.\"},\n  {\"title\": \"styles.css has no layout primitives and the 40rem container is too narrow for a 3-up row\", \"severity\": \"med\", \"file\": \"styles.css\", \"line\": 4, \"detail\": \"The stylesheet is 20 lines of text styling only: body max-width 40rem with margin 0 auto and 1rem padding. There is no flex, grid, card or figure rule, and no media query. Inside a 40rem container (~608px content width) a 3-column grid with gutters leaves roughly 190px per card, so the plan must choose between small thumbnails, widening the container for the gallery only, or collapsing to one column on mobile — none of which the current CSS supports.\", \"fix\": \"Plan a .gallery grid block (e.g. grid-template-columns repeat(3, 1fr) with a gap) plus a max-width media query collapsing to one column, and state whether the gallery stays inside the 40rem body constraint.\"},\n  {\"title\": \"Nav and footer markup is duplicated verbatim across the two pages with no include mechanism\", \"severity\": \"low\", \"file\": \"about.html\", \"line\": 10, \"detail\": \"The nav (lines 10-13) and footer (lines 19-21) of about.html are byte-identical to index.html lines 10-13 and 19-21; the site is pure duplicated static HTML with no templating or build step. Any wrapper or class the gallery plan introduces on shared elements would have to be hand-copied to stay consistent, so the plan should scope its changes to index.html and styles.css only.\", \"fix\": \"State in the plan that the gallery touches index.html and styles.css only, leaving about.html unchanged to avoid drift between the duplicated nav/footer blocks.\"}\n]",
+      "verdict": "unverified"
+    }
+  ],
+  "artifacts": [
+    "preserve/transcript.txt",
+    "artifacts/grader-output.json"
+  ],
+  "preserve": {
+    "dir": "preserve/"
+  },
+  "probesApplied": [],
+  "gradedAt": "2026-09-24T18:58:41.044Z",
+  "startedAt": "2026-09-24T18:57:22.865Z"
+}
