@@ -42,6 +42,22 @@ async function localExecutor(): Promise<LocalExecutor> {
   return new LocalExecutor({ root: await mkdtemp(join(tmpdir(), "agent-test-")) });
 }
 
+test("a malformed empty shell action is corrected before reaching the executor", async () => {
+  const executor = await localExecutor();
+  const { model } = scriptedModel([
+    "I'll inspect the files. ```bash pwd && ls -la ```\n```",
+    (observation) => {
+      assert.match(observation, /shell action is empty/);
+      return "```bash\nprintf recovered\n```";
+    },
+  ]);
+  const result = await runAgent({ model, executor, task: "Inspect the files", maxSteps: 2 });
+  assert.notEqual(result.status, "error");
+  assert.equal(result.steps.length, 2);
+  assert.equal(result.steps[0]!.action.kind, "invalid");
+  assert.match(result.steps[1]!.observation ?? "", /recovered/);
+});
+
 test("runs a full CodeAct session against a real executor and finishes", async () => {
   const executor = await localExecutor();
   const { model, calls } = scriptedModel([

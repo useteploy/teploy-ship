@@ -428,3 +428,18 @@ useteploy/teploy-ship: 18 alerts total, all `fixed` (latest batch
 0 open. Resolved versions confirmed in both lock sets (hono 4.13.5, devalue
 5.9.2, js-yaml 3.15.2, browserslist 4.28.7, postcss 8.5.26/8.5.28, nanoid
 6.0.1). No bump needed; nothing to record as open.
+
+## 2026-09-24 — request-path evaluation canary: empty executable fence
+
+`eval-20260924-12` failed on its first action: a malformed inline shell
+fence plus a trailing fence parsed as `bash` with empty code. The sandbox
+correctly refused a blank `cmd`, but Ship treated this as a fatal execution
+error. `src/actions.ts` now returns `invalid` for empty shell/Python actions,
+so the existing correction loop asks for a properly formatted command.
+Regression tests cover the recorded shape and correction through the agent
+loop. This fix is local, not deployed or live-reverified.
+
+The earlier BROWSER-display live-proof TODO above is superseded by the
+2026-09-24 live-ops receipt: image storage, authenticated retrieval and the
+rendered image reference were confirmed on `b06a1f0`. The combined two-park
+resume proof remains pending.

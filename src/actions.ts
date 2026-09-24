@@ -237,9 +237,11 @@ function parseFencedAction(text: string): { index: number; action: Action } | nu
       return { index, action: { kind: "search", query } };
     }
     if (PYTHON_LANGS.has(lang)) {
+      if (code.trim() === "") return { index, action: { kind: "invalid", message: "The Python action is empty. Put the code on a new line after ```python and close the block on its own line." } };
       return { index, action: { kind: "python", code } };
     }
     if (BASH_LANGS.has(lang) && arg === "") {
+      if (code.trim() === "") return { index, action: { kind: "invalid", message: "The shell action is empty. Put the command on a new line after ```bash and close the block on its own line." } };
       return { index, action: { kind: "bash", code } };
     }
     // A fenced block in an unknown language (e.g. ```json data) isn't an

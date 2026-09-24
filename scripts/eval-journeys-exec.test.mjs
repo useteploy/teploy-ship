@@ -44,6 +44,8 @@ const schema = JSON.parse(readFileSync(join(pjRoot, 'results', 'schema.json'), '
 
 test('a passing patch cannot hide a moved main or a mismatched captured revision', async () => {
   for (const [extra, reason] of [
+    [{ status: 'failed' }, /Ship run ended failed/],
+    [{ status: 'cancelled' }, /Ship run ended cancelled/],
     [{ fixtureRepo: { mainMoved: true } }, /fixture main moved/],
     [{ captured: { sha: 'actual', expected: 'recorded' } }, /captured PR revision/]
   ]) {

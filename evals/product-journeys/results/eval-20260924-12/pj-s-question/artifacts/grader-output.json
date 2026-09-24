@@ -1,0 +1,76 @@
+{
+  "scenarioId": "pj-s-question",
+  "grader": "graders/pj-s-question.mjs",
+  "pass": false,
+  "reasons": [
+    "the transcript cites nothing in a checkable form — each occurrence needs file, line number and the quoted exact string, e.g. index.html:6:\"Tideline Woodworks\", about.html, line 15: \"Tideline Woodworks\", or a FINDINGS_JSON entry with file/line and the exact string backticked in detail",
+    "Tideline coverage mismatch: independent=[\"about.html:15\",\"about.html:20\",\"about.html:6\",\"index.html:15\",\"index.html:20\",\"index.html:6\"] cited=[]",
+    "the tagline line (index.html:16) is not cited"
+  ],
+  "evidence": [
+    {
+      "kind": "structural",
+      "check": "work tree unchanged",
+      "value": {
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "unchanged": [
+          "about.html",
+          "index.html",
+          "styles.css"
+        ]
+      }
+    },
+    {
+      "kind": "transcript",
+      "check": "every cited file:line:string occurrence exists verbatim in the fixture",
+      "value": {
+        "citations": 0,
+        "ok": false
+      }
+    },
+    {
+      "kind": "transcript",
+      "check": "cited Tideline lines exactly cover the fixture occurrences (independent count)",
+      "value": {
+        "independent": [
+          "about.html:15",
+          "about.html:20",
+          "about.html:6",
+          "index.html:15",
+          "index.html:20",
+          "index.html:6"
+        ],
+        "cited": [],
+        "missing": [
+          "about.html:15",
+          "about.html:20",
+          "about.html:6",
+          "index.html:15",
+          "index.html:20",
+          "index.html:6"
+        ],
+        "extra": []
+      }
+    },
+    {
+      "kind": "transcript",
+      "check": "the home-page tagline line is cited",
+      "value": {
+        "taglineLines": [
+          16
+        ],
+        "cited": false
+      }
+    },
+    {
+      "kind": "adapter-reported",
+      "check": "no PR opened, nothing pushed",
+      "value": {
+        "prOpened": false,
+        "pushed": false
+      }
+    }
+  ]
+}

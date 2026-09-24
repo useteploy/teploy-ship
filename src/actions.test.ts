@@ -13,6 +13,16 @@ test("bare and sh fences are bash", () => {
   assert.equal(parseAction("```sh\necho hi\n```").kind, "bash");
 });
 
+test("empty actions ask the model to correct its format instead of sending an empty command", () => {
+  for (const text of ["```bash\n\n```", "```sh\n   \n```", "```python\n\n```",
+    "I'll start by exploring the repository structure. ```bash pwd && ls -la && git log --oneline -5 && git status --short ```\n```"
+  ]) {
+    const action = parseAction(text);
+    assert.equal(action.kind, "invalid");
+    if (action.kind === "invalid") assert.match(action.message, /empty.*new line/);
+  }
+});
+
 test("parses a python action", () => {
   assert.deepEqual(parseAction("```python\nprint(2+2)\n```"), { kind: "python", code: "print(2+2)\n" });
   assert.equal(parseAction("```py\nx=1\n```").kind, "python");

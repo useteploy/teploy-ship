@@ -84,6 +84,9 @@ export function renderShipTranscript(data, heading = null) {
   }
   if (typeof data?.plan === 'string' && data.plan.trim() !== '') lines.push(`Plan:\n${data.plan.trim()}`);
   if (data?.outcome && Object.keys(data.outcome).length > 0) lines.push(`Outcome: ${JSON.stringify(data.outcome)}`);
+  for (const item of Array.isArray(data?.items) ? data.items : []) {
+    if (item.kind === 'error') lines.push(`Error: ${item.title ?? ''} — ${item.body ?? ''}`);
+  }
   const checks = Array.isArray(data?.evidence?.checks) ? data.evidence.checks.filter(c => c.state !== 'not recorded') : [];
   if (checks.length > 0) lines.push(`Checks: ${checks.map(c => `${c.name}=${c.state}${c.detail ? ` (${c.detail})` : ''}`).join('; ')}`);
   return lines.join('\n') + '\n';

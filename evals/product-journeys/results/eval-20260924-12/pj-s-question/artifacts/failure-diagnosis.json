@@ -1,0 +1,8 @@
+{
+  "observedAt": "2026-09-24T20:02:57Z",
+  "run": "run-request-2aaa953f74dc6d69797adbfa0c47aca2460c4831db6e2c6207204b7916f251be",
+  "error": "Body must be JSON with a non-empty `cmd`.",
+  "cause": "Malformed fenced model output parsed as an empty bash action. Reproduced with parseAction locally.",
+  "status": "Local parser fix and regression tests; not yet deployed or re-proven live.",
+  "harnessProvenance": "Run began from dirty l10-s02-harness checkout at 1ab02d8, whose pending harness changes were committed as 9d7fe90 during this attempt. Original result preserved."
+}
