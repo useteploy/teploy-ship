@@ -312,11 +312,13 @@ open with the S17 starter.
   `ship_runtime_config` row. Before `f7987c5` a larger file poisoned the
   key; now it is refused with a reason ("edit it from the console"). A real
   fix needs a chunked carrier (artifact-style) for text content.
-  **2026-09-24: fixed locally**, using a private run/request-scoped store,
+  **2026-09-24: fixed and deployed as ae8f1bb**, using a private run/request-scoped store,
   8 KB chunks, SHA-256 integrity, 200,000 UTF-8 byte cap and 24h expiry.
   A separate real Nucleus v1.1.1 image passed the full 200 KB round-trip,
   cross-run/missing-chunk refusal, empty-file and expiry-prune checks.
-  Production editor rollout/read-back is still pending.
+  The real sandbox also passed fenced 200KB/empty-file reads and writes.
+  Production rolled out with six waiting histories preserved; receipts live
+  in `evals/receipts/2026-09-24-editor-content-*`.
 - **Screenshot retention.** Every browser action stores one screenshot
   (content-addressed, up to ~300 KB) in `ship_artifacts`, which has no GC.
   Needs a retention rule (e.g. drop takeover screenshots at handback/lapse
