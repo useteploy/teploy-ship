@@ -17,7 +17,22 @@ import * as lib from './lib.mjs';
 //   about.html, line 15: "Tideline Woodworks"
 // The quoted string is mandatory — "the exact current string" is the task's
 // own demand — and unknown files are rejected by the caller of this match.
-const CITATION = /([A-Za-z0-9_.-]+\.[A-Za-z0-9]+)\s*[,:]\s*(?:line\s+)?(\d+)\s*[,:]\s*"([^"]*)"/g;
+//   index.html:6:'  <title>Tideline Woodworks</title>'
+// Single quotes count as quoting (a correct live answer used them and failed
+// the 2026-09-24 canary); an apostrophe inside a word does not open a quote.
+// A file name never starts mid-word or right after a backslash: the Outcome
+// line of a Ship transcript is JSON, where "\nindex.html" is an escaped
+// newline followed by index.html, not a file called nindex.html.
+const CITATION = /(?<![\\A-Za-z0-9_.-])([A-Za-z0-9_.-]+\.[A-Za-z0-9]+)\s*[,:]\s*(?:line\s+)?(\d+)\s*[,:]\s*(?:"([^"\n]*)"|'([^'\n]*)'|`([^`\n]*)`)/g;
+
+// The first quoted segment of a findings detail, by position: backticks
+// (the scan's documented convention), double or single quotes. A single
+// quote only opens a segment when it is not inside a word.
+const QUOTED = /`([^`\n]+)`|"([^"\n]+)"|(?<![A-Za-z0-9])'([^'\n]+)'(?![A-Za-z0-9])/;
+function firstQuoted(detail) {
+  const m = String(detail).match(QUOTED);
+  return m === null ? null : (m[1] ?? m[2] ?? m[3]);
+}
 
 // A ship SCAN answers in the product's own findings shape, not inline prose
 // — the scan contract is structured output (title/severity/file/line/detail
@@ -41,11 +56,11 @@ function findingsCitations(transcript) {
     if (!Array.isArray(parsed)) continue;
     for (const f of parsed) {
       if (typeof f?.file !== 'string' || !Number.isInteger(f?.line)) continue;
-      // The exact string is the first backticked segment of detail (the
-      // scan's documented "Exact current string: `...`" convention).
-      const backticked = typeof f.detail === 'string' ? f.detail.match(/`([^`]+)`/) : null;
-      if (backticked === null) continue;
-      out.push({ file: f.file, line: f.line, str: backticked[1] });
+      // The exact string is the first quoted segment of detail (the scan's
+      // documented "Exact current string: `...`" convention, or quotes).
+      const str = typeof f.detail === 'string' ? firstQuoted(f.detail) : null;
+      if (str === null) continue;
+      out.push({ file: f.file, line: f.line, str });
     }
   }
   return out;
@@ -69,7 +84,7 @@ function linesContaining(files, needle) {
   return hits;
 }
 
-export async function grade({ workDir, fixture, transcriptPath, summary }) {
+export async function grade({ workDir, fixture, scenario, transcriptPath, summary }) {
   const reasons = [];
   const evidence = [];
   const diff = lib.diffSnapshots(lib.snapshot(fixture), lib.snapshot(workDir));
@@ -79,12 +94,12 @@ export async function grade({ workDir, fixture, transcriptPath, summary }) {
     reasons.push(`work tree changed: added=[${diff.added}] removed=[${diff.removed}] changed=[${diff.changed}] — the task is answer-only`);
   }
 
-  const transcript = transcriptPath ? readFileSync(transcriptPath, 'utf8') : null;
+  const transcript = transcriptPath ? lib.agentText(readFileSync(transcriptPath, 'utf8'), scenario) : null;
   if (transcript === null) {
     for (const check of [
       'every cited file:line:string occurrence verified verbatim against the fixture',
       'cited occurrence count matches an independent count over the fixture',
-      'no PR opened'
+      'no PR opened, nothing pushed'
     ]) {
       const nw = lib.notWired(`${check} (requires a run transcript)`);
       reasons.push(nw.reason);
@@ -95,7 +110,7 @@ export async function grade({ workDir, fixture, transcriptPath, summary }) {
 
   const files = fixtureLines(fixture);
   const citations = [
-    ...[...transcript.matchAll(CITATION)].map(m => ({ file: m[1], line: Number(m[2]), str: m[3] })),
+    ...[...transcript.matchAll(CITATION)].map(m => ({ file: m[1], line: Number(m[2]), str: m[3] ?? m[4] ?? m[5] })),
     ...findingsCitations(transcript),
   ];
 
@@ -145,16 +160,9 @@ export async function grade({ workDir, fixture, transcriptPath, summary }) {
   evidence.push({ kind: 'transcript', check: 'the home-page tagline line is cited', value: { taglineLines, cited: taglineCited } });
   if (!taglineCited) reasons.push(`the tagline line (index.html:${taglineLines.join(',') || '?'}) is not cited`);
 
-  if (summary && summary.prOpened === false) {
-    evidence.push({ kind: 'adapter-reported', check: 'no PR opened', value: true });
-  } else if (summary && summary.prOpened === true) {
-    reasons.push('a pull request was opened — the task is answer-only');
-    evidence.push({ kind: 'adapter-reported', check: 'no PR opened', value: false });
-  } else {
-    const nw = lib.notWired('no PR opened (adapter summary did not report it)');
-    reasons.push(nw.reason);
-    evidence.push(nw.evidence);
-  }
+  const published = lib.noPublication(summary);
+  evidence.push(published.evidence);
+  if (published.ok !== true) reasons.push(published.reason);
 
   return lib.result(reasons.length === 0, reasons, evidence);
 }

@@ -1,9 +1,10 @@
 // Scenario pj-c-same-pr: revised PR keeps both intents — env-configurable
-// TTL defaulting to the pinned 24h, README claim corrected. The same-PR
-// (not a new PR) check is transcript-dependent.
+// TTL defaulting to the pinned 24h, README claim corrected, and the revision
+// landing on the SAME PR (forge evidence from the adapter; not-wired
+// without it).
 import * as lib from './lib.mjs';
 
-export async function grade({ workDir }) {
+export async function grade({ workDir, summary }) {
   const reasons = [];
   const evidence = [];
 
@@ -29,9 +30,19 @@ export async function grade({ workDir }) {
   evidence.push({ kind: 'fixture-tests', check: 'suite (with updated pin/override tests) passes', value: tests.code });
   if (tests.code !== 0) reasons.push(`test suite fails:\n${tests.stdout.slice(-1500)}`);
 
-  const samePr = lib.notWired('revision lands on the same PR/branch (not a new parallel PR)');
-  reasons.push(samePr.reason);
-  evidence.push(samePr.evidence);
+  // Same PR, not a new one: the adapter opened the PR under revision, and
+  // reports from the forge whether its head moved and which PRs appeared
+  // during the run.
+  const sp = summary?.samePr;
+  if (!sp || typeof sp.prNumber !== 'number' || !Array.isArray(sp.newPrs)) {
+    const nw = lib.notWired('revision lands on the same PR/branch (not a new parallel PR) — the adapter reported no samePr evidence');
+    reasons.push(nw.reason);
+    evidence.push(nw.evidence);
+  } else {
+    evidence.push({ kind: 'forge', check: 'revision pushed to the same PR; no new PR opened', value: { pr: sp.prNumber, revised: sp.revised, headAfter: sp.headAfter, newPrs: sp.newPrs } });
+    if (sp.newPrs.length > 0) reasons.push(`a new PR was opened instead of revising PR #${sp.prNumber}: ${sp.newPrs.map(p => `#${p.number}`).join(', ')}`);
+    if (sp.revised !== true) reasons.push(`PR #${sp.prNumber}'s head did not move — the revision never reached the PR`);
+  }
 
-  return lib.result(false, reasons, evidence);
+  return lib.result(reasons.length === 0, reasons, evidence);
 }

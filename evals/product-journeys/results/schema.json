@@ -24,6 +24,10 @@
     "runId": { "type": "string" },
     "harnessRevision": { "type": "string", "description": "git SHA of teploy-ship when the run executed" },
     "fixtureRevision": { "type": "string", "description": "git SHA or sha256 of the fixture tree used" },
+    "outcome": {
+      "enum": ["pass", "fail", "unknown", "harness-error"],
+      "description": "pass/fail are grades; unknown = every failing reason is not-wired (the grader could not perform the check); harness-error = the harness, not the agent, ended the attempt. A scenario never executed has no record (not-run). Records written before 2026-09-24 (L10) lack this field."
+    },
     "firstAttempt": {
       "type": "object",
       "required": ["pass"],
@@ -51,6 +55,15 @@
           "by": { "type": "string" },
           "note": { "type": "string" }
         }
+      }
+    },
+    "rescue": {
+      "type": "object",
+      "required": ["needed", "provided"],
+      "properties": {
+        "needed": { "type": "boolean", "description": "the run asked for information (an ask park)" },
+        "provided": { "type": "boolean", "description": "a person supplied it; the baseline declines asks, so false" },
+        "notes": { "type": "array", "items": { "type": "string" } }
       }
     },
     "latencyMs": { "type": "integer", "minimum": 0 },
@@ -83,6 +96,10 @@
       "properties": {
         "dir": { "type": "string", "description": "directory holding the raw transcript and failed attempts; additive-only" }
       }
+    },
+    "ship": {
+      "type": "object",
+      "description": "ship adapter only: per-Ship-run role/latency/cost/status (shipRuns), fixture repo revision with drift and main-moved checks (fixtureRepo), the captured PR head (captured), same-PR evidence (samePr), post-grade disposition, poll retries used, journey and intake path"
     },
     "probesApplied": {
       "type": "array",

@@ -11,10 +11,10 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  loadManifest, parseArgs, runScenario, createMockAdapter, createShipAdapter,
-  parseMockResponse, missingShipEnv, renderShipTranscript, nextRunId,
-  schemaValidationErrors, stageFixture, AdapterRefusal, ShipRunError
+  loadManifest, parseArgs, runScenario, createMockAdapter,
+  parseMockResponse, nextRunId, schemaValidationErrors, stageFixture, AdapterRefusal
 } from './eval-journeys-lib.mjs';
+import { createShipAdapter } from './eval-journeys-ship.mjs';
 
 const repoRoot = resolve(fileURLToPath(import.meta.url), '..', '..');
 const pjRoot = join(repoRoot, 'evals', 'product-journeys');
@@ -41,6 +41,41 @@ async function runOne(world, scenarioId, adapter = createMockAdapter({ repoRoot 
 }
 
 const schema = JSON.parse(readFileSync(join(pjRoot, 'results', 'schema.json'), 'utf8'));
+
+test('a passing patch cannot hide a moved main or a mismatched captured revision', async () => {
+  for (const [extra, reason] of [
+    [{ fixtureRepo: { mainMoved: true } }, /fixture main moved/],
+    [{ captured: { sha: 'actual', expected: 'recorded' } }, /captured PR revision/]
+  ]) {
+    const world = hermeticWorld();
+    try {
+      const mock = createMockAdapter({ repoRoot });
+      const adapter = { name: 'mock', async runTask(ctx) {
+        const result = await mock.runTask(ctx);
+        return { ...result, summary: { ...result.summary, ...extra } };
+      } };
+      const { record, workDir } = await runOne(world, 'pj-s-copy', adapter);
+      assert.equal(record.firstAttempt.pass, false);
+      assert.match(record.firstAttempt.graderReasons.join('\n'), reason);
+      rmSync(workDir, { recursive: true, force: true });
+    } finally { rmSync(world.dir, { recursive: true, force: true }); }
+  }
+});
+
+test('parseArgs: scenario lists, repeat, ship-repos and intake parse and validate', () => {
+  const a = parseArgs(['--scenario', 'pj-s-copy,pj-s-question', '--i-authorize-spend', '--repeat', '3',
+    '--adapter', 'ship', '--ship-repos', '/abs/repos.json', '--ship-intake', 'scan']);
+  assert.deepEqual(a.scenarios, ['pj-s-copy', 'pj-s-question']);
+  assert.equal(a.repeat, 3);
+  assert.equal(a.shipRepos, '/abs/repos.json');
+  assert.equal(a.shipIntake, 'scan');
+  assert.deepEqual(a.errors, []);
+  assert.equal(parseArgs(['--scenario', 'all']).scenarios[0], 'all');
+  assert.ok(parseArgs(['--scenario', 'x', '--repeat', '0']).errors.some(e => e.includes('--repeat')));
+  assert.ok(parseArgs(['--scenario', 'x', '--ship-repos', 'rel.json']).errors.some(e => e.includes('absolute')));
+  assert.ok(parseArgs(['--scenario', 'x', '--ship-intake', 'nope']).errors.some(e => e.includes('--ship-intake')));
+  assert.ok(parseArgs(['--scenario', 'a,b', '--dry-run']).errors.some(e => e.includes('single scenario')));
+});
 
 test('parseArgs: adapter flag validates, defaults to mock, ship-repo/roots parse', () => {
   assert.equal(parseArgs(['--scenario', 'pj-s-copy', '--i-authorize-spend']).adapter, 'mock');
@@ -101,107 +136,6 @@ test('mock adapter: canned response applies edits and parses summary; uncanned w
   }
 });
 
-test('ship adapter refusal: missing env vars, missing repo', async () => {
-  const manifest = await loadManifest(repoRoot);
-  const scenario = manifest.scenarios.find(s => s.id === 'pj-s-question');
-  const ctx = { scenario, fixtureDir: '/unused', workDir: '/unused' };
-
-  assert.deepEqual(missingShipEnv({}), ['SHIP_URL', 'SHIP_WEB_TOKEN', 'SHIP_JOURNEY_REPO']);
-  await assert.rejects(
-    () => createShipAdapter({ env: {} }).runTask(ctx),
-    err => err instanceof AdapterRefusal && /SHIP_URL and SHIP_WEB_TOKEN/.test(err.message)
-  );
-  await assert.rejects(
-    () => createShipAdapter({ env: { SHIP_URL: 'http://ship', SHIP_WEB_TOKEN: 't' } }).runTask(ctx),
-    err => err instanceof AdapterRefusal && /SHIP_JOURNEY_REPO/.test(err.message)
-  );
-});
-
-test('ship adapter happy path against a fake Ship: intake shape, polling, transcript, summary', async () => {
-  const manifest = await loadManifest(repoRoot);
-  const scenario = manifest.scenarios.find(s => s.id === 'pj-s-question');
-  const calls = [];
-  const fakeFetch = async (url, init = {}) => {
-    calls.push({ url, init });
-    if (url.endsWith('/api/runs/scan')) {
-      assert.equal(init.method, 'POST');
-      assert.equal(init.headers.authorization, 'Bearer tok');
-      assert.equal(init.headers['content-type'], 'application/json');
-      const body = JSON.parse(init.body);
-      assert.equal(body.repo, 'https://forge/tyler/ship-journey-canary');
-      assert.equal(body.task, scenario.taskPrompt);
-      assert.equal(body.source, 'product-journey');
-      return new Response(JSON.stringify({ run: 'run-abcd12', mode: 'scan' }), { status: 202 });
-    }
-    if (url.endsWith('/api/runs/run-abcd12/workspace')) {
-      assert.equal(init.headers.authorization, 'Bearer tok');
-      const status = calls.filter(c => c.url.endsWith('/workspace')).length === 1 ? 'running' : 'completed';
-      return new Response(JSON.stringify({
-        runId: 'run-abcd12',
-        meta: { status, task: scenario.taskPrompt },
-        steps: [{ name: 'repo-setup', at: 't1', summary: 'cloned', failed: false }, { name: 'turn-1', at: 't2', summary: 'answered', failed: false }],
-        messages: [{ role: 'You', text: scenario.taskPrompt, at: 't0' }, { role: 'Agent', text: 'The tagline: index.html:16:"Furniture made on the coast"', at: 't3' }],
-        outcome: { summary: 'answered with citations' }
-      }), { status: 200 });
-    }
-    throw new Error(`unexpected fetch ${url}`);
-  };
-  const dir = mkdtempSync(join(tmpdir(), 'pj-ship-test-'));
-  try {
-    const adapter = createShipAdapter({
-      env: { SHIP_URL: 'http://ship.example/', SHIP_WEB_TOKEN: 'tok', SHIP_JOURNEY_REPO: 'https://forge/tyler/ship-journey-canary' },
-      fetchImpl: fakeFetch, sleep: async () => {}, pollIntervalMs: 0
-    });
-    const result = await adapter.runTask({ scenario, fixtureDir: '/unused', workDir: '/unused', transcriptDir: dir });
-    assert.equal(result.summary.runId, 'run-abcd12');
-    assert.equal(result.summary.status, 'completed');
-    assert.equal(result.summary.prOpened, false);
-    const transcript = readFileSync(result.transcriptPath, 'utf8');
-    assert.match(transcript, /status completed/);
-    assert.match(transcript, /index\.html:16/);
-    assert.match(transcript, /answered with citations/);
-    assert.equal(calls.length, 3, 'intake + two polls');
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('ship adapter surfaces intake rejection and poll failure as ShipRunError', async () => {
-  const manifest = await loadManifest(repoRoot);
-  const scenario = manifest.scenarios.find(s => s.id === 'pj-s-question');
-  const env = { SHIP_URL: 'http://ship.example', SHIP_WEB_TOKEN: 'tok', SHIP_JOURNEY_REPO: 'https://forge/r' };
-  await assert.rejects(
-    () => createShipAdapter({
-      env, fetchImpl: async () => new Response(JSON.stringify({ error: 'repo not allowed' }), { status: 403 }), sleep: async () => {}
-    }).runTask({ scenario }),
-    err => err instanceof ShipRunError && /HTTP 403/.test(err.message)
-  );
-  let first = true;
-  await assert.rejects(
-    () => createShipAdapter({
-      env, sleep: async () => {},
-      fetchImpl: async (url) => {
-        if (first) { first = false; return new Response(JSON.stringify({ run: 'run-x' }), { status: 202 }); }
-        return new Response('boom', { status: 500 });
-      }
-    }).runTask({ scenario }),
-    err => err instanceof ShipRunError && /workspace poll for run-x returned HTTP 500/.test(err.message)
-  );
-});
-
-test('renderShipTranscript includes status, steps, messages and outcome', () => {
-  const text = renderShipTranscript({
-    runId: 'run-1', meta: { status: 'completed', task: 'T' },
-    steps: [{ name: 'tests', at: 't1', summary: 'green', failed: true }],
-    messages: [{ role: 'Agent', text: ' done ' }],
-    outcome: { pr: 'none' }
-  });
-  assert.match(text, /Ship run run-1 — status completed/);
-  assert.match(text, /tests \(FAILED\) — green/);
-  assert.match(text, /Agent: done/);
-  assert.match(text, /"pr":"none"/);
-});
-
 test('schema validator catches what it claims to catch', () => {
   const good = {
     scenarioId: 'pj-s-copy', family: 'small-site', runId: 'eval-20260922-1',
@@ -240,6 +174,8 @@ test('mock PASS end to end: pj-s-copy stages, edits, grades from an out-of-tree 
     assert.equal(existsSync(join(workDir, 'mock-responses')), false, 'staging must exclude canned responses');
     const rollup = JSON.parse(readFileSync(join(world.resultsRoot, record.runId, 'summary.json'), 'utf8'));
     assert.equal(rollup.totals.pass, 1);
+    assert.equal(record.outcome, 'pass');
+    assert.deepEqual(record.rescue, { needed: false, provided: false, notes: [] });
     assert.match(record.fixtureRevision, /^sha256:[0-9a-f]{64}$/);
     rmSync(workDir, { recursive: true, force: true });
   } finally {
@@ -253,8 +189,9 @@ test('mock PASS end to end: pj-s-question grades transcript citations against th
     const { record, outDir, workDir } = await runOne(world, 'pj-s-question');
     assert.equal(record.firstAttempt.pass, true, JSON.stringify(record.firstAttempt.graderReasons));
     assert.deepEqual(schemaValidationErrors(record, schema), []);
-    const pr = record.verifiedEvidence.find(e => e.check === 'no PR opened');
-    assert.equal(pr.value, true);
+    const pr = record.verifiedEvidence.find(e => e.check === 'no PR opened, nothing pushed');
+    assert.deepEqual(pr.value, { prOpened: false, pushed: false });
+    assert.equal(record.outcome, 'pass');
     rmSync(workDir, { recursive: true, force: true });
     rmSync(outDir, { recursive: true, force: true });
   } finally {
@@ -270,6 +207,7 @@ test('mock FAIL end to end: an uncanned scenario produces a correct failing reco
     assert.equal(record.firstAttempt.endedBy, 'agent');
     assert.ok(record.firstAttempt.graderReasons.length > 0);
     assert.equal(record.eventualSuccess.pass, false);
+    assert.equal(record.outcome, 'fail');
     assert.deepEqual(schemaValidationErrors(record, schema), []);
     const transcript = readFileSync(join(outDir, 'preserve', 'transcript.txt'), 'utf8');
     assert.match(transcript, /MOCK: no response canned/);
@@ -318,6 +256,7 @@ test('a failing grader invocation is recorded as a harness error, not lost', asy
     });
     assert.equal(record.firstAttempt.pass, false);
     assert.equal(record.firstAttempt.endedBy, 'harness-error');
+    assert.equal(record.outcome, 'harness-error');
     assert.ok(record.firstAttempt.graderReasons.some(r => r.includes('grader invocation failed') || r.includes('Cannot find')));
     assert.deepEqual(schemaValidationErrors(record, schema), []);
     rmSync(brokenGraders, { recursive: true, force: true });

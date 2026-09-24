@@ -119,6 +119,38 @@ export function notWired(check) {
   };
 }
 
+// The agent's words only: the task prompt is echoed into a Ship transcript
+// (the Task line, the requester's message, a follow-up's context), and a
+// grader must never credit the agent with text it was given.
+export function agentText(transcript, scenario) {
+  let text = String(transcript ?? '');
+  const prompt = scenario?.taskPrompt;
+  if (typeof prompt === 'string' && prompt !== '') text = text.split(prompt).join(' ');
+  return text;
+}
+
+// Sentence-ish units for co-occurrence checks. File names like README.md:10
+// carry no following space, so they are not split. JSON-escaped newlines
+// (a transcript's Outcome line) and JSON field boundaries (a findings entry's
+// title vs its detail) split too, so two fields never read as one sentence.
+export function sentences(text) {
+  return String(text).split(/(?<=[.!?])\s+|\n+|\\n|\\?",\s*\\?"/).map(s => s.trim()).filter(Boolean);
+}
+
+// Read-only scenarios: nothing may be published. The ship adapter reports
+// `prOpened` from the run's outcome and `pushed` from the forge (a ship/<run>
+// branch or a captured PR head); both must be false.
+export function noPublication(summary) {
+  if (summary && summary.prOpened === false && summary.pushed === false) {
+    return { ok: true, evidence: { kind: 'adapter-reported', check: 'no PR opened, nothing pushed', value: { prOpened: false, pushed: false } } };
+  }
+  if (summary && (summary.prOpened === true || summary.pushed === true)) {
+    return { ok: false, reason: `the run published: prOpened=${summary.prOpened} pushed=${summary.pushed} — the task is read-only`, evidence: { kind: 'adapter-reported', check: 'no PR opened, nothing pushed', value: { prOpened: summary.prOpened, pushed: summary.pushed } } };
+  }
+  const nw = notWired('no PR opened and nothing pushed (the adapter did not report both prOpened and pushed)');
+  return { ok: null, reason: nw.reason, evidence: nw.evidence };
+}
+
 export function result(pass, reasons, evidence) {
   return { pass, reasons, evidence };
 }
