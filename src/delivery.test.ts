@@ -9,6 +9,7 @@ import { DEFAULT_AUTHORITY } from "./governance.js";
 import type { Governance, Grant } from "./governance.js";
 import {
   FileDeliveryStore,
+  approveDelivery,
   deliveryFromEvents,
   executeDelivery,
   executeDeliveryRollback,
@@ -385,48 +386,99 @@ test("revalidation holds a wrong-target, reverted, or superseded approval; exact
 });
 
 test("the rollback executor refuses honestly and verifies by read-back", async () => {
-  const confirmed = { ...unknownRecord(), state: "confirmed" } as DeliveryRecord;
+  const confirmed = {
+    ...unknownRecord(),
+    state: "confirmed",
+    rollback: { state: "executing", actor: "op@ship", reason: "regression", requestedAt: "2026-09-22T00:00:00.000Z" },
+  } as DeliveryRecord;
+  const authority = sourcesFor();
 
-  const unconfigured = await executeDeliveryRollback(confirmed, { run: never });
+  const unconfigured = await executeDeliveryRollback(confirmed, { run: never, authority });
   assert.equal(unconfigured.state, "failed");
   assert.match(unconfigured.evidence!, /SHIP_DELIVERY_DIR/);
 
-  const noRetained = await executeDeliveryRollback({ ...confirmed, recoveryVersion: undefined }, { dir: "/srv/trusted", run: never });
+  const noRetained = await executeDeliveryRollback({ ...confirmed, recoveryVersion: undefined }, { dir: "/srv/trusted", run: never, authority });
   assert.equal(noRetained.state, "failed");
   assert.match(noRetained.evidence!, /no retained recovery version/);
 
-  const refused: CommandRunner = async () => ({ code: 1, stdout: "", stderr: "no such version" });
-  const refusedOut = await executeDeliveryRollback(confirmed, { dir: "/srv/trusted", run: refused });
-  assert.equal(refusedOut.state, "failed");
-  assert.match(refusedOut.evidence!, /no such version/);
-
-  const rollbackOk = (currentHash: string, running = true): CommandRunner => {
+  /**
+   * A target that answers `status` with `before` until the rollback command
+   * runs, and `after` from then on — the real sequence, not one canned body.
+   */
+  const target = (before: string, after: string, opts: { running?: boolean; refuse?: boolean } = {}) => {
     const calls: string[][] = [];
-    const runner: CommandRunner = async (argv: string[]) => {
+    let rolled = false;
+    const run: CommandRunner = async (argv: string[]) => {
       calls.push(argv);
-      if (argv[1] === "rollback") return { code: 0, stdout: "Rolled back", stderr: "" };
+      if (argv[1] === "rollback") {
+        if (opts.refuse) return { code: 1, stdout: "", stderr: "no such version" };
+        rolled = true;
+        return { code: 0, stdout: "Rolled back", stderr: "" };
+      }
       if (argv[1] === "status") {
         return {
           code: 0,
           stdout: JSON.stringify({
-            state: { current_hash: currentHash },
-            containers: running ? [{ Name: "app", Image: "old", State: "running" }] : [],
+            state: { current_hash: rolled ? after : before },
+            containers: opts.running === false ? [] : [{ Name: "app", Image: "old", State: "running" }],
           }),
           stderr: "",
         };
       }
       return { code: 1, stdout: "", stderr: "unexpected" };
     };
-    return runner;
+    return { run, calls };
   };
 
-  const done = await executeDeliveryRollback({ ...confirmed, recoveryVersion: "v9" }, { dir: "/srv/trusted", run: rollbackOk("v9") });
+  const refused = target("abc123d", "abc123d", { refuse: true });
+  const refusedOut = await executeDeliveryRollback(confirmed, { dir: "/srv/trusted", run: refused.run, authority });
+  assert.equal(refusedOut.state, "failed");
+  assert.match(refusedOut.evidence!, /no such version/);
+
+  const ok = target("abc123d", "v9");
+  const done = await executeDeliveryRollback(confirmed, { dir: "/srv/trusted", run: ok.run, authority });
   assert.equal(done.state, "done");
   assert.match(done.evidence!, /retained version v9 serving/);
+  assert.deepEqual(ok.calls.find((c) => c[1] === "rollback"), ["teploy", "rollback", "--to", "v9"]);
 
-  const wrongVersion = await executeDeliveryRollback({ ...confirmed, recoveryVersion: "v9" }, { dir: "/srv/trusted", run: rollbackOk("v8") });
+  const wrongVersion = await executeDeliveryRollback(confirmed, { dir: "/srv/trusted", run: target("abc123d", "v8").run, authority });
   assert.equal(wrongVersion.state, "failed");
   assert.match(wrongVersion.evidence!, /target runs v8/);
+
+  // Delta audit (2026-09-23): the target has since received a NEWER
+  // delivery. `rollback --to v9` would undo that one too while its record
+  // stayed confirmed — refused before any command runs.
+  const superseded = target("f00ba12", "v9");
+  const supersededOut = await executeDeliveryRollback(confirmed, { dir: "/srv/trusted", run: superseded.run, authority });
+  assert.equal(supersededOut.state, "failed");
+  assert.match(supersededOut.evidence!, /runs f00ba12, not this delivery's abc123d/);
+  assert.equal(superseded.calls.some((c) => c[1] === "rollback"), false, "no rollback command against a superseded delivery");
+
+  // An earlier attempt that landed and lost its receipt: already on the
+  // recovery version → done, no second command.
+  const landed = target("v9", "v9");
+  const landedOut = await executeDeliveryRollback(confirmed, { dir: "/srv/trusted", run: landed.run, authority });
+  assert.equal(landedOut.state, "done");
+  assert.match(landedOut.evidence!, /already/);
+  assert.equal(landed.calls.some((c) => c[1] === "rollback"), false);
+
+  // An unread target is never acted on.
+  const unread: CommandRunner = async (argv) => (argv[1] === "status" ? { code: 255, stdout: "", stderr: "ssh: timeout" } : never());
+  const unreadOut = await executeDeliveryRollback(confirmed, { dir: "/srv/trusted", run: unread, authority });
+  assert.equal(unreadOut.state, "failed");
+  assert.match(unreadOut.evidence!, /could not be read before rollback.*ssh: timeout/s);
+
+  // The requester's authority is rechecked at ACTION time — revoked, deleted
+  // or unwired all refuse before the target is even read.
+  for (const [label, sources] of [
+    ["revoked", sourcesFor({ role: "viewer" })],
+    ["deleted", sourcesFor({ role: null })],
+    ["unwired", undefined],
+  ] as const) {
+    const out = await executeDeliveryRollback(confirmed, { dir: "/srv/trusted", run: never, ...(sources !== undefined ? { authority: sources } : {}) });
+    assert.equal(out.state, "failed", label);
+    assert.match(out.evidence!, /rollback requester recheck/, label);
+  }
 });
 
 test("rollback requests are refused, claimed, and finished through the fence", async () => {
@@ -744,4 +796,119 @@ test("confirmation records a wired Observe verdict — or an honest unknown — 
   assert.ok(projectRead.outcome === "confirmed");
   assert.equal(projectRead.health, "healthy");
   assert.match(projectRead.healthReason, /app-web served 120 requests/);
+});
+
+// --- delta audit of the delivery/promote path (S01, 2026-09-23) ---------------
+
+test("delta audit: a failed deploy command is unknown (may have touched the target), never held", async () => {
+  const now = "2026-09-23T00:00:00.000Z";
+  const record = { ...base(), actor: "op@ship", destination: "scratch", recoveryVersion: "v9", state: "executing", updatedAt: now } as DeliveryRecord;
+  const base_ = fullRunner();
+  const timedOut: CommandRunner = async (argv, opts) =>
+    argv[1] === "deploy" ? { code: 124, stdout: "", stderr: "ssh: timeout after container swap" } : base_(argv, opts);
+  const out = await executeDelivery(record, { dir: "/srv/trusted", run: timedOut, now: () => now, authority: sourcesFor() });
+  assert.equal(out.state, "unknown", "held would claim the target was never touched");
+  assert.equal(out.artifactDigest, "ship-delivery-abc123", "the read-back needs the artifact identity");
+  assert.match(out.reason!, /exit 124.*reading it back/s);
+  assert.ok(transitionAllowed("executing", "unknown"));
+});
+
+test("delta audit: a default branch that resolves but cannot be fetched holds instead of skipping revalidation", async () => {
+  const now = "2026-09-23T00:00:00.000Z";
+  const record = { ...base(), actor: "op@ship", destination: "scratch", recoveryVersion: "v9", state: "executing", updatedAt: now } as DeliveryRecord;
+  const calls: string[][] = [];
+  const run: CommandRunner = async (argv) => {
+    calls.push(argv);
+    if (argv[0] === "cat") return { code: 0, stdout: "", stderr: "" };
+    if (argv[1] === "symbolic-ref") return { code: 0, stdout: "refs/remotes/origin/main\n", stderr: "" };
+    if (argv[1] === "fetch" && argv[3] === "main") return { code: 128, stdout: "", stderr: "fatal: could not read from remote" };
+    if (argv[1] === "fetch") return { code: 0, stdout: "", stderr: "" };
+    throw new Error(`nothing past the failed revalidation may run: ${argv.join(" ")}`);
+  };
+  const out = await executeDelivery(record, { dir: "/srv/trusted", run, now: () => now, authority: sourcesFor() });
+  assert.equal(out.state, "held");
+  assert.match(out.reason!, /could not fetch the default branch main.*could not read from remote/s);
+});
+
+test("delta audit: the trusted-copy marker compares under the repository case rule (S01-3)", async () => {
+  const now = "2026-09-23T00:00:00.000Z";
+  const record = { ...base(), repo: "http://forge.example:3000/tyler/app", actor: "op@ship", destination: "scratch", recoveryVersion: "v9", state: "executing", updatedAt: now } as DeliveryRecord;
+  const withMarker = (marker: string): CommandRunner => {
+    const rest = fullRunner();
+    return async (argv, opts) => (argv[0] === "cat" ? { code: 0, stdout: `${marker}\n`, stderr: "" } : rest(argv, opts));
+  };
+  const twin = await executeDelivery(record, { dir: "/srv/trusted", run: withMarker("http://forge.example:3000/Tyler/App.git"), now: () => now, authority: sourcesFor() });
+  assert.equal(twin.state, "unknown", "the forge's display spelling names the same repository");
+  const other = await executeDelivery(record, { dir: "/srv/trusted", run: withMarker("http://forge.example:3000/Tyler/Other"), now: () => now, authority: sourcesFor() });
+  assert.equal(other.state, "held");
+  assert.match(other.reason!, /wrong target/);
+});
+
+test("delta audit: the recorded recovery version must be what the destination runs before promotion", async () => {
+  const now = "2026-09-23T00:00:00.000Z";
+  const record = { ...base(), actor: "op@ship", destination: "scratch", recoveryVersion: "v9", state: "executing", updatedAt: now } as DeliveryRecord;
+  const serving = (hash: string | null): CommandRunner => {
+    const rest = fullRunner();
+    return async (argv, opts) => {
+      if (argv[0] === "teploy" && argv[1] === "status") {
+        return hash === null ? { code: 1, stdout: "", stderr: "no deployment" } : { code: 0, stdout: JSON.stringify({ state: { current_hash: hash }, containers: [] }), stderr: "" };
+      }
+      return rest(argv, opts);
+    };
+  };
+  const mistyped = await executeDelivery(record, { dir: "/srv/trusted", run: serving("v8"), now: () => now, authority: sourcesFor() });
+  assert.equal(mistyped.state, "held", "a rollback to a mistyped version would verify as done against the wrong release");
+  assert.match(mistyped.reason!, /runs v8, not the recorded recovery version v9/);
+  const matching = await executeDelivery(record, { dir: "/srv/trusted", run: serving("v9"), now: () => now, authority: sourcesFor() });
+  assert.equal(matching.state, "unknown");
+  assert.doesNotMatch(matching.reason!, /unverified/);
+  const firstDeploy = await executeDelivery(record, { dir: "/srv/trusted", run: serving(null), now: () => now, authority: sourcesFor() });
+  assert.equal(firstDeploy.state, "unknown", "an unreadable/empty target proceeds — the deploy is the authority on reachability");
+  assert.match(firstDeploy.reason!, /recovery version unverified/);
+});
+
+test("delta audit: an ID-form image this worker cannot resolve is a lost read (unreadable), never a failed delivery", async () => {
+  const idStatus = JSON.stringify({ server: "infra-home", state: { current_hash: "abc123d" }, containers: [{ Image: "16a4e9a114f0", State: "running" }] });
+  const execRefused: CommandRunner = async (argv) =>
+    argv[1] === "exec" ? { code: 255, stdout: "", stderr: "ssh: connect to host infra-home: no route" } : { code: 0, stdout: idStatus, stderr: "" };
+  const refused = await readBackDelivery(unknownRecord(), { dir: "/srv/trusted", run: execRefused, observe: {} });
+  assert.equal(refused.outcome, "unreadable");
+  assert.match(refused.detail, /\[16a4e9a114f0\] could not be resolved/);
+  const garbled: CommandRunner = async (argv) =>
+    argv[1] === "exec" ? { code: 0, stdout: "template: unclosed action", stderr: "" } : { code: 0, stdout: idStatus, stderr: "" };
+  assert.equal((await readBackDelivery(unknownRecord(), { dir: "/srv/trusted", run: garbled, observe: {} })).outcome, "unreadable");
+  const noServer: CommandRunner = async () => ({
+    code: 0,
+    stdout: JSON.stringify({ state: { current_hash: "abc123d" }, containers: [{ Image: "16a4e9a114f0", State: "running" }] }),
+    stderr: "",
+  });
+  const unasked = await readBackDelivery(unknownRecord(), { dir: "/srv/trusted-none", run: noServer, observe: {} });
+  assert.equal(unasked.outcome, "unreadable");
+  assert.match(unasked.detail, /no server to ask/);
+});
+
+test("delta audit: held and failed deliveries re-approve through the product boundary, re-recording the tuple", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ship-delivery-"));
+  const store = new FileDeliveryStore(dir);
+  const record = await store.propose(base("run-re"));
+  const first = await approveDelivery(store, record.id, { destination: "scratch", recoveryVersion: "v8", actor: "op@ship" });
+  assert.equal(first.state, "approved");
+  assert.equal(first.policy, "operator-approval");
+  await store.transition(record.id, "approved", "executing", {});
+  await store.transition(record.id, "executing", "held", { reason: "the destination runs v9, not the recorded recovery version v8" });
+  const again = await approveDelivery(store, record.id, { destination: "scratch", recoveryVersion: "v9", actor: "lead@ship" });
+  assert.equal(again.state, "approved");
+  assert.equal(again.recoveryVersion, "v9", "re-approval re-records the recovery version");
+  assert.equal(again.actor, "lead@ship");
+  assert.equal(again.policy, "operator-reapproval");
+  assert.match(again.reason!, /re-approved after held: the destination runs v9/);
+  // approved is not approvable again: the caller learns what won.
+  const noop = await approveDelivery(store, record.id, { destination: "x", recoveryVersion: "y", actor: "late@ship" });
+  assert.equal(noop.actor, "lead@ship");
+  // failed re-approves the same way.
+  await store.transition(record.id, "approved", "executing", {});
+  await store.transition(record.id, "executing", "unknown", { artifactDigest: "img" });
+  await store.transition(record.id, "unknown", "failed", { reason: "read-back mismatch" });
+  assert.equal((await approveDelivery(store, record.id, { destination: "scratch", recoveryVersion: "v9", actor: "op@ship" })).state, "approved");
+  await assert.rejects(approveDelivery(store, "run-missing", { destination: "d", recoveryVersion: "v", actor: "a" }), /No delivery record/);
 });
