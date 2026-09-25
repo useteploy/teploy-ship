@@ -14,6 +14,7 @@ import { workspaceRecovery, conversation, diffSnapshots, evidence, previewPanel 
 import type { Message, DiffSnapshot, Evidence, PreviewPanel } from "./workspace.js";
 import { publicOrigin } from "./oidc.server.js";
 import { previewFrameBase } from "./preview-frame.server.js";
+import { parseSupersededMark, previewSupersededKey } from "../../../dist/preview-supersede.js";
 import { costUSD, isPricedModel, pendingQuestion, verificationFactsFromEvents } from "./ship.server.js";
 import { typicalDuration } from "./expect.js";
 import type { Typical } from "./expect.js";
@@ -219,6 +220,9 @@ export async function runData({ params, request }: { params: { id: string }; req
     }
     const history = await threadHistory(runtime, runId);
     const forgeRaw = await runtime.config.get("SHIP_FORGE_STATE_" + runId);
+    // The reverse link a newer revision left when it removed this run's
+    // preview (preview-supersede.ts). Advisory: unreadable means "not marked".
+    const superseded = parseSupersededMark(await runtime.config.get(previewSupersededKey(runId)).catch(() => undefined));
     // Package C: the takeover state — live lease record, last mediated
     // reply, bounded session history. Advisory reads only; the action route
     // holds the authority and the worker holds the credential.
@@ -281,7 +285,7 @@ export async function runData({ params, request }: { params: { id: string }; req
       messages: conversation(events),
       snapshots: diffSnapshots(events),
       evidence: evidence(facts, reviewedHead),
-      previewPanel: previewPanel(events, facts, { executing, now: Date.now(), dashboardOrigin: publicOrigin(request), frameBase: previewFrameBase() }),
+      previewPanel: previewPanel(events, facts, { executing, now: Date.now(), dashboardOrigin: publicOrigin(request), frameBase: previewFrameBase(), ...(superseded !== undefined ? { superseded } : {}) }),
       hasPr: facts.pr !== undefined || typeof (started?.data as any)?.input?.pr === "number",
       parentRunId: typeof (started?.data as any)?.input?.parentRunId === 'string' ? (started?.data as any).input.parentRunId : undefined,
       taskRootRunId: typeof (started?.data as any)?.taskRootRunId === 'string' ? (started?.data as any).taskRootRunId : undefined,

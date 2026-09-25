@@ -522,3 +522,22 @@ test("default mode never asks the CLI for its version: the argv sequence is unch
   await deployPreview({ dir: "/srv/app", run }, "fix/login");
   assert.deepEqual(calls.filter((c) => c[0] === "teploy").map((c) => c[1]), ["build", "preview", "preview"]);
 });
+
+test("previewEgressAllow: the tailnet suffix for a declared preview, main's host only for the visual rung, nothing without a valid tailnet IP", async () => {
+  const { previewEgressAllow, withPreviewEgress } = await import("./deploy.js");
+  const env = { SHIP_PREVIEW_TAILNET_IP: "100.107.192.39", SHIP_PREVIEW_MAIN_URL: "ship-preview-proof=http://100.107.192.39/,http://main.example.com:8080/" };
+  assert.deepEqual(previewEgressAllow({ preview: { app: "ship-preview-proof" } }, env), [".100.107.192.39.sslip.io"]);
+  assert.deepEqual(previewEgressAllow({ preview: { app: "ship-preview-proof" }, visual: true }, env), [".100.107.192.39.sslip.io", "100.107.192.39"]);
+  assert.deepEqual(previewEgressAllow({ preview: { app: "unnamed" }, visual: true }, env), [".100.107.192.39.sslip.io", "main.example.com:8080"], "the default main URL, with its port");
+  assert.deepEqual(previewEgressAllow({ visual: true }, env), [], "no declared preview, nothing derived");
+  assert.deepEqual(previewEgressAllow({ preview: {} }, { SHIP_PREVIEW_TAILNET_IP: "192.168.1.5" }), [], "not a tailnet address");
+  assert.deepEqual(previewEgressAllow({ preview: {} }, {}), []);
+  // Every derived entry is one the daemon's grammar accepts.
+  const { egressEntryError } = await import("./egress.js");
+  for (const e of previewEgressAllow({ preview: { app: "unnamed" }, visual: true }, env)) assert.equal(egressEntryError(e), null, e);
+  // Explicit entries survive; a full explicit list is never refused for the derived ones.
+  assert.deepEqual(withPreviewEgress(["a.example"], { preview: {} }, env), ["a.example", ".100.107.192.39.sslip.io"]);
+  const full = Array.from({ length: 64 }, (_v, i) => `h${i}.example`);
+  assert.deepEqual(withPreviewEgress(full, { preview: {} }, env), full);
+  assert.equal(withPreviewEgress(undefined, undefined, env), undefined);
+});

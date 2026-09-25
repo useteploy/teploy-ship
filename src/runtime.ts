@@ -42,6 +42,7 @@ import type { EvidenceStore } from "./evidence.js";
 import { FileProjectStore, NucleusProjectStore, ProjectEvidenceStore } from "./projects.js";
 import type { ProjectStore } from "./projects.js";
 import { effectiveAuthority } from "./ladder.js";
+import { withPreviewEgress } from "./deploy.js";
 import { FileBulletinStore, NucleusBulletinStore } from "./bulletin.js";
 import type { BulletinStore } from "./bulletin.js";
 import { FileGovernanceStore, NucleusGovernanceStore, reviewersFor } from "./governance.js";
@@ -1304,6 +1305,9 @@ export async function enqueueRun(
     ...(options.source !== undefined ? { source: options.source } : {}),
     ...(options.repo !== undefined ? { repo: options.repo } : {}),
   });
+  // The project's allowlist plus the entries its declared preview needs
+  // (deploy.ts previewEgressAllow). Scans preview nothing.
+  const sandboxEgressAllow = scan ? project?.sandboxEgressAllow : withPreviewEgress(project?.sandboxEgressAllow, project?.verification);
   // Hoisted out of the append below so the upgrade fence can fingerprint the
   // exact object the log will carry, rather than a reconstruction of it.
   const input = {
@@ -1340,6 +1344,10 @@ export async function enqueueRun(
         ...(settle === true ? { settle: true } : {}),
         ...(requireEdit === true ? { requireEdit: true } : {}),
         ...(preview === true ? { preview: true } : {}),
+        // A follow-up on an existing pull request removes the previews of the
+        // older runs on it once its own is up (preview-supersede.ts). Only
+        // where a preview step will run: the flag adds a recorded step.
+        ...(!scan && options.pr !== undefined && (preview === true || project?.verification?.preview !== undefined) ? { supersedePreviews: true } : {}),
         ...(telemetry === true ? { telemetry: true } : {}),
         ...(tests === true ? { tests: true } : {}),
         ...(testsFeedback === true ? { testsFeedback: true } : {}),
@@ -1378,7 +1386,11 @@ export async function enqueueRun(
         // external-task downgrade at execution, so the declaration and the
         // downgrade both stay readable.
         ...(project?.sandboxNetwork !== undefined ? { sandboxNetwork: project.sandboxNetwork } : {}),
-        ...(project?.sandboxEgressAllow !== undefined ? { sandboxEgressAllow: project.sandboxEgressAllow } : {}),
+        // Plus, for a project that declares a preview, the preview target's
+        // host derived from this deployment's SHIP_PREVIEW_TAILNET_IP (and
+        // main's host for the visual rung): the preview rungs run behind the
+        // same allowlist, and no per-project hand entry should be needed.
+        ...(sandboxEgressAllow !== undefined ? { sandboxEgressAllow } : {}),
         ...(project?.sandboxLimits !== undefined ? { sandboxLimits: project.sandboxLimits } : {}),
         // Every newly-enqueued run is steerable and index-eligible; runs
         // enqueued before these flags existed replay without the extra

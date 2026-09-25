@@ -25,6 +25,7 @@ import { execFile } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { assertGitSafe } from "./git.js";
+import { MAX_EGRESS_ALLOW_ENTRIES, normalizeEgressAllow } from "./egress.js";
 
 /** A preview attempt's leftovers: the UUID that named its ref and worktree. */
 export interface PreviewLeftover {
@@ -579,6 +580,68 @@ export function tailnetBaseDomain(ip: string): string | undefined {
   const octets = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip.trim())?.slice(1).map(Number);
   const ok = octets !== undefined && octets.every((o) => o <= 255) && octets[0] === 100 && octets[1]! >= 64 && octets[1]! <= 127;
   return ok ? `${octets!.join(".")}.sslip.io` : undefined;
+}
+
+/**
+ * The sandbox egress entries a project with a declared preview needs, derived
+ * from this deployment's preview config (wave 10, L13).
+ *
+ * The preview rungs (smoke, visual, flow) run IN the sandbox, behind its
+ * allowlist proxy, so a tailnet preview was refused until an operator added
+ * the target's sslip suffix to each project by hand (first live preview,
+ * 2026-09-24). With SHIP_PREVIEW_TAILNET_IP set, the preview host is known:
+ *
+ *   - `.<ip>.sslip.io` — every preview on this target. A leading-dot suffix
+ *     is the narrowest form the daemon's grammar has (no wildcards, exact host
+ *     or suffix), and a preview's hostname is minted per revision, after the
+ *     run's sandbox exists. Portless, so 80 and 443 only.
+ *   - main's host, when the project declares the visual rung and main's URL
+ *     is configured for its app (SHIP_PREVIEW_MAIN_URL): the rung screenshots
+ *     main through the same proxy.
+ *
+ * Empty when the tailnet setting is unset or invalid, or the project declares
+ * no preview. Resolved at enqueue and copied into the run input with the
+ * project's own entries, like every other sandbox setting.
+ */
+export function previewEgressAllow(
+  verification: { preview?: { app?: string }; visual?: boolean } | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  if (verification?.preview === undefined) return [];
+  const base = tailnetBaseDomain((env.SHIP_PREVIEW_TAILNET_IP ?? "").trim());
+  if (base === undefined) return [];
+  const out = [`.${base}`];
+  if (verification.visual === true) {
+    const main = mainUrls((env.SHIP_PREVIEW_MAIN_URL ?? "").trim());
+    const app = verification.preview.app;
+    const url = main.invalid === undefined ? ((app !== undefined ? main.urls.mainUrlByApp?.[app] : undefined) ?? main.urls.mainUrl) : undefined;
+    if (url !== undefined) {
+      const u = new URL(url);
+      out.push(u.port !== "" ? `${u.hostname}:${u.port}` : u.hostname);
+    }
+  }
+  return out;
+}
+
+/**
+ * A project's explicit allowlist with the derived preview entries appended.
+ * Explicit entries always survive: when both together would pass the daemon's
+ * bound, the derived ones are dropped rather than refusing the enqueue.
+ */
+export function withPreviewEgress(
+  explicit: string[] | undefined,
+  verification: { preview?: { app?: string }; visual?: boolean } | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): string[] | undefined {
+  const derived = previewEgressAllow(verification, env);
+  if (derived.length === 0) return explicit;
+  let merged: string[] | undefined;
+  try {
+    merged = normalizeEgressAllow([...(explicit ?? []), ...derived]);
+  } catch {
+    return explicit;
+  }
+  return merged !== undefined && merged.length <= MAX_EGRESS_ALLOW_ENTRIES ? merged : explicit;
 }
 
 /**

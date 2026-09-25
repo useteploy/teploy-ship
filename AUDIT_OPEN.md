@@ -472,3 +472,51 @@ on every operation so existing sessions receive fixes. Real Chromium proof
 passed all actions after the fix; before/after logs are under evals/receipts.
 The live proof script also now uses sandboxProvider and
 artifact-backed screenshots rather than its stale SDK/inline-image wiring.
+
+
+## 2026-09-24 — preview containers have unrestricted egress (trust model; L8 open item 4, recorded by L13)
+
+A tailnet preview runs unreviewed, model-authored code as a deployed app on
+the preview target (compute-1). The sandbox allowlist does not apply to it:
+`teploy preview deploy` starts the container through the CLI's ordinary
+`docker.Run`, on the target's shared `teploy` bridge. So a preview can:
+
+- reach anything the target host routes to: the internet, the LAN, and the
+  **tailnet** (every 100.64.0.0/10 peer that does not filter by source,
+  including the forge and any tailnet-only service), plus link-local
+  metadata addresses where a cloud host has them;
+- reach every other container on the `teploy` network directly, by name,
+  bypassing the Caddy route's tailnet allowlist (today on compute-1: the fixture
+  main app and the Caddy container).
+
+What already limits it: the target is compute-1, not infra-home (no Ship
+store or credentials on its docker network — see the L8 receipt); a preview
+publishes on 127.0.0.1 only, so the allowlist cannot be bypassed from outside
+through its host port; the TTL prune and (now) the superseded-preview cleanup
+bound how long any one runs.
+
+**Mitigation proposal (not implemented — it is not small, and it needs a live
+proof on the target):**
+
+1. teploy-cli: previews join a dedicated `teploy-preview` bridge instead of
+   `teploy`, and the target's Caddy container is attached to both. Pinned by a
+   preview-deploy argv test (`--network teploy-preview`, never `teploy`).
+   Closes the lateral path to other apps; Caddy still dials the preview by
+   network alias, and the 127.0.0.1 publish the readiness probe uses keeps
+   working (unlike an `--internal` network, which publishes nothing).
+2. `teploy setup` (or the first preview deploy) installs `DOCKER-USER` rules
+   for that bridge's subnet: DROP to 100.64.0.0/10, 10.0.0.0/8,
+   172.16.0.0/12, 192.168.0.0/16 and 169.254.0.0/16, ACCEPT established
+   return traffic, leave public egress open (a preview is a deployed app; many
+   need an external API). Idempotent and keyed by a rule comment so it can be
+   listed and removed. Pinned by a rules-rendering test.
+3. An opt-in `preview.egress: open|public|none` in teploy.yml for the app
+   that needs the tailnet (e.g. a preview talking to a tailnet-only
+   staging database), defaulting to `public`.
+4. Live proof on compute-1: from a preview container, a tailnet peer, a LAN
+   address and the metadata address are refused; a public HTTPS fetch works;
+   Caddy still serves the preview to a tailnet client and 403s the LAN.
+
+Until then the trust statement is: a preview has the preview TARGET's network
+reach, and the target must be chosen as if it ran untrusted code with that
+reach — which is why it is compute-1 and not the Ship host.

@@ -184,11 +184,13 @@ export function resolveMainUrl(preview: Extract<PreviewOutcome, { kind: "deploye
  *
  * The variables ALSO ride ExecOptions.env, but that alone never reached the
  * command on a real sandbox: the Neutron SandboxExecutor sends only
- * cmd/cwd/timeout to the daemon, and the daemon's exec API has no env field,
- * so `env` is silently dropped (upstream, reported). LocalExecutor honours it,
+ * cmd/cwd/timeout to the daemon (sandbox.ts exec body), and the daemon's exec
+ * API had no env field, so `env` is silently dropped. LocalExecutor honours it,
  * which is why every unit test passed while the first live preview ran its
- * smoke with an empty $PREVIEW_URL (2026-09-24, run-de2120f8). Exporting in the
- * command itself works on every executor.
+ * smoke with an empty $PREVIEW_URL (2026-09-24, run-de2120f8). The daemon half
+ * is fixed in teploy-sandbox ef9328a (an `env` body field); the SDK half is
+ * upstream (UPSTREAM_BUGS 2026-09-24). Keep this until BOTH are deployed:
+ * exporting in the command itself works on every executor and daemon.
  */
 function exportLines(env: Record<string, string>): string {
   return Object.entries(env)
