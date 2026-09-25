@@ -2,6 +2,14 @@
 # for the remote image build. The Dockerfile needs only: dist/, web/dist/,
 # web/src/ (+ web config files), and deploy/ (vendor tarballs + runtime
 # package.jsons).
+#
+# teploy-cli L14 (2026-09-24): the sync now honors .gitignore and never
+# sends teploy config, overlays or env files. dist/ and web/dist/ are
+# gitignored build outputs the Dockerfile COPYs, so they are allowlisted
+# explicitly here (`!` lines). Excludes below still win over these, which
+# is what keeps the source maps out.
+!/dist/
+!/web/dist/
 .git
 node_modules
 reference
