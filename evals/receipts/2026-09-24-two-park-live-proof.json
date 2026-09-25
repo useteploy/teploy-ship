@@ -1,0 +1,103 @@
+{
+  "pass": true,
+  "runId": "two-park-proof-mugbhj6i",
+  "calls": 6,
+  "snapshots": [
+    {
+      "handle": "01M3B4W1S0K30DF3MQCBAC61EG",
+      "image": "teploy-sbx-snap:01m3b4w33b098vzwq0a5k05nd1"
+    },
+    {
+      "handle": "01M3B4W8Q50GR3Y04CA79P5H5D",
+      "image": "teploy-sbx-snap:01m3b4waaje5q5633167tt7bg0"
+    }
+  ],
+  "destroyed": [
+    "01M3B4W1S0K30DF3MQCBAC61EG",
+    "01M3B4W8Q50GR3Y04CA79P5H5D",
+    "01M3B4WFRYJ0XAJM4B086GX5DG"
+  ],
+  "scope": "real sandbox snapshots; disk store reopened at each park; scripted model; no production run",
+  "events": [
+    {
+      "type": "run-started"
+    },
+    {
+      "type": "step-completed",
+      "name": "sandbox"
+    },
+    {
+      "type": "step-completed",
+      "name": "plan-think"
+    },
+    {
+      "type": "step-completed",
+      "name": "plan-snapshot"
+    },
+    {
+      "type": "event-waiting",
+      "name": "plan-approval"
+    },
+    {
+      "type": "event-received",
+      "name": "plan-approval"
+    },
+    {
+      "type": "step-completed",
+      "name": "plan-restore"
+    },
+    {
+      "type": "step-completed",
+      "name": "turn-0-think"
+    },
+    {
+      "type": "step-completed",
+      "name": "turn-0-snapshot"
+    },
+    {
+      "type": "event-waiting",
+      "name": "turn-0-approval"
+    },
+    {
+      "type": "event-received",
+      "name": "turn-0-approval"
+    },
+    {
+      "type": "step-completed",
+      "name": "turn-0-restore"
+    },
+    {
+      "type": "step-completed",
+      "name": "turn-0-exec"
+    },
+    {
+      "type": "step-completed",
+      "name": "turn-1-think"
+    },
+    {
+      "type": "step-completed",
+      "name": "turn-1-exec"
+    },
+    {
+      "type": "step-completed",
+      "name": "turn-2-think"
+    },
+    {
+      "type": "step-completed",
+      "name": "turn-3-think"
+    },
+    {
+      "type": "step-completed",
+      "name": "turn-3-exec"
+    },
+    {
+      "type": "step-completed",
+      "name": "turn-4-think"
+    },
+    {
+      "type": "run-completed"
+    }
+  ],
+  "deployment_revision": "385532d76abf921182608eccb02b9213847938f9",
+  "deployment_image_id": "sha256:f9114556bd8dda7444759ce0db57a5ef0c36245559261425f0c7c6687db61aa6"
+}
