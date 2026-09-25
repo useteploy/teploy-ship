@@ -78,6 +78,22 @@ test('pj-s-question: the live table answer is verified, and wrong table strings 
   } finally { w.cleanup(); }
 });
 
+test('pj-s-question: Markdown file-line citations retain exact content verification', async () => {
+  const w = await world('pj-s-question');
+  try {
+    const good = ['index.html:6', 'index.html:15', 'index.html:20', 'about.html:6', 'about.html:15', 'about.html:20']
+      .map(ref => '`' + ref + '` — `Tideline Woodworks`').join('\n') + '\n`index.html:16` — `Furniture made on the coast`';
+    assert.equal((await w.grade(w.transcript(good))).pass, true);
+    const html = good.replace('`Furniture made on the coast`', '`<p class="tagline">Furniture made on the coast</p>`');
+    assert.equal((await w.grade(w.transcript(html + '\nOutcome: ' + JSON.stringify({ summary: html })))).pass, true);
+    for (const bad of [good.replace('index.html:6', 'index.html:600'),
+      good.replace('about.html:20', 'missing.html:20'),
+      good.replace('Furniture made on the coast', 'Invented tagline')]) {
+      assert.equal((await w.grade(w.transcript(bad))).pass, false);
+    }
+  } finally { w.cleanup(); }
+});
+
 test('pj-s-plan (b): wired to the transcript — preserved plans pass; missing file references, publication and no transcript do not', async () => {
   const w = await world('pj-s-plan');
   try {

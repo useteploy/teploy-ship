@@ -82,6 +82,17 @@ function tableCitations(transcript) {
   return [...transcript.matchAll(rows)].map(m => ({ file: m[1], line: Number(m[2]), str: m[3] }));
 }
 
+function markdownCitations(transcript) {
+  // Keep the file/line and quoted content on the same line; all extracted
+  // claims still go through the exact fixture checks below.
+  transcript = transcript.replace(/^Outcome: (.+)$/gm, (line, raw) => {
+    try { const outcome = JSON.parse(raw); return typeof outcome.summary === 'string' ? outcome.summary : line; }
+    catch { return line; }
+  });
+  const rows = /`([A-Za-z0-9_.-]+\.[A-Za-z0-9]+):(\d+)`[ \t]*(?:—|–|-|:)[ \t]*`([^`\n]+)`/g;
+  return [...transcript.matchAll(rows)].map(m => ({ file: m[1], line: Number(m[2]), str: m[3] }));
+}
+
 function linesContaining(files, needle) {
   const hits = new Set();
   for (const [rel, lines] of files) {
@@ -121,6 +132,7 @@ export async function grade({ workDir, fixture, scenario, transcriptPath, summar
     ...[...transcript.matchAll(CITATION)].map(m => ({ file: m[1], line: Number(m[2]), str: m[3] ?? m[4] ?? m[5] })),
     ...findingsCitations(transcript),
     ...tableCitations(transcript),
+    ...markdownCitations(transcript),
   ];
 
   let citationsOk = true;
