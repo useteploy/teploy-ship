@@ -19,8 +19,8 @@
 # Go back to the checksum-verified release download (git history of this
 # file, pre-L8) once a release at or after TEPLOY_COMMIT exists.
 FROM golang:1.26-bookworm@sha256:a688600ca24f8a4d3ca77f95b0dd40704a9fc787c826660eb7ba0b641b8b175d AS teploy-cli
-ARG TEPLOY_COMMIT=006032680a7dd0d065da90153a63e6793b1f62e1
-ARG TEPLOY_VERSION_LABEL=0.1.37-next.0060326
+ARG TEPLOY_COMMIT=2041c615a8a467ef9173d9ba8698a0d73e80a26a
+ARG TEPLOY_VERSION_LABEL=0.1.37-next.2041c61
 RUN set -eux; \
     git clone --quiet --filter=blob:none --no-checkout https://github.com/useteploy/teploy-cli /src; \
     cd /src; \
