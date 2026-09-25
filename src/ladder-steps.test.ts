@@ -77,6 +77,41 @@ test("smoke: runs the project's command in the sandbox with PREVIEW_URL set", as
   assert.equal(steps[0]?.name, "preview-smoke");
 });
 
+/**
+ * The real sandbox executor drops ExecOptions.env (the Neutron SandboxExecutor
+ * sends only cmd/cwd/timeout, and the daemon's exec API has no env field), so
+ * the first live preview smoked an empty $PREVIEW_URL. This stand-in drops env
+ * the same way; the step must still hand the command its URL.
+ */
+function envDroppingExecutor(inner: AgentExecutor): AgentExecutor {
+  return new Proxy(inner, {
+    get(target, prop, receiver) {
+      if (prop === "exec") {
+        return (cmd: string, opts: Parameters<AgentExecutor["exec"]>[1] = {}) => {
+          const { env: _dropped, ...rest } = opts ?? {};
+          return target.exec(cmd, rest);
+        };
+      }
+      const v = Reflect.get(target, prop, receiver);
+      return typeof v === "function" ? v.bind(target) : v;
+    },
+  });
+}
+
+test("smoke: PREVIEW_URL reaches the command even on an executor that drops ExecOptions.env", async () => {
+  const { ctx } = fakeCtx();
+  const { exec } = await localExecutor();
+  const url = "http://preview-x-0ac514f5.100.107.192.39.sslip.io/it's";
+  const outcome = await smokeIfDeclared(
+    ctx,
+    envDroppingExecutor(exec),
+    { ...BASE_INPUT, verification: { preview: { app: "site", smoke: `test "$PREVIEW_URL" = "${url}"` } } },
+    { kind: "deployed", url, image: "img" },
+  );
+  assert.equal(outcome?.kind, "passed", JSON.stringify(outcome));
+  if (outcome?.kind === "passed") assert.equal(outcome.command, `test "$PREVIEW_URL" = "${url}"`, "the recorded command is the declared one, not the prefixed one");
+});
+
 test("smoke: a failing command reports its output; no preview is a skip with the reason", async () => {
   const { ctx } = fakeCtx();
   const { exec } = await localExecutor();
@@ -169,6 +204,7 @@ test("visual: with a browser on PATH, both screenshots are captured inside the w
   const binDir = await mkdtemp(join(tmpdir(), "ladder-steps-bin-"));
   const exec = new LocalExecutor({ root: dir });
   await exec.exec(`mkdir -p '${binDir}' && printf '#!/bin/sh\nfor a in "$@"; do case "$a" in --screenshot=*) out="${'$'}{a#--screenshot=}";; esac; done\nprintf fake-png-bytes > "$out"\n' > '${binDir}/chromium' && chmod +x '${binDir}/chromium'`);
+  await exec.exec(`printf '#!/bin/sh\nprintf "<h1>app</h1>"\n' > '${binDir}/curl' && chmod +x '${binDir}/curl'`);
   const { ctx } = fakeCtx();
   const path = process.env.PATH;
   process.env.PATH = `${binDir}:${path ?? ""}`;
@@ -188,6 +224,34 @@ test("visual: with a browser on PATH, both screenshots are captured inside the w
     }
     const left = await exec.exec("ls .ship-visual-preview.png .ship-visual-main.png 2>/dev/null | wc -l");
     assert.equal(left.stdout.trim(), "0", "the screenshots are removed after reading — they sit in the repo tree");
+  } finally {
+    process.env.PATH = path;
+  }
+});
+
+test("visual: a sandbox egress refusal fails the rung instead of screenshotting the proxy's refusal page", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ladder-steps-visual-refused-"));
+  const binDir = await mkdtemp(join(tmpdir(), "ladder-steps-bin-"));
+  const exec = new LocalExecutor({ root: dir });
+  await exec.exec(`printf '#!/bin/sh\nfor a in "$@"; do case "$a" in --screenshot=*) out="${'$'}{a#--screenshot=}";; esac; done\nprintf fake-png-bytes > "$out"\n' > '${binDir}/chromium' && chmod +x '${binDir}/chromium'`);
+  // What the allowlist proxy answers (teploy-sandbox internal/egress).
+  await exec.exec(`printf '#!/bin/sh\necho "egress denied by the sandbox allowlist: preview-x-0ac514f5.100.107.192.39.sslip.io"\n' > '${binDir}/curl' && chmod +x '${binDir}/curl'`);
+  const { ctx } = fakeCtx();
+  const path = process.env.PATH;
+  process.env.PATH = `${binDir}:${path ?? ""}`;
+  try {
+    const outcome = await visualIfDeclared(
+      ctx,
+      exec,
+      { ...BASE_INPUT, verification: { visual: true } },
+      { kind: "deployed", url: "http://preview-x-0ac514f5.100.107.192.39.sslip.io", image: "img", previewBase: "100.107.192.39.sslip.io", mainUrl: "http://100.107.192.39/" },
+    );
+    if (outcome?.kind === "skipped") return; // a real browser on PATH hijacked the probe
+    assert.equal(outcome?.kind, "failed", JSON.stringify(outcome));
+    if (outcome?.kind === "failed") {
+      assert.match(outcome.reason, /could not reach http:\/\/preview-x-0ac514f5/);
+      assert.match(outcome.reason, /egress denied by the sandbox allowlist/);
+    }
   } finally {
     process.env.PATH = path;
   }

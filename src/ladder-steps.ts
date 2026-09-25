@@ -23,6 +23,7 @@ import type { DurableAgentConfig, DurableAgentInput } from "./durable.js";
 import { resolvePreviewTarget, destroyPreview, type PreviewOutcome } from "./deploy.js";
 import { compareHealth, effectiveTelemetryTarget, readServiceHealth, telemetryAppliesTo, telemetryRegression } from "./observe.js";
 import { runTests, testTargetFromInput, type TestOutcome } from "./tests.js";
+import { detectEgressRefusal } from "./egress.js";
 import {
   ladderRungs,
   type FlowOutcome,
@@ -130,7 +131,7 @@ export async function smokeIfDeclared(
     }
     const started = Date.now();
     try {
-      const result = await executor.exec(declared.smoke, {
+      const result = await executor.exec(`${exportLines({ PREVIEW_URL: preview.url })}${declared.smoke}`, {
         env: { PREVIEW_URL: preview.url },
         timeoutMs: input.testTimeoutMs ?? 300_000,
       });
@@ -176,6 +177,46 @@ export function resolveMainUrl(preview: Extract<PreviewOutcome, { kind: "deploye
   }
   const derived = mainUrlOf(preview.url);
   return derived !== null ? { url: derived } : { reason: `could not derive main's URL from ${preview.url}` };
+}
+
+/**
+ * `export NAME='value'` lines to prefix a sandbox command with.
+ *
+ * The variables ALSO ride ExecOptions.env, but that alone never reached the
+ * command on a real sandbox: the Neutron SandboxExecutor sends only
+ * cmd/cwd/timeout to the daemon, and the daemon's exec API has no env field,
+ * so `env` is silently dropped (upstream, reported). LocalExecutor honours it,
+ * which is why every unit test passed while the first live preview ran its
+ * smoke with an empty $PREVIEW_URL (2026-09-24, run-de2120f8). Exporting in the
+ * command itself works on every executor.
+ */
+function exportLines(env: Record<string, string>): string {
+  return Object.entries(env)
+    .map(([name, value]) => `export ${name}='${value.replace(/'/g, `'\\''`)}'\n`)
+    .join("");
+}
+
+/**
+ * Could the sandbox reach `url`, or did its egress allowlist refuse it?
+ *
+ * A headless browser behind the allowlist proxy renders the proxy's refusal
+ * text as an ordinary page, so without this the visual rung "captured" two
+ * pictures of the refusal and passed (first live preview, 2026-09-24). Narrow
+ * on purpose: only the sandbox's own refusal signatures count
+ * (detectEgressRefusal); an app that answers with an error is still a page
+ * worth a screenshot. No curl in the image means no probe, not a failure.
+ */
+async function egressRefusalFor(executor: AgentExecutor, url: string): Promise<string | undefined> {
+  const probe = await executor.exec(
+    `command -v curl >/dev/null 2>&1 || exit 0; curl -sS --max-time 20 ${JSON.stringify(url)} 2>&1 | head -c 4000`,
+    { timeoutMs: 40_000 },
+  );
+  const refusal = detectEgressRefusal(`${probe.stdout}\n${probe.stderr}`);
+  if (refusal === null) return undefined;
+  return (
+    `the sandbox could not reach ${url}: ${refusal.evidence}. A screenshot would show the refusal, not the app; ` +
+    `allow ${refusal.host ?? "the host"} for this project (teploy-ship project set <repo> --egress-allow ...)`
+  );
 }
 
 const BROWSERS = ["chromium", "chromium-browser", "google-chrome", "google-chrome-stable"];
@@ -239,6 +280,10 @@ export async function visualIfDeclared(
         if (png.byteLength === 0) return `screenshot of ${url} is empty`;
         return { png, sha256: createHash("sha256").update(png).digest("hex") };
       };
+      for (const url of [preview.url, main]) {
+        const refused = await egressRefusalFor(executor, url);
+        if (refused !== undefined) return { kind: "failed", reason: refused };
+      }
       const p = await shot(preview.url, ".ship-visual-preview.png");
       if (typeof p === "string") return { kind: "failed", reason: p };
       const m = await shot(main, ".ship-visual-main.png");
@@ -312,7 +357,7 @@ export async function flowIfPresent(
     const shots: FlowShot[] = [];
     try {
       const r = await executor.exec(
-        `rm -rf ${FLOW_OUT} && mkdir -p ${FLOW_OUT} .ship/node_modules && ln -sfn ${JSON.stringify(playwright)} .ship/node_modules/playwright && node ${FLOW_SCRIPT} "$PREVIEW_URL" ${FLOW_OUT}`,
+        `${exportLines({ PREVIEW_URL: preview.url, FLOW_OUT })}rm -rf ${FLOW_OUT} && mkdir -p ${FLOW_OUT} .ship/node_modules && ln -sfn ${JSON.stringify(playwright)} .ship/node_modules/playwright && node ${FLOW_SCRIPT} "$PREVIEW_URL" ${FLOW_OUT}`,
         { env: { PREVIEW_URL: preview.url, FLOW_OUT }, timeoutMs: input.testTimeoutMs ?? 300_000 },
       );
       const durationMs = Date.now() - started;
