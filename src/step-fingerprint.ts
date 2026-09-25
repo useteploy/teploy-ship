@@ -523,6 +523,10 @@ export const WORKFLOW_STEPS: readonly WorkflowStep[] = [
   // The preview-deploy gate mirrors previewIfAsked exactly: the run asked via
   // `preview`, or its declared ladder carries a preview rung (C4).
   { key: "step:preview-deploy", admits: (i) => i.preview === true || i.verification?.preview !== undefined },
+  // Older previews of the same pull request, removed once a follow-up's
+  // preview is up (preview-supersede.ts). Its own flag, absent from every log
+  // written before it, so no in-flight run's fingerprint moves.
+  { key: "step:preview-supersede", admits: (i) => i.supersedePreviews === true },
   { key: "step:telemetry-check", admits: (i) => i.telemetry === true },
   { key: "step:verification", admits: repoRun },
   { key: "step:tests", admits: (i) => i.tests === true },

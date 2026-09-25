@@ -11,7 +11,7 @@ const started = (input: Record<string, unknown>): LogEvent[] => [{ type: "run-st
 const DECLARED = started({ verification: { preview: { app: "site", smoke: "true" } } });
 const URL_ = "http://preview-ship-abc-1a2b3c4d.100.101.102.103.sslip.io/";
 const BASE = "100.101.102.103.sslip.io";
-const opts = (o: Partial<{ executing: boolean; now: number; dashboardOrigin: string; frameBase: string | undefined }> = {}) => ({ executing: false, now: NOW, dashboardOrigin: DASH, frameBase: BASE, ...o });
+const opts = (o: Partial<{ executing: boolean; now: number; dashboardOrigin: string; frameBase: string | undefined; superseded: { byRunId: string; revision?: string } }> = {}) => ({ executing: false, now: NOW, dashboardOrigin: DASH, frameBase: BASE, ...o });
 
 test("preview panel: nothing declared is its own state, not a failure", () => {
   assert.deepEqual(previewPanel(started({}), {}, opts()), { state: "none" });
@@ -103,4 +103,20 @@ test("the web process derives the frame base from the same SHIP_PREVIEW_TAILNET_
   assert.equal(previewFrameBase({ SHIP_PREVIEW_TAILNET_IP: "100.101.102.103" }), BASE);
   assert.equal(previewFrameBase({}), undefined);
   assert.equal(previewFrameBase({ SHIP_PREVIEW_TAILNET_IP: "192.168.1.5" }), undefined, "not a tailnet address: frame nothing");
+});
+
+test("preview panel: a preview a newer revision replaced says so and links the run that replaced it, with no frame", () => {
+  const preview = { kind: "deployed", url: URL_, expiresAt: "2026-09-25T10:00:00Z" };
+  const revision = "b".repeat(40);
+  assert.deepEqual(previewPanel(DECLARED, { preview }, opts({ superseded: { byRunId: "run-2", revision } })), {
+    state: "superseded",
+    url: URL_,
+    byRunId: "run-2",
+    revision,
+  });
+  assert.deepEqual(previewPanel(DECLARED, { preview }, opts({ superseded: { byRunId: "run-2" } })), { state: "superseded", url: URL_, byRunId: "run-2" });
+  // Superseded wins over expiry: the page says what actually removed it.
+  assert.equal(previewPanel(DECLARED, { preview }, opts({ now: Date.parse("2026-09-26T00:00:00Z"), superseded: { byRunId: "run-2" } })).state, "superseded");
+  // A failed preview has nothing to supersede.
+  assert.equal(previewPanel(DECLARED, { preview: { kind: "failed", reason: "x" } }, opts({ superseded: { byRunId: "run-2" } })).state, "failed");
 });

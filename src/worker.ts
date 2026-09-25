@@ -20,6 +20,7 @@ import { externalAdapters } from "./harness-external.js";
 import { isAskEvent, pendingQuestion } from "./ask.js";
 import { hostRunner, previewTargetFromEnv, sweepStalePreviewCheckouts } from "./deploy.js";
 import type { CommandRunner } from "./deploy.js";
+import { parseSupersededMark, previewSupersededKey } from "./preview-supersede.js";
 import { telemetryTargetFromEnv } from "./observe.js";
 import { readServiceHealth } from "./observe.js";
 import { testTargetFromEnv } from "./tests.js";
@@ -798,6 +799,15 @@ export function startWorker(options: WorkerOptions): {
     // that asked for a preview then records the step as disabled rather than
     // silently skipping it.
     ...(previewTargetFromEnv() !== undefined ? { preview: previewTargetFromEnv()! } : {}),
+    // Run history for the preview-supersede step: a follow-up's preview removes
+    // the older runs' previews on the same pull request and leaves the reverse
+    // link their pages read (preview-supersede.ts).
+    previewLineage: {
+      loadEvents: (runId) => options.runtime.store.load(runId),
+      recentRunIds: async () => (await options.runtime.listMeta({ limit: 100 })).map((m) => m.runId),
+      marked: async (runId) => parseSupersededMark(await options.runtime.config.get(previewSupersededKey(runId))),
+      mark: (runId, mark) => options.runtime.config.set(previewSupersededKey(runId), JSON.stringify(mark), "preview-supersede"),
+    },
     // Where this worker reads service health (OBSERVE_URL + OBSERVE_READ_TOKEN
     // + OBSERVE_SERVICE). Absent unless all three are set.
     ...(telemetryTargetFromEnv() !== undefined ? { telemetry: telemetryTargetFromEnv()! } : {}),

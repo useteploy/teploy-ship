@@ -244,12 +244,21 @@ export type PreviewPanel =
   | { state: "failed"; reason: string }
   | { state: "deployed"; url: string; expiresAt?: string; blocked?: string }
   | { state: "expired"; url: string; expiresAt: string }
-  | { state: "removed"; url: string; reason: string };
+  | { state: "removed"; url: string; reason: string }
+  /** A newer revision of the same pull request deployed its own preview and removed this one (preview-supersede.ts). */
+  | { state: "superseded"; url: string; byRunId: string; revision?: string };
 
 export function previewPanel(
   events: LogEvent[],
   facts: Record<string, any>,
-  opts: { executing: boolean; now: number; dashboardOrigin: string; frameBase?: string },
+  opts: {
+    executing: boolean;
+    now: number;
+    dashboardOrigin: string;
+    frameBase?: string;
+    /** The mark a newer run left when it removed this run's preview. */
+    superseded?: { byRunId: string; revision?: string };
+  },
 ): PreviewPanel {
   const input = record(record(events.find((e) => e.type === "run-started")?.data).input);
   const declared = input.preview === true || record(input.verification).preview !== undefined;
@@ -273,6 +282,14 @@ export function previewPanel(
   }
   if (rollback.kind === "rolled-back" && rollback.scope === "preview") {
     return { state: "removed", url, reason: "The preview regressed and was removed by recovery." };
+  }
+  if (opts.superseded !== undefined) {
+    return {
+      state: "superseded",
+      url,
+      byRunId: opts.superseded.byRunId,
+      ...(opts.superseded.revision !== undefined ? { revision: opts.superseded.revision } : {}),
+    };
   }
   const expiresAt = typeof p.expiresAt === "string" && !Number.isNaN(Date.parse(p.expiresAt)) ? p.expiresAt : undefined;
   if (expiresAt !== undefined && Date.parse(expiresAt) <= opts.now) return { state: "expired", url, expiresAt };

@@ -539,3 +539,54 @@ test('migration preserves malformed unbound legacy records for inspection and re
   await store.remove('--store');
   assert.deepEqual(await new FileProjectStore(dir).list(),[]);
 });
+
+test("enqueueRun adds the tailnet preview host (and main's host for the visual rung) to a previewing project's egress allowlist; explicit entries survive", async () => {
+  const dir = await tempDir();
+  const projects = new FileProjectStore(dir);
+  await projects.set({
+    repo: TS_URL,
+    url: TS_URL,
+    sandboxEgressAllow: ["rubygems.org", ".100.101.102.103.sslip.io"],
+    verification: { preview: { app: "site", smoke: "true" }, visual: true },
+    autoMerge: false,
+    autoDeploy: false,
+  });
+  await projects.set({ repo: GO_URL, url: GO_URL, sandboxEgressAllow: ["proxy.golang.org"], autoMerge: false, autoDeploy: false });
+  const inputs: Array<Record<string, unknown>> = [];
+  const runtime = {
+    kind: "file",
+    projects,
+    evidence: new ProjectEvidenceStore(projects, new FileEvidenceStore(dir)),
+    governance: { get: async () => ({ authority: {}, windows: {}, reviewers: [] }) },
+    store: {
+      append: async (_runId: string, event: { type: string; data?: { input?: Record<string, unknown> } }) => {
+        if (event.type === "run-started") inputs.push(event.data!.input!);
+      },
+    },
+    saveMeta: async () => {},
+  } as unknown as ShipRuntime;
+  const saved = { ip: process.env.SHIP_PREVIEW_TAILNET_IP, main: process.env.SHIP_PREVIEW_MAIN_URL };
+  try {
+    process.env.SHIP_PREVIEW_TAILNET_IP = "100.101.102.103";
+    process.env.SHIP_PREVIEW_MAIN_URL = "site=http://100.101.102.103/,other=https://other.example.com";
+    await enqueueRun(runtime, { runId: "p1", task: "t", model: "m", repo: TS_URL });
+    await enqueueRun(runtime, { runId: "p2", task: "t", model: "m", repo: GO_URL });
+    await enqueueRun(runtime, { runId: "p3", task: "t", model: "m", repo: TS_URL, pr: 4 });
+    delete process.env.SHIP_PREVIEW_TAILNET_IP;
+    await enqueueRun(runtime, { runId: "p4", task: "t", model: "m", repo: TS_URL });
+  } finally {
+    if (saved.ip === undefined) delete process.env.SHIP_PREVIEW_TAILNET_IP;
+    else process.env.SHIP_PREVIEW_TAILNET_IP = saved.ip;
+    if (saved.main === undefined) delete process.env.SHIP_PREVIEW_MAIN_URL;
+    else process.env.SHIP_PREVIEW_MAIN_URL = saved.main;
+  }
+  assert.deepEqual(
+    inputs[0]!.sandboxEgressAllow,
+    ["rubygems.org", ".100.101.102.103.sslip.io", "100.101.102.103"],
+    "explicit entries first and kept; the derived suffix de-duplicates against a hand-added one; main's host for the visual rung",
+  );
+  assert.deepEqual(inputs[1]!.sandboxEgressAllow, ["proxy.golang.org"], "a project with no declared preview gets nothing derived");
+  assert.equal(inputs[0]!.supersedePreviews, undefined, "a first run has no older previews to supersede");
+  assert.equal(inputs[2]!.supersedePreviews, true, "a follow-up on a pull request removes the older runs' previews");
+  assert.deepEqual(inputs[3]!.sandboxEgressAllow, ["rubygems.org", ".100.101.102.103.sslip.io"], "without the tailnet setting only the explicit entries remain");
+});

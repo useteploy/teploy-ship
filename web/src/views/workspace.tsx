@@ -135,6 +135,15 @@ export function PreviewPanelView({ panel }: { panel: PreviewPanel }) {
           Removed: {panel.reason} <code>{panel.url}</code> no longer serves this change.
         </p>
       )}
+      {panel.state === "superseded" && (
+        <p class="meta">
+          Superseded by{" "}
+          <a href={`/runs/${encodeURIComponent(panel.byRunId)}`}>
+            {panel.revision !== undefined ? `revision ${panel.revision.slice(0, 10)}` : `run ${panel.byRunId}`}
+          </a>
+          . Its preview replaced this one, so <code>{panel.url}</code> no longer serves this change.
+        </p>
+      )}
       {panel.state === "deployed" && (
         <>
           <div class="preview-bar">

@@ -47,6 +47,7 @@ import {
   publishedDiff,
 } from "./git.js";
 import { deployPreview, resolvePreviewTarget, destroyPreview, type PreviewOutcome, type PreviewTarget } from "./deploy.js";
+import { supersedePreviews, type PreviewLineage, type SupersedeOutcome } from "./preview-supersede.js";
 import {
   effectiveAuthority,
   ladderGate,
@@ -283,6 +284,16 @@ export interface DurableAgentInput {
    * evidence about it.
    */
   preview?: boolean;
+  /**
+   * When this run is a follow-up on an existing pull request and its preview
+   * deploys, destroy the previews of OLDER runs of the same pull request
+   * (superseded revisions, and the run the follow-up cancelled) — the
+   * `preview-supersede` step, preview-supersede.ts. Previews stay per
+   * revision; this only removes the ones a newer revision replaced, and never
+   * reaches a run enqueued after this one. Materialised at enqueue because it
+   * adds a recorded step.
+   */
+  supersedePreviews?: boolean;
   /**
    * Read the affected service's error rate and latency around this change and
    * put the numbers on the pull request.
@@ -812,6 +823,13 @@ export interface DurableAgentConfig {
    * the input — same rule as the code index.
    */
   preview?: PreviewTarget;
+  /**
+   * Run history for the `preview-supersede` step (preview-supersede.ts): the
+   * earlier runs of a pull request, and the reverse link a superseded run's
+   * page reads. Absent = the step records itself skipped, so the step
+   * sequence stays a function of the input.
+   */
+  previewLineage?: PreviewLineage;
   /**
    * Where this worker reads telemetry, if it may at all. Worker wiring for the
    * same reason as `preview`: it carries a credential (an Observe share token)
@@ -2646,12 +2664,15 @@ async function publishIfRepoRun(
       },
       EXTERNAL_EFFECT_RETRY,
     );
-    // A review follow-up pushed new commits to the same branch, so the preview
-    // that branch is on is now stale. Refresh it, unless nothing was pushed.
-    // A review follow-up pushed new commits, so any preview is stale and the
-    // numbers moved. Refresh both, run the ladder legs over the fresh preview,
-    // then amend the same Verification section.
+    // A review follow-up pushed new commits, so the earlier preview shows an
+    // older revision and the numbers moved. Previews are per revision: this
+    // deploys a NEW preview of the pushed commit in its own slot (the earlier
+    // one is not refreshed in place), then removes the previews of the older
+    // runs on this pull request, runs the ladder legs over the new preview,
+    // and amends the same Verification section. Nothing is deployed when
+    // nothing was pushed.
     const followUpPreview = push.kind === "pushed" ? await previewIfAsked(ctx, config, input, co.branch, push.sha) : undefined;
+    if (followUpPreview !== undefined && input.supersedePreviews === true) await supersedeOlderPreviews(ctx, config, input, followUpPreview);
     const legs = await runLadderLegs(ctx, executor, config, input, followUpPreview, co.branch, { baseline, build, tests }, assetSink(ref, token, input.pr, config.artifacts));
     const followUpProof = proofLinks(legs);
     const followUp: Evidence = {
@@ -3276,6 +3297,38 @@ async function previewIfAsked(
   // Verification section — see publishVerification. Reporting it here as its
   // own comment made a reviewer hunt for two footnotes under the body.
   return outcome;
+}
+
+/**
+ * `preview-supersede`: once this follow-up's preview is up, destroy the
+ * previews of older runs on the same pull request (preview-supersede.ts).
+ * Recorded whenever the input asks and a preview step ran, refusals included,
+ * so step presence stays a function of the recorded input and the preview
+ * step's outcome. Advisory like the preview itself: never fails the run.
+ */
+async function supersedeOlderPreviews(
+  ctx: WorkflowContext,
+  config: DurableAgentConfig,
+  input: DurableAgentInput,
+  preview: PreviewOutcome,
+): Promise<SupersedeOutcome> {
+  return await ctx.step("preview-supersede", async (): Promise<SupersedeOutcome> => {
+    if (preview.kind !== "deployed") {
+      return { kind: "skipped", reason: `this run's preview did not deploy (${preview.kind}), so the older previews stay up` };
+    }
+    if (config.preview === undefined) return { kind: "skipped", reason: "no preview target configured on this worker" };
+    if (config.previewLineage === undefined) return { kind: "skipped", reason: "this worker cannot read earlier runs" };
+    const own = await config.previewLineage.loadEvents(ctx.runId).catch(() => []);
+    const at = own.find((e) => e.type === "run-started")?.at;
+    return await supersedePreviews({
+      runId: ctx.runId,
+      ...(at !== undefined ? { at } : {}),
+      input,
+      preview,
+      target: config.preview,
+      lineage: config.previewLineage,
+    });
+  });
 }
 
 /**
