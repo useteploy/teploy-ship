@@ -2,7 +2,9 @@
 
 Ship works without Akiroo. `examples/http-client.mjs` is a dependency-free Node
 22 example using the same external HTTP surfaces as the dashboard. It imports
-no Ship runtime, store, or Akiroo code. Supply your Ship origin and bearer token
+no Ship runtime, store, or Akiroo code. First add the repository in Ship’s Projects
+page with its test command and intended authority; an allowlisted forge alone
+does not create a connected project. Supply your Ship origin and bearer token
 through your own secret handling; never commit tokens or put them in URLs.
 
 ```js
