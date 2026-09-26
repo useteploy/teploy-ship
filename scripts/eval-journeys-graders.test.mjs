@@ -86,6 +86,16 @@ test('pj-s-question: Markdown file-line citations retain exact content verificat
     assert.equal((await w.grade(w.transcript(good))).pass, true);
     const html = good.replace('`Furniture made on the coast`', '`<p class="tagline">Furniture made on the coast</p>`');
     assert.equal((await w.grade(w.transcript(html + '\nOutcome: ' + JSON.stringify({ summary: html })))).pass, true);
+    for (const separator of ['→', '->']) {
+      const arrows = html.replaceAll(' — ', ` ${separator} `);
+      assert.equal((await w.grade(w.transcript(arrows))).pass, true);
+      assert.equal((await w.grade(w.transcript('Outcome: ' + JSON.stringify({ summary: arrows })))).pass, true);
+      for (const bad of [arrows.replace('index.html:16', 'index.html:600'),
+        arrows.replace('index.html:16', 'missing.html:16'),
+        arrows.replace('Furniture made on the coast', 'Invented tagline')]) {
+        assert.equal((await w.grade(w.transcript(bad))).pass, false);
+      }
+    }
     for (const bad of [good.replace('index.html:6', 'index.html:600'),
       good.replace('about.html:20', 'missing.html:20'),
       good.replace('Furniture made on the coast', 'Invented tagline')]) {

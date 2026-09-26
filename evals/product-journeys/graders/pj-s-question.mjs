@@ -89,7 +89,7 @@ function markdownCitations(transcript) {
     try { const outcome = JSON.parse(raw); return typeof outcome.summary === 'string' ? outcome.summary : line; }
     catch { return line; }
   });
-  const rows = /`([A-Za-z0-9_.-]+\.[A-Za-z0-9]+):(\d+)`[ \t]*(?:—|–|-|:)[ \t]*`([^`\n]+)`/g;
+  const rows = /`([A-Za-z0-9_.-]+\.[A-Za-z0-9]+):(\d+)`[ \t]*(?:—|–|→|->|-|:)[ \t]*`([^`\n]+)`/g;
   return [...transcript.matchAll(rows)].map(m => ({ file: m[1], line: Number(m[2]), str: m[3] }));
 }
 
