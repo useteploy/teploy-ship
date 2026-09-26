@@ -362,3 +362,42 @@ test("transaction pins statements and commit to one connection; errors roll back
   assert.equal(connects,2);
   assert.deepEqual(releases,[false,true]);
 });
+
+test("pool saturation bounds fresh retries and releases capacity after cleanup", async () => {
+  const failed = new Error("timeout exceeded when trying to connect");
+  const { pool } = fakePool({ poolRejections: Array(20).fill(failed) });
+  let opened = 0;
+  let ended = 0;
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const db = new NucleusPgwire("", "bounded-retry", { pool, solo: () => {
+    opened += 1;
+    return {
+      async connect() { await gate; },
+      async query() { return { rows: [], rowCount: 0 }; },
+      async end() { ended += 1; },
+    };
+  } });
+  const first = Array.from({ length: 4 }, () => db.query("SELECT 1"));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(opened, 4);
+  await assert.rejects(db.query("SELECT 1"), error => error === failed);
+  assert.equal(opened, 4, "pool failure must not create another connection at capacity");
+  release();
+  await Promise.all(first);
+  assert.equal(ended, 4);
+  await db.query("SELECT 1");
+  assert.equal(opened, 5, "cleanup restores retry capacity");
+  assert.equal(ended, 5);
+});
+
+test("a throwing retry factory does not permanently consume retry capacity", async () => {
+  const { pool } = fakePool({ poolRejections: Array(6).fill(MASKED) });
+  let calls = 0;
+  const db = new NucleusPgwire("", "factory-error", { pool, solo: () => {
+    calls += 1;
+    throw new Error("factory failed");
+  } });
+  for (let i = 0; i < 6; i += 1) await assert.rejects(db.query("SELECT 1"), /factory failed/);
+  assert.equal(calls, 6);
+});

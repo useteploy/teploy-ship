@@ -1,5 +1,15 @@
 # Open audit items
 
+## 2026-09-25 — database retry pressure
+
+Fresh-connection retries bypassed the four-connection pool without a concurrency
+limit or connection deadline. Concurrent pool timeouts could therefore amplify
+connection pressure. Each client now allows at most four fresh retries, refuses
+excess retries with the original error, and applies a five-second connection
+and 30-second query timeout. Cleanup restores capacity even when construction
+fails. This contains retry fan-out; it does not establish the cause of the
+observed database stalls or claim those upstream stalls are fixed.
+
 ## 2026-09-25 — narrow-screen decision cards
 
 Long request-derived run IDs made Inbox approval rows wider than the phone

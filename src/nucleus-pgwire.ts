@@ -116,6 +116,7 @@ export class NucleusPgwire {
   #inTransaction = false;
   /** How the retry path opens a connection that shares nothing with the pool. */
   #solo: (() => SoloClientLike) | null;
+  #soloActive = 0;
 
   /**
    * @param owner Same identifier callers already pass to `nucleusRuntime`
@@ -125,7 +126,11 @@ export class NucleusPgwire {
    */
   constructor(url: string, owner = "unknown", deps: { pool?: PoolLike; solo?: () => SoloClientLike } = {}) {
     this.#owner = owner;
-    this.#solo = deps.solo ?? (url === "" ? null : () => new pg.Client({ connectionString: url }) as unknown as SoloClientLike);
+    this.#solo = deps.solo ?? (url === "" ? null : () => new pg.Client({
+      connectionString: url,
+      connectionTimeoutMillis: 5_000,
+      query_timeout: 30_000,
+    }) as unknown as SoloClientLike);
     this.#pool = deps.pool ?? new pg.Pool({
       connectionString: url,
       max: 4,
@@ -223,6 +228,9 @@ export class NucleusPgwire {
       return await this.#pool.query(sql, params);
     } catch (error) {
       if (!isTransientPoolFailure(error)) throw error;
+      // A saturated pool must not fan out into unbounded fresh connections.
+      // Preserve the original failure when the retry budget is occupied.
+      if (this.#solo !== null && this.#soloActive >= 4) throw error;
       console.error(
         `[nucleus-pgwire] pool query failed (${this.#owner}), retrying on a connection of its own: ${describe(error)}`,
       );
@@ -239,8 +247,10 @@ export class NucleusPgwire {
           throw again instanceof Error ? again : new Error(`nucleus query rejected with a non-error value: ${describe(again)}`);
         }
       }
-      const solo = this.#solo();
+      this.#soloActive += 1;
+      let solo: SoloClientLike | undefined;
       try {
+        solo = this.#solo();
         await solo.connect();
         return await solo.query(sql, params);
       } catch (again) {
@@ -248,7 +258,11 @@ export class NucleusPgwire {
       } finally {
         // Never let closing the throwaway connection mask the result or the
         // error above it.
-        await solo.end().catch(() => {});
+        try {
+          await solo?.end().catch(() => {});
+        } finally {
+          this.#soloActive -= 1;
+        }
       }
     }
   }
