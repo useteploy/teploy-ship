@@ -24,7 +24,7 @@ test('independent client preserves refusals, decisions and cancellation state ov
   try {
     const origin = `http://127.0.0.1:${server.address().port}`;
     const ship = new ShipClient(origin, 'test-only');
-    const request = { task: 'explain', repo: 'https://example.invalid/repo', journey: 'question', requestId: 'persisted-id' };
+    const request = { task: 'explain', repo: 'https://example.invalid/repo', journey: 'investigate', requestId: 'persisted-id' };
     assert.equal(await ship.create(request), 'run-one');
     assert.equal(await ship.create(request), 'run-one');
     assert.equal(requests[0].body, requests[1].body);

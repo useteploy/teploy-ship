@@ -14,7 +14,7 @@ const ship = new ShipClient(process.env.SHIP_URL, process.env.SHIP_WEB_TOKEN);
 const requestId = randomUUID(); // persist before submission
 const id = await ship.create({
   task: 'Explain the request validation path, with file citations.',
-  repo: 'https://github.com/your-org/your-repo', journey: 'question', requestId,
+  repo: 'https://github.com/your-org/your-repo', journey: 'investigate', requestId,
 });
 console.log(await ship.workspace(id));
 ```
