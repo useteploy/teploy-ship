@@ -1,5 +1,13 @@
 # Open audit items
 
+## 2026-09-25 — narrow-screen decision cards
+
+Long request-derived run IDs made Inbox approval rows wider than the phone
+viewport. Approval rows now wrap; IDs wrap within the available width and keep
+the review action visible. A temporary style applied in the shared browser
+removed the measured document overflow. Repository web checks and deployed
+read-back remain required.
+
 ## 2026-09-25 — deployment history verification
 
 The operator history digest used to replace failed event-store reads with empty

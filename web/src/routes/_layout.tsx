@@ -259,6 +259,9 @@ h2.section { font-size: 14px; color: var(--dim); font-weight: 500; text-transfor
   padding: 12px 14px; margin: 8px 0; }
 .card.attn { border-left: 3px solid var(--yellow); }
 .row-actions { display: flex; gap: 8px; align-items: center; }
+.card.attn > .row-actions { flex-wrap: wrap; }
+.card.attn > .row-actions > a { min-width: 0; overflow-wrap: anywhere; flex: 1 1 12rem; }
+.card.attn > .row-actions > .spacer { display: none; }
 .chip { display: inline-block; padding: 2px 9px; border-radius: 10px; font-size: 12px;
   border: 1px solid var(--border); color: var(--dim); }
 .chips { display: flex; gap: 6px; margin: 10px 0 4px; flex-wrap: wrap; }
