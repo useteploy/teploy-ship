@@ -1,5 +1,14 @@
 # Open audit items
 
+## 2026-09-25 — deployment history verification
+
+The operator history digest used to replace failed event-store reads with empty
+histories, potentially certifying an incomplete read as a successful comparison.
+It now aborts without emitting a digest if any stream fails to load. Regression
+coverage checks read failure, repeatability and changed event detection. A digest
+still requires a quiescent boundary and a separately verified backup; it does not
+establish that the database contains every expected run.
+
 ## Akiroo remediation — 2026-09-12
 
 The [delivery contract](docs/AKIROO_DELIVERY.md) records the paired receiver/sender

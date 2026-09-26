@@ -21,8 +21,8 @@ for (const id of ids) {
   h.update(id);
   h.update(status);
   if (status === "waiting") waiting.push(id);
-  let log = [];
-  try { log = await store.load(id); } catch { log = []; }
+  // A failed read cannot certify that a deployment preserved this history.
+  const log = await store.load(id);
   for (const e of log) { events++; h.update(JSON.stringify(e)); }
 }
 console.log(JSON.stringify({ runs: ids.length, events, historySHA256: h.digest("hex"), waiting: waiting.sort() }));
