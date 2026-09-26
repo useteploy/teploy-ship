@@ -151,3 +151,23 @@ test("an ask park reads as a question, and its decision as the answer", () => {
   assert.equal(items[1]?.body, "Archive them");
   assert.equal(items[2]?.title, "waiting for approval");
 });
+
+// The production workflow's terminal timeout uses error.message, whereas
+// problem responses use detail/title. Both must reach the workspace evidence.
+test("failure evidence preserves workflow and problem-response causes", () => {
+  for (const [error, expected] of [
+    [{ message: "timeout expired" }, "timeout expired"],
+    [{ title: "Unavailable", detail: "store read timed out" }, "store read timed out"],
+    [{ detail: "", message: "connection reset", title: "Failed" }, "connection reset"],
+    ["model request failed", "model request failed"],
+    [{ message: 42 }, "No error detail was recorded."],
+    [undefined, "No error detail was recorded."],
+  ] as const) {
+    for (const type of ["run-failed", "step-failed"] as const) {
+      const events = [{ v: 1, seq: 1, type, name: "turn-5-think", at: T0, data: { error, attempt: 1 } }] as WorkflowEvent[];
+      const errors = toTimeline(events).filter((item) => item.kind === "error");
+      assert.equal(errors.length, 1);
+      assert.equal(errors[0]?.body, expected);
+    }
+  }
+});
