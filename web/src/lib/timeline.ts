@@ -198,11 +198,11 @@ export function toTimeline(events: WorkflowEvent[]): TimelineItem[] {
         break;
       }
       case "step-failed": {
-        const data = event.data as { error?: { message?: string }; attempt?: number } | undefined;
+        const data = event.data as { error?: unknown; attempt?: number } | undefined;
         items.push({
           kind: "error",
           title: `${event.name ?? "step"} failed (attempt ${data?.attempt ?? "?"})`,
-          body: data?.error?.message ?? "",
+          body: failureMessage(data?.error),
           at,
         });
         break;
@@ -247,8 +247,8 @@ export function toTimeline(events: WorkflowEvent[]): TimelineItem[] {
         break;
       }
       case "run-failed": {
-        const error = (event.data as { error?: { detail?: string; title?: string } } | undefined)?.error;
-        items.push({ kind: "error", title: "run failed", body: error?.detail ?? error?.title ?? "", at });
+        const error = (event.data as { error?: unknown } | undefined)?.error;
+        items.push({ kind: "error", title: "run failed", body: failureMessage(error), at });
         break;
       }
       default:
@@ -450,4 +450,15 @@ export function took(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
   const s = ms / 1000;
   return s < 60 ? `${s.toFixed(1)}s` : `${Math.floor(s / 60)}m ${String(Math.round(s % 60)).padStart(2, "0")}s`;
+}
+
+function failureMessage(error: unknown): string {
+  if (typeof error === "string" && error.trim() !== "") return error;
+  if (typeof error === "object" && error !== null) {
+    for (const key of ["detail", "message", "title"] as const) {
+      const value = (error as Record<string, unknown>)[key];
+      if (typeof value === "string" && value.trim() !== "") return value;
+    }
+  }
+  return "No error detail was recorded.";
 }

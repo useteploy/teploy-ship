@@ -547,3 +547,17 @@ proof on the target):**
 Until then the trust statement is: a preview has the preview TARGET's network
 reach, and the target must be chosen as if it ran untrusted code with that
 reach — which is why it is compute-1 and not the Ship host.
+
+### 2026-09-26 — terminal failure evidence
+
+Fixed on this branch: workflow terminal errors with `{error:{message:...}}`
+rendered an empty explanation in the workspace and its API. The timeline now
+reads the recorded detail/message/title or legacy string, and explicitly names
+missing details. Step failures use the same handling. This repairs presentation;
+it does not claim to fix the timeout that produced the event.
+
+Validation: lint; 1,411 runtime tests; 100 script tests with one existing skip;
+136 web tests; production web build. Initial web run through a shared dependency
+symlink loaded duplicate project-error classes and failed two unrelated identity
+checks; installing this worktree's web dependencies resolved both. Original
+failure log retained in the private execution receipts.
