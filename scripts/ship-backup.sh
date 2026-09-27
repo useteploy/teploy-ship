@@ -275,7 +275,9 @@ cmd_rehearse() {
 
   # Same posture as the teploy.yml accessory: no-auth pgwire, no clustering,
   # and the engine memory budget set above the 512 MB default so a real store
-  # is not rejected on load during the proof.
+  # is not rejected on load during the proof. Explicitly name the restored
+  # mount and local non-TLS transport: image defaults enable TLS, while the
+  # rehearsal client uses plain pgwire on its loopback-only published port.
   docker run -d --name "$name" \
     -p 127.0.0.1::5432 \
     -v "$rehearsal/$(basename "$NUCLEUS_DATA_REL"):/data" \
@@ -283,7 +285,8 @@ cmd_rehearse() {
     -e NUCLEUS_ALLOW_INSECURE_CLUSTER=1 \
     -e NUCLEUS_ALLOW_INSECURE_REPLICATION=1 \
     -e NUCLEUS_MAX_MEMORY_MB="${SHIP_REHEARSE_MAX_MEMORY_MB:-1024}" \
-    "$image" >/dev/null
+    "$image" start --data /data --host 0.0.0.0 --no-tls \
+      --max-memory "${SHIP_REHEARSE_MAX_MEMORY_MB:-1024}" >/dev/null
 
   local endpoint timeout elapsed=0
   endpoint="$(docker port "$name" 5432/tcp | head -1)"

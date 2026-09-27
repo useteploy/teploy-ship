@@ -572,3 +572,18 @@ Validation: lint; 1,411 runtime tests; 100 script tests with one existing skip;
 symlink loaded duplicate project-error classes and failed two unrelated identity
 checks; installing this worktree's web dependencies resolved both. Original
 failure log retained in the private execution receipts.
+
+## 2026-09-27 — rehearsal transport and completed coordination wording
+
+An exact production backup booted under Nucleus v1.1.1, but the rehearsal
+client lost its connection because the image default enabled TLS. Start the
+proof engine with explicit `/data`, host, non-TLS transport and memory budget,
+matching its loopback-only client. A restored 352-run store then exposed all
+five waiting decisions and passed the candidate fingerprint preflight. Keep
+independent history-count/digest verification in the release receipt; an empty
+preflight alone is not evidence that a populated backup restored correctly.
+
+The real standalone API/client coordination completed through both normal merge
+approvals and its compatibility scan. Its client description still said the
+check was owed despite the complete badge. It now points to the actual check
+result below without asserting an obsolete pending state.
