@@ -66,6 +66,10 @@ route and the forge co-location gate — and writes nothing and starts nothing
 unless all of them answered. It never fetches credentials over the network; you
 carry them in the bundle, and the reasoning is in `src/join.ts`.
 
+**Integrating another application?** The [independent HTTP client](docs/HTTP_CLIENT.md)
+shows task submission, progress, decisions, cancellation and follow-ups without
+Akiroo or direct store access.
+
 **First time? [docs/QUICKSTART.md](docs/QUICKSTART.md)** — nothing to a pull
 request that carries its test result, skipping everything
 you do not need to see the loop work.
