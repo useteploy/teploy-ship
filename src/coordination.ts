@@ -1133,6 +1133,10 @@ async function launchChild(
       model: claimed.model,
       repo: child.repo,
       journey: "change",
+      // Coordination depends on merge receipts, so publishing a PR alone is
+      // insufficient even on deployments where standalone change gates are off.
+      changeClass: true,
+      mergeGate: true,
       source: "manual",
       // The repos were typed by an authenticated human on the coordination
       // form; the allowlist was checked at creation and binds here too.

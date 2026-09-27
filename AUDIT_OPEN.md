@@ -1,5 +1,16 @@
 # Open audit items
 
+## 2026-09-27 — coordination on a minimal installation
+
+Coordination children inherited disabled change/merge gates, so successful PR
+publication ended their runs without the merge receipt required by the pair.
+The API was marked failed and held the client even after a separate forge merge.
+New coordination children now explicitly request classification and the existing
+merge boundary; operator approval and authority rechecks remain in that path.
+Regression coverage reproduces the missing flags and checks both children.
+Existing failed pairs are not rewritten or treated as merged; external merge
+reconciliation and the full live producer/consumer run remain acceptance work.
+
 ## 2026-09-25 — database retry pressure
 
 Fresh-connection retries bypassed the four-connection pool without a concurrency

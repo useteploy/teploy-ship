@@ -691,3 +691,25 @@ test("sweepCoordinations advances every coordination and collects per-record err
   assert.deepEqual((await listCoordinations(runtime)).map((r) => r.id).sort(), [fake.record.id, second.id].sort(), "the broken record never lists");
   assert.equal(third.errors.length, 0);
 });
+
+
+test("coordination requires a recorded merge even when deployment-wide change gates are off", async () => {
+  const saved = { change: process.env.SHIP_CHANGE_CLASS, merge: process.env.SHIP_MERGE_GATE };
+  process.env.SHIP_CHANGE_CLASS = "0";
+  process.env.SHIP_MERGE_GATE = "0";
+  try {
+    const fake = await newPair();
+    const api = await launchNext(fake.runtime, fake.record.id);
+    const input = recordedInput(fake, api.runId!) as unknown as { changeClass?: boolean; mergeGate?: boolean };
+    assert.equal(input.changeClass, true, "API change must reach classification and its merge boundary");
+    assert.equal(input.mergeGate, true, "publishing a PR alone cannot satisfy the dependency");
+    mergeRun(fake, api.runId!, "abc123def456");
+    const client = await launchNext(fake.runtime, fake.record.id);
+    const next = recordedInput(fake, client.runId!) as unknown as { changeClass?: boolean; mergeGate?: boolean };
+    assert.equal(next.changeClass, true);
+    assert.equal(next.mergeGate, true, "client completion also requires a recorded merge");
+  } finally {
+    if (saved.change === undefined) delete process.env.SHIP_CHANGE_CLASS; else process.env.SHIP_CHANGE_CLASS = saved.change;
+    if (saved.merge === undefined) delete process.env.SHIP_MERGE_GATE; else process.env.SHIP_MERGE_GATE = saved.merge;
+  }
+});
