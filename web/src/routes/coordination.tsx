@@ -170,7 +170,7 @@ function childView(record: CoordinationRecord, which: "api" | "client"): ChildVi
         line:
           which === "api"
             ? `Merged as ${child.anchorSha ?? "an unproven commit"} — that commit is the compatibility anchor for the client change. Delivery approval happens on the Deliveries surface.${run}`
-            : `Merged as ${child.mergedSha ?? "an unproven commit"} — the pair now owes its compatibility check before it can be called done. Delivery approval happens on the Deliveries surface.${run}`,
+            : `Merged as ${child.mergedSha ?? "an unproven commit"} — see the pair’s compatibility result below. Delivery approval happens on the Deliveries surface.${run}`,
       };
     case "delivered":
       return {
