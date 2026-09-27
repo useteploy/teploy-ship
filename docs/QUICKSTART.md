@@ -299,3 +299,11 @@ sometimes carries the real thing. Check `SHIP_TESTS=1`, and that the repo has a
 command: detection needs one of `package.json` `scripts.test`, a Makefile
 `test:` target, `go.mod`, `Cargo.toml` or pytest config at the root, otherwise
 set one on the Projects page.
+
+The installer builds from `teploy.example.yml` in a private temporary context,
+then applies its generated `teploy.install.yml`. It does not inherit the
+maintainer's production mounts, preview destinations, or integration settings.
+The temporary context is removed when the installer exits. Re-run the installer
+to update that installation; do not run `teploy deploy -d install` against the
+repository's maintainer configuration. The manual path uses the example as your
+own `teploy.yml`.
