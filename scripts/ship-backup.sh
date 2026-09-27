@@ -292,14 +292,16 @@ cmd_rehearse() {
   endpoint="$(docker port "$name" 5432/tcp | head -1)"
   [ -n "$endpoint" ] || { docker logs "$name" || true; die "proof container published no port"; }
   timeout="${SHIP_REHEARSE_TIMEOUT_S:-300}"
-  # The engine refuses connections while it replays its WAL, so wait on the
-  # socket, not on the container state.
-  until (exec 3<>"/dev/tcp/${endpoint%:*}/${endpoint##*:}") 2>/dev/null; do
+  # Docker can accept TCP through its published-port proxy before Nucleus
+  # finishes recovery. Require an actual SQL response inside the container;
+  # an open proxy socket is not database readiness.
+  until docker exec "$name" nucleus shell --host 127.0.0.1 --port 5432 \
+    --command "SELECT 1" --json >/dev/null 2>&1; do
     sleep 1
     elapsed=$((elapsed + 1))
     if [ "$elapsed" -ge "$timeout" ]; then
       docker logs "$name" || true
-      die "proof engine did not accept connections within ${timeout}s (see logs above)"
+      die "proof engine did not answer SQL within ${timeout}s (see logs above)"
     fi
   done
 
