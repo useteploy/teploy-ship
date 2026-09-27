@@ -1,0 +1,1 @@
+{"name":"coordination-api-fixture","private":true,"type":"module","scripts":{"test":"node --test server.test.mjs"}}
