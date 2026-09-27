@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import { createServer } from "node:net";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const script = join(root, "scripts", "ship-backup.sh");
@@ -16,8 +17,8 @@ const script = join(root, "scripts", "ship-backup.sh");
  * there is no undo for. These tests pin both directions against a FAKE ship
  * root — they never touch /deployments, never start docker, and stub docker
  * where a refusal depends on it seeing a running container. The rehearsal's
- * docker path needs a real engine and belongs to the operator's live pass,
- * not to CI: it is only asserted to refuse cleanly when docker is absent.
+ * data recovery needs a real engine and belongs to the operator's live pass.
+ * A separate fake checks readiness ordering, without claiming a restore proof.
  */
 function run(args, env = {}) {
   return spawnSync("bash", [script, ...args], { encoding: "utf8", env: { ...process.env, ...env } });
@@ -201,4 +202,45 @@ test("rehearse refuses cleanly when docker is absent (docker-dependent paths are
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("an open Docker proxy port cannot start preflight before SQL is ready", async (t) => {
+  const proxy = createServer((socket) => socket.destroy());
+  await new Promise((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+  t.after(() => proxy.close());
+  const { dir } = makeFakeRoot();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  assert.equal(run(["backup", "--label", "proof", "--i-stopped-writers"], { SHIP_ROOT: dir }).status, 0);
+  const bin = join(dir, "bin");
+  mkdirSync(bin);
+  writeFileSync(join(bin, "docker"), `#!/bin/sh
+case "$1" in
+  ps|rm) exit 0 ;;
+  run) echo proof-container ;;
+  port) echo 127.0.0.1:${proxy.address().port} ;;
+  exec)
+    case "$*" in *"SELECT 1"*) ;; *) exit 10 ;; esac
+    count=0
+    [ ! -f "$SQL_PROBE_COUNT" ] || count=$(cat "$SQL_PROBE_COUNT")
+    count=$((count + 1))
+    echo "$count" > "$SQL_PROBE_COUNT"
+    [ "$count" -ge 2 ] ;;
+  *) exit 1 ;;
+esac
+`);
+  writeFileSync(join(bin, "ship-proof"), `#!/bin/sh
+count=0
+[ ! -f "$SQL_PROBE_COUNT" ] || count=$(cat "$SQL_PROBE_COUNT")
+[ "$count" -ge 2 ] || { echo 'preflight ran before SQL readiness' >&2; exit 42; }
+echo preflight-after-sql > "$PREFLIGHT_RECEIPT"
+`);
+  chmodSync(join(bin, "docker"), 0o755);
+  chmodSync(join(bin, "ship-proof"), 0o755);
+  const receipt = join(dir, "preflight.txt");
+  const res = run(["rehearse", onlyArchive(join(dir, "_backups")), "--image", "fixture-engine"], {
+    SHIP_ROOT: dir, SHIP_BIN: join(bin, "ship-proof"), PATH: `${bin}:${process.env.PATH}`,
+    SQL_PROBE_COUNT: join(dir, "sql-probes"), PREFLIGHT_RECEIPT: receipt, SHIP_REHEARSE_TIMEOUT_S: "5",
+  });
+  assert.equal(res.status, 0, res.stdout + res.stderr);
+  assert.equal(readFileSync(receipt, "utf8").trim(), "preflight-after-sql");
 });

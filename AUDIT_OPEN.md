@@ -587,3 +587,11 @@ The real standalone API/client coordination completed through both normal merge
 approvals and its compatibility scan. Its client description still said the
 check was owed despite the complete badge. It now points to the actual check
 result below without asserting an obsolete pending state.
+
+The final-image replay additionally reproduced a startup race: Docker's port
+proxy accepted the TCP probe while Nucleus was still restoring its catalog.
+The first preflight query then lost its connection. TCP readiness is replaced
+with a successful `nucleus shell --command "SELECT 1"` inside the proof container.
+This corrects the earlier attribution: explicit data/transport is required, but
+transport alone did not explain every connection failure. Original failed and
+successful rehearsals remain in the release receipts.
