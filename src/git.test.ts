@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { LocalExecutor } from "@neutron-build/agents";
+import { LocalExecutor, type AgentExecutor } from "@neutron-build/agents";
 
 import {
   assertGitSafe,
@@ -795,4 +795,43 @@ test("uploadPrAsset posts multipart to Forgejo's issue assets and returns the do
   );
   const failImpl = (async () => new Response("quota", { status: 413 })) as typeof fetch;
   await assert.rejects(() => uploadPrAsset({ ref: forgejo, token: "t", pr: 1, name: "x.png", bytes: new Uint8Array([1]), fetchImpl: failImpl }), /413/);
+});
+
+test("S01: a failed authenticated fetch leaves no token in .git/config and none in the error", async () => {
+  const { work } = await warmFixture("git-cred-fail");
+  // A dead local port: the fetch fails fast, after the credential was written.
+  const dead = { kind: "forgejo" as const, base: "http://127.0.0.1:9", owner: "o", repo: "r", cloneUrl: "http://127.0.0.1:9/o/r.git" };
+  const token = "tok_SECRET_0123456789";
+  await work.exec(`git remote set-url origin ${dead.cloneUrl}`);
+
+  await assert.rejects(
+    () => reuseRepo(work, { ref: dead, token, runId: "run-cred" }),
+    (error: Error) => {
+      assert.ok(!error.message.includes(token), "the token must not appear in the surfaced error");
+      return true;
+    },
+  );
+  const config = (await work.exec("cat .git/config")).stdout;
+  assert.ok(!config.includes(token), "the token must not rest in .git/config after a failed fetch");
+  assert.equal((await work.exec("git remote get-url origin")).stdout.trim(), dead.cloneUrl, "the remote is credential-free");
+});
+
+test("S01: authenticated clone and fetch scrub the remote in the same shell invocation as the credential", async () => {
+  const seen: string[] = [];
+  const executor = {
+    async exec(command: string) {
+      seen.push(command);
+      return { exitCode: 0, stdout: "main\n", stderr: "", timedOut: false, truncated: false };
+    },
+  } as unknown as AgentExecutor;
+  const ref = { kind: "forgejo" as const, base: "http://h", owner: "o", repo: "r", cloneUrl: "http://h/o/r.git" };
+  await setupRepo(executor, { ref, token: "TOK", runId: "run-x" });
+  await reuseRepo(executor, { ref, token: "TOK", runId: "run-y" });
+
+  const withToken = seen.filter(c => c.includes("TOK@"));
+  assert.equal(withToken.length, 2, "only the clone and the fetch carry the credential");
+  for (const command of withToken) {
+    assert.ok(command.includes(`git remote set-url origin ${ref.cloneUrl}`), `scrub rides the same exec: ${command}`);
+    assert.ok(command.includes("exit $rc"), "the credentialed step's own status is the one reported");
+  }
 });

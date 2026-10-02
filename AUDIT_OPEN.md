@@ -1,5 +1,30 @@
 # Open audit items
 
+## 2026-10-02 — S01 Git credential placement (first-batch item 4, partial)
+
+Audit of `src/git.ts`: the forge token is embedded in the URL of `clone`,
+`fetch` and `push`, and for `clone`/warm-volume `fetch` it was written into
+`.git/config` and scrubbed by a *separate* executor call. A worker death or a
+half-failed clone between the two calls could leave a token resting in a warm
+volume the agent can read. **Fixed (this change):** clone and the warm fetch
+now scrub the remote in the same shell invocation, whatever the credentialed
+step's status (`cloneCredentialFree`, `reuseRepo`). Pinned by a same-shell
+sequencing test that fails on the previous code, plus a failed-fetch probe on a
+real `LocalExecutor` checkout (a regression pin: the old catch path also
+scrubbed, so that probe passes on both versions).
+
+**Still open, not fixed:** the token is still visible in the *command line* of
+those git processes for their lifetime (`ps`, executor command logging outside
+this repo), and push paths pass it as a URL argument. The intended fix is
+short-lived mediation (a credential helper or env-supplied config via
+`ExecOptions.env`, or a scoped proxy). It was not done blind: it depends on the
+Sandbox daemon honouring per-exec `env`, the sandbox image's git version
+(`GIT_CONFIG_COUNT` needs 2.31+), and a live private-repo proof, none of which
+can be established from a cloud session. Owner: Ship with Sandbox. No upstream
+Neutron/Nucleus defect is asserted; if the SDK's `env` handling turns out to
+drop values, that is an upstream report to write then.
+Also not verified here: snapshots/logs of past runs for token residue.
+
 ## 2026-09-27 — coordination on a minimal installation
 
 Coordination children inherited disabled change/merge gates, so successful PR

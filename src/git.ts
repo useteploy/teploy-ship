@@ -149,6 +149,25 @@ async function git(executor: AgentExecutor, command: string, timeoutMs = 120_000
   return result.stdout.trim();
 }
 
+/**
+ * Clone with the credential and leave the remote credential-free, in ONE
+ * shell invocation. `git clone <url-with-token>` writes the token into
+ * .git/config; scrubbing it in a separate exec left a window (and, if the
+ * clone half-failed or the worker died between the two calls, a token resting
+ * in a warm volume the agent can read). Here the scrub runs in the same shell
+ * whatever the clone's exit status, and the clone's status is what is
+ * reported. Argv visibility of the token during the clone is a separate,
+ * recorded limitation (AUDIT_OPEN.md, S01 Git credential placement).
+ */
+async function cloneCredentialFree(executor: AgentExecutor, ref: RepoRef, token: string): Promise<void> {
+  await git(
+    executor,
+    `git clone --depth 50 ${authenticatedUrl(ref, token)} . 2>&1; rc=$?; ` +
+      `git remote set-url origin ${ref.cloneUrl} >/dev/null 2>&1; exit $rc`,
+    300_000,
+  );
+}
+
 export interface RepoCheckout {
   /** The work branch the agent's changes will ride. */
   branch: string;
@@ -174,8 +193,7 @@ export async function setupRepo(
   options: { ref: RepoRef; token: string; runId: string },
 ): Promise<RepoCheckout> {
   const { ref, token, runId } = options;
-  await git(executor, `git clone --depth 50 ${authenticatedUrl(ref, token)} . 2>&1`, 300_000);
-  await git(executor, `git remote set-url origin ${ref.cloneUrl}`);
+  await cloneCredentialFree(executor, ref, token);
   await git(executor, 'git config user.name "Teploy Ship" && git config user.email "ship@teploy.dev"');
   await git(executor, excludeCommand());
   const base = await git(executor, "git rev-parse --abbrev-ref HEAD");
@@ -214,22 +232,19 @@ export async function reuseRepo(
   options: { ref: RepoRef; token: string; runId: string },
 ): Promise<RepoCheckout> {
   const { ref, token, runId } = options;
-  // Fetch under the credential, then scrub it back off the remote whatever
-  // happened — an error on the way out must not leave a token in a config
-  // file the agent can read.
-  await git(executor, `git remote set-url origin ${authenticatedUrl(ref, token)}`);
-  let failure: unknown = null;
-  try {
-    await git(executor, "git fetch --depth 50 --prune origin 2>&1", 300_000);
-    // The template was cloned by an earlier run, so refs/remotes/origin/HEAD
-    // may be stale or absent; asking the remote is the only honest answer to
-    // "what is the default branch".
-    await git(executor, "git remote set-head origin -a 2>&1");
-  } catch (error) {
-    failure = error;
-  }
-  await git(executor, `git remote set-url origin ${ref.cloneUrl}`);
-  if (failure !== null) throw failure;
+  // Fetch under the credential and scrub it back off the remote in the SAME
+  // shell, whatever happened: separate exec calls left a window where a dead
+  // worker or a failed step kept a token in a config file the agent can read.
+  // The template was cloned by an earlier run, so refs/remotes/origin/HEAD may
+  // be stale or absent; asking the remote is the only honest answer to "what
+  // is the default branch".
+  await git(
+    executor,
+    `git remote set-url origin ${authenticatedUrl(ref, token)} && ` +
+      "{ git fetch --depth 50 --prune origin 2>&1 && git remote set-head origin -a 2>&1; }; rc=$?; " +
+      `git remote set-url origin ${ref.cloneUrl} >/dev/null 2>&1; exit $rc`,
+    300_000,
+  );
 
   const base = assertGitSafe("branch", (await git(executor, "git symbolic-ref --short refs/remotes/origin/HEAD")).replace(/^origin\//, ""));
   // Drop the previous run's tree before switching: an unmergeable local
@@ -703,8 +718,7 @@ export async function setupRepoForPr(
 ): Promise<RepoCheckout> {
   const { ref, token, pr } = options;
   const checkout = await resolvePr(ref, token, pr, fetch, options.requireOpen);
-  await git(executor, `git clone --depth 50 ${authenticatedUrl(ref, token)} . 2>&1`, 300_000);
-  await git(executor, `git remote set-url origin ${ref.cloneUrl}`);
+  await cloneCredentialFree(executor, ref, token);
   await git(executor, 'git config user.name "Teploy Ship" && git config user.email "ship@teploy.dev"');
   await git(executor, excludeCommand());
   // A shallow clone only has the default branch; fetch the PR head into a
