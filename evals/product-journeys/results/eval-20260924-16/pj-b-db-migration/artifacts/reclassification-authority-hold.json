@@ -1,0 +1,10 @@
+{
+  "originalResultSha256": "ecd4f16c2a9843f6fd094fd238a7d381835c74e8c76cf342a12e7503ac1a4965",
+  "originalOutcome": "harness-error",
+  "reclassifiedOutcome": "authority-hold",
+  "reason": "The run parked on the change-approval decision and the harness deliberately left it pending (it never approves actions). That is an authority hold, not a harness malfunction and not an agent failure. The grader reasons about the missing pinned column describe a tree on which no change was ever approved or applied, so they say nothing about the model's ability to write the migration.",
+  "effectOnCounts": "Excluded from pass-rate denominators for model quality; counted separately as a hold. The original result.json is unchanged; this record is additive.",
+  "modelRerun": false,
+  "classifiedBy": "S02 grader correction, outcome enum added in scripts/eval-journeys-lib.mjs",
+  "stillUnknown": "Whether the migration would pass the independent grader if the approval were granted. No evidence exists for that; the scenario needs an authorised approval path before it can be graded."
+}

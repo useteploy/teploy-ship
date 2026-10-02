@@ -27,7 +27,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { AdapterRefusal, ShipRunError, hashTree } from './eval-journeys-lib.mjs';
+import { AdapterRefusal, AuthorityHoldError, ShipRunError, hashTree } from './eval-journeys-lib.mjs';
 
 export const SHIP_ENV_CONTRACT = ['SHIP_URL', 'SHIP_WEB_TOKEN'];
 export const JOURNEYS = ['change', 'investigate', 'plan', 'review'];
@@ -374,7 +374,7 @@ export function createShipAdapter({
               await decide(runId, event, false);
               interventions.push({ kind: 'clarification', at: new Date().toISOString(), by: 'harness', note: `${runId} asked; declined without an answer (no-rescue baseline): ${String(data.question ?? '').slice(0, 500)}` });
             } else if (isApprovalPark(event)) {
-              throw new ShipRunError(`${runId} requires a human decision on ${event}; left pending without approval`);
+              throw new AuthorityHoldError(`${runId} requires a human decision on ${event}; left pending without approval`, { runId, event });
             }
           }
           if (Date.now() >= deadline) throw new ShipRunError(`${runId} did not settle within ${limitMs}ms (last status: ${status}${event ? `, waiting on ${event}` : ''})`);

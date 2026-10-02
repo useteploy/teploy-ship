@@ -2,7 +2,7 @@
 
 Twelve scenarios attempted across the real Ship request path and private scratch repositories. This is a single-attempt functional sweep, not the repeated S02 baseline or recovery-probe sign-off.
 
-Original outcomes: **9 pass, 2 fail, 1 harness-error**. The question’s original failure was a citation-table parser defect; its hash-linked supplementary regrade passes. The review remains a lexical failure. The migration’s harness-error is an intentional stop at sensitive-change approval, not an executed implementation failing its grader.
+Original outcomes: **9 pass, 2 fail, 1 harness-error**. Since the S02 grader correction the migration run would be classified `authority-hold` (see its [reclassification](results/eval-20260924-16/pj-b-db-migration/artifacts/reclassification-authority-hold.json)); the original record is unchanged. The question’s original failure was a citation-table parser defect; its hash-linked supplementary regrade passes. The review remains a lexical failure. The migration’s harness-error is an intentional stop at sensitive-change approval, not an executed implementation failing its grader.
 
 | Scenario | Original record | Interpretation |
 | --- | --- | --- |

@@ -277,7 +277,7 @@ test('an action approval remains pending for a human, with no decision POST', as
       if (url === 'http://ship.example/') return redirect('/runs/run-request-held');
       return json(200, { meta: { status: 'waiting', eventName: 'turn-2-approval' } });
     }
-  }).runTask({ scenario: copy, fixtureDir: join(pjRoot, 'fixtures', 'small-site'), workDir: '/unused' }), /run-request-held requires a human decision.*left pending/);
+  }).runTask({ scenario: copy, fixtureDir: join(pjRoot, 'fixtures', 'small-site'), workDir: '/unused' }), err => err.name === 'AuthorityHoldError' && /run-request-held requires a human decision.*left pending/.test(err.message) && err.hold.runId === 'run-request-held' && err.hold.event === 'turn-2-approval');
   assert.equal(calls.some(url => url.endsWith('/decide')), false);
 });
 
