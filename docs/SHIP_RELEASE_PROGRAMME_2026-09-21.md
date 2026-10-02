@@ -476,7 +476,7 @@ This planning revision makes no production changes, runs no paid batch and cuts 
 
 Progress against package IDs. Updated 2026-10-02 from a cloud session at origin/main `796066d` (the plan's stated snapshot). Columns keep three claims apart: **implemented** (code merged or on a branch), **checked** (automated test or probe, negative control noted) and **verified outcome** (observed in a real system or against held-out tasks). Nothing below is a verified outcome unless it says so.
 
-Baseline reproduced in this session: `pnpm run lint` clean; root suite 1,412/1,412; scripts suite 104 with 1 existing skip (one failure at first, caused by missing `web/node_modules`, cleared by installing web dependencies, not a code defect); `web` 136/136 and production build succeeds. This is the state before this session's changes.
+Baseline reproduced in this session: `pnpm run lint` clean; root suite 1,412/1,412; scripts suite 104 with 1 existing skip (one failure at first, caused by missing `web/node_modules`, cleared by installing web dependencies, not a code defect); `web` 136/136 and production build succeeds. After this session's changes: lint clean; root 1,421/1,421; scripts 106 tests, 105 pass, 1 existing skip, 0 fail; `web` 136/136 and build succeeds.
 
 | Package | This session | Implemented | Checked | Verified outcome | Still open (specific) |
 | --- | --- | --- | --- | --- | --- |
@@ -492,7 +492,7 @@ First-executable-batch items: **(1)** partly done — origin/main identity match
 
 ### Evidence that was not available
 
-- Private execution receipts (`COMPLETION_2026-09-25/`), the claim ledger and the competitive review are not in this repository or this environment, so the plan's statements that rest on them (local `42af7fb`, last live deployment `dd5b13e`, the 21/13/2 product baseline) were **not re-verified** here. The 21/13/2 figure is consistent with the retained records under `evals/product-journeys/results/`, but that was not recounted.
+- Private execution receipts (`COMPLETION_2026-09-25/`), the claim ledger and the competitive review are not in this repository or this environment, so the plan's statements that rest on them (local `42af7fb`, last live deployment `dd5b13e`, the 21/13/2 product baseline) were **not re-verified** here. The 21/13/2 figure was not recounted against the retained records under `evals/product-journeys/results/`.
 - No live Ship, Nucleus, sandbox, forge, preview target or model gateway was reachable, so no live probe, canary, paid evaluation or deployment read-back was run.
 - The repository has no `CLAUDE.md`; `AGENTS.md` refers to one. Build/test conventions above come from `package.json` and `AGENTS.md`.
 - Competitor material was not re-read this session; the plan's references remain documented design references, not measured claims.
