@@ -1,5 +1,17 @@
 # Open audit items
 
+## 2026-10-03 — devalue advisories (web dependency, re-triage)
+
+CI `audit` began failing on three new high-severity `devalue` advisories
+(GHSA-j22f-vq7h-c4qm, GHSA-mcm9-63f2-9j32, GHSA-x5rw-q4pp-hg5g; vulnerable
+`<=5.9.2`, patched `5.9.3`), reached through `@neutron-build/core` in the web
+tree. The 2026-09-23 re-triage below recorded devalue 5.9.2 as clean; the
+advisories were published afterwards, and `main` was last green on 2026-09-27.
+The pinned override moves to 5.9.3 in `web/package.json`,
+`deploy/package.web.json` and both lockfiles (regenerated with pnpm and npm,
+not by hand). The Neutron core package is not patched or vendored differently;
+if Neutron later pins devalue itself, the override can be dropped.
+
 ## 2026-10-02/03 — S01 Git credential placement (first-batch item 4, partial)
 
 Audit of `src/git.ts`: the forge token is embedded in the URL of `clone`,
