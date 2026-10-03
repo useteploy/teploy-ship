@@ -34,6 +34,7 @@ import {
 } from "./step-fingerprint.js";
 import { resolveModelId, usesAnthropicWire } from "./model-id.js";
 import { auditRow, toCsv, withinWindow } from "./audit.js";
+import { auditTiming } from "./audit-timing.js";
 import type { NumberRange } from "./args.js";
 import { commitAndPush, fixPrompt, openPullRequest, setupRepo } from "./git.js";
 import { runTests, testTargetFromEnv } from "./tests.js";
@@ -1752,11 +1753,17 @@ async function auditCommand(rest: string[]): Promise<void> {
   try {
     const metas = await runtime.listMeta();
     const rows = [];
+    // Timing rides the JSON export only (CSV columns are a contract). Kept in
+    // a side map so AuditRow, and therefore the CSV, is untouched.
+    const timings = new Map<string, ReturnType<typeof auditTiming>>();
     for (const meta of metas) {
-      rows.push(auditRow(meta, await runtime.store.load(meta.runId)));
+      const events = await runtime.store.load(meta.runId);
+      rows.push(auditRow(meta, events));
+      if (format === "json") timings.set(meta.runId, auditTiming(events));
     }
     const windowed = withinWindow(rows, since, until);
-    process.stdout.write(format === "json" ? `${JSON.stringify(windowed, null, 2)}\n` : toCsv(windowed, { spreadsheetSafe: safeCsv }));
+    const jsonRows = windowed.map((r) => ({ ...r, timing: timings.get(r.runId) }));
+    process.stdout.write(format === "json" ? `${JSON.stringify(jsonRows, null, 2)}\n` : toCsv(windowed, { spreadsheetSafe: safeCsv }));
     if (windowed.length === 0) process.stderr.write(dim("no runs in that window\n"));
     else {
       // Report the gap by counting it, not with a blanket caveat. The old line

@@ -43,6 +43,16 @@ The worker process itself is not the resource: it sat at **24–47 MB and under
 - After every batch: the source ledger, the repo and actor attribution rows,
   and the sum of the per-run costs in `audit --format json` were compared.
 
+Per-run timing no longer has to be split by hand: `audit --format json` now
+carries an optional `timing` object per run (`src/run-timing.ts`, aggregated by
+`timingSummary` in `src/audit-timing.ts`; CSV is unchanged). Limits that carry
+over: `toFirstStepMs` is an **upper bound** on queue wait, since the log has no
+"claimed by a worker" event and the figure includes the first step itself;
+unknown figures are `null`, never 0, and runs with partial or missing
+timestamps are counted rather than averaged in; medians and p90 appear only at
+n >= 20 per status, below that the raw values are listed. The figures in the
+table below predate this and were derived by hand.
+
 ## Results
 
 | batch | ceiling (configured) | in flight (measured) | runs | completed | span | throughput | exec median / p90 | queue wait median / max | load1 max (mean) | mem used max | nucleus RSS |
