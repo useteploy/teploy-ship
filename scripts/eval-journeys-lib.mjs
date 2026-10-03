@@ -39,11 +39,15 @@ export const SHIP_JOURNEYS = ['change', 'investigate', 'plan', 'review'];
 
 // A record's outcome keeps four states apart. `unknown` is a grade the
 // harness could not perform (every failing reason is not-wired); it is never
-// counted as a failure or a pass. Scenarios that were not executed have no
-// record at all and are reported as not-run by the batch summary.
-export const OUTCOMES = ['pass', 'fail', 'unknown', 'harness-error'];
+// counted as a failure or a pass. `authority-hold` is a deliberate stop at a
+// decision the evaluation may not make (approval, merge): the agent neither
+// passed nor failed, and the harness did not malfunction. Scenarios that were
+// not executed have no record at all and are reported as not-run by the batch
+// summary.
+export const OUTCOMES = ['pass', 'fail', 'unknown', 'harness-error', 'authority-hold'];
 
 export function outcomeOf({ pass, reasons, endedBy }) {
+  if (endedBy === 'authority-hold') return 'authority-hold';
   if (endedBy === 'harness-error') return 'harness-error';
   if (pass) return 'pass';
   const list = reasons ?? [];
@@ -280,6 +284,18 @@ export class AdapterRefusal extends Error {
   }
 }
 
+// A run parked on a decision this evaluation is not authorised to take. It is
+// a ShipRunError so existing handlers still see it, but the executor records
+// it as an authority hold rather than a harness fault.
+export class AuthorityHoldError extends Error {
+  constructor(message, { runId = null, event = null, transcriptPath = null } = {}) {
+    super(message);
+    this.name = 'AuthorityHoldError';
+    this.hold = { runId, event };
+    this.transcriptPath = transcriptPath;
+  }
+}
+
 export class ShipRunError extends Error {
   constructor(message, { transcriptPath = null } = {}) {
     super(message);
@@ -503,6 +519,7 @@ export async function runScenario({ repoRoot, manifest, scenario, adapter, grade
   let summary = {};
   let endedBy = 'agent';
   let adapterError = null;
+  let hold = null;
   const t0 = Date.now();
   try {
     const result = await adapter.runTask({ scenario, fixtureDir, workDir, transcriptDir, attemptId: `${runId}-${scenario.id}` });
@@ -515,7 +532,8 @@ export async function runScenario({ repoRoot, manifest, scenario, adapter, grade
       throw err;
     }
     adapterError = err;
-    endedBy = 'harness-error';
+    endedBy = err instanceof AuthorityHoldError ? 'authority-hold' : 'harness-error';
+    if (err instanceof AuthorityHoldError) hold = err.hold;
     transcriptPath = err.transcriptPath ?? null;
   }
   const latencyMs = Date.now() - t0;
@@ -528,6 +546,7 @@ export async function runScenario({ repoRoot, manifest, scenario, adapter, grade
     graded = await grader.grade({ workDir, fixture: fixtureDir, scenario, transcriptPath, summary });
   } catch (err) {
     endedBy = 'harness-error';
+    hold = null;
     graded = {
       pass: false,
       reasons: [`grader invocation failed: ${err.message}`],
@@ -597,11 +616,12 @@ export async function runScenario({ repoRoot, manifest, scenario, adapter, grade
     latencyMs,
     cost: summary.cost?.status === 'priced' || summary.cost?.status === 'unknown'
       ? summary.cost
-      : { status: 'unknown', reason: adapterError !== null ? `adapter failed before reporting cost: ${adapterError.message}` : 'the adapter reported no cost; cost is never guessed' },
+      : { status: 'unknown', reason: adapterError !== null ? `${hold !== null ? 'held at an authority decision' : 'adapter failed'} before reporting cost: ${adapterError.message}` : 'the adapter reported no cost; cost is never guessed' },
     verifiedEvidence: (graded.evidence ?? []).map(e => ({ check: e.check ?? e.kind ?? 'check', value: e.value })),
     claimedEvidence: claims.map(c => ({ claim: String(c), verdict: 'unverified' })),
     artifacts: ['preserve/transcript.txt', 'artifacts/grader-output.json'],
     preserve: { dir: 'preserve/' },
+    ...(hold !== null ? { hold } : {}),
     probesApplied: [],
     gradedAt: new Date().toISOString(),
     startedAt

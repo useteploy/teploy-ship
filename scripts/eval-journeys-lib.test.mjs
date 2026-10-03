@@ -8,7 +8,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   loadManifest, validateManifest, buildDryRun, parseArgs, spendGateDecision,
-  EXIT, PROBES, SCENARIO_TYPES, outcomeOf
+  EXIT, PROBES, SCENARIO_TYPES, OUTCOMES, outcomeOf
 } from './eval-journeys-lib.mjs';
 
 const repoRoot = resolve(fileURLToPath(import.meta.url), '..', '..');
@@ -58,6 +58,11 @@ test('outcomeOf keeps pass, fail, unknown and harness-error apart', () => {
   assert.equal(outcomeOf({ pass: false, reasons: ['not-wired: x', 'README wrong'], endedBy: 'agent' }), 'fail');
   assert.equal(outcomeOf({ pass: false, reasons: [], endedBy: 'agent' }), 'fail');
   assert.equal(outcomeOf({ pass: false, reasons: ['not-wired: x'], endedBy: 'harness-error' }), 'harness-error');
+});
+
+test('an authority hold is neither a failure nor a harness error', () => {
+  assert.equal(outcomeOf({ pass: false, reasons: ['pinned column missing'], endedBy: 'authority-hold' }), 'authority-hold');
+  assert.ok(OUTCOMES.includes('authority-hold'));
 });
 
 test('duplicate scenario ids are rejected', async () => {

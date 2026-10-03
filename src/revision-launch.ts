@@ -1,7 +1,7 @@
 import { cancelRun } from "@neutron-build/workflow";
 import type { ShipRuntime } from "./runtime.js";
 import type { LaunchIntent } from "./launch-journal.js";
-import { MERGE_EVENT } from "./plan.js";
+import { MERGE_EVENT, REVISION_CANCEL_PREFIX } from "./plan.js";
 
 /** Accepted intent is the recovery record. Claim ownership is a durable token,
  * so another revision or merge cannot steal a held decision after a restart.
@@ -10,7 +10,7 @@ import { MERGE_EVENT } from "./plan.js";
 export async function finishReviewReplacement(runtime: Pick<ShipRuntime,"store"|"loadMeta"|"saveMeta"|"claimDecision"|"markWake">, intent: LaunchIntent): Promise<void> {
   const parent = intent.reviewParent;
   if (!parent) return;
-  const reason = `Changes requested in follow-up ${intent.runId}`;
+  const reason = `${REVISION_CANCEL_PREFIX}${intent.runId}`;
   const events = await runtime.store.load(parent);
   const cancelled = events.some(e => e.type === "run-cancelled" && (e.data as {reason?:string})?.reason === reason);
   if (!cancelled) {

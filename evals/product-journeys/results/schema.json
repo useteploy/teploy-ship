@@ -25,8 +25,8 @@
     "harnessRevision": { "type": "string", "description": "git SHA of teploy-ship when the run executed" },
     "fixtureRevision": { "type": "string", "description": "git SHA or sha256 of the fixture tree used" },
     "outcome": {
-      "enum": ["pass", "fail", "unknown", "harness-error"],
-      "description": "pass/fail are grades; unknown = every failing reason is not-wired (the grader could not perform the check); harness-error = the harness, not the agent, ended the attempt. A scenario never executed has no record (not-run). Records written before 2026-09-24 (L10) lack this field."
+      "enum": ["pass", "fail", "unknown", "harness-error", "authority-hold"],
+      "description": "pass/fail are grades; unknown = every failing reason is not-wired (the grader could not perform the check); harness-error = the harness, not the agent, ended the attempt; authority-hold = the run parked on a decision the evaluation may not take (approval, merge) and was deliberately left pending: neither a pass, a failure nor a malfunction, and excluded from pass-rate denominators. A scenario never executed has no record (not-run). Records written before 2026-09-24 (L10) lack this field."
     },
     "firstAttempt": {
       "type": "object",
@@ -34,7 +34,7 @@
       "properties": {
         "pass": { "type": "boolean" },
         "graderReasons": { "type": "array", "items": { "type": "string" } },
-        "endedBy": { "enum": ["agent", "step-cap", "intervention", "harness-error"] }
+        "endedBy": { "enum": ["agent", "step-cap", "intervention", "harness-error", "authority-hold"] }
       }
     },
     "eventualSuccess": {
@@ -100,6 +100,11 @@
     "ship": {
       "type": "object",
       "description": "ship adapter only: per-Ship-run role/latency/cost/status (shipRuns), fixture repo revision with drift and main-moved checks (fixtureRepo), the captured PR head (captured), same-PR evidence (samePr), post-grade disposition, poll retries used, journey and intake path"
+    },
+    "hold": {
+      "type": "object",
+      "description": "present only for outcome authority-hold: the Ship run and decision event the evaluation declined to take",
+      "properties": { "runId": { "description": "string or null" }, "event": { "description": "string or null" } }
     },
     "probesApplied": {
       "type": "array",

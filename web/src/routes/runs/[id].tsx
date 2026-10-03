@@ -18,6 +18,7 @@ import { PLAN_EVENT, MERGE_EVENT } from "teploy-ship/plan";
 // the park's event name without reaching runtime.ts.
 import { isAskEvent } from "teploy-ship/ask";
 import { UPGRADE_HOLD_EVENT } from "teploy-ship/fence";
+import { harnessSupports, STEER_UNSUPPORTED_MESSAGE } from "teploy-ship/harness-capabilities";
 
 
 import { shipRuntime } from "../../lib/store.server.js";
@@ -202,6 +203,9 @@ export async function action({
   if (active && intent === "steer") {
     const text = String(form.get("steer") ?? "").trim();
     if (text.length > 12000) return redirectTo(`/runs/${runId}?messageError=Message+must+be+under+12000+characters`);
+    // Refuse rather than store a note no executor will ever read.
+    const steerInput = ((await runtime.store.load(runId)).find(e => e.type === "run-started")?.data as { input?: { harness?: { id?: unknown }; harnessAttempts?: { id?: unknown }[] } } | undefined)?.input;
+    if (!harnessSupports(steerInput, "steer")) return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(STEER_UNSUPPORTED_MESSAGE)}`);
     if (text !== "") await runtime.steer.add(runId, text);
     return redirectTo(`/runs/${runId}?sent=1`);
   }

@@ -86,7 +86,9 @@
  * child records `integrationTest: "not-executed (scan is read-only)"`. Real
  * pair integration testing rides a future non-scan check kind that has
  * execution authority over a two-repo workspace; that is a new journey, not a
- * field here.
+ * field here. The evidence that kind must produce, and the rules for when
+ * it counts (exact revisions, static never satisfies executed, stale on an
+ * upstream move), are specified and tested in integration-evidence.ts.
  *
  * AGGREGATE COST. The coordination's spend is rolled up per child from the
  * runs' own recorded steps — the same read the worker's settle path uses

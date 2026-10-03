@@ -12,7 +12,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   loadManifest, parseArgs, runScenario, createMockAdapter,
-  parseMockResponse, nextRunId, schemaValidationErrors, stageFixture, AdapterRefusal
+  parseMockResponse, nextRunId, schemaValidationErrors, stageFixture, AdapterRefusal, AuthorityHoldError
 } from './eval-journeys-lib.mjs';
 import { createShipAdapter } from './eval-journeys-ship.mjs';
 
@@ -262,6 +262,38 @@ test('a failing grader invocation is recorded as a harness error, not lost', asy
     assert.ok(record.firstAttempt.graderReasons.some(r => r.includes('grader invocation failed') || r.includes('Cannot find')));
     assert.deepEqual(schemaValidationErrors(record, schema), []);
     rmSync(brokenGraders, { recursive: true, force: true });
+  } finally {
+    rmSync(world.dir, { recursive: true, force: true });
+  }
+});
+
+test('an approval hold is recorded as an authority hold, not a harness error or a failure', async () => {
+  const world = hermeticWorld();
+  try {
+    const manifest = await loadManifest(repoRoot);
+    const holding = {
+      name: 'holding',
+      async runTask() {
+        throw new AuthorityHoldError('run-x requires a human decision on change-approval; left pending without approval', { runId: 'run-x', event: 'change-approval' });
+      }
+    };
+    const { record, outDir } = await runScenario({
+      repoRoot, manifest,
+      scenario: manifest.scenarios.find(s => s.id === 'pj-s-copy'),
+      adapter: holding,
+      graderDir: join(repoRoot, 'evals', 'product-journeys', 'graders'),
+      fixtureRoot: world.fixtureRoot, resultsRoot: world.resultsRoot
+    });
+    assert.equal(record.outcome, 'authority-hold');
+    assert.equal(record.firstAttempt.endedBy, 'authority-hold');
+    assert.equal(record.firstAttempt.pass, false);
+    assert.equal(record.eventualSuccess.pass, false);
+    assert.deepEqual(record.hold, { runId: 'run-x', event: 'change-approval' });
+    assert.deepEqual(schemaValidationErrors(record, schema), []);
+    const rollup = JSON.parse(readFileSync(join(outDir, '..', 'summary.json'), 'utf8'));
+    assert.equal(rollup.totals['authority-hold'], 1);
+    assert.equal(rollup.totals['harness-error'], 0);
+    assert.equal(rollup.totals.fail, 0);
   } finally {
     rmSync(world.dir, { recursive: true, force: true });
   }

@@ -31,6 +31,16 @@ results/
    `fixtureRevision` (git SHA or content hash) so a baseline is
    reproducible.
 
+## Outcome classes
+
+`pass` and `fail` are grades. `unknown` means the grader could not perform a
+check. `harness-error` means the harness ended the attempt. `authority-hold`
+means the run parked on a decision the evaluation may not take (an approval or
+merge) and was left pending: it is not a failure, not a malfunction, and not a
+pass, so keep it out of model-quality denominators and count it on its own.
+Records written before this class existed keep their original outcome; a
+supplementary `reclassification-*.json` beside them says what they would be.
+
 ## Status: NO BASELINE NUMBERS EXIST YET
 
 Execution wiring exists and is gated (`--i-authorize-spend`); it has been

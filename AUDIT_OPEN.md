@@ -12,6 +12,41 @@ The pinned override moves to 5.9.3 in `web/package.json`,
 not by hand). The Neutron core package is not patched or vendored differently;
 if Neutron later pins devalue itself, the override can be dropped.
 
+## 2026-10-02/03 — S01 Git credential placement (first-batch item 4, partial)
+
+Audit of `src/git.ts`: the forge token is embedded in the URL of `clone`,
+`fetch` and `push`, and for `clone`/warm-volume `fetch` it was written into
+`.git/config` and scrubbed by a *separate* executor call. A worker death or a
+half-failed clone between the two calls could leave a token resting in a warm
+volume the agent can read. **Fixed (this change):** clone and the warm fetch
+now scrub the remote in the same shell invocation, whatever the credentialed
+step's status (`cloneCredentialFree`, `reuseRepo`). Pinned by a same-shell
+sequencing test that fails on the previous code, plus a failed-fetch probe on a
+real `LocalExecutor` checkout (a regression pin: the old catch path also
+scrubbed, so that probe passes on both versions).
+
+**Env credential mode (2026-10-03, implemented, OFF by default):**
+`SHIP_GIT_CREDENTIAL=env` sends the credential in the git process's
+environment as an origin-scoped `http.extraHeader` (`GIT_CONFIG_COUNT`, git
+2.31+), with the URL left clean, so the token is in no command line and no
+config file. It covers clone, warm fetch, push, PR-head fetch, rebase fetch and
+force push (`gitCredential` in `src/git.ts`). Proven: a real `git clone`
+against a local HTTP server received the Basic header on every request while a
+recording executor saw the token in no command and `.git/config` held none; the
+same probe fails in argv mode (negative control). Default behaviour is
+unchanged.
+
+**Still open before the flag can be turned on or the item closed:** (1) the
+Sandbox daemon must forward per-exec `env` to the process — unproven; if it
+drops it the failure is a forge authentication error, not a silent downgrade;
+(2) the sandbox image's git version must be 2.31+ — unchecked; (3) a live
+private-repo clone and push through the real sandbox on both Forgejo and
+GitHub; (4) argv mode remains the default, so until then the token is visible
+in git's command line for the process lifetime. Owner: Ship with Sandbox. No
+upstream Neutron/Nucleus defect is asserted; if the SDK or daemon's `env`
+handling drops values, that is an upstream report to write then.
+Also not verified here: snapshots/logs of past runs for token residue.
+
 ## 2026-09-27 — coordination on a minimal installation
 
 Coordination children inherited disabled change/merge gates, so successful PR

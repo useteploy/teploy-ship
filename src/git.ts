@@ -129,13 +129,58 @@ export function authenticatedUrl(ref: RepoRef, token: string): string {
   return url.toString();
 }
 
+/**
+ * How a forge credential reaches a git process.
+ *
+ * "argv" (default, historical): the token rides in the URL, so it is visible in
+ * the command line of the git process for its lifetime and is written to
+ * .git/config by clone.
+ *
+ * "env": the URL stays clean and the credential travels in that one process's
+ * ENVIRONMENT as an origin-scoped `http.extraHeader` (git >= 2.31
+ * GIT_CONFIG_COUNT). Nothing token-bearing appears in argv or in any config
+ * file. Off by default: it needs the executor to forward per-exec `env` (the
+ * SDK contract has it; the Sandbox daemon's behaviour is unproven from here)
+ * and a recent git in the sandbox image. If either is missing the failure is
+ * an authentication error from the forge, not a silent downgrade.
+ * Select with SHIP_GIT_CREDENTIAL=env.
+ */
+export type GitCredentialMode = "argv" | "env";
+
+export function gitCredentialMode(env: NodeJS.ProcessEnv = process.env): GitCredentialMode {
+  return env.SHIP_GIT_CREDENTIAL === "env" ? "env" : "argv";
+}
+
+export interface GitCredential {
+  /** URL to put on the command line. */
+  url: string;
+  /** Per-exec environment carrying the credential; absent in argv mode. */
+  env?: Record<string, string>;
+}
+
+export function gitCredential(ref: RepoRef, token: string, mode: GitCredentialMode = gitCredentialMode()): GitCredential {
+  if (token === "" || mode === "argv") return { url: authenticatedUrl(ref, token) };
+  // Same scheme the URL form used: the token as the basic-auth user, empty password.
+  const basic = Buffer.from(`${token}:`, "utf8").toString("base64");
+  return {
+    url: ref.cloneUrl,
+    env: {
+      GIT_CONFIG_COUNT: "1",
+      // Scoped to this origin, so a redirect to another host never receives it.
+      GIT_CONFIG_KEY_0: `http.${ref.base}/.extraheader`,
+      GIT_CONFIG_VALUE_0: `Authorization: Basic ${basic}`,
+      GIT_TERMINAL_PROMPT: "0",
+    },
+  };
+}
+
 /** Strip userinfo from every URL in a string: the clone URL carries the token. */
 function redactUrls(text: string): string {
   return text.replace(/\/\/[^@/\s'"]+@/g, "//***@");
 }
 
-async function git(executor: AgentExecutor, command: string, timeoutMs = 120_000): Promise<string> {
-  const result = await executor.exec(command, { timeoutMs });
+async function git(executor: AgentExecutor, command: string, timeoutMs = 120_000, env?: Record<string, string>): Promise<string> {
+  const result = await executor.exec(command, env === undefined ? { timeoutMs } : { timeoutMs, env });
   if (result.exitCode !== 0 || result.timedOut === true) {
     // The clone and the fetch run `2>&1` so a failure's words land in STDOUT;
     // reading stderr alone made every one of them "exit 128" with nothing
@@ -147,6 +192,27 @@ async function git(executor: AgentExecutor, command: string, timeoutMs = 120_000
     throw new Error(`git step failed (exit ${result.exitCode}${timedOut}): ${redactUrls(command)}\n${redactUrls(tail)}`);
   }
   return result.stdout.trim();
+}
+
+/**
+ * Clone with the credential and leave the remote credential-free, in ONE
+ * shell invocation. `git clone <url-with-token>` writes the token into
+ * .git/config; scrubbing it in a separate exec left a window (and, if the
+ * clone half-failed or the worker died between the two calls, a token resting
+ * in a warm volume the agent can read). Here the scrub runs in the same shell
+ * whatever the clone's exit status, and the clone's status is what is
+ * reported. Argv visibility of the token during the clone is a separate,
+ * recorded limitation (AUDIT_OPEN.md, S01 Git credential placement).
+ */
+async function cloneCredentialFree(executor: AgentExecutor, ref: RepoRef, token: string): Promise<void> {
+  const cred = gitCredential(ref, token);
+  await git(
+    executor,
+    `git clone --depth 50 ${cred.url} . 2>&1; rc=$?; ` +
+      `git remote set-url origin ${ref.cloneUrl} >/dev/null 2>&1; exit $rc`,
+    300_000,
+    cred.env,
+  );
 }
 
 export interface RepoCheckout {
@@ -174,8 +240,7 @@ export async function setupRepo(
   options: { ref: RepoRef; token: string; runId: string },
 ): Promise<RepoCheckout> {
   const { ref, token, runId } = options;
-  await git(executor, `git clone --depth 50 ${authenticatedUrl(ref, token)} . 2>&1`, 300_000);
-  await git(executor, `git remote set-url origin ${ref.cloneUrl}`);
+  await cloneCredentialFree(executor, ref, token);
   await git(executor, 'git config user.name "Teploy Ship" && git config user.email "ship@teploy.dev"');
   await git(executor, excludeCommand());
   const base = await git(executor, "git rev-parse --abbrev-ref HEAD");
@@ -214,22 +279,21 @@ export async function reuseRepo(
   options: { ref: RepoRef; token: string; runId: string },
 ): Promise<RepoCheckout> {
   const { ref, token, runId } = options;
-  // Fetch under the credential, then scrub it back off the remote whatever
-  // happened — an error on the way out must not leave a token in a config
-  // file the agent can read.
-  await git(executor, `git remote set-url origin ${authenticatedUrl(ref, token)}`);
-  let failure: unknown = null;
-  try {
-    await git(executor, "git fetch --depth 50 --prune origin 2>&1", 300_000);
-    // The template was cloned by an earlier run, so refs/remotes/origin/HEAD
-    // may be stale or absent; asking the remote is the only honest answer to
-    // "what is the default branch".
-    await git(executor, "git remote set-head origin -a 2>&1");
-  } catch (error) {
-    failure = error;
-  }
-  await git(executor, `git remote set-url origin ${ref.cloneUrl}`);
-  if (failure !== null) throw failure;
+  // Fetch under the credential and scrub it back off the remote in the SAME
+  // shell, whatever happened: separate exec calls left a window where a dead
+  // worker or a failed step kept a token in a config file the agent can read.
+  // The template was cloned by an earlier run, so refs/remotes/origin/HEAD may
+  // be stale or absent; asking the remote is the only honest answer to "what
+  // is the default branch".
+  const cred = gitCredential(ref, token);
+  await git(
+    executor,
+    `git remote set-url origin ${cred.url} && ` +
+      "{ git fetch --depth 50 --prune origin 2>&1 && git remote set-head origin -a 2>&1; }; rc=$?; " +
+      `git remote set-url origin ${ref.cloneUrl} >/dev/null 2>&1; exit $rc`,
+    300_000,
+    cred.env,
+  );
 
   const base = assertGitSafe("branch", (await git(executor, "git symbolic-ref --short refs/remotes/origin/HEAD")).replace(/^origin\//, ""));
   // Drop the previous run's tree before switching: an unmergeable local
@@ -318,7 +382,8 @@ export async function commitAndPush(
   const targetToken = checkout.headRepo !== undefined ? (options.headToken ?? "") : token;
   // Pushing the same commit twice is a no-op, which is what makes the publish
   // step safe to replay after a crash between the push and the PR call.
-  await git(executor, `git push ${authenticatedUrl(target, targetToken)} HEAD:refs/heads/${checkout.branch} 2>&1`, 300_000);
+  const pushCred = gitCredential(target, targetToken);
+  await git(executor, `git push ${pushCred.url} HEAD:refs/heads/${checkout.branch} 2>&1`, 300_000, pushCred.env);
   return { kind: "pushed", sha, ...(screen !== undefined && screen.warnings.length > 0 ? { screen } : {}) };
 }
 
@@ -703,8 +768,7 @@ export async function setupRepoForPr(
 ): Promise<RepoCheckout> {
   const { ref, token, pr } = options;
   const checkout = await resolvePr(ref, token, pr, fetch, options.requireOpen);
-  await git(executor, `git clone --depth 50 ${authenticatedUrl(ref, token)} . 2>&1`, 300_000);
-  await git(executor, `git remote set-url origin ${ref.cloneUrl}`);
+  await cloneCredentialFree(executor, ref, token);
   await git(executor, 'git config user.name "Teploy Ship" && git config user.email "ship@teploy.dev"');
   await git(executor, excludeCommand());
   // A shallow clone only has the default branch; fetch the PR head into a
@@ -716,10 +780,12 @@ export async function setupRepoForPr(
   // blindly (a fork is chosen by whoever opened the PR).
   const source = checkout.headRepo !== undefined ? parseRepoUrl(checkout.headRepo) : ref;
   const sourceToken = checkout.headRepo !== undefined ? (options.headToken ?? "") : token;
+  const sourceCred = gitCredential(source, sourceToken);
   await git(
     executor,
-    `git fetch --depth 50 ${authenticatedUrl(source, sourceToken)} ${checkout.branch}:${checkout.branch} 2>&1 && git checkout ${checkout.branch}`,
+    `git fetch --depth 50 ${sourceCred.url} ${checkout.branch}:${checkout.branch} 2>&1 && git checkout ${checkout.branch}`,
     300_000,
+    sourceCred.env,
   );
   return checkout;
 }
@@ -1144,7 +1210,8 @@ export async function rebaseOntoBase(
   let before: string;
   try {
     before = await git(executor, "git rev-parse HEAD");
-    await git(executor, `git fetch ${authenticatedUrl(ref, token)} ${checkout.base} 2>&1`, 300_000);
+    const fetchCred = gitCredential(ref, token);
+    await git(executor, `git fetch ${fetchCred.url} ${checkout.base} 2>&1`, 300_000, fetchCred.env);
   } catch (error) {
     return { kind: "failed", reason: error instanceof Error ? error.message : String(error) };
   }
@@ -1161,10 +1228,12 @@ export async function rebaseOntoBase(
   }
   try {
     const sha = await git(executor, "git rev-parse HEAD");
+    const forceCred = gitCredential(ref, token);
     await git(
       executor,
-      `git push --force-with-lease=refs/heads/${checkout.branch}:${before} ${authenticatedUrl(ref, token)} HEAD:refs/heads/${checkout.branch} 2>&1`,
+      `git push --force-with-lease=refs/heads/${checkout.branch}:${before} ${forceCred.url} HEAD:refs/heads/${checkout.branch} 2>&1`,
       300_000,
+      forceCred.env,
     );
     return { kind: "rebased", sha, base };
   } catch (error) {
