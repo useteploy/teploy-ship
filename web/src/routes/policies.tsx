@@ -144,7 +144,7 @@ function WindowForm({ row, sources, canEdit }: { row?: WindowRow; sources: strin
         </>
       ) : (
         <>
-          <input type="text" name="source" list="policy-sources" placeholder="source (blank = all)" style={`${field};width:170px`} />
+          <input type="text" name="source" list="policy-sources" aria-label="Source (blank = all)" placeholder="source (blank = all)" style={`${field};width:170px`} />
           <datalist id="policy-sources">
             {sources.map((s) => (
               <option key={s} value={s} />
@@ -160,10 +160,10 @@ function WindowForm({ row, sources, canEdit }: { row?: WindowRow; sources: strin
           </label>
         ))}
       </span>
-      <input type="time" name="start" value={row?.start ?? "09:00"} required style={field} />
+      <input type="time" name="start" aria-label="Window start time" value={row?.start ?? "09:00"} required style={field} />
       <span class="meta">to</span>
-      <input type="time" name="end" value={row?.end ?? "18:00"} required style={field} />
-      <input type="text" name="tz" value={row?.tz ?? ""} placeholder="IANA zone, e.g. Europe/Berlin" required style={`${field};width:190px`} />
+      <input type="time" name="end" aria-label="Window end time" value={row?.end ?? "18:00"} required style={field} />
+      <input type="text" name="tz" value={row?.tz ?? ""} aria-label="Time zone (IANA name)" placeholder="IANA zone, e.g. Europe/Berlin" required style={`${field};width:190px`} />
       <button class="approve sm" type="submit" disabled={!canEdit}>{row !== undefined ? "Save" : "Add window"}</button>
     </form>
   );
@@ -196,7 +196,7 @@ export default function Policies({ data, actionData }: { data: PoliciesData; act
       </p>
       <div class="table-wrap"><table class="runs">
         <thead>
-          <tr><th>action</th><th>roles</th><th>named users</th><th /></tr>
+          <tr><th>action</th><th>roles</th><th>named users</th><th><span class="sr-only">actions</span></th></tr>
         </thead>
         <tbody>
           {data.actions.map((a) => {
@@ -224,6 +224,7 @@ export default function Policies({ data, actionData }: { data: PoliciesData; act
                     type="text"
                     name="users"
                     form={`authority-${a}`}
+                    aria-label={`Named users for ${a}`}
                     value={grant.users.join(", ")}
                     placeholder="none — comma-separated"
                     style={`${field};width:100%;min-width:160px`}
@@ -274,7 +275,7 @@ export default function Policies({ data, actionData }: { data: PoliciesData; act
       </p>
       <div class="table-wrap"><table class="runs">
         <thead>
-          <tr><th>repository</th><th>users</th><th>teams</th><th /></tr>
+          <tr><th>repository</th><th>users</th><th>teams</th><th><span class="sr-only">actions</span></th></tr>
         </thead>
         <tbody>
           {g.reviewers.length === 0 && (
@@ -289,8 +290,8 @@ export default function Policies({ data, actionData }: { data: PoliciesData; act
                 </form>
                 <code>{r.repo}</code>
               </td>
-              <td><input type="text" name="users" form={`reviewers-${r.repo}`} value={r.users.join(", ")} placeholder="none" style={`${field};width:100%;min-width:140px`} /></td>
-              <td><input type="text" name="teams" form={`reviewers-${r.repo}`} value={r.teams.join(", ")} placeholder="none" style={`${field};width:100%;min-width:120px`} /></td>
+              <td><input type="text" name="users" form={`reviewers-${r.repo}`} aria-label={`Reviewer users for ${r.repo}`} value={r.users.join(", ")} placeholder="none" style={`${field};width:100%;min-width:140px`} /></td>
+              <td><input type="text" name="teams" form={`reviewers-${r.repo}`} aria-label={`Reviewer teams for ${r.repo}`} value={r.teams.join(", ")} placeholder="none" style={`${field};width:100%;min-width:120px`} /></td>
               <td style="text-align:right;white-space:nowrap">
                 <button class="approve sm" type="submit" form={`reviewers-${r.repo}`} disabled={!data.canEdit}>Save</button>{" "}
                 <form method="post" style="display:inline">
@@ -306,10 +307,10 @@ export default function Policies({ data, actionData }: { data: PoliciesData; act
               <form method="post" id="reviewers-new">
                 <input type="hidden" name="intent" value="reviewers" />
               </form>
-              <input type="text" name="repo" form="reviewers-new" placeholder="owner/name or clone URL" required style={`${field};width:100%;min-width:180px`} />
+              <input type="text" name="repo" form="reviewers-new" aria-label="Repository" placeholder="owner/name or clone URL" required style={`${field};width:100%;min-width:180px`} />
             </td>
-            <td><input type="text" name="users" form="reviewers-new" placeholder="alice, bob" style={`${field};width:100%;min-width:140px`} /></td>
-            <td><input type="text" name="teams" form="reviewers-new" placeholder="core" style={`${field};width:100%;min-width:120px`} /></td>
+            <td><input type="text" name="users" form="reviewers-new" aria-label="Reviewer users" placeholder="alice, bob" style={`${field};width:100%;min-width:140px`} /></td>
+            <td><input type="text" name="teams" form="reviewers-new" aria-label="Reviewer teams" placeholder="core" style={`${field};width:100%;min-width:120px`} /></td>
             <td style="text-align:right"><button class="approve sm" type="submit" form="reviewers-new" disabled={!data.canEdit}>Add</button></td>
           </tr>
         </tbody>

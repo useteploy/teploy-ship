@@ -72,7 +72,7 @@ export function Changes({
             {splitDiff(s.diff).map((f, j) => (
               <details class="diff-file" open={j === 0} key={j}>
                 <summary>{f.file}</summary>
-                <pre class="diff-code">
+                <pre class="diff-code" tabIndex={0}>
                   {f.lines.map((line, k) => (
                     <span
                       key={k}
@@ -223,7 +223,7 @@ export function Verification({ data, preview }: { data: Evidence; preview?: Prev
               {c.output && (
                 <details>
                   <summary>View output</summary>
-                  <pre>{c.output}</pre>
+                  <pre tabIndex={0}>{c.output}</pre>
                 </details>
               )}
             </div>

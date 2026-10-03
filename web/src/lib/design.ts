@@ -27,6 +27,15 @@ h1.page, .eyebrow, .meta, code, .config-value { overflow-wrap: anywhere; }
 .page-heading .meta { margin-bottom: 0; }
 .eyebrow { font-size: 12px; color: var(--dim); margin-bottom: 10px; }
 .row-actions { flex-wrap: wrap; }
+/* Long unbroken values (a pull request URL) must wrap inside a flex row, not
+   push the page wider than a 200%-zoomed viewport. */
+.row-actions > span, .row-actions > a { min-width: 0; overflow-wrap: anywhere; }
+/* Links inside running text and notices were told apart from the text by
+   colour alone (WCAG 1.4.1). Underline them; navigation and button rows keep
+   their existing look. */
+p:not(.row-actions) > a, .meta > a, .notice > a, .eyebrow > a { text-decoration: underline; text-underline-offset: 2px; }
+/* Visible to assistive technology only: names an icon-only/empty header cell. */
+.sr-only { position: absolute; left: 0; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .table-wrap { max-width: 100%; margin: 14px 0; }
 table.runs td { padding-top: 10px; padding-bottom: 10px; }
 .empty h3 { font-size: 14px; font-weight: 500; color: var(--text); margin: 0 0 8px; }
