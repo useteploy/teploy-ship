@@ -29,7 +29,16 @@ import { enqueueRun, proposeExternal } from "./runtime.js";
 import { changeClassRequired, sweepBulletin } from "./bulletin.js";
 import { parseSandboxUrls } from "./sandbox-pool.js";
 import { attributionsFrom } from "./attributed-spend.js";
-import { deliveryFromEvents, executeDelivery, executeDeliveryRollback, isStaleExecuting, readBackDelivery } from "./delivery.js";
+import {
+  deliveryFromEvents,
+  executeDelivery,
+  executeDeliveryRollback,
+  isStaleExecuting,
+  isStaleRollbackExecuting,
+  readBackDelivery,
+  reconcileStaleRollback,
+  unknownEscalation,
+} from "./delivery.js";
 import { intakeActor } from "./actor.js";
 import type { NucleusShipRuntime } from "./runtime.js";
 import type { RunMeta } from "./run-store.js";
@@ -1922,6 +1931,7 @@ export function startWorker(options: WorkerOptions): {
           await records
             .transition(claimed.id, "executing", to, {
               ...(outcome.artifactDigest !== undefined ? { artifactDigest: outcome.artifactDigest } : {}),
+              ...(outcome.configIdentity !== undefined ? { configIdentity: outcome.configIdentity } : {}),
               ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}),
             })
             .then(() => log(`[worker] delivery ${approved.id} → ${to}`))
@@ -1934,7 +1944,7 @@ export function startWorker(options: WorkerOptions): {
         // trusted copy, claim-fenced like the delivery itself, and are
         // verified by reading the target back — never by the command's
         // exit code alone.
-        const [rollback] = (await records.list(500)).filter((r) => r.rollback?.state === "requested").slice(0, 1);
+        const [rollback] = await records.dueRollbacks("requested", 1);
         if (rollback !== undefined) {
           const claimed = await records.claimRollback(rollback.id);
           if (claimed.rollback?.state !== "executing") return;
@@ -1969,6 +1979,12 @@ export function startWorker(options: WorkerOptions): {
           } else if (read.outcome === "mismatch") {
             await records.transition(unknown.id, "unknown", "failed", { reason: read.detail });
             log(`[worker] delivery ${unknown.id} → failed (read-back: ${read.detail})`);
+          } else {
+            // Unreadable: stays unknown and retries every sweep, so say so
+            // loudly once it has waited past the bound — the run page shows
+            // the same age signal.
+            const escalation = unknownEscalation(unknown, Date.now());
+            if (escalation !== null) log(`[worker] delivery ${unknown.id} ESCALATION: ${escalation} (${read.detail})`);
           }
           return;
         }
@@ -1992,6 +2008,16 @@ export function startWorker(options: WorkerOptions): {
             });
             log(`[worker] delivery ${stuck.id} → held (stale execution reconciled)`);
           }
+          return;
+        }
+        // The same window for a rollback stuck executing after a worker death:
+        // nothing else moves it (the route refuses a second request), so read
+        // the target back and record done/failed with the evidence.
+        const [stuckRollback] = (await records.dueRollbacks("executing", 10)).filter((r) => isStaleRollbackExecuting(r, Date.now(), deliveryStaleMs)).slice(0, 1);
+        if (stuckRollback !== undefined) {
+          const outcome = await reconcileStaleRollback(stuckRollback, { dir: deliveryDir, run: deliveryRunner });
+          await records.finishRollback(stuckRollback.id, outcome);
+          log(`[worker] delivery rollback ${stuckRollback.id} → ${outcome.state} (stale execution reconciled): ${outcome.evidence ?? ""}`);
         }
       })
       .catch((error) => log(`[worker] delivery sweep: ${error instanceof Error ? error.message : String(error)}`));
