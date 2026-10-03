@@ -10,7 +10,7 @@ overrides:
   hono: 4.13.5
   '@hono/node-server': '>=1.19.15'
   js-yaml@<4: 3.15.2
-  devalue: 5.9.2
+  devalue: 5.9.3
   browserslist: 4.28.7
   baseline-browser-mapping: 2.11.0
 
@@ -789,8 +789,8 @@ packages:
     resolution: {integrity: sha512-0je+qPKHEMohvfRTCEo3CrPG6cAzAYgmzKyxRiYSSDkS6eGJdyVJm7WaYA5ECaAD9wLB2T4EEeymA5aFVcYXCA==}
     engines: {node: '>=6'}
 
-  devalue@5.9.2:
-    resolution: {integrity: sha512-po4PAY5c53tw5XMocSnf8A/5OHhbbUftpr93aEN6BBoAdntUmK7vu7wOATqvt7cXO7m1Cl4gMVn6p7n6n4mj0w==}
+  devalue@5.9.3:
+    resolution: {integrity: sha512-xRumYOCUZN/EesqHEU3WOXanOZNvfZFZ/o1AHVFDX1yI0UAkZkOgDXt341CzKoBVIkgQba55/+DjGBKrIoKcHw==}
 
   devlop@1.1.0:
     resolution: {integrity: sha512-RWmIqhcFf1lRYBvNmr7qTNuyCt/7/ns2jbpp1+PalgE/rDQcBT0fioSMUpJ93irlUhC5hrg4cYqe6U+0ImW0rA==}
@@ -1715,7 +1715,7 @@ snapshots:
       '@mdx-js/mdx': 3.1.1
       '@preact/signals-core': 1.14.4
       '@sinclair/typebox': 0.34.52
-      devalue: 5.9.2
+      devalue: 5.9.3
       gray-matter: 4.0.3
       hono: 4.13.5
       magic-string: 0.30.21
@@ -1959,7 +1959,7 @@ snapshots:
 
   dequal@2.0.3: {}
 
-  devalue@5.9.2: {}
+  devalue@5.9.3: {}
 
   devlop@1.1.0:
     dependencies:
