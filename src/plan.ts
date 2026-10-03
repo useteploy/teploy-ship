@@ -50,3 +50,11 @@ export interface MergeDecisionPayload {
   approved: boolean;
   reason?: string;
 }
+
+/**
+ * Reason prefix recorded when a review follow-up replaces a parent run that was
+ * parked on its merge decision. The task projection (task-record.ts) reads it
+ * back to say which attempt superseded which, so both sides share this string
+ * rather than each spelling it.
+ */
+export const REVISION_CANCEL_PREFIX = "Changes requested in follow-up ";
