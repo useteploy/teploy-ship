@@ -1,5 +1,53 @@
 # Open audit items
 
+## 2026-10-03 — wave-2 modules landed unwired (S06–S28), and what each leaves open
+
+These modules are merged with tests but no route, worker or UI calls them, so
+they change no behaviour. Each is "checked", not "verified"; per-package
+detail is in the programme's wave-2 status table. Items that matter for audit:
+
+- **Delivery (PR #12), fixed:** config-identity digest, stuck-rollback
+  reconciliation, unbounded due/rollback reads, unknown-state escalation.
+  Still open: `destination` enforcement (proposed grammar `app:<name>`,
+  `server:<host>`, `addr:<host:port>`; bare strings stay legacy and
+  unenforced; check `teploy status --json` before build, hold on a readable
+  mismatch, treat unreadable as unverified). The digest covers
+  `<SHIP_DELIVERY_DIR>/teploy.yml`, not the merged-tree file. Legacy executing
+  rollbacks without `claimedAt` are not reaped.
+- **S11 budget ledger (PR #13):** unwired and single-process only; cross-process
+  atomicity waits on a Nucleus conditional write.
+- **S01/S04 safe-fetch (PR #14):** unwired; user-supplied repo URLs still reach
+  forge fetches without destination validation.
+- **S09 continuity (PR #15):** unwired; reviews do not yet carry findings across
+  revisions; thresholds unvalidated.
+- **S05 stack-detect (PR #17):** unwired; readiness still keys on project
+  config only, not manifest, lockfile or recipe digest.
+- **S08 test-integrity (PRs #18, #31):** advisory-only on the run page; not a
+  gate; not in the PR body or webhook; false-positive rate unmeasured.
+- **S16 schedules (PR #24):** the overlap policy is inert in the worker until
+  `sweepWorkflowSchedules` is given `isRunning`.
+- **S25 policy (PR #25):** tested pure core, no enforcement; every entry point
+  still applies its own limit independently. The service-account role needs
+  product confirmation.
+- **S26 placement (PR #26):** `sandbox-pool` still fails a run whose host dies;
+  `onHostLoss` defines recover-versus-fail but is not adopted until wired.
+- **S27 adapter (PR #27):** Teploy has no destination-level fence, so a manual
+  `teploy deploy` can race a tracked delivery; a destination lease is needed
+  before a Teploy adapter may declare fencing. Upstream feature requests (not
+  defects): a Teploy CLI dry-run, and a status field exposing a deploy
+  generation. Not yet filed.
+- **S13 (PR #28):** the steer-route refusal has no automated test.
+- **S21, S22, S23, S24, S06:** modules exist unwired (PRs #22, #19, #21, #23,
+  #29); see each PR's wiring list. The tool-manifest schema is strict, so a
+  manifest from a newer minor version is rejected.
+- **S02 recount (PR #11):** per-run `summary.json` totals for runs
+  20260924-3, -4, -6, -7, -9, -10, -11 count not-wired `unknown` and
+  `harness-error` as fail. The recount is authoritative; do not rewrite the
+  summaries.
+- **Flaky test, to investigate (not skipped):** kernel `TS-019` ("a cell that
+  outlives its timeout is cancelled") failed once in a loaded full-suite run
+  and passed alone and on retry. Timing sensitivity; a robustness fix is owed.
+
 ## 2026-10-03 — devalue advisories (web dependency, re-triage)
 
 CI `audit` began failing on three new high-severity `devalue` advisories
