@@ -17,6 +17,7 @@
  * record honest through its state machine, with conditional-UPDATE fencing
  * on every transition so an approval can never race a publication.
  */
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 
 import type { NucleusPgwire } from "./nucleus-pgwire.js";
@@ -48,7 +49,11 @@ export interface DeliveryRecord {
   recoveryVersion?: string;
   /** Image digest from the trusted copy's build; recorded at execution. */
   artifactDigest?: string;
-  /** Identity of the trusted working copy's configuration at execution. */
+  /**
+   * Identity of the trusted working copy's configuration at execution:
+   * `sha256:<hex>` of its teploy.yml bytes (see configIdentityOf). Absent when
+   * the file was unreadable, empty, or the record predates the field.
+   */
   configIdentity?: string;
   actor?: string;
   policy?: string;
@@ -71,6 +76,12 @@ export interface DeliveryRecord {
     actor: string;
     reason: string;
     requestedAt: string;
+    /**
+     * When a worker claimed it (requested → executing). The staleness clock for
+     * a rollback stuck `executing`; absent on records claimed before this field
+     * existed, which are never reaped (no clock to judge them by).
+     */
+    claimedAt?: string;
     finishedAt?: string;
     evidence?: string;
   };
@@ -191,10 +202,37 @@ export interface DeliveryStore {
    * re-requested). Fenced like every other move.
    */
   requestRollback(id: string, actor: string, reason: string): Promise<DeliveryRecord>;
+  /**
+   * Records whose ROLLBACK is in `state`, for the worker sweep. Unbounded by
+   * recency like `due`; oldest request first so none starves.
+   */
+  dueRollbacks(state: NonNullable<DeliveryRecord["rollback"]>["state"], limit?: number): Promise<DeliveryRecord[]>;
   /** Worker claims a requested rollback for execution; returns the winner. */
   claimRollback(id: string): Promise<DeliveryRecord>;
   /** Worker records the rollback outcome (done | failed + evidence). */
   finishRollback(id: string, outcome: NonNullable<DeliveryRecord["rollback"]>): Promise<DeliveryRecord>;
+}
+
+/**
+ * The sweep's selection: EVERY record in `state`, not a recency window.
+ * `list(n)` returns the newest n, so filtering that left an old approved or
+ * requested record behind n newer ones unreachable for good. Order is the
+ * list's (newest first) — selection is what changed, not priority.
+ */
+function dueByState(all: DeliveryRecord[], state: DeliveryState, limit: number): DeliveryRecord[] {
+  return all.filter((r) => r.state === state).slice(0, limit);
+}
+
+/** Rollbacks in `state`, oldest request first (a queue must not starve its head). */
+function dueByRollback(
+  all: DeliveryRecord[],
+  state: NonNullable<DeliveryRecord["rollback"]>["state"],
+  limit: number,
+): DeliveryRecord[] {
+  return all
+    .filter((r) => r.rollback?.state === state)
+    .sort((a, b) => (a.rollback!.requestedAt).localeCompare(b.rollback!.requestedAt))
+    .slice(0, limit);
 }
 
 const validate = (record: Partial<DeliveryRecord>): void => {
@@ -317,7 +355,11 @@ export class FileDeliveryStore implements DeliveryStore {
   }
 
   async due(state: DeliveryState, limit = 10): Promise<DeliveryRecord[]> {
-    return (await this.list(500)).filter((r) => r.state === state).slice(0, limit);
+    return dueByState(await this.list(Number.MAX_SAFE_INTEGER), state, limit);
+  }
+
+  async dueRollbacks(state: NonNullable<DeliveryRecord["rollback"]>["state"], limit = 10): Promise<DeliveryRecord[]> {
+    return dueByRollback(await this.list(Number.MAX_SAFE_INTEGER), state, limit);
   }
 
   async requestRollback(id: string, actor: string, reason: string): Promise<DeliveryRecord> {
@@ -346,7 +388,7 @@ export class FileDeliveryStore implements DeliveryStore {
         winner = current;
         return all;
       }
-      winner = { ...current, rollback: { ...current.rollback, state: "executing" } };
+      winner = { ...current, rollback: { ...current.rollback, state: "executing", claimedAt: new Date().toISOString() } };
       return { ...all, [id]: winner };
     });
     if (winner === null) throw new Error("Rollback claim could not be read back");
@@ -611,6 +653,12 @@ export async function executeDelivery(
     }
     recoveryVerified = serving !== "";
   }
+  // The trusted copy's configuration as of this execution: a digest of the
+  // teploy.yml the operator provisioned there (the file readBackDelivery also
+  // reads the server from), so an edit between two deliveries shows up as two
+  // different identities in their receipts. Recorded, never gating: an
+  // unreadable or empty file just leaves the identity absent.
+  const configIdentity = await configIdentityOf(exec, cwd);
   const checked = await exec(["git", "worktree", "add", "--detach", tree, record.mergedSha]);
   if (checked.code !== 0) {
     return { ...record, ...patch({ reason: `could not check out the merged SHA in the trusted copy: ${(checked.stderr || checked.stdout).slice(0, 300)}` }) };
@@ -644,6 +692,7 @@ export async function executeDelivery(
     return {
       ...record,
       artifactDigest: image,
+      ...(configIdentity !== undefined ? { configIdentity } : {}),
       state: "unknown",
       updatedAt: now,
       reason: `deployment command failed (exit ${deployed.code}): ${(deployed.stderr || deployed.stdout).slice(0, 300)} — the target may have changed; reading it back before deciding`,
@@ -656,10 +705,29 @@ export async function executeDelivery(
   return {
     ...record,
     artifactDigest: image,
+    ...(configIdentity !== undefined ? { configIdentity } : {}),
     state: "unknown",
     updatedAt: now,
     reason: `deployment command completed; target state not yet read back${recoveryVerified ? "" : " (recovery version unverified: the target's prior version could not be read)"}`,
   };
+}
+
+/**
+ * `sha256:<hex>` of the trusted copy's teploy.yml, read through the same
+ * runner as every other trusted-copy command (never a shell). Undefined when
+ * the file cannot be read or is empty — an absent identity, not a made-up one.
+ */
+export async function configIdentityOf(
+  exec: (argv: string[], timeoutMs?: number) => Promise<{ code: number; stdout: string; stderr: string }>,
+  dir: string,
+): Promise<string | undefined> {
+  try {
+    const read = await exec(["cat", `${dir.replace(/\/+$/, "")}/teploy.yml`], 30_000);
+    if (read.code !== 0 || read.stdout === "") return undefined;
+    return `sha256:${createHash("sha256").update(read.stdout).digest("hex")}`;
+  } catch {
+    return undefined;
+  }
 }
 
 /** What reading the target back proved. */
@@ -1023,6 +1091,97 @@ export function isStaleExecuting(record: DeliveryRecord, nowMs: number, staleMs 
   const updated = Date.parse(record.updatedAt);
   return Number.isFinite(updated) && nowMs - updated > staleMs;
 }
+
+/**
+ * A ROLLBACK stuck `executing` past the window is a worker that died between
+ * its claim and its outcome — the route refuses a second request while one is
+ * executing, so nothing else would ever move it. Judged by `claimedAt`; a
+ * record claimed before that field existed has no clock and is left alone.
+ */
+export function isStaleRollbackExecuting(record: DeliveryRecord, nowMs: number, staleMs = 35 * 60_000): boolean {
+  if (record.rollback?.state !== "executing") return false;
+  const claimed = Date.parse(record.rollback.claimedAt ?? "");
+  return Number.isFinite(claimed) && nowMs - claimed > staleMs;
+}
+
+/**
+ * Settle a stale `executing` rollback by READING the target, the delivery
+ * path's discipline: the retained version serving with a live container means
+ * the rollback landed and only its receipt was lost (done); anything else —
+ * still on the delivered version, on something else, or unreadable — records
+ * failed with the evidence. Failed is the re-requestable state, and a
+ * re-request re-reads before acting (already-on-recovery is done without a
+ * command), so failing on a lost read can never double-act.
+ */
+export async function reconcileStaleRollback(
+  record: DeliveryRecord,
+  options: {
+    dir?: string;
+    run: (argv: string[], opts: { cwd: string; timeoutMs: number }) => Promise<{ code: number; stdout: string; stderr: string }>;
+    now?: () => string;
+  },
+): Promise<NonNullable<DeliveryRecord["rollback"]>> {
+  const now = options.now?.() ?? new Date().toISOString();
+  const carried = record.rollback ?? { actor: "", reason: "", requestedAt: now };
+  const failed = (why: string): NonNullable<DeliveryRecord["rollback"]> => ({
+    ...carried,
+    state: "failed",
+    finishedAt: now,
+    evidence: `rollback did not report an outcome (worker died or restarted) and ${why} — re-request to retry`.slice(0, 500),
+  });
+  const expected = record.recoveryVersion ?? "";
+  if (options.dir === undefined || options.dir === "") return failed("no trusted delivery directory is configured to read the target");
+  const read = await options.run(["teploy", "status", "--json"], { cwd: options.dir, timeoutMs: 120_000 });
+  if (read.code !== 0) {
+    return failed(`the target could not be read back (exit ${read.code}): ${(read.stderr || read.stdout).slice(0, 200)}`);
+  }
+  try {
+    const parsed = JSON.parse(read.stdout.trim()) as { state?: { current_hash?: unknown }; containers?: Array<Record<string, unknown>> };
+    const current = typeof parsed.state?.current_hash === "string" ? parsed.state.current_hash : "";
+    const live = (parsed.containers ?? []).some((c) => c.State === "running");
+    if (expected !== "" && current === expected && live) {
+      return {
+        ...carried,
+        state: "done",
+        finishedAt: now,
+        evidence: `stale rollback reconciled by read-back: retained version ${expected} serving`,
+      };
+    }
+    return failed(`the target runs ${current === "" ? "(none)" : current} with ${live ? "a live" : "no"} container, not the retained ${expected === "" ? "(unrecorded)" : expected}`);
+  } catch {
+    return failed(`the target status was not JSON: ${read.stdout.slice(0, 200)}`);
+  }
+}
+
+/**
+ * How long an `unknown` delivery may retry its read-back before it is
+ * surfaced as stuck. The sweep retries every minute with no other signal, so
+ * an unreadable target would otherwise look identical at minute 2 and day 2.
+ */
+export const UNKNOWN_ESCALATION_MS = 60 * 60_000;
+
+/**
+ * The age signal for an `unknown` record: how long it has been waiting for
+ * its read-back (its `updatedAt` is when it went unknown; retries write
+ * nothing), or null when the record is not unknown or has no usable stamp.
+ */
+export function unknownAgeMs(record: DeliveryRecord, nowMs: number): number | null {
+  if (record.state !== "unknown") return null;
+  const since = Date.parse(record.updatedAt);
+  return Number.isFinite(since) ? Math.max(0, nowMs - since) : null;
+}
+
+/**
+ * The escalation message once an `unknown` record has waited past the bound,
+ * else null. Pure; the worker logs it and the run page shows it, so an
+ * unreadable target is a visible condition rather than a quiet loop.
+ */
+export function unknownEscalation(record: DeliveryRecord, nowMs: number, maxMs = UNKNOWN_ESCALATION_MS): string | null {
+  const age = unknownAgeMs(record, nowMs);
+  if (age === null || age <= maxMs) return null;
+  return `this delivery has been unconfirmed for ${Math.round(age / 60_000)} min — the worker cannot read the target back (SHIP_DELIVERY_DIR, teploy reachability); the deploy may or may not have landed, so check the target by hand`;
+}
+
 /** Nucleus-backed store over a fresh sibling table (the fleet-store pattern). */
 export class NucleusDeliveryStore implements DeliveryStore {
   #db: NucleusPgwire;
@@ -1108,7 +1267,11 @@ export class NucleusDeliveryStore implements DeliveryStore {
   }
 
   async due(state: DeliveryState, limit = 10): Promise<DeliveryRecord[]> {
-    return (await this.list(500)).filter((r) => r.state === state).slice(0, limit);
+    return dueByState(await this.list(Number.MAX_SAFE_INTEGER), state, limit);
+  }
+
+  async dueRollbacks(state: NonNullable<DeliveryRecord["rollback"]>["state"], limit = 10): Promise<DeliveryRecord[]> {
+    return dueByRollback(await this.list(Number.MAX_SAFE_INTEGER), state, limit);
   }
 
   /** The compare-and-swap every rollback move shares: exactly one mover wins. */
@@ -1146,7 +1309,7 @@ export class NucleusDeliveryStore implements DeliveryStore {
     const claimed = await this.#fencedRollback(
       id,
       (current) => (current.rollback?.state === "requested" ? null : `nothing to claim (rollback state: ${current.rollback?.state ?? "none"})`),
-      (current) => ({ ...current, rollback: { ...current.rollback!, state: "executing" } }),
+      (current) => ({ ...current, rollback: { ...current.rollback!, state: "executing", claimedAt: new Date().toISOString() } }),
     ).catch((error: unknown) => {
       // Another worker claimed first is a normal race, not an error.
       const message = error instanceof Error ? error.message : String(error);

@@ -1261,6 +1261,7 @@ function DeliveryCard({ data }: { data: RunData }) {
       </tbody>
     </table>
     {d.reason && <p class="meta" style="margin-top:8px">{d.reason}</p>}
+    {d.escalation && <p class="notice bad" role="alert">{d.escalation}</p>}
     {data.deliveryError && <p class="notice bad" role="alert">{data.deliveryError}</p>}
     {(d.state === "proposed" || d.state === "held" || d.state === "failed") && data.canLaunch && (
       <form method="post" action={`/api/runs/${data.runId}/promote`} style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;margin-top:12px">

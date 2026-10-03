@@ -15,6 +15,7 @@ import type { Message, DiffSnapshot, Evidence, PreviewPanel } from "./workspace.
 import { publicOrigin } from "./oidc.server.js";
 import { previewFrameBase } from "./preview-frame.server.js";
 import { parseSupersededMark, previewSupersededKey } from "../../../dist/preview-supersede.js";
+import { unknownEscalation } from "../../../dist/delivery.js";
 import { costUSD, isPricedModel, pendingQuestion, verificationFactsFromEvents } from "./ship.server.js";
 import { typicalDuration } from "./expect.js";
 import type { Typical } from "./expect.js";
@@ -87,6 +88,8 @@ export interface RunData {
     /** S15 wired health: healthy/degraded/unknown + why, never silent. */
     health?: string;
     healthReason?: string;
+    /** Set when an `unknown` delivery has waited past the bound for its read-back. */
+    escalation?: string;
     /** Additive rollback receipts (the operation rides, never a state change). */
     rollback?: { state: string; actor: string; reason: string; requestedAt: string; finishedAt?: string; evidence?: string };
   };
@@ -312,6 +315,7 @@ export async function runData({ params, request }: { params: { id: string }; req
               ...(deliveryRecord.health !== undefined ? { health: deliveryRecord.health } : {}),
               ...(deliveryRecord.healthReason !== undefined ? { healthReason: deliveryRecord.healthReason } : {}),
               ...(deliveryRecord.rollback !== undefined ? { rollback: deliveryRecord.rollback } : {}),
+              ...(unknownEscalation(deliveryRecord, Date.now()) !== null ? { escalation: unknownEscalation(deliveryRecord, Date.now())! } : {}),
             },
           }
         : {}),

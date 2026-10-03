@@ -912,3 +912,133 @@ test("delta audit: held and failed deliveries re-approve through the product bou
   assert.equal((await approveDelivery(store, record.id, { destination: "scratch", recoveryVersion: "v9", actor: "op@ship" })).state, "approved");
   await assert.rejects(approveDelivery(store, "run-missing", { destination: "d", recoveryVersion: "v", actor: "a" }), /No delivery record/);
 });
+
+// ---- S14/S15 delivery gaps (delta audit continuation) ----
+
+import { createHash } from "node:crypto";
+import { isStaleRollbackExecuting, reconcileStaleRollback, unknownAgeMs, unknownEscalation } from "./delivery.js";
+
+const sha = (text: string): string => `sha256:${createHash("sha256").update(text).digest("hex")}`;
+
+test("gap: execution records a digest of the trusted copy's teploy.yml, so a config edit between deliveries is visible", async () => {
+  const now = "2026-10-03T00:00:00.000Z";
+  const record = { ...base(), actor: "op@ship", destination: "scratch", recoveryVersion: "v9", state: "executing", updatedAt: now } as DeliveryRecord;
+  const withConfig = (yml: string): CommandRunner => {
+    const inner = fullRunner();
+    return async (argv, opts) =>
+      argv[0] === "cat" && argv[1]!.endsWith("/teploy.yml") ? { code: 0, stdout: yml, stderr: "" } : inner(argv, opts);
+  };
+  const a = await executeDelivery(record, { dir: "/srv/trusted", run: withConfig("server: 10.0.0.1\n"), now: () => now, authority: sourcesFor() });
+  const b = await executeDelivery(record, { dir: "/srv/trusted", run: withConfig("server: 10.0.0.2\n"), now: () => now, authority: sourcesFor() });
+  assert.equal(a.configIdentity, sha("server: 10.0.0.1\n"));
+  assert.equal(b.configIdentity, sha("server: 10.0.0.2\n"));
+  assert.notEqual(a.configIdentity, b.configIdentity);
+  // Unreadable or empty config: identity stays absent (never a made-up digest), and the delivery still proceeds.
+  const none = await executeDelivery(record, { dir: "/srv/trusted", run: fullRunner(), now: () => now, authority: sourcesFor() });
+  assert.equal(none.state, "unknown");
+  assert.equal(none.configIdentity, undefined);
+  // The identity travels through the store's transition like any other receipt field.
+  const store = new FileDeliveryStore(await mkdtemp(join(tmpdir(), "ship-delivery-")));
+  const p = await store.propose(base("run-cfg"));
+  await store.transition(p.id, "proposed", "approved", { actor: "op", destination: "d", recoveryVersion: "v1" });
+  await store.transition(p.id, "approved", "executing", {});
+  const unk = await store.transition(p.id, "executing", "unknown", { artifactDigest: "img", configIdentity: a.configIdentity! });
+  assert.equal(unk.configIdentity, a.configIdentity);
+});
+
+const rollbackRecord = (over: Partial<NonNullable<DeliveryRecord["rollback"]>> = {}): DeliveryRecord =>
+  ({
+    ...base("run-rb"),
+    state: "confirmed",
+    recoveryVersion: "v9",
+    updatedAt: "2026-10-03T00:00:00.000Z",
+    rollback: { state: "executing", actor: "op@ship", reason: "regression", requestedAt: "2026-10-03T00:00:00.000Z", claimedAt: "2026-10-03T00:00:00.000Z", ...over },
+  }) as DeliveryRecord;
+
+function statusOf(hash: string, running = true): CommandRunner {
+  return async () => ({ code: 0, stdout: JSON.stringify({ state: { current_hash: hash }, containers: running ? [{ State: "running", Image: "x" }] : [] }), stderr: "" });
+}
+
+test("gap: a rollback stuck executing is stale only past the window, and only with a claim clock", () => {
+  const now = Date.parse("2026-10-03T01:00:00.000Z");
+  assert.equal(isStaleRollbackExecuting(rollbackRecord({ claimedAt: new Date(now - 60_000).toISOString() }), now), false, "fresh claim left alone");
+  assert.equal(isStaleRollbackExecuting(rollbackRecord({ claimedAt: new Date(now - 36 * 60_000).toISOString() }), now), true);
+  assert.equal(isStaleRollbackExecuting(rollbackRecord({ state: "requested", claimedAt: new Date(now - 36 * 60_000).toISOString() }), now), false, "only executing");
+  const legacy = rollbackRecord();
+  delete legacy.rollback!.claimedAt;
+  assert.equal(isStaleRollbackExecuting(legacy, now), false, "records claimed before the field existed are never reaped");
+});
+
+test("gap: stale rollback reconciliation reads the target — landed is done, everything else is failed and re-requestable", async () => {
+  const now = () => "2026-10-03T02:00:00.000Z";
+  const landed = await reconcileStaleRollback(rollbackRecord(), { dir: "/srv/trusted", run: statusOf("v9"), now });
+  assert.equal(landed.state, "done");
+  assert.match(landed.evidence!, /reconciled by read-back.*v9/);
+  assert.equal(landed.finishedAt, now());
+
+  const notLanded = await reconcileStaleRollback(rollbackRecord(), { dir: "/srv/trusted", run: statusOf("abc123d"), now });
+  assert.equal(notLanded.state, "failed");
+  assert.match(notLanded.evidence!, /abc123d.*not the retained v9/);
+
+  const stopped = await reconcileStaleRollback(rollbackRecord(), { dir: "/srv/trusted", run: statusOf("v9", false), now });
+  assert.equal(stopped.state, "failed", "the retained version with no live container is not a rollback that worked");
+
+  const refused = await reconcileStaleRollback(rollbackRecord(), { dir: "/srv/trusted", run: async () => ({ code: 1, stdout: "", stderr: "ssh refused" }), now });
+  assert.equal(refused.state, "failed");
+  assert.match(refused.evidence!, /could not be read back/);
+  const unconfigured = await reconcileStaleRollback(rollbackRecord(), { run: never, now });
+  assert.equal(unconfigured.state, "failed");
+
+  // End to end through the store: a worker died after claiming, the route
+  // refuses a new request, and reconciliation unsticks it.
+  const store = new FileDeliveryStore(await mkdtemp(join(tmpdir(), "ship-delivery-")));
+  const p = await store.propose(base("run-stuck"));
+  await store.transition(p.id, "proposed", "approved", { actor: "op", destination: "d", recoveryVersion: "v9" });
+  await store.transition(p.id, "approved", "executing", {});
+  await store.transition(p.id, "executing", "unknown", { artifactDigest: "img" });
+  await store.transition(p.id, "unknown", "confirmed", { reason: "ok", health: "unknown", healthReason: "none" });
+  await store.requestRollback(p.id, "op@ship", "regression");
+  const claimed = await store.claimRollback(p.id);
+  assert.ok(Number.isFinite(Date.parse(claimed.rollback!.claimedAt!)), "the claim stamps its own clock");
+  await assert.rejects(store.requestRollback(p.id, "op", "again"), /already executing/);
+  const outcome = await reconcileStaleRollback(claimed, { dir: "/srv/trusted", run: statusOf("abc123d"), now });
+  const finished = await store.finishRollback(p.id, outcome);
+  assert.equal(finished.rollback?.state, "failed");
+  const again = await store.requestRollback(p.id, "op@ship", "retry");
+  assert.equal(again.rollback?.state, "requested");
+});
+
+test("gap: the sweep's selection reaches old approved and requested records behind more than 500 newer ones", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ship-delivery-"));
+  const store = new FileDeliveryStore(dir);
+  const fs = await import("node:fs/promises");
+  const t = (i: number) => new Date(Date.parse("2026-01-01T00:00:00.000Z") + i * 1000).toISOString();
+  const all: Record<string, DeliveryRecord> = {
+    "run-old-approved": { ...base("run-old-approved"), state: "approved", updatedAt: t(0) } as DeliveryRecord,
+    "run-old-rollback": {
+      ...base("run-old-rollback"), state: "confirmed", recoveryVersion: "v1", updatedAt: t(1),
+      rollback: { state: "requested", actor: "op", reason: "r", requestedAt: t(1) },
+    } as DeliveryRecord,
+  };
+  for (let i = 0; i < 520; i++) all[`run-new-${i}`] = { ...base(`run-new-${i}`), state: "confirmed", updatedAt: t(1000 + i) } as DeliveryRecord;
+  await fs.writeFile(join(dir, "deliveries.json"), JSON.stringify(all));
+  assert.deepEqual((await store.due("approved", 5)).map((r) => r.id), ["run-old-approved"]);
+  assert.deepEqual((await store.dueRollbacks("requested", 5)).map((r) => r.id), ["run-old-rollback"]);
+  // Oldest rollback request first, so a head-of-queue request cannot starve.
+  all["run-newer-rollback"] = { ...base("run-newer-rollback"), state: "confirmed", recoveryVersion: "v1", updatedAt: t(5000), rollback: { state: "requested", actor: "op", reason: "r", requestedAt: t(5000) } } as DeliveryRecord;
+  await fs.writeFile(join(dir, "deliveries.json"), JSON.stringify(all));
+  assert.deepEqual((await store.dueRollbacks("requested", 5)).map((r) => r.id), ["run-old-rollback", "run-newer-rollback"]);
+});
+
+test("gap: an unknown delivery that stays unreadable is escalated after a bounded age (and only then)", () => {
+  const since = "2026-10-03T00:00:00.000Z";
+  const rec = unknownRecord({ updatedAt: since });
+  const at = (min: number) => Date.parse(since) + min * 60_000;
+  assert.equal(unknownAgeMs(rec, at(5)), 5 * 60_000);
+  assert.equal(unknownEscalation(rec, at(5)), null, "a fresh unknown is just waiting for its read-back");
+  assert.equal(unknownEscalation(rec, at(60)), null, "the bound itself is not yet past");
+  assert.match(unknownEscalation(rec, at(61))!, /unconfirmed for 61 min.*check the target by hand/);
+  assert.equal(unknownEscalation(rec, at(61), 2 * 60 * 60_000), null, "the bound is a parameter");
+  assert.equal(unknownEscalation({ ...rec, state: "confirmed" }, at(600)), null, "only unknown records");
+  assert.equal(unknownAgeMs({ ...rec, updatedAt: "not a date" }, at(600)), null, "no usable stamp, no claim");
+});
