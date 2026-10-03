@@ -19,6 +19,7 @@ import { costUSD, isPricedModel, pendingQuestion, verificationFactsFromEvents } 
 import { typicalDuration } from "./expect.js";
 import type { Typical } from "./expect.js";
 import { isAskEvent } from "teploy-ship/ask";
+import { harnessSupports } from "teploy-ship/harness-capabilities";
 import type { RunMeta, ScanFinding } from "teploy-ship/runtime";
 import { shipRuntime } from "./store.server.js";
 import { currentUser } from "./session.server.js";
@@ -184,8 +185,10 @@ export async function runData({ params, request }: { params: { id: string }; req
     const outcome = runOutcome(events);
     const cost = costUSD(meta?.model ?? "", outcome.usage);
     const started = events.find((e) => e.type === "run-started");
-    const steerable =
-      (started?.data as { input?: { steer?: boolean } } | undefined)?.input?.steer === true;
+    // Offered only when the run's harness can read a steering note: the native
+    // loop does, external adapters read nothing but their starting prompt.
+    const startedInput = (started?.data as { input?: { steer?: boolean; harness?: { id?: unknown }; harnessAttempts?: { id?: unknown }[] } } | undefined)?.input;
+    const steerable = startedInput?.steer === true && harnessSupports(startedInput, "steer");
     const plan = planFrom(events);
     const scanned = findingsFrom(events);
     const executing = meta !== null && !["completed", "failed", "cancelled", "cancelling"].includes(meta.status);

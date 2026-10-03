@@ -32,6 +32,10 @@
       "types": "./dist/ask.d.ts",
       "import": "./dist/ask.js"
     },
+    "./harness-capabilities": {
+      "types": "./dist/harness-capabilities.d.ts",
+      "import": "./dist/harness-capabilities.js"
+    },
     "./egress": {
       "types": "./dist/egress.d.ts",
       "import": "./dist/egress.js"
