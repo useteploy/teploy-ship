@@ -10,6 +10,7 @@ import {
   type TakeoverRecord,
   type TakeoverSession,
 } from "../../../dist/takeover.js";
+import { testIntegrityPanel, parseOraclePaths, type TestIntegrityPanel } from "./test-integrity-view.js";
 import { workspaceRecovery, conversation, diffSnapshots, evidence, previewPanel } from "./workspace.js";
 import type { Message, DiffSnapshot, Evidence, PreviewPanel } from "./workspace.js";
 import { publicOrigin } from "./oidc.server.js";
@@ -47,6 +48,8 @@ export interface RunData {
   messages: Message[];
   snapshots: DiffSnapshot[];
   evidence: Evidence;
+  /** Advisory test-integrity read of the published diff; never an input to any decision. */
+  testIntegrity: TestIntegrityPanel;
   /** The run page's preview panel state, decided server-side (expiry uses the server clock). */
   previewPanel: PreviewPanel;
   parentRunId?: string;
@@ -319,6 +322,7 @@ export async function runData({ params, request }: { params: { id: string }; req
       messages: conversation(events),
       snapshots: diffSnapshots(events),
       evidence: evidence(facts, reviewedHead),
+      testIntegrity: testIntegrityPanel(events, parseOraclePaths(process.env.SHIP_ORACLE_PATHS)),
       previewPanel: previewPanel(events, facts, { executing, now: Date.now(), dashboardOrigin: publicOrigin(request), frameBase: previewFrameBase(), ...(superseded !== undefined ? { superseded } : {}) }),
       hasPr: facts.pr !== undefined || typeof (started?.data as any)?.input?.pr === "number",
       parentRunId: typeof (started?.data as any)?.input?.parentRunId === 'string' ? (started?.data as any).input.parentRunId : undefined,
