@@ -1,0 +1,187 @@
+{
+  "schema": 1,
+  "preamble": "Each claim states what it covers, what kind of evidence stands behind it, and what it does not show. Evidence classes: implementation (the code or document exists), automated (a test or probe in this repository), system (observed in a real system), human (a recorded observation), comparative (matched measurement against an alternative). A claim is `supported` only with automated or system evidence; it is marked verified only with system evidence at an exact revision. Automated evidence carries the commit at which its tests were last run green; any later change to its cited path makes it a candidate for re-running (`node scripts/claim-ledger.mjs --check --stale`). No claim in the first seeding has system-class evidence at a known revision, so none is marked verified. Publication, tag and visibility decisions are not made by this file.",
+  "claims": [
+    {
+      "id": "model.default-id",
+      "claim": "The default model id is zai/glm-5.3, with precedence --model, then SHIP_MODEL, then config file, then default.",
+      "scope": "Model id resolution only (src/model-id.ts). Says nothing about how well that model performs.",
+      "status": "supported",
+      "owner": "teploy-ship",
+      "evidence": [
+        { "class": "implementation", "path": "src/model-id.ts" },
+        { "class": "automated", "path": "src/model-id.test.ts", "test": "flag wins over env and config", "revision": "dd682c7acc4ee63ffe2e33a8246574778de87c9a" },
+        { "class": "automated", "path": "src/model-id.test.ts", "test": "an empty SHIP_MODEL falls through to config, then the default", "revision": "dd682c7acc4ee63ffe2e33a8246574778de87c9a" }
+      ],
+      "limitations": ["Resolution of the id string only; whether the configured gateway serves it is not checked."]
+    },
+    {
+      "id": "model.default-quality",
+      "claim": "glm-5.3 resolved 35 of 50 seeded SWE-bench Lite instances.",
+      "scope": "Seeded 50-of-300 Lite subset, official evaluator, bare configuration (not the product path), recorded 2026-08-16. Not a Ship product result and not a held-out result.",
+      "status": "provisional",
+      "owner": "teploy-ship",
+      "evidence": [
+        { "class": "implementation", "path": "docs/MODELS.md" },
+        { "class": "system", "path": "evals/2026-08-16-swebench-lite-50-glm53.md", "revisionUnknown": true }
+      ],
+      "limitations": [
+        "The writeup does not pin a Ship commit; the system evidence is therefore not counted.",
+        "Other models have little or no evidence: claude-haiku-4-5 was 1/9 on a hand-picked set with prompts tuned against GLM; claude-sonnet-5 3/3 and 6/6 on small saturated in-house suites; none for OpenAI-shaped, Gemini, DeepSeek, Opus or local models.",
+        "Not the product path, so it does not support any claim about Ship tasks."
+      ]
+    },
+    {
+      "id": "harness.native-steering",
+      "claim": "Steering notes are offered and accepted only for runs whose harness can consume them, which is the native harness only.",
+      "scope": "The capability table in src/harness-capabilities.ts, as consulted by the run page and the steering route.",
+      "status": "provisional",
+      "owner": "teploy-ship",
+      "evidence": [
+        { "class": "implementation", "path": "src/harness-capabilities.ts" },
+        { "class": "automated", "path": "src/harness-capabilities.test.ts", "test": "S13: only the native harness takes steering notes", "revision": "dd682c7acc4ee63ffe2e33a8246574778de87c9a" },
+        { "class": "automated", "path": "src/harness-capabilities.test.ts", "test": "S13: a multi-harness run supports a capability only if every attempt does", "revision": "dd682c7acc4ee63ffe2e33a8246574778de87c9a" }
+      ],
+      "limitations": [
+        "The table is tested; the route refusal itself has no automated test.",
+        "No live steering of a real native run is recorded.",
+        "External harnesses (claude-code, opencode) cannot be steered; that is a gap, not a feature."
+      ]
+    },
+    {
+      "id": "harness.external-refuse-plan-review",
+      "claim": "External harnesses refuse plan review: a run that requires plan review fails with an explicit error and starts no external agent.",
+      "scope": "claude-code and opencode adapters, at admission (runtime) and on direct workflow execution.",
+      "status": "supported",
+      "owner": "teploy-ship",
+      "evidence": [
+        { "class": "implementation", "path": "src/runtime.ts" },
+        { "class": "implementation", "path": "src/harness-external.ts" },
+        { "class": "automated", "path": "src/harness-external.test.ts", "test": "direct external execution cannot bypass requested plan review", "revision": "dd682c7acc4ee63ffe2e33a8246574778de87c9a" }
+      ],
+      "limitations": [
+        "The test drives a fake claude binary; the admission-time check in src/runtime.ts has no dedicated cited test here.",
+        "No real external harness run was observed."
+      ]
+    },
+    {
+      "id": "delivery.stale-executing",
+      "claim": "A delivery stuck in executing past the stale window is recognised as stale only by state and age, and stale rollback reconciliation reads the target before deciding.",
+      "scope": "src/delivery.ts state machine with in-memory and fake targets. Delivery execution is off without SHIP_DELIVERY_DIR.",
+      "status": "supported",
+      "owner": "teploy-ship",
+      "evidence": [
+        { "class": "implementation", "path": "src/delivery.ts" },
+        { "class": "automated", "path": "src/delivery.test.ts", "test": "isStaleExecuting keys on state and age, above the execution ceiling", "revision": "dd682c7acc4ee63ffe2e33a8246574778de87c9a" },
+        { "class": "automated", "path": "src/delivery.test.ts", "test": "gap: stale rollback reconciliation reads the target", "revision": "dd682c7acc4ee63ffe2e33a8246574778de87c9a" }
+      ],
+      "limitations": [
+        "No live forge or deployment target was exercised.",
+        "The stale window is a fixed 35 minutes by default."
+      ]
+    },
+    {
+      "id": "git.credential-scrub-same-shell",
+      "claim": "Authenticated clone and warm fetch scrub the remote in the same shell invocation as the credential, whatever the credentialed step returns.",
+      "scope": "src/git.ts clone and warm-volume fetch through an executor.",
+      "status": "supported",
+      "owner": "teploy-ship",
+      "evidence": [
+        { "class": "implementation", "path": "src/git.ts" },
+        { "class": "automated", "path": "src/git.test.ts", "test": "S01: authenticated clone and fetch scrub the remote in the same shell invocation as the credential", "revision": "dd682c7acc4ee63ffe2e33a8246574778de87c9a" }
+      ],
+      "limitations": [
+        "The sequencing test fails on the previous code; the failed-fetch probe on a real checkout is a regression pin only (the old path also scrubbed).",
+        "Not proven through the Sandbox daemon or a live private repository."
+      ]
+    },
+    {
+      "id": "git.env-credential-mode",
+      "claim": "SHIP_GIT_CREDENTIAL=env keeps the Git token out of every command line and out of .git/config.",
+      "scope": "LocalExecutor with a real git and a local HTTP server. Implemented, OFF by default (argv mode remains the default).",
+      "status": "provisional",
+      "owner": "teploy-ship",
+      "evidence": [
+        { "class": "implementation", "path": "src/git.ts" },
+        { "class": "automated", "path": "src/git.test.ts", "test": "S01: env credential mode keeps the token out of argv and the URL, argv mode does not", "revision": "dd682c7acc4ee63ffe2e33a8246574778de87c9a" },
+        { "class": "automated", "path": "src/git.test.ts", "test": "S01: a real git clone in env mode sends the credential as a header and never puts it in argv or config", "revision": "dd682c7acc4ee63ffe2e33a8246574778de87c9a" }
+      ],
+      "limitations": [
+        "Unproven live: the Sandbox daemon must forward per-exec env, and the sandbox git must be 2.31 or later.",
+        "No private-repo clone or push on Forgejo or GitHub through the real sandbox has been run.",
+        "Default unchanged; see AUDIT_OPEN.md before flipping it."
+      ]
+    },
+    {
+      "id": "eval.retained-recount",
+      "claim": "The retained product-journey records count 15 pass, 5 fail, 6 unknown and 2 harness-error over 28 attempts in 20 runs.",
+      "scope": "evals/product-journeys/results at the recount of 2026-10-03, using the recorded outcome where present and outcomeOf otherwise. A development and regression set, not held-out, and not a model-quality number.",
+      "status": "supported",
+      "owner": "teploy-ship",
+      "evidence": [
+        { "class": "implementation", "path": "evals/product-journeys/BASELINE_RECOUNT_2026-10-03.md" },
+        { "class": "automated", "path": "scripts/eval-report.test.mjs", "test": "each outcome class is counted exactly once and unknown is neither pass nor fail", "revision": "dd682c7acc4ee63ffe2e33a8246574778de87c9a" },
+        { "class": "automated", "path": "scripts/eval-report.test.mjs", "test": "negative control: an unknown record is in no pass or fail count and no denominator", "revision": "dd682c7acc4ee63ffe2e33a8246574778de87c9a" }
+      ],
+      "limitations": [
+        "The counting rules are tested on synthetic trees; the figures themselves are the generated report, not a separate test.",
+        "Costs: 12 records priced, 16 unknown; the priced sum is a lower bound.",
+        "Supplements (one regrade, one reclassification) are listed but not applied."
+      ]
+    },
+    {
+      "id": "eval.headline-21-13-2",
+      "claim": "The earlier headline of 21 passes, 13 failures and 2 human-gated harness errors over 36 attempts is not claimed.",
+      "scope": "It cannot be reproduced from the retained records; 8 of the 36 attempts are not in this repository. The private receipts it may come from were not available.",
+      "status": "disclaimed",
+      "owner": "teploy-ship",
+      "evidence": [
+        { "class": "implementation", "path": "evals/product-journeys/BASELINE_RECOUNT_2026-10-03.md" }
+      ],
+      "limitations": [
+        "Do not quote 21/13/2. Use eval.retained-recount, with its scope.",
+        "Not shown to be wrong either: the missing records were not checked."
+      ]
+    },
+    {
+      "id": "preview.egress-unrestricted",
+      "claim": "A tailnet preview container can reach the internet, the LAN, the tailnet and other containers on the shared bridge; it is not restricted by the sandbox allowlist.",
+      "scope": "Previews started by teploy preview deploy on the preview target. The defect is in the CLI, so the owning layer is teploy-cli.",
+      "status": "open",
+      "owner": "teploy-cli",
+      "evidence": [
+        { "class": "implementation", "path": "AUDIT_OPEN.md" }
+      ],
+      "limitations": [
+        "No Ship-side change made; any isolation claim for previews is withheld until the CLI change and a live proof on the preview target exist.",
+        "A successful preview is not evidence that production isolation guarantees exist."
+      ]
+    },
+    {
+      "id": "authority.command-regex-advisory",
+      "claim": "Command-regex approval classification is advisory, not an enforcement boundary.",
+      "scope": "defaultApprovalPolicy and sandboxApprovalPolicy classification of raw Bash and Python source, most relevant to the trusted-local executor. Open item teploy-ship-04.",
+      "status": "open",
+      "owner": "teploy-ship",
+      "evidence": [
+        { "class": "implementation", "path": "AUDIT_OPEN.md" }
+      ],
+      "limitations": [
+        "Equivalent operations through other commands, APIs, indirection or argument forms may not be recognised.",
+        "Deferred as a design project: capability-scoped executor boundaries and a policy corpus of equivalent spellings are not built.",
+        "This is not evidence of an escape from the separate sandbox implementation."
+      ]
+    },
+    {
+      "id": "comparative.superiority",
+      "claim": "No claim is made that Ship is better than, faster than or more capable than any other product.",
+      "scope": "The programme treats competitor material as documented design references, not measured quality.",
+      "status": "disclaimed",
+      "owner": "teploy-ship",
+      "evidence": [
+        { "class": "implementation", "path": "docs/SHIP_RELEASE_PROGRAMME_2026-09-21.md" }
+      ],
+      "limitations": ["A superiority claim needs matched direct comparative evidence on named dimensions; none exists."]
+    }
+  ]
+}
