@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Perfect citations, but the run also \"fixed\" the tagline in the work tree: the task is answer-only.",
+  "failsWith": "work tree changed"
+}

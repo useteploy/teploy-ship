@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Removes the whole health-check block; deploy exits 0 trivially.",
+  "failsWith": "no longer verifies /health"
+}

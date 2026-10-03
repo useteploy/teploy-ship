@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Page is wired and styled but says only \"Send us a message\" with a form: no address and no hours at all.",
+  "failsWith": "address and opening hours"
+}

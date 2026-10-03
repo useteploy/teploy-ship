@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "409 but the body is {error: \"error\"}: right status, nothing naming the duplicate.",
+  "failsWith": "does not name the duplicate"
+}

@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Handles both call shapes in code but leaves requirements.txt at >=3.5,<4.",
+  "failsWith": "does not allow markdown 4\\.x"
+}

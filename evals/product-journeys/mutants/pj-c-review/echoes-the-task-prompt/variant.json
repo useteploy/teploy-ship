@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Transcript only repeats the task prompt (as Ship transcripts do); no review.",
+  "failsWith": "does not identify"
+}

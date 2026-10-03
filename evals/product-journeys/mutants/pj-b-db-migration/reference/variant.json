@@ -1,0 +1,4 @@
+{
+  "kind": "correct",
+  "description": "New migrations/002_add_pinned.sql adds pinned INTEGER NOT NULL DEFAULT 0; API lists pinned."
+}

@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Returns 400 \"bad request\" for the duplicate: greens the shipped test (accepts 400 or 409) but is not a conflict.",
+  "failsWith": "^trap: 400"
+}

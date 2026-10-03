@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Correct expiry but records a last_expiry_run timestamp in the store, so a second run rewrites different bytes (and changes the store format).",
+  "failsWith": "not idempotent"
+}

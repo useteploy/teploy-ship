@@ -1,0 +1,4 @@
+{
+  "kind": "correct",
+  "description": "Env-configurable TTL (KEEPNOTE_TTL_SECONDS) defaulting to 24h; README corrected to 24 hours."
+}

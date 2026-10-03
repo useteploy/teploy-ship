@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Checks the token properly but answers 403 where the scenario contract says 401 for a missing/wrong credential.",
+  "failsWith": "expected 401"
+}

@@ -1,0 +1,1 @@
+Review patches/review-candidate.patch (read-only). It claims to align the session TTL with the documented 30-minute window. Is it safe to merge? Do not modify anything.

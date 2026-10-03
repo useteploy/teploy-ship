@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Correct expiry behaviour, but reads and writes store.json with raw json, bypassing service.load_store/save_store that jobs/README.md requires (and that owns the store format).",
+  "failsWith": "load_store|save_store"
+}

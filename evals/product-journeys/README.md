@@ -90,6 +90,15 @@ Additionally, every change-requiring grader fails when pointed at its
 pristine fixture (unchanged baseline = failing baseline), the same property
 the customer-directory search grade used.
 
+Failing on the pristine fixture is not enough: a grader can still pass a
+plausible wrong fix. `mutants/<scenario>/<variant>/` holds hand-written wrong
+solutions (and one correct reference) for all 12 scenarios; `node
+scripts/grader-sensitivity.mjs` grades each through the out-of-tree grader and
+prints the matrix, exiting non-zero if a wrong variant passes or a reference
+fails. The committed result, including the grader defects its first run found,
+is `GRADER_SENSITIVITY_2026-10-03.md`; `scripts/grader-sensitivity.test.mjs`
+runs the whole matrix in `pnpm test`.
+
 ## Probes
 
 Separate from the 12 base scenarios; applied by the harness during a run and

@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Treats \"expire\" as \"clear\": wipes the sessions map, unexpired sessions included.",
+  "failsWith": "sessions after job run"
+}

@@ -1,0 +1,4 @@
+{
+  "kind": "correct",
+  "description": "deploy.sh applies migrations to the fresh staging database before booting; smoke tests and the 200 health check intact."
+}

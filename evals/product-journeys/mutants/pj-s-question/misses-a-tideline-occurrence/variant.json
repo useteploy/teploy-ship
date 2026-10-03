@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Cites the tagline and five of six Tideline lines (skips the about.html footer).",
+  "failsWith": "Tideline coverage mismatch"
+}

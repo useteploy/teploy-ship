@@ -1,0 +1,1 @@
+The README documents a 30-minute window and the patch aligns the code with it. tests/test_service.py pins 24h and will fail until updated. Safe to merge once the test is updated. LGTM.

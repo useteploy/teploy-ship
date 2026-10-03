@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Wraps the old call in try/except AttributeError and returns the raw text: no crash on 4.x, but 4.x never renders markdown.",
+  "failsWith": "4\\.x-only markdown module"
+}

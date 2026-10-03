@@ -1,0 +1,1 @@
+Plan: add a gallery section to index.html with three cards under the hero.

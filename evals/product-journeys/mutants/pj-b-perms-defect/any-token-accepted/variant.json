@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Only checks that the header is present, not that it matches.",
+  "failsWith": "wrong token returned"
+}

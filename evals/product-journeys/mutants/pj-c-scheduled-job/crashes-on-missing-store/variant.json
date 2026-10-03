@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Correct expiry, but opens the store file unconditionally so a quiesced (absent) store exits non-zero.",
+  "failsWith": "on a missing store"
+}

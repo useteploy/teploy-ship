@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Adds the token check to DELETE and also to GET /api/notes (\"while we are at it\").",
+  "failsWith": "reads must stay open"
+}

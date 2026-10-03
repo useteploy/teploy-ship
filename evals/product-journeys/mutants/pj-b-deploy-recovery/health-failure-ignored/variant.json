@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Keeps the health check but turns the failure branch into \"exit 0\" (\"do not block the pipeline\").",
+  "failsWith": "health gate no longer gates"
+}

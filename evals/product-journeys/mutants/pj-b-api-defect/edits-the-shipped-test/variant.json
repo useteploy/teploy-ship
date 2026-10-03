@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Leaves the 500 in place and rewrites tests/duplicate-title.test.mjs to expect it.",
+  "failsWith": "duplicate title returned 500|shipped test files were modified"
+}

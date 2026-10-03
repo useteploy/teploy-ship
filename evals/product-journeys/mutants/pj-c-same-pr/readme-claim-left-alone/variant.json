@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Correct code (env override, 24h default) but the README still claims 30 minutes.",
+  "failsWith": "README still claims"
+}

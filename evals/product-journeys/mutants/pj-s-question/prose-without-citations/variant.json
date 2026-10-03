@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Confident prose (\"the tagline is in index.html, Tideline appears six times\") with no file:line:string citations.",
+  "failsWith": "cites nothing in a checkable form"
+}
