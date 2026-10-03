@@ -29,6 +29,11 @@ import { runOutcome, toTimeline, recordedSteps } from "./timeline.js";
 import type { RunOutcome, TimelineItem, RecordedStep } from "./timeline.js";
 import { startSpan } from "./observe.server.js";
 import { ProjectIdentityError } from "../../../dist/projects.js";
+import { taskRootRunId as resolveTaskRoot } from "../../../dist/task-session.js";
+import { taskRecord } from "teploy-ship/task-record";
+import type { DeliveryOutcome } from "teploy-ship/task-record";
+import { taskStateView } from "./task-state.js";
+import type { TaskStateView } from "./task-state.js";
 
 export interface RunData {
   followUpRequestId: string;
@@ -94,6 +99,13 @@ export interface RunData {
     rollback?: { state: string; actor: string; reason: string; requestedAt: string; finishedAt?: string; evidence?: string };
   };
   deliveryError?: string;
+  /**
+   * The task's execution / acceptance / delivery as three separate states
+   * (S03), projected read-only from the runs of this thread. Null when the
+   * lineage could not be read; `taskStateError` then says why.
+   */
+  taskState: TaskStateView | null;
+  taskStateError?: string;
   /** True when this run is a scan, even if it found nothing. */
   isScan: boolean;
   /** Steerable run (input.steer): show the steer box while active. */
@@ -280,6 +292,22 @@ export async function runData({ params, request }: { params: { id: string }; req
     // The merged change's delivery record (Package B): advisory read for the
     // card; the approve action is the authority boundary, not this loader.
     const deliveryRecord = (await runtime.deliveryRecords?.get(runId).catch(() => null)) ?? null;
+    // Advisory, read-only: the thread is at most threadHistory's 20 runs (this
+    // run and its ancestors), and a lineage that cannot be read costs the
+    // panel, never the page. Delivery is this run's own record, if any.
+    let taskState: TaskStateView | null = null;
+    let taskStateError: string | undefined;
+    try {
+      const root = await resolveTaskRoot(runtime.store, runId);
+      const record = taskRecord(
+        root,
+        history.map((h) => ({ meta: { runId: h.runId, task: h.task, status: "", model: "", createdAt: "", updatedAt: "" }, events: h.events })),
+        deliveryRecord !== null ? { state: deliveryRecord.state as Exclude<DeliveryOutcome, "not-recorded"> } : undefined,
+      );
+      taskState = taskStateView(record);
+    } catch (error) {
+      taskStateError = error instanceof Error ? error.message : "task history could not be read";
+    }
     const data: RunData = {
       userMessage: (started?.data as any)?.input?.userMessage,
       journey: (started?.data as any)?.input?.journey,
@@ -319,6 +347,8 @@ export async function runData({ params, request }: { params: { id: string }; req
             },
           }
         : {}),
+      taskState,
+      ...(taskStateError !== undefined ? { taskStateError } : {}),
       ...(query.get("deliveryError") !== null ? { deliveryError: query.get("deliveryError") ?? undefined } : {}),
       meta,
       items: toTimeline(events),

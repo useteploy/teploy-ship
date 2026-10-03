@@ -381,6 +381,7 @@ export default function RunDetail({ data: initialData }: { data: RunData }) {
       ) : (
         <>
           <section class="task-status" aria-label="Task status"><b>{taskStatus(data.meta.status, data.meta.eventName, data.hasPr, data.journey).label}</b><p>{taskStatus(data.meta.status, data.meta.eventName, data.hasPr, data.journey).next}</p><a href="#reply">Continue the conversation</a></section>
+          <TaskStatePanel data={data} />
           <details class="disclosure"><summary>Execution details</summary><p class="meta">
             <span class={`status ${data.meta.status}`}>{data.meta.status}</span> · {data.meta.model}
             {data.meta.ranOn !== undefined && <> · ran on {data.meta.ranOn}</>} · updated{" "}
@@ -1284,5 +1285,30 @@ function DeliveryCard({ data }: { data: RunData }) {
       </form>
     )}
     <p class="meta" style="margin-top:8px">Approval records intent against this exact tuple; deployment happens from the worker's trusted working copy and rolls back only to the retained version.</p>
+  </section>;
+}
+
+/**
+ * S03: execution, acceptance and delivery as three separate states, read-only
+ * from the thread's recorded events (src/task-record.ts). Fields the records
+ * cannot fill are listed, not omitted; wording comes from lib/task-state.ts.
+ */
+function TaskStatePanel({ data }: { data: RunData }) {
+  const t = data.taskState;
+  if (t === null) return <section class="task-state" aria-labelledby="ts-h"><h2 class="section" id="ts-h">Task state</h2><p class="meta">Not available: {data.taskStateError ?? "the task history could not be read"}.</p></section>;
+  const cells = [t.execution, t.acceptance, t.delivery];
+  return <section class="task-state" aria-labelledby="ts-h">
+    <h2 class="section" id="ts-h">Task state</h2>
+    <p class="meta">Three separate facts{t.attempts > 1 ? ` across ${t.attempts} attempts` : ""}. One does not imply another.</p>
+    <div class="ts-cells">{cells.map((c) => <div class={`ts-cell ${c.tone}`}>
+      <h3>{c.heading}</h3>
+      <p class="ts-label">{c.label}</p>
+      <p>{c.meaning}</p>
+    </div>)}</div>
+    {t.superseded.length > 0 && <ul aria-label="Superseded approvals">{t.superseded.map((s) => <li>{s}</li>)}</ul>}
+    {t.requirements.length > 0 && <><h3 class="ts-sub">Requested</h3><ol>{t.requirements.map((r) => <li>{r.statement.length > 300 ? r.statement.slice(0, 297) + "…" : r.statement}{r.current && t.requirements.length > 1 && <span class="ts-flag"> (current)</span>}</li>)}</ol></>}
+    <h3 class="ts-sub">Not recorded for this task</h3>
+    <ul>{t.notRecorded.map((n) => <li>{n}</li>)}</ul>
+    {t.anomalies.length > 0 && <><h3 class="ts-sub">Anomalies in the records</h3><ul role="list">{t.anomalies.map((a) => <li>{a}</li>)}</ul></>}
   </section>;
 }

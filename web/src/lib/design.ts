@@ -161,6 +161,18 @@ table.runs td { padding-top: 10px; padding-bottom: 10px; }
 .task-choice input { margin-top: 3px; }
 .task-status { border-left: 2px solid var(--blue); padding: 12px 16px; margin: 16px 0; background: var(--panel); }
 .task-status p { margin: 8px 0; line-height: 1.6; }
+.task-state { border: 1px solid var(--border); border-radius: 5px; padding: 12px 16px; margin: 16px 0; background: var(--panel); }
+.task-state h2 { margin: 0 0 4px; }
+.task-state h3 { margin: 0 0 6px; font-size: 12px; font-weight: 400; color: var(--dim); text-transform: uppercase; letter-spacing: .04em; }
+.task-state p { margin: 6px 0; line-height: 1.6; overflow-wrap: anywhere; }
+.task-state ol, .task-state ul { margin: 6px 0; padding-left: 20px; line-height: 1.6; overflow-wrap: anywhere; }
+.ts-cells { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr)); gap: 12px; margin: 12px 0; }
+.ts-cell { border-left: 2px solid var(--border); padding-left: 12px; min-width: 0; }
+.ts-cell.ok { border-left-color: var(--green); } .ts-cell.warn { border-left-color: var(--yellow); } .ts-cell.bad { border-left-color: var(--red); } .ts-cell.info { border-left-color: var(--blue); }
+.ts-label { font-weight: 700; }
+.ts-cell.ok .ts-label { color: var(--green); } .ts-cell.warn .ts-label { color: var(--yellow); } .ts-cell.bad .ts-label { color: var(--red); }
+.ts-flag { color: var(--dim); font-weight: 400; font-size: 12px; }
+.task-state .ts-sub { margin: 14px 0 4px; font-size: 12px; font-weight: 400; color: var(--dim); text-transform: uppercase; letter-spacing: .04em; }
 .conversation-scroll { max-height: 58vh; overflow-y: auto; overscroll-behavior: contain; padding-right: 12px; scrollbar-gutter: stable; }
 #reply { scroll-margin-top: 72px; }
 @media(max-width:600px) { .task-choices { grid-template-columns: 1fr; } .conversation-scroll { max-height: 52vh; } }

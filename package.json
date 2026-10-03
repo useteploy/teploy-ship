@@ -22,6 +22,10 @@
       "types": "./dist/plan.d.ts",
       "import": "./dist/plan.js"
     },
+    "./task-record": {
+      "types": "./dist/task-record.d.ts",
+      "import": "./dist/task-record.js"
+    },
     "./ask": {
       "types": "./dist/ask.d.ts",
       "import": "./dist/ask.js"
