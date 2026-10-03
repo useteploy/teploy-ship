@@ -33,7 +33,7 @@ Local (`LocalExecutor`, not isolated: strict approval policy, and externally-sou
 - CLI: run/runs/preflight/explain/enqueue/evidence/project/policy/audit/resume/approve/deny/answer/cancel/inbox/fix/join/worker/web/support/eval.
 - Web pages: inbox/launch, runs, run detail, projects, policies, workflows, reviews, sources, knowledge, spend, fleet, attention, recovery, incidents, coordination, setup, settings, account. Unauthenticated: health and bulletin pages only. SSE events stream. HMAC webhooks: forgejo, github, linear, slack, observe. JSON: run scan/decide/promote/rollback-delivery/findings/workspace, policies, incidents intake, artifacts.
 - Intake: forgejo/github (review events, failed CI on `ship/…` PRs), linear (needs `ship` label), slack (`repo:<url>` token), observe (alert → incident proposal), workflow schedules, team requests, Akiroo. Policy per source `ignore | propose | auto`, default off; dedupe key per task.
-- Schedules: interval only (60–44,640 minutes), once per slot, **no catch-up after downtime**, not timezone-aware.
+- Schedules: interval (60–44,640 minutes) or daily/weekly timezone-aware `at` (DST-safe, once per slot), missed-trigger policy, overlap policy (**inert in the worker until `isRunning` is wired**), debounce; no event triggers. No UI creates `at` schedules (S16, PR #24).
 - Lifecycle API: `docs/HTTP_CLIENT.md`; explicitly dashboard-compatible endpoints, "not a versioned general SDK". `requestId` is the idempotency key.
 
 ## Authority
@@ -48,6 +48,6 @@ Runs are an event log plus `RunMeta`; `run-started` carries the full recorded in
 
 - No declared harness capability contract (S13); only steering is now enforced from a table.
 - External harnesses have no recovery, approvals or steering, and cost may be unpriced.
-- Schedules have no catch-up, timezone or event triggers (S16).
+- Schedules have no event triggers, and `at` schedules have no UI; overlap is not enforced in the worker (S16).
 - Model evidence is concentrated on GLM; nothing for OpenAI-shaped or local models (S13, S23).
 - Requirements, acceptance criteria, waivers and plan versions are not stored (S03).
