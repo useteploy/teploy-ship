@@ -4,11 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
+import { createServer } from "node:http";
 import { LocalExecutor, type AgentExecutor } from "@neutron-build/agents";
 
 import {
   assertGitSafe,
   authenticatedUrl,
+  gitCredential,
+  gitCredentialMode,
   closePullRequest,
   commitAndPush,
   publishedDiff,
@@ -834,4 +837,69 @@ test("S01: authenticated clone and fetch scrub the remote in the same shell invo
     assert.ok(command.includes(`git remote set-url origin ${ref.cloneUrl}`), `scrub rides the same exec: ${command}`);
     assert.ok(command.includes("exit $rc"), "the credentialed step's own status is the one reported");
   }
+});
+
+test("S01: env credential mode keeps the token out of argv and the URL, argv mode does not", () => {
+  const ref = { kind: "forgejo" as const, base: "https://forge.example", owner: "o", repo: "r", cloneUrl: "https://forge.example/o/r.git" };
+  const argv = gitCredential(ref, "tok_abc", "argv");
+  assert.ok(argv.url.includes("tok_abc"), "the historical mode puts the token in the URL");
+  assert.equal(argv.env, undefined);
+
+  const viaEnv = gitCredential(ref, "tok_abc", "env");
+  assert.equal(viaEnv.url, ref.cloneUrl);
+  assert.ok(!viaEnv.url.includes("tok_abc"));
+  assert.equal(viaEnv.env?.GIT_CONFIG_KEY_0, "http.https://forge.example/.extraheader", "scoped to the forge origin only");
+  assert.equal(viaEnv.env?.GIT_CONFIG_VALUE_0, `Authorization: Basic ${Buffer.from("tok_abc:").toString("base64")}`);
+  assert.equal(viaEnv.env?.GIT_TERMINAL_PROMPT, "0");
+
+  assert.deepEqual(gitCredential(ref, "", "env"), { url: ref.cloneUrl }, "no token, no credential plumbing");
+  assert.equal(gitCredentialMode({}), "argv", "default is unchanged");
+  assert.equal(gitCredentialMode({ SHIP_GIT_CREDENTIAL: "env" }), "env");
+  assert.equal(gitCredentialMode({ SHIP_GIT_CREDENTIAL: "anything-else" }), "argv");
+});
+
+test("S01: a real git clone in env mode sends the credential as a header and never puts it in argv or config", async () => {
+  const seen: (string | undefined)[] = [];
+  const server = createServer((req, res) => {
+    seen.push(req.headers.authorization);
+    res.statusCode = 404;
+    res.end("not found");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  const token = "tok_PROBE_0123456789";
+  const base = `http://127.0.0.1:${port}`;
+  const ref = { kind: "forgejo" as const, base, owner: "o", repo: "r", cloneUrl: `${base}/o/r.git` };
+
+  const dir = await mkdtemp(join(tmpdir(), "git-cred-env-"));
+  const inner = new LocalExecutor({ root: dir });
+  const commands: string[] = [];
+  const recording = {
+    async exec(command: string, options?: Parameters<LocalExecutor["exec"]>[1]) {
+      commands.push(command);
+      return inner.exec(command, options);
+    },
+    putFile: inner.putFile.bind(inner),
+    getFile: inner.getFile.bind(inner),
+    destroy: inner.destroy.bind(inner),
+  } as unknown as AgentExecutor;
+
+  const saved = process.env.SHIP_GIT_CREDENTIAL;
+  process.env.SHIP_GIT_CREDENTIAL = "env";
+  try {
+    await assert.rejects(() => setupRepo(recording, { ref, token, runId: "run-env" }), /git step failed/);
+  } finally {
+    if (saved === undefined) delete process.env.SHIP_GIT_CREDENTIAL;
+    else process.env.SHIP_GIT_CREDENTIAL = saved;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+
+  assert.ok(seen.length > 0, "git reached the server");
+  assert.ok(
+    seen.every((h) => h === `Basic ${Buffer.from(`${token}:`).toString("base64")}`),
+    `every request carried the credential header: ${JSON.stringify(seen)}`,
+  );
+  assert.ok(commands.every((c) => !c.includes(token)), "the token is in no command line");
+  const config = await inner.exec("cat .git/config 2>/dev/null || true");
+  assert.ok(!config.stdout.includes(token), "the token is in no config file");
 });
