@@ -10,9 +10,11 @@ import type { NucleusPgwire } from "./nucleus-pgwire.js";
  * Today a task's intent exists only as the text of each run's input
  * (task-record.ts projects it). Nothing says which statements were ACCEPTED as
  * requirements, which were later waived, or by whom. This store is that
- * record. It is a NEW table: stores create their own tables with
- * CREATE TABLE IF NOT EXISTS, so no migration runs, no existing run, parked
- * fingerprint or populated table is touched, and nothing reads it yet.
+ * record. It is a NEW table: the store creates it with CREATE TABLE IF NOT
+ * EXISTS and migration 008 (src/migrations.ts) carries the ledger entry, the
+ * write-shaped shape probe and the DDL-parity guard — the same additive
+ * convention as 006/007. No existing run, parked fingerprint or populated
+ * table is touched, and nothing reads it yet.
  *
  * Rules, each pinned in task-requirements.test.ts:
  *  - Adding the same requirement twice is idempotent (a lost response retried
@@ -26,7 +28,10 @@ import type { NucleusPgwire } from "./nucleus-pgwire.js";
  *    records the actor it is given and does not decide.
  *
  * Rollout is separate and not done: wiring the store into enqueue and the run
- * page, and rehearsing it on a restored production copy (docs/UPGRADING.md).
+ * page (a write path remains future work; nothing here enables one). The
+ * migration has been rehearsed on a restored production copy —
+ * scripts/check-task-requirements-migration.mjs, receipt under
+ * evals/receipts/ (docs/UPGRADING.md).
  */
 
 export const TASK_REQUIREMENT_STATEMENT_LIMIT = 4000;

@@ -1,5 +1,6 @@
 import { CONNECT_REQUEST_COLUMNS } from "./connect-requests.js";
 import { RUNTIME_CONFIG_COLUMNS } from "./runtime-config.js";
+import { TASK_REQUIREMENT_COLUMNS } from "./task-requirements.js";
 import type { NucleusPgwire } from "./nucleus-pgwire.js";
 
 /**
@@ -357,6 +358,55 @@ const connectRequestsTable: Migration = {
   },
 };
 
+/**
+ * 008 — ship_task_requirements: S03's record of which statements were ACCEPTED
+ * as a task's requirements and which were later waived, by whom and why (see
+ * task-requirements.ts). The store is drafted but deliberately unwired — no
+ * route, worker path or UI writes it — so on the real deployment this migration
+ * lands as a ledger row and nothing else: the table does not exist there, the
+ * store's own CREATE TABLE IF NOT EXISTS is what will bring it in on first use,
+ * and a write path is future work gated on the programme's S03 rollout list.
+ *
+ * A no-op on a fresh install, exactly like 006 and 007, and written now for the
+ * same reason: the write-shaped probe in `needed()` and the DDL-parity test in
+ * migrations.test.ts only exist for a table that has an entry here, and the day
+ * this table grows a column is the day both are needed.
+ *
+ * The rename-aside limb below is unreachable today — ship_task_requirements has
+ * never been released in any other shape. If it ever fires, the rebuilt table
+ * is EMPTY and the old rows survive in ship_task_requirements_008: nothing is
+ * copied, because a shape we have never released has no knowable column names
+ * to copy from, and a requirement record guessed at is worse than one kept
+ * aside intact. Nothing is dropped, ever.
+ */
+const taskRequirementsTable: Migration = {
+  id: "008-ship-task-requirements",
+  description: "rebuild ship_task_requirements when its shape is behind the store DDL",
+  async needed(db) {
+    if (!(await tableExists(db, "ship_task_requirements"))) return false; // fresh install: the store DDL creates it
+    return !(await hasColumns(db, "ship_task_requirements", TASK_REQUIREMENT_COLUMNS));
+  },
+  async run(db) {
+    await db.query("ALTER TABLE ship_task_requirements RENAME TO ship_task_requirements_008");
+    await db.query(
+      `CREATE TABLE ship_task_requirements (
+        req_key TEXT PRIMARY KEY,
+        task_root_run_id TEXT,
+        requirement_id TEXT,
+        statement TEXT,
+        source TEXT,
+        source_run_id TEXT,
+        state TEXT,
+        created_at TEXT,
+        created_by TEXT,
+        waived_at TEXT,
+        waived_by TEXT,
+        waived_reason TEXT
+      )`,
+    );
+  },
+};
+
 export const MIGRATIONS: Migration[] = [
   docsSourceColumn,
   steerConsumedTurn,
@@ -365,6 +415,7 @@ export const MIGRATIONS: Migration[] = [
   tasksRequestedBy,
   runtimeConfigTable,
   connectRequestsTable,
+  taskRequirementsTable,
 ];
 
 /**
