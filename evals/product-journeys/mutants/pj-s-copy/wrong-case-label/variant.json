@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Uses \"Our Story\" (capital S) for the nav label; title is right.",
+  "failsWith": "nav labels are not exactly renamed"
+}

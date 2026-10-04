@@ -1,0 +1,3 @@
+Not safe to merge. tests/test_service.py pins SESSION_TTL_SECONDS to 24h, so this patch (30 minutes) fails test_session_ttl_is_24h.
+The README's 30-minute claim is wrong: service.py and the pinned test both say 24h, so the patch aligns code to a false statement.
+Request changes: fix the README instead.

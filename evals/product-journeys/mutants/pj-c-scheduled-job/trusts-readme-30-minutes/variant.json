@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Expires sessions older than the README's 30 minutes: the 1-hour-old live session is deleted.",
+  "failsWith": "sessions after job run"
+}

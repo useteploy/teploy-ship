@@ -9,6 +9,13 @@ import type { WorkflowEvent } from "@neutron-build/workflow";
 // cost reconstruction the settle path owns; one definition beats two.
 import { readOutcome } from "./worker.js";
 import { costUSD } from "./pricing.js";
+import {
+  planSlots,
+  specProblem,
+  type AtSpec,
+  type MissedPolicy,
+  type OverlapPolicy,
+} from "./schedule-time.js";
 export interface WorkflowSchedule {
   id: string;
   name: string;
@@ -17,7 +24,14 @@ export interface WorkflowSchedule {
   mode: "fix" | "scan";
   journey?: Journey;
   plan: boolean;
+  /** Interval, and the nominal period shown in the UI when `at` is set. */
   everyMinutes: number;
+  /** S16, all optional: absent means the original interval-only behaviour. */
+  at?: AtSpec;
+  missedPolicy?: MissedPolicy;
+  overlap?: OverlapPolicy;
+  debounceMinutes?: number;
+  graceMinutes?: number;
   enabled: boolean;
   createdAt: string;
   by: string;
@@ -25,6 +39,8 @@ export interface WorkflowSchedule {
 export const scheduleKey = (id: string) => "SHIP_SCHEDULE_DEF_" + id;
 /** Config key holding the slot receipt the sweep compares against (below). */
 export const scheduleReceiptKey = (id: string) => "SHIP_SCHEDULE_RECEIPT_" + id;
+/** Last slot that actually fired; written only for schedules that set debounce. */
+export const scheduleFiredKey = (id: string) => "SHIP_SCHEDULE_FIRED_" + id;
 /** The occurrence slot a schedule is in at `now` (missed intervals coalesce). */
 export function scheduleSlot(s: Pick<WorkflowSchedule, "createdAt" | "everyMinutes">, now: number): number {
   return Math.floor((now - Date.parse(s.createdAt)) / (s.everyMinutes * 60000));
@@ -47,7 +63,8 @@ export function validSchedule(v: any): v is WorkflowSchedule {
     Number.isInteger(v.everyMinutes) &&
     v.everyMinutes >= 60 &&
     v.everyMinutes <= 44640 &&
-    Number.isFinite(Date.parse(v.createdAt))
+    Number.isFinite(Date.parse(v.createdAt)) &&
+    specProblem(v) === null
   );
 }
 export async function workflowSchedules(
@@ -68,34 +85,62 @@ export async function workflowSchedules(
   }
   return out;
 }
-/** Missed intervals coalesce to the current one; no catch-up storm after downtime. */
+export interface SweepOptions {
+  /**
+   * Whether a prior occurrence of this schedule is still executing. Only
+   * consulted when the schedule sets `overlap`; without it overlap is treated
+   * as "not running" (the worker does not supply one yet).
+   */
+  isRunning?: (scheduleId: string) => Promise<boolean>;
+  log?: (line: string) => void;
+}
+
+/**
+ * Plans each schedule through schedule-time.ts. With no S16 fields set the
+ * plan is the original behaviour: missed intervals coalesce to the current
+ * one, no catch-up storm after downtime.
+ */
 export async function sweepWorkflowSchedules(
   runtime: Pick<ShipRuntime, "config" | "intake" | "projects">,
   now = Date.now(),
+  opts: SweepOptions = {},
 ): Promise<void> {
   for (const s of await workflowSchedules(runtime)) {
     if (!s.enabled) continue;
     const project = await runtime.projects.forRepo(s.repo);
     if (!project?.url) continue;
-    const slot = scheduleSlot(s, now);
-    if (slot < 1) continue;
     const receipt = scheduleReceiptKey(s.id);
-    if ((await runtime.config.get(receipt)) === String(slot)) continue;
-    await runtime.intake.propose({
-      source: "workflow",
-      kind: s.journey ? `request-${s.journey}` :
-        s.mode === "scan"
-          ? "workflow-scan"
-          : s.plan
-            ? "workflow-plan"
-            : "workflow-fix",
-      repo: project.url,
-      title: s.name,
-      detail: s.task,
-      dedupeKey: `workflow:${s.id}:${slot}`,
-      requestedBy: s.by,
-    });
-    await runtime.config.set(receipt, String(slot));
+    const last = await runtime.config.get(receipt);
+    const running = s.overlap !== undefined && s.overlap !== "allow" && opts.isRunning
+      ? await opts.isRunning(s.id)
+      : false;
+    const firedKey = scheduleFiredKey(s.id);
+    const lastFired = s.debounceMinutes !== undefined ? await runtime.config.get(firedKey) : undefined;
+    const plan = planSlots(s, last, now, running, lastFired);
+    for (const slot of plan.fire) {
+      await runtime.intake.propose({
+        source: "workflow",
+        kind: s.journey ? `request-${s.journey}` :
+          s.mode === "scan"
+            ? "workflow-scan"
+            : s.plan
+              ? "workflow-plan"
+              : "workflow-fix",
+        repo: project.url,
+        title: s.name,
+        detail: s.task,
+        dedupeKey: `workflow:${s.id}:${slot.id}`,
+        requestedBy: s.by,
+      });
+    }
+    if (s.debounceMinutes !== undefined && plan.fire.length > 0) {
+      await runtime.config.set(firedKey, plan.fire[plan.fire.length - 1].id);
+    }
+    if (plan.skippedCount > 0) {
+      opts.log?.(`[worker] workflow schedule ${s.id}: ${plan.skippedCount} occurrence(s) not run (${[...new Set(plan.skipped.map((k) => k.reason))].join(", ")})`);
+    }
+    if (plan.queued.length > 0) opts.log?.(`[worker] workflow schedule ${s.id}: ${plan.queued.length} occurrence(s) queued behind a running one`);
+    if (plan.advanceTo !== null) await runtime.config.set(receipt, plan.advanceTo);
   }
 }
 

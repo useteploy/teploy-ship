@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Compares against the literal default \"fixture-admin-token\", ignoring ADMIN_TOKEN from the environment.",
+  "failsWith": "correct token returned"
+}

@@ -1,0 +1,8 @@
+The home-page tagline and every Tideline occurrence:
+index.html:6:"Tideline Woodworks"
+index.html:15:"Tideline Woodworks"
+index.html:16:"Furniture made on the coast"
+index.html:20:"Tideline Woodworks"
+about.html:6:"Tideline Woodworks"
+about.html:15:"Tideline Woodworks"
+about.html:20:"Tideline Woodworks"

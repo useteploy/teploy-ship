@@ -1,0 +1,4 @@
+{
+  "kind": "correct",
+  "description": "Blocks the merge, names the 24h pin in tests/test_service.py as what breaks, and calls the README 30-minute claim false."
+}

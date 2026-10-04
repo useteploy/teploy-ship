@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Both navs link \"contacts.html\" (typo) while the page is contact.html.",
+  "failsWith": "nav does not link contact\\.html"
+}

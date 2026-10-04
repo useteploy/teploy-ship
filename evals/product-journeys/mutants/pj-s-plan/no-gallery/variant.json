@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Plan names the right files but is about restyling the nav, not the requested gallery.",
+  "failsWith": "never mentions the gallery"
+}

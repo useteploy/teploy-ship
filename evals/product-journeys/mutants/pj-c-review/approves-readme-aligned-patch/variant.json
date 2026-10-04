@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Approves because the patch matches the README (the seeded trap).",
+  "failsWith": "^trap:"
+}

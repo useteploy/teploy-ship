@@ -1,6 +1,7 @@
 import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 
 import { HARNESS_PACKAGES, HARNESS_VERSIONS } from "./harness.js";
+import { PLAN_REVIEW_REFUSAL, refusalFor } from "./harness-capabilities.js";
 import { clipDetail } from "./live.js";
 import type { LiveUpdate } from "./live.js";
 import type { HarnessAdapter, HarnessResult, HarnessStatus, HarnessUsage } from "./harness.js";
@@ -472,7 +473,7 @@ export function externalAdapter(id: "claude-code" | "opencode", options: Externa
           // Admission covers the UI/queue; direct CLI workflow execution also
           // must not silently skip an operator's requested plan gate. Keep
           // this inside the recorded step so prior completed runs replay.
-          if (task.input.plan === true && task.input.mode !== "scan") throw new Error("Plan review requires the native harness; no external agent was started.");
+          if (task.input.plan === true && task.input.mode !== "scan") throw new Error(`${refusalFor(id, "plan-review") ?? PLAN_REVIEW_REFUSAL} No external agent was started.`);
           await ws.executor.putFile(PROMPT_PATH, externalPrompt(task.prompt, task.input.mode));
           await ws.executor.putFile(ENV_PATH, forwardedEnv.text);
           const command =

@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Both shapes handled, but markdown is now imported unconditionally: the offline (no-package) service no longer imports.",
+  "failsWith": "fails with a 3\\.x-only|fallback|test suite fails"
+}

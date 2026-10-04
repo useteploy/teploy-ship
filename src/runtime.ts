@@ -37,6 +37,7 @@ import type { AkirooCursorStore } from "./akiroo.js";
 import { FileRepoStatsStore, NucleusRepoStatsStore } from "./repo-stats.js";
 import type { RepoStatsStore } from "./repo-stats.js";
 import { attemptsCount, harnessAttempts, harnessRef } from "./harness.js";
+import { PLAN_REVIEW_REFUSAL, refusalFor } from "./harness-capabilities.js";
 import type { HarnessRef } from "./harness.js";
 import type { EvidenceStore } from "./evidence.js";
 import { FileProjectStore, NucleusProjectStore, ProjectEvidenceStore } from "./projects.js";
@@ -1268,7 +1269,7 @@ export async function enqueueRun(
   // the recorded checkpoint so changing policy cannot change their replay.
   const planReview = !scan && (project?.requirePlanReview === true || options.plan === true);
   if (planReview && (harness.id !== "native" || attempts.some(h => h.id !== "native"))) {
-    throw new Error("Plan review requires the native harness. Select native in Project settings. A required project checkpoint cannot be disabled for an individual task.");
+    throw new Error(`${refusalFor([harness.id, ...attempts.map(h => h.id)].find(i => i !== "native") ?? "", "plan-review") ?? PLAN_REVIEW_REFUSAL} Select native in Project settings. A required project checkpoint cannot be disabled for an individual task.`);
   }
   // Independent attempts of one task, ranked by the project's own verification
   // (P6-1). Repo runs only — a second attempt is a second checkout — and never

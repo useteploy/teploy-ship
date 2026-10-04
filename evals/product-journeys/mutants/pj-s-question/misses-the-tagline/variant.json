@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Cites all six Tideline lines but never the tagline line.",
+  "failsWith": "tagline line .* is not cited"
+}

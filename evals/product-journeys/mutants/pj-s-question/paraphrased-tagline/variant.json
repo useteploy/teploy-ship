@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Cites the tagline line with a paraphrase, not the exact current string.",
+  "failsWith": "does not contain"
+}

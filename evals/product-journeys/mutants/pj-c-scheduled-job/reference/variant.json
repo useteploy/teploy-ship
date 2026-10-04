@@ -1,0 +1,4 @@
+{
+  "kind": "correct",
+  "description": "Reads and writes through service.load_store/save_store, keeps service.live_sessions (24h TTL), exits 0 on a missing store, rewrites only on change."
+}

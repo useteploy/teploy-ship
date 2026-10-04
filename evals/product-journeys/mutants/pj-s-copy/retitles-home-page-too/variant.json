@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Correct nav and about title, but also retitles index.html to match (\"Our story — ...\").",
+  "failsWith": "index\\.html title changed"
+}

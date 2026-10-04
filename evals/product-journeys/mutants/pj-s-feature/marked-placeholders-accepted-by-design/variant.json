@@ -1,0 +1,4 @@
+{
+  "kind": "known-limit",
+  "description": "Wired and styled page whose address/hours are explicitly marked placeholders (\"address: [street address to be confirmed]\", \"opening hours: Saturday tours\"). The grader accepts this ON PURPOSE: the fixture contains no street address, and the 2026-09-24 live run (eval-20260924-16) honestly shipped exactly this rather than invent one. A stricter grader would reject the honest behaviour. Recorded so the limit is visible, not hidden."
+}

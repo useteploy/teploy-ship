@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Appends the ALTER to the already-shipped 001 instead of adding a new forward-only migration: databases that already applied 001 never get the column.",
+  "failsWith": "already applied|existing"
+}

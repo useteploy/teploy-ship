@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Plan text plus the gallery actually written into index.html in the work tree.",
+  "failsWith": "work tree changed"
+}

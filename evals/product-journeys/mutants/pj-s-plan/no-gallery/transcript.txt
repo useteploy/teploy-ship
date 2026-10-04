@@ -1,0 +1,1 @@
+Plan: tidy the nav in index.html and refresh colours in styles.css.

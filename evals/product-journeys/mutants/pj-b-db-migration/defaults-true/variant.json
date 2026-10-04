@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Column default is 1: every existing note silently becomes pinned.",
+  "failsWith": "not defaulting to false"
+}

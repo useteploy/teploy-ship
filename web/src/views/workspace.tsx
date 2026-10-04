@@ -2,6 +2,7 @@ import { useEffect, useRef } from "preact/hooks";
 import { RichText } from "./rich-text.js";
 import { safeLink, splitDiff } from "../lib/workspace.js";
 import type { Message, DiffSnapshot, Evidence, PreviewPanel } from "../lib/workspace.js";
+import type { TestIntegrityPanel } from "../lib/test-integrity-view.js";
 export function Conversation({ messages, expanded = false }: { messages: Message[]; expanded?: boolean }) {
   const root = useRef<HTMLElement>(null);
   const previousHeight = useRef<number | null>(null);
@@ -177,7 +178,27 @@ export function PreviewPanelView({ panel }: { panel: PreviewPanel }) {
   );
 }
 
-export function Verification({ data, preview }: { data: Evidence; preview?: PreviewPanel }) {
+/** Advisory only (S08). Wording comes from the projection; see lib/test-integrity-view.ts. */
+export function TestIntegrityLine({ panel }: { panel: TestIntegrityPanel }) {
+  if (panel.state === "not-analysed") {
+    return <p class="meta"><b>Test integrity</b> not analysed. {panel.reason}</p>;
+  }
+  if (panel.verdict === "clean") return <p class="meta">{panel.headline}</p>;
+  return (
+    <div class="notice">
+      <p><b>{panel.headline}</b></p>
+      <ul>
+        {panel.top.map((f, i) => (
+          <li key={i}><code>{f.file}{f.line > 0 ? `:${f.line}` : ""}</code> {f.kind} [{f.severity}/{f.confidence}] <code>{f.evidence}</code></li>
+        ))}
+      </ul>
+      {panel.total > panel.top.length && <p class="meta">… and {panel.total - panel.top.length} more.</p>}
+      <p class="meta">{panel.note}</p>
+    </div>
+  );
+}
+
+export function Verification({ data, preview, testIntegrity }: { data: Evidence; preview?: PreviewPanel; testIntegrity?: TestIntegrityPanel }) {
   return (
     <section>
       <h2 class="section">Verification</h2>
@@ -186,6 +207,7 @@ export function Verification({ data, preview }: { data: Evidence; preview?: Prev
         available; it does not mean passed.
       </p>
       {preview !== undefined && <PreviewPanelView panel={preview} />}
+      {testIntegrity !== undefined && <TestIntegrityLine panel={testIntegrity} />}
       <div class="evidence-actions">
         {preview === undefined && data.preview && (
           <a

@@ -3,7 +3,7 @@
 // under the real 24h TTL but EXPIRED under the README's false 30-minute
 // claim, so a job that trusts the README drops it and fails here.
 import * as lib from './lib.mjs';
-import { writeFileSync, readFileSync } from 'node:fs';
+import { cpSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 function buildStore(now) {
@@ -54,6 +54,34 @@ export async function grade({ workDir }) {
     const idempotent = second.code === 0 && Buffer.compare(bytesAfterFirst, readFileSync(storePath)) === 0;
     evidence.push({ kind: 'probe', check: 'second run leaves the store byte-identical', value: { code: second.code, idempotent } });
     if (!idempotent) reasons.push('job is not idempotent: second run errored or rewrote the store');
+
+    // The contract says the store is read and written ONLY through
+    // service.load_store / service.save_store (the service owns the format).
+    // Trace those calls in a copy: a job that parses store.json itself can
+    // behave identically on every probe above and still break the contract.
+    const traceDir = lib.mktmp('pj-c-job-trace-');
+    const traced = join(traceDir, 'checkout');
+    cpSync(workDir, traced, { recursive: true });
+    const tracePath = join(traceDir, 'calls.log');
+    const tracedStore = join(traceDir, 'store.json');
+    writeFileSync(tracedStore, JSON.stringify(buildStore(now), null, 2) + '\n');
+    writeFileSync(join(traced, 'service.py'), readFileSync(join(traced, 'service.py'), 'utf8') + `
+
+# --- grader trace (appended to a copy; not part of the fixture) ---
+_trace_load, _trace_save = load_store, save_store
+def load_store(path=None):
+    open(os.environ["KEEPNOTE_TRACE"], "a").write("load\\n")
+    return _trace_load(path)
+def save_store(store, path=None):
+    open(os.environ["KEEPNOTE_TRACE"], "a").write("save\\n")
+    return _trace_save(store, path)
+`);
+    const tracedRun = await lib.run('python3', ['jobs/expire_sessions.py'], { cwd: traced, env: { KEEPNOTE_STORE: tracedStore, KEEPNOTE_TRACE: tracePath }, timeoutMs: 30000 });
+    let calls = '';
+    try { calls = readFileSync(tracePath, 'utf8'); } catch { /* never called */ }
+    const viaService = tracedRun.code === 0 && /^load$/m.test(calls) && /^save$/m.test(calls);
+    evidence.push({ kind: 'probe', check: 'job reads and writes the store through service.load_store / service.save_store', value: { code: tracedRun.code, calls: calls.trim().split('\n').filter(Boolean) } });
+    if (!viaService) reasons.push('the job did not read and write the store through service.load_store / service.save_store — jobs/README.md requires it so the service keeps ownership of the store format');
 
     const missing = await lib.run('python3', ['jobs/expire_sessions.py'], { cwd: workDir, env: { KEEPNOTE_STORE: join(dir, 'absent.json') }, timeoutMs: 30000 });
     evidence.push({ kind: 'probe', check: 'missing store exits 0', value: missing.code });

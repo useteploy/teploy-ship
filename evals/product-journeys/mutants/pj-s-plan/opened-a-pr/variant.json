@@ -1,0 +1,9 @@
+{
+  "kind": "wrong",
+  "description": "Good plan text, but the run opened a PR for it (plan-only task).",
+  "failsWith": "the run published",
+  "summary": {
+    "prOpened": true,
+    "pushed": true
+  }
+}

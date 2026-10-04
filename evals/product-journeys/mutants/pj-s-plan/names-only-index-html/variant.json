@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Plan covers the gallery markup in index.html but never mentions the stylesheet it must also touch.",
+  "failsWith": "styles\\.css"
+}

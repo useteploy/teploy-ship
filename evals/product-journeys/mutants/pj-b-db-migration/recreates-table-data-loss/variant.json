@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Drops and recreates notes with the new column and no copy: upgrade loses every existing row.",
+  "failsWith": "existing rows were lost"
+}

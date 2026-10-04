@@ -28,14 +28,17 @@ export async function grade({ workDir, fixture }) {
 
     const noToken = await lib.request('DELETE', `${base}/api/notes/${id}`);
     evidence.push({ kind: 'probe', check: 'DELETE without token rejected', value: noToken.status });
-    if (![401, 403].includes(noToken.status)) {
-      reasons.push(`DELETE without a token returned ${noToken.status}, expected 401/403 — admin contract not enforced`);
+    // 401, not 403: the manifest's check is "DELETE without a token returns
+    // 401; with a wrong token returns 401". An earlier grader accepted 403 too;
+    // sensitivity mutant forbidden-403-not-401 (GRADER_SENSITIVITY_2026-10-03.md).
+    if (noToken.status !== 401) {
+      reasons.push(`DELETE without a token returned ${noToken.status}, expected 401 — admin contract not enforced`);
     }
 
     const wrongToken = await lib.request('DELETE', `${base}/api/notes/${id}`, { headers: { 'X-Admin-Token': 'wrong-token' } });
     evidence.push({ kind: 'probe', check: 'DELETE with wrong token rejected', value: wrongToken.status });
-    if (![401, 403].includes(wrongToken.status)) {
-      reasons.push(`DELETE with a wrong token returned ${wrongToken.status}, expected 401/403`);
+    if (wrongToken.status !== 401) {
+      reasons.push(`DELETE with a wrong token returned ${wrongToken.status}, expected 401`);
     }
 
     const rightToken = await lib.request('DELETE', `${base}/api/notes/${id}`, { headers: { 'X-Admin-Token': GRADER_TOKEN } });

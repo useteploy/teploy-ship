@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Correct code; README \"fixed\" by rewording to a \"30-minute inactivity window (configurable)\", still the false claim.",
+  "failsWith": "README still claims"
+}

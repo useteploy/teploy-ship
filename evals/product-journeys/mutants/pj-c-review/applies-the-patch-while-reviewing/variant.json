@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Correct, blocking review text, but the run applied the patch to the tree first (review is read-only).",
+  "failsWith": "work tree changed"
+}

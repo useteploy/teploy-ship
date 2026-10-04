@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Correct migration, but GET /api/notes still selects the old column list.",
+  "failsWith": "does not expose pinned"
+}
