@@ -56,7 +56,7 @@ import { computeHealth, healthWarnings } from "./selfwatch.js";
 import { SECRET_PATTERNS, redactionMarker } from "./secret-patterns.js";
 
 /** Version of this bundle format. Bump when a file is added or a field changes meaning. */
-export const SUPPORT_SCRIPT_VERSION = 1;
+export const SUPPORT_SCRIPT_VERSION = 2;
 
 /** Default and hard cap for --log-lines. The cap is applied here, not trusted to the CLI. */
 export const DEFAULT_LOG_LINES = 200;
@@ -357,6 +357,16 @@ export interface SupportDeps {
   /** Create the .tgz next to the bundle dir. Returns its path, or undefined when tar is unavailable. */
   makeTgz?: (dir: string) => Promise<string | undefined>;
   files?: SupportFiles;
+  /**
+   * The rendered doctor report (renderDoctor().json), run at assembly time.
+   * Degrades to a note file when absent or failed — the bundle still ships.
+   */
+  doctorJson?: () => Promise<string>;
+  /**
+   * The latest backup MANIFEST (the receipt — the archive itself is never
+   * part of a bundle). Degrades to a note naming where it looked.
+   */
+  backupReceipt?: () => Promise<{ backupDir: string; name: string; text: string } | undefined>;
 }
 
 export interface SupportBundleResult {
@@ -588,6 +598,38 @@ export async function assembleSupportBundle(deps: SupportDeps): Promise<SupportB
       } catch (error) {
         await write(`logs/${safe}.error.txt`, gate.redact(`logs unavailable: ${error instanceof Error ? error.message : String(error)}\n`));
       }
+    }
+  }
+
+  // --- doctor --------------------------------------------------------------
+  // The install doctor folded in: a vendor reading a bundle gets the same
+  // pass/fail/unknown picture the operator sees, redacted the same way.
+  // A doctor that did not run is named, not omitted.
+  if (deps.doctorJson === undefined) {
+    await write("doctor-unavailable.txt", "the install doctor was not run for this bundle.\n");
+  } else {
+    try {
+      await write("doctor.json", gate.redact(await deps.doctorJson()));
+    } catch (error) {
+      await write("doctor-unavailable.txt", gate.redact(`doctor did not complete: ${error instanceof Error ? error.message : String(error)}\n`));
+    }
+  }
+
+  // --- backup receipt ------------------------------------------------------
+  // The receipt only: a support bundle must not carry the store itself.
+  if (deps.backupReceipt === undefined) {
+    await write("backup-receipt.txt", "no backup receipt was collected for this bundle.\n");
+  } else {
+    try {
+      const receipt = await deps.backupReceipt();
+      await write(
+        "backup-receipt.txt",
+        receipt === undefined
+          ? `no backup manifest found — backups are looked for under SHIP_BACKUP_DIR (default $SHIP_ROOT/_backups).\n`
+          : gate.redact(`# latest backup receipt: ${receipt.name} (from ${receipt.backupDir})\n# the archive itself is never part of a support bundle\n\n${receipt.text}`),
+      );
+    } catch (error) {
+      await write("backup-receipt.txt", gate.redact(`backup receipt unavailable: ${error instanceof Error ? error.message : String(error)}\n`));
     }
   }
 

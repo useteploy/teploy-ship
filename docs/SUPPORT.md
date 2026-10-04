@@ -29,6 +29,8 @@ states are recorded as note files inside the bundle instead.
 | `config-summary.json` | The known-safe Ship settings — a fixed **whitelist** of model ids, numbers, booleans, policy maps and URL hosts (`SHIP_MODEL`, `SHIP_MAX_STEPS`, `SHIP_SANDBOX_TTL_SEC`, `SHIP_WARM_PARKS`, `SHIP_PUBLIC_URL` as host, `SHIP_TELEMETRY`, `SHIP_INTAKE_POLICIES`, `SHIP_MIN_FREE_MB`, `SHIP_MAX_CONCURRENT_RUNS`, `SHIP_HARNESS_MODEL`). |
 | `runs-summary.json` | Counts by state over the read window, plus the 20 most recent runs: id, state, repo, createdAt, cost when attributed, and a one-line terminal error for failed runs. |
 | `selfwatch.txt` | The health snapshot from `src/selfwatch.ts` (queue depth, worker staleness, stuck runs) computed against the same store, plus its warnings. |
+| `doctor.json` | The redacted `teploy-ship doctor` report, run at assembly time with the same probes the command uses — live store liveness and clock skew when `NUCLEUS_URL` is set. Degrades to `doctor-unavailable.txt` when the doctor did not run or failed. |
+| `backup-receipt.txt` | The manifest of the newest backup under `SHIP_BACKUP_DIR` (default `$SHIP_ROOT/_backups`) — the receipt only; **the archive itself is never part of a bundle**. A note names where it looked when no backup exists. |
 | `logs/` | The last `--log-lines` lines of each `ship-*` container (`docker logs --tail`), or a note file explaining why not. |
 | `REDACTION-REPORT.txt` | Counts of every redaction the gate performed, by category. |
 
@@ -73,11 +75,21 @@ Every check reports `pass`, `fail` or `unknown`; **unknown is not pass**. The
 verdict is `ready` only when all pass, `not-ready` on any fail, `incomplete`
 when nothing failed but something could not be established. Exit code is 0 only
 for `ready`. Passing the `store-url` shape check does not mean the store was
-reached: `store-connectivity` stays `unknown` until a live check answers (use
-`teploy-ship preflight`). `--out` writes the redacted JSON, suitable to attach
-to a support request. The restore side is `src/restore-readiness.ts`, which
-compares backup and restored history snapshots and reports `unverified`
-whenever it did not actually compare; it is not yet exposed as a command.
+reached: with `NUCLEUS_URL` set, `store-connectivity` is probed read-only
+(`SELECT 1` — the rehearse proof's own liveness question) and `clock` measures
+skew against the store's own clock (`SELECT now()`); without a configured store,
+or when the engine does not answer a time query, both honestly stay `unknown` —
+store CONSISTENCY is deliberately not probed at all, because it cannot be
+established read-only while writers run (that proof is a snapshot rehearsal).
+`--out` writes the redacted JSON, suitable to attach to a support request.
+
+The snapshot side is now productized: `teploy-ship snapshot` produces the same
+archive shape as `scripts/ship-backup.sh backup` (see [BACKUP.md](BACKUP.md)),
+and `teploy-ship restore-check <archive>` verifies an archive — sha256 sidecar,
+gzip integrity, content listing — without unpacking it. The restore comparison
+module (`src/restore-readiness.ts`) still has no command of its own; the
+rehearsal (`scripts/ship-backup.sh rehearse`) plus `preflight` remain the
+restore proof.
 
 ## The support policy shape
 

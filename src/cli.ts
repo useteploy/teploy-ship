@@ -85,7 +85,16 @@ import { NucleusCodeIndex } from "./code-index.js";
 import type { CodeSearch } from "./code-index.js";
 import { startWorker } from "./worker.js";
 import { assembleSupportBundle, defaultDocker } from "./support.js";
-import { defaultProbes, formatDoctor, renderDoctor, runDoctor } from "./install-doctor.js";
+import { defaultProbes, formatDoctor, nucleusProbes, renderDoctor, runDoctor } from "./install-doctor.js";
+import {
+  DEFAULT_SHIP_ROOT,
+  SnapshotRefusal,
+  defaultSnapshotDocker,
+  formatRestoreCheck,
+  latestBackupReceipt,
+  produceSnapshot,
+  runRestoreCheck,
+} from "./snapshot.js";
 import { costUSD, isPricedModel } from "./pricing.js";
 import { defaultRetryPolicy, withRetry, withCallTimeout, modelTimeoutFromEnv } from "./provider.js";
 import { builtinSuite } from "./tasks.js";
@@ -205,10 +214,27 @@ Usage:
       [--port N] [--token <t>]        token also via SHIP_WEB_TOKEN (required)
       [--dev]                         vite dev server instead of the built app
   teploy-ship doctor [--json] [--out f]  check this machine is ready (pass|fail|unknown; unknown is not pass)
+                                       store liveness and clock skew are probed read-only
+                                       when NUCLEUS_URL is set; without a store they
+                                       stay unknown — nothing is guessed
+  teploy-ship snapshot [--label NAME] [--ship-root DIR] [--backup-dir DIR]
+                      [--dry-run] [--i-stopped-writers] [--json]
+                                       consistent-snapshot producer (same archive shape
+                                       as scripts/ship-backup.sh: tar of the nucleus
+                                       data dir + sha256 sidecar + manifest). Refuses
+                                       while ship-* containers run unless you attest
+                                       the coordinated stop; never overwrites, never
+                                       deletes. Retention is yours.
+  teploy-ship restore-check <archive> [--json]
+                                       verify an archive WITHOUT unpacking it: sha256
+                                       sidecar, gzip integrity, content listing.
+                                       Integrity only — the proof an archive restores
+                                       is scripts/ship-backup.sh rehearse
   teploy-ship support                 assemble a REDACTED diagnostic bundle (see docs/SUPPORT.md)
       [--out DIR] [--log-lines N]     what a vendor needs: versions, safe config keys,
-      [--days N]                      bounded logs, run-state summaries. Credentials
-                                      never enter it, but skim it before handing it over.
+      [--days N]                      bounded logs, run-state summaries, the doctor
+                                       report and the latest backup receipt. Credentials
+                                       never enter it, but skim it before handing it over.
   teploy-ship eval [--suite builtin|hard|extreme|all] [--repeats N] [--json] [--critic] [--settle]
 
 Config: flags > env > ~/.config/teploy-ship/config.json
@@ -2401,6 +2427,7 @@ async function supportCommand(rest: string[]): Promise<void> {
   const logLines = numFlag(args.flags["log-lines"], "log-lines", 200, { min: 1, max: 2000, integer: true });
   const days = args.flags.days !== undefined ? numFlag(args.flags.days, "days", 7, { min: 1, max: 3650, integer: true }) : undefined;
   const runtime = await makeRuntime(args, config);
+  const backupDir = process.env.SHIP_BACKUP_DIR ?? join(process.env.SHIP_ROOT ?? DEFAULT_SHIP_ROOT, "_backups");
   let result;
   try {
     result = await assembleSupportBundle({
@@ -2410,6 +2437,10 @@ async function supportCommand(rest: string[]): Promise<void> {
       store: runtime,
       config: { model: config.model, intake: config.intake, maxConcurrentRuns: config.maxConcurrentRuns, nucleusUrl: config.nucleusUrl },
       docker: defaultDocker(),
+      // The doctor report and the latest backup manifest (never the archive)
+      // ride along; both degrade to note files inside the bundle.
+      doctorJson: async () => renderDoctor(await runDoctor(doctorProbes())).json,
+      backupReceipt: () => latestBackupReceipt(backupDir),
     });
   } finally {
     await runtime.close();
@@ -2429,17 +2460,86 @@ async function supportCommand(rest: string[]): Promise<void> {
 // doctor — S19 install-readiness checks (all logic in src/install-doctor.ts)
 // ---------------------------------------------------------------------------
 
+/** The doctor probes every command shares: local checks always, live store checks when NUCLEUS_URL is set. */
+function doctorProbes(): ReturnType<typeof defaultProbes> {
+  const port = Number(process.env.SHIP_WEB_PORT ?? process.env.PORT ?? 7460);
+  const probes = defaultProbes({
+    env: process.env,
+    stateDir: stateDir(),
+    webPort: Number.isInteger(port) ? port : 7460,
+    nodeVersion: process.version,
+  });
+  const url = process.env.NUCLEUS_URL;
+  if (url !== undefined && url.trim() !== "") {
+    // Read-only liveness + the store's clock as the skew reference. With no
+    // configured store there is nothing to ask: connectivity and skew stay
+    // unknown rather than guessed.
+    Object.assign(probes, nucleusProbes(url));
+  }
+  return probes;
+}
+
 /** Exit 0 only for "ready"; 1 for not-ready or incomplete (unknown is not pass). */
 async function doctorCommand(rest: string[]): Promise<void> {
   const args = parseArgs(rest, COMMAND_FLAGS.doctor);
-  const port = Number(process.env.SHIP_WEB_PORT ?? process.env.PORT ?? 7460);
-  const report = await runDoctor(
-    defaultProbes({ env: process.env, stateDir: stateDir(), webPort: Number.isInteger(port) ? port : 7460, nodeVersion: process.version }),
-  );
+  const report = await runDoctor(doctorProbes());
   const rendered = renderDoctor(report);
   if (typeof args.flags.out === "string") writeFileSync(args.flags.out, rendered.json);
   process.stdout.write(args.flags.json === true ? rendered.json : formatDoctor(report));
   if (report.verdict !== "ready") process.exitCode = 1;
+}
+
+// ---------------------------------------------------------------------------
+// snapshot + restore-check — S19 tail, the CLI half of scripts/ship-backup.sh
+// (all logic in src/snapshot.ts)
+// ---------------------------------------------------------------------------
+
+async function snapshotCommand(rest: string[]): Promise<void> {
+  const args = parseArgs(rest, COMMAND_FLAGS.snapshot);
+  if (args.positional.length > 0) fail("snapshot takes no positional arguments — everything is a flag");
+  const label = (args.flags.label as string | undefined) ?? "manual";
+  const shipRoot = (args.flags["ship-root"] as string | undefined) ?? process.env.SHIP_ROOT ?? DEFAULT_SHIP_ROOT;
+  const backupDir = (args.flags["backup-dir"] as string | undefined) ?? process.env.SHIP_BACKUP_DIR ?? join(shipRoot, "_backups");
+  let result;
+  try {
+    result = await produceSnapshot({
+      shipRoot,
+      backupDir,
+      label,
+      dryRun: args.flags["dry-run"] === true,
+      attested: args.flags["i-stopped-writers"] === true,
+      docker: defaultSnapshotDocker(),
+      log: (line) => process.stderr.write(`${dim(line)}\n`),
+    });
+  } catch (error) {
+    if (error instanceof SnapshotRefusal) fail(error.message);
+    throw error;
+  }
+  for (const note of result.advisory) process.stderr.write(`${yellow(note)}\n`);
+  if (result.status === "dry-run") {
+    process.stdout.write(`dry-run: would create ${result.dir}/\n`);
+    process.stdout.write(`  archive   ${result.archive}  (tar czf of ${join(shipRoot, "accessories", "nucleus", "nucleus-data")})\n`);
+    process.stdout.write(`  sidecar   ${result.archive}.sha256\n`);
+    process.stdout.write(`  manifest  ${join(result.dir, "manifest.txt")}\n`);
+    process.stdout.write("  then checksum-verify + gzip-test the archive\n");
+    process.stdout.write("no files written\n");
+  } else {
+    process.stdout.write(`snapshot complete: ${result.archive} (${result.bytes} bytes, sha256 ${result.sha256})\n`);
+    process.stdout.write(`verify:   teploy-ship restore-check ${result.archive}\n`);
+    process.stdout.write(`rehearse: scripts/ship-backup.sh rehearse ${result.archive}\n`);
+    process.stdout.write("retention is yours: this command never deletes a backup\n");
+  }
+  if (args.flags.json === true) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+}
+
+/** Verify without unpacking; exit 0 only for "verified". */
+async function restoreCheckCommand(rest: string[]): Promise<void> {
+  const args = parseArgs(rest, COMMAND_FLAGS["restore-check"]);
+  if (args.positional.length < 1) fail("restore-check needs an archive path");
+  if (args.positional.length > 1) fail("restore-check takes one argument");
+  const report = await runRestoreCheck(args.positional[0]!);
+  process.stdout.write(args.flags.json === true ? `${JSON.stringify(report, null, 2)}\n` : formatRestoreCheck(report));
+  if (report.verdict !== "verified") process.exitCode = 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -2503,6 +2603,10 @@ async function main(): Promise<void> {
       return supportCommand(rest);
     case "doctor":
       return doctorCommand(rest);
+    case "snapshot":
+      return snapshotCommand(rest);
+    case "restore-check":
+      return restoreCheckCommand(rest);
     case "eval":
       return evalCommand(rest);
     default:

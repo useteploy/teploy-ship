@@ -44,8 +44,13 @@ All off by default or observe-only; flags are in the programme's wave-4 table.
 - **S15/S17 (PR #46):** inert; callers must redact log excerpts.
 - **S22 (PR #47):** the coordination record does not keep the revision the
   client was planned against.
-- **S19 (PR #49):** doctor's store and clock checks report unknown until real
-  probes exist; the restore comparison has no snapshot producer.
+- **S19 (PR #49; tail landed 2026-10-04):** doctor now answers store liveness
+  and clock skew read-only when `NUCLEUS_URL` is set (unknown otherwise, and
+  unknown when the engine answers no time query — honest, not a gap to paper
+  over); `teploy-ship snapshot` / `restore-check` exist with the script's
+  invariants. Still open: the unpack and rehearsal remain script-only by
+  design; restore-readiness has no command; none of the S19 tail has run
+  against a live store.
 - **S07 (PR #53):** unwired; wiring must not add a durable step to existing runs.
 - **Agent hygiene:** parallel agents share one scratch directory and the fixed
   grading port 8901. A backup-file collision corrupted one agent's mutation

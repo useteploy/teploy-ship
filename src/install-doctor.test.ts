@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { MAX_CLOCK_SKEW_MS, defaultProbes, formatDoctor, renderDoctor, runDoctor } from "./install-doctor.js";
-import type { DoctorProbes } from "./install-doctor.js";
+import { MAX_CLOCK_SKEW_MS, defaultProbes, formatDoctor, nucleusProbes, renderDoctor, runDoctor } from "./install-doctor.js";
+import type { DoctorProbes, StoreQueryClient } from "./install-doctor.js";
 
 // Fake secrets assembled at runtime so no secret-shaped literal sits in source.
 const FAKE_WEB_TOKEN = "webtok" + "-" + "Zq9".repeat(8);
@@ -173,4 +173,70 @@ test("real write probe against an unwritable path fails", async () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// nucleusProbes — the live store probes doctorCommand injects with NUCLEUS_URL
+// ---------------------------------------------------------------------------
+
+/** A fake store client: answers per-SQL, so the probes' read-only surface is pinned. */
+function fakeClient(behavior: { sql?: (sql: string) => unknown; error?: (sql: string) => Error | undefined }): StoreQueryClient {
+  return {
+    async query(sql: string) {
+      const error = behavior.error?.(sql);
+      if (error !== undefined) throw error;
+      const value = behavior.sql?.(sql);
+      return value === undefined ? [] : [{ t: value }];
+    },
+    async close() {},
+  };
+}
+
+test("nucleusProbes: liveness is SELECT 1, answered true, unanswered false — never unknown-pass", async () => {
+  const probes = nucleusProbes("postgres://store:5432/ship", { connect: () => fakeClient({}) });
+  assert.equal(await probes.storeReachable("postgres://store:5432/ship"), true, "a store that answers SELECT 1 is reachable");
+
+  const dead = nucleusProbes("postgres://store:5432/ship", {
+    connect: () => fakeClient({ error: () => new Error("ECONNREFUSED") }),
+  });
+  assert.equal(await dead.storeReachable("postgres://store:5432/ship"), false, "a store that does not answer is fail, not unknown");
+});
+
+test("nucleusProbes: the store's clock is the reference — Date, epoch-number and ISO string all parse", async () => {
+  const ref = NOW - 2_000;
+  const byDate = nucleusProbes("postgres://s/x", { connect: () => fakeClient({ sql: () => new Date(ref) }) });
+  const byNumber = nucleusProbes("postgres://s/x", { connect: () => fakeClient({ sql: () => ref }) });
+  const byString = nucleusProbes("postgres://s/x", { connect: () => fakeClient({ sql: () => new Date(ref).toISOString() }) });
+  assert.equal(await byDate.referenceMs(), ref);
+  assert.equal(await byNumber.referenceMs(), ref);
+  assert.equal(await byString.referenceMs(), ref);
+});
+
+test("nucleusProbes: a store without a time query degrades the clock to unknown, never a guess", async () => {
+  const noTime = nucleusProbes("postgres://s/x", { connect: () => fakeClient({ sql: (sql) => (sql.includes("now()") ? "not-a-time" : undefined) }) });
+  assert.equal(await noTime.referenceMs(), undefined);
+  const throwing = nucleusProbes("postgres://s/x", { connect: () => fakeClient({ error: (sql) => (sql.includes("now()") ? new Error("unknown function") : undefined) }) });
+  assert.equal(await throwing.referenceMs(), undefined);
+
+  // And doctor reports that honestly: reachable store, clock unknown.
+  const r = await runDoctor(allGood({ ...nucleusProbes("postgres://s/x", { connect: () => fakeClient({ sql: (sql) => (sql.includes("now()") ? "not-a-time" : undefined) }) }) }));
+  assert.equal(byId(r, "store-connectivity").status, "pass");
+  assert.equal(byId(r, "clock").status, "unknown");
+  assert.equal(r.verdict, "incomplete");
+});
+
+test("nucleusProbes wired through runDoctor: an answering store with its clock is ready; a silent store fails connectivity", async () => {
+  const good = await runDoctor(allGood({ ...nucleusProbes("postgres://s/x", { connect: () => fakeClient({ sql: () => new Date(NOW + 1000) }) }) }));
+  assert.equal(good.verdict, "ready");
+  assert.equal(byId(good, "store-connectivity").status, "pass");
+  assert.equal(byId(good, "clock").status, "pass");
+
+  const silent = await runDoctor(
+    allGood({
+      ...nucleusProbes("postgres://s/x", { connect: () => fakeClient({ error: () => new Error("connection refused") }) }),
+    }),
+  );
+  assert.equal(byId(silent, "store-connectivity").status, "fail");
+  assert.equal(byId(silent, "clock").status, "unknown");
+  assert.equal(silent.verdict, "not-ready");
 });
