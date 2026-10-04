@@ -42,6 +42,8 @@ import { attachEvidence, envAsked } from "./fix-evidence.js";
 import type { Evidence } from "./verification.js";
 import type { RepoRef } from "./git.js";
 import { assertRepoAllowed, credentialFor, policyFromEnv } from "./repo-policy.js";
+import { detectRepository } from "./stack-import.js";
+import { renderProposal, stackDetectEnabled } from "./stack-propose.js";
 import type { RepoPolicyConfig } from "./repo-policy.js";
 import { loadRepoContext, runNote } from "./repo-memory.js";
 import { runAgent } from "./agent.js";
@@ -1473,6 +1475,25 @@ async function projectCommand(rest: string[]): Promise<void> {
       await runtime.close();
     }
     process.stderr.write(`${green("removed")} ${target}\n`);
+    return;
+  }
+  if (sub === "detect") {
+    // S05/S06 import dry-run. Read-only, proposal-only; gated so that with the
+    // flag off this subcommand does not exist to the operator.
+    if (!stackDetectEnabled()) fail("project detect is disabled; set SHIP_STACK_DETECT=on to enable the import dry-run");
+    if (target === undefined || target === "") fail("a repo is required: teploy-ship project detect <clone-url|path> [--json]");
+    const policy: RepoPolicyConfig = {
+      ...policyFromEnv(),
+      ...(config.gitToken !== undefined ? { gitToken: config.gitToken } : {}),
+      ...(config.githubToken !== undefined ? { githubToken: config.githubToken } : {}),
+    };
+    let proposal;
+    try {
+      proposal = await detectRepository(target, { policy });
+    } catch (error) {
+      fail(error instanceof Error ? error.message : String(error));
+    }
+    process.stdout.write(args.flags.json === true ? `${JSON.stringify(proposal, null, 2)}\n` : `${renderProposal(proposal)}\n`);
     return;
   }
   if (sub === "set") {
