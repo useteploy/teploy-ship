@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Batch layout (heading with `index.html:16` plus fenced block) but the block quotes a paraphrase, not the exact current string — the bound triple must still be verified verbatim.",
+  "failsWith": "does not contain"
+}

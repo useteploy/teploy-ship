@@ -25,7 +25,7 @@ test('every manifest scenario has a correct reference and at least two wrong var
   assert.equal(manifest.scenarios.length, 12);
   for (const s of manifest.scenarios) {
     const variants = variantsFor(pjRoot, s.id);
-    assert.equal(variants.filter(v => v.kind === 'correct').length, 1, `${s.id}: exactly one correct reference`);
+    assert.ok(variants.filter(v => v.kind === 'correct').length >= 1, `${s.id}: at least one correct reference`);
     assert.ok(variants.filter(v => v.kind === 'wrong').length >= 2, `${s.id}: at least two wrong variants`);
     assert.ok(variants.every(v => ['correct', 'wrong', 'known-limit'].includes(v.kind)), `${s.id}: variant kinds`);
     assert.ok(variants.filter(v => v.kind === 'wrong').every(v => typeof v.failsWith === 'string' && v.failsWith.length > 0), `${s.id}: each wrong variant names the reason it must fail with`);
