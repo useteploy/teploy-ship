@@ -1,0 +1,53 @@
+{
+  "originalResultSha256": "a9bbfb994bf2a07ed9588c64450844373ca5fe7c146b494d3dab9ade9c6ba138",
+  "graderSha256": "b3515358c103228ad6184a74127546a77adad18fd69bb4f630ca684dd6676217",
+  "graderRevision": "7ec49824bbeb682dd631d03624dc0fcd110b5af6",
+  "gradedAt": "2026-10-04T08:47:15.789Z",
+  "originalOutcome": "unknown",
+  "adapter": "ship",
+  "workDirNote": "no worked tree was preserved; the structural \"work tree unchanged\" check ran against a fresh copy of the pristine fixture and is vacuous here — the verdict rests on the transcript checks",
+  "summaryProvenance": "not preserved in a reconstructable shape (no adapter-reported {prOpened, pushed} evidence) — the current grader reports its not-wired publication reason",
+  "reason": "Supplementary re-grade under the current (post-PR-#34) graders at 7ec49824: preserved transcript verified against the pristine fixture. Listed for audit; never replaces the original record.",
+  "pass": false,
+  "reasons": [
+    "not-wired: no PR opened and nothing pushed (the adapter did not report both prOpened and pushed) (requires execution wiring; not graded in this slice)"
+  ],
+  "evidence": [
+    {
+      "kind": "structural",
+      "check": "work tree unchanged",
+      "value": {
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "unchanged": [
+          "about.html",
+          "index.html",
+          "styles.css"
+        ]
+      }
+    },
+    {
+      "kind": "transcript",
+      "check": "plan references index.html and styles.css",
+      "value": {
+        "index.html": true,
+        "styles.css": true
+      }
+    },
+    {
+      "kind": "transcript",
+      "check": "plan contains no applied unified diff",
+      "value": true
+    },
+    {
+      "kind": "transcript",
+      "check": "plan addresses the gallery",
+      "value": true
+    },
+    {
+      "kind": "not-wired",
+      "check": "no PR opened and nothing pushed (the adapter did not report both prOpened and pushed)"
+    }
+  ]
+}

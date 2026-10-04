@@ -1,0 +1,77 @@
+{
+  "originalResultSha256": "3faebb4e595447b9267d3af327ab2760b630d8d860b503866d053479f3371620",
+  "graderSha256": "f49a04b8223ccffdf11337fb8c79a3ffcce924f3bf2966db1440b3f4308ad82a",
+  "graderRevision": "7ec49824bbeb682dd631d03624dc0fcd110b5af6",
+  "gradedAt": "2026-10-04T08:47:15.626Z",
+  "originalOutcome": "pass",
+  "adapter": "mock",
+  "workDirNote": "no worked tree was preserved; the structural \"work tree unchanged\" check ran against a fresh copy of the pristine fixture and is vacuous here — the verdict rests on the transcript checks",
+  "summaryProvenance": "not preserved in a reconstructable shape (no adapter-reported {prOpened, pushed} evidence) — the current grader reports its not-wired publication reason",
+  "reason": "Supplementary re-grade under the current (post-PR-#34) graders at 7ec49824: preserved transcript verified against the pristine fixture. Listed for audit; never replaces the original record.",
+  "pass": false,
+  "reasons": [
+    "not-wired: no PR opened and nothing pushed (the adapter did not report both prOpened and pushed) (requires execution wiring; not graded in this slice)"
+  ],
+  "evidence": [
+    {
+      "kind": "structural",
+      "check": "work tree unchanged",
+      "value": {
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "unchanged": [
+          "about.html",
+          "index.html",
+          "styles.css"
+        ]
+      }
+    },
+    {
+      "kind": "transcript",
+      "check": "every cited file:line:string occurrence exists verbatim in the fixture",
+      "value": {
+        "citations": 7,
+        "ok": true
+      }
+    },
+    {
+      "kind": "transcript",
+      "check": "cited Tideline lines exactly cover the fixture occurrences (independent count)",
+      "value": {
+        "independent": [
+          "about.html:15",
+          "about.html:20",
+          "about.html:6",
+          "index.html:15",
+          "index.html:20",
+          "index.html:6"
+        ],
+        "cited": [
+          "about.html:15",
+          "about.html:20",
+          "about.html:6",
+          "index.html:15",
+          "index.html:20",
+          "index.html:6"
+        ],
+        "missing": [],
+        "extra": []
+      }
+    },
+    {
+      "kind": "transcript",
+      "check": "the home-page tagline line is cited",
+      "value": {
+        "taglineLines": [
+          16
+        ],
+        "cited": true
+      }
+    },
+    {
+      "kind": "not-wired",
+      "check": "no PR opened and nothing pushed (the adapter did not report both prOpened and pushed)"
+    }
+  ]
+}
