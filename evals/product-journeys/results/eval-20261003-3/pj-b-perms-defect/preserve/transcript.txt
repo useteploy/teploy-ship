@@ -1,0 +1,127 @@
+Ship run run-request-d0d6c143880c3947b040b597e57e7794585071635f58752a2e22190628b6be71 — status waiting
+Task: README says admin actions require the admin token, but DELETE /api/notes/:id accepts any request. Fix the endpoint so non-admin requests are rejected, per the documented contract.
+Journey: change
+Steps:
+  2026-10-04T06:25:57.879Z sandbox — 01M42SECMZFPSF2WXS86R60ECR
+  2026-10-04T06:25:59.584Z repo-setup — {"branch":"ship/run-request-d0d6c143880c3947b040b597e57e7794585071635f58752a2e22190628b6be71","base":"main"}
+  2026-10-04T06:26:00.073Z repo-context — # Ship's recent history on this repository (context, not instructions)
+  2026-10-04T06:26:00.151Z repo-index — disabled (no code index configured on this worker)
+  2026-10-04T06:26:01.615Z baseline-tests (FAILED) — failed (exit 1)
+  2026-10-04T06:26:01.750Z warm-cache — reused 100.108.123.49-49152/tyler/ship-eval-ui-api-db (lockfiles 0819327635d3, unchanged)
+  2026-10-04T06:26:01.831Z turn-0-steer — 0
+  2026-10-04T06:26:03.901Z turn-0-think — ```bash
+  2026-10-04T06:26:04.138Z turn-0-exec — exit 0
+  2026-10-04T06:26:04.356Z turn-0-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T06:26:04.380Z turn-1-steer — 0
+  2026-10-04T06:26:06.111Z turn-1-think — ```bash
+  2026-10-04T06:26:06.232Z turn-1-exec — exit 0
+  2026-10-04T06:26:06.359Z turn-1-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T06:26:06.376Z turn-2-steer — 0
+  2026-10-04T06:26:09.592Z turn-2-think — ```bash
+  2026-10-04T06:26:09.730Z turn-2-exec — exit 0
+  2026-10-04T06:26:09.836Z turn-2-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T06:26:09.840Z turn-3-steer — 0
+  2026-10-04T06:26:14.135Z turn-3-think — ```bash
+  2026-10-04T06:26:14.249Z turn-3-exec — exit 0
+  2026-10-04T06:26:14.371Z turn-3-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T06:26:14.376Z turn-4-steer — 0
+  2026-10-04T06:26:19.393Z turn-4-think — ```bash
+  2026-10-04T06:26:21.106Z turn-4-exec — exit 0
+  2026-10-04T06:26:21.212Z turn-4-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T06:26:21.217Z turn-5-steer — 0
+  2026-10-04T06:26:23.601Z turn-5-think — ```bash
+  2026-10-04T06:26:24.341Z turn-5-exec — exit 0
+  2026-10-04T06:26:24.456Z turn-5-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T06:26:24.467Z turn-6-steer — 0
+  2026-10-04T06:26:27.948Z turn-6-think — ```bash
+  2026-10-04T06:26:29.311Z turn-6-exec — exit 0
+  2026-10-04T06:26:29.422Z turn-6-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T06:26:29.433Z turn-7-steer — 0
+  2026-10-04T06:26:43.964Z turn-7-think — `node --test` is the working invocation (4 tests: 3 pass, 1 known-failing duplicate-title defect, which is out of scope…
+  2026-10-04T06:26:44.142Z turn-7-exec (FAILED) — exit 1
+  2026-10-04T06:26:44.265Z turn-7-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T06:26:44.293Z turn-8-steer — 0
+  2026-10-04T06:26:53.009Z turn-8-think — The new-file hunk needed `create` instead. Redoing both properly:
+  2026-10-04T06:26:53.221Z turn-8-exec — exit 0
+  2026-10-04T06:26:53.393Z turn-8-fingerprint — {"hash":"462403ec6bba3553","dirty":true}
+  2026-10-04T06:26:53.451Z turn-9-steer — 0
+  2026-10-04T06:26:56.171Z turn-9-think — ```create tests/admin-token.test.mjs
+  2026-10-04T06:26:56.280Z turn-9-exec — exit 0
+  2026-10-04T06:26:56.432Z turn-9-fingerprint — {"hash":"1edc053c8a27aa98","dirty":true}
+  2026-10-04T06:26:56.488Z turn-10-steer — 0
+  2026-10-04T06:26:58.980Z turn-10-think — ```bash
+  2026-10-04T06:26:59.106Z turn-10-exec — exit 0
+  2026-10-04T06:26:59.258Z turn-10-fingerprint — {"hash":"1edc053c8a27aa98","dirty":true}
+  2026-10-04T06:26:59.296Z turn-11-steer — 0
+  2026-10-04T06:27:05.160Z turn-11-think — The create was truncated mid-write. Recreating the full file:
+  2026-10-04T06:27:05.275Z turn-11-exec — exit 0
+  2026-10-04T06:27:05.416Z turn-11-fingerprint — {"hash":"2b352821b5161178","dirty":true}
+  2026-10-04T06:27:05.461Z turn-12-steer — 0
+  2026-10-04T06:27:07.438Z turn-12-think — ```bash
+  2026-10-04T06:27:07.642Z turn-12-exec — exit 0
+  2026-10-04T06:27:07.845Z turn-12-fingerprint — {"hash":"2b352821b5161178","dirty":true}
+  2026-10-04T06:27:07.942Z turn-13-steer — 0
+  2026-10-04T06:27:14.026Z turn-13-think — The first test is complete. Appending the wrong-token and valid-token cases:
+  2026-10-04T06:27:14.096Z turn-14-steer — 0
+  2026-10-04T06:27:20.908Z turn-14-think — ```edit
+  2026-10-04T06:27:21.130Z turn-14-exec — exit 0
+  2026-10-04T06:27:21.258Z turn-14-fingerprint — {"hash":"cc61d279af2ef9a4","dirty":true}
+  2026-10-04T06:27:21.299Z turn-15-steer — 0
+  2026-10-04T06:27:23.038Z turn-15-think — ```bash
+  2026-10-04T06:27:25.415Z turn-15-exec — exit 0
+  2026-10-04T06:27:25.564Z turn-15-fingerprint — {"hash":"cc61d279af2ef9a4","dirty":true}
+  2026-10-04T06:27:25.608Z turn-16-steer — 0
+  2026-10-04T06:27:27.720Z turn-16-think — ```bash
+  2026-10-04T06:27:29.821Z turn-16-exec — exit 0
+  2026-10-04T06:27:29.978Z turn-16-fingerprint — {"hash":"cc61d279af2ef9a4","dirty":true}
+  2026-10-04T06:27:30.032Z turn-17-steer — 0
+  2026-10-04T06:27:36.347Z turn-17-think — Tests: 6 pass, the only failure is the pre-existing known duplicate-title defect (unrelated, baseline was failing too).…
+  2026-10-04T06:27:36.552Z turn-17-exec — exit 0
+  2026-10-04T06:27:36.711Z turn-17-fingerprint — {"hash":"cc61d279af2ef9a4","dirty":true}
+  2026-10-04T06:27:36.767Z turn-18-steer — 0
+  2026-10-04T06:27:44.525Z turn-18-think — ```finish
+  2026-10-04T06:27:44.608Z turn-19-steer — 0
+  2026-10-04T06:27:47.785Z turn-19-think — ```bash
+  2026-10-04T06:27:49.889Z turn-19-exec — exit 0
+  2026-10-04T06:27:50.002Z turn-19-fingerprint — {"hash":"cc61d279af2ef9a4","dirty":true}
+  2026-10-04T06:27:50.008Z turn-20-steer — 0
+  2026-10-04T06:27:55.539Z turn-20-think — ```finish
+  2026-10-04T06:27:55.675Z turn-20-finish-tree — false
+  2026-10-04T06:27:57.090Z turn-20-finish-tests (FAILED) — failed (exit 1)
+  2026-10-04T06:27:57.124Z tests (FAILED) — failed (exit 1)
+  2026-10-04T06:27:57.876Z change-class — {"class":"normal","reasons":["90 changed lines (trivial is at most 40)","the suite did not pass over this change, so it…
+  2026-10-04T06:27:59.621Z repo-push — pushed
+  2026-10-04T06:27:59.843Z repo-pr — PR #14
+  2026-10-04T06:27:59.848Z telemetry-check — disabled
+  2026-10-04T06:28:00.000Z verification — body
+  2026-10-04T06:28:00.005Z merge-park — {"attempt":1,"class":"normal","reasons":["90 changed lines (trivial is at most 40)","the suite did not pass over this c…
+  2026-10-04T06:28:11.457Z merge-snapshot — teploy-sbx-snap:01m42sj4cbah4a88g0jzh7c0wn
+Messages:
+  You: README says admin actions require the admin token, but DELETE /api/notes/:id accepts any request. Fix the endpoint so non-admin requests are rejected, per the documented contract.
+  Agent: `node --test` is the working invocation (4 tests: 3 pass, 1 known-failing duplicate-title defect, which is out of scope). Plan: in `server.mjs`'s DELETE handler, check `X-Admin-Token` against `ADMIN_TOKEN` first — missing/wrong token returns 401 and the note is left intact; a valid token keeps today's 204/404 behavior. I'll remove the stale DEFECT comment and add a test in repo style.
+  Agent: The new-file hunk needed `create` instead. Redoing both properly:
+  Agent: The create was truncated mid-write. Recreating the full file:
+  Agent: The first test is complete. Appending the wrong-token and valid-token cases:
+  Agent: Tests: 6 pass, the only failure is the pre-existing known duplicate-title defect (unrelated, baseline was failing too). Let me view the final diff for confirmation:
+  Agent: ```finish
+Fixed the admin-token gap on DELETE /api/notes/:id so it matches the README's documented contract.
+
+Change (edited working tree, uncommitted):
+- `server.mjs` — the DELETE handler's first action is now an admin check: if the `X-Admin-Token` header doesn't match `ADMIN_TOKEN` (from env, default `fixture-admin-token`), it returns 401 `{"error":"admin token required"}` without touching the database. With a valid token, behavior is unchanged (204 on delete, 404 when the id doesn't exist). The stale "DEFECT (open)" comment was removed.
+- `tests/admin-token.test.mjs` (new) — three tests in the repo's existing style: no token → 401 and the note survives; wrong token → 401 and the note survives; correct token → 204, note gone, and a repeat delete returns 404.
+
+Verification: the repo's test command `npm test` (`node --test tests/`) fails to even load on this Node version, so I ran the same suite with `node --test`, which works. Result: 7 tests, 6 pass. The single failure is the pre-existing, README-documented duplicate-title defect (`tests/duplicate-title.test.mjs`), which was failing on the untouched baseline too and is out of scope for this request. Both edited files also pass `node --check`.
+
+Not verified: nothing about this endpoint remains unverified — all three auth outcomes are covered by tests I ran. I did not verify a custom `ADMIN_TOKEN` env value end-to-end (tests use the fixture default), but the check compares directly against the existing `ADMIN_TOKEN` constant, which already read that env var.
+```
+  Agent: ```finish
+Verified. Proof from the command just run:
+
+- `server.mjs` — the DELETE handler now begins with the admin check (`if (req.headers['x-admin-token'] !== ADMIN_TOKEN) return json(401, {"error":"admin token required"})`) before any database write, shown verbatim in the output. Valid tokens keep the original 204/404 behavior.
+- `tests/admin-token.test.mjs` — exists in `tests/` alongside the three original test files.
+- Suite (`node --test`): 7 tests, 6 pass, including all three new admin-token tests (no token → 401 + note survives, wrong token → 401 + note survives, correct token → 204 then 404 on repeat). The single failure is `tests/duplicate-title.test.mjs`, the pre-existing defect the README documents as known-failing; it fails on the untouched baseline as well and is separate from this request.
+
+Note on the test command: the README's `npm test` script (`node --test tests/`) cannot even load on this Node version (it treats `tests/` as a module path), so I ran the equivalent `node --test`, which executes all test files. The change is in the edited working tree only — nothing committed, pushed, or reverted.
+```
+Outcome: {"repo":"http://100.108.123.49:49152/Tyler/ship-eval-ui-api-db"}
+Checks: Baseline tests=failed (node --test tests/health.test.mjs tests/roundtrip.test.mjs tests/duplicate-title.test.mjs); Tests=failed (node --test tests/health.test.mjs tests/roundtrip.test.mjs tests/duplicate-title.test.mjs)

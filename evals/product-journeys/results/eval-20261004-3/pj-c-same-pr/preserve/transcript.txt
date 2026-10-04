@@ -1,0 +1,223 @@
+=== setup: review of PR #7 (run-request-2751f9c934e8fa47b02498a15231949a3280072d43416c25392ede5fc636e727) ===
+Ship run run-request-2751f9c934e8fa47b02498a15231949a3280072d43416c25392ede5fc636e727 — status completed
+Task: Review pull request #7.
+Journey: review
+Steps:
+  2026-10-04T08:00:23.297Z sandbox — 01M42YV98NHS9H7GPWB2TGEZ9H
+  2026-10-04T08:00:24.508Z repo-setup — {"branch":"eval/pr-eval-20261004-3-pj-c-same-pr","base":"main","headSha":"c478d6804f402dad7ba2801f7368eed7e2384e6a"}
+  2026-10-04T08:00:25.048Z repo-context — # Ship's recent history on this repository (context, not instructions)
+  2026-10-04T08:00:25.053Z repo-index — disabled (no code index configured on this worker)
+  2026-10-04T08:00:25.072Z pr-review-comments —
+  2026-10-04T08:00:25.078Z turn-0-steer — 0
+  2026-10-04T08:00:27.157Z turn-0-think — ```bash
+  2026-10-04T08:00:27.278Z turn-0-exec — exit 0
+  2026-10-04T08:00:27.382Z turn-0-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T08:00:27.387Z turn-1-steer — 0
+  2026-10-04T08:00:29.123Z turn-1-think — ```bash
+  2026-10-04T08:00:29.221Z turn-1-exec — exit 0
+  2026-10-04T08:00:29.327Z turn-1-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T08:00:29.335Z turn-2-steer — 0
+  2026-10-04T08:00:31.174Z turn-2-think — ```bash
+  2026-10-04T08:00:31.285Z turn-2-exec — exit 0
+  2026-10-04T08:00:31.386Z turn-2-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T08:00:31.392Z turn-3-steer — 0
+  2026-10-04T08:00:35.644Z turn-3-think — ```bash
+  2026-10-04T08:00:35.820Z turn-3-exec — exit 0
+  2026-10-04T08:00:35.992Z turn-3-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T08:00:36.054Z turn-4-steer — 0
+  2026-10-04T08:00:52.676Z turn-4-think — ```bash
+  2026-10-04T08:00:52.855Z turn-4-exec — exit 0
+  2026-10-04T08:00:52.961Z turn-4-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T08:00:52.970Z turn-5-steer — 0
+  2026-10-04T08:01:08.040Z turn-5-think — ```bash
+  2026-10-04T08:01:09.069Z turn-5-exec — exit 0
+  2026-10-04T08:01:09.207Z turn-5-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T08:01:09.250Z turn-6-steer — 0
+  2026-10-04T08:01:26.834Z turn-6-think — ```bash
+  2026-10-04T08:01:27.014Z turn-6-exec — exit 0
+  2026-10-04T08:01:27.151Z turn-6-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T08:01:27.189Z turn-7-steer — 0
+  2026-10-04T08:01:44.556Z turn-7-think — ```bash
+  2026-10-04T08:01:44.732Z turn-7-exec — exit 0
+  2026-10-04T08:01:44.836Z turn-7-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T08:01:44.842Z turn-8-steer — 0
+  2026-10-04T08:02:20.809Z turn-8-think — I have all the evidence I need. Summary of what I verified:
+  2026-10-04T08:02:20.817Z scan-findings — {"found":true,"findings":[{"title":"PR changes the pinned session TTL without the contract decision it requires, breaki…
+Messages:
+  You: Review pull request #7.
+  Agent: I have all the evidence I need. Summary of what I verified:
+
+- **PR #7** = head `c478d68` vs base `f2938d0`: a one-line diff to `service.py:12` changing `SESSION_TTL_SECONDS` from `24*60*60` to `30*60`. No other files touched.
+- Running the suite reproduces a failure (`AssertionError: 1800 != 86400`) because the PR leaves `tests/test_service.py` pinning 24h with a "contract decision" comment.
+- `git merge-tree` shows a content conflict with `main`, which now carries an env-configurable TTL (`KEEPNOTE_TTL_SECONDS`) that this PR would silently drop.
+- The PR's stated rationale ("align with documented inactivity window") is not actually achieved: `session_expired` measures time since `created_at`, and nothing ever refreshes it — a pre-existing semantic mismatch, unchanged by this diff.
+
+```finish
+PR #7 (head c478d68 vs base f2938d0) changes exactly one line, service.py:12: SESSION_TTL_SECONDS goes from 24*60*60 to 30*60. It does not update the test that pins the old value, it conflicts with (and would revert) main's env-configurable TTL, and its stated rationale — aligning with the README's 30-minute window — is not achieved because the expiry check measures time since creation, not inactivity. Verified by running the suite (1 failure), git merge-tree (conflict), and reading service.py/tests/README.
+
+FINDINGS_JSON
+[
+  {"title": "PR changes the pinned session TTL without the contract decision it requires, breaking the test suite", "severity": "high", "file": "service.py", "line": 12, "detail": "The diff rewrites SESSION_TTL_SECONDS from `24 * 60 * 60  # pinned by tests/test_service.py -- do not change without a contract decision` to `30 * 60  # align with the documented 30-minute inactivity window in README.md`, but tests/test_service.py:14-16 still asserts `assertEqual(service.SESSION_TTL_SECONDS, 24 * 60 * 60)` under the comment 'Contract decision 2024-06: 24h, recorded here on purpose.' Reproduced, not just read: `python3 -m unittest discover -s tests` fails with `AssertionError: 1800 != 86400` (1 failure, 6 tests). The PR touches no test file, so CI on this branch is red.", "fix": "Either revert the constant, or obtain the contract decision and land the constant, the test, and the README wording in the same change. Changing the value while leaving the pinning test behind is the regression, not the value itself."},
+  {"title": "PR does not rebase on main and would silently revert main's KEEPNOTE_TTL_SECONDS ops override", "severity": "high", "file": "service.py", "line": 12, "detail": "main (2617e04, one commit ahead of the PR base) sets `SESSION_TTL_SECONDS = int(os.environ.get(\"KEEPNOTE_TTL_SECONDS\", 24 * 60 * 60))`. The PR head still hardcodes a literal, so `git merge-tree --write-tree main HEAD` reports `CONFLICT (content): Merge conflict in service.py` (exit 1). Code-reading conclusion: if this is resolved by taking the PR's line, deployments that set KEEPNOTE_TTL_SECONDS lose their override with no error — a behavioral regression relative to current main, in addition to the textual conflict.", "fix": "Rebase on main and keep the env lookup: `SESSION_TTL_SECONDS = int(os.environ.get(\"KEEPNOTE_TTL_SECONDS\", 30 * 60))` (or the agreed default), so the ops override survives."},
+  {"title": "PR's rationale does not hold: expiry is measured from creation, not inactivity (pre-existing, unchanged by this diff)", "severity": "med", "file": "service.py", "line": 44, "detail": "README.md:10 documents 'Sessions expire after 30 minutes of inactivity,' and the new comment on service.py:12 claims alignment with that window. But session_expired computes `now - session[\"created_at\"] > SESSION_TTL_SECONDS`, and sessions are written once at POST (service.py:87) with no refresh path — a continuously active session is still dropped 30 minutes after creation, and GET never persists pruned sessions. This is a pre-existing semantic mismatch inherited from the base (f2938d0 has the identical check); the PR only changes the magnitude, so it fixes the number, not the documented behavior.", "fix": "If the intent is really 'inactivity', store and refresh a last_seen_at (or update created_at on each request) and compare against that; otherwise correct README.md:10 to say 'expire 30 minutes after creation'. Either way the comment on line 12 is currently misleading."}
+]
+```
+  Agent: PR #7 (head c478d68 vs base f2938d0) changes exactly one line, service.py:12: SESSION_TTL_SECONDS goes from 24*60*60 to 30*60. It does not update the test that pins the old value, it conflicts with (and would revert) main's env-configurable TTL, and its stated rationale — aligning with the README's 30-minute window — is not achieved because the expiry check measures time since creation, not inactivity. Verified by running the suite (1 failure), git merge-tree (conflict), and reading service.py/tests/README.
+
+FINDINGS_JSON
+[
+  {"title": "PR changes the pinned session TTL without the contract decision it requires, breaking the test suite", "severity": "high", "file": "service.py", "line": 12, "detail": "The diff rewrites SESSION_TTL_SECONDS from `24 * 60 * 60  # pinned by tests/test_service.py -- do not change without a contract decision` to `30 * 60  # align with the documented 30-minute inactivity window in README.md`, but tests/test_service.py:14-16 still asserts `assertEqual(service.SESSION_TTL_SECONDS, 24 * 60 * 60)` under the comment 'Contract decision 2024-06: 24h, recorded here on purpose.' Reproduced, not just read: `python3 -m unittest discover -s tests` fails with `AssertionError: 1800 != 86400` (1 failure, 6 tests). The PR touches no test file, so CI on this branch is red.", "fix": "Either revert the constant, or obtain the contract decision and land the constant, the test, and the README wording in the same change. Changing the value while leaving the pinning test behind is the regression, not the value itself."},
+  {"title": "PR does not rebase on main and would silently revert main's KEEPNOTE_TTL_SECONDS ops override", "severity": "high", "file": "service.py", "line": 12, "detail": "main (2617e04, one commit ahead of the PR base) sets `SESSION_TTL_SECONDS = int(os.environ.get(\"KEEPNOTE_TTL_SECONDS\", 24 * 60 * 60))`. The PR head still hardcodes a literal, so `git merge-tree --write-tree main HEAD` reports `CONFLICT (content): Merge conflict in service.py` (exit 1). Code-reading conclusion: if this is resolved by taking the PR's line, deployments that set KEEPNOTE_TTL_SECONDS lose their override with no error — a behavioral regression relative to current main, in addition to the textual conflict.", "fix": "Rebase on main and keep the env lookup: `SESSION_TTL_SECONDS = int(os.environ.get(\"KEEPNOTE_TTL_SECONDS\", 30 * 60))` (or the agreed default), so the ops override survives."},
+  {"title": "PR's rationale does not hold: expiry is measured from creation, not inactivity (pre-existing, unchanged by this diff)", "severity": "med", "file": "service.py", "line": 44, "detail": "README.md:10 documents 'Sessions expire after 30 minutes of inactivity,' and the new comment on service.py:12 claims alignment with that window. But session_expired computes `now - session[\"created_at\"] > SESSION_TTL_SECONDS`, and sessions are written once at POST (service.py:87) with no refresh path — a continuously active session is still dropped 30 minutes after creation, and GET never persists pruned sessions. This is a pre-existing semantic mismatch inherited from the base (f2938d0 has the identical check); the PR only changes the magnitude, so it fixes the number, not the documented behavior.", "fix": "If the intent is really 'inactivity', store and refresh a last_seen_at (or update created_at on each request) and compare against that; otherwise correct README.md:10 to say 'expire 30 minutes after creation'. Either way the comment on line 12 is currently misleading."}
+]
+Outcome: {"repo":"http://100.108.123.49:49152/Tyler/ship-eval-same-pr","summary":"PR #7 (head c478d68 vs base f2938d0) changes exactly one line, service.py:12: SESSION_TTL_SECONDS goes from 24*60*60 to 30*60. It does not update the test that pins the old value, it conflicts with (and would revert) main's env-configurable TTL, and its stated rationale — aligning with the README's 30-minute window — is not achieved because the expiry check measures time since creation, not inactivity. Verified by running the suite (1 failure), git merge-tree (conflict), and reading service.py/tests/README.\n\nFINDINGS_JSON\n[\n  {\"title\": \"PR changes the pinned session TTL without the contract decision it requires, breaking the test suite\", \"severity\": \"high\", \"file\": \"service.py\", \"line\": 12, \"detail\": \"The diff rewrites SESSION_TTL_SECONDS from `24 * 60 * 60  # pinned by tests/test_service.py -- do not change without a contract decision` to `30 * 60  # align with the documented 30-minute inactivity window in README.md`, but tests/test_service.py:14-16 still asserts `assertEqual(service.SESSION_TTL_SECONDS, 24 * 60 * 60)` under the comment 'Contract decision 2024-06: 24h, recorded here on purpose.' Reproduced, not just read: `python3 -m unittest discover -s tests` fails with `AssertionError: 1800 != 86400` (1 failure, 6 tests). The PR touches no test file, so CI on this branch is red.\", \"fix\": \"Either revert the constant, or obtain the contract decision and land the constant, the test, and the README wording in the same change. Changing the value while leaving the pinning test behind is the regression, not the value itself.\"},\n  {\"title\": \"PR does not rebase on main and would silently revert main's KEEPNOTE_TTL_SECONDS ops override\", \"severity\": \"high\", \"file\": \"service.py\", \"line\": 12, \"detail\": \"main (2617e04, one commit ahead of the PR base) sets `SESSION_TTL_SECONDS = int(os.environ.get(\\\"KEEPNOTE_TTL_SECONDS\\\", 24 * 60 * 60))`. The PR head still hardcodes a literal, so `git merge-tree --write-tree main HEAD` reports `CONFLICT (content): Merge conflict in service.py` (exit 1). Code-reading conclusion: if this is resolved by taking the PR's line, deployments that set KEEPNOTE_TTL_SECONDS lose their override with no error — a behavioral regression relative to current main, in addition to the textual conflict.\", \"fix\": \"Rebase on main and keep the env lookup: `SESSION_TTL_SECONDS = int(os.environ.get(\\\"KEEPNOTE_TTL_SECONDS\\\", 30 * 60))` (or the agreed default), so the ops override survives.\"},\n  {\"title\": \"PR's rationale does not hold: expiry is measured from creation, not inactivity (pre-existing, unchanged by this diff)\", \"severity\": \"med\", \"file\": \"service.py\", \"line\": 44, \"detail\": \"README.md:10 documents 'Sessions expire after 30 minutes of inactivity,' and the new comment on service.py:12 claims alignment with that window. But session_expired computes `now - session[\\\"created_at\\\"] > SESSION_TTL_SECONDS`, and sessions are written once at POST (service.py:87) with no refresh path — a continuously active session is still dropped 30 minutes after creation, and GET never persists pruned sessions. This is a pre-existing semantic mismatch inherited from the base (f2938d0 has the identical check); the PR only changes the magnitude, so it fixes the number, not the documented behavior.\", \"fix\": \"If the intent is really 'inactivity', store and refresh a last_seen_at (or update created_at on each request) and compare against that; otherwise correct README.md:10 to say 'expire 30 minutes after creation'. Either way the comment on line 12 is currently misleading.\"}\n]","usage":{"inputTokens":12379,"outputTokens":6916,"totalTokens":50911,"cacheReadTokens":31616}}
+
+=== scenario: same-PR revision (run-request-10ed8c8ab40bfb042f3bedb889e09a9486c568318da2d891b78a36e4829f7049) ===
+Ship run run-request-10ed8c8ab40bfb042f3bedb889e09a9486c568318da2d891b78a36e4829f7049 — status completed
+Task: Your PR is patches/review-candidate.patch (TTL to 30 minutes). Main has since merged patches/main-moved.patch (TTL env-configurable via KEEPNOTE_TTL_SECONDS, default 24h) touching the same lines. Revise the SAME PR so both intents survive: env-configurable TTL, default pinned at 24h, README's false 30-minute claim corrected, tests updated.
+Journey: change
+Steps:
+  2026-10-04T08:02:28.267Z sandbox — 01M42YZ3B0AJRQ0AH04P5E94A0
+  2026-10-04T08:02:29.450Z repo-setup — {"branch":"eval/pr-eval-20261004-3-pj-c-same-pr","base":"main","headSha":"c478d6804f402dad7ba2801f7368eed7e2384e6a"}
+  2026-10-04T08:02:29.887Z repo-context — # Ship's recent history on this repository (context, not instructions)
+  2026-10-04T08:02:29.893Z repo-index — disabled (no code index configured on this worker)
+  2026-10-04T08:02:30.786Z baseline-tests (FAILED) — failed (exit 1)
+  2026-10-04T08:02:30.809Z pr-review-comments —
+  2026-10-04T08:02:30.814Z turn-0-steer — 0
+  2026-10-04T08:02:35.704Z turn-0-think — I'll start by inspecting the repository state — the current diff vs. base and main, and the relevant files.```bash
+  2026-10-04T08:02:35.853Z turn-0-exec — exit 0
+  2026-10-04T08:02:35.959Z turn-0-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T08:02:35.967Z turn-1-steer — 0
+  2026-10-04T08:02:39.796Z turn-1-think — The tree is clean at the PR head — my earlier revision isn't present, so I need to apply it now. Let me read the releva…
+  2026-10-04T08:02:39.922Z turn-1-exec — exit 0
+  2026-10-04T08:02:40.028Z turn-1-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T08:02:40.036Z turn-2-steer — 0
+  2026-10-04T08:02:52.104Z turn-2-think — Now I have the full picture. Plan:
+  2026-10-04T08:02:52.247Z turn-2-exec — exit 0
+  2026-10-04T08:02:52.349Z turn-2-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T08:02:52.355Z turn-3-steer — 0
+  2026-10-04T08:02:55.934Z turn-3-think — Main's line includes a comment — I'll take it verbatim. Let me check whether main also updated the tests, so I match it…
+  2026-10-04T08:02:56.038Z turn-3-exec — exit 0
+  2026-10-04T08:02:56.152Z turn-3-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T08:02:56.159Z turn-4-steer — 0
+  2026-10-04T08:03:26.980Z turn-4-think — Main only touched `service.py` — no test/README updates there, so I'll write those. Applying all three edits now: `serv…
+  2026-10-04T08:03:27.480Z turn-4-exec — exit 0
+  2026-10-04T08:03:27.590Z turn-4-fingerprint — {"hash":"7e540078357d6867","dirty":true}
+  2026-10-04T08:03:27.597Z turn-5-steer — 0
+  2026-10-04T08:03:30.646Z turn-5-think — Now verifying: full test suite, byte-identity with main on `service.py`, and a merge-tree check against main.```bash
+  2026-10-04T08:03:31.603Z turn-5-exec — exit 0
+  2026-10-04T08:03:31.711Z turn-5-fingerprint — {"hash":"7e540078357d6867","dirty":true}
+  2026-10-04T08:03:31.717Z turn-6-steer — 0
+  2026-10-04T08:03:45.132Z turn-6-think — Tests pass (7/7) and `service.py` is byte-identical to main. The `merge-tree` exit 1 is expected here: it compares the …
+  2026-10-04T08:03:45.383Z turn-6-exec — exit 0
+  2026-10-04T08:03:45.499Z turn-6-fingerprint — {"hash":"7e540078357d6867","dirty":true}
+  2026-10-04T08:03:45.507Z turn-7-steer — 0
+  2026-10-04T08:03:52.701Z turn-7-think — The loop missed my untracked-in-HEAD test/README edits because it diffed commits. Re-running with the working tree incl…
+  2026-10-04T08:03:53.063Z turn-7-exec — exit 0
+  2026-10-04T08:03:53.163Z turn-7-fingerprint — {"hash":"7e540078357d6867","dirty":true}
+  2026-10-04T08:03:53.175Z turn-8-steer — 0
+  2026-10-04T08:04:04.834Z turn-8-think — All three files three-way-merge cleanly against main. Final check: the cumulative PR diff, plus a direct runtime sanity…
+  2026-10-04T08:04:05.174Z turn-8-exec — exit 0
+  2026-10-04T08:04:05.331Z turn-8-fingerprint — {"hash":"7e540078357d6867","dirty":true}
+  2026-10-04T08:04:05.337Z turn-9-steer — 0
+  2026-10-04T08:04:11.849Z turn-9-think — Everything checks out. One last confirmation that HEAD is untouched (nothing committed/pushed) and a clean full-suite r…
+  2026-10-04T08:04:12.760Z turn-9-exec — exit 0
+  2026-10-04T08:04:12.874Z turn-9-fingerprint — {"hash":"7e540078357d6867","dirty":true}
+  2026-10-04T08:04:12.881Z turn-10-steer — 0
+  2026-10-04T08:04:26.413Z turn-10-think — All verified. Summary of the revision to PR #7 (all changes in the working tree, nothing committed or pushed — HEAD sti…
+  2026-10-04T08:04:26.422Z turn-11-steer — 0
+  2026-10-04T08:04:31.709Z turn-11-think — ```finish
+  2026-10-04T08:04:31.897Z turn-12-steer — 0
+  2026-10-04T08:04:37.720Z turn-12-think — Re-reading the task: it requires (a) env-configurable TTL with 24h default, (b) README's false 30-minute claim correcte…
+  2026-10-04T08:04:37.819Z turn-12-exec (FAILED) — exit 2
+  2026-10-04T08:04:37.931Z turn-12-fingerprint — {"hash":"7e540078357d6867","dirty":true}
+  2026-10-04T08:04:37.939Z turn-13-steer — 0
+  2026-10-04T08:04:44.880Z turn-13-think — `sh` doesn't support process substitution — rewriting without it:```bash
+  2026-10-04T08:04:45.881Z turn-13-exec — exit 0
+  2026-10-04T08:04:45.992Z turn-13-fingerprint — {"hash":"7e540078357d6867","dirty":true}
+  2026-10-04T08:04:45.999Z turn-14-steer — 0
+  2026-10-04T08:04:53.586Z turn-14-think — All required artifacts are proven present and correct — the edits were made earlier in this session and this command re…
+  2026-10-04T08:04:53.693Z turn-14-finish-tree — false
+  2026-10-04T08:04:54.532Z turn-14-finish-tests — passed
+  2026-10-04T08:04:54.541Z tests — passed
+  2026-10-04T08:04:54.890Z change-class — {"class":"normal","reasons":["42 changed lines (trivial is at most 40)"],"files":[{"path":"README.md","added":4,"delete…
+  2026-10-04T08:04:56.822Z repo-push — pushed
+  2026-10-04T08:04:56.915Z repo-comment — true
+  2026-10-04T08:04:56.920Z telemetry-check — disabled
+  2026-10-04T08:04:57.106Z verification — body
+  2026-10-04T08:04:57.114Z repo-memory — true
+Messages:
+  You: Your PR is patches/review-candidate.patch (TTL to 30 minutes). Main has since merged patches/main-moved.patch (TTL env-configurable via KEEPNOTE_TTL_SECONDS, default 24h) touching the same lines. Revise the SAME PR so both intents survive: env-configurable TTL, default pinned at 24h, README's false 30-minute claim corrected, tests updated.
+  Agent: I'll start by inspecting the repository state — the current diff vs. base and main, and the relevant files.
+  Agent: The tree is clean at the PR head — my earlier revision isn't present, so I need to apply it now. Let me read the relevant files.
+  Agent: Now I have the full picture. Plan:
+
+- **`service.py:12`**: restore main's line verbatim — `SESSION_TTL_SECONDS = int(os.environ.get("KEEPNOTE_TTL_SECONDS", 24 * 60 * 60))` — so the env override survives, the default is pinned at 24h, and the merge conflict with main disappears.
+- **`README.md`**: replace the false "30 minutes of inactivity" claim with the real semantics (24h **from creation** by default, overridable via `KEEPNOTE_TTL_SECONDS`) — this addresses the medium finding via the documented-behavior route rather than inventing an inactivity-refresh mechanism the feedback didn't ask for.
+- **`tests/test_service.py`**: keep pinning the 24h default (with env cleared) and add a test that the env var actually overrides it, matching main's intent.
+
+Verification: full unittest run, plus `git merge-tree` against main and a diff of `service.py` vs main (should be empty).
+
+First, the rest of `service.py` to check for import-time state before I write a module-reload test:
+  Agent: Main's line includes a comment — I'll take it verbatim. Let me check whether main also updated the tests, so I match its conventions:
+  Agent: Main only touched `service.py` — no test/README updates there, so I'll write those. Applying all three edits now: `service.py` line 12 byte-identical to main, README semantics corrected + override documented, tests pinning the 24h default (with the env var cleared) and proving the override works.
+  Agent: Now verifying: full test suite, byte-identity with main on `service.py`, and a merge-tree check against main.
+  Agent: Tests pass (7/7) and `service.py` is byte-identical to main. The `merge-tree` exit 1 is expected here: it compares the **commit** `HEAD`, which I'm not allowed to touch — my revision lives in the working tree. So let me verify mergeability of the actual working-tree content with a file-level three-way merge (base `f2938d0` → ours = working tree → theirs = `main`) for every file that differs:
+  Agent: The loop missed my untracked-in-HEAD test/README edits because it diffed commits. Re-running with the working tree included:
+  Agent: All three files three-way-merge cleanly against main. Final check: the cumulative PR diff, plus a direct runtime sanity check of the default and override values.
+  Agent: Everything checks out. One last confirmation that HEAD is untouched (nothing committed/pushed) and a clean full-suite run:
+  Agent: All verified. Summary of the revision to PR #7 (all changes in the working tree, nothing committed or pushed — HEAD still at `c478d68`):
+
+**What changed**
+
+1. **`service.py:12`** — reverted the hardcoded `30 * 60` and took main's line byte-for-byte:
+   `SESSION_TTL_SECONDS = int(os.environ.get("KEEPNOTE_TTL_SECONDS", 24 * 60 * 60))  # default pinned by tests/test_service.py; ops override via KEEPNOTE_TTL_SECONDS`
+   This keeps the PR's alignment intent available *through the env var* while restoring the 24h contract default and preserving main's ops override.
+
+2. **`README.md`** — the false "Sessions expire after 30 minutes of inactivity" claim now states the real behavior: sessions expire **24 hours after creation** (measured from `created_at`, not activity), with the `KEEPNOTE_TTL_SECONDS` override documented (e.g. `=1800` for a 30-minute window). I chose the "correct the README" route from the review's medium finding rather than adding a last-seen/refresh mechanism, since the feedback asked for doc/test alignment, not a behavioral redesign of session expiry.
+
+3. **`tests/test_service.py`** — the pinning test now asserts the **24h default with `KEEPNOTE_TTL_SECONDS` explicitly cleared**, plus a new test proving the env override is honored (via `importlib.reload` inside a save/restore context manager, so no leakage between tests).
+
+**Verification**
+
+- `python3 -m unittest discover -s tests`: **7 tests, all OK** (was 1 failure before).
+- `git diff main -- service.py` is **empty** — line 12 is identical to main, so deployments keep their `KEEPNOTE_TTL_SECONDS` override and the textual conflict is gone.
+- File-level three-way merge (base `f2938d0` vs. working tree vs. `main`) is **clean for all three files**, with the merge result identical to the working tree — so this PR can merge into main without conflicts.
+- Runtime check: default `86400` (24h), `KEEPNOTE_TTL_SECONDS=1800` yields 1800s, and expiry still measures from `created_at` (unchanged, pre-existing semantics — now documented honestly).
+
+**Not verified / out of scope:** I did not add an activity-based (inactivity) expiry refresh mechanism; the review offered that as an alternative to fixing the README, and the README fix is the smaller, in-scope change. Real deployments' actual env settings are also unverifiable from here.
+  Agent: ```finish
+Revised PR #7 in the working tree (HEAD untouched at c478d68; nothing committed or pushed) so both intents survive:
+
+- service.py:12 now carries main's line byte-for-byte — `SESSION_TTL_SECONDS = int(os.environ.get("KEEPNOTE_TTL_SECONDS", 24 * 60 * 60))` — restoring the 24h contract default and preserving main's KEEPNOTE_TTL_SECONDS ops override.
+- README.md's false "30 minutes of inactivity" claim replaced with the real semantics: sessions expire 24h after creation (measured from created_at, not activity), plus the KEEPNOTE_TTL_SECONDS override documented (e.g. 1800 for a 30-minute window).
+- tests/test_service.py updated: the pinning test now asserts the 24h default with the env var explicitly cleared, and a new test proves the env override is honored (importlib.reload inside a save/restore context manager).
+
+Verification: full suite `python3 -m unittest discover -s tests` passes 7/7 (was 1 failure); `git diff main -- service.py` is empty; a file-level three-way merge of all three changed files against main is clean with the result identical to the working tree; runtime check confirms default 86400s and override 1800s. Not done (out of scope): no activity-based/inactivity expiry mechanism was added — the README was corrected instead, per the review's alternative fix; actual deployment env settings are unverifiable from here.
+```
+  Agent: Re-reading the task: it requires (a) env-configurable TTL with 24h default, (b) README's false 30-minute claim corrected, (c) tests updated, and proof that nothing broke. One command to prove all of it:
+  Agent: `sh` doesn't support process substitution — rewriting without it:
+  Agent: All required artifacts are proven present and correct — the edits were made earlier in this session and this command re-verified each one: `service.py:12` is env-configurable with the 24h default and byte-identical to main, README no longer claims 30-minute inactivity expiry (now states 24h-from-creation plus the `KEEPNOTE_TTL_SECONDS` override), the tests pin the 24h default and cover the override, the suite passes 7/7, and the work sits uncommitted in the working tree as required (HEAD unchanged at c478d68).
+
+```finish
+Revised PR #7 in the working tree (nothing committed/pushed; HEAD still at c478d68) so both the PR's and main's intents survive, verified end-to-end this turn:
+
+1. service.py:12 — `SESSION_TTL_SECONDS = int(os.environ.get("KEEPNOTE_TTL_SECONDS", 24 * 60 * 60))`, proven byte-identical to main via cmp, so the env-configurable TTL and 24h default are restored and main's ops override survives.
+2. README.md — the false "Sessions expire after 30 minutes of inactivity" claim is replaced by the real semantics: expiry is 24 hours after creation, measured from `created_at` (not activity), with the `KEEPNOTE_TTL_SECONDS` override documented. Confirmed by grep; the old claim is gone.
+3. tests/test_service.py — updated: `test_session_ttl_default_is_24h` asserts the 86400s default with the env var explicitly cleared, and the new `test_session_ttl_env_override` proves the override is honored (importlib.reload inside a save/restore context manager, so no cross-test leakage).
+
+Proof nothing broke: `python3 -m unittest discover -s tests` runs 7 tests, all OK (the branch was red with 1 failure before the revision). Additionally verified earlier: a file-level three-way merge of all three files against main resolves cleanly with the result identical to the working tree, and a runtime check showed default 86400s and override 1800s both behave correctly.
+
+Out of scope / not done: no activity-based (inactivity) expiry mechanism was added — the review offered "correct the README" as the alternative fix, which is the smaller change actually requested; real deployment env settings are unverifiable from this sandbox.
+```
+  Agent: Revised PR #7 in the working tree (nothing committed/pushed; HEAD still at c478d68) so both the PR's and main's intents survive, verified end-to-end this turn:
+
+1. service.py:12 — `SESSION_TTL_SECONDS = int(os.environ.get("KEEPNOTE_TTL_SECONDS", 24 * 60 * 60))`, proven byte-identical to main via cmp, so the env-configurable TTL and 24h default are restored and main's ops override survives.
+2. README.md — the false "Sessions expire after 30 minutes of inactivity" claim is replaced by the real semantics: expiry is 24 hours after creation, measured from `created_at` (not activity), with the `KEEPNOTE_TTL_SECONDS` override documented. Confirmed by grep; the old claim is gone.
+3. tests/test_service.py — updated: `test_session_ttl_default_is_24h` asserts the 86400s default with the env var explicitly cleared, and the new `test_session_ttl_env_override` proves the override is honored (importlib.reload inside a save/restore context manager, so no cross-test leakage).
+
+Proof nothing broke: `python3 -m unittest discover -s tests` runs 7 tests, all OK (the branch was red with 1 failure before the revision). Additionally verified earlier: a file-level three-way merge of all three files against main resolves cleanly with the result identical to the working tree, and a runtime check showed default 86400s and override 1800s both behave correctly.
+
+Out of scope / not done: no activity-based (inactivity) expiry mechanism was added — the review offered "correct the README" as the alternative fix, which is the smaller change actually requested; real deployment env settings are unverifiable from this sandbox.
+Outcome: {"repo":"http://100.108.123.49:49152/Tyler/ship-eval-same-pr","pr":"http://100.108.123.49:49152/Tyler/ship-eval-same-pr/pulls/7","summary":"What I did: Revised PR #7 in the working tree (nothing committed/pushed; HEAD still at c478d68) so both the PR's and main's intents survive, verified end-to-end this turn:; changed 3 files (classified normal); pushed bc52525107. What I verified: the suite was already failing on the base branch (exit 1) before any edit; the suite passed over the published tree (`python3 -m unittest discover -s tests`, 1s). What I could not verify: nothing outstanding.","usage":{"inputTokens":19411,"outputTokens":7907,"totalTokens":109750,"cacheReadTokens":82432}}
+Checks: Baseline tests=failed (python3 -m unittest discover -s tests); Tests=passed (python3 -m unittest discover -s tests)

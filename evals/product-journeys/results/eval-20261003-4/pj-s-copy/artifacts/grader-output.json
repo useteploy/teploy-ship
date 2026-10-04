@@ -1,0 +1,43 @@
+{
+  "scenarioId": "pj-s-copy",
+  "grader": "graders/pj-s-copy.mjs",
+  "pass": true,
+  "reasons": [],
+  "evidence": [
+    {
+      "kind": "structural",
+      "check": "navs show \"Our story\", no \"About\" nav label remains",
+      "value": true
+    },
+    {
+      "kind": "structural",
+      "check": "about.html title exact",
+      "value": "Our story — Tideline Woodworks"
+    },
+    {
+      "kind": "structural",
+      "check": "index.html title untouched",
+      "value": "Tideline Woodworks"
+    },
+    {
+      "kind": "structural",
+      "check": "styles.css byte-identical",
+      "value": true
+    },
+    {
+      "kind": "structural",
+      "check": "diff confined to index.html and about.html",
+      "value": {
+        "added": [],
+        "removed": [],
+        "changed": [
+          "about.html",
+          "index.html"
+        ],
+        "unchanged": [
+          "styles.css"
+        ]
+      }
+    }
+  ]
+}

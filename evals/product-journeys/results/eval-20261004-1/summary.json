@@ -1,0 +1,121 @@
+{
+  "runId": "eval-20261004-1",
+  "adapter": "ship",
+  "startedAt": "2026-10-04T07:14:51.027Z",
+  "completedAt": "2026-10-04T07:54:20.541Z",
+  "scenarios": [
+    {
+      "id": "pj-s-question",
+      "outcome": "fail",
+      "pass": false,
+      "latencyMs": 52647,
+      "costUSD": 0.014221,
+      "rescueNeeded": false,
+      "interventions": 0,
+      "result": "eval-20261004-1/pj-s-question/result.json"
+    },
+    {
+      "id": "pj-s-plan",
+      "outcome": "pass",
+      "pass": true,
+      "latencyMs": 84048,
+      "costUSD": 0.016573,
+      "rescueNeeded": false,
+      "interventions": 0,
+      "result": "eval-20261004-1/pj-s-plan/result.json"
+    },
+    {
+      "id": "pj-s-copy",
+      "outcome": "pass",
+      "pass": true,
+      "latencyMs": 125600,
+      "costUSD": 0.026871,
+      "rescueNeeded": false,
+      "interventions": 0,
+      "result": "eval-20261004-1/pj-s-copy/result.json"
+    },
+    {
+      "id": "pj-s-feature",
+      "outcome": "pass",
+      "pass": true,
+      "latencyMs": 523972,
+      "costUSD": 0.039643,
+      "rescueNeeded": false,
+      "interventions": 0,
+      "result": "eval-20261004-1/pj-s-feature/result.json"
+    },
+    {
+      "id": "pj-b-api-defect",
+      "outcome": "pass",
+      "pass": true,
+      "latencyMs": 629954,
+      "costUSD": 0.108344,
+      "rescueNeeded": false,
+      "interventions": 0,
+      "result": "eval-20261004-1/pj-b-api-defect/result.json"
+    },
+    {
+      "id": "pj-b-perms-defect",
+      "outcome": "pass",
+      "pass": true,
+      "latencyMs": 199223,
+      "costUSD": 0.057025,
+      "rescueNeeded": false,
+      "interventions": 0,
+      "result": "eval-20261004-1/pj-b-perms-defect/result.json"
+    },
+    {
+      "id": "pj-b-deploy-recovery",
+      "outcome": "pass",
+      "pass": true,
+      "latencyMs": 178491,
+      "costUSD": 0.05336,
+      "rescueNeeded": false,
+      "interventions": 0,
+      "result": "eval-20261004-1/pj-b-deploy-recovery/result.json"
+    },
+    {
+      "id": "pj-c-dependency-update",
+      "outcome": "pass",
+      "pass": true,
+      "latencyMs": 155184,
+      "costUSD": 0.052112,
+      "rescueNeeded": false,
+      "interventions": 0,
+      "result": "eval-20261004-1/pj-c-dependency-update/result.json"
+    },
+    {
+      "id": "pj-c-review",
+      "outcome": "fail",
+      "pass": false,
+      "latencyMs": 195591,
+      "costUSD": 0.053554,
+      "rescueNeeded": false,
+      "interventions": 0,
+      "result": "eval-20261004-1/pj-c-review/result.json"
+    },
+    {
+      "id": "pj-c-scheduled-job",
+      "outcome": "pass",
+      "pass": true,
+      "latencyMs": 208917,
+      "costUSD": 0.070601,
+      "rescueNeeded": false,
+      "interventions": 0,
+      "result": "eval-20261004-1/pj-c-scheduled-job/result.json"
+    }
+  ],
+  "totals": {
+    "pass": 8,
+    "fail": 2,
+    "unknown": 0,
+    "harness-error": 0,
+    "authority-hold": 0
+  },
+  "notRun": [
+    {
+      "id": "pj-c-same-pr",
+      "reason": "ship adapter refuses: no fixture repo for same-pr: set SHIP_JOURNEY_REPOS (JSON family->url) or pass --ship-repos <file> / --ship-repo <url>"
+    }
+  ]
+}

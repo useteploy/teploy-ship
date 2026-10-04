@@ -1,0 +1,25 @@
+{
+  "runId": "eval-20261003-2",
+  "adapter": "ship",
+  "startedAt": "2026-10-04T06:14:05.025Z",
+  "completedAt": "2026-10-04T06:14:50.203Z",
+  "scenarios": [
+    {
+      "id": "pj-s-question",
+      "outcome": "pass",
+      "pass": true,
+      "latencyMs": 44937,
+      "costUSD": 0.012088,
+      "rescueNeeded": false,
+      "interventions": 0,
+      "result": "eval-20261003-2/pj-s-question/result.json"
+    }
+  ],
+  "totals": {
+    "pass": 1,
+    "fail": 0,
+    "unknown": 0,
+    "harness-error": 0,
+    "authority-hold": 0
+  }
+}

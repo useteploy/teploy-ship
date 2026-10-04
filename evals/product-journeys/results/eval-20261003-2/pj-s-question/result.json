@@ -1,0 +1,137 @@
+{
+  "scenarioId": "pj-s-question",
+  "family": "small-site",
+  "runId": "eval-20261003-2",
+  "harnessRevision": "7c3388c2f1caf2841539a7e2b570b99fb2f58a36",
+  "fixtureRevision": "sha256:54aa415a72c85b5e2cb91895bcd9c07bb9263893b626ff391b37abbe6c3e7e98",
+  "adapter": "ship",
+  "outcome": "pass",
+  "firstAttempt": {
+    "pass": true,
+    "graderReasons": [],
+    "endedBy": "agent"
+  },
+  "eventualSuccess": {
+    "pass": true
+  },
+  "interventions": [],
+  "rescue": {
+    "needed": false,
+    "provided": false,
+    "notes": []
+  },
+  "latencyMs": 44937,
+  "cost": {
+    "status": "priced",
+    "amount": 0.012088,
+    "currency": "USD",
+    "source": "Ship run ledger (workspace API costUSD), summed over this attempt's runs"
+  },
+  "verifiedEvidence": [
+    {
+      "check": "work tree unchanged",
+      "value": {
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "unchanged": [
+          "about.html",
+          "index.html",
+          "styles.css"
+        ]
+      }
+    },
+    {
+      "check": "every cited file:line:string occurrence exists verbatim in the fixture",
+      "value": {
+        "citations": 36,
+        "ok": true
+      }
+    },
+    {
+      "check": "cited Tideline lines exactly cover the fixture occurrences (independent count)",
+      "value": {
+        "independent": [
+          "about.html:15",
+          "about.html:20",
+          "about.html:6",
+          "index.html:15",
+          "index.html:20",
+          "index.html:6"
+        ],
+        "cited": [
+          "about.html:15",
+          "about.html:20",
+          "about.html:6",
+          "index.html:15",
+          "index.html:20",
+          "index.html:6"
+        ],
+        "missing": [],
+        "extra": []
+      }
+    },
+    {
+      "check": "the home-page tagline line is cited",
+      "value": {
+        "taglineLines": [
+          16
+        ],
+        "cited": true
+      }
+    },
+    {
+      "check": "no PR opened, nothing pushed",
+      "value": {
+        "prOpened": false,
+        "pushed": false
+      }
+    }
+  ],
+  "claimedEvidence": [
+    {
+      "claim": "**Direct answer:** The home-page tagline lives at `index.html:16` — `    <p class=\"tagline\">Furniture made on the coast</p>` (visible text \"Furniture made on the coast\", styled italic by the `.tagline` rule at `styles.css:18`–20). The word \"Tideline\" appears in exactly 6 places, always capitalized as \"Tideline\" and always as part of \"Tideline Woodworks\": 3 in `index.html`, 3 in `about.html`.\n\n**Supporting detail**\n\nTagline:\n- `index.html:16` — `    <p class=\"tagline\">Furniture made on the coast</p>` (the only tagline markup in the site)\n- Related style hook only (not the tagline itself): `styles.css:18` — `.tagline {` containing `font-style: italic;`\n\n\"Tideline\" occurrences (exact current strings, leading whitespace included):\n- `index.html:6` — `  <title>Tideline Woodworks</title>`\n- `index.html:15` — `    <h1>Tideline Woodworks</h1>`\n- `index.html:20` — `    <p>Tideline Woodworks — Bear Harbor, California</p>`\n- `about.html:6` — `  <title>About — Tideline Woodworks</title>`\n- `about.html:15` — `    <h1>Tideline Woodworks</h1>`\n- `about.html:20` — `    <p>Tideline Woodworks — Bear Harbor, California</p>`\n\nEvidence and confidence:\n- Verified by running `grep -rni tideline` and `grep -rn Tideline` over the entire working directory (excluding `.git`); both returned the identical 6 lines above, and a case-variant check returned nothing — so there are no \"tideline\"/\"TIDELINE\" variants and no occurrences in `styles.css`. The repo contains only `index.html`, `about.html`, and `styles.css`.\n- These findings come from direct inspection (grep/reading files); the repo has no tests, so nothing here was test-verified.\n- Uncertainty: this checkout (branch `ship/run-request-8a2e23b401e188a68be71a3130ae6fd8c8c60f5158b7e6e554204fbd0e78a77c`) does not contain the `contact.html` page or the \"Our story\" nav renaming mentioned in the recent-history notes, so those PRs are not reflected here; line numbers apply to this checkout only.\n- Nothing was changed: `git status --porcelain` was empty before and after inspection, and no changes were published.\n\nFINDINGS_JSON []",
+      "verdict": "unverified"
+    }
+  ],
+  "artifacts": [
+    "preserve/transcript.txt",
+    "artifacts/grader-output.json"
+  ],
+  "preserve": {
+    "dir": "preserve/"
+  },
+  "probesApplied": [],
+  "gradedAt": "2026-10-04T06:14:50.203Z",
+  "startedAt": "2026-10-04T06:14:05.025Z",
+  "ship": {
+    "shipRuns": [
+      {
+        "role": "scenario",
+        "runId": "run-request-8a2e23b401e188a68be71a3130ae6fd8c8c60f5158b7e6e554204fbd0e78a77c",
+        "journey": "investigate",
+        "status": "completed",
+        "latencyMs": 42511,
+        "costUSD": 0.012087600000000002,
+        "costPriced": true,
+        "pr": null
+      }
+    ],
+    "fixtureRepo": {
+      "url": "http://100.108.123.49:49152/tyler/ship-eval-small-site.git",
+      "head": "eab3c41e06482456b2d6e8d6f61ef90502106457",
+      "ref": "refs/heads/main",
+      "treeMatchesFixture": true,
+      "mainAfter": "eab3c41e06482456b2d6e8d6f61ef90502106457",
+      "mainMoved": false
+    },
+    "captured": {
+      "sha": null,
+      "source": "none"
+    },
+    "disposition": [],
+    "pollRetries": 0,
+    "journey": "investigate",
+    "intake": "request"
+  }
+}

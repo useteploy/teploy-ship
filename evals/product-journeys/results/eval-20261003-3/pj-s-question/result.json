@@ -1,0 +1,139 @@
+{
+  "scenarioId": "pj-s-question",
+  "family": "small-site",
+  "runId": "eval-20261003-3",
+  "harnessRevision": "7c3388c2f1caf2841539a7e2b570b99fb2f58a36",
+  "fixtureRevision": "sha256:54aa415a72c85b5e2cb91895bcd9c07bb9263893b626ff391b37abbe6c3e7e98",
+  "adapter": "ship",
+  "outcome": "fail",
+  "firstAttempt": {
+    "pass": false,
+    "graderReasons": [
+      "the tagline line (index.html:16) is not cited"
+    ],
+    "endedBy": "agent"
+  },
+  "eventualSuccess": {
+    "pass": false
+  },
+  "interventions": [],
+  "rescue": {
+    "needed": false,
+    "provided": false,
+    "notes": []
+  },
+  "latencyMs": 42213,
+  "cost": {
+    "status": "priced",
+    "amount": 0.011082,
+    "currency": "USD",
+    "source": "Ship run ledger (workspace API costUSD), summed over this attempt's runs"
+  },
+  "verifiedEvidence": [
+    {
+      "check": "work tree unchanged",
+      "value": {
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "unchanged": [
+          "about.html",
+          "index.html",
+          "styles.css"
+        ]
+      }
+    },
+    {
+      "check": "every cited file:line:string occurrence exists verbatim in the fixture",
+      "value": {
+        "citations": 18,
+        "ok": true
+      }
+    },
+    {
+      "check": "cited Tideline lines exactly cover the fixture occurrences (independent count)",
+      "value": {
+        "independent": [
+          "about.html:15",
+          "about.html:20",
+          "about.html:6",
+          "index.html:15",
+          "index.html:20",
+          "index.html:6"
+        ],
+        "cited": [
+          "about.html:15",
+          "about.html:20",
+          "about.html:6",
+          "index.html:15",
+          "index.html:20",
+          "index.html:6"
+        ],
+        "missing": [],
+        "extra": []
+      }
+    },
+    {
+      "check": "the home-page tagline line is cited",
+      "value": {
+        "taglineLines": [
+          16
+        ],
+        "cited": false
+      }
+    },
+    {
+      "check": "no PR opened, nothing pushed",
+      "value": {
+        "prOpened": false,
+        "pushed": false
+      }
+    }
+  ],
+  "claimedEvidence": [
+    {
+      "claim": "**Short answer:** The home-page tagline lives in `index.html` line 16 — the element `<p class=\"tagline\">Furniture made on the coast</p>`. The word \"Tideline\" appears in exactly 6 places: 3 in `index.html` (lines 6, 15, 20) and 3 in `about.html` (lines 6, 15, 20), and nowhere in `styles.css` or any other file. Nothing was changed — the repo tree is untouched and no edits were made.\n\n**Supporting details**\n\nHome-page tagline — `index.html`, line 16, exact current string:\n    <p class=\"tagline\">Furniture made on the coast</p>\n\nNote on wording: \"Tideline Woodworks\" on line 15 is the page's `<h1>` heading, not the tagline; the tagline is the separate classed paragraph on line 16, whose italic styling comes from the `.tagline` rule at `styles.css` lines 18–20.\n\nAll occurrences of the word \"Tideline\", with exact current strings:\n\n1. `index.html:6` — `  <title>Tideline Woodworks</title>`\n2. `index.html:15` — `    <h1>Tideline Woodworks</h1>`\n3. `index.html:20` — `    <p>Tideline Woodworks — Bear Harbor, California</p>` (footer)\n4. `about.html:6` — `  <title>About — Tideline Woodworks</title>`\n5. `about.html:15` — `    <h1>Tideline Woodworks</h1>`\n6. `about.html:20` — `    <p>Tideline Woodworks — Bear Harbor, California</p>` (footer)\n\nIn every occurrence \"Tideline\" is part of the longer string \"Tideline Woodworks\". Each of the six lines is inside `<head>`/`<main>`/`<footer>` of one of the two HTML files; `styles.css` contains no site-name text.\n\n**Evidence vs. inference**\n\nDirectly observed (commands run against the working tree): `grep -rniF \"tideline\" .` (case-insensitive, excluding `.git`) returned exactly the six lines listed and nothing else, confirming there are no other occurrences — including none in comments, `styles.css`, or filenames. `cat -n` of `index.html`, `about.html`, and `styles.css` supplied the verbatim line contents and numbers quoted above.\n\nInference, not tested: \"the tagline\" is my identification of the line-16 paragraph, based on its `class=\"tagline\"` and the matching `.tagline` CSS rule. The site was not rendered in a browser, so I did not visually verify how the tagline displays; that conclusion rests on reading the HTML and CSS only. The listed footer/heading/title occurrences are factual; only the interpretive labeling (which element is \"the tagline\") is a reading-based conclusion.\n\nFINDINGS_JSON []",
+      "verdict": "unverified"
+    }
+  ],
+  "artifacts": [
+    "preserve/transcript.txt",
+    "artifacts/grader-output.json"
+  ],
+  "preserve": {
+    "dir": "preserve/"
+  },
+  "probesApplied": [],
+  "gradedAt": "2026-10-04T06:15:56.960Z",
+  "startedAt": "2026-10-04T06:15:14.699Z",
+  "ship": {
+    "shipRuns": [
+      {
+        "role": "scenario",
+        "runId": "run-request-a327db76d7d0c41d62496d9f0e358b8022b0b87e05bdfd1986c9a4b2861c7a29",
+        "journey": "investigate",
+        "status": "completed",
+        "latencyMs": 41500,
+        "costUSD": 0.0110816,
+        "costPriced": true,
+        "pr": null
+      }
+    ],
+    "fixtureRepo": {
+      "url": "http://100.108.123.49:49152/tyler/ship-eval-small-site.git",
+      "head": "eab3c41e06482456b2d6e8d6f61ef90502106457",
+      "ref": "refs/heads/main",
+      "treeMatchesFixture": true,
+      "mainAfter": "eab3c41e06482456b2d6e8d6f61ef90502106457",
+      "mainMoved": false
+    },
+    "captured": {
+      "sha": null,
+      "source": "none"
+    },
+    "disposition": [],
+    "pollRetries": 0,
+    "journey": "investigate",
+    "intake": "request"
+  }
+}

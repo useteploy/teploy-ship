@@ -1,0 +1,113 @@
+{
+  "scenarioId": "pj-s-plan",
+  "family": "small-site",
+  "runId": "eval-20261003-4",
+  "harnessRevision": "80c9187fe961defaf99d7334c4e38b093862234c",
+  "fixtureRevision": "sha256:54aa415a72c85b5e2cb91895bcd9c07bb9263893b626ff391b37abbe6c3e7e98",
+  "adapter": "ship",
+  "outcome": "pass",
+  "firstAttempt": {
+    "pass": true,
+    "graderReasons": [],
+    "endedBy": "agent"
+  },
+  "eventualSuccess": {
+    "pass": true
+  },
+  "interventions": [],
+  "rescue": {
+    "needed": false,
+    "provided": false,
+    "notes": []
+  },
+  "latencyMs": 85270,
+  "cost": {
+    "status": "priced",
+    "amount": 0.018705,
+    "currency": "USD",
+    "source": "Ship run ledger (workspace API costUSD), summed over this attempt's runs"
+  },
+  "verifiedEvidence": [
+    {
+      "check": "work tree unchanged",
+      "value": {
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "unchanged": [
+          "about.html",
+          "index.html",
+          "styles.css"
+        ]
+      }
+    },
+    {
+      "check": "plan references index.html and styles.css",
+      "value": {
+        "index.html": true,
+        "styles.css": true
+      }
+    },
+    {
+      "check": "plan contains no applied unified diff",
+      "value": true
+    },
+    {
+      "check": "plan addresses the gallery",
+      "value": true
+    },
+    {
+      "check": "no PR opened, nothing pushed",
+      "value": {
+        "prOpened": false,
+        "pushed": false
+      }
+    }
+  ],
+  "claimedEvidence": [
+    {
+      "claim": "## Plan: gallery section (three photo cards) on the home page — PLAN ONLY, nothing implemented\n\n### What the repository actually contains (verified)\n- Three tracked files, no directories, no assets: `index.html`, `about.html`, `styles.css` (`git ls-files`, `find`). **No image files exist anywhere in the repo.**\n- Current branch `ship/run-request-…` is **identical to `main`** (`git diff --stat main HEAD` is empty). Despite the ship history mentioning `contact.html` PRs and an \"Our story\" nav rename, **none of that is present here**: the nav on both pages still reads `Home` / `About` (index.html:11-12, about.html:11-12). Do not assume a contact page or a renamed label exists.\n- `index.html` has no element literally called a \"hero\". The hero block is effectively `<main>` with `<h1>Tideline Woodworks</h1>`, `<p class=\"tagline\">` (line 16), and one intro paragraph (line 17). `styles.css` is 20 lines: `body` (max-width 40rem, centered), `nav a`, `footer`, `.tagline`. **There is no grid/flex, card, or `img` styling at all.**\n- No build system, package manifest, tests, or CI — verification is manual/browser-based.\n\n### Assumptions (stated, not verified with the user)\n1. \"Under the hero\" means: inside `<main>`, after the tagline + intro paragraph, before `</main>` (index.html lines 17-18).\n2. \"Gallery\" is decorative home-page content only — no new page, no nav change, no changes to `about.html`.\n3. Adding new image files and appending CSS rules is in scope for the eventual implementation; `styles.css` must be edited (it is tracked), which the user's follow-up authorization would need to cover.\n4. Plain static HTML + CSS only, consistent with the site (no JS, no build step).\n\n### Scoped steps (for the authorized follow-up)\n1. **Resolve the photo source** (open question 1 — this is the blocker). Preferred: commit three image files under a new `images/` directory.\n2. **HTML** — in `index.html`, after line 17, add one section: `<section class=\"gallery\">` containing an `<h2>` heading and a list of three cards. Recommended markup: `<ul class=\"gallery-grid\">` of `<li><figure><img …loading=\"lazy\"><figcaption>…</figcaption></figure></li>` so the three cards are an actual list semantically.\n3. **CSS** — append (never rewrite) to `styles.css`:\n   - `.gallery { margin-top: 2rem; }`\n   - `.gallery-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; list-style: none; padding: 0; margin: 0; }`\n   - `.gallery-grid img { width: 100%; height: auto; display: block; aspect-ratio: 4 / 3; object-fit: cover; }`\n   - Optional media query (or `repeat(auto-fit, minmax(10rem, 1fr))`) for narrow screens — see tradeoffs.\n4. **Leave untouched**: `about.html`, the `<nav>`, the `<footer>`, and all four existing CSS rules.\n5. **Verify** against the acceptance checks below in a browser / local file view, then hand back for review.\n\n### Tradeoffs in plain language\n- **Fixed 3-up vs. responsive wrap.** The whole site is capped at 40rem (~640px), so three fixed columns give each card only ~190px — fine for thumbnails, cramped for detail. `repeat(auto-fit, minmax(10rem, 1fr))` keeps three across at desktop width and wraps to 2/1 on phones at the cost of not *guaranteeing* exactly three across. Given the site has a mobile viewport meta and a paragraph-heavy layout, I lean responsive; a strict \"always three in a row\" reading favors fixed `repeat(3, 1fr)`.\n- **Committing photos vs. external URLs.** Committing keeps the site self-contained and works offline, at the cost of repo size (binaries in git, no CDN here). Hotlinking placeholders is zero-repo-cost but breaks when the host moves and adds third-party requests. There is no existing asset convention to follow either way.\n- **`figure`/`figcaption` vs. plain `img` + `p`.** `figure` is more semantic and pairs captions with images for screen readers; plain markup is fewer moving parts. Cost is trivial either way; I'd take `figure`.\n- **Editing `styles.css`.** Unavoidable for a real card grid, and low risk: only four selectors exist today, so additive rules can't collide. But it *is* a shared-file edit that touches every page's stylesheet — the diff must stay strictly additive.\n\n### Acceptance criteria\n- `index.html` contains exactly one `section.gallery` with exactly three cards, positioned inside `<main>` after the tagline/intro block and before `</main>`.\n- Every card has an `<img>` with meaningful, non-empty `alt` text, and all three images actually resolve (no broken-image icons; files exist in the repo).\n- `git diff styles.css` shows only appended rules; the four existing rules are byte-identical.\n- `about.html`, nav, and footer are unchanged (`git diff about.html` empty).\n- No horizontal scrolling and no overlapping cards at 320px viewport width or at the 40rem maximum.\n- Markup stays valid HTML (elements properly closed, single `<h2>` in the section).\n\n### Open questions (need operator input before implementing)\n1. **Where do the three photos come from?** No images exist in the repo — will files be supplied, or should the implementation generate/commit placeholders? This blocks any real `src` values.\n2. **Card content**: captions/text for the three cards (which pieces of work?), and the section heading wording (\"Gallery\" vs. \"Recent work\" vs. none)?\n3. **Layout preference**: strictly three-across at all widths, or responsive wrap on small screens?\n4. **Should cards link anywhere** (e.g., a future contact/gallery page)? Note that prior `contact.html` attempts are *not* in this tree, so linking to one would 404 today.\n\nNo files were modified and no PR was opened; every claim above is from reading the working tree on this branch.\n\nFINDINGS_JSON\n[]",
+      "verdict": "unverified"
+    }
+  ],
+  "artifacts": [
+    "preserve/transcript.txt",
+    "artifacts/grader-output.json"
+  ],
+  "preserve": {
+    "dir": "preserve/"
+  },
+  "probesApplied": [],
+  "gradedAt": "2026-10-04T06:48:05.822Z",
+  "startedAt": "2026-10-04T06:46:40.529Z",
+  "ship": {
+    "shipRuns": [
+      {
+        "role": "scenario",
+        "runId": "run-request-6e00a74a0e2f972a37203829c34c80c51cdeab50f3e3e95ffad1ad13d712efe1",
+        "journey": "plan",
+        "status": "completed",
+        "latencyMs": 84748,
+        "costUSD": 0.0187054,
+        "costPriced": true,
+        "pr": null
+      }
+    ],
+    "fixtureRepo": {
+      "url": "http://100.108.123.49:49152/tyler/ship-eval-small-site.git",
+      "head": "eab3c41e06482456b2d6e8d6f61ef90502106457",
+      "ref": "refs/heads/main",
+      "treeMatchesFixture": true,
+      "mainAfter": "eab3c41e06482456b2d6e8d6f61ef90502106457",
+      "mainMoved": false
+    },
+    "captured": {
+      "sha": null,
+      "source": "none"
+    },
+    "disposition": [],
+    "pollRetries": 0,
+    "journey": "plan",
+    "intake": "request"
+  }
+}

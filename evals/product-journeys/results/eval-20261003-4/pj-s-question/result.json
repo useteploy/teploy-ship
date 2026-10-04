@@ -1,0 +1,139 @@
+{
+  "scenarioId": "pj-s-question",
+  "family": "small-site",
+  "runId": "eval-20261003-4",
+  "harnessRevision": "80c9187fe961defaf99d7334c4e38b093862234c",
+  "fixtureRevision": "sha256:54aa415a72c85b5e2cb91895bcd9c07bb9263893b626ff391b37abbe6c3e7e98",
+  "adapter": "ship",
+  "outcome": "fail",
+  "firstAttempt": {
+    "pass": false,
+    "graderReasons": [
+      "the tagline line (index.html:16) is not cited"
+    ],
+    "endedBy": "agent"
+  },
+  "eventualSuccess": {
+    "pass": false
+  },
+  "interventions": [],
+  "rescue": {
+    "needed": false,
+    "provided": false,
+    "notes": []
+  },
+  "latencyMs": 42290,
+  "cost": {
+    "status": "priced",
+    "amount": 0.012037,
+    "currency": "USD",
+    "source": "Ship run ledger (workspace API costUSD), summed over this attempt's runs"
+  },
+  "verifiedEvidence": [
+    {
+      "check": "work tree unchanged",
+      "value": {
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "unchanged": [
+          "about.html",
+          "index.html",
+          "styles.css"
+        ]
+      }
+    },
+    {
+      "check": "every cited file:line:string occurrence exists verbatim in the fixture",
+      "value": {
+        "citations": 18,
+        "ok": true
+      }
+    },
+    {
+      "check": "cited Tideline lines exactly cover the fixture occurrences (independent count)",
+      "value": {
+        "independent": [
+          "about.html:15",
+          "about.html:20",
+          "about.html:6",
+          "index.html:15",
+          "index.html:20",
+          "index.html:6"
+        ],
+        "cited": [
+          "about.html:15",
+          "about.html:20",
+          "about.html:6",
+          "index.html:15",
+          "index.html:20",
+          "index.html:6"
+        ],
+        "missing": [],
+        "extra": []
+      }
+    },
+    {
+      "check": "the home-page tagline line is cited",
+      "value": {
+        "taglineLines": [
+          16
+        ],
+        "cited": false
+      }
+    },
+    {
+      "check": "no PR opened, nothing pushed",
+      "value": {
+        "prOpened": false,
+        "pushed": false
+      }
+    }
+  ],
+  "claimedEvidence": [
+    {
+      "claim": "**Short answer:** The home-page tagline is `index.html` line 16 — the exact string is `<p class=\"tagline\">Furniture made on the coast</p>` (the visible tagline text being \"Furniture made on the coast\", styled italic by the `.tagline` rule in `styles.css` line 18). The word \"Tideline\" appears in exactly six places across two files, always as part of the phrase \"Tideline Woodworks\" — three in `index.html` and three in `about.html`.\n\n**Where \"Tideline\" appears (file, line, exact current string):**\n\n- `index.html:6` — `  <title>Tideline Woodworks</title>`\n- `index.html:15` — `    <h1>Tideline Woodworks</h1>`\n- `index.html:20` — `    <p>Tideline Woodworks — Bear Harbor, California</p>`\n- `about.html:6` — `  <title>About — Tideline Woodworks</title>`\n- `about.html:15` — `    <h1>Tideline Woodworks</h1>`\n- `about.html:20` — `    <p>Tideline Woodworks — Bear Harbor, California</p>`\n\nNote that the dash in lines 20 of both files is an em dash (—, U+2014), not a hyphen, so a plain-ASCII search for \"Tideline -\" would miss it.\n\n**Supporting detail / how this was established:**\n\n- The repository contains exactly three tracked files besides `.git`: `index.html`, `about.html`, `styles.css` (`ls -la`). A recursive, case-insensitive grep for \"tideline\" over the whole tree excluding `.git` returned only the six lines above, so there are no other occurrences anywhere (including `styles.css`, and there are no images, scripts, or other assets that could contain the word).\n- The tagline location is confirmed two ways: `grep -rn \"tagline\"` shows the only occurrences of the class are `index.html:16` (the element) and `styles.css:18` (the `.tagline { font-style: italic; }` rule), and a case-insensitive search for the phrase \"furniture made on the coast\" matches only that same line. `about.html` has no tagline element.\n- I read the full numbered contents of both HTML files, so the exact strings above are copied verbatim from the files, including leading indentation.\n- These findings come from reading and searching the source files (there is no test suite in this repository), not from executing anything. As a read-only check on my own behavior: `git status --porcelain` was empty and `git diff --stat` produced no output, confirming nothing was modified. No changes were published or committed.\n\nFINDINGS_JSON []",
+      "verdict": "unverified"
+    }
+  ],
+  "artifacts": [
+    "preserve/transcript.txt",
+    "artifacts/grader-output.json"
+  ],
+  "preserve": {
+    "dir": "preserve/"
+  },
+  "probesApplied": [],
+  "gradedAt": "2026-10-04T06:46:40.524Z",
+  "startedAt": "2026-10-04T06:45:58.183Z",
+  "ship": {
+    "shipRuns": [
+      {
+        "role": "scenario",
+        "runId": "run-request-50027ab6028b52f85ce450d04a31c8c37e647f4973036c6cf87e20afb690f5ab",
+        "journey": "investigate",
+        "status": "completed",
+        "latencyMs": 41336,
+        "costUSD": 0.0120374,
+        "costPriced": true,
+        "pr": null
+      }
+    ],
+    "fixtureRepo": {
+      "url": "http://100.108.123.49:49152/tyler/ship-eval-small-site.git",
+      "head": "eab3c41e06482456b2d6e8d6f61ef90502106457",
+      "ref": "refs/heads/main",
+      "treeMatchesFixture": true,
+      "mainAfter": "eab3c41e06482456b2d6e8d6f61ef90502106457",
+      "mainMoved": false
+    },
+    "captured": {
+      "sha": null,
+      "source": "none"
+    },
+    "disposition": [],
+    "pollRetries": 0,
+    "journey": "investigate",
+    "intake": "request"
+  }
+}

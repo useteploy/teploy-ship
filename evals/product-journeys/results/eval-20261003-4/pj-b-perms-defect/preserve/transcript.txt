@@ -1,0 +1,133 @@
+Ship run run-request-cb97829652710357da0b0a9c6f4b92c461af55e2474690078a325e6bae12f188 — status waiting
+Task: README says admin actions require the admin token, but DELETE /api/notes/:id accepts any request. Fix the endpoint so non-admin requests are rejected, per the documented contract.
+Journey: change
+Steps:
+  2026-10-04T06:59:02.928Z sandbox — 01M42VAZ34JXMX318RF43RCYM1
+  2026-10-04T06:59:04.669Z repo-setup — {"branch":"ship/run-request-cb97829652710357da0b0a9c6f4b92c461af55e2474690078a325e6bae12f188","base":"main"}
+  2026-10-04T06:59:05.087Z repo-context — # Ship's recent history on this repository (context, not instructions)
+  2026-10-04T06:59:05.093Z repo-index — disabled (no code index configured on this worker)
+  2026-10-04T06:59:06.458Z baseline-tests (FAILED) — failed (exit 1)
+  2026-10-04T06:59:06.468Z warm-cache — reused 100.108.123.49-49152/tyler/ship-eval-ui-api-db (lockfiles 0819327635d3, unchanged)
+  2026-10-04T06:59:06.473Z turn-0-steer — 0
+  2026-10-04T06:59:08.294Z turn-0-think — ```bash
+  2026-10-04T06:59:08.401Z turn-0-exec — exit 0
+  2026-10-04T06:59:08.507Z turn-0-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T06:59:08.512Z turn-1-steer — 0
+  2026-10-04T06:59:10.173Z turn-1-think — ```bash
+  2026-10-04T06:59:10.277Z turn-1-exec — exit 0
+  2026-10-04T06:59:10.388Z turn-1-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T06:59:10.396Z turn-2-steer — 0
+  2026-10-04T06:59:12.802Z turn-2-think — ```bash
+  2026-10-04T06:59:12.887Z turn-2-exec — exit 0
+  2026-10-04T06:59:12.993Z turn-2-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T06:59:13.000Z turn-3-steer — 0
+  2026-10-04T06:59:26.259Z turn-3-think — ```bash
+  2026-10-04T06:59:28.003Z turn-3-exec — exit 0
+  2026-10-04T06:59:28.137Z turn-3-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T06:59:28.216Z turn-4-steer — 0
+  2026-10-04T06:59:29.818Z turn-4-think — ```bash
+  2026-10-04T06:59:30.713Z turn-4-exec — exit 0
+  2026-10-04T06:59:30.861Z turn-4-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T06:59:30.960Z turn-5-steer — 0
+  2026-10-04T06:59:33.221Z turn-5-think — ```bash
+  2026-10-04T06:59:33.618Z turn-5-exec — exit 0
+  2026-10-04T06:59:33.807Z turn-5-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T06:59:33.861Z turn-6-steer — 0
+  2026-10-04T06:59:36.111Z turn-6-think — ```bash
+  2026-10-04T06:59:37.571Z turn-6-exec — exit 0
+  2026-10-04T06:59:37.735Z turn-6-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T06:59:37.793Z turn-7-steer — 0
+  2026-10-04T06:59:50.169Z turn-7-think — Baseline established: 3 pass, 1 known-fail (duplicate-title, out of scope). Now the fix plus a test.
+  2026-10-04T06:59:50.337Z turn-7-exec (FAILED) — exit 1
+  2026-10-04T06:59:50.491Z turn-7-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T06:59:50.500Z turn-8-steer — 0
+  2026-10-04T06:59:54.742Z turn-8-think — The create must use a separate fence. First, the server fix: ```edit
+  2026-10-04T06:59:54.943Z turn-8-exec — exit 0
+  2026-10-04T06:59:55.067Z turn-8-fingerprint — {"hash":"462403ec6bba3553","dirty":true}
+  2026-10-04T06:59:55.072Z turn-9-steer — 0
+  2026-10-04T07:00:00.271Z turn-9-think — ```create
+  2026-10-04T07:00:00.288Z turn-10-steer — 0
+  2026-10-04T07:00:05.463Z turn-10-think — ```create tests/admin-delete.test.mjs
+  2026-10-04T07:00:05.553Z turn-10-exec — exit 0
+  2026-10-04T07:00:05.668Z turn-10-fingerprint — {"hash":"0ac25039abb7955b","dirty":true}
+  2026-10-04T07:00:05.675Z turn-11-steer — 0
+  2026-10-04T07:00:08.891Z turn-11-think — The create block may have lost some quotes. Let me verify the file content. ```bash
+  2026-10-04T07:00:08.992Z turn-11-exec — exit 0
+  2026-10-04T07:00:09.110Z turn-11-fingerprint — {"hash":"0ac25039abb7955b","dirty":true}
+  2026-10-04T07:00:09.116Z turn-12-steer — 0
+  2026-10-04T07:00:12.366Z turn-12-think — Quotes were stripped by the create. Fixing those lines. ```edit
+  2026-10-04T07:00:12.532Z turn-12-exec — exit 0
+  2026-10-04T07:00:12.642Z turn-12-fingerprint — {"hash":"0ac25039abb7955b","dirty":true}
+  2026-10-04T07:00:12.647Z turn-13-steer — 0
+  2026-10-04T07:00:14.953Z turn-13-think — ```bash
+  2026-10-04T07:00:15.068Z turn-13-exec — exit 0
+  2026-10-04T07:00:15.205Z turn-13-fingerprint — {"hash":"0ac25039abb7955b","dirty":true}
+  2026-10-04T07:00:15.211Z turn-14-steer — 0
+  2026-10-04T07:00:18.103Z turn-14-think — Two lines still lost quotes (38, 47). Fixing. ```edit
+  2026-10-04T07:00:18.318Z turn-14-exec — exit 0
+  2026-10-04T07:00:18.514Z turn-14-fingerprint — {"hash":"0ac25039abb7955b","dirty":true}
+  2026-10-04T07:00:18.588Z turn-15-steer — 0
+  2026-10-04T07:00:21.378Z turn-15-think — ```bash
+  2026-10-04T07:00:23.481Z turn-15-exec — exit 0
+  2026-10-04T07:00:23.653Z turn-15-fingerprint — {"hash":"0ac25039abb7955b","dirty":true}
+  2026-10-04T07:00:23.703Z turn-16-steer — 0
+  2026-10-04T07:00:28.504Z turn-16-think — New test passes; the only failure is the pre-existing known-failing duplicate-title test (documented in README, out of …
+  2026-10-04T07:00:29.161Z turn-16-exec — exit 0
+  2026-10-04T07:00:29.263Z turn-16-fingerprint — {"hash":"0ac25039abb7955b","dirty":true}
+  2026-10-04T07:00:29.269Z turn-17-steer — 0
+  2026-10-04T07:00:36.887Z turn-17-think — Verified end-to-end. The change is complete.
+  2026-10-04T07:00:36.895Z turn-18-steer — 0
+  2026-10-04T07:00:40.165Z turn-18-think — ```bash
+  2026-10-04T07:00:42.180Z turn-18-exec — exit 0
+  2026-10-04T07:00:42.327Z turn-18-fingerprint — {"hash":"0ac25039abb7955b","dirty":true}
+  2026-10-04T07:00:42.481Z turn-19-steer — 0
+  2026-10-04T07:00:50.373Z turn-19-think — All checks pass in one command: the auth guard is present in `server.mjs` exactly as claimed, the new test file exists …
+  2026-10-04T07:00:50.518Z turn-19-finish-tree — false
+  2026-10-04T07:00:51.972Z turn-19-finish-tests (FAILED) — failed (exit 1)
+  2026-10-04T07:00:52.018Z tests (FAILED) — failed (exit 1)
+  2026-10-04T07:00:52.337Z change-class — {"class":"normal","reasons":["62 changed lines (trivial is at most 40)","the suite did not pass over this change, so it…
+  2026-10-04T07:00:54.072Z repo-push — pushed
+  2026-10-04T07:00:54.361Z repo-pr — PR #17
+  2026-10-04T07:00:54.389Z telemetry-check — disabled
+  2026-10-04T07:00:54.596Z verification — body
+  2026-10-04T07:00:54.665Z merge-park — {"attempt":1,"class":"normal","reasons":["62 changed lines (trivial is at most 40)","the suite did not pass over this c…
+  2026-10-04T07:01:05.615Z merge-snapshot — teploy-sbx-snap:01m42vectrv9g9bcsszq8qk8dn
+Messages:
+  You: README says admin actions require the admin token, but DELETE /api/notes/:id accepts any request. Fix the endpoint so non-admin requests are rejected, per the documented contract.
+  Agent: Baseline established: 3 pass, 1 known-fail (duplicate-title, out of scope). Now the fix plus a test.
+  Agent: The create must use a separate fence. First, the server fix:
+  Agent: The create block may have lost some quotes. Let me verify the file content.
+  Agent: Quotes were stripped by the create. Fixing those lines.
+  Agent: Two lines still lost quotes (38, 47). Fixing.
+  Agent: New test passes; the only failure is the pre-existing known-failing duplicate-title test (documented in README, out of scope). Final sanity: diff plus a run with a custom `ADMIN_TOKEN` to prove the env override is honored.
+  Agent: Verified end-to-end. The change is complete.
+
+```finish
+Fixed the admin-auth defect on DELETE /api/notes/:id and verified it.
+
+What changed (working tree, uncommitted):
+1. server.mjs — the DELETE handler now checks `X-Admin-Token` against ADMIN_TOKEN (which honors the `ADMIN_TOKEN` env var, falling back to `fixture-admin-token`) before touching the database. Missing or wrong token returns 401 `{"error":"admin token required"}`; a valid token keeps the original behavior (204 on delete, 404 for unknown id). The stale "DEFECT (open)" comment was replaced.
+2. tests/admin-delete.test.mjs (new) — covers no token → 401, wrong token → 401 (and that the note survives both), correct token → 204 with the note gone, and authorized delete of a missing id → 404.
+
+Verification:
+- `node --test tests/*.test.mjs`: 4 pass, 1 fail. The single failure is `tests/duplicate-title.test.mjs`, the pre-existing known-failing test the README documents as tracking a separate open defect — it failed identically before my change and is out of scope for this request. No previously passing test broke.
+- Separate run with `ADMIN_TOKEN=sekret`: the default fixture token now returns 401 and the custom token returns 204, proving the env override works.
+
+Note: `npm test` itself cannot run in this sandbox (`node --test tests/` treats the bare directory as a module and errors); I ran the same test files via glob expansion instead. One thing I could not verify is behavior under real production configuration beyond the env-var override tested above.
+```
+  Agent: All checks pass in one command: the auth guard is present in `server.mjs` exactly as claimed, the new test file exists and parses, and the test run shows my test passing with only the pre-existing, documented duplicate-title failure remaining.
+
+```finish
+Re-verified the change end-to-end with a single command.
+
+Proof (from the run just now):
+1. server.mjs — the DELETE /api/notes/:id handler begins with `if (req.headers['x-admin-token'] !== ADMIN_TOKEN) return json(401, {"error":"admin token required"})`, shown verbatim above, before any database write. ADMIN_TOKEN honors the env var with the `fixture-admin-token` fallback.
+2. tests/admin-delete.test.mjs — exists (2113 bytes) and passes `node --check` (valid syntax).
+3. Test run — `ok 1 - DELETE /api/notes/:id requires the admin token` plus the 3 originally passing tests all pass; the only failure is `not ok 2 - duplicate title is rejected, not a 500`, the pre-existing known-failing test the README documents as tracking a separate open defect. It failed identically before my change, so nothing regressed.
+
+Earlier verification also showed the env-var path works (`ADMIN_TOKEN=sekret`: default token → 401, custom token → 204) and that rejected deletes leave the note intact.
+
+Change summary: working tree contains the admin-token check on DELETE (server.mjs) and a new regression test covering 401 for missing/wrong token, 204 for a valid token, note survival after rejected deletes, and 404 for an authorized delete of an unknown id. Nothing committed or pushed, per instructions.
+```
+Outcome: {"repo":"http://100.108.123.49:49152/Tyler/ship-eval-ui-api-db"}
+Checks: Baseline tests=failed (node --test tests/health.test.mjs tests/roundtrip.test.mjs tests/duplicate-title.test.mjs); Tests=failed (node --test tests/health.test.mjs tests/roundtrip.test.mjs tests/duplicate-title.test.mjs)

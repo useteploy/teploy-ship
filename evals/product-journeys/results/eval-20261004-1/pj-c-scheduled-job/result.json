@@ -1,0 +1,123 @@
+{
+  "scenarioId": "pj-c-scheduled-job",
+  "family": "unfamiliar-service",
+  "runId": "eval-20261004-1",
+  "harnessRevision": "80c9187fe961defaf99d7334c4e38b093862234c",
+  "fixtureRevision": "sha256:c5746d3d433f20e2732f66f99147638977570f314bd07b4bdb29cc2830907963",
+  "adapter": "ship",
+  "outcome": "pass",
+  "firstAttempt": {
+    "pass": true,
+    "graderReasons": [],
+    "endedBy": "agent"
+  },
+  "eventualSuccess": {
+    "pass": true
+  },
+  "interventions": [],
+  "rescue": {
+    "needed": false,
+    "provided": false,
+    "notes": []
+  },
+  "latencyMs": 208917,
+  "cost": {
+    "status": "priced",
+    "amount": 0.070601,
+    "currency": "USD",
+    "source": "Ship run ledger (workspace API costUSD), summed over this attempt's runs"
+  },
+  "verifiedEvidence": [
+    {
+      "check": "jobs/expire_sessions.py exists",
+      "value": true
+    },
+    {
+      "check": "job run 1 exit code",
+      "value": {
+        "code": 0,
+        "err": ""
+      }
+    },
+    {
+      "check": "expired removed, 24h-live kept, bookmarks intact",
+      "value": {
+        "sessions": [
+          "sess-fresh",
+          "sess-recent"
+        ],
+        "bookmarks": 1
+      }
+    },
+    {
+      "check": "second run leaves the store byte-identical",
+      "value": {
+        "code": 0,
+        "idempotent": true
+      }
+    },
+    {
+      "check": "job reads and writes the store through service.load_store / service.save_store",
+      "value": {
+        "code": 0,
+        "calls": [
+          "load",
+          "save"
+        ]
+      }
+    },
+    {
+      "check": "missing store exits 0",
+      "value": 0
+    }
+  ],
+  "claimedEvidence": [
+    {
+      "claim": "What I did: jobs/expire_sessions.py and tests/test_jobs.py exist and are proven correct in one command chain: store accessed only through service.load_store/save_store, expiry taken from the real test-pinned TTL via service.live_sessions (not README's…; changed 2 files (classified normal); pushed a186150078; opened pull request #15; the merge was denied and the pull request closed (S02 eval harness: graded; scratch fixtures are never merged). What I verified: the suite passed on the base branch before any edit (`python3 -m unittest discover -s tests`); the suite passed over the published tree (`python3 -m unittest discover -s tests`, 1s). What I could not verify: telemetry (this run is not on tyler/fylun, which is the repo OBSERVE_SERVICE=fylun-web is built from).",
+      "verdict": "unverified"
+    }
+  ],
+  "artifacts": [
+    "preserve/transcript.txt",
+    "artifacts/grader-output.json"
+  ],
+  "preserve": {
+    "dir": "preserve/"
+  },
+  "probesApplied": [],
+  "gradedAt": "2026-10-04T07:54:20.541Z",
+  "startedAt": "2026-10-04T07:50:51.139Z",
+  "ship": {
+    "shipRuns": [
+      {
+        "role": "scenario",
+        "runId": "run-request-920a1484ade07dbe1a0ee82431fc7cf72941e57b9e3ec81c7440d9841b968c72",
+        "journey": "change",
+        "status": "completed",
+        "latencyMs": 208417,
+        "costUSD": 0.0706006,
+        "costPriced": true,
+        "pr": "http://100.108.123.49:49152/Tyler/ship-eval-unfamiliar-service/pulls/15"
+      }
+    ],
+    "fixtureRepo": {
+      "url": "http://100.108.123.49:49152/tyler/ship-eval-unfamiliar-service.git",
+      "head": "a1f466005d0cf8d23615787fb9b7757704c6a4a0",
+      "ref": "refs/heads/main",
+      "treeMatchesFixture": true,
+      "mainAfter": "a1f466005d0cf8d23615787fb9b7757704c6a4a0",
+      "mainMoved": false
+    },
+    "captured": {
+      "sha": "a1861500784f71d497ebbf6e9c68480f40e01019",
+      "source": "PR #15 head",
+      "expected": "a1861500784f71d497ebbf6e9c68480f40e01019"
+    },
+    "disposition": [
+      "run-request-920a1484ade07dbe1a0ee82431fc7cf72941e57b9e3ec81c7440d9841b968c72: merge denied after capture (Ship closes the PR)"
+    ],
+    "pollRetries": 0,
+    "journey": "change",
+    "intake": "request"
+  }
+}

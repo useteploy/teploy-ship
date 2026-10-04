@@ -1,0 +1,113 @@
+{
+  "scenarioId": "pj-s-plan",
+  "family": "small-site",
+  "runId": "eval-20261004-1",
+  "harnessRevision": "80c9187fe961defaf99d7334c4e38b093862234c",
+  "fixtureRevision": "sha256:54aa415a72c85b5e2cb91895bcd9c07bb9263893b626ff391b37abbe6c3e7e98",
+  "adapter": "ship",
+  "outcome": "pass",
+  "firstAttempt": {
+    "pass": true,
+    "graderReasons": [],
+    "endedBy": "agent"
+  },
+  "eventualSuccess": {
+    "pass": true
+  },
+  "interventions": [],
+  "rescue": {
+    "needed": false,
+    "provided": false,
+    "notes": []
+  },
+  "latencyMs": 84048,
+  "cost": {
+    "status": "priced",
+    "amount": 0.016573,
+    "currency": "USD",
+    "source": "Ship run ledger (workspace API costUSD), summed over this attempt's runs"
+  },
+  "verifiedEvidence": [
+    {
+      "check": "work tree unchanged",
+      "value": {
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "unchanged": [
+          "about.html",
+          "index.html",
+          "styles.css"
+        ]
+      }
+    },
+    {
+      "check": "plan references index.html and styles.css",
+      "value": {
+        "index.html": true,
+        "styles.css": true
+      }
+    },
+    {
+      "check": "plan contains no applied unified diff",
+      "value": true
+    },
+    {
+      "check": "plan addresses the gallery",
+      "value": true
+    },
+    {
+      "check": "no PR opened, nothing pushed",
+      "value": {
+        "prOpened": false,
+        "pushed": false
+      }
+    }
+  ],
+  "claimedEvidence": [
+    {
+      "claim": "Plan only — nothing was modified (working tree clean at `eab3c41`, branch `ship/run-request-9b03e6202f…`); no PR opened.\n\n## What the repo actually looks like (verified)\n\nThe site is three files, no build step, no JS, no images anywhere:\n\n- `/work/index.html` — nav (lines 10–13: `Home`, `About`), `<main>` with `h1` (line 15), `.tagline` (16), intro `<p>` (17), footer (19–21). The \"hero\" is just the `h1` + tagline + intro paragraph; there is no dedicated hero element or hero image.\n- `/work/about.html` — same skeleton; not touched by this plan.\n- `/work/styles.css` — 4 rules, 249 bytes: `body` (Georgia serif, `max-width: 40rem`, centered → the whole site is a ~640px single column), `nav a`, `footer` (1px `#999` top border), `.tagline` (italic).\n- No `images/` dir, no `<img>`, no `gallery`/`photo` references in any file (`grep` returned nothing).\n- History note: the recent-history context mentions merged-looking `contact.html` and \"Our story\" PRs, but this branch has only the seed commit — nav still reads `Home`/`About` and there is no `contact.html`. Those PRs are evidently unmerged relative to this branch. Low conflict risk (they touch nav/title, we'd touch `<main>` + CSS tail), but ordering is worth deciding.\n\n## Assumptions\n\n1. \"Hero\" = the `h1`/tagline/intro block; the gallery is inserted between line 17 (`</p>`) and line 18 (`</main>`), home page only.\n2. \"Photo card\" = semantic `<figure><img …><figcaption>…</figcaption></figure>` — no divs, no JS.\n3. All styling goes in the existing `styles.css`, scoped under a `.gallery` class so `about.html` (which shares the stylesheet but has no `.gallery`) is provably unaffected.\n4. Pages stay hand-authored static HTML, UTF-8, 2-space indent, matching existing conventions; the home `<title>` stays exactly `Tideline Woodworks`.\n5. Some image asset must exist at the end — I assume three real photos will be supplied by you (biggest open question, below).\n\n## Scoped steps\n\n1. **Assets.** Add three photos under a new `images/` directory, lowercase-hyphen filenames (e.g. `images/table-driftwood.jpg`), each ideally ≤ ~150 KB JPEG.\n2. **`index.html`.** One insertion after the intro paragraph: `<section class=\"gallery\">` containing an optional visible `<h2>` and three `<figure class=\"card\">` with `<img src loading=\"lazy\" decoding=\"async\" width height alt=\"…\">` + `<figcaption>`. No other lines touched — nav, footer, `<head>` unchanged.\n3. **`styles.css`.** Append ~12–15 lines scoped to `.gallery`: responsive grid (`grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr))`), gap, `figure { margin: 0 }`, small italic `figcaption` echoing `.tagline`, optional `#999` border echoing the footer. Nothing rewritten.\n4. **Verify, don't ship.** Acceptance pass below; commit/PR only after your explicit follow-up authorization.\n\n## Acceptance checks\n\n- `index.html` has exactly one `.gallery` section containing exactly three `<figure>` elements, each with one `<img>` carrying a non-empty `alt`, explicit `width`/`height`, and one `<figcaption>`.\n- Section sits after the intro `<p>` and before `</main>`; `nav`, `<footer>`, `<head>` byte-identical (`git diff` shows only the one insertion).\n- `git diff --stat`: only `index.html` + `styles.css` modified, `images/` added, `about.html` unchanged.\n- All three `src` paths resolve: serve with `python3 -m http.server` and confirm no 404s; grep confirms no absolute/external URLs.\n- Tags balanced (parse with Python's `html.parser`); file remains valid UTF-8.\n- CSS additions all start with `.gallery` (`grep '^[^.]' styles.css` diff-clean outside it), so `about.html` rendering is unchanged by construction.\n- Cards wrap to one column on narrow viewports (reasoned from `auto-fit`; a true headless-browser check isn't available in this sandbox).\n\n## Tradeoffs, plainly\n\n- **Three-across vs. responsive wrap:** fixed 3 columns look tidy on desktop but become ~180px thumbnails inside the 40rem column on a phone. Responsive `auto-fit` costs one slightly fancier line of CSS and looks good everywhere — recommended.\n- **Real photos vs. placeholders vs. empty `src`:** committing JPEGs permanently grows the repo but is the only option that passes acceptance; locally generated placeholders keep the layout reviewable until you supply real photos; leaving `src` pointing at nonexistent files would ship broken images — rejected.\n- **Visible `<h2>` vs. heading-less section:** a heading (\"From the workshop\"?) improves document outline and screen-reader navigation at the cost of one more line on the page. Recommend including it.\n- **Shared stylesheet vs. inline styles:** shared CSS matches every existing convention; the only risk is cross-page impact, which the `.gallery` scoping removes.\n- **`width`/`height` on `<img>`:** two extra attributes per card that prevent layout jump while loading — cheap win.\n\n## Open questions (blocking or preference)\n\n1. **Photo source:** will you supply the three images (and their filenames/captions/alt text), or should placeholders be generated? This is the only genuinely blocking unknown.\n2. Visible section heading — include one? If so, preferred wording.\n3. Should cards be static, or link somewhere (enlarged view / detail pages)? Plan assumes static.\n4. Always-3-across or responsive wrapping? Plan assumes responsive.\n5. Ordering vs. the unmerged `contact.html` / nav-rename PRs in the history — independent, but if you want one review order, say which lands first.\n\nFINDINGS_JSON []",
+      "verdict": "unverified"
+    }
+  ],
+  "artifacts": [
+    "preserve/transcript.txt",
+    "artifacts/grader-output.json"
+  ],
+  "preserve": {
+    "dir": "preserve/"
+  },
+  "probesApplied": [],
+  "gradedAt": "2026-10-04T07:17:07.776Z",
+  "startedAt": "2026-10-04T07:15:43.700Z",
+  "ship": {
+    "shipRuns": [
+      {
+        "role": "scenario",
+        "runId": "run-request-9b03e6202fb3b6d63a0dc1b0d5a415629524bf4dc2ee69fde563a0e7df993800",
+        "journey": "plan",
+        "status": "completed",
+        "latencyMs": 83218,
+        "costUSD": 0.016572800000000002,
+        "costPriced": true,
+        "pr": null
+      }
+    ],
+    "fixtureRepo": {
+      "url": "http://100.108.123.49:49152/tyler/ship-eval-small-site.git",
+      "head": "eab3c41e06482456b2d6e8d6f61ef90502106457",
+      "ref": "refs/heads/main",
+      "treeMatchesFixture": true,
+      "mainAfter": "eab3c41e06482456b2d6e8d6f61ef90502106457",
+      "mainMoved": false
+    },
+    "captured": {
+      "sha": null,
+      "source": "none"
+    },
+    "disposition": [],
+    "pollRetries": 0,
+    "journey": "plan",
+    "intake": "request"
+  }
+}

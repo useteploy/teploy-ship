@@ -1,0 +1,108 @@
+{
+  "scenarioId": "pj-b-deploy-recovery",
+  "family": "ui-api-db",
+  "runId": "eval-20261004-1",
+  "harnessRevision": "80c9187fe961defaf99d7334c4e38b093862234c",
+  "fixtureRevision": "sha256:d52d22eff8f12e8d2c02bc69200bc34b8d8dfbd8ef87400cefaf53f58e2b6886",
+  "adapter": "ship",
+  "outcome": "pass",
+  "firstAttempt": {
+    "pass": true,
+    "graderReasons": [],
+    "endedBy": "agent"
+  },
+  "eventualSuccess": {
+    "pass": true
+  },
+  "interventions": [],
+  "rescue": {
+    "needed": false,
+    "provided": false,
+    "notes": []
+  },
+  "latencyMs": 178491,
+  "cost": {
+    "status": "priced",
+    "amount": 0.05336,
+    "currency": "USD",
+    "source": "Ship run ledger (workspace API costUSD), summed over this attempt's runs"
+  },
+  "verifiedEvidence": [
+    {
+      "check": "deploy.sh on clean checkout of fixed head",
+      "value": {
+        "code": 0,
+        "tail": "{\"applied\":[\"001_deploy_sentinel.sql\"],\"pending\":[]}\nlistening 8901\n== deploy 3/3: health check ==\ndeploy OK\n"
+      }
+    },
+    {
+      "check": "second deploy run",
+      "value": 0
+    },
+    {
+      "check": "deploy.sh (comments stripped) still checks /health for 200",
+      "value": true
+    },
+    {
+      "check": "deploy.sh (comments stripped) still runs the smoke tests",
+      "value": true
+    },
+    {
+      "check": "deploy.sh exits non-zero when the booted server reports /health 503",
+      "value": 1
+    },
+    {
+      "check": "server /health is 503 on an unmigrated database (README contract)",
+      "value": 503
+    }
+  ],
+  "claimedEvidence": [
+    {
+      "claim": "What I did: Verified and complete; changed 1 file (classified normal); pushed ff05887cd4; opened pull request #21; the merge was denied and the pull request closed (S02 eval harness: graded; scratch fixtures are never merged). What I verified: the suite was already failing on the base branch (exit 1) before any edit. What I could not verify: the suite fails the same way it did on the base branch (exit 1), which is inherited breakage, not this change; telemetry (this run is not on tyler/fylun, which is the repo OBSERVE_SERVICE=fylun-web is built from).",
+      "verdict": "unverified"
+    }
+  ],
+  "artifacts": [
+    "preserve/transcript.txt",
+    "artifacts/grader-output.json"
+  ],
+  "preserve": {
+    "dir": "preserve/"
+  },
+  "probesApplied": [],
+  "gradedAt": "2026-10-04T07:44:59.155Z",
+  "startedAt": "2026-10-04T07:41:47.505Z",
+  "ship": {
+    "shipRuns": [
+      {
+        "role": "scenario",
+        "runId": "run-request-9ed81592aa112162a49440dddf9253152b451e31c40b1af9c5059139cc2e67a6",
+        "journey": "change",
+        "status": "completed",
+        "latencyMs": 176567,
+        "costUSD": 0.05336,
+        "costPriced": true,
+        "pr": "http://100.108.123.49:49152/Tyler/ship-eval-ui-api-db/pulls/21"
+      }
+    ],
+    "fixtureRepo": {
+      "url": "http://100.108.123.49:49152/tyler/ship-eval-ui-api-db.git",
+      "head": "ea8408b7e178ed3f81f20519165fa86f6e9bdc13",
+      "ref": "refs/heads/main",
+      "treeMatchesFixture": true,
+      "mainAfter": "ea8408b7e178ed3f81f20519165fa86f6e9bdc13",
+      "mainMoved": false
+    },
+    "captured": {
+      "sha": "ff05887cd45691e218ea8c37ebda84f9ff1dbf57",
+      "source": "PR #21 head",
+      "expected": "ff05887cd45691e218ea8c37ebda84f9ff1dbf57"
+    },
+    "disposition": [
+      "run-request-9ed81592aa112162a49440dddf9253152b451e31c40b1af9c5059139cc2e67a6: merge denied after capture (Ship closes the PR)"
+    ],
+    "pollRetries": 0,
+    "journey": "change",
+    "intake": "request"
+  }
+}

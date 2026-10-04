@@ -1,0 +1,33 @@
+{
+  "scenarioId": "pj-s-feature",
+  "grader": "graders/pj-s-feature.mjs",
+  "pass": true,
+  "reasons": [],
+  "evidence": [
+    {
+      "kind": "structural",
+      "check": "contact.html exists",
+      "value": true
+    },
+    {
+      "kind": "structural",
+      "check": "contact.html links stylesheet, has address and hours",
+      "value": true
+    },
+    {
+      "kind": "structural",
+      "check": "index.html nav links contact.html",
+      "value": true
+    },
+    {
+      "kind": "structural",
+      "check": "about.html nav links contact.html",
+      "value": true
+    },
+    {
+      "kind": "structural",
+      "check": "all internal links resolve",
+      "value": []
+    }
+  ]
+}
