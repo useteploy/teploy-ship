@@ -56,3 +56,37 @@ SDK. Raw durable storage is deliberately absent. Workspace activity is the
 recorded view, not an event-stream subscription. Contract tests do not prove a
 particular live provider/forge configuration; installation and live lifecycle
 receipts are separate acceptance evidence.
+
+## Verifying webhook events
+
+Ship's run webhook (`SHIP_NOTIFY_URL`) is signed as before:
+`X-Teploy-Signature: sha256=hex(HMAC-SHA256(secret, timestamp + "." + body))`.
+That is unchanged and is all a receiver needs. Delivery is at-least-once, so a
+receiver should also dedupe on `X-Teploy-Delivery`.
+
+If the operator sets `SHIP_EVENT_ENVELOPE=on` (default off) and a
+`SHIP_NOTIFY_SECRET`, each delivery that carries an `event_seq` also gets two
+additive headers; the body and every existing header stay byte-identical:
+
+- `X-Teploy-Event`: a JSON envelope (`eventId`, `schemaVersion`, `type`,
+  `cursor`, `occurredAt`, `data`). `eventId` equals `X-Teploy-Delivery`, `cursor`
+  is `event_seq`, and `data.payloadSha256` is the SHA-256 of the exact body.
+- `X-Teploy-Event-Signature`: `sha256=hex(HMAC-SHA256(secret, X-Teploy-Timestamp + "." + <the X-Teploy-Event value>))`.
+
+`verifyEvent` and `EventDedupe` in `examples/http-client.mjs` check all of that
+(signature, a 5 minute replay window, schema major, body binding) and report a
+retried delivery as `duplicate: true`, which you acknowledge without acting on:
+
+```js
+import { EventDedupe, verifyEvent } from './examples/http-client.mjs';
+const dedupe = new EventDedupe();
+// `raw` is the unparsed request body string; headers are lower-cased (node:http)
+const r = verifyEvent(req.headers, raw, process.env.SHIP_NOTIFY_SECRET, { dedupe });
+if (!r.ok) return reply(401, r.reason);          // never act on an unverified event
+if (r.duplicate) return reply(200, 'duplicate'); // already handled
+handle(JSON.parse(raw), r.event.cursor);
+```
+
+Verify against the raw bytes, not a re-serialised body. Keep the dedupe set
+durable if your receiver restarts. Run webhooks carry no `requestId`: a run
+notification is not the answer to one of your calls.

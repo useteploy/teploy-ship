@@ -1,6 +1,9 @@
 import type { ScanFinding } from "./findings.js";
 import type { ChangeClass } from "./change-class.js";
 import { rungsForWire, type Rung } from "./ladder.js";
+import { canonicalJson, EVENT_SCHEMA_VERSION } from "./tool-manifest.js";
+import type { EventEnvelope } from "./tool-manifest.js";
+import { createHash, createHmac } from "node:crypto";
 
 /**
  * A4 — outbound notifications: one short Slack message when a run needs
@@ -351,9 +354,55 @@ export async function signWebhookBody(
   return { "X-Teploy-Timestamp": ts, "X-Teploy-Signature": `sha256=${mac}` };
 }
 
+/**
+ * S24: the signed EventEnvelope as an ADDITIVE pair of headers, behind
+ * `SHIP_EVENT_ENVELOPE=on` (default off). The body and the existing
+ * X-Teploy-Timestamp / X-Teploy-Signature are untouched, so a receiver that
+ * has never heard of envelopes is byte-compatible whether the flag is on or off.
+ *
+ *   X-Teploy-Event:           the envelope as JSON (eventId, cursor, type, ...)
+ *   X-Teploy-Event-Signature: sha256=hex(HMAC(secret, <same timestamp> + "." + that header value))
+ *
+ * The envelope rides in headers, not the body, because the body can be 64 KiB
+ * and headers cannot; `data.payloadSha256` binds the envelope to the exact body
+ * that was sent, so a receiver verifies the envelope with verifyEvent, then
+ * compares the hash. eventId is the delivery id (stable across retries) so the
+ * receiver's dedupe matches X-Teploy-Delivery; cursor is event_seq. An event
+ * with no event_seq has no honest cursor, so it carries NO envelope. There is no
+ * requestId: a run notification is not the answer to a client call.
+ */
+export function eventEnvelopeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return (env.SHIP_EVENT_ENVELOPE ?? "").trim().toLowerCase() === "on";
+}
+
+export function envelopeHeaders(
+  event: RunNotification,
+  deliveryId: string | undefined,
+  secret: string,
+  body: string,
+  timestamp: string,
+): Record<string, string> {
+  if (secret === "" || event.eventSeq === undefined || !Number.isInteger(event.eventSeq) || event.eventSeq < 0) return {};
+  const eventId = deliveryId ?? `${event.runId}:${event.status}:${event.eventName ?? ""}:${event.eventSeq}`;
+  const envelope: EventEnvelope = {
+    eventId,
+    schemaVersion: EVENT_SCHEMA_VERSION,
+    type: `run.${event.status}`,
+    cursor: event.eventSeq,
+    occurredAt: event.eventAt ?? new Date(Number(timestamp) * 1000).toISOString(),
+    data: { runId: event.runId, status: event.status, payloadSha256: createHash("sha256").update(body).digest("hex") },
+  };
+  // Header values are ByteStrings: escape anything non-ASCII (the same JSON).
+  const value = canonicalJson(envelope).replace(/[^\x20-\x7e]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  const mac = createHmac("sha256", secret).update(`${timestamp}.${value}`).digest("hex");
+  return { "X-Teploy-Event": value, "X-Teploy-Event-Signature": `sha256=${mac}` };
+}
+
 export function webhookNotifier(options?: {
   webhookUrl?: string;
   secret?: string;
+  /** Add the signed-envelope headers (default: SHIP_EVENT_ENVELOPE=on). */
+  eventEnvelope?: boolean;
   publicUrl?: string;
   log?: (line: string) => void;
   fetchImpl?: typeof fetch;
@@ -363,6 +412,7 @@ export function webhookNotifier(options?: {
   const publicUrl = options?.publicUrl ?? process.env.SHIP_PUBLIC_URL ?? "";
   const log = options?.log ?? ((line: string) => process.stderr.write(line + "\n"));
   const fetchImpl = options?.fetchImpl ?? fetch;
+  const envelopeOn = options?.eventEnvelope ?? eventEnvelopeEnabled();
   if (webhookUrl === "") return { enabled: false, runEvent: async () => true };
   return {
     enabled: true,
@@ -371,6 +421,7 @@ export function webhookNotifier(options?: {
       const body = JSON.stringify(runWebhookPayload(event, publicUrl));
       try {
         const headers = await signWebhookBody(secret, body);
+        const envelope = envelopeOn ? envelopeHeaders(event, deliveryId, secret, body, headers["X-Teploy-Timestamp"] ?? "") : {};
         const response = await fetchImpl(webhookUrl, {
           method: "POST",
           headers: {
@@ -379,6 +430,7 @@ export function webhookNotifier(options?: {
             // recognise a repeat instead of acting on it twice.
             ...(deliveryId !== undefined ? { "X-Teploy-Delivery": deliveryId } : {}),
             ...headers,
+            ...envelope,
           },
           body,
         });
