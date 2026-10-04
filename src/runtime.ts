@@ -1,4 +1,6 @@
 import { ScopedRepoMemory } from "./scoped-repo-memory.js";
+import { KnowledgeProvenance, knowledgeProvenanceMode } from "./knowledge-provenance.js";
+import { FileKnowledgeStore, NucleusKnowledgeStore } from "./knowledge-store.js";
 import { canonicalRepositoryURL, repoSlug } from "./repository-reference.js";
 import { ScopedRepoStatsStore } from "./scoped-repo-stats.js";
 import { finishReviewReplacement } from "./revision-launch.js";
@@ -466,7 +468,7 @@ export function fileRuntime(): ShipRuntime {
     governance: new FileGovernanceStore(),
     fleet: new FileFleetStore(),
     placement: new FilePlacementStore(),
-    memory: new ScopedRepoMemory(new FileRepoMemory(),store),
+    memory: new ScopedRepoMemory(new FileRepoMemory(),store,knowledgeProvenanceMode()==='off'?undefined:new KnowledgeProvenance({mode:knowledgeProvenanceMode(),store:new FileKnowledgeStore()})),
     steer: new FileSteerStore(),
     live: new FileLiveStore(),
     users: new FileUserStore(),
@@ -589,7 +591,7 @@ export async function nucleusRuntime(
     governance: new NucleusGovernanceStore(db),
     fleet: new NucleusFleetStore(db),
     placement: new NucleusPlacementStore(db),
-    memory: new ScopedRepoMemory(new NucleusRepoMemory(db),store),
+    memory: new ScopedRepoMemory(new NucleusRepoMemory(db),store,knowledgeProvenanceMode()==='off'?undefined:new KnowledgeProvenance({mode:knowledgeProvenanceMode(),store:new NucleusKnowledgeStore(db)})),
     steer: new NucleusSteerStore(db),
     live: new NucleusLiveStore(db),
     users: new NucleusUserStore(db),

@@ -91,6 +91,12 @@ export async function condenseIfNeeded(
   messages: Message[],
   summarize: Summarizer,
   config: CondenseConfig = defaultCondenseConfig,
+  /**
+   * S21: told about each summary this call generates, so it can be recorded as
+   * a derived (never evidence) knowledge record. Observe-only: it cannot change
+   * the messages, and a throw is swallowed. Omitted => identical to before.
+   */
+  onSummary?: (info: { summary: string; condensed: number }) => Promise<void> | void,
 ): Promise<Message[]> {
   if (historyTokens(messages) <= config.maxTokens) {
     return messages;
@@ -127,6 +133,13 @@ export async function condenseIfNeeded(
     .map((m) => `${m.role.toUpperCase()}: ${typeof m.content === "string" ? m.content : JSON.stringify(m.content)}`)
     .join("\n\n");
   const summary = await summarize(transcript);
+  if (onSummary !== undefined) {
+    try {
+      await onSummary({ summary, condensed: middle.length });
+    } catch {
+      // advisory
+    }
+  }
 
   const summaryMessage: Message = {
     role: "user",

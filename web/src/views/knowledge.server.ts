@@ -34,7 +34,9 @@ export async function action({ request }: { request: Request }): Promise<Respons
     // notes written in the same millisecond — which happens when runs finish
     // together — were both deleted by one click.
     const noteId = String(form.get("noteId") ?? "");
-    if (noteId !== "") await runtime.memory.remove(noteId);
+    // The repo goes along so S21 redaction (a no-op with provenance off) can
+    // also find summaries derived from this note.
+    if (noteId !== "") await runtime.memory.remove(noteId, repo);
   }
   return redirect(knowledgeHref(repo));
 }
