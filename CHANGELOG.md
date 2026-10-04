@@ -5,6 +5,30 @@ All notable changes to Teploy Ship are recorded here.
 ## [Unreleased]
 
 ### Added
+- **S19 tail: `teploy-ship snapshot` and `teploy-ship restore-check`, live
+  doctor probes, and doctor + backup receipt in the support bundle.** The
+  practiced procedure in `scripts/ship-backup.sh` is now productized where
+  that is safe: `snapshot` produces the identical archive shape (tar of the
+  nucleus data dir + sha256 sidecar + manifest under
+  `$SHIP_BACKUP_DIR/<label>-<date>/`), refuses while any `ship-*` container
+  it can see is running — printing the exact coordinated `docker stop` it
+  expects — unless the operator attests with `--i-stopped-writers`, never
+  overwrites, and never deletes anything except its own partial output after
+  a failed production (so a failed tar cannot wedge the label+date slot;
+  retention stays the operator's). `restore-check` verifies an archive
+  WITHOUT unpacking it: sha256 sidecar in `sha256sum -c` form (the sidecar
+  must travel with its archive), full-stream gzip integrity, and the content
+  listing, failing on absolute or `..` paths; its verdict is integrity-only
+  and names the rehearsal as the restore proof — the unpack and rehearse
+  steps stay in the script, deliberately. `doctor` stops reporting blind
+  unknowns for the store and clock when `NUCLEUS_URL` is set: read-only
+  liveness (`SELECT 1`) and skew against the store's own clock
+  (`SELECT now()`), each degrading to unknown rather than guessing, and
+  store consistency deliberately not probed at all (read-only, writers may
+  run — that proof is a rehearsal). The support bundle (`scriptVersion` 2)
+  now carries `doctor.json` and the latest backup manifest — the receipt,
+  never the archive — both degrading to note files.
+
 - **The S03 requirements store has its migration, rehearsed on the real
   store's backup (008).** `ship_task_requirements` — the record of which
   statements were ACCEPTED as a task's requirements and which were later

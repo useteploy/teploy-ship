@@ -17,8 +17,10 @@
  *    to pass tells a fresh operator they are ready when nobody looked.
  * 2. **Shape is not connectivity.** The store-url check parses NUCLEUS_URL and
  *    never opens a socket; the separate store-connectivity check is "unknown"
- *    unless a connect probe was injected and answered. Passing the first must
- *    not read as passing the second.
+ *    unless a connect probe was injected and answered. The CLI injects the
+ *    read-only `nucleusProbes` when NUCLEUS_URL is set; with no configured
+ *    store there is nothing to ask and connectivity honestly stays unknown.
+ *    Passing the first must not read as passing the second.
  * 3. **Values never leave.** Env checks report presence only, never the value
  *    or its length, and the whole report passes the support RedactionGate
  *    before it is emitted (`renderDoctor`), so even a detail string that
@@ -34,6 +36,7 @@ import { mkdir, rm, statfs, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join } from "node:path";
 
+import { NucleusPgwire } from "./nucleus-pgwire.js";
 import { RedactionGate } from "./support.js";
 
 export type CheckStatus = "pass" | "fail" | "unknown";
@@ -257,5 +260,68 @@ export function defaultProbes(base: Pick<DoctorProbes, "env" | "stateDir" | "web
         srv.once("error", (e: NodeJS.ErrnoException) => resolve(e.code === "EADDRINUSE" ? "in-use" : undefined));
         srv.listen(port, "127.0.0.1", () => srv.close(() => resolve("free")));
       }),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// live store probes — read-only, or honestly unknown
+// ---------------------------------------------------------------------------
+
+/** The read-only query surface the live probes need. */
+export interface StoreQueryClient {
+  query(sql: string): Promise<Record<string, unknown>[]>;
+  close(): Promise<void>;
+}
+
+export interface LiveStoreProbes {
+  storeReachable: NonNullable<DoctorProbes["storeReachable"]>;
+  referenceMs: () => Promise<number | undefined>;
+}
+
+/**
+ * Real read-only probes against the store NUCLEUS_URL names — the one this
+ * machine will actually run on, so asking it is not new network surface.
+ *
+ * `storeReachable` is liveness only (`SELECT 1`, the rehearse proof's own
+ * question). `referenceMs` asks the store its clock (`SELECT now()`); the
+ * store's clock is the independent reference the skew check needs, and when
+ * the engine does not answer a time query the clock check stays UNKNOWN and
+ * says why — never a guessed reference. What is deliberately NOT probed:
+ * anything write-shaped, and store CONSISTENCY, which cannot be established
+ * read-only while writers run (that proof is a snapshot rehearsal, not a
+ * doctor check).
+ */
+export function nucleusProbes(url: string, deps: { connect?: () => StoreQueryClient } = {}): LiveStoreProbes {
+  const connect = deps.connect ?? (() => new NucleusPgwire(url, "doctor"));
+  return {
+    storeReachable: async () => {
+      const client = connect();
+      try {
+        await client.query("SELECT 1");
+        return true;
+      } catch {
+        return false;
+      } finally {
+        await client.close().catch(() => {});
+      }
+    },
+    referenceMs: async () => {
+      const client = connect();
+      try {
+        const rows = await client.query("SELECT now() AS t");
+        const value = Object.values(rows[0] ?? {})[0];
+        if (value instanceof Date) return value.getTime();
+        if (typeof value === "number" && Number.isFinite(value)) return value;
+        if (typeof value === "string") {
+          const t = Date.parse(value);
+          if (Number.isFinite(t)) return t;
+        }
+        return undefined;
+      } catch {
+        return undefined;
+      } finally {
+        await client.close().catch(() => {});
+      }
+    },
   };
 }

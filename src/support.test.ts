@@ -290,7 +290,7 @@ test("a bundle from a fake store carries manifest+versions+runs-summary, bounded
     const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
     assert.equal(manifest.hostname, "box.example.internal");
     assert.equal(manifest.shipVersion, "0.2.1-test");
-    assert.equal(manifest.scriptVersion, 1);
+    assert.equal(manifest.scriptVersion, 2);
     assert.equal(manifest.logLines, 10);
     assert.ok(typeof manifest.buildFingerprint === "string" && manifest.buildFingerprint.length > 0);
 
@@ -378,6 +378,57 @@ test("the config summary and versions never carry the Nucleus URL's credentials"
       const text = readFileSync(path, "utf8");
       assert.ok(!text.includes("supersecret") && !text.includes(GHP_TOKEN), `${path} leaked`);
     }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the bundle carries the doctor report and the latest backup receipt — never the archive", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ship-support-test-"));
+  try {
+    await assembleSupportBundle(
+      bundleDeps({
+        outDir: dir,
+        store: fakeStore([], {}),
+        doctorJson: async () => `{"verdict": "incomplete", "note": "clock unknown, token ${GHP_TOKEN} in a detail"}`,
+        backupReceipt: async () => ({
+          backupDir: "/deployments/ship/_backups",
+          name: "pre-upgrade-2026-10-04",
+          text: `ship-backup manifest (script version 1.0.0)\nsha256: deadbeef\n`,
+        }),
+      }),
+    );
+    const doctor = JSON.parse(readFileSync(join(dir, "doctor.json"), "utf8"));
+    assert.equal(doctor.verdict, "incomplete");
+    assert.ok(!JSON.stringify(doctor).includes(GHP_TOKEN), "doctor output is redacted inside the bundle");
+    assert.ok(readFileSync(join(dir, "doctor.json"), "utf8").includes("[REDACTED"), "a marker is present");
+
+    const receipt = readFileSync(join(dir, "backup-receipt.txt"), "utf8");
+    assert.match(receipt, /latest backup receipt: pre-upgrade-2026-10-04/);
+    assert.match(receipt, /never part of a support bundle/);
+    assert.match(receipt, /sha256: deadbeef/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("doctor and receipt degrade to note files — the bundle still ships without them", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ship-support-test-"));
+  try {
+    await assembleSupportBundle(
+      bundleDeps({
+        outDir: dir,
+        store: fakeStore([], {}),
+        doctorJson: async () => {
+          throw new Error("probe blew up");
+        },
+        backupReceipt: async () => undefined,
+      }),
+    );
+    const doctor = readFileSync(join(dir, "doctor-unavailable.txt"), "utf8");
+    assert.match(doctor, /doctor did not complete/);
+    const receipt = readFileSync(join(dir, "backup-receipt.txt"), "utf8");
+    assert.match(receipt, /no backup manifest found/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

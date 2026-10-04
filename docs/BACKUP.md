@@ -62,6 +62,38 @@ Environment: `SHIP_ROOT` (default `/deployments/ship`), `SHIP_BACKUP_DIR`
 (default `$SHIP_ROOT/_backups`), and for `rehearse` only: `SHIP_BIN`
 (default `teploy-ship`), `SHIP_NUCLEUS_IMAGE`, `SHIP_REHEARSE_TIMEOUT_S`.
 
+## The CLI commands: `snapshot` and `restore-check`
+
+The producer and the verifier are also first-class CLI commands, with the
+same invariants and the same archive shape — a backup taken with either tool
+verifies with both:
+
+```sh
+teploy-ship snapshot [--label NAME] [--ship-root DIR] [--backup-dir DIR]
+                     [--dry-run] [--i-stopped-writers] [--json]
+teploy-ship restore-check <archive> [--json]
+```
+
+- `snapshot` writes the identical `<label>-<date>/nucleus-data-full.tgz` +
+  `.sha256` sidecar + `manifest.txt` under `SHIP_BACKUP_DIR` (flags
+  `--ship-root`/`--backup-dir`, env `SHIP_ROOT`/`SHIP_BACKUP_DIR`, same
+  defaults as the script). It refuses while `ship-*` containers run unless
+  you attest the coordinated stop with `--i-stopped-writers`, never
+  overwrites an existing backup dir, and never deletes anything — except its
+  own partial output when a production fails, so a failed tar does not
+  occupy the label+date slot forever. Retention stays yours.
+- `restore-check` verifies an archive WITHOUT unpacking it: sha256 sidecar
+  (in `sha256sum -c` form — the sidecar must travel with its archive),
+  full-stream gzip integrity, and the tar content listing, failing on
+  absolute or `..` paths that would escape an unpack target. It is integrity
+  only: it says plainly that no engine has booted on the archive and points
+  at `scripts/ship-backup.sh rehearse` as the restore proof.
+
+The unpack (`restore --into` an empty isolated dir) and the rehearsal stay
+in the script, deliberately: they are the steps that touch a live recovery,
+and a shell script an operator reads line by line is the right shape for
+them.
+
 ## What the archive contains
 
 The complete engine data directory (`accessories/nucleus/nucleus-data`):
