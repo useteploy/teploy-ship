@@ -1,6 +1,7 @@
 import type { AgentExecutor } from "@neutron-build/agents";
 
 import { frameUntrusted } from "./guard.js";
+import { forgeFetch } from "./forge-egress.js";
 import { publishLimitsFromEnv, screenPublication } from "./publish-policy.js";
 import type { PublishLimits, PublishScreen } from "./publish-policy.js";
 
@@ -404,7 +405,7 @@ export async function findOpenPullRequest(options: {
   fetchImpl?: typeof fetch;
 }): Promise<PullRequest | null> {
   const { ref, token, head, owner } = options;
-  const doFetch = options.fetchImpl ?? fetch;
+  const doFetch = options.fetchImpl ?? forgeFetch;
   const endpoint =
     ref.kind === "github"
       ? `https://api.github.com/repos/${ref.owner}/${ref.repo}/pulls?state=open&head=${encodeURIComponent(`${owner}:${head}`)}`
@@ -544,7 +545,7 @@ export async function openPullRequest(options: {
   fetchImpl?: typeof fetch;
 }): Promise<PullRequest> {
   const { ref, token } = options;
-  const doFetch = options.fetchImpl ?? fetch;
+  const doFetch = options.fetchImpl ?? forgeFetch;
   const draft = options.draft === true;
   const body = withTrailers(options.body, options.trailers);
   const title = draft && ref.kind !== "github" ? `WIP: ${options.title}` : options.title;
@@ -591,7 +592,7 @@ export async function requestReviewers(options: {
 }): Promise<void> {
   const { ref, token } = options;
   if (options.users.length === 0 && options.teams.length === 0) return;
-  const doFetch = options.fetchImpl ?? fetch;
+  const doFetch = options.fetchImpl ?? forgeFetch;
   const endpoint =
     ref.kind === "github"
       ? `https://api.github.com/repos/${ref.owner}/${ref.repo}/pulls/${options.pr}/requested_reviewers`
@@ -634,7 +635,7 @@ export async function updatePullRequestBody(options: {
   fetchImpl?: typeof fetch;
 }): Promise<boolean> {
   const { ref, token } = options;
-  const doFetch = options.fetchImpl ?? fetch;
+  const doFetch = options.fetchImpl ?? forgeFetch;
   const endpoint =
     ref.kind === "github"
       ? `https://api.github.com/repos/${ref.owner}/${ref.repo}/pulls/${options.pr}`
@@ -671,7 +672,7 @@ export async function readPullRequestBody(options: {
   fetchImpl?: typeof fetch;
 }): Promise<string | null> {
   const { ref, token } = options;
-  const doFetch = options.fetchImpl ?? fetch;
+  const doFetch = options.fetchImpl ?? forgeFetch;
   const endpoint =
     ref.kind === "github"
       ? `https://api.github.com/repos/${ref.owner}/${ref.repo}/pulls/${options.pr}`
@@ -724,7 +725,7 @@ export async function resolvePr(
   ref: RepoRef,
   token: string,
   pr: number,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = forgeFetch,
   requireOpen = false,
 ): Promise<RepoCheckout> {
   const endpoint =
@@ -767,7 +768,7 @@ export async function setupRepoForPr(
   options: { ref: RepoRef; token: string; pr: number; headToken?: string; requireOpen?: boolean },
 ): Promise<RepoCheckout> {
   const { ref, token, pr } = options;
-  const checkout = await resolvePr(ref, token, pr, fetch, options.requireOpen);
+  const checkout = await resolvePr(ref, token, pr, forgeFetch, options.requireOpen);
   await cloneCredentialFree(executor, ref, token);
   await git(executor, 'git config user.name "Teploy Ship" && git config user.email "ship@teploy.dev"');
   await git(executor, excludeCommand());
@@ -799,7 +800,7 @@ export async function commentOnPr(
   token: string,
   pr: number,
   body: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = forgeFetch,
 ): Promise<void> {
   const endpoint =
     ref.kind === "github"
@@ -831,7 +832,7 @@ export async function uploadPrAsset(options: {
   fetchImpl?: typeof fetch;
 }): Promise<string> {
   const { ref, token, pr, name, bytes } = options;
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const fetchImpl = options.fetchImpl ?? forgeFetch;
   if (ref.kind === "github") throw new Error("GitHub has no API for attaching a file to a pull request");
   const form = new FormData();
   form.append("attachment", new Blob([Buffer.from(bytes)], { type: name.endsWith(".webm") ? "video/webm" : "image/png" }), name);
@@ -910,7 +911,7 @@ export async function listPrReviewComments(
   pr: number,
   options: { reviewId?: number; max?: number; fetchImpl?: typeof fetch } = {},
 ): Promise<PrReviewComment[]> {
-  const doFetch = options.fetchImpl ?? fetch;
+  const doFetch = options.fetchImpl ?? forgeFetch;
   const max = options.max ?? 50;
   const headers = {
     authorization: ref.kind === "github" ? `Bearer ${token}` : `token ${token}`,
@@ -1055,7 +1056,7 @@ export async function readPullRequestState(
   ref: RepoRef,
   token: string,
   pr: number,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = forgeFetch,
 ): Promise<PullRequestRead> {
   try {
     const response = await fetchImpl(pullEndpoint(ref, pr), { headers: forgeHeaders(ref, token) });
@@ -1095,7 +1096,7 @@ export async function mergePullRequestReconciled(
   token: string,
   pr: number,
   options: { method?: "squash" | "merge" | "rebase"; title?: string; message?: string } = {},
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = forgeFetch,
 ): Promise<MergeOutcome> {
   const outcome = await mergePullRequest(ref, token, pr, options, fetchImpl);
   if (outcome.kind === "merged") return outcome;
@@ -1138,7 +1139,7 @@ export async function mergePullRequest(
   token: string,
   pr: number,
   options: { method?: "squash" | "merge" | "rebase"; title?: string; message?: string } = {},
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = forgeFetch,
 ): Promise<MergeOutcome> {
   const method = options.method ?? "squash";
   const github = ref.kind === "github";
@@ -1269,7 +1270,7 @@ export async function markPullRequestReady(
   ref: RepoRef,
   token: string,
   pr: number,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = forgeFetch,
 ): Promise<{ ok: boolean; reason?: string }> {
   try {
     const current = await fetchImpl(pullEndpoint(ref, pr), { headers: forgeHeaders(ref, token) });
@@ -1312,7 +1313,7 @@ export async function closePullRequest(
   ref: RepoRef,
   token: string,
   pr: number,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = forgeFetch,
 ): Promise<{ ok: boolean; reason?: string }> {
   try {
     const response = await fetchImpl(pullEndpoint(ref, pr), {
