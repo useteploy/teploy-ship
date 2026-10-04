@@ -2,9 +2,10 @@
 // Builds a real v1 database with data, runs the worked tree's migrate.mjs,
 // and checks preservation + idempotence + API exposure.
 import * as lib from './lib.mjs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-export async function grade({ workDir }) {
+export async function grade({ workDir, fixture }) {
   const reasons = [];
   const evidence = [];
 
@@ -42,6 +43,35 @@ export async function grade({ workDir }) {
     if (second.code !== 0 || appliedTwice.length > 0) reasons.push('migration is not idempotent (second run errored or double-applied)');
     check.close();
   }
+
+  // Forward-only: a database that already recorded the migrations shipped
+  // with the fixture (a staging or production DB upgraded last window) must
+  // still gain the column. Editing a shipped migration in place leaves the
+  // fresh-v1 probe above green and strands exactly these databases.
+  const shipped = readdirSync(join(fixture, 'migrations')).filter(n => n.endsWith('.sql')).sort();
+  const upgradedPath = join(dir, 'already-migrated.sqlite');
+  {
+    const prior = new DatabaseSync(upgradedPath);
+    prior.exec("CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT NOT NULL UNIQUE, body TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
+    prior.prepare("INSERT INTO notes (title, body) VALUES ('keep me too', 'already migrated')").run();
+    // Replay the fixture's own shipped migration SQL, as that database had.
+    for (const name of shipped) prior.exec(readFileSync(join(fixture, 'migrations', name), 'utf8'));
+    prior.exec("CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (datetime('now')))");
+    for (const name of shipped) prior.prepare('INSERT INTO schema_migrations (name) VALUES (?)').run(name);
+    prior.close();
+  }
+  const upgraded = await lib.run('node', ['migrate.mjs'], { cwd: workDir, env: { NOTES_DB: upgradedPath }, timeoutMs: 60000 });
+  let upgradedOk = false;
+  if (upgraded.code === 0) {
+    const check = new DatabaseSync(upgradedPath);
+    try {
+      const rows = check.prepare('SELECT title, pinned FROM notes').all();
+      upgradedOk = rows.length === 1 && rows[0].title === 'keep me too' && rows[0].pinned === 0;
+    } catch { upgradedOk = false; }
+    check.close();
+  }
+  evidence.push({ kind: 'probe', check: 'database that already applied the shipped migrations still gains pinned (forward-only)', value: { code: upgraded.code, upgradedOk } });
+  if (!upgradedOk) reasons.push('a database that already applied the shipped migrations does not gain pinned — the change must be a NEW migration, not an edit to one that already shipped');
 
   const server = await lib.bootServer('node', ['server.mjs'], {
     cwd: workDir,

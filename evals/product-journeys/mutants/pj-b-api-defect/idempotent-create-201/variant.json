@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Swallows the duplicate and answers 201 with the existing note (silently makes create idempotent).",
+  "failsWith": "returned 201, expected 409"
+}

@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Correct wording change, plus a \"while I was here\" nav tweak in styles.css.",
+  "failsWith": "styles\\.css changed"
+}

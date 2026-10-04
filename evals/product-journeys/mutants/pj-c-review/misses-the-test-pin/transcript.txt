@@ -1,0 +1,1 @@
+Not safe to merge. The README claim of 30 minutes is wrong; the service has always used a longer window. Request changes.

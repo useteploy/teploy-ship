@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Env override is wired to KEEPNOTE_SESSION_TTL instead of the agreed KEEPNOTE_TTL_SECONDS.",
+  "failsWith": "KEEPNOTE_TTL_SECONDS|override"
+}

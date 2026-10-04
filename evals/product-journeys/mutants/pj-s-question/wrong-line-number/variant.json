@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Right strings, but the tagline is cited at index.html:17 (off by one).",
+  "failsWith": "does not contain"
+}

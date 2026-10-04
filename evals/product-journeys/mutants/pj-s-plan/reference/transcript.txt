@@ -1,0 +1,4 @@
+Plan (nothing implemented, no PR):
+1. In index.html, add a gallery section under the hero: three photo cards in a <section class="gallery">.
+2. In styles.css, add a grid layout for .gallery and card styling.
+3. Verify by opening the page at desktop and phone widths.

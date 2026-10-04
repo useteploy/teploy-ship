@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Pin lifted to >=4,<5 and the code now only calls markdown.render: breaks every 3.x install.",
+  "failsWith": "3\\.x-only markdown module"
+}

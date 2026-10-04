@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Loosens the pin to a bare \"markdown\" (any version) and changes nothing else.",
+  "failsWith": "4\\.x-only markdown module"
+}

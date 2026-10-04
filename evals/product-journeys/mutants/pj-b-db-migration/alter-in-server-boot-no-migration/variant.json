@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Adds the column from server boot (connect()) and ships no migration: node migrate.mjs on an existing database never adds it.",
+  "failsWith": "column missing"
+}

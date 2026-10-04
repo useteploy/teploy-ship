@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Blocks the merge on the failing test but treats the README as correct (\"update the pinned test to 30 minutes\").",
+  "failsWith": "README claim is false"
+}

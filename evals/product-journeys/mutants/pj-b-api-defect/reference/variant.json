@@ -1,0 +1,4 @@
+{
+  "kind": "correct",
+  "description": "Only a UNIQUE-constraint failure becomes 409 {error: \"duplicate title: ...\"}; other failures keep their 500."
+}

@@ -1,0 +1,4 @@
+{
+  "kind": "correct",
+  "description": "DELETE rejects a missing or wrong X-Admin-Token with 401; correct token still 204; reads open."
+}

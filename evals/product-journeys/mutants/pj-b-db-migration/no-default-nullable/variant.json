@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Adds a bare \"pinned INTEGER\" column: existing rows come out NULL, not false.",
+  "failsWith": "not defaulting to false"
+}

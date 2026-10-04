@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Keeps the 24h pin and fixes the README but never adopts main's KEEPNOTE_TTL_SECONDS override (drops main's intent).",
+  "failsWith": "KEEPNOTE_TTL_SECONDS"
+}

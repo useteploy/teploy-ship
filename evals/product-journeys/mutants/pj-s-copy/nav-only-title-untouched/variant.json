@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Renames the nav on both pages but leaves about.html <title> as \"About — ...\".",
+  "failsWith": "about\\.html title is"
+}

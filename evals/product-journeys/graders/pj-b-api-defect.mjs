@@ -34,6 +34,16 @@ export async function grade({ workDir, fixture }) {
     } else if (!/duplicate|conflict|exists/i.test(String(second.body?.error ?? ''))) {
       reasons.push(`409 but error body does not name the duplicate: ${JSON.stringify(second.body)}`);
     }
+
+    // A catch-all `catch { return 409 }` greens the duplicate probe above but
+    // erases status semantics (the manifest forbids it): a body that is not
+    // JSON is not a title conflict. Only the duplicate may be a 409.
+    const malformed = await fetch(base + '/api/notes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{not json' });
+    await malformed.text();
+    evidence.push({ kind: 'probe', check: 'malformed JSON is not reported as a duplicate-title conflict', value: malformed.status });
+    if (malformed.status === 409) {
+      reasons.push('a malformed JSON body returned 409 — the duplicate-title handler swallows every failure as a conflict (malformed input is not a duplicate)');
+    }
   } finally {
     await server.stop();
   }

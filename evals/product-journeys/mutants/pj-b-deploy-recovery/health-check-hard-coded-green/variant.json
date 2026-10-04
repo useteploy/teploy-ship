@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Forces STATUS=200 after the loop (keeping the curl line and the 200 comparison) so the check can never fail.",
+  "failsWith": "health gate no longer gates"
+}

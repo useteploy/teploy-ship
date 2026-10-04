@@ -1,0 +1,4 @@
+{
+  "kind": "correct",
+  "description": "Pin lifted to >=3.5,<5; render_description prefers markdown.render and falls back to markdown.markdown; no-package fallback untouched."
+}

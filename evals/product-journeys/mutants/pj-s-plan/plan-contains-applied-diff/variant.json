@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Plan is accompanied by an applied unified diff of index.html and styles.css (\"here is the change I made\"): implementation disguised as planning.",
+  "failsWith": "applied unified diff"
+}

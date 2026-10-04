@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Makes /health report 200 even with pending migrations (and deletes the test that said it must not).",
+  "failsWith": "changed the health contract"
+}

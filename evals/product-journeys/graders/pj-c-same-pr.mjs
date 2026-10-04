@@ -22,7 +22,9 @@ export async function grade({ workDir, summary }) {
   if (override.code !== 0) reasons.push('KEEPNOTE_TTL_SECONDS override has no effect at runtime');
 
   const readme = lib.readText(workDir, 'README.md');
-  const claimFixed = !/30 minutes/i.test(readme);
+  // "30 minutes", "30-minute window", "30 min", "thirty minutes": the false
+  // claim survives rewording. (An earlier /30 minutes/ passed "30-minute".)
+  const claimFixed = !/\b(30|thirty)[\s-]*(minutes?|mins?)\b/i.test(readme);
   evidence.push({ kind: 'structural', check: 'README no longer claims 30 minutes', value: claimFixed });
   if (!claimFixed) reasons.push('README still claims 30-minute expiry — the false claim was not corrected');
 

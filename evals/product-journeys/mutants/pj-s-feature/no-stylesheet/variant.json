@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Contact page is complete and linked, but uses an inline <style> instead of linking styles.css.",
+  "failsWith": "must link styles\\.css"
+}

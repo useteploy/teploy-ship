@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Blocks the merge and calls the README wrong but never identifies the pinned test.",
+  "failsWith": "tests/test_service\\.py pinning 24h"
+}

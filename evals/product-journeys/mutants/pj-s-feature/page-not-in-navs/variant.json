@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Creates a good contact.html but only wires it into index.html nav; about.html nav forgotten.",
+  "failsWith": "about\\.html nav does not link"
+}

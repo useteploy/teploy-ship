@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Fixes the boot with migrate.mjs but drops the smoke-test step to save time.",
+  "failsWith": "no longer runs smoke tests"
+}

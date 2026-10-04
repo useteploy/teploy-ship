@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Every failure in the create handler becomes 409 \"duplicate title\" (malformed JSON included): erases status semantics.",
+  "failsWith": "malformed"
+}

@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Lifts the pin to allow 4.x but leaves the call site on markdown.markdown, which 4.x removed.",
+  "failsWith": "4\\.x-only markdown module"
+}

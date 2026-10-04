@@ -27,6 +27,12 @@ export async function grade({ workDir, fixture, scenario, transcriptPath, summar
     evidence.push({ kind: 'transcript', check: 'plan references index.html and styles.css', value: files });
     const missing = Object.keys(files).filter(f => !files[f]);
     if (missing.length > 0) reasons.push(`the plan does not reference ${missing.join(' or ')} — it must name the real files it would touch`);
+    // "the plan contains no applied diff": a unified-diff body is the change
+    // itself, not a plan for it. (Quoting a snippet in a fence is fine; diff
+    // headers and hunks are what an applied change looks like.)
+    const appliedDiff = /^(diff --git |--- a\/|\+\+\+ b\/|@@ -\d+(,\d+)? \+\d+)/m.test(text);
+    evidence.push({ kind: 'transcript', check: 'plan contains no applied unified diff', value: !appliedDiff });
+    if (appliedDiff) reasons.push('the transcript contains an applied unified diff — the plan must not carry the implementation itself');
     const gallery = /gallery/i.test(text);
     evidence.push({ kind: 'transcript', check: 'plan addresses the gallery', value: gallery });
     if (!gallery) reasons.push('the plan never mentions the gallery it was asked to plan');
