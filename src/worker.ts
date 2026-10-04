@@ -1,6 +1,6 @@
 import { recoverLaunches } from "./launch-journal.js";
 import { intakeJourney } from "./journeys.js";
-import { sweepWorkflowSchedules, sweepScheduleDigests } from "./workflow-schedules.js";
+import { sweepSchedulesForWorker, sweepScheduleDigests } from "./workflow-schedules.js";
 import { serveWorkspaceRequests } from "./workspace-requests.js";
 import { loadTakeover } from "./takeover.js";
 import { sweepIncidents, sweepIncidentRecovery, type IncidentRecoveryReader } from "./incidents.js";
@@ -1709,7 +1709,7 @@ export function startWorker(options: WorkerOptions): {
   const intakeTimer = setInterval(() => {
     if (sweepChain !== null) return;
     sweepChain = sweep()
-      .then(() => sweepWorkflowSchedules(options.runtime).catch(e => log(`[worker] workflow schedules: ${e instanceof Error ? e.message : String(e)}`)))
+      .then(() => sweepSchedulesForWorker(options.runtime, log))
       .then(() => sweepScheduleDigests(options.runtime, { log }).catch(e => log(`[worker] schedule digests: ${e instanceof Error ? e.message : String(e)}`)))
       .then(() => akirooSweep())
       .then(() => bulletinSweep())
