@@ -268,7 +268,7 @@ export function BulletinAdmin({ data }: { data: BulletinAdminData }) {
                 <th>Policy</th>
                 <th>Threshold</th>
                 <th>Notes</th>
-                <th />
+                <th><span class="sr-only">Actions</span></th>
               </tr>
             </thead>
             <tbody>

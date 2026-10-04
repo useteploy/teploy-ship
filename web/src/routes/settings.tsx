@@ -475,7 +475,7 @@ export default function Settings({ data, actionData }: { data: SettingsData; act
 
       <div class="table-wrap"><table class="runs">
         <thead>
-          <tr><th>Username</th><th>Role</th><th>Reset password</th><th /></tr>
+          <tr><th>Username</th><th>Role</th><th>Reset password</th><th><span class="sr-only">Actions</span></th></tr>
         </thead>
         <tbody>
           {data.users.length === 0 && (

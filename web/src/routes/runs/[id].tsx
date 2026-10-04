@@ -564,7 +564,7 @@ export default function RunDetail({ data: initialData }: { data: RunData }) {
             {data.ancestors.map(h => <details class="disclosure"><summary>Earlier: {h.task.slice(0,100)} · {h.runId}</summary><a href={`/runs/${h.runId}`}>Open run</a><Conversation messages={h.messages}/></details>)}
             <div class="conversation-scroll" role="region" tabIndex={0} aria-label="Conversation history"><Conversation messages={data.messages} /></div><div id="reply"><RunComposer data={data}/></div>
           </div>{data.view === 'review' && <aside class="review-evidence"><ForgePanel data={data}/><Changes snapshots={data.snapshots} pr={data.evidence.pr} sha={data.evidence.sha}/><Verification data={data.evidence} preview={data.previewPanel} testIntegrity={data.testIntegrity}/></aside>}</div>}
-          {data.view === 'files' && <section><h2 class="section">Repository files</h2><details class="disclosure"><summary>Workspace recovery</summary><p class="meta">{data.recovery?.snapshotAt ? `Last recorded snapshot: ${data.recovery.snapshotAt}. Retention has not been checked.` : "No workspace snapshot is recorded."}</p><p class="meta">{data.recovery?.restoredAt ? `Last restored: ${data.recovery.restoredAt}. ${data.recovery.checked ? "Repository validation passed." : "Repository validation was not recorded for this run."}` : "No workspace restore is recorded."}</p>{data.recovery?.warm && <p class="meta">This run uses a warm volume. Container snapshots do not establish recovery of that volume.</p>}</details><p class="meta">Inspect up to 200 tracked file names and the first 10,000 characters of a file at the workspace’s current HEAD. Inspect live changes to see tracked edits and untracked file names. This is a read-only observation while the agent may still be working. Availability depends on sandbox retention.</p><form method="post" class="row-actions"><button name="intent" value="changes">Inspect live changes</button><button name="intent" value="files">List files</button><input name="path" placeholder="src/example.ts" aria-label="Repository file path"/><button name="intent" value="file">Read file</button></form>{data.workspace && <p class="meta">Last inspection: {data.workspace.kind ?? "file"}{data.workspace.path ? ` · ${data.workspace.path}` : ""} · {data.workspace.at}{data.workspace.truncated ? " · partial output" : ""}</p>}{data.workspace?.error && <p class="notice bad">{data.workspace.error}</p>}{data.workspace?.output !== undefined && <pre class="workspace-file">{data.workspace.output}</pre>}<p class="meta">Requests are handled by the worker; refresh to see the result.</p><a href={`/runs/${data.runId}?view=files`}>Refresh files</a></section>}
+          {data.view === 'files' && <section><h2 class="section">Repository files</h2><details class="disclosure"><summary>Workspace recovery</summary><p class="meta">{data.recovery?.snapshotAt ? `Last recorded snapshot: ${data.recovery.snapshotAt}. Retention has not been checked.` : "No workspace snapshot is recorded."}</p><p class="meta">{data.recovery?.restoredAt ? `Last restored: ${data.recovery.restoredAt}. ${data.recovery.checked ? "Repository validation passed." : "Repository validation was not recorded for this run."}` : "No workspace restore is recorded."}</p>{data.recovery?.warm && <p class="meta">This run uses a warm volume. Container snapshots do not establish recovery of that volume.</p>}</details><p class="meta">Inspect up to 200 tracked file names and the first 10,000 characters of a file at the workspace’s current HEAD. Inspect live changes to see tracked edits and untracked file names. This is a read-only observation while the agent may still be working. Availability depends on sandbox retention.</p><form method="post" class="row-actions"><button name="intent" value="changes">Inspect live changes</button><button name="intent" value="files">List files</button><input name="path" placeholder="src/example.ts" aria-label="Repository file path"/><button name="intent" value="file">Read file</button></form>{data.workspace && <p class="meta">Last inspection: {data.workspace.kind ?? "file"}{data.workspace.path ? ` · ${data.workspace.path}` : ""} · {data.workspace.at}{data.workspace.truncated ? " · partial output" : ""}</p>}{data.workspace?.error && <p class="notice bad">{data.workspace.error}</p>}{data.workspace?.output !== undefined && <pre class="workspace-file" tabIndex={0}>{data.workspace.output}</pre>}<p class="meta">Requests are handled by the worker; refresh to see the result.</p><a href={`/runs/${data.runId}?view=files`}>Refresh files</a></section>}
 
           {data.view === 'changes' && <ForgePanel data={data}/>}
           {data.view === 'changes' && <Changes snapshots={data.snapshots} pr={data.evidence.pr} sha={data.evidence.sha} />}
@@ -597,8 +597,8 @@ export default function RunDetail({ data: initialData }: { data: RunData }) {
                           <span> {elapsed}</span>
                         </span>
                       </summary>
-                      {item.thought !== undefined && item.thought !== "" && <pre class="turn-thought">{item.thought}</pre>}
-                      {item.body !== "" && <pre>{item.body}</pre>}
+                      {item.thought !== undefined && item.thought !== "" && <pre class="turn-thought" tabIndex={0}>{item.thought}</pre>}
+                      {item.body !== "" && <pre tabIndex={0}>{item.body}</pre>}
                     </details>
                   </li>
                 );
@@ -613,7 +613,7 @@ export default function RunDetail({ data: initialData }: { data: RunData }) {
                         <span class="turn-name">{item.title}</span>
                         <span class="turn-meta">{item.body.length.toLocaleString()} chars · {elapsed}</span>
                       </summary>
-                      <pre>{item.body}</pre>
+                      <pre tabIndex={0}>{item.body}</pre>
                     </details>
                   </li>
                 );
@@ -623,7 +623,7 @@ export default function RunDetail({ data: initialData }: { data: RunData }) {
                   <div class="kind">
                     {item.title} <span style="float: right">{elapsed}</span>
                   </div>
-                  {item.body !== "" && <pre>{item.body}</pre>}
+                  {item.body !== "" && <pre tabIndex={0}>{item.body}</pre>}
                 </li>
               );
             })}
@@ -982,7 +982,7 @@ function TakeoverPanel({ data, record }: { data: RunData; record: NonNullable<Ru
         </form>
         {reply?.kind === "takeover-console" && reply.error && <p class="notice bad" role="alert">{reply.error}</p>}
         {consoleOut !== undefined && (
-          <pre aria-label="Console output" style="white-space:pre-wrap;margin:8px 0 0;max-height:340px;overflow:auto">{consoleOut}{consoleRunning ? "\n…" : ""}</pre>
+          <pre aria-label="Console output" tabIndex={0} style="white-space:pre-wrap;margin:8px 0 0;max-height:340px;overflow:auto">{consoleOut}{consoleRunning ? "\n…" : ""}</pre>
         )}
         {reply?.kind === "takeover-console" && reply.truncated && !reply.running && <p class="meta">Output truncated — only the tail is kept.</p>}
         {record.execsRun.length > 0 && (

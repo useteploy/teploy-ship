@@ -332,7 +332,7 @@ function IncidentActions({ incident, canSteer }: { incident: IncidentRecord; can
     <form method="post" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:8px">
       <input type="hidden" name="intent" value="close" />
       <input type="hidden" name="id" value={incident.id} />
-      <div class="field" style="flex:1;min-width:200px">
+      <div class="field" style="flex:1;min-width:min(200px,100%)">
         <label for={`close-${incident.id}`}>Close this incident (reason, optional)</label>
         <input id={`close-${incident.id}`} name="reason" type="text" placeholder="why it is being closed by hand" />
       </div>
@@ -362,7 +362,7 @@ export default function Incidents({ data }: { data: IncidentsData }) {
             <textarea id="alertText" name="alertText" rows={3} required maxLength={INCIDENT_ALERT_MAX} placeholder="Paste the alert: what fired, on which service, when, with what numbers"></textarea>
           </div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
-            <div class="field" style="flex:1;min-width:220px">
+            <div class="field" style="flex:1;min-width:min(220px,100%)">
               <label for="serviceHint">Observe service (optional, for attribution)</label>
               <input id="serviceHint" name="serviceHint" type="text" placeholder="e.g. fylun-web" />
             </div>
@@ -434,7 +434,7 @@ export default function Incidents({ data }: { data: IncidentsData }) {
             <form method="post" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:8px">
               <input type="hidden" name="intent" value="attribute" />
               <input type="hidden" name="id" value={incident.id} />
-              <div class="field" style="flex:1;min-width:200px">
+              <div class="field" style="flex:1;min-width:min(200px,100%)">
                 <label for={`hint-${incident.id}`}>Observe service (corrected, optional)</label>
                 <input id={`hint-${incident.id}`} name="serviceHint" type="text" placeholder={incident.serviceHint ?? "name the exact service"} />
               </div>

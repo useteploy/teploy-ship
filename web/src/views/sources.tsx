@@ -110,7 +110,7 @@ export default function Sources({ data }: { data: SourcesData }) {
       <h2 class="section">Add a source</h2>
       <div class="card">
         <form method="post" class="row-actions" style="flex-wrap:wrap;gap:12px;align-items:center">
-          <input type="text" name="source" placeholder="source name, e.g. gitlab" style="min-width:180px" />
+          <input type="text" name="source" aria-label="Source name" placeholder="source name, e.g. gitlab" style="min-width:min(180px,100%)" />
           <label class="meta">
             policy{" "}
             <select name="policy" style="margin-left:4px">
