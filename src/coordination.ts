@@ -110,6 +110,8 @@ import { canonicalRepositoryURL } from "./repository-reference.js";
 import { assertRepoAllowedForOperator, enqueueRun } from "./runtime.js";
 import { gradeDiagnosis } from "./incidents.js";
 import { costUSD } from "./pricing.js";
+import { integrationStatus } from "./integration-evidence.js";
+import type { IntegrationEvidence, IntegrationStatus } from "./integration-evidence.js";
 import type { ParsedFindings, ScanFinding } from "./findings.js";
 import type { Actor } from "./actor.js";
 import type { ShipRuntime } from "./runtime.js";
@@ -210,6 +212,12 @@ export interface CoordinationRecord {
   actor?: Actor;
   api: CoordinationChild;
   client: CoordinationChild;
+  /**
+   * S18 opt-in: the pair-level command whose executed evidence completion
+   * requires (integration-check.ts). Absent = not declared = nothing changes.
+   * Only enforced while SHIP_INTEGRATION_CHECK is on.
+   */
+  integrationCheck?: { command: string; evidence: IntegrationEvidence[] };
   createdAt: string;
   updatedAt: string;
 }
@@ -230,7 +238,7 @@ export interface LaunchOutcome {
  */
 export async function createCoordination(
   runtime: ShipRuntime,
-  options: { parentIntent: string; apiRepo: string; clientRepo: string; model: string; actor?: Actor },
+  options: { parentIntent: string; apiRepo: string; clientRepo: string; model: string; actor?: Actor; integrationCheckCommand?: string },
 ): Promise<CoordinationRecord> {
   const intent = options.parentIntent.trim();
   if (intent === "" || intent.length > 20000) throw new Error("Describe the parent intent in 20,000 characters or fewer.");
@@ -255,6 +263,9 @@ export async function createCoordination(
     ...(options.actor !== undefined ? { actor: options.actor } : {}),
     api: { repo: apiRepo, state: "pending", attempts: 0 },
     client: { repo: clientRepo, state: "pending", attempts: 0 },
+    ...(options.integrationCheckCommand !== undefined && options.integrationCheckCommand.trim() !== ""
+      ? { integrationCheck: { command: options.integrationCheckCommand.trim(), evidence: [] } }
+      : {}),
     createdAt: now,
     updatedAt: now,
   };
@@ -536,13 +547,38 @@ export async function proposeCheckFixTask(
  * check compatible — or an imperfect verdict explicitly accepted by a human.
  * Everything else is still in flight or parked on someone.
  */
-export function coordinationComplete(record: CoordinationRecord): boolean {
+type PairHeads = { producer: { repo: string; sha: string }; consumer: { repo: string; sha: string } };
+
+export function coordinationComplete(
+  record: CoordinationRecord,
+  options: { env?: NodeJS.ProcessEnv; current?: PairHeads } = {},
+): boolean {
   const landed = (child: CoordinationChild) => child.state === "merged" || child.state === "delivered";
   if (!landed(record.api) || !landed(record.client)) return false;
+  if (integrationGate(record, options)?.blocking === true) return false;
   const check = record.client.clientCheck;
   if (check === "compatible") return true;
   if ((check === "incompatible" || check === "uncertain") && record.client.checkAccepted !== undefined) return true;
   return false;
+}
+
+/**
+ * S18: the executed-integration status, or null when it does not apply (flag
+ * off or not declared) — the only two cases where completion is unchanged.
+ * `current` lets a caller that has seen newer heads than the record (a racing
+ * upstream merge) make recorded evidence read stale.
+ */
+export function integrationGate(
+  record: CoordinationRecord,
+  options: { env?: NodeJS.ProcessEnv; current?: PairHeads } = {},
+): IntegrationStatus | null {
+  if (record.integrationCheck === undefined) return null;
+  if ((options.env ?? process.env).SHIP_INTEGRATION_CHECK?.trim().toLowerCase() !== "on") return null;
+  const current = options.current ?? {
+    producer: { repo: record.api.repo, sha: record.api.anchorSha ?? "" },
+    consumer: { repo: record.client.repo, sha: record.client.mergedSha ?? record.client.anchorSha ?? "" },
+  };
+  return integrationStatus(true, record.integrationCheck.evidence, current);
 }
 
 /**

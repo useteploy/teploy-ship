@@ -32,7 +32,9 @@ import {
   tableDrift,
   upgradeHoldRefusal,
 } from "./step-fingerprint.js";
-import { resolveModelId, usesAnthropicWire } from "./model-id.js";
+import { usesAnthropicWire } from "./model-id.js";
+import { NucleusSegmentSink, routedModelId, routingFromEnv, withRoutedFallback } from "./model-routing-wire.js";
+import type { Routing, SegmentSink } from "./model-routing-wire.js";
 import { auditRow, toCsv, withinWindow } from "./audit.js";
 import { auditTiming } from "./audit-timing.js";
 import type { NumberRange } from "./args.js";
@@ -42,6 +44,8 @@ import { attachEvidence, envAsked } from "./fix-evidence.js";
 import type { Evidence } from "./verification.js";
 import type { RepoRef } from "./git.js";
 import { assertRepoAllowed, credentialFor, policyFromEnv } from "./repo-policy.js";
+import { detectRepository } from "./stack-import.js";
+import { renderProposal, stackDetectEnabled } from "./stack-propose.js";
 import type { RepoPolicyConfig } from "./repo-policy.js";
 import { loadRepoContext, runNote } from "./repo-memory.js";
 import { runAgent } from "./agent.js";
@@ -356,6 +360,29 @@ const KNOWN_CONFIG_KEYS = new Set([
  * keys never reach the app; caching stays on either way.
  */
 function resolveModel(modelId: string): ModelAdapter {
+  // OUTSIDE withRetry (inside resolveModelBase): a switch is only considered
+  // once the same-model retries are spent.
+  return withRoutedFallback(resolveModelBase(modelId), activeRouting(), modelId);
+}
+
+/**
+ * Model routing (S23), OFF unless SHIP_MODEL_ROUTING=shadow|on. Resolved once
+ * per process; the worker passes a Nucleus-backed sink before its first use,
+ * everything else logs to stderr only.
+ */
+let routingState: { value: Routing | undefined } | undefined;
+function activeRouting(sink?: SegmentSink): Routing | undefined {
+  routingState ??= {
+    value: routingFromEnv({
+      log: (line) => process.stderr.write(`${dim(line)}\n`),
+      ...(sink !== undefined ? { sink } : {}),
+      build: (id) => resolveModelBase(id),
+    }),
+  };
+  return routingState.value;
+}
+
+function resolveModelBase(modelId: string): ModelAdapter {
   // Ship's own policies sit above whatever the SDK does: a durable run that
   // has already paid for ten turns should not die to one 429 (retry), and a
   // hung model call must fail the run visibly rather than wedge it past even
@@ -567,7 +594,7 @@ async function runCommand(rest: string[]): Promise<void> {
     return;
   }
 
-  const modelId = resolveModelId(args.flags.model, process.env, config.model);
+  const modelId = routedModelId(args.flags.model, process.env, config.model, activeRouting());
   const model = resolveModel(modelId);
   const { executor, workdir } = await makeExecutor(args, config);
 
@@ -777,7 +804,7 @@ async function fixCommand(rest: string[]): Promise<void> {
   }
   if (token === "") fail("a git token is required: --git-token, SHIP_GIT_TOKEN, SHIP_GIT_TOKENS, or gitToken in config");
   const runId = `run-${randomUUID().slice(0, 8)}`;
-  const modelId = resolveModelId(args.flags.model, process.env, config.model);
+  const modelId = routedModelId(args.flags.model, process.env, config.model, activeRouting());
   const model = resolveModel(modelId);
   const { executor } = await makeExecutor(args, config);
 
@@ -975,7 +1002,7 @@ async function executePass(
   config: Config,
   opts?: { plan?: boolean; critic?: boolean; settle?: boolean },
 ): Promise<RunOutcome | null> {
-  const modelId = resolveModelId(args.flags.model, process.env, config.model);
+  const modelId = routedModelId(args.flags.model, process.env, config.model, activeRouting());
   const usingSandbox = resolveSandbox(args, config) !== undefined;
   const provider = durableProvider(args, config);
   const wf = durableAgent({
@@ -1297,7 +1324,7 @@ async function enqueueCommand(rest: string[]): Promise<void> {
     report = await enqueueRun(runtime, {
       runId,
       task,
-      model: resolveModelId(args.flags.model, process.env, config.model),
+      model: routedModelId(args.flags.model, process.env, config.model, activeRouting()),
       source: "manual",
       // Whoever holds this shell. Attested by the OS, not by Ship — see actor.ts.
       actor: cliActor(),
@@ -1473,6 +1500,25 @@ async function projectCommand(rest: string[]): Promise<void> {
       await runtime.close();
     }
     process.stderr.write(`${green("removed")} ${target}\n`);
+    return;
+  }
+  if (sub === "detect") {
+    // S05/S06 import dry-run. Read-only, proposal-only; gated so that with the
+    // flag off this subcommand does not exist to the operator.
+    if (!stackDetectEnabled()) fail("project detect is disabled; set SHIP_STACK_DETECT=on to enable the import dry-run");
+    if (target === undefined || target === "") fail("a repo is required: teploy-ship project detect <clone-url|path> [--json]");
+    const policy: RepoPolicyConfig = {
+      ...policyFromEnv(),
+      ...(config.gitToken !== undefined ? { gitToken: config.gitToken } : {}),
+      ...(config.githubToken !== undefined ? { githubToken: config.githubToken } : {}),
+    };
+    let proposal;
+    try {
+      proposal = await detectRepository(target, { policy });
+    } catch (error) {
+      fail(error instanceof Error ? error.message : String(error));
+    }
+    process.stdout.write(args.flags.json === true ? `${JSON.stringify(proposal, null, 2)}\n` : `${renderProposal(proposal)}\n`);
     return;
   }
   if (sub === "set") {
@@ -2013,7 +2059,8 @@ async function workerCommand(rest: string[]): Promise<void> {
   await publishDeploymentAsks(runtime.config).catch((error: unknown) => {
     process.stderr.write(`${yellow("warning:")} could not publish the deployment's evidence asks: ${error instanceof Error ? error.message : String(error)}\n`);
   });
-  const modelId = resolveModelId(args.flags.model, process.env, config.model);
+  activeRouting(new NucleusSegmentSink((runtime as import("./runtime.js").NucleusShipRuntime).db));
+  const modelId = routedModelId(args.flags.model, process.env, config.model, activeRouting());
   const gitToken = (args.flags["git-token"] as string) ?? process.env.SHIP_GIT_TOKEN ?? config.gitToken;
   const githubToken = process.env.SHIP_GITHUB_TOKEN ?? config.githubToken;
   // A teploy-deployed worker has no config file — everything is env. Intake
@@ -2243,7 +2290,7 @@ async function webCommand(rest: string[]): Promise<void> {
 async function evalCommand(rest: string[]): Promise<void> {
   const config = loadConfig();
   const args = parseArgs(rest);
-  const modelId = resolveModelId(args.flags.model, process.env, config.model);
+  const modelId = routedModelId(args.flags.model, process.env, config.model, activeRouting());
   const model = resolveModel(modelId);
   const repeats = numFlag(args.flags.repeats, "repeats", 1, { min: 1, max: 100, integer: true });
   const suiteName = (args.flags.suite as string) ?? "builtin";

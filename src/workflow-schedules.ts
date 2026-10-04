@@ -95,6 +95,70 @@ export interface SweepOptions {
   log?: (line: string) => void;
 }
 
+/** SHIP_SCHEDULE_OVERLAP=on makes the worker enforce the overlap policy. Off by default. */
+export function scheduleOverlapEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const v = env.SHIP_SCHEDULE_OVERLAP?.trim().toLowerCase();
+  return v === "on" || v === "1" || v === "true";
+}
+
+/** Runs inspected per sweep; same bound the digest sweep uses. */
+const OVERLAP_SCAN_LIMIT = 200;
+
+/**
+ * Builds the `isRunning` lookup the sweep needs. RunMeta carries no dedupe
+ * key (it lives in each run's run-started event), so the index is built once
+ * per sweep, lazily on the first overlap-policy schedule: listMeta (bounded) →
+ * only non-terminal workflow-source runs → load their log once. Settled runs
+ * are never loaded, so the cost scales with what is in flight, not history.
+ * A log that cannot be read is treated as running (fail closed: skipping or
+ * deferring one occurrence beats a duplicate overlapping run).
+ */
+export function makeScheduleIsRunning(
+  runtime: Pick<ShipRuntime, "listMeta" | "store">,
+): (scheduleId: string) => Promise<boolean> {
+  let index: Promise<Set<string>> | undefined;
+  const build = async (): Promise<Set<string>> => {
+    const live = new Set<string>();
+    for (const meta of await runtime.listMeta({ limit: OVERLAP_SCAN_LIMIT })) {
+      if (meta.source !== "workflow") continue;
+      if (meta.status === "completed" || meta.status === "failed" || meta.status === "cancelled") continue;
+      let events: WorkflowEvent[];
+      try {
+        events = await runtime.store.load(meta.runId);
+      } catch {
+        live.add("*"); // unreadable: cannot rule any schedule out
+        continue;
+      }
+      const started = events.find((e) => e.type === "run-started");
+      const key = (started as { data?: { input?: { origin?: { dedupeKey?: string } } } } | undefined)
+        ?.data?.input?.origin?.dedupeKey;
+      const id = typeof key === "string" ? /^workflow:([a-z0-9-]{1,70}):\d+$/.exec(key)?.[1] : undefined;
+      if (id !== undefined) live.add(id);
+    }
+    return live;
+  };
+  return async (scheduleId) => {
+    index ??= build();
+    const live = await index;
+    return live.has(scheduleId) || live.has("*");
+  };
+}
+
+/**
+ * The worker's whole schedule step: with the flag off this is exactly the old
+ * `sweepWorkflowSchedules(runtime)` (no isRunning, no log), so behaviour is
+ * identical by construction.
+ */
+export async function sweepSchedulesForWorker(
+  runtime: Pick<ShipRuntime, "config" | "intake" | "projects" | "listMeta" | "store">,
+  log: (line: string) => void,
+  env: NodeJS.ProcessEnv = process.env,
+  now?: number,
+): Promise<void> {
+  const opts: SweepOptions = scheduleOverlapEnabled(env) ? { isRunning: makeScheduleIsRunning(runtime), log } : {};
+  await sweepWorkflowSchedules(runtime, now, opts).catch(e => log(`[worker] workflow schedules: ${e instanceof Error ? e.message : String(e)}`));
+}
+
 /**
  * Plans each schedule through schedule-time.ts. With no S16 fields set the
  * plan is the original behaviour: missed intervals coalesce to the current

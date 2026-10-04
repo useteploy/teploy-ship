@@ -2,7 +2,8 @@ import { ScopedRepoMemory } from "./scoped-repo-memory.js";
 import { canonicalRepositoryURL, repoSlug } from "./repository-reference.js";
 import { ScopedRepoStatsStore } from "./scoped-repo-stats.js";
 import { finishReviewReplacement } from "./revision-launch.js";
-import { projectReadinessKey } from "./project-readiness.js";
+import { projectReadinessRecord } from "./project-readiness.js";
+import { stackDetectEnabled } from "./stack-propose.js";
 import { taskRootRunId } from "./task-session.js";
 import { FileLaunchJournal, NucleusLaunchJournal, assertSameLaunch, launchRequestHash, type LaunchJournal } from "./launch-journal.js";
 import { parseJourney, journeyInstruction, type Journey } from "./journeys.js";
@@ -25,6 +26,8 @@ import { FileIntakeStore, NucleusIntakeStore } from "./intake.js";
 import type { IntakeStore } from "./intake.js";
 import { FileSpendStore, NucleusSpendStore, FileUnpricedRunStore, NucleusUnpricedRunStore, defaultDailyBudgetUSD, estimatedRunCostUSD, utcDay as spendDay } from "./spend.js";
 import type { SpendStore, UnpricedRunStore } from "./spend.js";
+import { resolveBudgetGate } from "./budget-gate.js";
+import type { BudgetGate } from "./budget-gate.js";
 import { FilePolicyStore, NucleusPolicyStore } from "./policies.js";
 import type { PolicyStore } from "./policies.js";
 import { FileEvidenceStore, NucleusEvidenceStore } from "./evidence.js";
@@ -774,7 +777,7 @@ export class DailyBudgetExceededError extends Error {
  */
 export async function assertDailyBudget(
   runtime: Pick<ShipRuntime, "spend" | "policies" | "projects">,
-  options: { runId: string; source?: string; repo?: string; now?: Date },
+  options: { runId: string; source?: string; repo?: string; now?: Date; budgetGate?: BudgetGate },
 ): Promise<void> {
   const source = options.source ?? "";
   // An unsourced run is never SETTLED against a budget either (worker.ts:617
@@ -800,9 +803,16 @@ export async function assertDailyBudget(
   // the same room. Over-reserving briefly is the safe direction.
   await spend.reserve(options.runId, source, day, estimate);
   const committed = await spend.get(source, day);
-  if (committed > budget) {
+  // SHIP_BUDGET_RESERVATION: the ledger judges the same admission; it denies
+  // only in `on` mode (see budget-gate.ts). Off => gate undefined => unchanged.
+  const gate = options.budgetGate ?? resolveBudgetGate(runtime as { kind?: string });
+  const gated = gate
+    ? await gate.admit({ runId: options.runId, source, day, budgetUSD: budget, estimateUSD: estimate, existingAllowed: !(committed > budget), existingCommittedUSD: committed })
+    : undefined;
+  if (committed > budget || gated?.allow === false) {
     await spend.release(options.runId).catch(() => {});
-    throw new DailyBudgetExceededError(source, budget, committed);
+    await gate?.release(options.runId);
+    throw new DailyBudgetExceededError(source, budget, Math.max(committed, gated?.ledgerCommittedUSD ?? 0));
   }
 }
 
@@ -889,6 +899,8 @@ export async function enqueueRun(
     userMessage?: string;
     journey?: Journey;
     environmentCheck?: boolean;
+    /** Digest of the manifests/recipe a person reviewed (stack-propose.ts); recorded only with SHIP_STACK_DETECT on. */
+    environmentInputsDigest?: string;
     /** Deterministic setup probe: no model turns or publication. */
     environmentCheckOnly?: boolean;
     task: string;
@@ -1316,7 +1328,7 @@ export async function enqueueRun(
         task: journey ? `${options.task}\n\n${journeyInstruction(journey)}` : options.task,
         ...(journey ? { journey, userMessage: options.userMessage ?? options.task } : {}),
         ...(options.environmentCheckOnly === true ? { environmentCheckOnly: true } : {}),
-        ...(options.environmentCheck === true ? { environmentCheck: true, ...(project ? { environmentConfigId: projectReadinessKey(project) } : {}) } : {}),
+        ...(options.environmentCheck === true ? { environmentCheck: true, ...projectReadinessRecord(project, options.environmentInputsDigest, stackDetectEnabled()) } : {}),
         ...(options.userMessage !== undefined ? { userMessage: options.userMessage } : {}),
         ...(options.parentRunId !== undefined ? { parentRunId: options.parentRunId } : {}),
         ...(options.parentRunId !== undefined && options.pr !== undefined ? { requireOpenPr: true } : {}),
