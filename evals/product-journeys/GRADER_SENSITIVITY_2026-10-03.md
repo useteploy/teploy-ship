@@ -7,12 +7,12 @@ matrix grades hand-written variants in `mutants/`, never a live run.
 ## Totals
 
 - scenarios covered: 12 of 12
-- variants graded: 73 (60 wrong, 12 correct references, 1 documented known limits)
-- wrong variants rejected: 60 of 60; rejected for the reason they target: 60 of 60
+- variants graded: 75 (61 wrong, 13 correct references, 1 documented known limits)
+- wrong variants rejected: 61 of 61; rejected for the reason they target: 61 of 61
 - wrong variants that PASSED the grader (escaped): 0
 - wrong variants rejected for an unrelated reason: 0
 - documented known limits (grader accepts on purpose, see below): 1
-- correct references accepted: 12 of 12
+- correct references accepted: 13 of 13
 - verdict: CLEAN
 
 Status key: `ok` = wrong variant rejected for its targeted reason, or correct reference accepted;
@@ -24,7 +24,9 @@ Status key: `ok` = wrong variant rejected for its targeted reason, or correct re
 
 | scenario | graded on | variant | kind | grader | status | first reason from the grader |
 | --- | --- | --- | --- | --- | --- | --- |
+| pj-s-question | transcript | batch-form-reference | correct | PASS | ok | — |
 | pj-s-question | transcript | reference | correct | PASS | ok | — |
+| pj-s-question | transcript | batch-form-paraphrased-tagline | wrong | FAIL | ok | index.html:16 does not contain "<p class=\"tagline\">Coastal furniture</p>" verbatim |
 | pj-s-question | transcript | edits-a-file-while-answering | wrong | FAIL | ok | work tree changed: added=[] removed=[] changed=[index.html] — the task is answer-only |
 | pj-s-question | transcript | misses-a-tideline-occurrence | wrong | FAIL | ok | Tideline coverage mismatch: independent=["about.html:15","about.html:20","about.html:6","index.html:15","index.html:20"… |
 | pj-s-question | transcript | misses-the-tagline | wrong | FAIL | ok | the tagline line (index.html:16) is not cited |
@@ -102,7 +104,9 @@ Status key: `ok` = wrong variant rejected for its targeted reason, or correct re
 
 ### pj-s-question
 
+- `batch-form-reference` (correct): Correct answer in the 2026-10-03/04 batch layout (eval-20261003-3/4, eval-20261004-1): file and line number separated by the word 'line', the exact string after a dash on the same line or as a fenced/indented block under a colon-ended heading; changes nothing; nothing published.
 - `reference` (correct): Cites the tagline plus all six Tideline lines with exact strings; changes nothing; nothing published.
+- `batch-form-paraphrased-tagline` (wrong): Batch layout (heading with `index.html:16` plus fenced block) but the block quotes a paraphrase, not the exact current string — the bound triple must still be verified verbatim.
 - `edits-a-file-while-answering` (wrong): Perfect citations, but the run also "fixed" the tagline in the work tree: the task is answer-only.
 - `misses-a-tideline-occurrence` (wrong): Cites the tagline and five of six Tideline lines (skips the about.html footer).
 - `misses-the-tagline` (wrong): Cites all six Tideline lines but never the tagline line.
@@ -215,6 +219,14 @@ graders of the day gave. The tightened graders apply to runs from now on.
 | 6 | pj-c-same-pr | readme-30-minute-hyphenated | README check was `!/30 minutes/`, so "30-minute window" or "30 min" survived as the false claim | pattern widened to 30/thirty + minute(s)/min with space or hyphen |
 | 7 | pj-c-scheduled-job | bypasses-service-store-io | manifest: "reading the store only through service.load_store/save_store"; a job parsing store.json directly behaved identically on every probe and passed | trace probe: a copy of service.py logs load_store/save_store calls; the job must make both |
 | 8 | pj-s-plan | plan-contains-applied-diff | manifest: "the plan contains no applied diff"; the grader never looked, so a transcript carrying a unified diff of the implementation passed | unified-diff headers/hunks in the agent text fail |
+
+A ninth defect, of the mirror class, was found later by the live S02 batch (2026-10-03/04) rather than by this
+matrix: pj-s-question rejected CORRECT answers whose citation layout it did not understand (file and line number
+separated by the word "line", exact string after a dash or under a colon-ended heading) — eval-20261003-3/4 and
+eval-20261004-1 all failed with "the tagline line is not cited" while citing it verbatim. Fixed by signpost citation
+extraction with the verbatim and coverage checks untouched; pinned by the batch-form-reference (must pass) and
+batch-form-paraphrased-tagline (must fail) variants. Supplementary regrades beside the three records, originals
+never modified.
 
 Known limit, not a defect (pj-s-feature / marked-placeholders-accepted-by-design): a contact page whose address and
 hours are explicitly marked placeholders passes. That is deliberate. The fixture holds no street address, and the live

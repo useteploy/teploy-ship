@@ -2,6 +2,7 @@ import { nextRequestId } from "../../views/task-composer.js";
 import { taskStatus, taskTitle } from "../../lib/task-status.js";
 import { JOURNEYS, parseJourney, journeyOptions } from "teploy-ship/journeys";
 import { RichText } from "../../views/rich-text.js";
+import type { PlanGroundingView } from "../../lib/plan-grounding-view.js";
 import { runData } from "../../lib/run-data.server.js";
 import type { RunData } from "../../lib/run-data.server.js";
 import { useEffect, useRef, useState } from "preact/hooks";
@@ -312,6 +313,31 @@ const NOW_TICK = `(function(){
 /** Severity -> the palette variable already used elsewhere in the dashboard. */
 const SEVERITY_COLOR: Record<string, string> = { high: "var(--red)", med: "var(--yellow)", low: "var(--fg-dim, inherit)" };
 
+/** Status -> the word plus a colour already used for verdicts; the word carries the label, colour only echoes it. */
+const GROUNDING_STATUS_CLASS: Record<string, string> = { ungrounded: "bad", grounded: "good", proposed: "meta", unchecked: "meta" };
+
+/** Advisory plan grounding (S07) at the plan park. Wording comes from the projection; see lib/plan-grounding-view.ts. */
+function PlanGroundingNotice({ grounding }: { grounding: PlanGroundingView }) {
+  return (
+    <div class="notice" style="margin:8px 0 0">
+      <p style="margin:0"><b>Plan grounding</b> — {grounding.headline}</p>
+      {grounding.mismatch !== undefined && <p style="margin:4px 0 0">{grounding.mismatch}</p>}
+      <ul style="margin:4px 0 0">
+        {grounding.refs.map((r, i) => (
+          <li key={i}>
+            <span class={GROUNDING_STATUS_CLASS[r.status] ?? "meta"}>{r.status}</span>{" "}
+            {r.kind !== "" ? `${r.kind} ` : ""}<code>{r.name}</code> — {r.detail}
+          </li>
+        ))}
+      </ul>
+      {grounding.omitted !== undefined && grounding.omitted > 0 && (
+        <p class="meta" style="margin:4px 0 0">… and {grounding.omitted} more, counted in the headline.</p>
+      )}
+      <p class="meta" style="margin:4px 0 0">{grounding.caveat}</p>
+    </div>
+  );
+}
+
 export default function RunDetail({ data: initialData }: { data: RunData }) {
   const [data, setData] = useState(initialData);
   const [connection, setConnection] = useState("Live updates connected");
@@ -535,6 +561,7 @@ export default function RunDetail({ data: initialData }: { data: RunData }) {
                   <span class="meta">edit the text before approving to redirect the plan</span>
                 </div>
               </form>
+              {data.planGrounding !== undefined && <PlanGroundingNotice grounding={data.planGrounding} />}
             </div>
           )}
           <TakeoverCard data={data} />

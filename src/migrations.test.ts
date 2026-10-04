@@ -4,6 +4,7 @@ import test from "node:test";
 import { DOC_FIELDS } from "./nucleus-pgwire.js";
 import { MIGRATIONS, hasColumns, migrate } from "./migrations.js";
 import { RUN_META_FIELDS } from "./run-store.js";
+import { TASK_REQUIREMENT_COLUMNS } from "./task-requirements.js";
 import type { NucleusPgwire } from "./nucleus-pgwire.js";
 
 /**
@@ -229,6 +230,7 @@ test("each migrated table's shape matches the store DDL that creates it fresh", 
     { table: "ship_memory", file: "repo-memory.ts" },
     { table: "ship_runtime_config", file: "runtime-config.ts" },
     { table: "ship_connect_requests", file: "connect-requests.ts" },
+    { table: "ship_task_requirements", file: "task-requirements.ts" },
   ];
 
   for (const { table, file } of owners) {
@@ -337,4 +339,73 @@ test("007 probes ship_connect_requests write-shaped, and is a no-op on a fresh i
   // one is to start the connect again.
   assert.doesNotMatch(joined, /DROP TABLE|TRUNCATE/i);
   assert.doesNotMatch(joined, /INSERT INTO ship_connect_requests/);
+});
+
+/**
+ * 008's probe, and the slice it exists for. ship_task_requirements is S03's
+ * requirement record and it is deliberately unwired: no route or worker path
+ * writes it, so on a real deployment the migration lands as a ledger row and
+ * nothing else. The dangerous fault is therefore the SILENT one a SELECT probe
+ * would leave: `waived_reason` read back as NULL is a waiver with no recorded
+ * reason — a decision that looks made when nothing was — and `state` read back
+ * as NULL collapses active and waived into one list. A SELECT-shaped probe
+ * would report every column present forever, record 008 as applied, and leave
+ * exactly that behind.
+ */
+test("008 probes ship_task_requirements write-shaped, and is a no-op on a fresh install", async () => {
+  const fresh = fakeDb();
+  assert.deepEqual(await migrate(fresh), [], "the store DDL creates the table; there is nothing to migrate");
+
+  const stale = fakeDb({
+    existingTables: new Set(["ship_task_requirements"]),
+    // A shape from before the waiver columns existed.
+    columns: { ship_task_requirements: ["req_key", "task_root_run_id", "requirement_id", "statement", "source", "source_run_id", "state", "created_at", "created_by"] },
+  });
+  assert.deepEqual(await migrate(stale), ["008-ship-task-requirements"]);
+
+  const joined = stale.sql.join("\n");
+  assert.match(
+    joined,
+    /UPDATE ship_task_requirements SET req_key = req_key, task_root_run_id = task_root_run_id, requirement_id = requirement_id, statement = statement, source = source, source_run_id = source_run_id, state = state, created_at = created_at, created_by = created_by, waived_at = waived_at, waived_by = waived_by, waived_reason = waived_reason WHERE 1 = 0/,
+    "the shape probe must be an UPDATE",
+  );
+  assert.doesNotMatch(
+    joined,
+    /SELECT[^\n]*\bwaived_reason\b/,
+    "a SELECT probe cannot see a missing column on Nucleus — that is the bug this rule exists for",
+  );
+  assert.match(joined, /ALTER TABLE ship_task_requirements RENAME TO ship_task_requirements_008/);
+  // The rebuilt table is empty and nothing is destroyed: the shape has never
+  // been released, so its columns are not knowable here — the aside table
+  // keeps whatever they held.
+  assert.doesNotMatch(joined, /DROP TABLE|TRUNCATE/i);
+  assert.doesNotMatch(joined, /INSERT INTO ship_task_requirements/);
+});
+
+/**
+ * 008 against a store that already has the table in the CURRENT shape —
+ * populated or not — records the migration without table surgery, and a second
+ * migrate() is a no-op. This is the leg the real deployment takes: the store
+ * is drafted, not wired, so its table (when it exists at all) was created by
+ * the store DDL itself and the migration must only enter the ledger.
+ */
+test("008 is ledger-only on a current-shape table, and replay is a no-op", async () => {
+  const current = fakeDb({
+    existingTables: new Set(["ship_task_requirements"]),
+    columns: { ship_task_requirements: TASK_REQUIREMENT_COLUMNS },
+  });
+  assert.deepEqual(await migrate(current), []);
+  assert.doesNotMatch(current.sql.join("\n"), /RENAME TO/, "a current-shape table must not be rebuilt");
+  const ledger = await current.query("SELECT id FROM ship_migrations");
+  assert.ok(
+    ledger.some((r) => String(r.id) === "008-ship-task-requirements"),
+    "008 must still be recorded as applied",
+  );
+
+  const stale = fakeDb({
+    existingTables: new Set(["ship_task_requirements"]),
+    columns: { ship_task_requirements: ["req_key", "statement"] },
+  });
+  assert.deepEqual(await migrate(stale), ["008-ship-task-requirements"]);
+  assert.deepEqual(await migrate(stale), [], "second call must be a no-op");
 });

@@ -1,0 +1,17 @@
+Short answer: the home-page tagline lives in `index.html` line 16 — `<p class="tagline">Furniture made on the coast</p>`.
+
+Home-page tagline (`index.html:16`, full line verbatim):
+```
+    <p class="tagline">Furniture made on the coast</p>
+```
+
+Home-page tagline — `index.html`, line 16, exact current string:
+    <p class="tagline">Furniture made on the coast</p>
+
+All occurrences of the word "Tideline", with exact current strings:
+1. `index.html:6` — `  <title>Tideline Woodworks</title>`
+2. `index.html:15` — `    <h1>Tideline Woodworks</h1>`
+3. `index.html:20` — `    <p>Tideline Woodworks — Bear Harbor, California</p>`
+4. `about.html:6` — `  <title>About — Tideline Woodworks</title>`
+5. `about.html:15` — `    <h1>Tideline Woodworks</h1>`
+6. `about.html:20` — `    <p>Tideline Woodworks — Bear Harbor, California</p>`
