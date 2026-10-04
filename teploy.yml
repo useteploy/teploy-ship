@@ -307,6 +307,10 @@ volumes:
   # --- Preview root (tailnet previews, see env above) -------------------
   /srv/ship-preview: /srv/ship-preview
   /deployments/forgejo/volumes/data/git/repositories/tyler/ship-preview-proof.git: /srv/forge-bare/ship-preview-proof.git:ro
+  # Operator-held config (read-only): SHIP_MODEL_ROUTING_POLICY points at a
+  # file under here (e.g. /srv/ship-config/routing-policy.json), so the
+  # routing shadow/on policy can change without an image rebuild.
+  /srv/ship-config: /srv/ship-config:ro
   # The worker's ONE SSH identity (the CLI reads ~/.ssh/id_ed25519) plus
   # known_hosts for every target it deploys to. Rotated 2026-09-24 (L8): the
   # wave-9 delivery scratch key was retired (authorized nowhere); the current
