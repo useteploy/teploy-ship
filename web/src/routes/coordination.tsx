@@ -17,6 +17,8 @@ import {
   retryCoordinationChild,
   rollupCoordinationCost,
 } from "../../../dist/coordination.js";
+import { missionViewEnabled, missionViewFor } from "../../../dist/mission-view.js";
+import type { MissionView } from "../../../dist/mission-view.js";
 import type { CoordinationChild, CoordinationCheckState, CoordinationCost, CoordinationRecord } from "../../../dist/coordination.js";
 
 export const config = { mode: "app" };
@@ -34,7 +36,7 @@ interface ChildView {
 }
 
 interface CoordinationData {
-  coordinations: Array<{ record: CoordinationRecord; api: ChildView; client: ChildView; cost: CoordinationCost; complete: boolean }>;
+  coordinations: Array<{ record: CoordinationRecord; api: ChildView; client: ChildView; cost: CoordinationCost; complete: boolean; mission?: { view: MissionView } | { error: string } }>;
   canApprove: boolean;
   created: string | null;
   error: string | null;
@@ -63,6 +65,8 @@ export async function loader({ request }: { request: Request }): Promise<Coordin
       client: childView(fresh, "client"),
       cost,
       complete: coordinationComplete(fresh),
+      // SHIP_MISSION_VIEW=on only: a derived, read-only projection (mission-view.ts).
+      ...(missionViewEnabled() ? { mission: await missionViewFor(runtime, fresh) } : {}),
     });
   }
   return {
@@ -225,6 +229,33 @@ function costLine(roll: { costUsd: number; unknown: boolean }): string {
   return roll.unknown ? `${known} known · total unknown (unpriced work included)` : known;
 }
 
+function MissionPanel({ mission }: { mission: { view: MissionView } | { error: string } }) {
+  if ("error" in mission) return <p class="meta" style="margin:10px 0 0">Mission view unavailable: {mission.error}</p>;
+  const v = mission.view;
+  const list = (ids: string[]) => (ids.length > 0 ? ids.join(", ") : "none");
+  return (
+    <div class="summary-card" style="margin-top:10px;cursor:default" data-mission-view>
+      <div class="row-actions">
+        <strong>Mission view</strong>
+        <span class="chip">read-only, derived</span>
+        <span class="spacer" style="flex:1" />
+        <span class={`status ${v.verdict === "accepted" ? "completed" : v.verdict === "waived" ? "waiting" : "queued"}`}>{v.verdict}</span>
+      </div>
+      <p class="meta" style="margin:6px 0 0">Ready to start: {list(v.ready)}</p>
+      <p class="meta" style="margin:6px 0 0">Blocked: {v.blocked.length > 0 ? v.blocked.map((b) => `${b.id} (by ${b.by.join(", ")})`).join("; ") : "none"}</p>
+      <p class="meta" style="margin:6px 0 0">Stale (planned on a moved revision): {list(v.stale)}</p>
+      <p class="meta" style="margin:6px 0 0">
+        Aggregate acceptance: {v.aggregate.accepted ? "accepted" : v.aggregate.verdict}
+        {v.aggregate.unmet.length > 0 ? ` — unmet: ${v.aggregate.unmet.join(", ")}` : ""}
+        {v.aggregate.waived.length > 0 ? ` — waived (not accepted): ${v.aggregate.waived.map((w) => `${w.requirement} by ${w.actor}`).join(", ")}` : ""}
+      </p>
+      {v.integration !== null && <p class="meta" style="margin:6px 0 0">Integration evidence: {v.integration.state} — {v.integration.reason}</p>}
+      {v.notes.map((n) => <p class="meta" style="margin:6px 0 0" key={n}>{n}</p>)}
+      <p class="meta" style="margin:6px 0 0">A finished child counts only once its change is accepted in the task record. Nothing here launches or changes the coordination.</p>
+    </div>
+  );
+}
+
 export default function Coordination({ data }: { data: CoordinationData }) {
   return (
     <>
@@ -277,7 +308,7 @@ export default function Coordination({ data }: { data: CoordinationData }) {
           <h2 class="section">
             Coordinated changes <span class="count">({data.coordinations.length})</span>
           </h2>
-          {data.coordinations.map(({ record, api, client, cost, complete }) => (
+          {data.coordinations.map(({ record, api, client, cost, complete, mission }) => (
             <article class="card" key={record.id}>
               <div class="row-actions">
                 <strong>{record.parentIntent.length > 120 ? `${record.parentIntent.slice(0, 120)}…` : record.parentIntent}</strong>
@@ -367,6 +398,7 @@ export default function Coordination({ data }: { data: CoordinationData }) {
                   )}
                 </div>
               )}
+              {mission !== undefined && <MissionPanel mission={mission} />}
               <p class="meta" style="margin:10px 0 0">Total spend: {costLine(cost.total)}</p>
             </article>
           ))}
