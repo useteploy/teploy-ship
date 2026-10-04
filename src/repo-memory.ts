@@ -7,6 +7,7 @@ import type { AgentExecutor } from "@neutron-build/agents";
 import { appendLineSync, withFileLock, writeTextFile } from "./file-store.js";
 import { frameUntrusted } from "./guard.js";
 import type { NucleusPgwire } from "./nucleus-pgwire.js";
+import type { KnowledgeMode, NoteProvenanceHint, RetrievalContext } from "./knowledge-provenance.js";
 import { stateDir } from "./run-store.js";
 
 /**
@@ -38,16 +39,32 @@ export interface RepoNote {
   note: string;
   runId?: string;
   createdAt: string;
+  /**
+   * S21: set ONLY on notes returned for model context with
+   * SHIP_KNOWLEDGE_PROVENANCE=on. Never stored. Absent means "not judged".
+   */
+  freshness?: "fresh" | "stale" | "unknown";
 }
 
+/** What record() accepts: a note, plus (optionally) where its claim came from. Provenance is never stored on the note itself. */
+export type RecordInput = Omit<RepoNote, "createdAt" | "noteId" | "freshness"> & { provenance?: NoteProvenanceHint };
+
 export interface RepoMemoryStore {
-  record(note: Omit<RepoNote, "createdAt" | "noteId">): Promise<RepoNote>;
-  /** Most recent first, bounded in the query rather than after the fact. */
-  recent(repo: string, limit: number): Promise<RepoNote[]>;
+  record(note: RecordInput): Promise<RepoNote>;
+  /**
+   * Most recent first, bounded in the query rather than after the fact.
+   * `context` marks a read for model context (S21 screens only those; the
+   * dashboard listing is never filtered, so a hidden note stays deletable).
+   */
+  recent(repo: string, limit: number, options?: { context?: RetrievalContext }): Promise<RepoNote[]>;
+  /** S21: the provenance mode this store applies to context reads. Absent = off. */
+  provenanceMode?(): KnowledgeMode;
+  /** S21: record a condenser summary as a derived record. Absent = nothing recorded. */
+  recordSummary?(input: { id: string; repo: string; runId: string; summary: string; derivedFrom: string[] }): Promise<void>;
   /** Every repo that has notes, with its note count — for the dashboard. */
   repos(): Promise<{ repo: string; count: number }[]>;
-  /** Delete exactly one note. */
-  remove(noteId: string): Promise<void>;
+  /** Delete exactly one note. `repo` (optional) lets S21 redaction find summaries derived from a note that has no provenance record. */
+  remove(noteId: string, repo?: string): Promise<void>;
 }
 
 /** File-backed memory: one JSONL per repo under the state dir. */
@@ -62,7 +79,8 @@ export class FileRepoMemory implements RepoMemoryStore {
     return join(this.#dir, `${repo.replace(/[^a-zA-Z0-9._-]/g, "_")}.jsonl`);
   }
 
-  async record(note: Omit<RepoNote, "createdAt" | "noteId">): Promise<RepoNote> {
+  async record(input: RecordInput): Promise<RepoNote> {
+    const { provenance: _provenance, ...note } = input;
     const full: RepoNote = { ...note, noteId: `note-${randomUUID().slice(0, 12)}`, createdAt: new Date().toISOString() };
     // Append, not read-modify-write — two concurrent records must not clobber
     // each other's note. Durably, so a note is not lost to a crash.
@@ -162,7 +180,8 @@ export class NucleusRepoMemory implements RepoMemoryStore {
     return this.#ready;
   }
 
-  async record(note: Omit<RepoNote, "createdAt" | "noteId">): Promise<RepoNote> {
+  async record(input: RecordInput): Promise<RepoNote> {
+    const { provenance: _provenance, ...note } = input;
     await this.#ensure();
     const full: RepoNote = { ...note, noteId: `note-${randomUUID().slice(0, 12)}`, createdAt: new Date().toISOString() };
     await this.#db.query(
@@ -249,7 +268,7 @@ const RECENT_NOTES = 5;
  */
 export async function loadRepoContext(
   executor: AgentExecutor,
-  options: { repo: string; memory?: RepoMemoryStore },
+  options: { repo: string; memory?: RepoMemoryStore; onNotes?: (noteIds: string[]) => void },
 ): Promise<string> {
   const parts: string[] = [];
   for (const file of PLAYBOOK_FILES) {
@@ -276,9 +295,18 @@ export async function loadRepoContext(
     }
   }
   if (options.memory !== undefined) {
-    const notes = await options.memory.recent(options.repo, RECENT_NOTES);
+    // S21: with provenance off (the default) this is the same call as before.
+    let notes: RepoNote[];
+    if ((options.memory.provenanceMode?.() ?? "off") === "off") {
+      notes = await options.memory.recent(options.repo, RECENT_NOTES);
+    } else {
+      const head = await executor.exec("git rev-parse HEAD 2>/dev/null").catch(() => undefined);
+      const sha = head !== undefined && head.exitCode === 0 ? head.stdout.trim() : "";
+      notes = await options.memory.recent(options.repo, RECENT_NOTES, { context: sha !== "" ? { head: sha } : {} });
+    }
     if (notes.length > 0) {
-      const lines = notes.map((n) => `- [${n.createdAt.slice(0, 10)}] ${n.note}`);
+      options.onNotes?.(notes.map((n) => n.noteId));
+      const lines = notes.map((n) => `- [${n.createdAt.slice(0, 10)}]${n.freshness !== undefined ? ` (${n.freshness})` : ""} ${n.note}`);
       // Ship's own notes about past runs — but their text came from task and
       // summary strings that originated outside, so they are framed too. A
       // poisoned note would otherwise be an instruction channel into every

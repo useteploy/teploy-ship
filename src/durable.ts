@@ -1183,11 +1183,17 @@ export function durableAgent(
       // Playbook + recent-run notes, recorded so replay never re-reads
       // a tree or memory that has since changed.
       let repoContext = "";
+      // S21: ids of the notes injected into context, for summary derivedFrom.
+      // Filled on first execution only (the step's recorded output is a
+      // string); empty on replay, which recordSummary tolerates (putIfAbsent).
+      const contextNoteIds: string[] = [];
+      CONTEXT_NOTES.set(ctx, contextNoteIds);
       if (checkout !== null && repoKey !== null) {
         repoContext = await ctx.step("repo-context", () =>
           loadRepoContext(executor, {
             repo: repoKey,
             ...(config.repoMemory !== undefined ? { memory: config.repoMemory } : {}),
+            ...(config.repoMemory?.recordSummary !== undefined ? { onNotes: (ids: string[]) => contextNoteIds.push(...ids) } : {}),
           }),
         );
       }
@@ -1697,6 +1703,9 @@ export function durableAgent(
 }
 
 
+/** S21: note ids injected into a run's context, by workflow ctx (see the repo-context step). */
+const CONTEXT_NOTES = new WeakMap<object, string[]>();
+
 /**
  * The native CodeAct loop as a harness adapter — the current code,
  * re-entry-pointed. Every recorded step name is unchanged when `stepPrefix`
@@ -1920,6 +1929,16 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
               return summaryStep.text;
             },
             condense,
+            config.repoMemory?.recordSummary !== undefined && input.repo !== undefined
+              ? ({ summary }) =>
+                  config.repoMemory!.recordSummary!({
+                    id: `summary-${ws.ctx.runId}-${p}turn-${turn}`,
+                    repo: repoKeyOf(input.repo!, input.repositoryScopeVersion),
+                    runId: ws.ctx.runId,
+                    summary,
+                    derivedFrom: [...(CONTEXT_NOTES.get(ws.ctx) ?? [])],
+                  })
+              : undefined,
           );
         }
 
@@ -2690,6 +2709,11 @@ async function publishIfRepoRun(
           repo: repoKeyOf(repoUrl, input.repositoryScopeVersion),
           note: runNote({ task: input.task, summary, ...(pr !== undefined ? { pr } : {}) }),
           runId: ctx.runId,
+          // S21: where the claim came from — the run, at the revision it pushed.
+          // Only passed with provenance on, so a plain store sees the old call.
+          ...(config.repoMemory!.provenanceMode?.() !== undefined && config.repoMemory!.provenanceMode() !== "off"
+            ? { provenance: { revision: push.kind === "pushed" ? push.sha : "", sourceKind: "run" as const } }
+            : {}),
         })
         .catch(() => {}); // memory is advisory — never fail a publish over it
       return true;
