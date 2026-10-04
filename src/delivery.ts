@@ -29,6 +29,8 @@ import type { UserStore } from "./users.js";
 import { DEFAULT_WINDOW_MINUTES, readServiceHealth, telemetryAppliesTo, telemetryTargetFromEnv } from "./observe.js";
 import type { TelemetryTarget } from "./observe.js";
 import { repositoryKeyFold } from "./repository-reference.js";
+import { makeRecoveryPlan, runDeliveryJourney, runRecovery } from "./deployment-adapter.js";
+import type { DeploymentAdapter } from "./deployment-adapter.js";
 
 /** What a delivery record holds. Additive only; fields grow, never rename. */
 export interface DeliveryRecord {
@@ -525,6 +527,48 @@ export async function recheckApprovingActor(
 }
 
 /**
+ * The opt-in alternative to the inline teploy commands (S27, SHIP_DEPLOY_ADAPTER
+ * =teploy): a factory for the DeploymentAdapter the deploy step and the
+ * rollback run through. Absent (the default) leaves every line below on the
+ * legacy path. `unavailable` is an honest hold, e.g. no service in teploy.yml.
+ */
+export interface DeliveryAdapterFactory {
+  create(input: { deployDir: string; destination: string }): Promise<{ adapter: DeploymentAdapter; service: string } | { unavailable: string }>;
+}
+
+/** A deploy that went through the adapter journey: `acted` means the target may have changed. */
+async function deployViaAdapter(
+  record: DeliveryRecord,
+  image: string,
+  destination: string,
+  factory: DeliveryAdapterFactory,
+  deployDir: string,
+  now: string,
+): Promise<{ acted: boolean; reason: string }> {
+  const made = await factory.create({ deployDir, destination });
+  if ("unavailable" in made) return { acted: false, reason: `deployment adapter unavailable: ${made.unavailable}` };
+  const identity = { service: made.service, destination, artifact: image, revision: record.mergedSha!.slice(0, 7) };
+  const journey = await runDeliveryJourney(made.adapter, {
+    identity,
+    authorisation: {
+      kind: "deploy",
+      actor: record.actor ?? "",
+      service: made.service,
+      destination,
+      expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
+    },
+    ...(record.actor !== undefined ? { holder: record.actor } : {}),
+  });
+  const adapterName = made.adapter.capabilities().adapter;
+  return {
+    acted: journey.acted,
+    reason: journey.outcome === "confirmed"
+      ? `deployment adapter (${adapterName}) deployed and read the target back on the approved version and image; the sweep records the confirmation`
+      : `deployment adapter (${adapterName}) ${journey.outcome}: ${journey.reason}${journey.acted ? " — the target may have changed; reading it back before deciding" : ""}`,
+  };
+}
+
+/**
  * Execute one approved delivery against the TRUSTED working copy. This is
  * the S14 execution boundary; it runs on the worker host via argv arrays
  * (the deploy.ts discipline — never a shell), and it ACTS only when every
@@ -542,6 +586,8 @@ export async function executeDelivery(
     now?: () => string;
     /** The live governance/account stores for the S15 actor recheck. */
     authority?: ApproveAuthoritySources;
+    /** S27 opt-in: deploy through a DeploymentAdapter instead of the inline `teploy deploy`. Absent = legacy. */
+    adapter?: DeliveryAdapterFactory;
   },
 ): Promise<DeliveryRecord> {
   const now = options.now?.() ?? new Date().toISOString();
@@ -565,6 +611,9 @@ export async function executeDelivery(
   }
   if (record.mergedSha === undefined) {
     return { ...record, ...patch({ reason: "the merged SHA was never proven (read-back did not confirm the merge); re-verify before delivery" }) };
+  }
+  if (options.adapter !== undefined && (record.destination === undefined || record.destination === "")) {
+    return { ...record, ...patch({ reason: "the deployment adapter path needs the destination recorded at approval (none was); re-approve naming the destination" }) };
   }
   const cwd = options.dir;
   const exec = async (argv: string[], timeoutMs = 120_000) => options.run(argv, { cwd, timeoutMs });
@@ -678,6 +727,13 @@ export async function executeDelivery(
   if (image === "") {
     await exec(["git", "worktree", "remove", "--force", tree]).catch(() => undefined);
     return { ...record, ...patch({ reason: `the trusted build printed no image identity: ${build.stdout.slice(0, 300)}` }) };
+  }
+  if (options.adapter !== undefined) {
+    const via = await deployViaAdapter(record, image, record.destination!, options.adapter, tree, now);
+    await exec(["git", "worktree", "remove", "--force", tree]).catch(() => undefined);
+    // Held means "never touched the target": only a journey that did not act.
+    if (!via.acted) return { ...record, ...patch({ reason: via.reason }) };
+    return { ...record, artifactDigest: image, ...(configIdentity !== undefined ? { configIdentity } : {}), state: "unknown", updatedAt: now, reason: via.reason };
   }
   const deployed = await options.run(
     ["teploy", "deploy", "--image", image, "--version", record.mergedSha.slice(0, 7), "--skip-dns-check"],
@@ -1005,6 +1061,8 @@ export async function executeDeliveryRollback(
     now?: () => string;
     /** The live governance/account stores for the requester recheck. */
     authority?: ApproveAuthoritySources;
+    /** S27 opt-in: roll back through a DeploymentAdapter instead of the inline commands. Absent = legacy. */
+    adapter?: DeliveryAdapterFactory;
   },
 ): Promise<NonNullable<DeliveryRecord["rollback"]>> {
   const now = options.now?.() ?? new Date().toISOString();
@@ -1023,6 +1081,9 @@ export async function executeDeliveryRollback(
   const recheck = await recheckApprovingActor(record.rollback?.actor, options.authority);
   if (recheck.outcome === "hold") {
     return failed(`rollback requester recheck: ${recheck.reason}`);
+  }
+  if (options.adapter !== undefined) {
+    return rollbackViaAdapter(record, options.dir, options.adapter, now, failed);
   }
   const before = await options.run(["teploy", "status", "--json"], { cwd: options.dir, timeoutMs: 120_000 });
   if (before.code !== 0) {
@@ -1076,6 +1137,47 @@ export async function executeDeliveryRollback(
   } catch {
     return failed(`target status was not JSON after rollback: ${read.stdout.slice(0, 300)}`);
   }
+}
+
+/**
+ * The adapter-path rollback: the same refusals as the inline path (an unread
+ * target, a target that no longer runs THIS delivery, an already-recovered
+ * target), decided by runRecovery over the adapter's own readback.
+ */
+async function rollbackViaAdapter(
+  record: DeliveryRecord,
+  dir: string,
+  factory: DeliveryAdapterFactory,
+  now: string,
+  failed: (evidence: string) => NonNullable<DeliveryRecord["rollback"]>,
+): Promise<NonNullable<DeliveryRecord["rollback"]>> {
+  const destination = record.destination ?? "";
+  if (destination === "" || record.mergedSha === undefined || record.artifactDigest === undefined) {
+    return failed("the deployment adapter path needs the delivery's destination, merged SHA and artifact digest, and one is not recorded");
+  }
+  const made = await factory.create({ deployDir: dir, destination });
+  if ("unavailable" in made) return failed(`deployment adapter unavailable: ${made.unavailable}`);
+  const recoveryVersion = record.recoveryVersion!;
+  const delivered = { service: made.service, destination, artifact: record.artifactDigest, revision: record.mergedSha.slice(0, 7) };
+  const done = (evidence: string): NonNullable<DeliveryRecord["rollback"]> => ({
+    ...(record.rollback ?? { actor: "", reason: "", requestedAt: now }),
+    state: "done",
+    finishedAt: now,
+    evidence: evidence.slice(0, 500),
+  });
+  const read = await made.adapter.readback(delivered);
+  if (read.kind === "ok" && read.value.serving && read.value.revision === recoveryVersion) {
+    return done(`target read back: retained version ${recoveryVersion} serving (already — no rollback command was needed)`);
+  }
+  const plan = await makeRecoveryPlan(made.adapter, delivered, "rollback-to-version", { revision: recoveryVersion }, () => new Date(now));
+  if (plan.kind !== "ok") return failed(`rollback plan: ${plan.reason}`);
+  const actor = record.rollback?.actor ?? "";
+  const result = await runRecovery(made.adapter, {
+    plan: plan.value,
+    authorisation: { kind: "recover", actor, service: made.service, destination, expiresAt: new Date(Date.now() + 30 * 60_000).toISOString() },
+  });
+  if (result.outcome === "recovered") return done(`target read back: retained version ${recoveryVersion} serving (${result.reason})`);
+  return failed(`rollback ${result.outcome}: ${result.reason}`);
 }
 
 /**
