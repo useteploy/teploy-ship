@@ -1,33 +1,40 @@
 # Next session
 
-The single forward plan is [docs/SHIP_RELEASE_PROGRAMME_2026-09-21.md](docs/SHIP_RELEASE_PROGRAMME_2026-09-21.md); its **Execution status** section (the wave-2, wave-3 and wave-4 tables) plus the wave-5 notes at the top of [AUDIT_OPEN.md](AUDIT_OPEN.md) are the only status lists. Update both rather than creating another plan.
+Start with [docs/DECISIONS_OPEN_2026-10-04.md](docs/DECISIONS_OPEN_2026-10-04.md) (the two open founder calls and everything already decided), then this file. The single forward plan is [docs/SHIP_RELEASE_PROGRAMME_2026-09-21.md](docs/SHIP_RELEASE_PROGRAMME_2026-09-21.md); status lists live in its execution tables plus [AUDIT_OPEN.md](AUDIT_OPEN.md) wave-5 section. Update those rather than creating another plan.
 
-## Where things stand (2026-10-04, after wave 5)
+## Where things stand (2026-10-04, end of wave 5)
 
-Wave 4's state ("implemented and checked by automated tests only") is now partly superseded by live receipts:
+Production ship web+worker run `acca080` (all wave-5 code merged #58-#66; gateway `c0b07dd`; six shadow flags live). The five waiting runs have survived every deploy. Backups: `pre-80c9187-shadow-deploy-2026-10-04` and `pre-acca080-wave5-2026-10-04`, both verified.
 
-- **S02 batch executed** (A only, glm-5.3 via the gateway's coding-plan key, $0 real spend): canary + 33 runs, 24/33 first-attempt passes, $1.81 priced. Read [evals/product-journeys/BATCH_2026-10-04.md](evals/product-journeys/BATCH_2026-10-04.md) first — including the `pj-s-question` 0/3 variance signal.
-- **Production upgraded** `dd5b13e` -> `80c9187`: coordinated stop, pre-deploy backup verified, five waiting runs intact, gateway untouched at `c0b07dd`.
-- **Shadows are ON in production** (budget-reservation, model-routing, policy, tool-manifest, knowledge-provenance = shadow; policy-shadow = on). They need soak time and then a log review before any `on` flip.
-- **Founder decisions recorded 2026-10-04**: S28 n>=20 confirmed; S25 service-account stays id-only; S08 findings WILL reach PR body + webhook (approved, **not yet built** — new work); the 79 sub-24px targets stay compact; upstream reports filed (neutron#6 404 page, teploy-cli#18/#19/#20).
-- **Known live variance**: `pj-s-question` canary pass + 0/3 batch — compare the four transcripts before touching prompts.
+Landed this wave (all on green CI):
+- **S02 batch executed** (A only, coding-plan key, $0 real): 24/33 recorded, effectively 27/33 after the grader fix — see [evals/product-journeys/BATCH_2026-10-04.md](evals/product-journeys/BATCH_2026-10-04.md).
+- **Grader extraction defect fixed** (#61): the pj-s-question batch failures were layout-brittleness, not model variance; supplementary regrades PASS; matrix regenerated 61/61 + 13/13.
+- **Retained runs re-graded** (#58): current graders flip nothing on substance; only publication-evidence preservation gaps.
+- **S03** (#60): migration 008 + rehearsal on the restored real-store copy (receipt in `evals/receipts/`); write path stays future work.
+- **S07** (#59): plan-grounding at the plan park, advisory, `SHIP_PLAN_GROUNDING` off.
+- **S08** (#63): findings in PR body + webhook, `SHIP_TEST_INTEGRITY_SURFACING=off|shadow|on`, off.
+- **S19** (#64): `teploy-ship snapshot` / `restore-check`, doctor store+clock probes, support bundle v2.
+- **Routing policy live in shadow** (#65 mount + host file `/srv/ship-config/routing-policy.json`): destination gate cleared via `SHIP_MODEL_ROUTING_DESTINATIONS=api.z.ai`; the retention gate still refuses private data honestly — see DECISIONS_OPEN item 1.
 
 ## Next work, in order
 
-1. **Shadow-log review** after soak (placement/policy/budget/tool-manifest/knowledge-provenance JSONL + reports); set `SHIP_MODEL_ROUTING_POLICY` so the routing shadow has something to record. Only then discuss any `on` flips.
-2. **S08 wiring** (approved): BUILT in wave 5 (#63) — findings in the PR body + run-completion webhook behind `SHIP_TEST_INTEGRITY_SURFACING=off|shadow|on`, default off. Still to do: soak `shadow` on the real worker, then decide the `on` flip.
-3. **Live proofs still open**: S01 credential proofs on a real sandbox with a private repo; S27 real teploy-adapter run against a scratch target; S19 doctor probes against a live store; human observation of dashboard users. (S03's storage migration is done: migration 008 rehearsed on the restored `pre-80c9187` copy, receipt in `evals/receipts/2026-10-04-s03-requirements-migration.json`; the store stays unwired — a write path is separate future work. S07's plan-park wiring landed in #59.)
-4. **Code still unfinished**: S04 and S12 barely started; most of S07 beyond the grounding check; S10 follow-ups (offline and error states, other roles, screen readers); wiring the inert modules (S15/S17 into delivery+incidents, S18 worker tree provisioning). Done in wave 5: S07's plan-park wiring (#59), S19's snapshot producer + restore-check + doctor probes (this PR).
-5. **Re-grade retained runs where possible**: only transcripts were preserved for pre-batch runs, so regrades are limited to transcript+fixture-verifiable scenarios; write supplementary `regrade-*.json` beside the records, never replacing originals.
-6. **Deferred**: configuration B of the S02 comparison (needs real API spend, owner-gated).
+1. **The z.ai terms lookup + retention stance** (DECISIONS_OPEN item 1) — a fact, then a one-line policy edit on infra-home; no image rebuild needed (the mount exists for this).
+2. **S27 live proof**: real TeployAdapter deploy against a scratch target (`SHIP_DEPLOY_ADAPTER=teploy`, off; needs a scratch destination provisioned — compute-1 is the sandbox host).
+3. **S01 live proof**: `SHIP_GIT_CREDENTIAL=env` on a real sandbox + private repo (daemon env forwarding, sandbox git >= 2.31, live proof on Forgejo+GitHub, then default-flip).
+4. **Shadow soak + review** (days of calendar time): placement/policy/budget/tool-manifest/knowledge-provenance JSONL + `placement shadow-report` / `policy shadow-report`; routing shadow selections in worker logs. No `on` flips before review.
+5. **Wave-2 code lanes** (delegate as wave 5 was): S10 follow-ups (offline/error states, other roles, screen readers), S04 preview isolation (teploy-cli repo — the AUDIT_OPEN mitigation proposal), rest of S07, S18 worker tree provisioning, S15/S17 wiring.
+6. **S12/D07**: owner call first (DECISIONS_OPEN item 2).
+7. **B-leg** of the S02 comparison: owner-gated real API spend.
 
 ## Working rules that paid off
 
-- One branch and PR per slice; merge only on green CI, pinned to the checked head; resolve conflicts by merging main in, never rewriting history.
-- Agents in parallel worktrees: give each its own scratch directory (the shared one caused a backup collision) and tell them to skip `scripts/grader-sensitivity.test.mjs` locally (fixed port 8901); CI runs it.
+- One branch and PR per slice; merge only on green CI, pinned to the checked head; resolve conflicts by merging main in, never rewriting history (the S19 lane's triple conflict was resolved this way).
+- Parallel agents in isolated worktrees: own scratch dir each, skip `scripts/grader-sensitivity.test.mjs` locally (fixed port 8901); CI runs it. Give each lane the full spec in its prompt — truncated reports are cosmetic, verify by PR contents + CI.
 - Every wiring change: default-off equivalence test, a real-path test with the flag on, a negative control per rule.
-- Quote interpolated paths in any command template a test executes (PR #56 was the spaced-checkout lesson).
-- Never redeploy a teploy app from a hand-copied or stripped teploy.yml — deploy from the repo that owns the full one, or you fight the original deployment's shape (the 2026-10-04 gateway incident: ad-hoc deploy from a stripped yml removed the running container; restored by redeploying the exact revision from the real repo with no data loss, but it did not need to happen).
-- Production changes: coordinated stop + verified backup first (scripts/ship-backup.sh), waiting runs must survive, gateway is a separate app and stays up.
+- Quote interpolated paths in command templates (PR #56).
+- Never redeploy from a stripped teploy.yml — deploy from the repo that owns the full one (the gateway incident, recorded in AUDIT_OPEN).
+- Production changes: coordinated stop + verified backup (`scripts/ship-backup.sh`), waiting runs must survive (audit states: 164 completed / 25 failed / 6 cancelled / 5 waiting), gateway stays up.
+- Env changes need a teploy redeploy to take effect (container env is baked at create; `docker restart` reuses it).
+- GitHub PR CI events occasionally dropped for lane-pushed branches this wave — a fresh push to the branch (merge main in) reliably re-fired it.
 
-Before finishing any slice: `pnpm run lint`, `pnpm test`, and for `web/` changes `cd web && pnpm test && pnpm run build`. Install `web` dependencies first (`cd web && pnpm install --frozen-lockfile`) or the deployment-pin script test fails for an environmental reason.
+Before finishing any slice: `pnpm run lint`, `pnpm test`, and for `web/` changes `cd web && pnpm test && pnpm run build`. Install `web` dependencies first (`cd web && pnpm install --frozen-lockfile`).
