@@ -82,15 +82,69 @@ function tableCitations(transcript) {
   return [...transcript.matchAll(rows)].map(m => ({ file: m[1], line: Number(m[2]), str: m[3] }));
 }
 
-function markdownCitations(transcript) {
-  // Keep the file/line and quoted content on the same line; all extracted
-  // claims still go through the exact fixture checks below.
-  transcript = transcript.replace(/^Outcome: (.+)$/gm, (line, raw) => {
+// The Outcome line of a Ship transcript is JSON; layout-sensitive
+// extraction replaces it with the summary the run reported, so the answer
+// is read as rendered, not as one escaped line.
+function withOutcomeSummary(transcript) {
+  return String(transcript).replace(/^Outcome: (.+)$/gm, (line, raw) => {
     try { const outcome = JSON.parse(raw); return typeof outcome.summary === 'string' ? outcome.summary : line; }
     catch { return line; }
   });
+}
+
+function markdownCitations(transcript) {
+  // Keep the file/line and quoted content on the same line; all extracted
+  // claims still go through the exact fixture checks below.
   const rows = /`([A-Za-z0-9_.-]+\.[A-Za-z0-9]+):(\d+)`[ \t]*(?:—|–|→|->|-|:)[ \t]*`([^`\n]+)`/g;
-  return [...transcript.matchAll(rows)].map(m => ({ file: m[1], line: Number(m[2]), str: m[3] }));
+  return [...withOutcomeSummary(transcript).matchAll(rows)].map(m => ({ file: m[1], line: Number(m[2]), str: m[3] }));
+}
+
+// A bound triple can also be laid out as a signpost: the reference names
+// the file and the line with the word "line" between them ("`index.html`
+// line 16", "`index.html:16`"), and the exact string follows on the same
+// line after a dash or colon connector, or on the next line as a fenced or
+// indented block under a heading that ends with ":". Found live by the
+// 2026-10-03/04 batch (eval-20261003-3/4, eval-20261004-1): all three
+// answers carried the same verifiable triple the inline forms carry and all
+// three failed a grader that understood only adjacent-quote layouts. The
+// binding stays tight on purpose: between the line number and the string
+// there must be a connector (dash, arrow or colon) and no digits (so range
+// prose like "lines 18–20" never binds), and a block binds only directly
+// under a colon-ended heading. Every bound triple goes through the same
+// verbatim verification below — a paraphrase or an off-by-one in this
+// layout fails exactly as it does inline.
+const SIGNPOST_REF = /(?<![\\A-Za-z0-9_.-])`?([A-Za-z0-9_.-]+\.[A-Za-z0-9]+)`?(?:\s*[,:]\s*|\s+)(?:lines?\s+)?(\d+)/g;
+const SIGNPOST_CONNECTOR = /[—–→]|->|:|-/;
+
+function signpostCitations(transcript) {
+  const out = [];
+  const lines = withOutcomeSummary(transcript).split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    for (const ref of line.matchAll(SIGNPOST_REF)) {
+      const after = line.slice(ref.index + ref[0].length);
+      const quoted = after.match(QUOTED);
+      if (quoted !== null) {
+        const between = after.slice(0, quoted.index);
+        if (SIGNPOST_CONNECTOR.test(between) && !/\d/.test(between)) {
+          out.push({ file: ref[1], line: Number(ref[2]), str: quoted[1] ?? quoted[2] ?? quoted[3] });
+        }
+      }
+      if (line.trimEnd().endsWith(':') && i + 1 < lines.length && lines[i + 1].trim() !== '') {
+        const next = lines[i + 1];
+        let str = null;
+        if (/^\s*(?:```|~~~)/.test(next)) {
+          for (let j = i + 2; j < lines.length && !/^\s*(?:```|~~~)/.test(lines[j]); j++) {
+            if (lines[j].trim() !== '') { str = lines[j].trim(); break; }
+          }
+        } else if (/^ {2,}\S/.test(next)) {
+          str = next.trim();
+        }
+        if (str !== null) out.push({ file: ref[1], line: Number(ref[2]), str });
+      }
+    }
+  }
+  return out;
 }
 
 function linesContaining(files, needle) {
@@ -133,6 +187,7 @@ export async function grade({ workDir, fixture, scenario, transcriptPath, summar
     ...findingsCitations(transcript),
     ...tableCitations(transcript),
     ...markdownCitations(transcript),
+    ...signpostCitations(transcript),
   ];
 
   let citationsOk = true;

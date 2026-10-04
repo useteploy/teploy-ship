@@ -24,6 +24,7 @@ import { telemetryComment } from "./observe.js";
 import type { TestOutcome } from "./tests.js";
 import { testComment, testScopeNote } from "./tests.js";
 import type { Rung } from "./ladder.js";
+import { testIntegritySection, type TestIntegrityRecord } from "./test-integrity-surface.js";
 
 export const VERIFICATION_START = "<!-- teploy-ship:verification -->";
 export const VERIFICATION_END = "<!-- /teploy-ship:verification -->";
@@ -56,6 +57,14 @@ export interface Evidence {
    * proofLinks): the visual pair and the flow's shots, in reading order.
    */
   proof?: Array<{ name: string; url: string }>;
+  /**
+   * S08 surfacing (advisory, behind SHIP_TEST_INTEGRITY_SURFACING=on): the
+   * detector's findings over the published diff, rendered by
+   * test-integrity-surface.ts next to the test line they qualify. Present
+   * only when the flag is on AND something was found; absent is
+   * byte-identical to a build without the field.
+   */
+  testIntegrity?: TestIntegrityRecord;
 }
 
 /**
@@ -74,6 +83,11 @@ export function verificationSection(evidence: Evidence, runId: string): string |
     parts.push(testComment(tests, evidence.testsBaseline));
     const scope = testScopeNote(tests.command, evidence.changedPaths ?? []);
     if (scope !== undefined) parts.push(`**Scope:** ${scope}`);
+  }
+  // Beside the test line it qualifies, the same placement the run page's
+  // Verification panel uses for its advisory line.
+  if (evidence.testIntegrity !== undefined) {
+    parts.push(testIntegritySection(evidence.testIntegrity));
   }
   const preview = evidence.preview;
   if (preview !== undefined && preview.kind !== "skipped") {

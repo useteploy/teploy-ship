@@ -28,6 +28,29 @@ All notable changes to Teploy Ship are recorded here.
   run — that proof is a rehearsal). The support bundle (`scriptVersion` 2)
   now carries `doctor.json` and the latest backup manifest — the receipt,
   never the archive — both degrading to note files.
+
+- **The S03 requirements store has its migration, rehearsed on the real
+  store's backup (008).** `ship_task_requirements` — the record of which
+  statements were ACCEPTED as a task's requirements and which were later
+  waived, by whom and why (`src/task-requirements.ts`, drafted in an earlier
+  slice) — now has migration `008-ship-task-requirements` in `src/migrations.ts`,
+  the same additive new-table convention as 006/007: ledger-recorded on every
+  store, guarded by the write-shaped shape probe and the DDL-parity test, and a
+  rename-aside rebuild for a shape that has in fact never been released (so the
+  limb is unreachable today and nothing is ever copied or dropped). The store
+  itself stays deliberately UNWIRED — no route, worker path or UI writes it;
+  the `taskRecord()` projection is still read-only and a write path remains
+  future work gated on the programme's S03 rollout list. The migration was
+  rehearsed on a restored copy of the production store (verified
+  `pre-80c9187-shadow-deploy-2026-10-04` backup, isolated throwaway engine,
+  live containers untouched): additive-only across 45 tables / 4223 rows (only
+  `ship_migrations` moved, 7→8), replay a no-op, and the store's primary-key
+  and conditional-update semantics (idempotent add, conflict refusal,
+  exactly-once waiver) verified on the real engine rather than the unit-test
+  fake. Driver: `scripts/check-task-requirements-migration.mjs`
+  (`SHIP_ISOLATED_CHECK=1` + `NUCLEUS_URL`, the check-intake-concurrency
+  isolation contract); receipt:
+  `evals/receipts/2026-10-04-s03-requirements-migration.json`.
 - **The takeover panel has a BROWSER tab (S12's last surface).** While a
   lease is held, the operator drives a real headless Chromium running inside
   the sandbox — the same one the visual and flow rungs use (the node and go

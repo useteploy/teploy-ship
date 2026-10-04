@@ -63,6 +63,7 @@ import {
 import { buildIfDeclared, flowIfPresent, observeIfDeclared, recordLadder, smokeIfDeclared, visualIfDeclared, type AssetSink, type LadderHooks } from "./ladder-steps.js";
 import { compareAroundNow, effectiveTelemetryTarget, telemetryAppliesTo, telemetryRegression, type TelemetryTarget, type TelemetryVerdict } from "./observe.js";
 import { spliceVerification, verificationSection, type Evidence } from "./verification.js";
+import { surfacedTestIntegrity } from "./test-integrity-surface.js";
 import { shortHash, warmClient, warmSlugOf, type WarmState } from "./warm.js";
 import { mergeFact, verificationSummary, type VerificationFacts } from "./verification-summary.js";
 import { preExisting, runTests, testComment, testTargetFromInput, testsFailedNudge, type TestOutcome, type TestTarget } from "./tests.js";
@@ -86,6 +87,8 @@ import type { NetworkTier } from "./egress.js";
 import type { CodeSearch } from "./code-index.js";
 import { CHANGE_EVENT, MERGE_EVENT, PLAN_EVENT } from "./plan.js";
 import type { ChangeDecisionPayload, MergeDecisionPayload } from "./plan.js";
+import { groundPlanFromExecutor, planGroundingEnabled } from "./plan-grounding.js";
+import type { GroundingReport } from "./plan-grounding.js";
 import { classifyChange, mergeParkSummary, midRunParkReasons, parseNumstat } from "./change-class.js";
 import type { ChangedFile, ChangeVerdict } from "./change-class.js";
 import type { PlanDecisionPayload } from "./plan.js";
@@ -1838,7 +1841,23 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
         messages.push({ role: "user", content: PLAN_REQUEST });
         const planStep = await ws.ctx.step(`${p}plan-think`, async () => {
           const generated = await generateText({ model: config.model, messages });
-          return { text: generated.text, usage: generated.usage };
+          // S07 plan grounding (advisory, SHIP_PLAN_GROUNDING, default off):
+          // computed INSIDE this step and attached as an additive `grounding`
+          // field on its result — never a new step, so the recorded sequence is
+          // a function of the input whatever the executing worker's env says,
+          // and a replay reads the report back from the log without re-running
+          // git. A workspace that is not a git repository (a bare run) has no
+          // committed tree to ground against: the field is omitted, and the
+          // park proceeds exactly as without the flag.
+          let grounding: GroundingReport | undefined;
+          if (planGroundingEnabled()) {
+            try {
+              grounding = await groundPlanFromExecutor(ws.executor, generated.text);
+            } catch {
+              grounding = undefined;
+            }
+          }
+          return { text: generated.text, usage: generated.usage, ...(grounding !== undefined ? { grounding } : {}) };
         });
         addUsage(planStep.usage);
 
@@ -2748,6 +2767,13 @@ async function publishIfRepoRun(
     if (followUpPreview !== undefined && input.supersedePreviews === true) await supersedeOlderPreviews(ctx, config, input, followUpPreview);
     const legs = await runLadderLegs(ctx, executor, config, input, followUpPreview, co.branch, { baseline, build, tests }, assetSink(ref, token, input.pr, config.artifacts));
     const followUpProof = proofLinks(legs);
+    // S08 surfacing: the detector over the diff this follow-up just published,
+    // rendered into the same Verification section as the rest of the evidence.
+    const followUpIntegrity = surfacedTestIntegrity({
+      diff: push.kind === "pushed" ? push.diff : undefined,
+      where: "the pull request body",
+      runId: ctx.runId,
+    });
     const followUp: Evidence = {
       ...(tests !== undefined ? { tests } : {}),
       ...(baseline !== undefined ? { testsBaseline: baseline } : {}),
@@ -2755,6 +2781,7 @@ async function publishIfRepoRun(
       ...(input.telemetry === true ? { telemetry: await telemetryIfAsked(ctx, config, input) } : {}),
       ...(legs.rungs !== undefined ? { rungs: legs.rungs } : {}),
       ...(followUpProof.length > 0 ? { proof: followUpProof } : {}),
+      ...(followUpIntegrity !== undefined ? { testIntegrity: followUpIntegrity } : {}),
     };
     await publishVerification(ctx, ref, token, input.pr, followUp);
     // NO auto-merge and NO rollback watch on this path, deliberately. A review
@@ -2839,6 +2866,11 @@ async function publishIfRepoRun(
   if (legs.flow !== undefined) facts.flow = legs.flow;
   if (legs.observe !== undefined) facts.observeWindow = legs.observe;
   const proof = proofLinks(legs);
+  // S08 surfacing: the detector over the diff this run published (the recorded
+  // repo-push diff — the same bytes the run page's panel analyses), rendered
+  // into the Verification section publishVerification amends onto the body.
+  // Nothing is recorded; off and shadow write nothing at all.
+  const integrity = surfacedTestIntegrity({ diff: push.diff, where: "the pull request body", runId: ctx.runId });
   await publishVerification(ctx, ref, token, pr.number, {
     ...(tests !== undefined ? { tests } : {}),
     ...(baseline !== undefined ? { testsBaseline: baseline } : {}),
@@ -2849,6 +2881,7 @@ async function publishIfRepoRun(
     // So a root-level suite over a change confined to one subtree is called
     // out on the pull request rather than read as a green gate (tests.ts).
     ...(changedList.length > 0 ? { changedPaths: changedList.map((f) => f.path) } : {}),
+    ...(integrity !== undefined ? { testIntegrity: integrity } : {}),
   });
   // Computed ONCE, outside any step, and fed to both gates below. It is a pure
   // function of the `telemetry-check` step's recorded verdict (see
