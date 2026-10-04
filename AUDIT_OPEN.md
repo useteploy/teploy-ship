@@ -1,5 +1,20 @@
 # Open audit items
 
+## 2026-10-04 — grader sensitivity and UI audit (S02, S10)
+
+- **Eight product-journey graders were too weak and are tightened (PR #34).**
+  Eleven wrong-but-plausible variants passed the previous graders; ten were
+  defects (see the programme's S02 graders row). Recorded results under
+  `evals/product-journeys/results/` were not re-graded, so earlier pass counts
+  were scored under the looser graders and must be quoted with that caveat.
+  The `pj-s-feature` placeholder acceptance is a deliberate known limit.
+  Re-grading retained runs is possible only where their trees were preserved
+  (only `eval-20260924-16` could be checked; it still passes).
+- **UI audit (PR #33), deferred:** 79 sub-24px compact targets (design
+  decision), the framework's plain-text 404 for unknown paths (upstream
+  candidate for Neutron, with reproduction in `docs/UI_AUDIT_2026-10-03.md`;
+  not yet filed), and human observation of target users.
+
 ## 2026-10-03 — wave-2 modules landed unwired (S06–S28), and what each leaves open
 
 These modules are merged with tests but no route, worker or UI calls them, so
