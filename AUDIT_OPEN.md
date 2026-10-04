@@ -17,6 +17,16 @@
   (neutron#6, teploy-cli#18/#19/#20 — links above/below).
 - The integration-check test-quoting defect (spaced checkout paths) was
   fixed in PR #56.
+- **S08 PR-body/webhook surfacing built (PR #58, this wave):** the detector's
+  findings now reach the pull request's Verification section and the
+  run-completion webhook behind `SHIP_TEST_INTEGRITY_SURFACING=off|shadow|on`
+  (default off; invalid values are off with a log). Advisory only — not a
+  gate, not in the delivery record, and no step is added to the durable log
+  in any mode. The one step-sequence effect, under `on` only: a run whose
+  only verification part is an integrity finding now records the existing
+  `verification` step. Clean diffs surface nothing (pinned by test). Not one
+  live run; soak `shadow` on the real worker and read its logs before any
+  `on` flip, the same rule as the other shadows.
 
 ## 2026-10-04 — wave 4 (S07, S13, S15/S17, S19, S21, S22, S24, S26, S27)
 
@@ -123,7 +133,8 @@ detail is in the programme's wave-2 status table. Items that matter for audit:
 - **S05 stack-detect (PR #17):** unwired; readiness still keys on project
   config only, not manifest, lockfile or recipe digest.
 - **S08 test-integrity (PRs #18, #31):** advisory-only on the run page; not a
-  gate; not in the PR body or webhook; false-positive rate unmeasured.
+  gate; PR-body/webhook surfacing landed in wave 5 (PR #58) behind a
+  default-off flag; false-positive rate unmeasured.
 - **S16 schedules (PR #24):** the overlap policy is inert in the worker until
   `sweepWorkflowSchedules` is given `isRunning`.
 - **S25 policy (PR #25):** tested pure core, no enforcement; every entry point
