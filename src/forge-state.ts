@@ -1,4 +1,5 @@
 import type { RepoRef } from "./git.js";
+import { forgeFetch } from "./forge-egress.js";
 import { safeForDisplay } from "./redact.js";
 export interface ForgeState {
   checkedAt: string;
@@ -37,7 +38,7 @@ export async function readForgeState(
   ref: RepoRef,
   token: string,
   pr: number,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = forgeFetch,
   options: { inlineComments?: boolean } = {},
 ): Promise<ForgeState> {
   if (!Number.isSafeInteger(pr) || pr < 1)
