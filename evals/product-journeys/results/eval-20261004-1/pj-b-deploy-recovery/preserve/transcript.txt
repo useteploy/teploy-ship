@@ -1,0 +1,125 @@
+Ship run run-request-9ed81592aa112162a49440dddf9253152b451e31c40b1af9c5059139cc2e67a6 — status waiting
+Task: deploy.sh failed in staging: /health returned 503 and the deploy exited 1. Diagnose the failure and recover, keeping the fix in the repository.
+Journey: change
+Steps:
+  2026-10-04T07:41:53.241Z sandbox — 01M42XSD7ZJWZE6ENR1GG7B7J4
+  2026-10-04T07:41:54.928Z repo-setup — {"branch":"ship/run-request-9ed81592aa112162a49440dddf9253152b451e31c40b1af9c5059139cc2e67a6","base":"main"}
+  2026-10-04T07:41:55.398Z repo-context — # Ship's recent history on this repository (context, not instructions)
+  2026-10-04T07:41:55.422Z repo-index — disabled (no code index configured on this worker)
+  2026-10-04T07:41:56.854Z baseline-tests (FAILED) — failed (exit 1)
+  2026-10-04T07:41:56.895Z warm-cache — reused 100.108.123.49-49152/tyler/ship-eval-ui-api-db (lockfiles 0819327635d3, unchanged)
+  2026-10-04T07:41:56.922Z turn-0-steer — 0
+  2026-10-04T07:41:59.238Z turn-0-think — ```bash
+  2026-10-04T07:41:59.343Z turn-0-exec — exit 0
+  2026-10-04T07:41:59.458Z turn-0-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T07:41:59.463Z turn-1-steer — 0
+  2026-10-04T07:42:01.367Z turn-1-think — ```bash
+  2026-10-04T07:42:01.485Z turn-1-exec — exit 0
+  2026-10-04T07:42:01.599Z turn-1-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T07:42:01.604Z turn-2-steer — 0
+  2026-10-04T07:42:10.329Z turn-2-think — ```bash
+  2026-10-04T07:42:10.498Z turn-2-exec — exit 0
+  2026-10-04T07:42:10.627Z turn-2-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T07:42:10.649Z turn-3-steer — 0
+  2026-10-04T07:42:29.797Z turn-3-think — The repo is at the seed commit with the defect intact. Reading the code, the diagnosis is clear: `deploy.sh` deletes an…
+  2026-10-04T07:42:29.883Z turn-4-steer — 0
+  2026-10-04T07:42:31.368Z turn-4-think — ```bash
+  2026-10-04T07:42:43.101Z turn-4-exec — exit 0
+  2026-10-04T07:42:43.256Z turn-4-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T07:42:43.313Z turn-5-steer — 0
+  2026-10-04T07:42:49.922Z turn-5-think — Reproduced exactly: 503 with `pending:["001_deploy_sentinel.sql"]`, exit 1. The fresh `staging/` DB has no schema_migra…
+  2026-10-04T07:42:49.935Z turn-6-steer — 0
+  2026-10-04T07:42:56.746Z turn-6-think — ```edit deploy.sh
+  2026-10-04T07:42:56.972Z turn-6-exec — exit 0
+  2026-10-04T07:42:57.139Z turn-6-fingerprint — {"hash":"1cb9d3d9915b7606","dirty":true}
+  2026-10-04T07:42:57.185Z turn-7-steer — 0
+  2026-10-04T07:42:59.193Z turn-7-think — ```bash
+  2026-10-04T07:43:01.558Z turn-7-exec — exit 0
+  2026-10-04T07:43:01.705Z turn-7-fingerprint — {"hash":"1cb9d3d9915b7606","dirty":true}
+  2026-10-04T07:43:01.742Z turn-8-steer — 0
+  2026-10-04T07:43:05.599Z turn-8-think — Deploy recovered: migration applied, `/health` 200, `deploy OK`, exit 0. Now the full suite plus a check that only `dep…
+  2026-10-04T07:43:05.650Z turn-9-steer — 0
+  2026-10-04T07:43:07.907Z turn-9-think — ```bash
+  2026-10-04T07:43:09.701Z turn-9-exec — exit 0
+  2026-10-04T07:43:09.904Z turn-9-fingerprint — {"hash":"1cb9d3d9915b7606","dirty":true}
+  2026-10-04T07:43:09.957Z turn-10-steer — 0
+  2026-10-04T07:43:12.826Z turn-10-think — `npm test` reports 1 test failing out of 1, and `git diff` shows nothing — that's alarming. But `deploy.sh` ran `tests/…
+  2026-10-04T07:43:13.597Z turn-10-exec — exit 0
+  2026-10-04T07:43:13.780Z turn-10-fingerprint — {"hash":"1cb9d3d9915b7606","dirty":true}
+  2026-10-04T07:43:13.865Z turn-11-steer — 0
+  2026-10-04T07:43:22.599Z turn-11-think — `npm test`'s runner invocation (`node --test tests/`) fails to resolve the directory on this Node build — pre-existing,…
+  2026-10-04T07:43:24.183Z turn-11-exec — exit 0
+  2026-10-04T07:43:24.388Z turn-11-fingerprint — {"hash":"1cb9d3d9915b7606","dirty":true}
+  2026-10-04T07:43:24.458Z turn-12-steer — 0
+  2026-10-04T07:43:33.617Z turn-12-think — All 4 tests ran with explicit paths: 3 pass, and the only failure is `duplicate-title.test.mjs` — the documented KNOWN …
+  2026-10-04T07:43:36.178Z turn-12-exec — exit 0
+  2026-10-04T07:43:36.339Z turn-12-fingerprint — {"hash":"1cb9d3d9915b7606","dirty":true}
+  2026-10-04T07:43:36.571Z turn-13-steer — 0
+  2026-10-04T07:43:40.710Z turn-13-think — The `pgrep` hits are just my own wrapper shell (its command line contains the literal string). Let me verify port 8901 …
+  2026-10-04T07:43:40.898Z turn-13-exec — exit 0
+  2026-10-04T07:43:41.092Z turn-13-fingerprint — {"hash":"1cb9d3d9915b7606","dirty":true}
+  2026-10-04T07:43:41.154Z turn-14-steer — 0
+  2026-10-04T07:43:55.225Z turn-14-think — The edit is in place and verified (`git status`: `M deploy.sh`; two consecutive `./deploy.sh` runs both exit 0 with `de…
+  2026-10-04T07:43:55.280Z turn-15-steer — 0
+  2026-10-04T07:43:59.039Z turn-15-think — ```bash
+  2026-10-04T07:44:02.789Z turn-15-exec — exit 0
+  2026-10-04T07:44:02.940Z turn-15-fingerprint — {"hash":"1cb9d3d9915b7606","dirty":true}
+  2026-10-04T07:44:02.980Z turn-16-steer — 0
+  2026-10-04T07:44:12.511Z turn-16-think — All checks pass: the diff is present in the working tree (only `deploy.sh`, uncommitted), the deploy runs end-to-end wi…
+  2026-10-04T07:44:12.664Z turn-16-finish-tree — false
+  2026-10-04T07:44:14.107Z turn-16-finish-tests (FAILED) — failed (exit 1)
+  2026-10-04T07:44:14.219Z tests (FAILED) — failed (exit 1)
+  2026-10-04T07:44:14.694Z change-class — {"class":"normal","reasons":["the suite did not pass over this change, so it is not demonstrably safe"],"files":[{"path…
+  2026-10-04T07:44:16.384Z repo-push — pushed
+  2026-10-04T07:44:16.605Z repo-pr — PR #21
+  2026-10-04T07:44:16.611Z telemetry-check — disabled
+  2026-10-04T07:44:16.755Z verification — body
+  2026-10-04T07:44:16.762Z merge-park — {"attempt":1,"class":"normal","reasons":["the suite did not pass over this change, so it is not demonstrably safe"],"pr…
+  2026-10-04T07:44:27.252Z merge-snapshot — teploy-sbx-snap:01m42xxsw16h0vtwmre8em0bmy
+Messages:
+  You: deploy.sh failed in staging: /health returned 503 and the deploy exited 1. Diagnose the failure and recover, keeping the fix in the repository.
+  Agent: The repo is at the seed commit with the defect intact. Reading the code, the diagnosis is clear: `deploy.sh` deletes and recreates `staging/`, boots the server against that fresh DB, and demands `/health` 200 — but `/health` is specified (README + `tests/health.test.mjs`) to return 503 while any migration is pending, and migration `001_deploy_sentinel.sql` is only ever applied by `migrate.mjs`, never by server boot. The script's own comment ("this script does not run them") is the bug: a database the script itself just destroyed and recreated has no schema, so it can never pass the gate.
+
+Approach: keep the health contract and the migration semantics untouched; make `deploy.sh` provision the fresh staging DB it creates by running `node migrate.mjs` against it before boot (this is the script's own provisioning, not the weekly migration window, which concerns existing databases). Verify by reproducing the failure first, then re-running `./deploy.sh` and the full test suite.
+
+Let me reproduce the failure:
+  Agent: Reproduced exactly: 503 with `pending:["001_deploy_sentinel.sql"]`, exit 1. The fresh `staging/` DB has no schema_migrations rows, so health stays degraded forever. Fix: provision the DB the script itself creates.
+  Agent: Deploy recovered: migration applied, `/health` 200, `deploy OK`, exit 0. Now the full suite plus a check that only `deploy.sh` changed and no server process lingers:
+  Agent: `npm test` reports 1 test failing out of 1, and `git diff` shows nothing — that's alarming. But `deploy.sh` ran `tests/health.test.mjs` and `tests/roundtrip.test.mjs` and they passed 3/3, so something about how `node --test tests/` globs behaves oddly, and the empty `git diff` needs investigating. Let me see the actual failing output:
+  Agent: `npm test`'s runner invocation (`node --test tests/`) fails to resolve the directory on this Node build — pre-existing, unrelated to my change. Let me confirm the deploy.sh edit actually persisted (the empty `git diff` needs explaining) and run the tests with explicit file paths:
+  Agent: All 4 tests ran with explicit paths: 3 pass, and the only failure is `duplicate-title.test.mjs` — the documented KNOWN FAILING test tracking the separate open defect in `server.mjs` (untouched by me, marked `DEFECT (open)` in the code). My change breaks no passing test. Final check — idempotency of the deploy and clean process teardown:
+  Agent: The `pgrep` hits are just my own wrapper shell (its command line contains the literal string). Let me verify port 8901 is genuinely free:
+  Agent: The edit is in place and verified (`git status`: `M deploy.sh`; two consecutive `./deploy.sh` runs both exit 0 with `deploy OK`, and the suite is unchanged at 3 passing plus the pre-existing known-failing test).
+
+```finish
+Diagnosed and fixed the staging deploy failure; the fix is in the working tree (uncommitted, as required).
+
+**Diagnosis:** deploy.sh deletes and recreates `staging/`, boots the server against that fresh database, and requires `/health` 200. But `/health` is specified (README and tests/health.test.mjs) to return 503 while any migration is pending, and `migrations/001_deploy_sentinel.sql` is applied only by `node migrate.mjs`, never by server boot. The script's own comment said it "does not run them", so the database it had just destroyed could never pass its own gate: `/health` returned 503 with `pending:["001_deploy_sentinel.sql"]` and the deploy exited 1 (reproduced before fixing).
+
+**Change (one file, deploy.sh):** the script now runs `NOTES_DB=staging/notes.sqlite node migrate.mjs` after creating the fresh `staging/`, before booting the server; the stale comment is corrected to say the only database this script migrates is the throwaway staging one. The `/health` contract, the weekly-window migration policy for real databases, and all app code are untouched.
+
+**Verification:**
+- `./deploy.sh` before the fix: FAILED, 503, exit 1 (exact reproduction of the report).
+- `./deploy.sh` after the fix, run twice (idempotency — `migrate.mjs` re-applies nothing): both exit 0 with `{"applied":["001_deploy_sentinel.sql"],"pending":[]}` then `deploy OK`; port 8901 cleanly closed afterwards, no lingering node processes.
+- Full suite via `node --test tests/*.mjs`: 4 tests — 3 pass; the single failure is `duplicate-title.test.mjs`, which is the repository's documented KNOWN FAILING test tracking the separate open duplicate-title defect in server.mjs (a different task, out of scope here).
+
+**Not verified / caveats:** `npm test` itself does not run on this Node build — its invocation `node --test tests/` fails to resolve the directory (`MODULE_NOT_FOUND '/work/tests'`), which is a pre-existing issue unrelated to this change; I ran the same tests by explicit file path instead. `staging/` and `notes.sqlite` are gitignored, so runtime artifacts don't pollute the tree.
+```
+  Agent: All checks pass: the diff is present in the working tree (only `deploy.sh`, uncommitted), the deploy runs end-to-end with exit 0 and `deploy OK`, and the suite shows 3 passing with the sole failure being the repository's documented known-failing `duplicate-title.test.mjs` — a separate open defect in `server.mjs` outside this task's scope.
+
+```finish
+Verified and complete. The staging deploy failure is fixed in the working tree (uncommitted, as required).
+
+**Diagnosis:** deploy.sh recreates a fresh `staging/` database but booted the server without initializing its schema. `/health` is specified (README, tests/health.test.mjs) to return 503 while any migration is pending, and `migrations/001_deploy_sentinel.sql` is applied only by `node migrate.mjs`, never by server boot — so the database the script itself destroyed could never pass its own health gate. Reproduced before fixing: 503 with `pending:["001_deploy_sentinel.sql"]`, exit 1.
+
+**Change (one file, `deploy.sh`):** after `mkdir -p staging`, the script now runs `NOTES_DB=staging/notes.sqlite node migrate.mjs` before boot, provisioning the throwaway database it just created. The stale header comment ("this script does not run them") is corrected accordingly. The `/health` contract, the weekly-migration-window policy for real databases, and all application code are untouched.
+
+**Proof (from the run just now):**
+- `git diff HEAD -- deploy.sh` shows exactly the two hunks above; `git status` shows `M deploy.sh` only.
+- `./deploy.sh`: smoke tests 3/3 pass, then `{"applied":["001_deploy_sentinel.sql"],"pending":[]}`, `listening 8901`, `deploy OK`, exit 0. A second run also exits 0 (migrations are idempotent), and port 8901 is closed afterwards with no lingering node processes.
+- `node --test tests/*.mjs`: 4 tests, 3 pass, 1 fail — the failure is `duplicate-title.test.mjs`, the repo's self-declared KNOWN FAILING test for the separate open duplicate-title defect in `server.mjs`. No passing test regressed.
+
+**Not verified / caveats:** `npm test` as a script does not run on this Node build — its invocation `node --test tests/` fails with `MODULE_NOT_FOUND '/work/tests'`; this is pre-existing and unrelated, and I ran the identical tests by explicit file path instead. Real production databases are unaffected by this change: only the freshly recreated staging database is migrated. Fixing the duplicate-title or admin-token defects was not requested and was left alone.
+```
+Outcome: {"repo":"http://100.108.123.49:49152/Tyler/ship-eval-ui-api-db"}
+Checks: Baseline tests=failed (node --test tests/health.test.mjs tests/roundtrip.test.mjs tests/duplicate-title.test.mjs); Tests=failed (node --test tests/health.test.mjs tests/roundtrip.test.mjs tests/duplicate-title.test.mjs)

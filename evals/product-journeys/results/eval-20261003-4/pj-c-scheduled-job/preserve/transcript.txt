@@ -1,0 +1,145 @@
+Ship run run-request-9b245de2a5180726397c4be5b19976521ce759f26078b76c3799a3401762fc65 — status waiting
+Task: Implement jobs/expire_sessions.py per jobs/README.md: expire sessions older than the service's real TTL, nightly, idempotent, exit 0 on a missing store, reading the store only through service.load_store/save_store.
+Journey: change
+Steps:
+  2026-10-04T07:10:37.961Z sandbox — 01M42W05X8KXF2WXY4M6C0KZPX
+  2026-10-04T07:10:39.590Z repo-setup — {"branch":"ship/run-request-9b245de2a5180726397c4be5b19976521ce759f26078b76c3799a3401762fc65","base":"main"}
+  2026-10-04T07:10:40.015Z repo-context — # Ship's recent history on this repository (context, not instructions)
+  2026-10-04T07:10:40.021Z repo-index — disabled (no code index configured on this worker)
+  2026-10-04T07:10:40.926Z baseline-tests — passed
+  2026-10-04T07:10:40.933Z warm-cache — reused 100.108.123.49-49152/tyler/ship-eval-unfamiliar-service (lockfiles 0819327635d3, unchanged)
+  2026-10-04T07:10:40.937Z turn-0-steer — 0
+  2026-10-04T07:10:52.708Z turn-0-think — I'll start by exploring the repository structure. ```bash
+  2026-10-04T07:10:52.803Z turn-0-exec — exit 0
+  2026-10-04T07:10:52.921Z turn-0-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T07:10:52.928Z turn-1-steer — 0
+  2026-10-04T07:10:55.374Z turn-1-think — ```bash
+  2026-10-04T07:10:55.493Z turn-1-exec — exit 0
+  2026-10-04T07:10:55.596Z turn-1-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T07:10:55.602Z turn-2-steer — 0
+  2026-10-04T07:10:58.588Z turn-2-think — ```bash
+  2026-10-04T07:10:58.696Z turn-2-exec — exit 0
+  2026-10-04T07:10:58.811Z turn-2-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T07:10:58.817Z turn-3-steer — 0
+  2026-10-04T07:11:02.673Z turn-3-think — ```bash
+  2026-10-04T07:11:02.796Z turn-3-exec — exit 0
+  2026-10-04T07:11:02.904Z turn-3-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T07:11:02.911Z turn-4-steer — 0
+  2026-10-04T07:11:07.713Z turn-4-think — ```bash
+  2026-10-04T07:11:07.841Z turn-4-exec — exit 0
+  2026-10-04T07:11:07.942Z turn-4-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T07:11:07.947Z turn-5-steer — 0
+  2026-10-04T07:12:02.930Z turn-5-think — Let me check `.gitignore` and run the existing test suite as a baseline before writing anything.```bash
+  2026-10-04T07:12:03.930Z turn-5-exec — exit 0
+  2026-10-04T07:12:04.057Z turn-5-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T07:12:04.139Z turn-6-steer — 0
+  2026-10-04T07:12:47.198Z turn-6-think — Baseline: 6 tests pass. Here's my read of the situation and plan:
+  2026-10-04T07:12:47.343Z turn-6-exec — exit 0
+  2026-10-04T07:12:47.513Z turn-6-fingerprint — {"hash":"ae62e7ca68d1162d","dirty":true}
+  2026-10-04T07:12:47.564Z turn-7-steer — 0
+  2026-10-04T07:13:03.131Z turn-7-think — Now the tests. I'll put them in `tests/` (not `jobs/`, since cron executes every `*.py` in `jobs/` nightly).```create t…
+  2026-10-04T07:13:03.308Z turn-7-exec — exit 0
+  2026-10-04T07:13:03.593Z turn-7-fingerprint — {"hash":"ad0caa05befab133","dirty":true}
+  2026-10-04T07:13:03.718Z turn-8-steer — 0
+  2026-10-04T07:13:05.346Z turn-8-think — ```bash
+  2026-10-04T07:13:06.386Z turn-8-exec — exit 0
+  2026-10-04T07:13:06.612Z turn-8-fingerprint — {"hash":"ad0caa05befab133","dirty":true}
+  2026-10-04T07:13:06.645Z turn-9-steer — 0
+  2026-10-04T07:13:19.739Z turn-9-think — The test surfaced a real edge case: `service.live_sessions` raises `KeyError` if the store JSON lacks a `sessions` key.…
+  2026-10-04T07:13:20.169Z turn-9-exec — exit 0
+  2026-10-04T07:13:20.372Z turn-9-fingerprint — {"hash":"2d46231fe9a6839f","dirty":true}
+  2026-10-04T07:13:20.492Z turn-10-steer — 0
+  2026-10-04T07:13:23.810Z turn-10-think — ```bash
+  2026-10-04T07:13:24.830Z turn-10-exec — exit 0
+  2026-10-04T07:13:25.040Z turn-10-fingerprint — {"hash":"2d46231fe9a6839f","dirty":true}
+  2026-10-04T07:13:25.082Z turn-11-steer — 0
+  2026-10-04T07:13:31.597Z turn-11-think — All 13 tests pass. Now a real end-to-end run the way cron would invoke it â from a different cwd, via `KEEPNOTE_STORE…
+  2026-10-04T07:13:32.330Z turn-11-exec — exit 0
+  2026-10-04T07:13:32.529Z turn-11-fingerprint — {"hash":"2d46231fe9a6839f","dirty":true}
+  2026-10-04T07:13:32.640Z turn-12-steer — 0
+  2026-10-04T07:13:36.912Z turn-12-think — End-to-end verified from a foreign cwd. Final check of the tree state and the finished artifact:```bash
+  2026-10-04T07:13:37.097Z turn-12-exec — exit 0
+  2026-10-04T07:13:37.240Z turn-12-fingerprint — {"hash":"2d46231fe9a6839f","dirty":true}
+  2026-10-04T07:13:37.294Z turn-13-steer — 0
+  2026-10-04T07:13:41.502Z turn-13-think — One tidy-up for readability (the `sessions` variable is already guaranteed non-empty by the guard), then a final full t…
+  2026-10-04T07:13:41.717Z turn-13-exec — exit 0
+  2026-10-04T07:13:41.872Z turn-13-fingerprint — {"hash":"2d46231fe9a6839f","dirty":true}
+  2026-10-04T07:13:41.935Z turn-14-steer — 0
+  2026-10-04T07:13:44.069Z turn-14-think — ```bash
+  2026-10-04T07:13:45.089Z turn-14-exec — exit 0
+  2026-10-04T07:13:45.237Z turn-14-fingerprint — {"hash":"2d46231fe9a6839f","dirty":true}
+  2026-10-04T07:13:45.296Z turn-15-steer — 0
+  2026-10-04T07:13:54.368Z turn-15-think — Done and verified.
+  2026-10-04T07:13:54.511Z turn-16-steer — 0
+  2026-10-04T07:14:01.044Z turn-16-think — ```finish
+  2026-10-04T07:14:01.050Z turn-17-steer — 0
+  2026-10-04T07:14:09.674Z turn-17-think — Re-reading the task: it requires (1) `jobs/expire_sessions.py` implementing the README contract — expire sessions older…
+  2026-10-04T07:14:11.287Z turn-17-exec — exit 0
+  2026-10-04T07:14:11.619Z turn-17-fingerprint — {"hash":"2d46231fe9a6839f","dirty":true}
+  2026-10-04T07:14:11.781Z turn-18-steer — 0
+  2026-10-04T07:14:18.738Z turn-18-think — Everything required by the task is present and proven by the output above: the artifact exists and is correct, the cont…
+  2026-10-04T07:14:18.937Z turn-18-finish-tree — false
+  2026-10-04T07:14:19.917Z turn-18-finish-tests — passed
+  2026-10-04T07:14:19.973Z tests — passed
+  2026-10-04T07:14:20.301Z change-class — {"class":"normal","reasons":["150 changed lines (trivial is at most 40)"],"files":[{"path":"jobs/expire_sessions.py","a…
+  2026-10-04T07:14:22.119Z repo-push — pushed
+  2026-10-04T07:14:22.353Z repo-pr — PR #13
+  2026-10-04T07:14:22.360Z telemetry-check — disabled
+  2026-10-04T07:14:22.523Z verification — body
+  2026-10-04T07:14:22.530Z merge-park — {"attempt":1,"class":"normal","reasons":["150 changed lines (trivial is at most 40)"],"pr":"http://100.108.123.49:49152…
+  2026-10-04T07:14:33.188Z merge-snapshot — teploy-sbx-snap:01m42w71p9v3w4egs7t25w5fkg
+Messages:
+  You: Implement jobs/expire_sessions.py per jobs/README.md: expire sessions older than the service's real TTL, nightly, idempotent, exit 0 on a missing store, reading the store only through service.load_store/save_store.
+  Agent: I'll start by exploring the repository structure.
+  Agent: Let me check `.gitignore` and run the existing test suite as a baseline before writing anything.
+  Agent: Baseline: 6 tests pass. Here's my read of the situation and plan:
+
+**Approach**: Create `jobs/expire_sessions.py` that prunes sessions via `service.live_sessions()` (so the TTL is whatever `service.SESSION_TTL_SECONDS` actually is â not the README's 30 min, which conflicts with the code's pinned 24 h; the tests pin 24 h "on purpose"). It saves only when something was actually removed, which makes it byte-idempotent *and* guarantees a missing store is never created (exit 0). Store access goes exclusively through `service.load_store`/`service.save_store`. Verification: new tests in `tests/` covering missing-store, pruning, byte-identical reruns, no-op untouched writes, and TTL-not-hardcoded, plus the existing suite.
+  Agent: Now the tests. I'll put them in `tests/` (not `jobs/`, since cron executes every `*.py` in `jobs/` nightly).
+  Agent: The test surfaced a real edge case: `service.live_sessions` raises `KeyError` if the store JSON lacks a `sessions` key. Rather than changing `service.py`'s format-owning behavior (out of scope), I'll guard in the job so a malformed store is a no-op, not a crash.
+  Agent: All 13 tests pass. Now a real end-to-end run the way cron would invoke it â from a different cwd, via `KEEPNOTE_STORE`, checking exit codes and byte-identity:
+  Agent: End-to-end verified from a foreign cwd. Final check of the tree state and the finished artifact:
+  Agent: One tidy-up for readability (the `sessions` variable is already guaranteed non-empty by the guard), then a final full test run:
+  Agent: Done and verified.
+
+**What I did**
+
+- **Approach**: implement the job in `jobs/expire_sessions.py` that prunes sessions by delegating to `service.live_sessions()` (so the TTL is whatever `service.SESSION_TTL_SECONDS` really is), saves only when something was actually removed, and exits 0 when the store is absent. Tests go in `tests/` rather than `jobs/`, because cron executes *every* `*.py` in `jobs/` nightly.
+- **`jobs/expire_sessions.py`** (new): `prune_sessions(path=None)` reads via `service.load_store`, compares against `service.live_sessions`, and writes via `service.save_store` **only if `expired > 0`**. That single condition gives both required properties: a rerun is a byte-identical no-op (idempotence), and a missing store is never created (exit 0 on the quiesced box). It tolerates a hand-edited store missing the `sessions` key by returning 0 instead of crashing.
+- **`tests/test_jobs_expire_sessions.py`** (new): 7 tests â missing store exits 0 and creates no file; only expired sessions are pruned (bookmarks untouched); reruns are byte-identical; a no-op run doesn't even rewrite the file; the TTL is *not* hardcoded (verified both by source inspection and behaviorally by monkeypatching `service.SESSION_TTL_SECONDS` to 60s and confirming a 1-hour-old session is pruned); store access uses only the service helpers; and a store without a `sessions` key is survivable.
+- Did not touch `service.py`, `requirements.txt`, or the TTL. Note a pre-existing conflict in the repo: `README.md` says sessions expire after 30 minutes, but `service.SESSION_TTL_SECONDS` is 24 h and `tests/test_service.py` pins 24 h "on purpose" as a contract decision. The job follows the *code*, which is the only behavior that matters for expiry; reconciling that doc/test discrepancy (or applying `patches/review-candidate.patch`) is a contract decision for the lighthouse team, out of scope here.
+
+**Verification** (all green): the full suite now runs 13 tests (6 pre-existing + 7 new), `OK` â no regressions. I also ran the job the way cron would, from `/tmp` with `KEEPNOTE_STORE` set: first run `rc 0`, pruned 1 expired session; second run `rc 0`, removed 0, file **byte-identical**; with the store file deleted, `rc 0` and no store file was created. The working tree contains only the two new files; nothing was committed.
+
+**Not verified**: behavior against a real `store.json` in production, and the actual 02:00 UTC cron invocation (no cron exists in this sandbox).
+  Agent: ```finish
+Implemented jobs/expire_sessions.py per jobs/README.md and verified it.
+
+Approach: prune sessions by delegating to service.live_sessions() so the TTL is whatever service.SESSION_TTL_SECONDS actually is (not hardcoded — README says 30 min but code/tests pin 24 h; the job follows the code). It saves via service.save_store ONLY when expired > 0, which yields both required properties at once: a rerun is a byte-identical no-op (idempotent), and a missing store is never created (exit 0 on the quiesced box). Store access goes exclusively through service.load_store/save_store. Tests live in tests/ (not jobs/) because cron executes every *.py in jobs/ nightly.
+
+Artifacts (edited working tree, nothing committed; only these two files added):
+- jobs/expire_sessions.py — prune_sessions(path=None) + main(); tolerates a hand-edited store missing the "sessions" key by returning 0 instead of crashing.
+- tests/test_jobs_expire_sessions.py — 7 tests: missing store exits 0 and creates no file; only expired sessions pruned (bookmarks untouched); reruns byte-identical; no-op run doesn't rewrite the file; TTL not hardcoded (source check + behavioral: monkeypatched service.SESSION_TTL_SECONDS=60 prunes a 1-hour-old session); store access only via service helpers; store without "sessions" key survivable.
+
+Verification: full suite runs 13 tests (6 pre-existing + 7 new), OK — no regressions. Also ran the job the way cron would, from /tmp with KEEPNOTE_STORE set: run1 rc 0 removed 1 expired session; run2 rc 0 removed 0 and the file was byte-identical; with the store deleted rc 0 and no store file was created.
+
+Not verified: real production store.json and the actual 02:00 UTC cron invocation (no cron in this sandbox). The pre-existing README (30 min) vs code/tests (24 h) TTL discrepancy was left alone — a contract decision for the lighthouse team, out of scope.
+```
+  Agent: Re-reading the task: it requires (1) `jobs/expire_sessions.py` implementing the README contract — expire sessions older than the service's real TTL, idempotent, exit 0 on missing store, store access only via `service.load_store`/`save_store`; (2) tests found and run, no regressions; (3) edited working tree, uncommitted. One command chain proving all of it:
+  Agent: Everything required by the task is present and proven by the output above: the artifact exists and is correct, the contract is met, all 13 tests pass, and nothing is committed.
+
+```finish
+Re-verified the whole task with one command chain; every requirement is proven above.
+
+Artifacts (existing and correct, uncommitted in the working tree — git status shows exactly the two new files, HEAD untouched):
+- jobs/expire_sessions.py (1282 bytes, cat'd above) — prunes sessions via service.live_sessions()/service.load_store()/service.save_store() only (grep confirms; no direct json.load/json.dump and no hardcoded TTL). It writes only when expired > 0, which makes it idempotent AND means a missing store is never created; exits 0 in all cases. Also tolerates a store missing the "sessions" key.
+- tests/test_jobs_expire_sessions.py (4407 bytes) — 7 new tests covering missing-store exit 0 with no file created, pruning only expired sessions, byte-identical reruns, untouched no-op runs, TTL-not-hardcoded (behavioral + source check), service-helper-only store access, and the missing-sessions-key edge case.
+
+Proof of behavior:
+- Full suite: Ran 13 tests, OK (6 pre-existing service tests + 7 new) — no regressions.
+- Executed as cron would (cwd=/tmp, KEEPNOTE_STORE set): run1 rc=0 removed 1 expired session; run2 rc=0 removed 0 and the file was byte-identical (idempotent); the stale session was pruned while the fresh session and bookmarks were kept; with the store file deleted, rc=0, no stderr, and no store file was created (quiesced-box requirement).
+
+Not verified: behavior against a real production store.json and the actual 02:00 UTC cron invocation (no cron in this sandbox). The pre-existing README (30 min) vs code/tests (24 h) TTL discrepancy was deliberately left alone — the job follows the code's real TTL, and reconciling that conflict is a lighthouse contract decision outside this task's scope.
+```
+Outcome: {"repo":"http://100.108.123.49:49152/Tyler/ship-eval-unfamiliar-service"}
+Checks: Baseline tests=passed (python3 -m unittest discover -s tests); Tests=passed (python3 -m unittest discover -s tests)

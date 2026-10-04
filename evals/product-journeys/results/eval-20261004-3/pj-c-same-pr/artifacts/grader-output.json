@@ -1,0 +1,51 @@
+{
+  "scenarioId": "pj-c-same-pr",
+  "grader": "graders/pj-c-same-pr.mjs",
+  "pass": false,
+  "reasons": [
+    "README still claims 30-minute expiry — the false claim was not corrected"
+  ],
+  "evidence": [
+    {
+      "kind": "structural",
+      "check": "TTL resolves from KEEPNOTE_TTL_SECONDS, 24h default present",
+      "value": true
+    },
+    {
+      "kind": "probe",
+      "check": "default TTL is 24h",
+      "value": {
+        "code": 0,
+        "out": "default-24h"
+      }
+    },
+    {
+      "kind": "probe",
+      "check": "env override works",
+      "value": {
+        "code": 0,
+        "out": "override-60"
+      }
+    },
+    {
+      "kind": "structural",
+      "check": "README no longer claims 30 minutes",
+      "value": false
+    },
+    {
+      "kind": "fixture-tests",
+      "check": "suite (with updated pin/override tests) passes",
+      "value": 0
+    },
+    {
+      "kind": "forge",
+      "check": "revision pushed to the same PR; no new PR opened",
+      "value": {
+        "pr": 7,
+        "revised": true,
+        "headAfter": "bc52525107d35abf77a9c01da03a31bf12148848",
+        "newPrs": []
+      }
+    }
+  ]
+}

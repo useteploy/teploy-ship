@@ -1,5 +1,23 @@
 # Open audit items
 
+## 2026-10-04 — wave 5 (live: S02 batch, production upgrade, shadows on)
+
+- Production ship web+worker upgraded `dd5b13e` -> `80c9187` (coordinated
+  stop; pre-deploy backup `pre-80c9187-shadow-deploy-2026-10-04` verified;
+  the five waiting runs survived intact; gateway stayed at `c0b07dd`).
+- Shadow flags set on production: `SHIP_BUDGET_RESERVATION`, 
+  `SHIP_MODEL_ROUTING`, `SHIP_PLACEMENT`, `SHIP_TOOL_MANIFEST`,
+  `SHIP_KNOWLEDGE_PROVENANCE` = shadow, `SHIP_POLICY_SHADOW=on`.
+  `SHIP_MODEL_ROUTING` shadow logs "no usable policy" until
+  `SHIP_MODEL_ROUTING_POLICY` is set — setting that policy is now the
+  unblock for that shadow's logs. Shadow-log review before any `on` flip
+  is still the rule (see NEXT_SESSION.md).
+- S02 executed (A only, $0 real spend): see
+  `evals/product-journeys/BATCH_2026-10-04.md`. Upstream reports filed
+  (neutron#6, teploy-cli#18/#19/#20 — links above/below).
+- The integration-check test-quoting defect (spaced checkout paths) was
+  fixed in PR #56.
+
 ## 2026-10-04 — wave 4 (S07, S13, S15/S17, S19, S21, S22, S24, S26, S27)
 
 All off by default or observe-only; flags are in the programme's wave-4 table.
@@ -8,9 +26,12 @@ All off by default or observe-only; flags are in the programme's wave-4 table.
   legacy path (unreadable status, including a brand-new destination, holds).
   A manual `teploy deploy` landing inside Ship's deploy is overwritten and still
   reads back confirmed; the lease serialises Ship's own releases on one host
-  only. Upstream feature requests (not filed): deploy dry-run; deploy generation
-  and compare-and-set in `status --json`; documented `logs` flags and a
-  no-deployment-versus-unreachable signal.
+  only. Upstream feature requests (filed 2026-10-04): deploy dry-run
+  ([teploy-cli#18](http://100.108.123.49:49152/Tyler/teploy-cli/issues/18)); deploy generation
+  and compare-and-set in `status --json`
+  ([teploy-cli#19](http://100.108.123.49:49152/Tyler/teploy-cli/issues/19)); documented `logs` flags and a
+  no-deployment-versus-unreachable signal
+  ([teploy-cli#20](http://100.108.123.49:49152/Tyler/teploy-cli/issues/20)).
 - **S21 (PR #51):** provenance is a sidecar, not fields on the note. Project
   scope is repo-only. Pre-flag notes read as unknown. Run `shadow` and read the
   logs before `on`.
@@ -114,7 +135,7 @@ detail is in the programme's wave-2 status table. Items that matter for audit:
   `teploy deploy` can race a tracked delivery; a destination lease is needed
   before a Teploy adapter may declare fencing. Upstream feature requests (not
   defects): a Teploy CLI dry-run, and a status field exposing a deploy
-  generation. Not yet filed.
+  generation. Filed 2026-10-04: teploy-cli#18 and #19.
 - **S13 (PR #28):** the steer-route refusal has no automated test.
 - **S21, S22, S23, S24, S06:** modules exist unwired (PRs #22, #19, #21, #23,
   #29); see each PR's wiring list. The tool-manifest schema is strict, so a

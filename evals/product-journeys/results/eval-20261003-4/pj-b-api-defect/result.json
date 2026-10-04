@@ -1,0 +1,108 @@
+{
+  "scenarioId": "pj-b-api-defect",
+  "family": "ui-api-db",
+  "runId": "eval-20261003-4",
+  "harnessRevision": "80c9187fe961defaf99d7334c4e38b093862234c",
+  "fixtureRevision": "sha256:d52d22eff8f12e8d2c02bc69200bc34b8d8dfbd8ef87400cefaf53f58e2b6886",
+  "adapter": "ship",
+  "outcome": "pass",
+  "firstAttempt": {
+    "pass": true,
+    "graderReasons": [],
+    "endedBy": "agent"
+  },
+  "eventualSuccess": {
+    "pass": true
+  },
+  "interventions": [],
+  "rescue": {
+    "needed": false,
+    "provided": false,
+    "notes": []
+  },
+  "latencyMs": 433925,
+  "cost": {
+    "status": "priced",
+    "amount": 0.094947,
+    "currency": "USD",
+    "source": "Ship run ledger (workspace API costUSD), summed over this attempt's runs"
+  },
+  "verifiedEvidence": [
+    {
+      "check": "first create is 201",
+      "value": 201
+    },
+    {
+      "check": "duplicate title status",
+      "value": 409
+    },
+    {
+      "check": "duplicate title body",
+      "value": {
+        "error": "duplicate title",
+        "title": "same title"
+      }
+    },
+    {
+      "check": "malformed JSON is not reported as a duplicate-title conflict",
+      "value": 500
+    },
+    {
+      "check": "shipped suite passes in the worked tree",
+      "value": 0
+    },
+    {
+      "check": "shipped test files unmodified",
+      "value": true
+    }
+  ],
+  "claimedEvidence": [
+    {
+      "claim": "What I did: Verified end-to-end; the task is complete; changed 2 files (classified trivial); pushed 18ada2239e; opened pull request #16; the merge was denied and the pull request closed (S02 eval harness: graded; scratch fixtures are never merged). What I verified: the suite was already failing on the base branch (exit 1) before any edit; the suite passed over the published tree (`node --test tests/health.test.mjs tests/roundtrip.test.mjs tests/duplicate-title.test.mjs`, 1s). What I could not verify: telemetry (this run is not on tyler/fylun, which is the repo OBSERVE_SERVICE=fylun-web is built from).",
+      "verdict": "unverified"
+    }
+  ],
+  "artifacts": [
+    "preserve/transcript.txt",
+    "artifacts/grader-output.json"
+  ],
+  "preserve": {
+    "dir": "preserve/"
+  },
+  "probesApplied": [],
+  "gradedAt": "2026-10-04T06:59:00.932Z",
+  "startedAt": "2026-10-04T06:51:46.721Z",
+  "ship": {
+    "shipRuns": [
+      {
+        "role": "scenario",
+        "runId": "run-request-4eab5be8c2bf4199b80971dc5135fdb283c8fb43d662cb5b1041d0f1e7b2131f",
+        "journey": "change",
+        "status": "completed",
+        "latencyMs": 433378,
+        "costUSD": 0.0949468,
+        "costPriced": true,
+        "pr": "http://100.108.123.49:49152/Tyler/ship-eval-ui-api-db/pulls/16"
+      }
+    ],
+    "fixtureRepo": {
+      "url": "http://100.108.123.49:49152/tyler/ship-eval-ui-api-db.git",
+      "head": "ea8408b7e178ed3f81f20519165fa86f6e9bdc13",
+      "ref": "refs/heads/main",
+      "treeMatchesFixture": true,
+      "mainAfter": "ea8408b7e178ed3f81f20519165fa86f6e9bdc13",
+      "mainMoved": false
+    },
+    "captured": {
+      "sha": "18ada2239e1e0a14268cca929fc66fd2f7586bdd",
+      "source": "PR #16 head",
+      "expected": "18ada2239e1e0a14268cca929fc66fd2f7586bdd"
+    },
+    "disposition": [
+      "run-request-4eab5be8c2bf4199b80971dc5135fdb283c8fb43d662cb5b1041d0f1e7b2131f: merge denied after capture (Ship closes the PR)"
+    ],
+    "pollRetries": 0,
+    "journey": "change",
+    "intake": "request"
+  }
+}

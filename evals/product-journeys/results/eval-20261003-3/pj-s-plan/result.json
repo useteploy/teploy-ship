@@ -1,0 +1,113 @@
+{
+  "scenarioId": "pj-s-plan",
+  "family": "small-site",
+  "runId": "eval-20261003-3",
+  "harnessRevision": "7c3388c2f1caf2841539a7e2b570b99fb2f58a36",
+  "fixtureRevision": "sha256:54aa415a72c85b5e2cb91895bcd9c07bb9263893b626ff391b37abbe6c3e7e98",
+  "adapter": "ship",
+  "outcome": "pass",
+  "firstAttempt": {
+    "pass": true,
+    "graderReasons": [],
+    "endedBy": "agent"
+  },
+  "eventualSuccess": {
+    "pass": true
+  },
+  "interventions": [],
+  "rescue": {
+    "needed": false,
+    "provided": false,
+    "notes": []
+  },
+  "latencyMs": 72554,
+  "cost": {
+    "status": "priced",
+    "amount": 0.016027,
+    "currency": "USD",
+    "source": "Ship run ledger (workspace API costUSD), summed over this attempt's runs"
+  },
+  "verifiedEvidence": [
+    {
+      "check": "work tree unchanged",
+      "value": {
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "unchanged": [
+          "about.html",
+          "index.html",
+          "styles.css"
+        ]
+      }
+    },
+    {
+      "check": "plan references index.html and styles.css",
+      "value": {
+        "index.html": true,
+        "styles.css": true
+      }
+    },
+    {
+      "check": "plan contains no applied unified diff",
+      "value": true
+    },
+    {
+      "check": "plan addresses the gallery",
+      "value": true
+    },
+    {
+      "check": "no PR opened, nothing pushed",
+      "value": {
+        "prOpened": false,
+        "pushed": false
+      }
+    }
+  ],
+  "claimedEvidence": [
+    {
+      "claim": "PLAN: Gallery section (three photo cards) under the home page hero — planning only, nothing implemented.\n\n## What the repo actually looks like (evidence)\n\n- Tracked files are exactly `index.html`, `about.html`, `styles.css` (249 bytes). No build tooling, no JS, no `images/` directory.\n- `index.html` has no formal `<header>`/hero element. What reads as the \"hero\" is the top of `<main>`: `<h1>Tideline Woodworks</h1>`, `<p class=\"tagline\">Furniture made on the coast</p>`, and the intro paragraph `Hand-built tables and shelves…`. The gallery would slot between that paragraph and `</main>`.\n- No existing image usage: a repo-wide grep for `<img`, `<picture`, `<figure`, `background-image` returns nothing, and no `.jpg/.png/.webp/.svg/.gif/.avif` files exist. Every image the gallery needs must come from somewhere new.\n- `styles.css` is minimal (page max-width `40rem`, nav link spacing, footer rule, `.tagline` italic). It has no grid/flex or card styles, so card layout CSS is entirely new — and `styles.css` is shared by both pages, which constrains how we add to it.\n- Branch is byte-identical to `main` (`git diff main` empty). Note: Ship's prior-run history mentions a `contact.html` and an \"Our story\" nav label, but neither exists in this tree — this plan is based on the current two-page state and stays inside `index.html`/`styles.css`, so it would not conflict with those changes if they land first.\n\n## Assumptions (stated, not decided for you)\n\n1. \"Hero\" means the `h1` + `.tagline` + intro paragraph block at the top of `<main>` in `index.html`; the gallery goes directly after the intro paragraph, before `</main>`.\n2. \"Photo card\" means a `<figure>` containing an `<img>` plus a short `<figcaption>` caption. Semantic `<figure>`/`<figcaption>` beats a bare `<div>` here: the caption is a caption, screen readers get the pairing for free, and no extra class plumbing is needed.\n3. Cards are static (no lightbox, no links).\n4. Editing `styles.css` is in scope even though it is shared — additions will be class-scoped and purely additive, so `about.html` rendering is provably unchanged.\n5. No new page is created and the nav is untouched.\n\n## Open questions (genuinely change the work)\n\n- **Where do the three photos come from?** Nothing exists in the repo. Options: (a) you supply real files, (b) neutral placeholder images committed as `images/gallery-1.jpg`… to be swapped later, (c) no image files at all — colored CSS placeholder blocks. This is the biggest fork in the plan and I have not assumed an answer for a real implementation; for scoping, (b) is what the steps below assume.\n- **Image dimensions/aspect ratio** — ideally uniform (e.g. 4:3, ~800px wide) so three cards align without cropping hacks.\n- **Caption and alt-text wording** (e.g. product names like \"Driftwood dining table\") — needs your copy.\n- **Section heading** — include an `<h2>` (e.g. \"Recent work\") or let the cards stand alone?\n\n## Scoped steps (not executed)\n\n1. **Assets** — add `images/` with three photos, named consistently (e.g. `gallery-table.jpg`, `gallery-shelf.jpg`, `gallery-bench.jpg`).\n2. **`index.html`** — one insertion between the intro paragraph and `</main>`: a `<section class=\"gallery\">` (optionally with an `<h2>`) containing three `<figure class=\"card\">` elements, each with `<img src=\"images/…\" alt=\"…\" loading=\"lazy\">` and a `<figcaption>`. No other lines touched.\n3. **`styles.css`** — append only: `.gallery { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: 1rem; margin-top: 2rem; }` plus card framing (border, small padding) and `img { max-width: 100%; height: auto; display: block; }`. Nothing existing is edited or removed.\n4. **Verify** — serve locally (`python3 -m http.server`) and check both pages; confirm no 404s for the images; check a narrow (~360px) viewport to confirm the cards wrap.\n\n## Tradeoffs in plain language\n\n- **Real photos vs placeholders vs CSS blocks:** real photos look right immediately but require assets I don't have; placeholder files keep the layout shippable and swappable; CSS-only blocks avoid binary files entirely but arguably aren't \"photo cards\". Cheapest honest option is placeholder files with clearly-named paths.\n- **`auto-fit` grid vs media queries:** `auto-fit` gives you a 3-up row on desktop and automatic stacking on phones in one rule with no breakpoints — right for a site this size. Media queries would buy finer control nobody has asked for.\n- **Shared stylesheet vs page-local styles:** the site's convention is one shared `styles.css`; adding page-scoped rules there is correct. The cost is that the file affects both pages, which is why the plan insists on additive, `.gallery`/`.card`-scoped rules only — `about.html` has no matching elements, so its rendering cannot change.\n- **`loading=\"lazy\"`:** free win for images below the fold, one attribute, no downside at this scale.\n\n## Acceptance criteria\n\n1. `index.html` contains one `<section class=\"gallery\">` placed after the intro paragraph and before `</main>`, holding exactly three `<figure>` cards.\n2. Every `<img>` has a non-empty `alt` and a resolvable `src` (no 404s when served); each card has a `<figcaption>`.\n3. `about.html` is byte-identical to its current version; `git diff` shows changes only in `index.html`, `styles.css`, and new files under `images/`.\n4. In `styles.css`, existing rules are untouched — the diff is purely appended lines scoped to `.gallery`/`.card`.\n5. At the 40rem page width the three cards sit in a row; at ~360px they stack one-per-row without horizontal scrolling.\n6. Both pages still load with no console errors via a local static server.\n\nNo implementation, merge, or deployment is authorized by this plan; it awaits your explicit go-ahead, and answers to the open questions above (especially the photo source) before any code is written.\nFINDINGS_JSON []\n[]",
+      "verdict": "unverified"
+    }
+  ],
+  "artifacts": [
+    "preserve/transcript.txt",
+    "artifacts/grader-output.json"
+  ],
+  "preserve": {
+    "dir": "preserve/"
+  },
+  "probesApplied": [],
+  "gradedAt": "2026-10-04T06:17:09.571Z",
+  "startedAt": "2026-10-04T06:15:56.968Z",
+  "ship": {
+    "shipRuns": [
+      {
+        "role": "scenario",
+        "runId": "run-request-065cc11b3f77611ec6909d7b8f26026689f8e986d6ac6cab61a263d5ae60d85e",
+        "journey": "plan",
+        "status": "completed",
+        "latencyMs": 71785,
+        "costUSD": 0.016027200000000002,
+        "costPriced": true,
+        "pr": null
+      }
+    ],
+    "fixtureRepo": {
+      "url": "http://100.108.123.49:49152/tyler/ship-eval-small-site.git",
+      "head": "eab3c41e06482456b2d6e8d6f61ef90502106457",
+      "ref": "refs/heads/main",
+      "treeMatchesFixture": true,
+      "mainAfter": "eab3c41e06482456b2d6e8d6f61ef90502106457",
+      "mainMoved": false
+    },
+    "captured": {
+      "sha": null,
+      "source": "none"
+    },
+    "disposition": [],
+    "pollRetries": 0,
+    "journey": "plan",
+    "intake": "request"
+  }
+}

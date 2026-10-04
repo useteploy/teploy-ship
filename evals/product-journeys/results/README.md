@@ -41,10 +41,15 @@ pass, so keep it out of model-quality denominators and count it on its own.
 Records written before this class existed keep their original outcome; a
 supplementary `reclassification-*.json` beside them says what they would be.
 
-## Status: NO BASELINE NUMBERS EXIST YET
+## Status
 
-Execution wiring exists and is gated (`--i-authorize-spend`); it has been
-validated against the mock adapter only. No scenario has run against a real
-model through this harness — the first live run is the orchestrator's
-single-scenario canary (`pj-s-question` via the ship adapter). Records
-written so far by tests use temp results roots and are not baselines.
+- **First live canary**: `eval-20261003-2` `pj-s-question` n=1 via the ship
+  adapter (pass). Mock-adapter validation predates it.
+- **First executed batch (2026-10-04, configuration A only)**:
+  `eval-20261003-3`, `eval-20261003-4`, `eval-20261004-1` (11 scenarios
+  × 3 repeats; `pj-b-db-migration` excluded as planned) plus
+  `eval-20261004-2/-3/-4` (`pj-c-same-pr` × 3). Summary and honest reads:
+  [../BATCH_2026-10-04.md](../BATCH_2026-10-04.md). 24/33 first-attempt
+  passes, $1.81 priced, $0 real spend (coding-plan key). Records earlier
+  than this batch were scored under the pre-PR-#34 graders and keep their
+  original grades.

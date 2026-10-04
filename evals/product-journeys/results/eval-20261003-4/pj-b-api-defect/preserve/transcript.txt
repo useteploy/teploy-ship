@@ -1,0 +1,184 @@
+Ship run run-request-4eab5be8c2bf4199b80971dc5135fdb283c8fb43d662cb5b1041d0f1e7b2131f — status waiting
+Task: tests/duplicate-title.test.mjs fails: POSTing a note with a duplicate title returns 500. Make the endpoint behave correctly per README.
+Journey: change
+Steps:
+  2026-10-04T06:51:52.916Z sandbox — 01M42TXV6EAV6KE6TNAGQ7TGDA
+  2026-10-04T06:51:54.689Z repo-setup — {"branch":"ship/run-request-4eab5be8c2bf4199b80971dc5135fdb283c8fb43d662cb5b1041d0f1e7b2131f","base":"main"}
+  2026-10-04T06:51:55.137Z repo-context — # Ship's recent history on this repository (context, not instructions)
+  2026-10-04T06:51:55.184Z repo-index — disabled (no code index configured on this worker)
+  2026-10-04T06:51:56.564Z baseline-tests (FAILED) — failed (exit 1)
+  2026-10-04T06:51:56.707Z warm-cache — reused 100.108.123.49-49152/tyler/ship-eval-ui-api-db (lockfiles 0819327635d3, unchanged)
+  2026-10-04T06:51:56.830Z turn-0-steer — 0
+  2026-10-04T06:51:59.723Z turn-0-think — I'll start by exploring the repository to understand the project structure and conventions. ```bash ls -la && cat packa…
+  2026-10-04T06:51:59.782Z turn-1-steer — 0
+  2026-10-04T06:52:07.020Z turn-1-think — ```bash
+  2026-10-04T06:52:07.186Z turn-1-exec — exit 0
+  2026-10-04T06:52:07.552Z turn-1-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T06:52:07.625Z turn-2-steer — 0
+  2026-10-04T06:52:09.982Z turn-2-think — Let me look at the README, server code, and the failing test. ```bash cat README.md && echo "=== server.mjs ===" && cat…
+  2026-10-04T06:52:10.056Z turn-3-steer — 0
+  2026-10-04T06:52:12.747Z turn-3-think — ```bash
+  2026-10-04T06:52:12.945Z turn-3-exec — exit 0
+  2026-10-04T06:52:13.130Z turn-3-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T06:52:13.197Z turn-4-steer — 0
+  2026-10-04T06:52:16.234Z turn-4-think — Now let me read the test files, especially the failing one. ```bash for f in tests/*.test.mjs; do echo "=== $f ==="; ca…
+  2026-10-04T06:52:16.345Z turn-5-steer — 0
+  2026-10-04T06:52:19.966Z turn-5-think — ```bash
+  2026-10-04T06:52:20.123Z turn-5-exec — exit 0
+  2026-10-04T06:52:20.324Z turn-5-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T06:52:20.363Z turn-6-steer — 0
+  2026-10-04T06:52:26.258Z turn-6-think — Baseline: run the test suite to confirm the failure. ```bash node --version && npm test 2>&1 | tail -40```
+  2026-10-04T06:52:26.306Z turn-7-steer — 0
+  2026-10-04T06:52:29.291Z turn-7-think — ```bash
+  2026-10-04T06:52:31.062Z turn-7-exec — exit 0
+  2026-10-04T06:52:31.181Z turn-7-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T06:52:31.190Z turn-8-steer — 0
+  2026-10-04T06:52:36.994Z turn-8-think — The `npm test` script has an issue with directory arg on this Node version. Let me run the test files directly to get t…
+  2026-10-04T06:52:37.002Z turn-9-steer — 0
+  2026-10-04T06:52:39.145Z turn-9-think — ```bash
+  2026-10-04T06:52:40.491Z turn-9-exec — exit 0
+  2026-10-04T06:52:40.596Z turn-9-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T06:52:40.603Z turn-10-steer — 0
+  2026-10-04T06:52:49.469Z turn-10-think — Baseline confirmed: 3 pass, 1 fail (`duplicate-title.test.mjs`). Before editing, let me inspect the exact shape of the …
+  2026-10-04T06:52:49.569Z turn-11-steer — 0
+  2026-10-04T06:53:00.162Z turn-11-think — ```bash
+  2026-10-04T06:53:00.492Z turn-11-exec — exit 0
+  2026-10-04T06:53:00.671Z turn-11-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T06:53:00.725Z turn-12-steer — 0
+  2026-10-04T06:53:12.120Z turn-12-think — Error shape confirmed: `code: ERR_SQLITE_ERROR`, message `UNIQUE constraint failed: notes.title`. Let me check whether …
+  2026-10-04T06:53:12.127Z turn-13-steer — 0
+  2026-10-04T06:53:22.152Z turn-13-think — ```bash
+  2026-10-04T06:53:22.412Z turn-13-exec — exit 0
+  2026-10-04T06:53:22.523Z turn-13-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T06:53:22.534Z turn-14-steer — 0
+  2026-10-04T06:53:31.945Z turn-14-think — The `errcode`/`errstr` properties confirm a SQLite-origin error; `code: 'ERR_SQLITE_ERROR'` plus the message naming `no…
+  2026-10-04T06:53:32.196Z turn-14-exec — exit 0
+  2026-10-04T06:53:32.369Z turn-14-fingerprint — {"hash":"95767a34f2c20535","dirty":true}
+  2026-10-04T06:53:32.438Z turn-15-steer — 0
+  2026-10-04T06:53:34.479Z turn-15-think — Now let me verify the change in context and run the full test suite. ```bash sed -n '36,60p' server.mjs && echo "=== te…
+  2026-10-04T06:53:34.563Z turn-16-steer — 0
+  2026-10-04T06:53:36.241Z turn-16-think — ```bash
+  2026-10-04T06:55:36.507Z turn-16-exec (FAILED) — exit 124
+  2026-10-04T06:55:36.925Z turn-16-fingerprint — {"hash":"95767a34f2c20535","dirty":true}
+  2026-10-04T06:55:37.095Z turn-17-steer — 0
+  2026-10-04T06:55:47.595Z turn-17-think — The edit is in place. The test run timed out — I need to see the real output rather than assume; let me rerun writing t…
+  2026-10-04T06:55:47.773Z turn-18-steer — 0
+  2026-10-04T06:55:49.528Z turn-18-think — ```bash
+  2026-10-04T06:56:49.735Z turn-18-exec — exit 0
+  2026-10-04T06:56:49.897Z turn-18-fingerprint — {"hash":"95767a34f2c20535","dirty":true}
+  2026-10-04T06:56:50.121Z turn-19-steer — 0
+  2026-10-04T06:56:54.766Z turn-19-think — A `ReferenceError: title is not defined` at line 53 — the sed view may not match the real file. Let me inspect with lin…
+  2026-10-04T06:56:54.813Z turn-20-steer — 0
+  2026-10-04T06:56:56.799Z turn-20-think — ```bash
+  2026-10-04T06:56:56.948Z turn-20-exec — exit 0
+  2026-10-04T06:56:57.068Z turn-20-fingerprint — {"hash":"95767a34f2c20535","dirty":true}
+  2026-10-04T06:56:57.085Z turn-21-steer — 0
+  2026-10-04T06:57:02.415Z turn-21-think — Found it: `title` is `const`-scoped inside the `try` block, so the `catch` can't see it. I'll hoist the declaration. ``…
+  2026-10-04T06:57:02.669Z turn-21-exec — exit 0
+  2026-10-04T06:57:02.825Z turn-21-fingerprint — {"hash":"f46723d6703f1a4b","dirty":true}
+  2026-10-04T06:57:02.863Z turn-22-steer — 0
+  2026-10-04T06:57:05.563Z turn-22-think — Now let me verify the full suite passes and confirm the fix works end-to-end against a real server. ```bash timeout 90 …
+  2026-10-04T06:57:05.683Z turn-23-steer — 0
+  2026-10-04T06:57:08.184Z turn-23-think — ```bash
+  2026-10-04T06:57:09.593Z turn-23-exec — exit 0
+  2026-10-04T06:57:09.787Z turn-23-fingerprint — {"hash":"f46723d6703f1a4b","dirty":true}
+  2026-10-04T06:57:09.890Z turn-24-steer — 0
+  2026-10-04T06:57:16.465Z turn-24-think — All 4 tests pass. Let me also verify the fix end-to-end against a real running server, so the check isn't only via the …
+  2026-10-04T06:57:16.514Z turn-25-steer — 0
+  2026-10-04T06:57:21.683Z turn-25-think — ```bash
+  2026-10-04T06:57:23.600Z turn-25-exec — exit 0
+  2026-10-04T06:57:23.778Z turn-25-fingerprint — {"hash":"f46723d6703f1a4b","dirty":true}
+  2026-10-04T06:57:23.819Z turn-26-steer — 0
+  2026-10-04T06:57:30.347Z turn-26-think — The duplicate-title path is fixed (409 with the title named). The malformed-JSON case still returns 500 — that's pre-ex…
+  2026-10-04T06:57:30.397Z turn-27-steer — 0
+  2026-10-04T06:57:32.613Z turn-27-think — ```bash
+  2026-10-04T06:57:34.117Z turn-27-exec — exit 0
+  2026-10-04T06:57:34.350Z turn-27-fingerprint — {"hash":"f46723d6703f1a4b","dirty":true}
+  2026-10-04T06:57:34.502Z turn-28-steer — 0
+  2026-10-04T06:57:38.163Z turn-28-think — The change shows as staged rather than unstaged. Let me confirm the diff content against HEAD. ```bash git diff HEAD --…
+  2026-10-04T06:57:38.198Z turn-29-steer — 0
+  2026-10-04T06:57:40.800Z turn-29-think — ```bash
+  2026-10-04T06:57:40.928Z turn-29-exec — exit 0
+  2026-10-04T06:57:41.065Z turn-29-fingerprint — {"hash":"f46723d6703f1a4b","dirty":true}
+  2026-10-04T06:57:41.166Z turn-30-steer — 0
+  2026-10-04T06:57:47.828Z turn-30-think — The diff is exactly the intended minimal change and all tests pass. One remaining piece of housekeeping: the README sti…
+  2026-10-04T06:57:48.032Z turn-30-exec — exit 0
+  2026-10-04T06:57:48.207Z turn-30-fingerprint — {"hash":"bb31a5a6a2fff683","dirty":true}
+  2026-10-04T06:57:48.245Z turn-31-steer — 0
+  2026-10-04T06:57:51.062Z turn-31-think — Now the final verification of both the tests and the README consistency. ```bash timeout 90 node --test tests/*.test.mj…
+  2026-10-04T06:57:51.090Z turn-32-steer — 0
+  2026-10-04T06:57:54.000Z turn-32-think — ```bash
+  2026-10-04T06:57:55.604Z turn-32-exec — exit 0
+  2026-10-04T06:57:55.749Z turn-32-fingerprint — {"hash":"bb31a5a6a2fff683","dirty":true}
+  2026-10-04T06:57:55.831Z turn-33-steer — 0
+  2026-10-04T06:58:04.712Z turn-33-think — ```finish
+  2026-10-04T06:58:04.797Z turn-34-steer — 0
+  2026-10-04T06:58:16.386Z turn-34-think — ```bash
+  2026-10-04T06:58:19.636Z turn-34-exec — exit 0
+  2026-10-04T06:58:19.740Z turn-34-fingerprint — {"hash":"bb31a5a6a2fff683","dirty":true}
+  2026-10-04T06:58:19.747Z turn-35-steer — 0
+  2026-10-04T06:58:25.833Z turn-35-think — ```finish
+  2026-10-04T06:58:25.943Z turn-35-finish-tree — false
+  2026-10-04T06:58:27.296Z turn-35-finish-tests — passed
+  2026-10-04T06:58:27.301Z tests — passed
+  2026-10-04T06:58:27.576Z change-class — {"class":"trivial","reasons":["2 files, 15 changed lines, suite green"],"files":[{"path":"README.md","added":1,"deleted…
+  2026-10-04T06:58:29.310Z repo-push — pushed
+  2026-10-04T06:58:29.524Z repo-pr — PR #16
+  2026-10-04T06:58:29.531Z telemetry-check — disabled
+  2026-10-04T06:58:29.687Z verification — body
+  2026-10-04T06:58:29.695Z merge-park — {"attempt":1,"class":"trivial","reasons":["2 files, 15 changed lines, suite green"],"pr":"http://100.108.123.49:49152/T…
+  2026-10-04T06:58:40.539Z merge-snapshot — teploy-sbx-snap:01m42v9z65fk77erekfy49xae9
+Messages:
+  You: tests/duplicate-title.test.mjs fails: POSTing a note with a duplicate title returns 500. Make the endpoint behave correctly per README.
+  Agent: I'll start by exploring the repository to understand the project structure and conventions. ```bash ls -la && cat package.json ```
+  Agent: Let me look at the README, server code, and the failing test. ```bash cat README.md && echo "=== server.mjs ===" && cat server.mjs && echo "=== tests ===" && ls tests/ && for f in tests/*; do echo "--- $f ---"; cat "$f"; done```
+  Agent: Now let me read the test files, especially the failing one. ```bash for f in tests/*.test.mjs; do echo "=== $f ==="; cat "$f"; done```
+  Agent: Baseline: run the test suite to confirm the failure. ```bash node --version && npm test 2>&1 | tail -40```
+  Agent: The `npm test` script has an issue with directory arg on this Node version. Let me run the test files directly to get the real baseline. ```bash node --test tests/*.test.mjs 2>&1 | tail -40```
+  Agent: Baseline confirmed: 3 pass, 1 fail (`duplicate-title.test.mjs`). Before editing, let me inspect the exact shape of the SQLite constraint error so the detection is precise rather than a loose message match. ```bash node -e " import { DatabaseSync } from 'node:sqlite'; const db = new DatabaseSync('/tmp/probe.sqlite'); db.exec('CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, title TEXT NOT NULL UNIQUE, body TEXT NOT NULL)'); db.prepare('INSERT INTO notes (title, body) VALUES (?, ?)').run('t','b'); try { db.prepare('INSERT INTO notes (title, body) VALUES (?, ?)').run('t','b2'); } catch (err) { console.log('name:', err.name); console.log('code:', err.code); console.log('message:', err.message); console.log('err.err:', err.err); } db.close(); "```
+  Agent: Error shape confirmed: `code: ERR_SQLITE_ERROR`, message `UNIQUE constraint failed: notes.title`. Let me check whether there's a SQLite-specific property for a more robust check. ```bash node -e " import { DatabaseSync } from 'node:sqlite'; const db = new DatabaseSync('/tmp/probe2.sqlite'); db.exec('CREATE TABLE n (t TEXT PRIMARY KEY)'); db.prepare('INSERT INTO n (t) VALUES (?)').run('x'); try { db.prepare('INSERT INTO n (t) VALUES (?)').run('x'); } catch (err) { console.log(JSON.stringify(Object.keys(err))); console.log('err.err =', err.err); console.log('code =', err.code); } db.close(); " 2>/dev/null```
+  Agent: The `errcode`/`errstr` properties confirm a SQLite-origin error; `code: 'ERR_SQLITE_ERROR'` plus the message naming `notes.title` is the precise discriminator. 
+
+**Approach:** Make `POST /api/notes` return `409 Conflict` naming the duplicate when the insert trips the `notes.title` UNIQUE constraint, keeping the existing `500` fallback for any other error. Scope is that one handler only — no schema, migration, or token work. Verify with `node --test tests/*.test.mjs` (the repo's `npm test` script is broken on this Node version because of the trailing-slash directory arg, so I run the files directly, which covers the same tests).
+  Agent: Now let me verify the change in context and run the full test suite. ```bash sed -n '36,60p' server.mjs && echo "=== tests ===" && node --test tests/*.test.mjs 2>&1 | grep -E "^(ok|not ok|# (tests|pass|fail))"```
+  Agent: The edit is in place. The test run timed out — I need to see the real output rather than assume; let me rerun writing to a file. ```bash timeout 60 node --test tests/*.test.mjs > /tmp/test-out.txt 2>&1; echo "exit=$?"; tail -30 /tmp/test-out.txt```
+  Agent: A `ReferenceError: title is not defined` at line 53 — the sed view may not match the real file. Let me inspect with line numbers. ```bash nl -ba server.mjs | sed -n '36,60p'```
+  Agent: Found it: `title` is `const`-scoped inside the `try` block, so the `catch` can't see it. I'll hoist the declaration.
+  Agent: Now let me verify the full suite passes and confirm the fix works end-to-end against a real server. ```bash timeout 90 node --test tests/*.test.mjs > /tmp/test-out.txt 2>&1; echo "exit=$?"; grep -E "^(ok|not ok|# (tests|pass|fail))" /tmp/test-out.txt```
+  Agent: All 4 tests pass. Let me also verify the fix end-to-end against a real running server, so the check isn't only via the test harness. ```bash cd /tmp && rm -rf e2e && mkdir e2e && cd e2e && NOTES_DB=/tmp/e2e/notes.sqlite PORT=8931 node /work/server.mjs & SRV=$!; sleep 1.5; echo "--- create first note (expect 201) ---"; curl -s -o /tmp/e2e/r1.json -w "status=%{http_code}\n" -X POST http://127.0.0.1:8931/api/notes -H 'Content-Type: application/json' -d '{"title":"dup title","body":"one"}'; cat /tmp/e2e/r1.json; echo; echo "--- duplicate (expect 409) ---"; curl -s -o /tmp/e2e/r2.json -w "status=%{http_code}\n" -X POST http://127.0.0.1:8931/api/notes -H 'Content-Type: application/json' -d '{"title":"dup title","body":"two"}'; cat /tmp/e2e/r2.json; echo; echo "--- other errors still 500 path / bad body (expect 400) ---"; curl -s -o /tmp/e2e/r3.json -w "status=%{http_code}\n" -X POST http://127.0.0.1:8931/api/notes -H 'Content-Type: application/json' -d 'not json'; cat /tmp/e2e/r3.json; echo; kill $SRV 2>/dev/null; wait $SRV 2>/dev/null; echo done```
+  Agent: The duplicate-title path is fixed (409 with the title named). The malformed-JSON case still returns 500 — that's pre-existing behavior outside this defect's scope (README/test only cover duplicate titles), so I'm leaving it and will note it. Let me review the final diff. ```bash git diff && echo "=== status ===" && git status --short && echo "=== final full suite ===" && timeout 90 node --test tests/*.test.mjs > /tmp/final.txt 2>&1; echo "exit=$?"; grep -E "^(ok|not ok|# (tests|pass|fail))" /tmp/final.txt```
+  Agent: The change shows as staged rather than unstaged. Let me confirm the diff content against HEAD. ```bash git diff HEAD -- server.mjs```
+  Agent: The diff is exactly the intended minimal change and all tests pass. One remaining piece of housekeeping: the README still calls `tests/duplicate-title.test.mjs` a "known failing test," which is now stale. I'll correct that line so the docs match reality.
+  Agent: Now the final verification of both the tests and the README consistency. ```bash timeout 90 node --test tests/*.test.mjs > /tmp/final2.txt 2>&1; echo "exit=$?"; grep -E "^(ok|not ok|# (tests|pass|fail))" /tmp/final2.txt; echo "=== git status ==="; git status --short; echo "=== README tail ==="; tail -5 README.md```
+  Agent: ```finish
+Fixed the duplicate-title defect in `server.mjs` (POST /api/notes) and updated the now-stale README test note.
+
+**Approach & change:** The handler's `catch` treated every failure as a 500. I added a targeted check — when the insert trips the `notes.title` UNIQUE constraint (`err.code === 'ERR_SQLITE_ERROR'` + message `UNIQUE constraint failed: notes.title`), it now returns `409 {"error":"duplicate title","title":...}`, matching README ("Duplicate titles are a conflict") and the test's accepted outcomes. Any other error still falls through to the existing 500. One supporting edit: hoisted `title` out of the `try` so the catch can name it (this caused a transient ReferenceError I caught and fixed during verification). No schema, migration, or auth changes.
+
+**Verified:**
+- Baseline was 3 pass / 1 fail; after the change the full suite is 4/4 passing (`node --test tests/*.test.mjs`, exit 0), including the previously failing `duplicate-title.test.mjs`.
+- End-to-end against a real server: first create → 201, same title again → 409 with the duplicate named, valid single create still 201.
+
+**Not verified / out of scope (noted, not changed):**
+- `npm test` itself fails on this Node (v22.23.2) with `Cannot find module '/work/tests'` — the package.json script uses a trailing-slash directory arg. This is pre-existing and unrelated to my change; I ran the same test files directly instead. Happy to fix it if you want that in scope.
+- Malformed JSON bodies still return 500 (pre-existing behavior, outside this defect).
+- I did not commit; the edited working tree is the deliverable.
+```
+  Agent: ```finish
+Verified end-to-end; the task is complete.
+
+**What changed (working tree, uncommitted as required):**
+1. `server.mjs` — the POST /api/notes `catch` block now detects the `notes.title` UNIQUE-constraint failure (`err.code === 'ERR_SQLITE_ERROR'` + `UNIQUE constraint failed: notes.title`) and returns `409 {"error":"duplicate title","title":...}`, matching the README ("Duplicate titles are a conflict") and the test's accepted outcomes (409 or 400). Any other error still falls through to the original 500. Supporting edit: `title` was hoisted above the `try` so the catch can name it.
+2. `README.md` — removed the now-false line describing `tests/duplicate-title.test.mjs` as a "known failing test."
+
+**Proof (single command, output above):**
+- Changed files present: `README.md`, `server.mjs` (shown verbatim with the 409 branch).
+- Full suite: 4/4 pass, 0 fail — including the previously failing `duplicate title is rejected, not a 500`.
+- Live server: first create → 201, same title again → **409** with the duplicate named, a different title → 201. Server exits cleanly.
+
+**Not verified / out of scope (unchanged, pre-existing):**
+- `npm test` itself errors on this Node (v22.23.2) with `Cannot find module '/work/tests'`, caused by the package.json script's trailing-slash directory arg; I ran the same test files directly instead.
+- Malformed JSON bodies still return 500 (pre-existing behavior, unrelated to the duplicate-title defect).
+```
+Outcome: {"repo":"http://100.108.123.49:49152/Tyler/ship-eval-ui-api-db"}
+Checks: Baseline tests=failed (node --test tests/health.test.mjs tests/roundtrip.test.mjs tests/duplicate-title.test.mjs); Tests=passed (node --test tests/health.test.mjs tests/roundtrip.test.mjs tests/duplicate-title.test.mjs)

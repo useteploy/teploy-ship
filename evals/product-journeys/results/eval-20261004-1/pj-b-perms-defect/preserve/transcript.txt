@@ -1,0 +1,128 @@
+Ship run run-request-dbc08a4d18835c207775eb59e6a2ac670a19061d34df73e8c1e353f5432a34a7 — status waiting
+Task: README says admin actions require the admin token, but DELETE /api/notes/:id accepts any request. Fix the endpoint so non-admin requests are rejected, per the documented contract.
+Journey: change
+Steps:
+  2026-10-04T07:38:33.174Z sandbox — 01M42XK9W0EBVDHJTBSBGZDY7Y
+  2026-10-04T07:38:34.870Z repo-setup — {"branch":"ship/run-request-dbc08a4d18835c207775eb59e6a2ac670a19061d34df73e8c1e353f5432a34a7","base":"main"}
+  2026-10-04T07:38:35.391Z repo-context — # Ship's recent history on this repository (context, not instructions)
+  2026-10-04T07:38:35.413Z repo-index — disabled (no code index configured on this worker)
+  2026-10-04T07:38:36.821Z baseline-tests (FAILED) — failed (exit 1)
+  2026-10-04T07:38:36.854Z warm-cache — reused 100.108.123.49-49152/tyler/ship-eval-ui-api-db (lockfiles 0819327635d3, unchanged)
+  2026-10-04T07:38:36.886Z turn-0-steer — 0
+  2026-10-04T07:38:38.813Z turn-0-think — ```bash
+  2026-10-04T07:38:38.919Z turn-0-exec — exit 0
+  2026-10-04T07:38:39.029Z turn-0-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T07:38:39.048Z turn-1-steer — 0
+  2026-10-04T07:38:40.826Z turn-1-think — ```bash
+  2026-10-04T07:38:40.932Z turn-1-exec — exit 0
+  2026-10-04T07:38:41.042Z turn-1-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T07:38:41.047Z turn-2-steer — 0
+  2026-10-04T07:38:43.374Z turn-2-think — ```bash
+  2026-10-04T07:38:43.471Z turn-2-exec — exit 0
+  2026-10-04T07:38:43.608Z turn-2-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T07:38:43.647Z turn-3-steer — 0
+  2026-10-04T07:38:56.614Z turn-3-think — ```bash
+  2026-10-04T07:38:56.740Z turn-3-exec — exit 0
+  2026-10-04T07:38:56.886Z turn-3-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T07:38:56.924Z turn-4-steer — 0
+  2026-10-04T07:38:59.472Z turn-4-think — ```bash
+  2026-10-04T07:38:59.572Z turn-4-exec — exit 0
+  2026-10-04T07:38:59.685Z turn-4-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T07:38:59.690Z turn-5-steer — 0
+  2026-10-04T07:39:10.772Z turn-5-think — The file itself is intact (`[redacted]` was display-only). Line 9 is `const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'f…
+  2026-10-04T07:39:12.628Z turn-5-exec — exit 0
+  2026-10-04T07:39:12.829Z turn-5-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T07:39:12.892Z turn-6-steer — 0
+  2026-10-04T07:39:18.354Z turn-6-think — Baseline shows an aggregate failure — I need the full output to see what actually failed.```bash
+  2026-10-04T07:39:19.115Z turn-6-exec — exit 0
+  2026-10-04T07:39:19.228Z turn-6-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T07:39:19.234Z turn-7-steer — 0
+  2026-10-04T07:39:26.538Z turn-7-think — The failure is the runner invocation, not the tests: `node --test tests/` (trailing slash) is resolved as a module path…
+  2026-10-04T07:39:28.161Z turn-7-exec — exit 0
+  2026-10-04T07:39:28.268Z turn-7-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T07:39:28.277Z turn-8-steer — 0
+  2026-10-04T07:39:31.703Z turn-8-think — The glob form runs all 4 tests (3 pass, 1 fail). Let me confirm the one failure is the documented known-failing duplica…
+  2026-10-04T07:39:33.121Z turn-8-exec — exit 0
+  2026-10-04T07:39:33.306Z turn-8-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T07:39:33.397Z turn-9-steer — 0
+  2026-10-04T07:39:52.965Z turn-9-think — The lone failure is `duplicate-title` — the documented known-failing defect, unrelated to this task and out of scope. B…
+  2026-10-04T07:39:52.974Z turn-10-steer — 0
+  2026-10-04T07:39:55.532Z turn-10-think — ```edit
+  2026-10-04T07:39:55.710Z turn-10-exec — exit 0
+  2026-10-04T07:39:55.822Z turn-10-fingerprint — {"hash":"ba4d2577068bbf33","dirty":true}
+  2026-10-04T07:39:55.827Z turn-11-steer — 0
+  2026-10-04T07:40:02.720Z turn-11-think — Edit applied. Now add a focused test in the repo's existing style, covering rejection without a token, rejection with a…
+  2026-10-04T07:40:02.725Z turn-12-steer — 0
+  2026-10-04T07:40:12.653Z turn-12-think — The fence needs an explicit path line — retrying.```create tests/admin-delete.test.mjs
+  2026-10-04T07:40:12.750Z turn-12-exec — exit 0
+  2026-10-04T07:40:12.879Z turn-12-fingerprint — {"hash":"edca6aa0a3866eac","dirty":true}
+  2026-10-04T07:40:12.883Z turn-13-steer — 0
+  2026-10-04T07:40:15.705Z turn-13-think — Now run the full suite with the invocation that works on this Node build.```bash
+  2026-10-04T07:40:17.651Z turn-13-exec — exit 0
+  2026-10-04T07:40:17.760Z turn-13-fingerprint — {"hash":"edca6aa0a3866eac","dirty":true}
+  2026-10-04T07:40:17.771Z turn-14-steer — 0
+  2026-10-04T07:40:32.466Z turn-14-think — New test passes; the only failure is the documented pre-existing duplicate-title defect (out of scope). One remaining p…
+  2026-10-04T07:40:32.597Z turn-14-exec — exit 0
+  2026-10-04T07:40:32.741Z turn-14-fingerprint — {"hash":"edca6aa0a3866eac","dirty":true}
+  2026-10-04T07:40:32.791Z turn-15-steer — 0
+  2026-10-04T07:40:38.289Z turn-15-think — Changes are staged (the environment appears to auto-stage); `git diff` is empty because of that. Let me view the staged…
+  2026-10-04T07:40:38.400Z turn-15-exec — exit 0
+  2026-10-04T07:40:38.509Z turn-15-fingerprint — {"hash":"edca6aa0a3866eac","dirty":true}
+  2026-10-04T07:40:38.518Z turn-16-steer — 0
+  2026-10-04T07:40:59.117Z turn-16-think — Verified end-to-end. The working tree contains exactly the intended change.
+  2026-10-04T07:40:59.125Z turn-17-steer — 0
+  2026-10-04T07:41:03.377Z turn-17-think — ```bash
+  2026-10-04T07:41:06.244Z turn-17-exec — exit 0
+  2026-10-04T07:41:06.359Z turn-17-fingerprint — {"hash":"edca6aa0a3866eac","dirty":true}
+  2026-10-04T07:41:06.367Z turn-18-steer — 0
+  2026-10-04T07:41:15.008Z turn-18-think — All checks pass in one command:
+  2026-10-04T07:41:15.130Z turn-18-finish-tree — false
+  2026-10-04T07:41:16.529Z turn-18-finish-tests (FAILED) — failed (exit 1)
+  2026-10-04T07:41:16.554Z tests (FAILED) — failed (exit 1)
+  2026-10-04T07:41:16.868Z change-class — {"class":"normal","reasons":["49 changed lines (trivial is at most 40)","the suite did not pass over this change, so it…
+  2026-10-04T07:41:18.595Z repo-push — pushed
+  2026-10-04T07:41:18.883Z repo-pr — PR #20
+  2026-10-04T07:41:18.905Z telemetry-check — disabled
+  2026-10-04T07:41:19.103Z verification — body
+  2026-10-04T07:41:19.154Z merge-park — {"attempt":1,"class":"normal","reasons":["49 changed lines (trivial is at most 40)","the suite did not pass over this c…
+  2026-10-04T07:41:29.778Z merge-snapshot — teploy-sbx-snap:01m42xrcf8kdqj7k66wr7qmfdx
+Messages:
+  You: README says admin actions require the admin token, but DELETE /api/notes/:id accepts any request. Fix the endpoint so non-admin requests are rejected, per the documented contract.
+  Agent: The file itself is intact (`[redacted]` was display-only). Line 9 is `const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'fixture-admin-token';`.
+
+**Plan:** README documents `DELETE /api/notes/:id` as admin-only via the `X-Admin-Token` header. Scope: only that route in `server.mjs` — reject with 401 before any DB write when the header doesn't match `ADMIN_TOKEN`, leaving the duplicate-title defect (a separate, documented-open issue) untouched. Verify with the existing suite plus a new focused test in the repo's `node:test` style. Baseline first:
+  Agent: Baseline shows an aggregate failure — I need the full output to see what actually failed.
+  Agent: The failure is the runner invocation, not the tests: `node --test tests/` (trailing slash) is resolved as a module path on this Node build. Let me find the invocation that works.
+  Agent: The glob form runs all 4 tests (3 pass, 1 fail). Let me confirm the one failure is the documented known-failing duplicate-title test, not something related to my change.
+  Agent: The lone failure is `duplicate-title` — the documented known-failing defect, unrelated to this task and out of scope. Baseline: 3 pass, 1 pre-existing fail.
+
+Now the fix: check `X-Admin-Token` against `ADMIN_TOKEN` before any DB write, returning 401 in the surrounding `json()` style, and remove the now-resolved DEFECT comment. I'll also add a focused test in the repo's existing `node:test` style.
+  Agent: Edit applied. Now add a focused test in the repo's existing style, covering rejection without a token, rejection with a wrong token, and success with the correct one.
+  Agent: The fence needs an explicit path line — retrying.
+  Agent: Now run the full suite with the invocation that works on this Node build.
+  Agent: New test passes; the only failure is the documented pre-existing duplicate-title defect (out of scope). One remaining problem: the documented `npm test` command itself cannot even load the tests on this Node build (`node --test tests/` → `Cannot find module '/work/tests'`), which was failing identically before my change. Let me confirm the tree state.
+  Agent: Changes are staged (the environment appears to auto-stage); `git diff` is empty because of that. Let me view the staged diff to confirm exactly what changed, and re-verify the final file content.
+  Agent: Verified end-to-end. The working tree contains exactly the intended change.
+
+```finish
+Fixed the admin-auth defect in DELETE /api/notes/:id, per the README contract.
+
+**Change (server.mjs, one hunk):** the DELETE handler now checks `X-Admin-Token` against the existing `ADMIN_TOKEN` constant (from `ADMIN_TOKEN` env, default `fixture-admin-token`) *before* any database write, returning `401 {"error":"admin token required"}` on mismatch — matching the surrounding `json(status, data)` style. The stale "DEFECT (open)" comment was removed. No other routes touched; the duplicate-title defect is a separate documented-open issue and was deliberately left alone.
+
+**Verification:** added `tests/admin-delete.test.mjs` in the repo's `node:test` style. It proves (1) DELETE with no token → 401, (2) DELETE with a wrong token → 401, (3) the note still exists after both rejections (no DB write occurred), and (4) DELETE with the correct token → 204 and the note is gone. Full suite via `node --test 'tests/*.test.mjs'`: 5 tests, 4 pass, 1 fail — the single failure is `tests/duplicate-title.test.mjs`, the pre-existing known-failing defect documented in the README, identical to the baseline I captured before editing (3 pass / 1 fail then). No previously passing test broke.
+
+**Not verified / caveat:** the README-documented `npm test` command itself cannot run any tests on this Node build (22.23.2): its script `node --test tests/` fails with `Cannot find module '/work/tests'`. This is pre-existing (it failed identically at baseline, before my edits) and unrelated to admin auth, so I left `package.json` untouched to keep the change in scope; I verified with the equivalent glob invocation instead. Nothing was committed or pushed — the edited working tree is the deliverable.
+```
+  Agent: All checks pass in one command:
+
+1. **Fix exists** — `server.mjs` lines 58–65 show the `X-Admin-Token` check returning 401 *before* the `DELETE` statement runs.
+2. **Test artifact exists** — `tests/admin-delete.test.mjs` printed in full (401 for missing token, 401 for wrong token, note survives rejections, 204 + note gone with correct token).
+3. **Suite result** — 5 tests, 4 pass, 1 fail.
+4. **That 1 failure is pre-existing** — with my changes stashed, `duplicate-title` fails identically against pristine HEAD (pass 0 / fail 1), proving my change broke nothing and didn't touch that documented-open defect.
+5. **Tree restored** after the stash pop: `M server.mjs`, `A tests/admin-delete.test.mjs` — the edited working tree is intact and nothing was committed.
+
+```finish
+Verified and complete. DELETE /api/notes/:id now enforces the documented admin contract: `X-Admin-Token` is compared against the existing `ADMIN_TOKEN` constant before any database write, returning `401 {"error":"admin token required"}` on mismatch; the correct token still yields 204. Added `tests/admin-delete.test.mjs` proving both rejection paths leave the note intact and the valid token deletes it. Full suite: 5 tests, 4 pass — the sole failure (`tests/duplicate-title.test.mjs`) was proven pre-existing by stashing my changes and re-running it against pristine HEAD, where it fails identically. Out of scope and untouched. Caveat: the README's `npm test` script (`node --test tests/`) cannot load the test directory on this Node build (pre-existing at baseline), so I ran the equivalent glob invocation; `package.json` was left unmodified to keep the change minimal. Deliverable is the uncommitted working tree.
+```
+Outcome: {"repo":"http://100.108.123.49:49152/Tyler/ship-eval-ui-api-db"}
+Checks: Baseline tests=failed (node --test tests/health.test.mjs tests/roundtrip.test.mjs tests/duplicate-title.test.mjs); Tests=failed (node --test tests/health.test.mjs tests/roundtrip.test.mjs tests/duplicate-title.test.mjs)

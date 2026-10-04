@@ -1,0 +1,25 @@
+{
+  "runId": "eval-20261004-2",
+  "adapter": "ship",
+  "startedAt": "2026-10-04T07:54:56.766Z",
+  "completedAt": "2026-10-04T08:00:15.160Z",
+  "scenarios": [
+    {
+      "id": "pj-c-same-pr",
+      "outcome": "pass",
+      "pass": true,
+      "latencyMs": 317545,
+      "costUSD": 0.100134,
+      "rescueNeeded": false,
+      "interventions": 0,
+      "result": "eval-20261004-2/pj-c-same-pr/result.json"
+    }
+  ],
+  "totals": {
+    "pass": 1,
+    "fail": 0,
+    "unknown": 0,
+    "harness-error": 0,
+    "authority-hold": 0
+  }
+}

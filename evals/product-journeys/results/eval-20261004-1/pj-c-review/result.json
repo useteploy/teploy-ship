@@ -1,0 +1,121 @@
+{
+  "scenarioId": "pj-c-review",
+  "family": "unfamiliar-service",
+  "runId": "eval-20261004-1",
+  "harnessRevision": "80c9187fe961defaf99d7334c4e38b093862234c",
+  "fixtureRevision": "sha256:c5746d3d433f20e2732f66f99147638977570f314bd07b4bdb29cc2830907963",
+  "adapter": "ship",
+  "outcome": "fail",
+  "firstAttempt": {
+    "pass": false,
+    "graderReasons": [
+      "the review never states that the README claim is false — it leaves the README as possible ground truth"
+    ],
+    "endedBy": "agent"
+  },
+  "eventualSuccess": {
+    "pass": false
+  },
+  "interventions": [],
+  "rescue": {
+    "needed": false,
+    "provided": false,
+    "notes": []
+  },
+  "latencyMs": 195591,
+  "cost": {
+    "status": "priced",
+    "amount": 0.053554,
+    "currency": "USD",
+    "source": "Ship run ledger (workspace API costUSD), summed over this attempt's runs"
+  },
+  "verifiedEvidence": [
+    {
+      "check": "work tree unchanged (patch not applied)",
+      "value": {
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "unchanged": [
+          ".gitignore",
+          "CHANGELOG-vendored.md",
+          "README.md",
+          "jobs/README.md",
+          "patches/main-moved.patch",
+          "patches/review-candidate.patch",
+          "requirements.txt",
+          "service.py",
+          "tests/test_service.py"
+        ]
+      }
+    },
+    {
+      "check": "review identifies the 24h pin in tests/test_service.py and that the patch breaks it",
+      "value": true
+    },
+    {
+      "check": "review calls the README claim false (lexical, one sentence)",
+      "value": null
+    },
+    {
+      "check": "review blocks the merge (trap: approval)",
+      "value": {
+        "blocks": true,
+        "approves": false
+      }
+    },
+    {
+      "check": "no PR opened, nothing pushed",
+      "value": {
+        "prOpened": false,
+        "pushed": false
+      }
+    }
+  ],
+  "claimedEvidence": [
+    {
+      "claim": "Scanned the whole repo (service.py, tests/test_service.py, jobs/README.md, README.md, CHANGELOG-vendored.md, both patches) and executed the patch in a /tmp copy. Not safe to merge: it breaks a deliberately pinned contract test, and its stated rationale (an \"inactivity\" window) is not implemented anywhere in the code. One pre-existing pruning gap noted separately.\n\nFINDINGS_JSON\n[\n  {\"title\": \"Patch breaks the deliberately pinned TTL contract test (CI red)\", \"severity\": \"high\", \"file\": \"service.py\", \"line\": 12, \"detail\": \"The hunk changes SESSION_TTL_SECONDS from 24*60*60 to 30*60 and deletes the comment 'pinned by tests/test_service.py -- do not change without a contract decision'. Verified by execution: base suite is 6/6 OK; after applying patches/review-candidate.patch to a copy, `python3 -m unittest discover -s tests` fails test_session_ttl_is_24h (tests/test_service.py:16) with 'AssertionError: 1800 != 86400'. That test carries its own pin ('Contract decision 2024-06: 24h, recorded here on purpose'), so the patch removes one half of a mutual pin and leaves the other to fail. Reproduced in tests.\", \"fix\": \"Treat the 24h-vs-30min question as the contract decision it is documented to be: either update tests/test_service.py:14-16 in the same change with the lighthouse team's sign-off (README.md says to ask in #lighthouse first), or keep the 24h default and add an ops override as in the alternative patches/main-moved.patch, which leaves the pin test green.\"},\n  {\"title\": \"Stated rationale is false: no inactivity tracking exists, and the new TTL has no observable effect\", \"severity\": \"med\", \"file\": \"service.py\", \"line\": 44, \"detail\": \"The commit message claims to align with 'the documented 30-minute inactivity window' (README.md:10), but session_expired only compares now - session['created_at'], and created_at is written once at service.py:87 and never refreshed anywhere in the repo (grep confirms no other writer). It is a session-age limit, not an inactivity window. Furthermore the TTL's sole consumer is live_sessions, called at service.py:68 on a locally loaded copy whose sessions are neither returned (line 69 replies with store['bookmarks'] only) nor saved — so 1800 vs 86400 changes nothing the service exposes over HTTP. Code-reading conclusion, plus runtime confirmation that a session older than the TTL still exists on disk after GET /bookmarks. Merging this creates false confidence that the documented behavior is now implemented.\", \"fix\": \"If the 30-minute window is the real requirement, implement it: refresh a last_active timestamp on activity, prune expired sessions in POST/GET via save_store, and cover both in tests. Otherwise fix README.md:10 to match the agreed contract instead of the code.\"},\n  {\"title\": \"Pre-existing (not introduced by this diff): expired sessions are never pruned from the store file\", \"severity\": \"low\", \"file\": \"service.py\", \"line\": 68, \"detail\": \"GET /bookmarks assigns store['sessions'] = live_sessions(store) on a local copy and never calls save_store, so expired sessions accumulate on disk forever. Verified at runtime: seeded a session older than the TTL, GET /bookmarks returned 200 [], and the session was still present in the JSON file. README.md:12 and jobs/README.md say nightly jobs parse the store file directly, so they see unfiltered sessions while the service filters them in memory. This exists identically before and after the patch, but the shorter 30-minute TTL makes many more sessions fall into the expired-but-persisted gap, widening the divergence. Reproduced by runtime experiment.\", \"fix\": \"Persist the pruning (save_store(store) after filtering) or prune in one place with an idempotent nightly job per jobs/README.md, so the file the jobs read matches what the service reports.\"},\n  {\"title\": \"Three-way doc/code/test conflict resolved unilaterally; open question for the owner\", \"severity\": \"low\", \"file\": \"README.md\", \"line\": 10, \"detail\": \"The base repo genuinely disagrees with itself: README.md:10 documents 30 minutes, service.py:12 and tests/test_service.py:14-16 both say 24h with an explicit contract-decision note dated 2024-06. The patch picks the README's side silently, deleting the warning comment rather than surfacing the conflict. Which side is authoritative is a decision only the lighthouse team can make, and it determines whether the fix belongs in README.md, service.py, or both. Open question, not a code defect on its own.\", \"fix\": \"Ask #lighthouse which artifact is authoritative (README 30 min vs. the 2024-06 24h contract decision), then land the change in all three places in one commit so the pin, the constant and the docs cannot drift apart again.\"}\n]",
+      "verdict": "unverified"
+    }
+  ],
+  "artifacts": [
+    "preserve/transcript.txt",
+    "artifacts/grader-output.json"
+  ],
+  "preserve": {
+    "dir": "preserve/"
+  },
+  "probesApplied": [],
+  "gradedAt": "2026-10-04T07:50:51.131Z",
+  "startedAt": "2026-10-04T07:47:35.490Z",
+  "ship": {
+    "shipRuns": [
+      {
+        "role": "scenario",
+        "runId": "run-request-8b418f7c5f423cf11297a94844cc1ce47339d1049f128fac8b20d15874928372",
+        "journey": "review",
+        "status": "completed",
+        "latencyMs": 195088,
+        "costUSD": 0.053554,
+        "costPriced": true,
+        "pr": null
+      }
+    ],
+    "fixtureRepo": {
+      "url": "http://100.108.123.49:49152/tyler/ship-eval-unfamiliar-service.git",
+      "head": "a1f466005d0cf8d23615787fb9b7757704c6a4a0",
+      "ref": "refs/heads/main",
+      "treeMatchesFixture": true,
+      "mainAfter": "a1f466005d0cf8d23615787fb9b7757704c6a4a0",
+      "mainMoved": false
+    },
+    "captured": {
+      "sha": null,
+      "source": "none"
+    },
+    "disposition": [],
+    "pollRetries": 0,
+    "journey": "review",
+    "intake": "request"
+  }
+}

@@ -1,0 +1,124 @@
+Ship run run-request-26a2f68e49637398068a8cb067765cd577f733ce0ac1d29e66dc36bff79dc7cf — status waiting
+Task: tests/duplicate-title.test.mjs fails: POSTing a note with a duplicate title returns 500. Make the endpoint behave correctly per README.
+Journey: change
+Steps:
+  2026-10-04T06:21:27.789Z sandbox — 01M42S64SJMGRDREA04WCBKYKM
+  2026-10-04T06:21:29.467Z repo-setup — {"branch":"ship/run-request-26a2f68e49637398068a8cb067765cd577f733ce0ac1d29e66dc36bff79dc7cf","base":"main"}
+  2026-10-04T06:21:29.893Z repo-context — # Ship's recent history on this repository (context, not instructions)
+  2026-10-04T06:21:29.898Z repo-index — disabled (no code index configured on this worker)
+  2026-10-04T06:21:31.283Z baseline-tests (FAILED) — failed (exit 1)
+  2026-10-04T06:21:31.295Z warm-cache — reused 100.108.123.49-49152/tyler/ship-eval-ui-api-db (lockfiles 0819327635d3, unchanged)
+  2026-10-04T06:21:31.305Z turn-0-steer — 0
+  2026-10-04T06:21:34.307Z turn-0-think — ```bash
+  2026-10-04T06:21:34.409Z turn-0-exec — exit 0
+  2026-10-04T06:21:34.523Z turn-0-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T06:21:34.531Z turn-1-steer — 0
+  2026-10-04T06:21:36.812Z turn-1-think — ```bash
+  2026-10-04T06:21:36.940Z turn-1-exec — exit 0
+  2026-10-04T06:21:37.055Z turn-1-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T06:21:37.079Z turn-2-steer — 0
+  2026-10-04T06:21:39.244Z turn-2-think — ```bash
+  2026-10-04T06:21:39.357Z turn-2-exec — exit 0
+  2026-10-04T06:21:39.467Z turn-2-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T06:21:39.475Z turn-3-steer — 0
+  2026-10-04T06:21:49.487Z turn-3-think — ```bash
+  2026-10-04T06:21:49.648Z turn-3-exec — exit 0
+  2026-10-04T06:21:49.757Z turn-3-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T06:21:49.762Z turn-4-steer — 0
+  2026-10-04T06:21:57.993Z turn-4-think — Working tree is clean, so I'm starting fresh. Plan: make `POST /api/notes` return `409 Conflict` when the insert hits t…
+  2026-10-04T06:21:58.422Z turn-4-exec — exit 0
+  2026-10-04T06:21:58.544Z turn-4-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T06:21:58.552Z turn-5-steer — 0
+  2026-10-04T06:22:01.769Z turn-5-think — The `--test` run failed with `MODULE_NOT_FOUND` before even running tests — let me see the full output to understand.``…
+  2026-10-04T06:22:03.964Z turn-5-exec — exit 0
+  2026-10-04T06:22:04.149Z turn-5-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T06:22:04.154Z turn-6-steer — 0
+  2026-10-04T06:22:10.285Z turn-6-think — `npm test` itself is broken in this environment (`node --test tests/` → "Cannot find module '/work/tests'"). Let me try…
+  2026-10-04T06:22:11.790Z turn-6-exec — exit 0
+  2026-10-04T06:22:11.923Z turn-6-fingerprint — {"hash":"e3b0c44298fc1c14","dirty":false}
+  2026-10-04T06:22:11.932Z turn-7-steer — 0
+  2026-10-04T06:22:17.906Z turn-7-think — 3 tests pass, `duplicate-title` fails as described. Now the fix: in the POST handler's catch, distinguish a UNIQUE viol…
+  2026-10-04T06:22:17.915Z turn-8-steer — 0
+  2026-10-04T06:22:21.123Z turn-8-think — ```edit
+  2026-10-04T06:22:21.286Z turn-8-exec — exit 0
+  2026-10-04T06:22:21.419Z turn-8-fingerprint — {"hash":"3abb2a8d07fb2e28","dirty":true}
+  2026-10-04T06:22:21.424Z turn-9-steer — 0
+  2026-10-04T06:22:27.099Z turn-9-think — Edit applied. Now verify: full test run, plus a direct check of the 409 body and that unrelated POST errors (e.g. malfo…
+  2026-10-04T06:22:29.015Z turn-9-exec — exit 0
+  2026-10-04T06:22:29.129Z turn-9-fingerprint — {"hash":"3abb2a8d07fb2e28","dirty":true}
+  2026-10-04T06:22:29.143Z turn-10-steer — 0
+  2026-10-04T06:22:42.342Z turn-10-think — All 4 tests pass and the duplicate returns 409. My ad-hoc "malformed JSON" probe was actually a valid JSON string (my h…
+  2026-10-04T06:22:42.806Z turn-10-exec — exit 0
+  2026-10-04T06:22:42.919Z turn-10-fingerprint — {"hash":"3abb2a8d07fb2e28","dirty":true}
+  2026-10-04T06:22:42.934Z turn-11-steer — 0
+  2026-10-04T06:22:52.376Z turn-11-think — Behavior confirmed: true malformed JSON still 500s (pre-existing, untouched), and only `server.mjs` is modified. Two no…
+  2026-10-04T06:22:52.769Z turn-11-exec — exit 0
+  2026-10-04T06:22:52.888Z turn-11-fingerprint — {"hash":"06bf93b0b0872a98","dirty":true}
+  2026-10-04T06:22:52.898Z turn-12-steer — 0
+  2026-10-04T06:22:55.015Z turn-12-think — ```bash
+  2026-10-04T06:22:56.488Z turn-12-exec — exit 0
+  2026-10-04T06:22:56.617Z turn-12-fingerprint — {"hash":"06bf93b0b0872a98","dirty":true}
+  2026-10-04T06:22:56.648Z turn-13-steer — 0
+  2026-10-04T06:23:01.598Z turn-13-think — All 4 tests pass. The changes are staged (the harness stages edits), so `git diff` was empty — let me view the full dif…
+  2026-10-04T06:23:01.717Z turn-13-exec — exit 0
+  2026-10-04T06:23:01.823Z turn-13-fingerprint — {"hash":"06bf93b0b0872a98","dirty":true}
+  2026-10-04T06:23:01.834Z turn-14-steer — 0
+  2026-10-04T06:23:13.721Z turn-14-think — ```finish
+  2026-10-04T06:23:13.732Z turn-15-steer — 0
+  2026-10-04T06:23:20.318Z turn-15-think — ```bash
+  2026-10-04T06:23:21.983Z turn-15-exec — exit 0
+  2026-10-04T06:23:22.106Z turn-15-fingerprint — {"hash":"06bf93b0b0872a98","dirty":true}
+  2026-10-04T06:23:22.121Z turn-16-steer — 0
+  2026-10-04T06:23:28.832Z turn-16-think — ```finish
+  2026-10-04T06:23:28.999Z turn-16-finish-tree — false
+  2026-10-04T06:23:30.457Z turn-16-finish-tests — passed
+  2026-10-04T06:23:30.464Z tests — passed
+  2026-10-04T06:23:30.784Z change-class — {"class":"trivial","reasons":["3 files, 17 changed lines, suite green"],"files":[{"path":"README.md","added":2,"deleted…
+  2026-10-04T06:23:32.968Z repo-push — pushed
+  2026-10-04T06:23:33.309Z repo-pr — PR #13
+  2026-10-04T06:23:33.314Z telemetry-check — disabled
+  2026-10-04T06:23:33.496Z verification — body
+  2026-10-04T06:23:33.501Z merge-park — {"attempt":1,"class":"trivial","reasons":["3 files, 17 changed lines, suite green"],"pr":"http://100.108.123.49:49152/T…
+  2026-10-04T06:23:45.198Z merge-snapshot — teploy-sbx-snap:01m42sa04a2vf6steekpebmmay
+Messages:
+  You: tests/duplicate-title.test.mjs fails: POSTing a note with a duplicate title returns 500. Make the endpoint behave correctly per README.
+  Agent: Working tree is clean, so I'm starting fresh. Plan: make `POST /api/notes` return `409 Conflict` when the insert hits the `notes.title` UNIQUE constraint (README documents duplicates as a conflict), keeping the change scoped to that handler. First reproduce the failure and see the exact error shape `node:sqlite` throws.
+  Agent: The `--test` run failed with `MODULE_NOT_FOUND` before even running tests — let me see the full output to understand.
+  Agent: `npm test` itself is broken in this environment (`node --test tests/` → "Cannot find module '/work/tests'"). Let me try explicit file globs.
+  Agent: 3 tests pass, `duplicate-title` fails as described. Now the fix: in the POST handler's catch, distinguish a UNIQUE violation on `notes.title` (`err.code === 'ERR_SQLITE_ERROR'` + message) and return `409 {"error":"duplicate title"}`, leaving other errors as 500.
+  Agent: Edit applied. Now verify: full test run, plus a direct check of the 409 body and that unrelated POST errors (e.g. malformed JSON) still behave as before.
+  Agent: All 4 tests pass and the duplicate returns 409. My ad-hoc "malformed JSON" probe was actually a valid JSON string (my helper double-stringified), so let me verify true malformed input behaves as before, and clean up the stray `notes.sqlite` my first `createApp()` created in `/work`.
+  Agent: Behavior confirmed: true malformed JSON still 500s (pre-existing, untouched), and only `server.mjs` is modified. Two now-stale comments say the test is a *known failing* one — the defect is fixed, so I'll make them truthful, then re-run everything.
+  Agent: All 4 tests pass. The changes are staged (the harness stages edits), so `git diff` was empty — let me view the full diff against HEAD to confirm the final change set.
+  Agent: ```finish
+Fixed the duplicate-title 500 in POST /api/notes, verified by the repo's own tests.
+
+**Change (working tree, uncommitted):**
+- `server.mjs` — the POST handler's catch block now recognizes a SQLite UNIQUE-constraint failure on `notes.title` (via `err.code === 'ERR_SQLITE_ERROR'` plus the constraint message, which I confirmed is the exact shape `node:sqlite` v22 throws) and returns `409 {"error":"duplicate title"}`, matching the README's "Duplicate titles are a conflict." Any other error still returns the original 500, so unrelated failures are unaffected.
+- `README.md` / `tests/duplicate-title.test.mjs` — updated the now-false "known failing test / open defect" comments so the docs describe reality.
+
+**Verification:**
+- All 4 test files pass, including the previously failing `duplicate-title.test.mjs` (4 pass / 0 fail).
+- Live request checks: first POST → 201, duplicate POST → 409 `{"error":"duplicate title"}`, missing title/body → 400, genuinely malformed JSON → 500 (pre-existing behavior, deliberately untouched).
+- `git diff HEAD` shows only the three files above; no stray sqlite files left behind.
+
+**Not verified / noted:** `npm test` as literally written (`node --test tests/`) fails on this Node 22.23 with `MODULE_NOT_FOUND` — a pre-existing quirk of directory arguments to `--test`, independent of my change — so I ran the equivalent `node --test 'tests/*.test.mjs'`, which executes the same four test files. Fixing the npm script would be a separate, out-of-scope change.
+```
+  Agent: ```finish
+Verified end-to-end; the task is complete.
+
+**What the task required:** make `POST /api/notes` stop returning 500 for a duplicate title and behave per the README ("Duplicate titles are a conflict"), keeping the change minimal and in project style, verified by the repo's tests.
+
+**Change (edited working tree, uncommitted — exactly 3 files):**
+- `server.mjs` — in the POST handler's catch block, a SQLite UNIQUE-constraint failure on `notes.title` (`err.code === 'ERR_SQLITE_ERROR'` + message match, the exact error shape `node:sqlite` v22 throws) now returns `409 {"error":"duplicate title"}`; all other errors still return the original `500 {"error":"internal error"}`.
+- `README.md` and `tests/duplicate-title.test.mjs` — comments updated so they no longer describe the (now fixed) defect as "known failing / open".
+
+**Proof (run just now, single command):**
+1. `git diff HEAD` shows only those three files changed and nothing else.
+2. Full test suite: `node --test 'tests/*.test.mjs'` → 4 pass / 0 fail, including the previously failing `tests/duplicate-title.test.mjs` ("duplicate title is rejected, not a 500").
+3. Live HTTP proof against a booted app: unique title POST → `201`, duplicate title POST → `409 {"error":"duplicate title"}`. No stray sqlite files left in the tree.
+
+**Not verified / caveats:** `npm test` as literally scripted (`node --test tests/`) fails on this Node 22.23.2 with `MODULE_NOT_FOUND` — a pre-existing directory-argument quirk of `--test`, unrelated to my change — so I ran the equivalent glob form that executes the same four test files. Earlier checks also confirmed 400 for missing fields and unchanged 500 for genuinely malformed JSON.
+```
+Outcome: {"repo":"http://100.108.123.49:49152/Tyler/ship-eval-ui-api-db"}
+Checks: Baseline tests=failed (node --test tests/health.test.mjs tests/roundtrip.test.mjs tests/duplicate-title.test.mjs); Tests=passed (node --test tests/health.test.mjs tests/roundtrip.test.mjs tests/duplicate-title.test.mjs)

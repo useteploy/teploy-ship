@@ -1,0 +1,138 @@
+{
+  "scenarioId": "pj-c-same-pr",
+  "family": "unfamiliar-service",
+  "runId": "eval-20261004-2",
+  "harnessRevision": "80c9187fe961defaf99d7334c4e38b093862234c",
+  "fixtureRevision": "sha256:c5746d3d433f20e2732f66f99147638977570f314bd07b4bdb29cc2830907963",
+  "adapter": "ship",
+  "outcome": "pass",
+  "firstAttempt": {
+    "pass": true,
+    "graderReasons": [],
+    "endedBy": "agent"
+  },
+  "eventualSuccess": {
+    "pass": true
+  },
+  "interventions": [],
+  "rescue": {
+    "needed": false,
+    "provided": false,
+    "notes": []
+  },
+  "latencyMs": 317545,
+  "cost": {
+    "status": "priced",
+    "amount": 0.100134,
+    "currency": "USD",
+    "source": "Ship run ledger (workspace API costUSD), summed over this attempt's runs"
+  },
+  "verifiedEvidence": [
+    {
+      "check": "TTL resolves from KEEPNOTE_TTL_SECONDS, 24h default present",
+      "value": true
+    },
+    {
+      "check": "default TTL is 24h",
+      "value": {
+        "code": 0,
+        "out": "default-24h"
+      }
+    },
+    {
+      "check": "env override works",
+      "value": {
+        "code": 0,
+        "out": "override-60"
+      }
+    },
+    {
+      "check": "README no longer claims 30 minutes",
+      "value": true
+    },
+    {
+      "check": "suite (with updated pin/override tests) passes",
+      "value": 0
+    },
+    {
+      "check": "revision pushed to the same PR; no new PR opened",
+      "value": {
+        "pr": 6,
+        "revised": true,
+        "headAfter": "db7ebb842d412540005d447fde626df696080cbb",
+        "newPrs": []
+      }
+    }
+  ],
+  "claimedEvidence": [
+    {
+      "claim": "What I did: Re-verified all four required artifacts of the PR revision with one command: service.py:12 byte-identical to main's env-configurable TTL (KEEPNOTE_TTL_SECONDS, 24h default), README's false 30-minute-inactivity claim replaced by the real 24…; changed 3 files (classified trivial); pushed db7ebb842d. What I verified: the suite was already failing on the base branch (exit 1) before any edit; the suite passed over the published tree (`python3 -m unittest discover -s tests`, 1s). What I could not verify: nothing outstanding.",
+      "verdict": "unverified"
+    }
+  ],
+  "artifacts": [
+    "preserve/transcript.txt",
+    "artifacts/grader-output.json"
+  ],
+  "preserve": {
+    "dir": "preserve/"
+  },
+  "probesApplied": [],
+  "gradedAt": "2026-10-04T08:00:15.160Z",
+  "startedAt": "2026-10-04T07:54:56.766Z",
+  "ship": {
+    "shipRuns": [
+      {
+        "role": "setup-review",
+        "runId": "run-request-a3dba46256d40f05e672a221329ff844d5eec00d5186cf8b3e6a2c4b8dfbc082",
+        "journey": "review",
+        "status": "completed",
+        "latencyMs": 165688,
+        "costUSD": 0.04687,
+        "costPriced": true,
+        "pr": null
+      },
+      {
+        "role": "scenario",
+        "runId": "run-request-3104679cb8cd820cba53f89340567b26b0cf75e600cb7e1131871fada58c2596",
+        "journey": "change",
+        "status": "completed",
+        "latencyMs": 147849,
+        "costUSD": 0.0532644,
+        "costPriced": true,
+        "pr": "http://100.108.123.49:49152/Tyler/ship-eval-same-pr/pulls/6"
+      }
+    ],
+    "fixtureRepo": {
+      "url": "http://100.108.123.49:49152/tyler/ship-eval-same-pr.git",
+      "head": "f2938d0ee805fceec843f7c61908259c49c80571",
+      "ref": "refs/tags/eval-seed",
+      "treeMatchesFixture": true,
+      "movedMainTo": "ece260dab8351d1b0d872d35db99f93277ee6274",
+      "mainAfter": "ece260dab8351d1b0d872d35db99f93277ee6274",
+      "mainMoved": false
+    },
+    "captured": {
+      "sha": "db7ebb842d412540005d447fde626df696080cbb",
+      "source": "PR #6 head"
+    },
+    "samePr": {
+      "prNumber": 6,
+      "prUrl": "http://100.108.123.49:49152/Tyler/ship-eval-same-pr/pulls/6",
+      "branch": "eval/pr-eval-20261004-2-pj-c-same-pr",
+      "setupHead": "ea72cf00db30fe3d71b0840a540ef095745806e7",
+      "mainHead": "ece260dab8351d1b0d872d35db99f93277ee6274",
+      "seed": "f2938d0ee805fceec843f7c61908259c49c80571",
+      "headAfter": "db7ebb842d412540005d447fde626df696080cbb",
+      "revised": true,
+      "runPr": "http://100.108.123.49:49152/Tyler/ship-eval-same-pr/pulls/6",
+      "newPrs": []
+    },
+    "disposition": [
+      "PR #6 closed after capture"
+    ],
+    "pollRetries": 0,
+    "journey": "change",
+    "intake": "request"
+  }
+}
