@@ -44,6 +44,7 @@ import { attachEvidence, envAsked } from "./fix-evidence.js";
 import type { Evidence } from "./verification.js";
 import type { RepoRef } from "./git.js";
 import { assertRepoAllowed, credentialFor, policyFromEnv } from "./repo-policy.js";
+import { placementShadowFile, placementShadowFromEnv, readPlacementSummary, renderPlacementReport } from "./placement-shadow.js";
 import { readShadowSummary, renderShadowReport, shadowFile } from "./policy-shadow.js";
 import { dryRunManifest, parseGrant, renderDryRun } from "./tool-manifest-shadow.js";
 import { detectRepository } from "./stack-import.js";
@@ -84,6 +85,7 @@ import { NucleusCodeIndex } from "./code-index.js";
 import type { CodeSearch } from "./code-index.js";
 import { startWorker } from "./worker.js";
 import { assembleSupportBundle, defaultDocker } from "./support.js";
+import { defaultProbes, formatDoctor, renderDoctor, runDoctor } from "./install-doctor.js";
 import { costUSD, isPricedModel } from "./pricing.js";
 import { defaultRetryPolicy, withRetry, withCallTimeout, modelTimeoutFromEnv } from "./provider.js";
 import { builtinSuite } from "./tasks.js";
@@ -140,6 +142,7 @@ Usage:
   teploy-ship tool validate <manifest.json> [--grant <json|file>] [--json]
                                       dry run: is a tool manifest well formed, and what would
                                       the admin grant actually allow? Stores and enforces nothing
+  teploy-ship placement shadow-report [--json]   where the placement shadow (SHIP_PLACEMENT=shadow) disagreed with the pool
   teploy-ship audit                   export the run history (what ran, cost, PRs)
       [--format csv|json] [--since <iso>] [--until <iso>]
   teploy-ship runs                    list durable runs
@@ -201,6 +204,7 @@ Usage:
   teploy-ship web                     serve the runs dashboard (browser approve/deny)
       [--port N] [--token <t>]        token also via SHIP_WEB_TOKEN (required)
       [--dev]                         vite dev server instead of the built app
+  teploy-ship doctor [--json] [--out f]  check this machine is ready (pass|fail|unknown; unknown is not pass)
   teploy-ship support                 assemble a REDACTED diagnostic bundle (see docs/SUPPORT.md)
       [--out DIR] [--log-lines N]     what a vendor needs: versions, safe config keys,
       [--days N]                      bounded logs, run-state summaries. Credentials
@@ -954,9 +958,12 @@ function durableProvider(args: ReturnType<typeof parseArgs>, config: Config): Ex
         fetch: longRequestFetch,
       });
     if (urls.length <= 1) return build(urls[0] ?? sandbox.url);
+    // S26 shadow: undefined (and so absent below) unless SHIP_PLACEMENT=shadow.
+    const placementShadow = placementShadowFromEnv(process.env, (line) => process.stderr.write(`${line}\n`));
     return new SandboxPool({
       hosts: urls.map((url) => ({ url, provider: build(url) })),
       log: (line) => process.stderr.write(`${line}\n`),
+      ...(placementShadow !== undefined ? { placementShadow } : {}),
     });
   }
   // Local durable runs: a persistent per-run workspace under the state
@@ -1659,6 +1666,18 @@ async function toolCommand(rest: string[]): Promise<void> {
   const report = dryRunManifest(manifest, grant);
   process.stdout.write(args.flags.json === true ? `${JSON.stringify(report, null, 2)}\n` : `${renderDryRun(report)}\n`);
   if (!report.validation.ok) process.exitCode = 1;
+}
+
+/** S26 placement shadow: `placement shadow-report [--json]`. Read-only. */
+async function placementCommand(rest: string[]): Promise<void> {
+  const [sub] = rest;
+  const args = parseArgs(rest);
+  if (sub !== "shadow-report") {
+    fail("usage: teploy-ship placement shadow-report [--json]    where the S26 placement shadow (SHIP_PLACEMENT=shadow) disagreed with the pool");
+  }
+  const file = placementShadowFile();
+  const summary = await readPlacementSummary(file);
+  process.stdout.write(args.flags.json === true ? `${JSON.stringify({ file, ...summary }, null, 2)}\n` : `${renderPlacementReport(summary, file)}\n`);
 }
 
 async function policyCommand(rest: string[]): Promise<void> {
@@ -2407,6 +2426,23 @@ async function supportCommand(rest: string[]): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// doctor — S19 install-readiness checks (all logic in src/install-doctor.ts)
+// ---------------------------------------------------------------------------
+
+/** Exit 0 only for "ready"; 1 for not-ready or incomplete (unknown is not pass). */
+async function doctorCommand(rest: string[]): Promise<void> {
+  const args = parseArgs(rest, COMMAND_FLAGS.doctor);
+  const port = Number(process.env.SHIP_WEB_PORT ?? process.env.PORT ?? 7460);
+  const report = await runDoctor(
+    defaultProbes({ env: process.env, stateDir: stateDir(), webPort: Number.isInteger(port) ? port : 7460, nodeVersion: process.version }),
+  );
+  const rendered = renderDoctor(report);
+  if (typeof args.flags.out === "string") writeFileSync(args.flags.out, rendered.json);
+  process.stdout.write(args.flags.json === true ? rendered.json : formatDoctor(report));
+  if (report.verdict !== "ready") process.exitCode = 1;
+}
+
+// ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
   const [command, ...rest] = process.argv.slice(2);
@@ -2439,6 +2475,8 @@ async function main(): Promise<void> {
       return policyCommand(rest);
     case "tool":
       return toolCommand(rest);
+    case "placement":
+      return placementCommand(rest);
     case "audit":
       return auditCommand(rest);
     case "resume":
@@ -2463,6 +2501,8 @@ async function main(): Promise<void> {
       return webCommand(rest);
     case "support":
       return supportCommand(rest);
+    case "doctor":
+      return doctorCommand(rest);
     case "eval":
       return evalCommand(rest);
     default:

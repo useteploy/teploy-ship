@@ -33,6 +33,8 @@
 import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 
 import type { ExecutorProvider, SandboxOverrides } from "./durable.js";
+import { requirementOf } from "./placement-shadow.js";
+import type { PlacementShadow, PoolView } from "./placement-shadow.js";
 import type { WarmState } from "./warm.js";
 
 /** Separator between the host tag and the daemon's own run id. */
@@ -102,6 +104,12 @@ export interface SandboxPoolOptions {
   log?: (line: string) => void;
   now?: () => number;
   cooldownMs?: number;
+  /**
+   * S26 shadow (placement-shadow.ts). Absent unless `SHIP_PLACEMENT=shadow`.
+   * Compares each placement with execution-target.ts and records the
+   * difference; it never influences which host is used.
+   */
+  placementShadow?: PlacementShadow;
 }
 
 /**
@@ -121,6 +129,10 @@ export class SandboxPool implements ExecutorProvider {
   #log: (line: string) => void;
   #now: () => number;
   #cooldownMs: number;
+  #shadow: PlacementShadow | undefined;
+  /** Shadow bookkeeping only: live runs per project per host, and which project/host each handle is. */
+  #projectRuns: Array<Record<string, number>>;
+  #handleProject = new Map<string, string>();
 
   constructor(options: SandboxPoolOptions) {
     if (options.hosts.length === 0) throw new Error("a sandbox pool needs at least one host");
@@ -131,6 +143,8 @@ export class SandboxPool implements ExecutorProvider {
     this.#log = options.log ?? (() => {});
     this.#now = options.now ?? Date.now;
     this.#cooldownMs = options.cooldownMs ?? UNHEALTHY_COOLDOWN_MS;
+    this.#shadow = options.placementShadow;
+    this.#projectRuns = options.hosts.map(() => ({}));
     // Every host must isolate, or the pool does not. A run whose task came from
     // outside refuses to execute on a non-isolating provider, and that check
     // reads ONE boolean — so the honest answer for a mixed pool is false.
@@ -149,8 +163,11 @@ export class SandboxPool implements ExecutorProvider {
         if (host?.provider.createFrom === undefined) {
           throw new Error(`this run's snapshot is on host #${index}, which is no longer configured`);
         }
+        const shadowDone = this.#shadow?.begin("createFrom", this.#view(), overrides, index);
         const created = await host.provider.createFrom(inner, overrides);
         this.#live[index] += 1;
+        shadowDone?.(index);
+        this.#track(poolHandle(index, created.handle), index, overrides);
         return { handle: poolHandle(index, created.handle) };
       };
     }
@@ -231,11 +248,45 @@ export class SandboxPool implements ExecutorProvider {
   }
 
   async create(overrides?: SandboxOverrides): Promise<{ handle: string }> {
+    // Shadow: decided from the state BEFORE the attempt, recorded after it.
+    const shadowDone = this.#shadow?.begin("create", this.#view(), overrides);
     return this.#place("start a sandbox", async (host, index) => {
       const created = await host.provider.create(overrides);
       this.#live[index] += 1;
+      shadowDone?.(index);
+      this.#track(poolHandle(index, created.handle), index, overrides);
       return { handle: poolHandle(index, created.handle) };
     });
+  }
+
+  /** Shadow only: what the pool believes about each host right now. */
+  #view(): PoolView {
+    const state = this.state();
+    return {
+      hosts: this.#hosts.map((h, i) => ({ url: h.url, isolated: h.provider.isolated === true, live: state[i]!.live, healthy: state[i]!.healthy })),
+      projectRuns: this.#projectRuns.map((r) => ({ ...r })),
+    };
+  }
+
+  #track(handle: string, index: number, overrides: SandboxOverrides | undefined): void {
+    if (this.#shadow === undefined) return;
+    const project = requirementOf(overrides).req.project;
+    this.#handleProject.set(handle, project);
+    this.#projectRuns[index]![project] = (this.#projectRuns[index]![project] ?? 0) + 1;
+  }
+
+  /**
+   * C5 liveness probe failed for `handle` (durable.ts). Shadow only: record
+   * what execution-target.ts would have done. Does nothing, and returns, when
+   * the shadow is off. The caller's failure path is unchanged either way.
+   */
+  observeHostLoss(handle: string): void {
+    if (this.#shadow === undefined) return;
+    const { index } = parsePoolHandle(handle);
+    if (this.#hosts[index] === undefined) return;
+    const project = this.#handleProject.get(handle);
+    const req = requirementOf(project !== undefined && project !== "(unknown)" ? { warm: { repo: project } } : undefined, {});
+    this.#shadow.hostLoss(this.#view(), index, req);
   }
 
   attach(handle: string): AgentExecutor {
@@ -260,6 +311,12 @@ export class SandboxPool implements ExecutorProvider {
     if (host?.provider.destroy === undefined) return;
     await host.provider.destroy(inner);
     this.#live[index] = Math.max(0, this.#live[index]! - 1);
+    const project = this.#handleProject.get(handle);
+    if (project !== undefined) {
+      this.#handleProject.delete(handle);
+      const runs = this.#projectRuns[index]!;
+      runs[project] = Math.max(0, (runs[project] ?? 1) - 1);
+    }
   }
 
   /**
