@@ -29,6 +29,8 @@
  */
 
 /** What Ship records and reasons about. */
+import { shadowObserve } from "./shadow-hook.js";
+
 export type NetworkTier = "none" | "allowlist" | "open";
 
 export const NETWORK_TIERS: readonly NetworkTier[] = ["none", "allowlist", "open"];
@@ -95,7 +97,10 @@ export function resolveNetworkTier(
   config?: string | undefined,
 ): NetworkTier | null {
   const chosen = parseNetworkTier(flag ?? env ?? config);
-  return chosen === null ? null : (chosen ?? DEFAULT_NETWORK_TIER);
+  const result = chosen === null ? null : (chosen ?? DEFAULT_NETWORK_TIER);
+  // S25 shadow (SHIP_POLICY_SHADOW): report the decision, never alter it.
+  shadowObserve({ point: "network", result });
+  return result;
 }
 
 /**
@@ -151,6 +156,13 @@ export function egressEntryError(entry: string): string | null {
  * host nobody can explain, on a run that has already been paid for.
  */
 export function normalizeEgressAllow(entries: readonly string[] | undefined): string[] | undefined {
+  const result = normalizeEgressAllowEntries(entries);
+  // S25 shadow (SHIP_POLICY_SHADOW): report the decision, never alter it. A throw above is not reported.
+  shadowObserve({ point: "egress", result });
+  return result;
+}
+
+function normalizeEgressAllowEntries(entries: readonly string[] | undefined): string[] | undefined {
   if (entries === undefined) return undefined;
   const out: string[] = [];
   for (const raw of entries) {

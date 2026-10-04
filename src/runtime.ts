@@ -80,6 +80,8 @@ import type { RecoveryTuning } from "./durable.js";
 import type { ProposeInput as IntakeProposeInput, IntakeTask as IntakeTaskType } from "./intake.js";
 import { FileEventStore, RunMetaStore } from "./run-store.js";
 import { askEnv, readDeploymentAsks } from "./deployment-asks.js";
+import { installPolicyShadowFromEnv } from "./policy-shadow.js";
+import { shadowObserve } from "./shadow-hook.js";
 import type { RunMeta } from "./run-store.js";
 
 export type { RunMeta } from "./run-store.js";
@@ -439,6 +441,7 @@ export interface ShipRuntime {
 }
 
 export function fileRuntime(): ShipRuntime {
+  installPolicyShadowFromEnv(); // no-op unless SHIP_POLICY_SHADOW=on
   const store = new FileEventStore();
   const meta = new RunMetaStore();
   const projects = new FileProjectStore();
@@ -508,6 +511,7 @@ export async function nucleusRuntime(
   // `db` is a seam, not a feature: NucleusPgwire already takes a PoolLike so a
   // test can watch the statements it emits, and the reads this runtime issues
   // (listMeta above all) are worth asserting on rather than trusting.
+  installPolicyShadowFromEnv(); // no-op unless SHIP_POLICY_SHADOW=on
   const db = options?.db ?? new NucleusPgwire(url, owner);
   // Bring the shared schema to the shape this binary expects BEFORE handing
   // back a runtime. A rolling deploy runs old and new processes against one
@@ -794,15 +798,21 @@ export async function assertDailyBudget(
   if ((await spend.held?.(options.runId)) === true) return;
 
   const budget = await dailyBudgetForSource(runtime, source, options.repo);
-  if (!(budget > 0)) return; // <= 0 disables the cap for that source, as in the worker
+  const estimate = estimatedRunCostUSD();
+  const shadowProject = async () => (options.repo === undefined ? null : await runtime.projects.forRepo(options.repo));
+  if (!(budget > 0)) {
+    // <= 0 disables the cap for that source, as in the worker
+    shadowObserve({ point: "budget", source, ...(options.repo !== undefined ? { repo: options.repo } : {}), budget, committed: null, estimate, existingAllowed: true, loadProject: shadowProject });
+    return;
+  }
 
   const day = spendDay(options.now ?? new Date());
-  const estimate = estimatedRunCostUSD();
   // Reserve BEFORE reading the total, exactly as the sweep does: two surfaces
   // admitting at once must see each other's commitment rather than both reading
   // the same room. Over-reserving briefly is the safe direction.
   await spend.reserve(options.runId, source, day, estimate);
   const committed = await spend.get(source, day);
+  shadowObserve({ point: "budget", source, ...(options.repo !== undefined ? { repo: options.repo } : {}), budget, committed, estimate, existingAllowed: !(committed > budget), loadProject: shadowProject });
   // SHIP_BUDGET_RESERVATION: the ledger judges the same admission; it denies
   // only in `on` mode (see budget-gate.ts). Off => gate undefined => unchanged.
   const gate = options.budgetGate ?? resolveBudgetGate(runtime as { kind?: string });

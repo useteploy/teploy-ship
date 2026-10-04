@@ -1,5 +1,6 @@
 import { parseRepoUrl } from "./git.js";
 import type { RepoRef } from "./git.js";
+import { shadowObserve } from "./shadow-hook.js";
 
 /**
  * Which repositories Ship will point a credential at, and which credential.
@@ -183,6 +184,30 @@ export function effectiveAllowlist(config: RepoPolicyConfig): RepoAllowEntry[] {
  * Throws RepoNotAllowedError with an operator-actionable message otherwise.
  */
 export function assertRepoAllowed(
+  url: string,
+  options: { trust: RepoTrust; config?: RepoPolicyConfig },
+): RepoRef {
+  // S25 shadow (SHIP_POLICY_SHADOW): report the decision either way, never alter it.
+  let ref: RepoRef;
+  try {
+    ref = assertRepoAllowedDecision(url, options);
+  } catch (error) {
+    shadowObserve({ point: "repo", url, trust: options.trust, host: repoHost(url), allowed: false, reason: error instanceof Error ? error.message : String(error) });
+    throw error;
+  }
+  shadowObserve({ point: "repo", url, trust: options.trust, host: ref.base === "file://" ? null : repoHost(url), allowed: true });
+  return ref;
+}
+
+function repoHost(url: string): string | null {
+  try {
+    return parseRepoUrl(url).base.replace(/^[a-z+]+:\/\//i, "").toLowerCase() || null;
+  } catch {
+    return null;
+  }
+}
+
+function assertRepoAllowedDecision(
   url: string,
   options: { trust: RepoTrust; config?: RepoPolicyConfig },
 ): RepoRef {
