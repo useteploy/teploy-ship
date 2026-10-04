@@ -86,6 +86,8 @@ import type { NetworkTier } from "./egress.js";
 import type { CodeSearch } from "./code-index.js";
 import { CHANGE_EVENT, MERGE_EVENT, PLAN_EVENT } from "./plan.js";
 import type { ChangeDecisionPayload, MergeDecisionPayload } from "./plan.js";
+import { groundPlanFromExecutor, planGroundingEnabled } from "./plan-grounding.js";
+import type { GroundingReport } from "./plan-grounding.js";
 import { classifyChange, mergeParkSummary, midRunParkReasons, parseNumstat } from "./change-class.js";
 import type { ChangedFile, ChangeVerdict } from "./change-class.js";
 import type { PlanDecisionPayload } from "./plan.js";
@@ -1838,7 +1840,23 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
         messages.push({ role: "user", content: PLAN_REQUEST });
         const planStep = await ws.ctx.step(`${p}plan-think`, async () => {
           const generated = await generateText({ model: config.model, messages });
-          return { text: generated.text, usage: generated.usage };
+          // S07 plan grounding (advisory, SHIP_PLAN_GROUNDING, default off):
+          // computed INSIDE this step and attached as an additive `grounding`
+          // field on its result — never a new step, so the recorded sequence is
+          // a function of the input whatever the executing worker's env says,
+          // and a replay reads the report back from the log without re-running
+          // git. A workspace that is not a git repository (a bare run) has no
+          // committed tree to ground against: the field is omitted, and the
+          // park proceeds exactly as without the flag.
+          let grounding: GroundingReport | undefined;
+          if (planGroundingEnabled()) {
+            try {
+              grounding = await groundPlanFromExecutor(ws.executor, generated.text);
+            } catch {
+              grounding = undefined;
+            }
+          }
+          return { text: generated.text, usage: generated.usage, ...(grounding !== undefined ? { grounding } : {}) };
         });
         addUsage(planStep.usage);
 

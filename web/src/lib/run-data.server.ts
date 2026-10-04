@@ -34,6 +34,8 @@ import { taskRootRunId as resolveTaskRoot } from "../../../dist/task-session.js"
 import { taskRecord } from "teploy-ship/task-record";
 import type { DeliveryOutcome } from "teploy-ship/task-record";
 import { findingContinuityLines } from "./finding-continuity-view.js";
+import { planGroundingView } from "./plan-grounding-view.js";
+import type { PlanGroundingView } from "./plan-grounding-view.js";
 import { harnessIdentityView } from "./harness-identity-view.js";
 import type { HarnessIdentityView } from "./harness-identity-view.js";
 import { taskStateView } from "./task-state.js";
@@ -79,6 +81,13 @@ export interface RunData {
   eventCount: number;
   /** The agent's proposed plan, when this run is parked on plan approval. */
   plan?: string;
+  /**
+   * Advisory plan grounding (S07): whether the files, symbols and commands
+   * the plan names exist in the committed tree, read off the `plan-think`
+   * step's additive `grounding` field. Absent unless the run was made with
+   * SHIP_PLAN_GROUNDING=on; never an input to the decision.
+   */
+  planGrounding?: PlanGroundingView;
   /**
    * What a scan run found (L2 / D3), read off its `scan-findings` step.
    *
@@ -215,6 +224,7 @@ export async function runData({ params, request }: { params: { id: string }; req
     const startedInput = (started?.data as { input?: { steer?: boolean; harness?: { id?: unknown }; harnessAttempts?: { id?: unknown }[] } } | undefined)?.input;
     const steerable = startedInput?.steer === true && harnessSupports(startedInput, "steer");
     const plan = planFrom(events);
+    const planGrounding = planGroundingView(events);
     const scanned = findingsFrom(events);
     const executing = meta !== null && !["completed", "failed", "cancelled", "cancelling"].includes(meta.status);
     const question = meta?.eventName !== undefined && isAskEvent(meta.eventName) ? pendingQuestion(events) : undefined;
@@ -372,6 +382,7 @@ export async function runData({ params, request }: { params: { id: string }; req
       followUpRequestId: randomUUID(),
       eventCount: events.length,
       ...(plan !== undefined ? { plan } : {}),
+      ...(planGrounding !== undefined ? { planGrounding } : {}),
       findings: scanned.findings,
       findingsNotes: scanned.notes,
       ...(findingContinuityLines(events) !== undefined ? { findingContinuity: findingContinuityLines(events)! } : {}),
