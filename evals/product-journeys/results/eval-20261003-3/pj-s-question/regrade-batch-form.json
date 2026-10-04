@@ -1,0 +1,86 @@
+{
+  "kind": "supplementary-regrade",
+  "file": "regrade-batch-form.json",
+  "date": "2026-10-04",
+  "scenarioId": "pj-s-question",
+  "runId": "eval-20261003-3",
+  "why": "The original verdict failed on \"the tagline line (index.html:16) is not cited\" although the transcript cites it verbatim in a layout the grader did not extract (file and line number separated by the word \"line\"; exact string after a dash on the same line, or as a fenced/indented block under a colon-ended heading). Ruled a grader extraction defect; the fixed grader binds those signpost triples and runs the same verbatim and coverage checks over them. The original result.json is untouched; this record supplements it.",
+  "gradedWith": "w5/grader-question-ruling ef04ee2",
+  "transcript": "preserve/transcript.txt (unchanged, same bytes the original verdict graded)",
+  "original": {
+    "outcome": "fail",
+    "graderReasons": [
+      "the tagline line (index.html:16) is not cited"
+    ]
+  },
+  "regraded": {
+    "pass": true,
+    "reasons": [],
+    "evidence": [
+      {
+        "kind": "structural",
+        "check": "work tree unchanged",
+        "value": {
+          "added": [],
+          "removed": [],
+          "changed": [],
+          "unchanged": [
+            "about.html",
+            "index.html",
+            "styles.css"
+          ]
+        }
+      },
+      {
+        "kind": "transcript",
+        "check": "every cited file:line:string occurrence exists verbatim in the fixture",
+        "value": {
+          "citations": 25,
+          "ok": true
+        }
+      },
+      {
+        "kind": "transcript",
+        "check": "cited Tideline lines exactly cover the fixture occurrences (independent count)",
+        "value": {
+          "independent": [
+            "about.html:15",
+            "about.html:20",
+            "about.html:6",
+            "index.html:15",
+            "index.html:20",
+            "index.html:6"
+          ],
+          "cited": [
+            "about.html:15",
+            "about.html:20",
+            "about.html:6",
+            "index.html:15",
+            "index.html:20",
+            "index.html:6"
+          ],
+          "missing": [],
+          "extra": []
+        }
+      },
+      {
+        "kind": "transcript",
+        "check": "the home-page tagline line is cited",
+        "value": {
+          "taglineLines": [
+            16
+          ],
+          "cited": true
+        }
+      },
+      {
+        "kind": "adapter-reported",
+        "check": "no PR opened, nothing pushed",
+        "value": {
+          "prOpened": false,
+          "pushed": false
+        }
+      }
+    ]
+  }
+}
