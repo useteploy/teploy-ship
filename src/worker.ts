@@ -73,6 +73,8 @@ import { NucleusOutbox, flushOutbox, notificationId } from "./outbox.js";
 import type { Outbox } from "./outbox.js";
 import type { SpendStore } from "./spend.js";
 import { utcDay } from "./spend.js";
+import { resolveBudgetGate } from "./budget-gate.js";
+import type { BudgetGate } from "./budget-gate.js";
 import { NucleusAdmission } from "./admission.js";
 import type { AdmissionControl } from "./admission.js";
 import type { RepoPolicyConfig } from "./repo-policy.js";
@@ -339,6 +341,8 @@ export function verificationContext(events: WorkflowEvent[]): Pick<RunNotificati
 export interface IntakeSweepDeps {
   intake: Pick<IntakeStore, "list" | "setState" | "claim">;
   spend: SpendStore;
+  /** SHIP_BUDGET_RESERVATION ledger (budget-gate.ts). Absent = flag off = the code below is unchanged. */
+  budgetGate?: BudgetGate;
   /** Fleet-wide slots and counters (see admission.ts). */
   admission: AdmissionControl;
   policies: Record<string, IntakePolicy>;
@@ -449,9 +453,18 @@ export async function sweepIntake(deps: IntakeSweepDeps): Promise<void> {
         await deps.spend.reserve(runId, task.source, today, deps.estimatedRunCostUSD);
         holdTaken = true;
         const committed = await deps.spend.get(task.source, today);
-        if (committed > budget) {
+        // Shadow/on only: the reservation ledger judges the same admission. It
+        // can deny only in `on` mode; otherwise it records and the existing
+        // verdict below stands.
+        const gated = deps.budgetGate
+          ? await deps.budgetGate.admit({
+              runId, source: task.source, day: today, budgetUSD: budget, estimateUSD: deps.estimatedRunCostUSD,
+              existingAllowed: !(committed > budget), existingCommittedUSD: committed,
+            })
+          : undefined;
+        if (committed > budget || gated?.allow === false) {
           deps.log(
-            `[worker] intake: ${task.source} would exceed its daily budget ($${budget.toFixed(2)}; committed $${committed.toFixed(2)}); ${task.taskId} stays proposed`,
+            `[worker] intake: ${task.source} would exceed its daily budget ($${budget.toFixed(2)}; committed $${Math.max(committed, gated?.ledgerCommittedUSD ?? 0).toFixed(2)}); ${task.taskId} stays proposed`,
           );
           await deps.intake.setState(task.taskId, "proposed");
           continue;
@@ -485,7 +498,10 @@ export async function sweepIntake(deps: IntakeSweepDeps): Promise<void> {
       throw error;
     } finally {
       if (slotTaken) await deps.admission.releaseSlot(runId).catch(() => {});
-      if (holdTaken) await deps.spend.release(runId).catch(() => {});
+      if (holdTaken) {
+        await deps.spend.release(runId).catch(() => {});
+        await deps.budgetGate?.release(runId);
+      }
     }
   }
 }
@@ -949,6 +965,9 @@ export function startWorker(options: WorkerOptions): {
         // The fleet resources this run held come back whatever the outcome was.
         await admission.releaseSlot(runId);
         await options.runtime.spend.release(runId).catch(() => {});
+        // Ledger (flag-gated, shadow unless `on`): every path below states what
+        // happened to the hold. Unpriced is settled as unknown, never as $0.
+        const budgetGate = resolveBudgetGate(options.runtime);
         // A merged change earns a PROPOSED delivery record (Package B): what
         // merged, from the recorded steps — never the model's account — so an
         // operator can approve a promotion against a tuple later. Purely
@@ -968,7 +987,10 @@ export function startWorker(options: WorkerOptions): {
           }
         }
         const source = meta?.source;
-        if (source === undefined || source === "") return; // pre-source run; nothing to attribute
+        if (source === undefined || source === "") {
+          await budgetGate?.release(runId);
+          return; // pre-source run; nothing to attribute
+        }
         const model = meta?.model ?? modelId;
         const day = utcDay(new Date());
         if (settled.usage?.priced === false) {
@@ -978,7 +1000,11 @@ export function startWorker(options: WorkerOptions): {
           // consumed NOTHING (the binary never answered, a credential was
           // refused) is not a quota draw and is not counted — the same gate
           // as `cost <= 0` below for priced runs.
-          if (!(settled.usage.totalTokens > 0)) return;
+          if (!(settled.usage.totalTokens > 0)) {
+            await budgetGate?.settle(runId, { kind: "none" });
+            return;
+          }
+          await budgetGate?.settle(runId, { kind: "unpriced" });
           await options.runtime.unpricedRuns.add(source, day, runId);
           log(`[worker] ${runId} (${source}) ran unpriced (${settled.usage.totalTokens} tokens on a quota Ship cannot price) — counted to ${day}, not priced`);
           return;
@@ -994,7 +1020,11 @@ export function startWorker(options: WorkerOptions): {
         // consumption can price at zero — a quota or local model with tokens
         // — so nothing is ever dropped, only counted.
         if (cost <= 0) {
-          if (!((settled.usage?.totalTokens ?? 0) > 0)) return;
+          if (!((settled.usage?.totalTokens ?? 0) > 0)) {
+            await budgetGate?.settle(runId, { kind: "none" });
+            return;
+          }
+          await budgetGate?.settle(runId, { kind: "unpriced" });
           await options.runtime.unpricedRuns.add(source, day, runId);
           log(
             `[worker] ${runId} (${source}) priced at $0 on ${model} but consumed ${settled.usage?.totalTokens} tokens — ` +
@@ -1008,6 +1038,7 @@ export function startWorker(options: WorkerOptions): {
           log(`[worker] ${runId}: model ${model} is not in the pricing table — charging the highest known rate`);
         }
         await retrying(() => options.runtime.spend.add(source, day, cost), { attempts: 4, delayMs: 500, onRetry });
+        await budgetGate?.settle(runId, { kind: "priced", costUSD: cost });
         log(`[worker] ${runId} (${source}) cost $${cost.toFixed(4)} recorded to ${day}`);
         // The same cost, cut by repository and by actor. Fire-and-forget with
         // its own guard, in the style of the surrounding side effects:
@@ -1502,6 +1533,7 @@ export function startWorker(options: WorkerOptions): {
     return sweepIntake({
       intake: options.runtime.intake,
       spend: options.runtime.spend,
+      ...(resolveBudgetGate(options.runtime) !== undefined ? { budgetGate: resolveBudgetGate(options.runtime)! } : {}),
       admission,
       policies,
       windows,
