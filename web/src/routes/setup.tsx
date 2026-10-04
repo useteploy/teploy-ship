@@ -8,6 +8,8 @@ import { may } from "../lib/authority.server.js";
 import { shipRuntime } from "../lib/store.server.js";
 import { readiness } from "../lib/readiness.server.js";
 import type { ReadinessCheck } from "../lib/readiness.server.js";
+import { stackDetectEnabled, suggestionsFor } from "../lib/stack-suggest.server.js";
+import type { SuggestionResult } from "../lib/stack-suggest.server.js";
 export const config = { mode: "app" };
 interface Data {
   selected: Project | null;
@@ -19,6 +21,9 @@ interface Data {
   checkedAt: string;
   canEdit: boolean;
   error: string | null;
+  /** SHIP_STACK_DETECT: proposals read from the repository, never applied. */
+  detectEnabled: boolean;
+  suggestions: SuggestionResult | null;
 }
 export async function loader({ request }: { request: Request }): Promise<Data> {
   const runtime = await shipRuntime(),
@@ -38,6 +43,11 @@ export async function loader({ request }: { request: Request }): Promise<Data> {
     if (input?.repo === selected?.url)
       recentRuns.push({ runId: r.runId, task: r.task, status: r.status });
   }
+  const detectEnabled = stackDetectEnabled();
+  const suggestions: SuggestionResult | null =
+    detectEnabled && selected?.url && new URL(request.url).searchParams.get("detect") === "1" && (await may("approve", await currentUser(request)))
+      ? await suggestionsFor(selected.url, selected.sandboxImage)
+      : null;
   return {
     selected,
     canLaunch: await may("approve", await currentUser(request)),
@@ -51,6 +61,8 @@ export async function loader({ request }: { request: Request }): Promise<Data> {
     checkedAt: new Date().toISOString(),
     canEdit: await may("policies", await currentUser(request)),
     error: identityError ?? new URL(request.url).searchParams.get("error"),
+    detectEnabled,
+    suggestions,
   };
 }
 export async function action({
@@ -86,6 +98,8 @@ export async function action({
         mode: "scan",
         environmentCheck: true,
         environmentCheckOnly: true,
+        // Recorded only when the flag is on (the runtime also drops it otherwise).
+        ...(stackDetectEnabled() && /^[0-9a-f]{64}$/.test(String(f.get("inputsDigest") ?? "")) ? { environmentInputsDigest: String(f.get("inputsDigest")) } : {}),
         journey: "investigate",
         task: `Verify project environment: ${project.label ?? project.repo}. Clone the repository, run its configured preparation and test commands, and record their actual result.`,
       });
@@ -286,9 +300,93 @@ export default function Setup({ data }: { data: Data }) {
               Save environment
             </button>
           </form>
+          {data.detectEnabled && data.selected.url && (
+            <section class="setup-suggestions" aria-label="Suggestions from the repository">
+              <h3 class="section">Suggested from the repository</h3>
+              <p class="meta">
+                Proposals only, each with the file it came from. Nothing is run
+                or saved; copy what you accept into the form above.
+              </p>
+              <form method="get">
+                <input type="hidden" name="repo" value={data.selected.url} />
+                <input type="hidden" name="detect" value="1" />
+                <button type="submit">
+                  {data.suggestions ? "Re-read repository" : "Suggest from repository"}
+                </button>
+              </form>
+              {data.suggestions && "error" in data.suggestions && (
+                <p class="notice bad" role="alert">{data.suggestions.error}</p>
+              )}
+              {data.suggestions && "view" in data.suggestions && (
+                <>
+                  <dl>
+                    {data.suggestions.view.commands.map((c) => (
+                      <>
+                        <dt>{c.field === "preparation" ? "Preparation" : c.field === "test" ? "Test" : "Start (not used by Ship)"}</dt>
+                        <dd>
+                          {c.command ? (
+                            <>
+                              <code>{c.command}</code>
+                              {c.timeoutSeconds ? <span class="meta"> · {c.timeoutSeconds}s</span> : null}
+                              <br />
+                              <span class="meta">From {c.cite}</span>
+                              {c.review && (
+                                <p class="notice">Runs repository-authored text; read it before accepting: {c.review.join("; ")}</p>
+                              )}
+                            </>
+                          ) : (
+                            <>
+                              <span class="meta">{c.why}</span>
+                              {c.options && (
+                                <ul>
+                                  {c.options.map((o) => (
+                                    <li><code>{o}</code></li>
+                                  ))}
+                                </ul>
+                              )}
+                            </>
+                          )}
+                        </dd>
+                      </>
+                    ))}
+                  </dl>
+                  {data.suggestions.view.services.length > 0 && (
+                    <>
+                      <h4>Services the repository declares</h4>
+                      <ul>
+                        {data.suggestions.view.services.map((s) => (
+                          <li>
+                            <strong>{s.name}</strong> · {s.detail}
+                            <br />
+                            <span class="meta">From {s.cite}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </>
+                  )}
+                  {data.suggestions.view.gaps.length > 0 && (
+                    <details>
+                      <summary>What this does not cover</summary>
+                      <ul>
+                        {data.suggestions.view.gaps.map((g) => (
+                          <li>{g}</li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
+                  {data.suggestions.view.notes.map((n) => (
+                    <p class="meta">{n}</p>
+                  ))}
+                </>
+              )}
+            </section>
+          )}
           {data.canLaunch && (
             <form method="post">
               <input type="hidden" name="repo" value={data.selected.url ?? data.selected.repo} />
+              {data.detectEnabled && data.suggestions && "view" in data.suggestions && (
+                <input type="hidden" name="inputsDigest" value={data.suggestions.view.digest} />
+              )}
               <button name="intent" value="verify">
                 Verify environment
               </button>

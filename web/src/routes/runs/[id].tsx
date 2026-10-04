@@ -485,6 +485,14 @@ export default function RunDetail({ data: initialData }: { data: RunData }) {
                   ))}
                 </ul>
               )}
+              {data.findingContinuity !== undefined && (
+                <div class="notice" style="margin:8px 0 0">
+                  <p style="margin:0"><b>Since the earlier review</b></p>
+                  <ul style="margin:4px 0 0">
+                    {data.findingContinuity.map((line, i) => <li key={i}>{line}</li>)}
+                  </ul>
+                </div>
+              )}
               {data.findingsNotes.length > 0 && (
                 <p class="meta" style="margin:8px 0 0">
                   {/* Why entries were dropped. Visible on purpose: a silently

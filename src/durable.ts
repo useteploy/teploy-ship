@@ -92,6 +92,7 @@ import type { PlanDecisionPayload } from "./plan.js";
 import type { ApprovalPolicy } from "./approval.js";
 import { SCAN_EDIT_REFUSED, SCAN_MIDPOINT_REMINDER, formatObservation, scanFindingsNudge, scanPrompt, systemPrompt } from "./prompt.js";
 import { parseFindings } from "./findings.js";
+import { compareWithPrior, findingContinuityEnabled, loadPriorReview, revisionDiff } from "./finding-continuity-wiring.js";
 import type { ParsedFindings, ScanFinding } from "./findings.js";
 import { costUSD } from "./pricing.js";
 import { HARNESS_VERSIONS, NATIVE_HARNESS_ID, selectAdapter } from "./harness.js";
@@ -524,6 +525,8 @@ export interface DurableAgentInput {
   sandboxImage?: string;
   preparation?: EnvironmentPreparation;
   environmentCheck?: boolean;
+  /** Additive readiness basis next to environmentConfigId; see projectReadinessRecord. */
+  environmentInputsDigest?: string;
   /** Recorded opt-in: stop after deterministic setup checks, without a model. */
   environmentCheckOnly?: boolean;
   requireOpenPr?: boolean;
@@ -1322,6 +1325,7 @@ export function durableAgent(
               journey: input.journey,
               ...(checkout !== null ? { branch: checkout.branch } : {}),
               ...(repoContext !== "" ? { context: repoContext } : {}),
+              ...(findingContinuityEnabled() ? { revisionFields: true } : {}),
             })
           : checkout !== null
           ? input.pr !== undefined
@@ -1363,7 +1367,42 @@ export function durableAgent(
        * for what happened to the file-shaped one.
        */
       const collectFindings = async (summary: string): Promise<ParsedFindings | null> =>
-        input.mode === "scan" ? await ctx.step("scan-findings", () => parseFindings(summary)) : null;
+        input.mode === "scan"
+          ? await ctx.step(
+              "scan-findings",
+              // Flag off: the exact call this step always made. Flag on (S09,
+              // advisory): same step, additive result fields. Never a new step.
+              findingContinuityEnabled()
+                ? async () => {
+                    const parsed = parseFindings(summary, { revisionFields: true });
+                    try {
+                      if (input.repo === undefined || config.previewLineage === undefined) return parsed;
+                      const prior = await loadPriorReview(config.previewLineage, {
+                        runId: ctx.runId,
+                        repo: input.repo,
+                        ...(input.pr !== undefined ? { pr: input.pr } : {}),
+                        task: input.task,
+                      });
+                      if (prior === null) return parsed;
+                      const diff = await revisionDiff(
+                        (command, options) => primary.executor.exec(command, options),
+                        prior.snapshot.revision,
+                        checkout?.headSha,
+                      );
+                      return compareWithPrior({
+                        parsed,
+                        prior,
+                        ...(checkout?.headSha !== undefined ? { revision: checkout.headSha } : {}),
+                        ...(diff !== undefined ? { diff } : {}),
+                      }).parsed;
+                    } catch {
+                      // Advisory: a comparison that cannot run must not cost the scan its findings.
+                      return parsed;
+                    }
+                  }
+                : () => parseFindings(summary),
+            )
+          : null;
 
       // Single attempt when there IS a single adapter: never-declared
       // harnessAttempts, or independent K of 1 (P6-1's off switch). The

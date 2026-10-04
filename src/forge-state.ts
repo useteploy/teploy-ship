@@ -11,14 +11,34 @@ export interface ForgeState {
   draft: boolean;
   checks: { name: string; state: string; url?: string }[];
   reviews: { author: string; state: string; body: string }[];
+  /**
+   * Inline review comments, present only when the caller asked for them
+   * (S09 finding continuity). Additive: `reviews` keeps its shape and caps.
+   * `resolved` is set only when the forge says so: GitHub's REST API does not
+   * expose thread resolution (GraphQL does), so there it stays undefined,
+   * meaning "unknown", never "unresolved".
+   */
+  reviewComments?: ForgeReviewComment[];
   warnings: string[];
 }
+export interface ForgeReviewComment {
+  author: string;
+  path?: string;
+  line?: number;
+  body: string;
+  /** True when a later push left the comment with no current anchor (GitHub). */
+  outdated?: boolean;
+  resolved?: boolean;
+}
+const MAX_INLINE_COMMENTS = 100;
+const FORGEJO_REVIEWS_WALKED = 10;
 /** Read only, bounded, never follows a forge redirect with credentials. */
 export async function readForgeState(
   ref: RepoRef,
   token: string,
   pr: number,
   fetchImpl: typeof fetch = fetch,
+  options: { inlineComments?: boolean } = {},
 ): Promise<ForgeState> {
   if (!Number.isSafeInteger(pr) || pr < 1)
     throw new Error("Invalid pull request number");
@@ -101,16 +121,63 @@ export async function readForgeState(
         result.warnings.push("Only the first 100 checks are shown");
     }
   }
+  if (options.inlineComments === true) {
+    try {
+      result.reviewComments = await readInlineComments(read, github, pr, parts[1]!);
+    } catch {
+      result.warnings.push("Inline review comments unavailable");
+    }
+  }
   if (Buffer.byteLength(JSON.stringify(result)) > 10000)
     result.warnings.push(
       "Some reviews or checks omitted; open the forge for the full list",
     );
   while (
     Buffer.byteLength(JSON.stringify(result)) > 10000 &&
-    (result.reviews.length || result.checks.length)
+    (result.reviews.length || result.checks.length || result.reviewComments?.length)
   ) {
-    if (result.reviews.length) result.reviews.pop();
+    if (result.reviewComments?.length) result.reviewComments.pop();
+    else if (result.reviews.length) result.reviews.pop();
     else result.checks.pop();
   }
   return result;
+}
+
+/**
+ * GitHub lists every inline comment flat at /pulls/N/comments. Forgejo hangs
+ * them off each review (/pulls/N/reviews/ID/comments), so that walk is bounded
+ * to the newest reviews; its comments carry a `resolver`, the one place either
+ * forge's REST API says a thread is resolved.
+ */
+async function readInlineComments(
+  read: (path: string) => Promise<any>,
+  github: boolean,
+  pr: number,
+  reviewsPart: PromiseSettledResult<any>,
+): Promise<ForgeReviewComment[]> {
+  const out: ForgeReviewComment[] = [];
+  const push = (c: any): void => {
+    if (out.length >= MAX_INLINE_COMMENTS) return;
+    const line = c.line ?? c.original_line ?? c.position ?? c.original_position;
+    out.push({
+      author: String(c.user?.login ?? "Reviewer").slice(0, 100),
+      ...(typeof c.path === "string" ? { path: c.path.slice(0, 300) } : {}),
+      ...(typeof line === "number" && line >= 1 ? { line } : {}),
+      body: safeForDisplay(String(c.body ?? ""), 500),
+      ...(github && c.position === null ? { outdated: true } : {}),
+      ...(!github && "resolver" in c ? { resolved: c.resolver !== null && c.resolver !== undefined } : {}),
+    });
+  };
+  if (github) {
+    const raw = await read(`/pulls/${pr}/comments?per_page=100`);
+    for (const c of Array.isArray(raw) ? raw : []) push(c);
+    return out;
+  }
+  const list = reviewsPart.status === "fulfilled" && Array.isArray(reviewsPart.value) ? reviewsPart.value : [];
+  for (const r of list.slice(-FORGEJO_REVIEWS_WALKED)) {
+    if (typeof r?.id !== "number") continue;
+    const raw = await read(`/pulls/${pr}/reviews/${r.id}/comments`).catch(() => []);
+    for (const c of Array.isArray(raw) ? raw : []) push(c);
+  }
+  return out;
 }

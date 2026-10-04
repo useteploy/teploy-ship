@@ -28,16 +28,23 @@ const DIR = ".teploy-agent/kernel";
  * A cell that ignores the interrupt (blocked in C, or catching BaseException)
  * is escalated by the caller killing the kernel outright.
  */
-const KERNEL_PY = `import io, os, sys, time, threading, traceback, _thread
+const KERNEL_PY = `import io, os, sys, time, threading, traceback, signal
 base = os.path.dirname(os.path.abspath(__file__))
 ns = {"__name__": "__main__"}
 done = {f[5:] for f in os.listdir(base) if f.startswith("done-")}
 
+# A backgrounded non-interactive shell starts us with SIGINT ignored; restore it.
+signal.signal(signal.SIGINT, signal.default_int_handler)
+main_ident = threading.main_thread().ident
+
 def watch(cid, stop):
     # Raise KeyboardInterrupt in the main thread the moment the caller gives up.
+    # A real signal, not _thread.interrupt_main(): that only sets a flag, so a
+    # cell blocked in time.sleep() or a socket read kept blocking until the call
+    # returned and the caller always escalated to killing the kernel.
     while not stop.is_set():
         if os.path.exists(os.path.join(base, "cancel-" + cid)):
-            _thread.interrupt_main()
+            signal.pthread_kill(main_ident, signal.SIGINT)
             return
         time.sleep(0.05)
 

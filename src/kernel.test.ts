@@ -143,6 +143,10 @@ test("TS-019: a cell that outlives its timeout is cancelled, not left running", 
     );
     assert.equal(result.timedOut, true);
     assert.match(result.stdout, /cancelled/);
+    // The interrupt must actually break a blocking call: escalating to a kernel
+    // kill ("restarted") is the fallback, and used to be taken every time
+    // because _thread.interrupt_main() cannot wake time.sleep().
+    assert.doesNotMatch(result.stdout, /restarted/, "the cell should stop on the interrupt, not need a kernel kill");
 
     // Give a still-running cell ample time to do the damage it was going to do.
     await new Promise((r) => setTimeout(r, 2500));

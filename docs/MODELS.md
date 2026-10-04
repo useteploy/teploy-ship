@@ -164,6 +164,57 @@ runs were going anyway, since a clean tree publishes nothing either way.
 
 Closing this properly is per-family prompt tuning, and should be called that.
 
+## 3a. Model routing and fallback (S23): shadow only, checked 2026-10-04
+
+Ship still never substitutes a model silently. A versioned routing policy
+(`src/model-routing.ts`, loaded by `src/model-routing-policy.ts`, wired in
+`src/model-routing-wire.ts`) is the one sanctioned way to change that, and it is
+**off by default**.
+
+| `SHIP_MODEL_ROUTING` | effect |
+|---|---|
+| unset / anything else | none. `routedModelId` returns what `resolveModelId` returned. |
+| `shadow` | compute what the policy would choose, at run start and when a model call fails with a trigger-class error; append it to the segment log; change nothing (same model, same error). |
+| `on` | the policy picks the model (an explicit `--model` still wins) and a permitted fallback is called. An unusable policy or a route with no eligible candidate refuses to start. |
+
+`SHIP_MODEL_ROUTING_POLICY` names a JSON file: `schemaVersion` (only `1`),
+`version` (your label, copied into every record), `fallbackOn` (a subset of
+`outage`, `rate-limit`, `budget`, `unsupported-tool`, `refusal`; absent = never
+switch) and `roles` (`worker` is the role the CLI asks for) mapping to ordered
+candidates (`model`, `effort`, `capabilities`, `dataDestination`, `retention`,
+`maxContext`, optional `requestedAuthority`). Unknown fields are errors. The
+file's sha256 is recorded with each decision.
+
+Task facts come from the environment and default to the cautious value:
+`SHIP_MODEL_ROUTING_DATA_CLASS` (default `private`),
+`SHIP_MODEL_ROUTING_DESTINATIONS` (comma list of hosts or `class:<name>`; unset
+means no destination is permitted for non-public data),
+`SHIP_MODEL_ROUTING_MAX_RETENTION`, `SHIP_MODEL_ROUTING_CONTEXT_TOKENS`
+(32000), `SHIP_MODEL_ROUTING_MAX_OUTPUT_TOKENS` (8000), and
+`SHIP_MAX_RUN_COST_USD` as the reserved budget. A model with no price is
+reserved at the highest known rate.
+
+Failures are classified (rate-limit, overloaded, context-length, auth,
+content-filter, network, unknown). Only rate-limit (`rate-limit`), overloaded
+and network (`outage`) and content-filter (`refusal`) can lead to a switch, and
+only if `fallbackOn` lists the trigger. Auth, context-length and unknown never
+do. The fallback is considered **after** `withRetry` has given up, never inside
+it, and is not sticky across calls.
+
+Records go to a new append-only table, `ship_model_segments` (the worker's
+Nucleus store; other commands log to stderr). They are not a workflow step:
+a new step would change every in-flight run's fingerprint. A recorded attempt
+is never edited; a fallback is a new row naming the model it replaced.
+
+What this does NOT yet do, so do not read more into it:
+
+- Nothing in `durable.ts` feeds the tool-call journal, so a real worker has no
+  knowledge of side effects. Unknown is treated as uncertain, so `on` refuses
+  every mid-run switch until that is connected. Shadow says so on each record.
+- Nothing has been run against a real provider outage or a real policy.
+- The fixed-versus-routed comparison on the same tasks is not built, so no
+  claim that routing improves any outcome is made.
+
 ## 4. What we do not claim
 
 - Not that every model works. One family is validated; another is measurably

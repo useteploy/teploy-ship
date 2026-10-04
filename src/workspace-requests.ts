@@ -15,6 +15,7 @@ import {
   type RepoPolicyConfig,
 } from "./repo-policy.js";
 import { readForgeState, type ForgeState } from "./forge-state.js";
+import { findingContinuityEnabled } from "./finding-continuity-wiring.js";
 import { safeForDisplay } from "./redact.js";
 import { verificationFactsFromEvents } from "./verification-summary.js";
 import {
@@ -531,6 +532,8 @@ async function serveReadOnlyRequest(
         ref,
         credentialFor(ref, effective),
         pr,
+        undefined,
+        { inlineComments: findingContinuityEnabled() },
       );
     } else {
       if (req.kind !== "files" && req.kind !== "file" && req.kind !== "changes")
