@@ -1,0 +1,63 @@
+{
+  "rehearsal": {
+    "date": "2026-10-04",
+    "purpose": "S03: prove migration 008-ship-task-requirements and the task-requirements store against a real Nucleus holding a restored copy of the production store",
+    "archive": "/deployments/ship/_backups/pre-80c9187-shadow-deploy-2026-10-04/nucleus-data-full.tgz",
+    "archiveSha256": "verified against its .sha256 sidecar (sha256sum -c) + gzip -t",
+    "engineImage": "ghcr.io/neutron-build/nucleus:v1.1.1 (the image of the live ship-nucleus container, read from docker ps -a)",
+    "isolation": "restore unpacked into /root/s03-rehearsal-s03104851 only; throwaway engine container ship-s03-proof-104851 on a private docker network (no published port); check script run from a node:22-bookworm container on the same network; only the proof container, network and directory were removed afterwards",
+    "liveContainersUntouched": "ship-web-80c9187, ship-worker-80c9187, ship-nucleus, ship-gateway-web-c0b07dd Up throughout (verified before and after; no restart)",
+    "engineBootMs": 3000,
+    "checkWallMs": 951,
+    "cleanup": "proof container + network + rehearsal dir removed; /deployments/ship and all ship-* containers never touched"
+  },
+  "check": {
+    "pass": true,
+    "scope": "migration 008 + task-requirements store on a restored copy; no production path",
+    "startedAt": "2026-10-04T09:10:35.393Z",
+    "finishedAt": "2026-10-04T09:10:35.564Z",
+    "url": "postgres://ship-s03-proof-104851:5432/nucleus",
+    "tablesSource": "SHOW TABLES",
+    "tablesPopulatedBefore": 37,
+    "totalRowsBefore": 4223,
+    "tablesBefore": {
+      "ship_akiroo_cursor": 2, "ship_artifact_expiry": 0, "ship_artifacts": 217,
+      "ship_attributed_spend": 89, "ship_bulletin_boards": 0, "ship_bulletin_posts": 0,
+      "ship_code_chunks": 329, "ship_code_files": 244, "ship_code_rates": 2,
+      "ship_code_repos": 6, "ship_connect_requests": 5, "ship_delivery": 7,
+      "ship_docs": 778, "ship_docs_001": 170, "ship_docs_004": 178,
+      "ship_evidence": 1, "ship_fleet": 1, "ship_fleet_capacity": 1,
+      "ship_fleet_load": 1, "ship_governance": 1, "ship_launch_chunks": 149,
+      "ship_launch_commits": 140, "ship_launch_dispositions": 0, "ship_launches": 140,
+      "ship_live": 0, "ship_memory": 205, "ship_memory_003": 13,
+      "ship_migrations": 7, "ship_outbox": 0, "ship_placement": 384,
+      "ship_policies": 1, "ship_projects": 18, "ship_projects_v2": 24,
+      "ship_repo_stats": 206, "ship_runtime_config": 531, "ship_spend": 253,
+      "ship_spend_holds": 16, "ship_steer": 5, "ship_steer_002": 1,
+      "ship_tasks": 58, "ship_tasks_005": 18, "ship_tasks_v2": 2,
+      "ship_unpriced_runs": 20, "ship_users": 0, "ship_workspace_content": 0
+    },
+    "tablesAfter": "identical to tablesBefore on every table except ship_migrations: 7 -> 8 (the 008 ledger row). ship_task_requirements was absent before the store-proof leg and is created by the store DDL, empty",
+    "migrate": {
+      "firstPassAppliedIds": [],
+      "firstPassNote": "ledger-only, the designed path: the table does not exist on the real store (the store is unwired), so needed() is false and 008 is recorded without table surgery. The rename-aside limb is covered by the unit tests against a stale shape.",
+      "firstPassMs": 34,
+      "ledgerIds": [
+        "001-ship-docs-source-ranon", "002-ship-steer-consumed-turn", "003-ship-memory-note-id",
+        "004-ship-docs-actor", "005-ship-tasks-requested-by", "006-ship-runtime-config",
+        "007-ship-connect-requests", "008-ship-task-requirements"
+      ],
+      "replayAppliedIds": [],
+      "replayMs": 12
+    },
+    "storeProof": {
+      "ms": 40,
+      "idempotentAdd": true,
+      "conflictRefused": true,
+      "waiverExactlyOnce": true,
+      "waivedStaysListed": true,
+      "rowsCreated": 2,
+      "cleanup": "proof rows deleted (final ship_task_requirements count 0, all other tables unchanged); the empty table and the 008 ledger row stay in the throwaway copy only"
+    }
+  }
+}
