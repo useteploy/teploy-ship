@@ -2,7 +2,8 @@ import { ScopedRepoMemory } from "./scoped-repo-memory.js";
 import { canonicalRepositoryURL, repoSlug } from "./repository-reference.js";
 import { ScopedRepoStatsStore } from "./scoped-repo-stats.js";
 import { finishReviewReplacement } from "./revision-launch.js";
-import { projectReadinessKey } from "./project-readiness.js";
+import { projectReadinessRecord } from "./project-readiness.js";
+import { stackDetectEnabled } from "./stack-propose.js";
 import { taskRootRunId } from "./task-session.js";
 import { FileLaunchJournal, NucleusLaunchJournal, assertSameLaunch, launchRequestHash, type LaunchJournal } from "./launch-journal.js";
 import { parseJourney, journeyInstruction, type Journey } from "./journeys.js";
@@ -898,6 +899,8 @@ export async function enqueueRun(
     userMessage?: string;
     journey?: Journey;
     environmentCheck?: boolean;
+    /** Digest of the manifests/recipe a person reviewed (stack-propose.ts); recorded only with SHIP_STACK_DETECT on. */
+    environmentInputsDigest?: string;
     /** Deterministic setup probe: no model turns or publication. */
     environmentCheckOnly?: boolean;
     task: string;
@@ -1325,7 +1328,7 @@ export async function enqueueRun(
         task: journey ? `${options.task}\n\n${journeyInstruction(journey)}` : options.task,
         ...(journey ? { journey, userMessage: options.userMessage ?? options.task } : {}),
         ...(options.environmentCheckOnly === true ? { environmentCheckOnly: true } : {}),
-        ...(options.environmentCheck === true ? { environmentCheck: true, ...(project ? { environmentConfigId: projectReadinessKey(project) } : {}) } : {}),
+        ...(options.environmentCheck === true ? { environmentCheck: true, ...projectReadinessRecord(project, options.environmentInputsDigest, stackDetectEnabled()) } : {}),
         ...(options.userMessage !== undefined ? { userMessage: options.userMessage } : {}),
         ...(options.parentRunId !== undefined ? { parentRunId: options.parentRunId } : {}),
         ...(options.parentRunId !== undefined && options.pr !== undefined ? { requireOpenPr: true } : {}),

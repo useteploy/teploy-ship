@@ -524,6 +524,8 @@ export interface DurableAgentInput {
   sandboxImage?: string;
   preparation?: EnvironmentPreparation;
   environmentCheck?: boolean;
+  /** Additive readiness basis next to environmentConfigId; see projectReadinessRecord. */
+  environmentInputsDigest?: string;
   /** Recorded opt-in: stop after deterministic setup checks, without a model. */
   environmentCheckOnly?: boolean;
   requireOpenPr?: boolean;
