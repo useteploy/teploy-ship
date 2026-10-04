@@ -66,6 +66,7 @@ import type { Windows } from "./governance.js";
 import { makeObserveEmitter } from "./observe.js";
 import { multiNotifier, projectNotifier, scanReport, slackNotifier, webhookNotifier } from "./notify.js";
 import type { RunNotification, RunOrigin } from "./notify.js";
+import { pushDiffFromEvents, surfacedTestIntegrity } from "./test-integrity-surface.js";
 import { NucleusAkirooReceipts } from "./akiroo-receipts.js";
 import { ladderRungsFromEvents, type Rung } from "./ladder.js";
 import { runVerificationSummary, verificationFactsFromEvents } from "./verification-summary.js";
@@ -1118,7 +1119,23 @@ export function startWorker(options: WorkerOptions): {
           }
           // Terminal: include the PR link when the run opened one, and the
           // findings when it was a scan.
-          await owe({ runId, status: outcome.status, ...context, ...terminalContext(events), ...verification });
+          // S08 surfacing (flag-gated, advisory): the detector over the
+          // published diff, as an additive field. Off is no field and no
+          // computation worth speaking of; shadow logs what on would send.
+          const integrity = surfacedTestIntegrity({
+            diff: pushDiffFromEvents(events),
+            log,
+            where: "the run webhook payload",
+            runId,
+          });
+          await owe({
+            runId,
+            status: outcome.status,
+            ...context,
+            ...terminalContext(events),
+            ...verification,
+            ...(integrity !== undefined ? { testIntegrity: integrity } : {}),
+          });
           await flush();
         })());
       }

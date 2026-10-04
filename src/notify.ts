@@ -1,6 +1,7 @@
 import type { ScanFinding } from "./findings.js";
 import type { ChangeClass } from "./change-class.js";
 import { rungsForWire, type Rung } from "./ladder.js";
+import type { TestIntegrityRecord } from "./test-integrity-surface.js";
 import { canonicalJson, EVENT_SCHEMA_VERSION } from "./tool-manifest.js";
 import type { EventEnvelope } from "./tool-manifest.js";
 import { createHash, createHmac } from "node:crypto";
@@ -77,6 +78,13 @@ export interface RunNotification {
   merged?: boolean;
   /** The agent's own result status on a terminal run (see RunWebhookPayload.outcome). */
   outcome?: string;
+  /**
+   * S08 surfacing (advisory, behind SHIP_TEST_INTEGRITY_SURFACING=on): the
+   * test-integrity detector's findings over the run's published diff. Absent
+   * when the flag is off or shadow, or when nothing was found — a consumer
+   * treats absent as "nothing surfaced", never as "the tests are sound".
+   */
+  testIntegrity?: TestIntegrityRecord;
 }
 
 /**
@@ -303,6 +311,21 @@ export interface RunWebhookPayload {
    * wire; this is what says it did not finish. Additive: absent on parks.
    */
   outcome?: string;
+  /**
+   * S08 surfacing (additive): present only when SHIP_TEST_INTEGRITY_SURFACING
+   * is on AND the detector found something in the published diff. Advisory —
+   * a receiver shows it, never gates on it; the same caveat the run page's
+   * panel carries (it flags patterns, it does not prove intent).
+   */
+  test_integrity?: {
+    verdict: "suspicious" | "tampered";
+    total: number;
+    omitted?: number;
+    findings: Array<{ kind: string; file: string; line: number; severity: string; confidence: string; evidence: string }>;
+    /** False when the published diff was recorded with a middle cut, so the read is partial. */
+    diff_complete: boolean;
+    oracle_configured: boolean;
+  };
 }
 
 export function runWebhookPayload(event: RunNotification, publicUrl?: string): RunWebhookPayload {
@@ -338,6 +361,18 @@ export function runWebhookPayload(event: RunNotification, publicUrl?: string): R
       ? { verification: { rungs: rungsForWire(event.verification.rungs), summary: event.verification.summary } }
       : {}),
     ...(event.merged !== undefined ? { merged: event.merged } : {}),
+    ...(event.testIntegrity !== undefined
+      ? {
+          test_integrity: {
+            verdict: event.testIntegrity.verdict,
+            total: event.testIntegrity.total,
+            ...(event.testIntegrity.omitted !== undefined ? { omitted: event.testIntegrity.omitted } : {}),
+            findings: event.testIntegrity.findings.map((f) => ({ ...f })),
+            diff_complete: event.testIntegrity.diffComplete,
+            oracle_configured: event.testIntegrity.oracleConfigured,
+          },
+        }
+      : {}),
   };
 }
 

@@ -15,7 +15,7 @@ Wave 4's state ("implemented and checked by automated tests only") is now partly
 ## Next work, in order
 
 1. **Shadow-log review** after soak (placement/policy/budget/tool-manifest/knowledge-provenance JSONL + reports); set `SHIP_MODEL_ROUTING_POLICY` so the routing shadow has something to record. Only then discuss any `on` flips.
-2. **S08 wiring** (approved): findings into PR body + webhook behind a default-off flag; worker-path change, so shadow-first per the standing rule.
+2. **S08 wiring** (approved): BUILT in PR #58 (wave 5) — findings in the PR body + run-completion webhook behind `SHIP_TEST_INTEGRITY_SURFACING=off|shadow|on`, default off. Still to do: soak `shadow` on the real worker, then decide the `on` flip.
 3. **Live proofs still open**: S01 credential proofs on a real sandbox with a private repo; S03 storage migration (write the additive migration, rehearse on a restored copy — backup `pre-80c9187-shadow-deploy-2026-10-04` is available and verified); S27 real teploy-adapter run against a scratch target; S19 doctor probes against the real store/clock; human observation of dashboard users.
 4. **Code still unfinished**: S04 and S12 barely started; most of S07 beyond the grounding check; S10 follow-ups (offline/error states, other roles, screen readers); wiring the inert modules (S15/S17 into delivery+incidents, S19 snapshot producer + restore-check, S18 worker tree provisioning, S07 into the plan-park point).
 5. **Re-grade retained runs where possible**: only transcripts were preserved for pre-batch runs, so regrades are limited to transcript+fixture-verifiable scenarios; write supplementary `regrade-*.json` beside the records, never replacing originals.
