@@ -44,6 +44,7 @@ import { attachEvidence, envAsked } from "./fix-evidence.js";
 import type { Evidence } from "./verification.js";
 import type { RepoRef } from "./git.js";
 import { assertRepoAllowed, credentialFor, policyFromEnv } from "./repo-policy.js";
+import { placementShadowFile, placementShadowFromEnv, readPlacementSummary, renderPlacementReport } from "./placement-shadow.js";
 import { readShadowSummary, renderShadowReport, shadowFile } from "./policy-shadow.js";
 import { detectRepository } from "./stack-import.js";
 import { renderProposal, stackDetectEnabled } from "./stack-propose.js";
@@ -136,6 +137,7 @@ Usage:
   teploy-ship policy window remove [--source <s>]      (no --source = the global window)
   teploy-ship policy window check [--source <s>]       is auto allowed right now?
   teploy-ship policy reviewers set <repo> [--users a,b] [--teams t]   (both empty = remove)
+  teploy-ship placement shadow-report [--json]   where the placement shadow (SHIP_PLACEMENT=shadow) disagreed with the pool
   teploy-ship audit                   export the run history (what ran, cost, PRs)
       [--format csv|json] [--since <iso>] [--until <iso>]
   teploy-ship runs                    list durable runs
@@ -950,9 +952,12 @@ function durableProvider(args: ReturnType<typeof parseArgs>, config: Config): Ex
         fetch: longRequestFetch,
       });
     if (urls.length <= 1) return build(urls[0] ?? sandbox.url);
+    // S26 shadow: undefined (and so absent below) unless SHIP_PLACEMENT=shadow.
+    const placementShadow = placementShadowFromEnv(process.env, (line) => process.stderr.write(`${line}\n`));
     return new SandboxPool({
       hosts: urls.map((url) => ({ url, provider: build(url) })),
       log: (line) => process.stderr.write(`${line}\n`),
+      ...(placementShadow !== undefined ? { placementShadow } : {}),
     });
   }
   // Local durable runs: a persistent per-run workspace under the state
@@ -1630,6 +1635,18 @@ async function projectCommand(rest: string[]): Promise<void> {
  * The buyer half of P2-3 (governance.ts): per-user authority, auto windows,
  * required reviewers. The dashboard's Policies page edits the same store.
  */
+/** S26 placement shadow: `placement shadow-report [--json]`. Read-only. */
+async function placementCommand(rest: string[]): Promise<void> {
+  const [sub] = rest;
+  const args = parseArgs(rest);
+  if (sub !== "shadow-report") {
+    fail("usage: teploy-ship placement shadow-report [--json]    where the S26 placement shadow (SHIP_PLACEMENT=shadow) disagreed with the pool");
+  }
+  const file = placementShadowFile();
+  const summary = await readPlacementSummary(file);
+  process.stdout.write(args.flags.json === true ? `${JSON.stringify({ file, ...summary }, null, 2)}\n` : `${renderPlacementReport(summary, file)}\n`);
+}
+
 async function policyCommand(rest: string[]): Promise<void> {
   const config = loadConfig();
   const [sub, second, third] = rest;
@@ -2406,6 +2423,8 @@ async function main(): Promise<void> {
       return projectCommand(rest);
     case "policy":
       return policyCommand(rest);
+    case "placement":
+      return placementCommand(rest);
     case "audit":
       return auditCommand(rest);
     case "resume":

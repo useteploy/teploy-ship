@@ -717,6 +717,11 @@ export interface ExecutorProvider {
    * workflow). Providers must be honest here — false is the safe answer.
    */
   isolated?: boolean;
+  /**
+   * Shadow observation only (S26): told when the C5 liveness probe found this
+   * handle's container gone. Must not throw and must not change anything.
+   */
+  observeHostLoss?: (handle: string) => void;
   snapshot?: (handle: string) => Promise<string>;
   createFrom?: (image: string, overrides?: SandboxOverrides) => Promise<{ handle: string }>;
   /**
@@ -1103,6 +1108,11 @@ export function durableAgent(
                   () => false,
                 );
         if (!alive) {
+          try {
+            config.executor.observeHostLoss?.(probed);
+          } catch {
+            // shadow evidence, never a dependency of the failure below
+          }
           throw new Error(
             `the sandbox this run recorded (${probed}) is no longer available — it has almost certainly outlived its TTL ` +
               `(SHIP_SANDBOX_TTL_SEC). A durable run replays its recorded container rather than creating a new one, and ` +
