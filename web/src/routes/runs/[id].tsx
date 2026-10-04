@@ -420,6 +420,14 @@ export default function RunDetail({ data: initialData }: { data: RunData }) {
               </form>
             </div>
           )}
+          {data.harnessIdentity !== undefined && (
+            <details class="card" style="margin:12px 0">
+              <summary class="meta">Ran on {data.harnessIdentity.rows[0]?.value}{data.harnessIdentity.revisionMismatch ? " · binary differs from expected" : ""}</summary>
+              <dl class="meta" style="margin:8px 0 0">
+                {data.harnessIdentity.rows.map((r, i) => <div key={i}><dt style="display:inline"><b>{r.label}</b>: </dt><dd style="display:inline;margin:0">{r.value}</dd></div>)}
+              </dl>
+            </details>
+          )}
           {(data.outcome.pr !== undefined || data.outcome.usage !== undefined || data.outcome.repo !== undefined) && (
             <div class="card" style="margin:12px 0">
               <div class="row-actions" style="flex-wrap:wrap;gap:14px">
