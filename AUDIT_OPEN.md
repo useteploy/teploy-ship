@@ -17,7 +17,7 @@
   (neutron#6, teploy-cli#18/#19/#20 — links above/below).
 - The integration-check test-quoting defect (spaced checkout paths) was
   fixed in PR #56.
-- **S08 PR-body/webhook surfacing built (PR #58, this wave):** the detector's
+- **S08 PR-body/webhook surfacing built (PR #62, this wave):** the detector's
   findings now reach the pull request's Verification section and the
   run-completion webhook behind `SHIP_TEST_INTEGRITY_SURFACING=off|shadow|on`
   (default off; invalid values are off with a log). Advisory only — not a
@@ -133,7 +133,7 @@ detail is in the programme's wave-2 status table. Items that matter for audit:
 - **S05 stack-detect (PR #17):** unwired; readiness still keys on project
   config only, not manifest, lockfile or recipe digest.
 - **S08 test-integrity (PRs #18, #31):** advisory-only on the run page; not a
-  gate; PR-body/webhook surfacing landed in wave 5 (PR #58) behind a
+  gate; PR-body/webhook surfacing landed in wave 5 (PR #62) behind a
   default-off flag; false-positive rate unmeasured.
 - **S16 schedules (PR #24):** the overlap policy is inert in the worker until
   `sweepWorkflowSchedules` is given `isRunning`.
