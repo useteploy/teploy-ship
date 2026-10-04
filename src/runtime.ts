@@ -25,6 +25,8 @@ import { FileIntakeStore, NucleusIntakeStore } from "./intake.js";
 import type { IntakeStore } from "./intake.js";
 import { FileSpendStore, NucleusSpendStore, FileUnpricedRunStore, NucleusUnpricedRunStore, defaultDailyBudgetUSD, estimatedRunCostUSD, utcDay as spendDay } from "./spend.js";
 import type { SpendStore, UnpricedRunStore } from "./spend.js";
+import { resolveBudgetGate } from "./budget-gate.js";
+import type { BudgetGate } from "./budget-gate.js";
 import { FilePolicyStore, NucleusPolicyStore } from "./policies.js";
 import type { PolicyStore } from "./policies.js";
 import { FileEvidenceStore, NucleusEvidenceStore } from "./evidence.js";
@@ -774,7 +776,7 @@ export class DailyBudgetExceededError extends Error {
  */
 export async function assertDailyBudget(
   runtime: Pick<ShipRuntime, "spend" | "policies" | "projects">,
-  options: { runId: string; source?: string; repo?: string; now?: Date },
+  options: { runId: string; source?: string; repo?: string; now?: Date; budgetGate?: BudgetGate },
 ): Promise<void> {
   const source = options.source ?? "";
   // An unsourced run is never SETTLED against a budget either (worker.ts:617
@@ -800,9 +802,16 @@ export async function assertDailyBudget(
   // the same room. Over-reserving briefly is the safe direction.
   await spend.reserve(options.runId, source, day, estimate);
   const committed = await spend.get(source, day);
-  if (committed > budget) {
+  // SHIP_BUDGET_RESERVATION: the ledger judges the same admission; it denies
+  // only in `on` mode (see budget-gate.ts). Off => gate undefined => unchanged.
+  const gate = options.budgetGate ?? resolveBudgetGate(runtime as { kind?: string });
+  const gated = gate
+    ? await gate.admit({ runId: options.runId, source, day, budgetUSD: budget, estimateUSD: estimate, existingAllowed: !(committed > budget), existingCommittedUSD: committed })
+    : undefined;
+  if (committed > budget || gated?.allow === false) {
     await spend.release(options.runId).catch(() => {});
-    throw new DailyBudgetExceededError(source, budget, committed);
+    await gate?.release(options.runId);
+    throw new DailyBudgetExceededError(source, budget, Math.max(committed, gated?.ledgerCommittedUSD ?? 0));
   }
 }
 
