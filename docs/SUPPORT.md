@@ -62,6 +62,23 @@ rather than emit a bundle that silently lacks its core.
 The container-name filter defaults to the `ship-` prefix (the `app:` name in
 `teploy.yml`); `--out` can point anywhere writable.
 
+## Checking a fresh install: `teploy-ship doctor`
+
+`teploy-ship doctor [--json] [--out <file>]` checks prerequisites before first
+use: Node version, a writable state directory with enough free space, the web
+port, `SHIP_WEB_TOKEN` and a model credential (presence only, values never
+printed), the `NUCLEUS_URL` shape, store connectivity, and clock sanity.
+
+Every check reports `pass`, `fail` or `unknown`; **unknown is not pass**. The
+verdict is `ready` only when all pass, `not-ready` on any fail, `incomplete`
+when nothing failed but something could not be established. Exit code is 0 only
+for `ready`. Passing the `store-url` shape check does not mean the store was
+reached: `store-connectivity` stays `unknown` until a live check answers (use
+`teploy-ship preflight`). `--out` writes the redacted JSON, suitable to attach
+to a support request. The restore side is `src/restore-readiness.ts`, which
+compares backup and restored history snapshots and reports `unverified`
+whenever it did not actually compare; it is not yet exposed as a command.
+
 ## The support policy shape
 
 Hand the `.tgz` to the vendor. The bundle is safe by construction — whitelist

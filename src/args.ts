@@ -74,6 +74,7 @@ export const COMMAND_FLAGS: Record<string, FlagSpec> = {
   },
   web: { boolean: ["dev"], value: ["port", "token", "model"] },
   support: { value: ["out", "log-lines", "days"] },
+  doctor: { boolean: ["json"], value: ["out"] },
   eval: { boolean: ["critic", "settle"], value: ["model", "suite", "repeats"] },
 };
 
