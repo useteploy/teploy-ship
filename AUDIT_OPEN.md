@@ -46,7 +46,7 @@ All off by default or observe-only; flags are in the programme's wave-4 table.
   client was planned against.
 - **S19 (PR #49):** doctor's store and clock checks report unknown until real
   probes exist; the restore comparison has no snapshot producer.
-- **S07 (PR #53):** unwired; wiring must not add a durable step to existing runs.
+- **S07 (PR #53):** wired at the plan park 2026-10-04 behind `SHIP_PLAN_GROUNDING` (default off): the grounding report is an additive `grounding` field on the `plan-think` step result — no durable step added, flag-off bytes unchanged — and the run page's plan-review card renders it as advisory text with the name-existence caveat. Still open: the rest of S07 (planning-time use beyond the park, other consumers).
 - **Agent hygiene:** parallel agents share one scratch directory and the fixed
   grading port 8901. A backup-file collision corrupted one agent's mutation
   backup (caught and fixed before push) and spurious grader-test failures
