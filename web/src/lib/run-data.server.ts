@@ -34,6 +34,8 @@ import { taskRootRunId as resolveTaskRoot } from "../../../dist/task-session.js"
 import { taskRecord } from "teploy-ship/task-record";
 import type { DeliveryOutcome } from "teploy-ship/task-record";
 import { findingContinuityLines } from "./finding-continuity-view.js";
+import { harnessIdentityView } from "./harness-identity-view.js";
+import type { HarnessIdentityView } from "./harness-identity-view.js";
 import { taskStateView } from "./task-state.js";
 import type { TaskStateView } from "./task-state.js";
 
@@ -53,6 +55,8 @@ export interface RunData {
   testIntegrity: TestIntegrityPanel;
   /** Advisory comparison with the earlier review (S09); absent unless the run recorded one. */
   findingContinuity?: string[];
+  /** Model, harness, revision and configuration that wrote the run (S13); absent unless recorded. */
+  harnessIdentity?: HarnessIdentityView;
   /** The run page's preview panel state, decided server-side (expiry uses the server clock). */
   previewPanel: PreviewPanel;
   parentRunId?: string;
@@ -371,6 +375,7 @@ export async function runData({ params, request }: { params: { id: string }; req
       findings: scanned.findings,
       findingsNotes: scanned.notes,
       ...(findingContinuityLines(events) !== undefined ? { findingContinuity: findingContinuityLines(events)! } : {}),
+      ...(harnessIdentityView(events) !== undefined ? { harnessIdentity: harnessIdentityView(events)! } : {}),
       isScan: (started?.data as { input?: { mode?: string } } | undefined)?.input?.mode === "scan",
       steerable,
       steerPending: steerNotes.map((n) => n.text),
