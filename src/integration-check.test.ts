@@ -19,7 +19,7 @@ import type { ShipRuntime } from "./runtime.js";
 // against it through the executor.
 const FIXTURES = resolve(dirname(fileURLToPath(import.meta.url)), "..", "evals", "coordination-fixtures");
 const VERIFY = join(FIXTURES, "verify-pair.mjs");
-const COMMAND = `node ${VERIFY} {producer} {consumer} /sum`;
+const COMMAND = `node '${VERIFY}' {producer} {consumer} /sum`;
 const ON = { SHIP_INTEGRATION_CHECK: "on" } as NodeJS.ProcessEnv;
 
 let work: string;
@@ -132,7 +132,7 @@ test("real run, negative: an incompatible consumer fails and blocks completion",
 
 test("real run, sensitivity control: the original /add pair passes its own contract", async () => {
   const record = landed(sha.apiAdd, sha.clientAdd, true);
-  record.integrationCheck!.command = `node ${VERIFY} {producer} {consumer} /add`;
+  record.integrationCheck!.command = `node '${VERIFY}' {producer} {consumer} /add`;
   const evidence = await runPair(sha.apiAdd, sha.clientAdd, record, "orig");
   assert.equal(evidence.result, "passed", evidence.source);
 });
