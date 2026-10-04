@@ -23,6 +23,7 @@ import type { ChangeClass } from "./change-class.js";
 import type { TestOutcome } from "./tests.js";
 import type { WorkflowEvent } from "@neutron-build/workflow";
 import { verificationFactsFromEvents } from "./verification-summary.js";
+import { shadowObserve } from "./shadow-hook.js";
 
 /** Contract 1's `verification` block, camel-cased for the project record. */
 export interface ProjectVerification {
@@ -102,7 +103,10 @@ export function effectiveAuthority(project: {
 }): Authority {
   const asked = project.authority ?? "send";
   const capped = minAuthority(asked, authorityCap(project.verification));
-  return project.neverAuto === true ? minAuthority(capped, "send") : capped;
+  const result = project.neverAuto === true ? minAuthority(capped, "send") : capped;
+  // S25 shadow (SHIP_POLICY_SHADOW): report the decision, never alter it.
+  shadowObserve({ point: "authority", project, result });
+  return result;
 }
 
 export type RungName = "baseline" | "build" | "tests" | "preview" | "visual" | "flow" | "observe";

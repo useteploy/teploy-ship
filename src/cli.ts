@@ -42,6 +42,7 @@ import { attachEvidence, envAsked } from "./fix-evidence.js";
 import type { Evidence } from "./verification.js";
 import type { RepoRef } from "./git.js";
 import { assertRepoAllowed, credentialFor, policyFromEnv } from "./repo-policy.js";
+import { readShadowSummary, renderShadowReport, shadowFile } from "./policy-shadow.js";
 import type { RepoPolicyConfig } from "./repo-policy.js";
 import { loadRepoContext, runNote } from "./repo-memory.js";
 import { runAgent } from "./agent.js";
@@ -1597,7 +1598,15 @@ async function policyCommand(rest: string[]): Promise<void> {
     "       teploy-ship policy authority <approve|auto|steer|policies> --roles admin,editor [--users a,b]\n" +
     "       teploy-ship policy window set [--source <s>] --days mon-fri --start 09:00 --end 18:00 --tz <zone>\n" +
     "       teploy-ship policy window remove|check [--source <s>]\n" +
-    "       teploy-ship policy reviewers set <repo> [--users a,b] [--teams t]";
+    "       teploy-ship policy reviewers set <repo> [--users a,b] [--teams t]\n" +
+    "       teploy-ship policy shadow-report [--json]    where the S25 policy shadow (SHIP_POLICY_SHADOW=on) disagreed";
+
+  if (sub === "shadow-report") {
+    const file = shadowFile();
+    const summary = await readShadowSummary(file);
+    process.stdout.write(args.flags.json === true ? `${JSON.stringify({ file, ...summary }, null, 2)}\n` : `${renderShadowReport(summary, file)}\n`);
+    return;
+  }
 
   if (sub === "show") {
     const runtime = await makeRuntime(args, config);

@@ -7,6 +7,7 @@ import { upsertByKey } from "./upsert.js";
 import { stateDir } from "./run-store.js";
 import { repoSlug } from "./observe.js";
 import { normalizeRole } from "./users.js";
+import { shadowObserve } from "./shadow-hook.js";
 import type { Role } from "./users.js";
 
 /**
@@ -98,6 +99,17 @@ export interface GovernanceStore {
  * an unknown role, and an absent principal are all refused.
  */
 export function mayDo(
+  governance: Pick<Governance, "authority">,
+  action: AuthorityAction,
+  principal: { user: string; role: string } | null | undefined,
+): boolean {
+  const allowed = mayDoDecision(governance, action, principal);
+  // S25 shadow (SHIP_POLICY_SHADOW): report the decision, never alter it.
+  shadowObserve({ point: "mayDo", governance, action, principal, allowed });
+  return allowed;
+}
+
+function mayDoDecision(
   governance: Pick<Governance, "authority">,
   action: AuthorityAction,
   principal: { user: string; role: string } | null | undefined,
