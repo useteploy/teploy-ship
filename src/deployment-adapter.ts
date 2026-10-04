@@ -76,6 +76,12 @@ export interface AdapterCapabilities {
   fencing: readonly FencingMode[];
   /** Recovery modes actually supported. Anything else must be refused, never approximated. */
   recovery: readonly RecoveryMode[];
+  /**
+   * What this adapter knows it cannot honestly provide, stated so a report can
+   * list it (an adapter that cannot do X must say so, never approximate X).
+   * Additive and optional: adapters that predate it declare nothing.
+   */
+  unsupported?: readonly { capability: string; reason: string }[];
 }
 
 // ------------------------------------------------------------------ authority

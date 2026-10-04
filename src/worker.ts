@@ -39,6 +39,7 @@ import {
   reconcileStaleRollback,
   unknownEscalation,
 } from "./delivery.js";
+import { deployAdapterFlagOn, teployDeliveryAdapterFactory } from "./teploy-adapter.js";
 import { intakeActor } from "./actor.js";
 import type { NucleusShipRuntime } from "./runtime.js";
 import type { RunMeta } from "./run-store.js";
@@ -1929,6 +1930,12 @@ export function startWorker(options: WorkerOptions): {
   const deliveryDir = process.env.SHIP_DELIVERY_DIR;
   const deliveryStaleMs = Number(process.env.SHIP_DELIVERY_STALE_MS ?? "") > 0 ? Number(process.env.SHIP_DELIVERY_STALE_MS) : 35 * 60_000;
   const deliveryRunner: CommandRunner = hostRunner();
+  // S27 opt-in (SHIP_DEPLOY_ADAPTER=teploy, default off): the deploy step and
+  // rollbacks go through the TeployAdapter journey instead of the inline commands.
+  const deliveryAdapter = deployAdapterFlagOn() && deliveryDir !== undefined && deliveryDir !== ""
+    ? { adapter: teployDeliveryAdapterFactory({ dir: deliveryDir, run: deliveryRunner }) }
+    : {};
+  if ("adapter" in deliveryAdapter) log("[worker] delivery: SHIP_DEPLOY_ADAPTER=teploy — deploys and rollbacks run through the TeployAdapter");
   /**
    * The telemetry binding a delivery's health verdict reads through: the
    * worker's env target plus the PROJECT's declared Observe service when the
@@ -1958,6 +1965,7 @@ export function startWorker(options: WorkerOptions): {
             // S15: the approving actor's authority is rechecked against the
             // LIVE stores at execution — an approval cannot outlive its grant.
             authority: { governance: options.runtime.governance, users: options.runtime.users },
+            ...deliveryAdapter,
           });
           const to = outcome.state === "held" ? "held" : "unknown";
           await records
@@ -1985,6 +1993,7 @@ export function startWorker(options: WorkerOptions): {
             run: deliveryRunner,
             // The requester's authority is rechecked at action time, like an approval's.
             authority: { governance: options.runtime.governance, users: options.runtime.users },
+            ...deliveryAdapter,
           });
           await records.finishRollback(claimed.id, outcome);
           log(`[worker] delivery rollback ${claimed.id} → ${outcome.state}: ${outcome.evidence ?? ""}`);
