@@ -1,5 +1,37 @@
 # Open audit items
 
+## 2026-10-04 — wave 3 wired behind flags (S01/S04, S05/S06, S09, S11, S16, S18, S23, S25)
+
+All off by default or observe-only; see the programme's wave-3 table for flags.
+Items an operator or reviewer should know:
+
+- **Default-on behaviour that is new:** `SHIP_SAFE_FETCH` defaults to shadow, so
+  each forge API call does one extra background address lookup and may log a
+  one-time warning per host. The request is never changed. Enforcement needs
+  `SHIP_SAFE_FETCH=on` and, for a private forge, `SHIP_SAFE_FETCH_ALLOW`.
+- **Kernel fix (PR #38) changes behaviour where it was broken:** a cell blocked
+  past its timeout is now interrupted instead of the kernel being killed.
+  POSIX-only. The original `TS-019` flake was not reproduced, so the cause is
+  unproven; keep watching for it.
+- **`SHIP_BUDGET_RESERVATION=on` is single-process only.** It is refused off the
+  file runtime, but two file-runtime processes on one host cannot be detected.
+- **`SHIP_MODEL_ROUTING=on` cannot switch mid-run** until `durable.ts` feeds the
+  tool-call journal; side effects are treated as uncertain.
+- **`SHIP_POLICY_SHADOW` records disagreements only**, so no rate is available;
+  a missing record file means unknown, not zero.
+- **S16 overlap** scans only the 200 most recent runs and does not count a task
+  proposed but not yet launched.
+- **S05 digest** is recorded but not compared; readiness staleness is unchanged.
+- **S09** forge thread resolution is read but not used; GitHub's REST API does
+  not expose it.
+- **S18** has no worker wiring: nothing provisions the trees or runs the check.
+- Earlier "unwired" notes for S09, S11, S16, S25, S01/S04 above now read as
+  "wired behind a flag, observe-only or off by default".
+- The three scripts-suite failures several agents reported (grader matrix,
+  deploy-recovery reference, report totals) did **not** reproduce in CI on
+  any wave-3 PR; they appeared only in agent sandboxes. Parallel agents sharing
+  the fixed grading port 8901 is the leading suspect, unproven.
+
 ## 2026-10-04 — grader sensitivity and UI audit (S02, S10)
 
 - **Eight product-journey graders were too weak and are tightened (PR #34).**
