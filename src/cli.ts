@@ -45,6 +45,7 @@ import type { Evidence } from "./verification.js";
 import type { RepoRef } from "./git.js";
 import { assertRepoAllowed, credentialFor, policyFromEnv } from "./repo-policy.js";
 import { readShadowSummary, renderShadowReport, shadowFile } from "./policy-shadow.js";
+import { dryRunManifest, parseGrant, renderDryRun } from "./tool-manifest-shadow.js";
 import { detectRepository } from "./stack-import.js";
 import { renderProposal, stackDetectEnabled } from "./stack-propose.js";
 import type { RepoPolicyConfig } from "./repo-policy.js";
@@ -136,6 +137,9 @@ Usage:
   teploy-ship policy window remove [--source <s>]      (no --source = the global window)
   teploy-ship policy window check [--source <s>]       is auto allowed right now?
   teploy-ship policy reviewers set <repo> [--users a,b] [--teams t]   (both empty = remove)
+  teploy-ship tool validate <manifest.json> [--grant <json|file>] [--json]
+                                      dry run: is a tool manifest well formed, and what would
+                                      the admin grant actually allow? Stores and enforces nothing
   teploy-ship audit                   export the run history (what ran, cost, PRs)
       [--format csv|json] [--since <iso>] [--until <iso>]
   teploy-ship runs                    list durable runs
@@ -1630,6 +1634,33 @@ async function projectCommand(rest: string[]): Promise<void> {
  * The buyer half of P2-3 (governance.ts): per-user authority, auto windows,
  * required reviewers. The dashboard's Policies page edits the same store.
  */
+/**
+ * S24: `tool validate` is the read-only install dry run. It reads a manifest
+ * and an admin-entered grant, prints validation and the effective permissions
+ * (intersection, with the excess reported), and writes nothing. Exit 1 when the
+ * manifest is invalid so a script can gate on it.
+ */
+async function toolCommand(rest: string[]): Promise<void> {
+  const args = parseArgs(rest, COMMAND_FLAGS.tool);
+  const [sub, file] = args.positional;
+  if (sub !== "validate" || file === undefined) fail("usage: teploy-ship tool validate <manifest.json> [--grant <json|file>] [--json]");
+  let manifest: unknown;
+  try {
+    manifest = JSON.parse(readFileSync(file, "utf8"));
+  } catch (error) {
+    fail(`cannot read manifest ${file}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  let grant;
+  try {
+    grant = parseGrant(typeof args.flags.grant === "string" ? args.flags.grant : undefined);
+  } catch (error) {
+    fail(`bad --grant: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const report = dryRunManifest(manifest, grant);
+  process.stdout.write(args.flags.json === true ? `${JSON.stringify(report, null, 2)}\n` : `${renderDryRun(report)}\n`);
+  if (!report.validation.ok) process.exitCode = 1;
+}
+
 async function policyCommand(rest: string[]): Promise<void> {
   const config = loadConfig();
   const [sub, second, third] = rest;
@@ -2406,6 +2437,8 @@ async function main(): Promise<void> {
       return projectCommand(rest);
     case "policy":
       return policyCommand(rest);
+    case "tool":
+      return toolCommand(rest);
     case "audit":
       return auditCommand(rest);
     case "resume":

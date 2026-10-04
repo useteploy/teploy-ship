@@ -46,6 +46,7 @@ export const COMMAND_FLAGS: Record<string, FlagSpec> = {
   enqueue: { boolean: ["json", "plan", "critic", "settle", "tests"], value: ["repo", "model", "store", "nucleus-url"] },
   evidence: { boolean: ["json"], value: ["test-command", "test-timeout-ms", "observe-service"] },
   policy: { boolean: ["json"], value: ["roles", "users", "teams", "source", "days", "start", "end", "tz", "store", "nucleus-url"] },
+  tool: { boolean: ["json"], value: ["grant"] },
   resume: { value: ["model", "sandbox", "sandbox-token", "sandbox-image", "sandbox-network", "max-steps"] },
   approve: { boolean: ["handoff"], value: ["model", "sandbox", "sandbox-token", "sandbox-image", "sandbox-network"] },
   deny: { boolean: ["handoff"], value: ["model", "sandbox", "sandbox-token", "sandbox-image", "sandbox-network"] },

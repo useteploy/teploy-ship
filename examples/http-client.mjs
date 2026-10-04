@@ -1,3 +1,5 @@
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+
 /** A dependency-free Node 22 client for Ship's existing HTTP surfaces. */
 export class ShipHTTPError extends Error {
   constructor(status, operation, detail) {
@@ -78,4 +80,57 @@ export class ShipClient {
       ...(eventName ? { eventName } : {}),
     }, 'follow-up');
   }
+}
+
+// ---- Event verification (webhook receivers) -------------------------------
+// A port of verifyEvent/EventDedupe from src/tool-manifest.ts, kept dependency
+// free. Only meaningful when the Ship operator set SHIP_EVENT_ENVELOPE=on and a
+// notify secret: Ship then adds X-Teploy-Event and X-Teploy-Event-Signature to
+// each run webhook (body and X-Teploy-Signature unchanged).
+
+/** Bounded set of seen event ids (FIFO eviction). */
+export class EventDedupe {
+  #seen = new Set();
+  #capacity;
+  constructor(capacity = 10_000) { this.#capacity = capacity; }
+  has(id) { return this.#seen.has(id); }
+  add(id) {
+    this.#seen.add(id);
+    if (this.#seen.size > this.#capacity) this.#seen.delete(this.#seen.values().next().value);
+  }
+}
+
+/**
+ * Verify one delivery. `headers` is a plain object with lower-cased names.
+ * Order: authenticate, freshness, parse, major version, body binding, dedupe.
+ * Only an event that passed everything is remembered, so a forged one cannot
+ * poison the dedupe set. A duplicate returns { ok: true, duplicate: true }:
+ * acknowledge it (2xx) and do nothing. Returns { ok: false, reason } otherwise.
+ */
+export function verifyEvent(headers, body, secret, { nowMs = Date.now(), replayWindowMs = 300_000, dedupe } = {}) {
+  const envelope = headers['x-teploy-event'];
+  const signature = headers['x-teploy-event-signature'];
+  const timestamp = headers['x-teploy-timestamp'];
+  if (typeof envelope !== 'string' || typeof signature !== 'string') return { ok: false, reason: 'no-envelope' };
+  const sig = /^sha256=([0-9a-f]{64})$/.exec(signature);
+  if (!sig) return { ok: false, reason: 'malformed-signature' };
+  if (!/^\d{1,12}$/.test(timestamp ?? '')) return { ok: false, reason: 'bad-timestamp' };
+  if (!secret) return { ok: false, reason: 'bad-signature' };
+  const expected = createHmac('sha256', secret).update(`${timestamp}.${envelope}`).digest();
+  const given = Buffer.from(sig[1], 'hex');
+  if (given.length !== expected.length || !timingSafeEqual(given, expected)) return { ok: false, reason: 'bad-signature' };
+  if (Math.abs(nowMs - Number(timestamp) * 1000) > replayWindowMs) return { ok: false, reason: 'expired' };
+  let event;
+  try { event = JSON.parse(envelope); } catch { return { ok: false, reason: 'malformed-body' }; }
+  if (!event || typeof event !== 'object' || typeof event.eventId !== 'string' || event.eventId === '' ||
+      typeof event.type !== 'string' || typeof event.schemaVersion !== 'string' || !Number.isInteger(event.cursor) ||
+      event.cursor < 0 || typeof event.occurredAt !== 'string') return { ok: false, reason: 'malformed-envelope' };
+  const version = /^(\d+)\.(\d+)/.exec(event.schemaVersion);
+  if (!version) return { ok: false, reason: 'malformed-envelope' };
+  if (Number(version[1]) !== 1) return { ok: false, reason: 'unsupported-major' };
+  // The envelope travels in headers; this ties it to the body actually received.
+  if (event.data?.payloadSha256 !== createHash('sha256').update(body).digest('hex')) return { ok: false, reason: 'body-mismatch' };
+  if (dedupe?.has(event.eventId)) return { ok: true, duplicate: true, eventId: event.eventId };
+  dedupe?.add(event.eventId);
+  return { ok: true, duplicate: false, event };
 }

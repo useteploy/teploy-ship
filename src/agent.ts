@@ -21,6 +21,7 @@ import { formatObservation, systemPrompt } from "./prompt.js";
 import { scrub } from "./redact.js";
 import { RecoveryTracker, defaultRecoveryConfig } from "./recovery.js";
 import type { RecoveryConfig } from "./recovery.js";
+import { observeToolCall } from "./tool-manifest-shadow.js";
 
 export interface AgentStep {
   index: number;
@@ -543,6 +544,19 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
  * file surgery with no shell quoting anywhere.
  */
 export async function executeAction(
+  executor: AgentExecutor,
+  action: Extract<Action, { kind: "bash" | "python" | "edit" | "create" }>,
+  timeoutMs?: number,
+  scriptSuffix?: string,
+  useKernel = true,
+): Promise<ExecResult> {
+  const result = await runAction(executor, action, timeoutMs, scriptSuffix, useKernel);
+  // S24 shadow: report the call AFTER it ran; a no-op unless SHIP_TOOL_MANIFEST is set.
+  void observeToolCall(action);
+  return result;
+}
+
+async function runAction(
   executor: AgentExecutor,
   action: Extract<Action, { kind: "bash" | "python" | "edit" | "create" }>,
   timeoutMs?: number,
