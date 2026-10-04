@@ -1,5 +1,37 @@
 # Open audit items
 
+## 2026-10-04 — wave 4 (S07, S13, S15/S17, S19, S21, S22, S24, S26, S27)
+
+All off by default or observe-only; flags are in the programme's wave-4 table.
+
+- **S27 Teploy adapter (PR #54):** flag off. When on, it is stricter than the
+  legacy path (unreadable status, including a brand-new destination, holds).
+  A manual `teploy deploy` landing inside Ship's deploy is overwritten and still
+  reads back confirmed; the lease serialises Ship's own releases on one host
+  only. Upstream feature requests (not filed): deploy dry-run; deploy generation
+  and compare-and-set in `status --json`; documented `logs` flags and a
+  no-deployment-versus-unreachable signal.
+- **S21 (PR #51):** provenance is a sidecar, not fields on the note. Project
+  scope is repo-only. Pre-flag notes read as unknown. Run `shadow` and read the
+  logs before `on`.
+- **S24 (PR #52):** host and secret findings cannot fire until the executor or
+  credential layer reports hosts contacted and secrets injected. Enforcement is
+  untouched and stays with that layer.
+- **S26 (PR #48):** records disagreements only; the sandbox pool still fails a
+  run whose host dies.
+- **S13 (PR #50):** probes are test-only; five operations unprobed.
+- **S15/S17 (PR #46):** inert; callers must redact log excerpts.
+- **S22 (PR #47):** the coordination record does not keep the revision the
+  client was planned against.
+- **S19 (PR #49):** doctor's store and clock checks report unknown until real
+  probes exist; the restore comparison has no snapshot producer.
+- **S07 (PR #53):** unwired; wiring must not add a durable step to existing runs.
+- **Agent hygiene:** parallel agents share one scratch directory and the fixed
+  grading port 8901. A backup-file collision corrupted one agent's mutation
+  backup (caught and fixed before push) and spurious grader-test failures
+  appeared only in agent sandboxes. Later waves told agents to use their own
+  directories and skip those tests locally.
+
 ## 2026-10-04 — wave 3 wired behind flags (S01/S04, S05/S06, S09, S11, S16, S18, S23, S25)
 
 All off by default or observe-only; see the programme's wave-3 table for flags.
