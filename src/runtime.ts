@@ -41,6 +41,7 @@ import { FileRepoStatsStore, NucleusRepoStatsStore } from "./repo-stats.js";
 import type { RepoStatsStore } from "./repo-stats.js";
 import { attemptsCount, harnessAttempts, harnessRef } from "./harness.js";
 import { PLAN_REVIEW_REFUSAL, refusalFor } from "./harness-capabilities.js";
+import { harnessIdentity, harnessRecordEnabled } from "./harness-identity.js";
 import type { HarnessRef } from "./harness.js";
 import type { EvidenceStore } from "./evidence.js";
 import { FileProjectStore, NucleusProjectStore, ProjectEvidenceStore } from "./projects.js";
@@ -1465,6 +1466,10 @@ export async function enqueueRun(
       // The engine reads `workflow` and `input` and ignores everything else on
       // this event, so this key is inert to replay.
       stepFingerprint: stepFingerprint(input),
+      // Who ran it (S13): model, harness, expected revision, configuration
+      // identity. A sibling like the fingerprint, and only under
+      // SHIP_HARNESS_RECORD=on; off writes no key at all.
+      ...(harnessRecordEnabled() ? { harnessIdentity: harnessIdentity({ harness, attempts, shipModel: options.model }) } : {}),
     },
   };
   const meta: RunMeta = {
