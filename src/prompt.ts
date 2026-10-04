@@ -176,6 +176,19 @@ ${options.task}`;
 }
 
 /**
+ * Appended to the scan prompt only under SHIP_FINDING_CONTINUITY=on (S09).
+ * These fields are what lets a later review of the next revision recognise
+ * this finding again after lines have shifted.
+ */
+export const REVISION_FIELDS_PROMPT = `
+
+Optional fields that let a later review of a newer revision recognise the same finding even after lines move (include them whenever you can):
+- \`snippet\`: the cited code, copied verbatim (one to a few lines).
+- \`symbol\`: the enclosing function or class.
+- \`confidence\`: low | med | high, how sure you are after verifying.
+- \`evidence\`: the concrete proof (command output, trace or quoted code), kept separate from \`detail\`.`;
+
+/**
  * The task wrapper for a `mode: "scan"` run (L2 / D3) — the read-only
  * counterpart of git.ts's `fixPrompt`.
  *
@@ -192,7 +205,7 @@ ${options.task}`;
  * the tree is either published (and a scan publishes nothing) or refused —
  * see the header of findings.ts.
  */
-export function scanPrompt(options: { task: string; branch?: string; context?: string; journey?: string }): string {
+export function scanPrompt(options: { task: string; branch?: string; context?: string; journey?: string; revisionFields?: boolean }): string {
   const context = options.context !== undefined && options.context !== "" ? `\n\n${options.context}` : "";
   const where =
     options.branch !== undefined
@@ -232,7 +245,7 @@ Rules for the array:
 - At most ${MAX_FINDINGS} findings; extras are dropped. Report the ones that matter, ranked by severity.
 - Every finding must be something you VERIFIED by reading the code, with the file and line to prove it. A plausible-sounding finding you did not confirm is worse than no finding: it costs a reviewer more than it saves.
 - Found nothing worth reporting? Emit ${FINDINGS_MARKER} followed by \`[]\`. That is a real answer and it is accepted.
-- Emit the finish block while you still have turns left. A scan that runs out of turns still reading has produced nothing at all.`;
+- Emit the finish block while you still have turns left. A scan that runs out of turns still reading has produced nothing at all.${options.revisionFields === true ? REVISION_FIELDS_PROMPT : ""}`;
 }
 
 /**

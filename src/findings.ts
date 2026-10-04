@@ -19,6 +19,8 @@
  * Dependency-free on purpose, like plan.ts: the dashboard imports the types.
  */
 
+import type { ContinuityRecord } from "./finding-continuity-wiring.js";
+
 /** How bad the scan says it is. Three levels, because a fourth is never used. */
 export type FindingSeverity = "low" | "med" | "high";
 
@@ -39,6 +41,21 @@ export interface ScanFinding {
   detail: string;
   /** What to do about it, when the scan proposes something concrete. */
   fix?: string;
+  /**
+   * Revision-aware fields (S09 finding continuity). Only ever present when the
+   * run was started with SHIP_FINDING_CONTINUITY=on: parseFindings drops them
+   * otherwise, so a default run records exactly the shape it always did.
+   * finding-continuity.ts reads them as identity anchors.
+   */
+  /** The cited code, verbatim. The strongest anchor for matching across revisions. */
+  snippet?: string;
+  /** Enclosing function/class, when the reviewer named one. */
+  symbol?: string;
+  confidence?: "low" | "med" | "high";
+  /** Concrete evidence (output, trace, quoted code) for the claim. */
+  evidence?: string;
+  /** Stable identity assigned by a continuity pass (see finding-continuity-wiring.ts). */
+  id?: string;
 }
 
 export interface ParsedFindings {
@@ -53,6 +70,11 @@ export interface ParsedFindings {
   findings: ScanFinding[];
   /** Why entries were dropped, or why nothing parsed. Recorded on the step. */
   errors: string[];
+  /**
+   * Additive, and only under SHIP_FINDING_CONTINUITY=on: the advisory
+   * comparison with the earlier review (finding-continuity-wiring.ts).
+   */
+  continuity?: ContinuityRecord;
 }
 
 /**
@@ -165,6 +187,33 @@ function locateArray(text: string): unknown[] | null {
   return empty;
 }
 
+/** Normalise a confidence word; unknown or absent means "not stated", never a guess. */
+function normalizeConfidence(value: unknown): "low" | "med" | "high" | undefined {
+  const raw = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (raw === "high" || raw === "certain" || raw === "confirmed") return "high";
+  if (raw === "med" || raw === "medium" || raw === "moderate") return "med";
+  if (raw === "low" || raw === "tentative" || raw === "uncertain") return "low";
+  return undefined;
+}
+
+/**
+ * The optional revision-aware fields (S09), each only when the model supplied
+ * it. `evidence` is only read as its own field when a `detail` exists too:
+ * otherwise it was already consumed as the detail text (see parseFindings).
+ */
+function revisionFields(record: Record<string, unknown>): Partial<ScanFinding> {
+  const snippet = alias(record, ["snippet", "code", "quote"]);
+  const symbol = alias(record, ["symbol", "function", "enclosing"]);
+  const evidence = str(record.detail) !== null ? str(record.evidence) : null;
+  const confidence = normalizeConfidence(record.confidence);
+  return {
+    ...(snippet !== null ? { snippet: clamp(snippet, MAX_TEXT) } : {}),
+    ...(symbol !== null ? { symbol: clamp(symbol, 200) } : {}),
+    ...(confidence !== undefined ? { confidence } : {}),
+    ...(evidence !== null ? { evidence: clamp(evidence, MAX_TEXT) } : {}),
+  };
+}
+
 /**
  * Parse and validate the findings a scan run's finish message carries.
  *
@@ -172,7 +221,7 @@ function locateArray(text: string): unknown[] | null {
  * re-runs on replay and can branch differently (the rule stated throughout
  * durable.ts). Everything it refuses is reported in `errors` instead.
  */
-export function parseFindings(text: string): ParsedFindings {
+export function parseFindings(text: string, options: { revisionFields?: boolean } = {}): ParsedFindings {
   const errors: string[] = [];
   const located = locateArray(text ?? "");
   if (located === null) {
@@ -229,6 +278,7 @@ export function parseFindings(text: string): ParsedFindings {
       ...(line !== undefined ? { line } : {}),
       detail: clamp(detail, MAX_TEXT),
       ...(fix !== null ? { fix: clamp(fix, MAX_TEXT) } : {}),
+      ...(options.revisionFields === true ? revisionFields(record) : {}),
     });
   }
   if (overCap > 0) errors.push(`dropped ${overCap} finding(s) over the ${MAX_FINDINGS} cap`);
