@@ -4,7 +4,21 @@ The single list of decisions only the owner can make, with the context each
 one needs. Everything else open is in [NEXT_SESSION.md](../NEXT_SESSION.md).
 When a decision is made, record it here and in the programme row it affects.
 
-## 1. Model-routing data gates (OPEN — terms lookup DONE 2026-10-04, awaiting operator assertion)
+## Decided 2026-10-05 (owner, relayed in session)
+
+- **Decision 1 (model-routing data gates): DECIDED — do NOT assert
+  `retention: "none"`.** Owner call: when in doubt, don't send the data.
+  The z.ai destination keeps its refusal for `private` data (the terms
+  evidence in the 2026-10-04 lookup below stays recorded for a future
+  revisit if z.ai ever ships explicit coding-plan retention wording);
+  hosted routing remains `internal`/`public`-data only. No policy change
+  on infra-home — the fail-closed gate is the decision.
+- **Decision 2 (S12/D07): DECIDED — keep the current browser harness,
+  skip the evaluation slice** (accepts the recommendation below). Re-open
+  D07 only if the first S12 interactive milestone lands and the harness
+  measurably fights the work.
+
+## 1. Model-routing data gates (DECIDED 2026-10-05 — see top of file)
 
 **The architecture is right; one fact is missing.** The routing layer gates
 candidates on data class before any model choice: `private` data may only
@@ -59,7 +73,7 @@ clauses above, with a re-check trigger on any z.ai privacy-policy date
 bump (current: 2025-09-29). Until asserted, the shadow refusals keep
 recording — routing stays honest either way.
 
-## 2. S12 browser harness — D07 (OPEN — recommendation recorded 2026-10-04)
+## 2. S12 browser harness — D07 (DECIDED 2026-10-05 — see top of file)
 
 The last undecided design call (deferred as D07). Options: keep the current
 harness approach and scope remaining S12 browser/interactive work on it, or
