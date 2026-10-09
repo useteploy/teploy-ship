@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@neutron-build/cli": "0.2.3",
-    "@neutron-build/core": "0.2.2",
+    "@neutron-build/cli": "0.3.2",
+    "@neutron-build/core": "0.3.2",
     "@preact/preset-vite": "2.10.5",
     "openid-client": "6.8.4",
     "preact": "10.25.4",
@@ -21,6 +21,7 @@
     "devalue": "5.9.3",
     "browserslist": "4.28.7",
     "baseline-browser-mapping": "2.11.0",
-    "@neutron-build/core": "0.2.2"
+    "@neutron-build/core": "0.3.2",
+    "@neutron-build/create": "0.1.9"
   }
 }

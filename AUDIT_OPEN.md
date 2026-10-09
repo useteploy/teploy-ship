@@ -806,3 +806,18 @@ with a successful `nucleus shell --command "SELECT 1"` inside the proof containe
 This corrects the earlier attribution: explicit data/transport is required, but
 transport alone did not explain every connection failure. Original failed and
 successful rehearsals remain in the release receipts.
+
+
+## 2026-10-07 — framework 0.3.2 integration prepared, publication pending
+
+The `stage/core-0.3.2` branch pins development and deployment web manifests
+to core/CLI 0.3.2. The console response boundary now preserves representation
+`Vary` dimensions and sends `Cache-Control: private, no-store` for successful,
+redirect and authorization responses. This prevents new cache reuse; existing
+proxy/browser cache entries still require invalidation.
+
+Registry publication is not yet complete. Existing tracked locks remain registry
+locks; run `node scripts/refresh-framework-locks.mjs` after the core/CLI/create
+release becomes available, then install/test/build before integrating this branch.
+No production rollout or browser acceptance is claimed. See
+[FRAMEWORK_UPGRADE.md](docs/FRAMEWORK_UPGRADE.md) for validation and rollback.

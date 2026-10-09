@@ -1,12 +1,10 @@
 import { DESIGN_CSS } from "../lib/design.js";
-import { dashboardCsp } from "../lib/csp.js";
-import { previewFrameBase } from "../lib/preview-frame.server.js";
 import type { ComponentChildren } from "preact";
 import faviconUrl from "../favicon.svg?url";
 import type { MiddlewareFn } from "@neutron-build/core";
 
 import { currentUser, requiredRole, roleAllows, sameOrigin, isMutating } from "../lib/session.server.js";
-import { publicOrigin } from "../lib/oidc.server.js";
+import { withSecurityHeaders } from "../lib/response-security.server.js";
 import { teployNav } from "../lib/nav.server.js";
 import type { NavData } from "../lib/nav.server.js";
 import { installProcessErrorHooks, reportError } from "../lib/observe.server.js";
@@ -53,9 +51,8 @@ function activeHref(path: string): string | null {
 /**
  * Identity + RBAC for the whole surface (Teploy RBAC contract:
  * admin/editor/viewer), exported from the root layout because that is where
- * the framework actually collects middleware (route and layout modules — the
- * documented global src/middleware.ts is not loaded by either server; recorded
- * as a framework-excellence finding).
+ * the framework collects route and layout middleware. Keeping the gate here
+ * scopes it to the console, including router data and authorization responses.
  *
  * A web approve button is remote code + spend approval, so nothing is served
  * unauthenticated, and the role gate fails closed. Authentication is a Bearer
@@ -64,7 +61,10 @@ function activeHref(path: string): string | null {
  * (back-compat → admin). Roles: reads need viewer, mutations need editor,
  * settings/sources/users need admin.
  */
-export const middleware: MiddlewareFn = async (request, _context, next) => {
+export const middleware: MiddlewareFn = async (request, context, next) =>
+  withSecurityHeaders(await authorizeRequest(request, context, next), request);
+
+const authorizeRequest: MiddlewareFn = async (request, _context, next) => {
   // Runs only on the server (middleware is a routing concept, never
   // hydrated), so this is a safe, guaranteed-once-per-process place to
   // install the catch-alls for anything that escapes a request entirely.
@@ -93,7 +93,7 @@ export const middleware: MiddlewareFn = async (request, _context, next) => {
   // bearer gate moves the authority to that check; an unsigned or wrongly
   // signed POST still gets 401 from the route itself.
   if (path === "/login" || path === "/health" || path.startsWith("/hooks/") || path.startsWith("/bulletin/") || path.startsWith("/oidc/") || path.startsWith("/assets/") || path === "/favicon.ico" || path.startsWith("/api/incidents/intake")) {
-    return withSecurityHeaders(await next(), request);
+    return next();
   }
 
   // /api/* is a machine surface: answer it with a status, never a redirect to a
@@ -151,40 +151,8 @@ export const middleware: MiddlewareFn = async (request, _context, next) => {
       headers: { "content-type": "text/plain; charset=utf-8" },
     });
   }
-  return withSecurityHeaders(await next(), request);
+  return next();
 };
-
-/**
- * Response boundary for an operations console.
- *
- * The dashboard approves remote code execution and spend, and it set no
- * response security headers at all. SameSite=Lax covers the common CSRF case,
- * but framing, MIME sniffing, referrer leakage and injected script are separate
- * problems with separate answers — and `frame-ancestors 'none'` is the explicit
- * decision this surface should be making rather than inheriting.
- *
- * The CSP allows inline styles and scripts because the app ships both (the live
- * updater and the inline stylesheet); it still forbids loading script, style
- * or connections from another origin, which is the part that matters for a
- * self-hosted console. The one framed origin is the configured tailnet
- * preview base, for the run page's preview panel — see lib/csp.ts.
- */
-function withSecurityHeaders(response: Response, request: Request): Response {
-  const headers = new Headers(response.headers);
-  headers.set("content-security-policy", dashboardCsp(previewFrameBase()));
-  headers.set("x-content-type-options", "nosniff");
-  headers.set("x-frame-options", "DENY");
-  // Plain-HTTP browsers may send Origin: null under no-referrer. Keep the
-  // same-origin Referer available for CSRF checks without leaking it off-site.
-  headers.set("referrer-policy", "same-origin");
-  headers.set("permissions-policy", "camera=(), microphone=(), geolocation=(), payment=()");
-  // Only on an HTTPS deployment: sending HSTS from a plain-HTTP tailnet box
-  // would strand it behind a browser-pinned upgrade it cannot satisfy.
-  if (publicOrigin(request).startsWith("https://")) {
-    headers.set("strict-transport-security", "max-age=31536000; includeSubDomains");
-  }
-  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
-}
 
 /**
  * App shell. Styles are inline and minimal on purpose — this is an
