@@ -1,0 +1,346 @@
+PROOF A — Chromium through teploy-sandbox's per-run AUTHENTICATED egress proxy
+2026-10-14 · branch proof/egress-browser-proxy-2026-10-14 (worktree, docs-only) · receipt
+
+==============================================================================
+0. QUESTION
+==============================================================================
+Can Chromium reach the internet inside an allowlist-tier sandbox run, given
+that the per-run egress proxy requires Proxy-Authorization and the credential
+only rides the HTTP(S)_PROXY URL userinfo? Hypothesis under test (from
+docs/PERCEPTION_INPUT_S12_S13_2026-10-14.md §2, "unverified live"): a naive
+Chromium launch that only inherits the proxy env vars fails (407 expected);
+the fix is Playwright's explicit proxy:{server,username,password}.
+
+VERDICT UP FRONT: hypothesis CONFIRMED live, with one correction — Chromium
+on Linux headless DOES read the env proxy vars (lowercase), but strips the
+URL userinfo, so every tunnel dies at the daemon's 407. Playwright's
+explicit proxy option works end-to-end (200, real DOM, page title).
+
+==============================================================================
+1. CODE-LEVEL ANALYSIS (read before any live run; teploy-sandbox @ main)
+==============================================================================
+
+Proxy URL shape — internal/egress/pool.go:102-148 (OpenFor):
+  - per-run listener on the egress bridge gateway, kernel-picked port
+  - credential = 32 random bytes, hex-encoded (64 chars), pool.go:102-107
+  - URL built at pool.go:147:
+        u := &url.URL{Scheme: "http", Host: listener.Addr().String(),
+                      User: url.UserPassword("run", credential)}
+    => EXACT SHAPE:  scheme http, host 172.31.99.1:<ephemeral-port>, userinfo
+       "run" ":" <64-hex-chars>  (credential travels as URL userinfo)
+    (The SHARED deployment-wide proxy, http://172.31.99.1:7443, carries NO
+     credential — Credential=="" skips the auth gate entirely, pool.go:271.)
+
+Auth check — internal/egress/proxy.go:271-278 (ServeHTTP):
+  - expected = "Basic " + base64("run:" + credential), constant-time compare
+  - ANY missing/wrong Proxy-Authorization on ANY method (CONNECT included):
+    407 + `Proxy-Authenticate: Basic realm="sandbox"` + body "proxy
+    credential required". The auth gate runs BEFORE the allowlist check,
+    so an unauthenticated request never reveals whether its host is allowed.
+
+Allowlist gate — internal/egress/proxy.go:178-210 (Permits), 289, 316:
+  - host[:port] entries; bare host admits ONLY ports 80/443; denial = 403
+    "egress denied by the sandbox allowlist: <host>" + remedy text.
+
+Env injection — internal/run/runtime.go:223-235 (createArgs):
+  - allowlist runs join network teploy-sbx-egress-v2 (internal bridge
+    teploy-sbx1, subnet 172.31.99.0/24, gateway 172.31.99.1, ICC off,
+    IPv6 disabled; runtime.go:74-83, 226), and get, with the URL INCLUDING
+    userinfo: HTTP_PROXY, HTTPS_PROXY, http_proxy, https_proxy
+    + NO_PROXY/no_proxy=localhost,127.0.0.1.
+  - i.e. the daemon already does the best env-var job possible: all four
+    spellings carry run:<credential>@. If Chromium ignores URL userinfo,
+    no env arrangement can fix it — it must be a launch option.
+
+Container hardening relevant to a browser: --init, --shm-size 512m
+(main.go:111 SBX_SHM_MB default 512 — "Chromium needs 512 MB or more"),
+--cap-drop NET_RAW/MKNOD/AUDIT_WRITE, no-new-privileges, default limits
+1 CPU / 1024 MB / 256 pids (README; manager CreateSpec defaults).
+
+Daemon startup — main.go:124-158:
+  - On a Mac dev box (docker-in-VM): EgressGateway() returns an IP that is
+    NOT a host interface; the daemon logs "egress proxy disabled" and runs
+    allowlist-tier runs FULLY SEALED (main.go:136-138 comment says exactly
+    this). => A live proof cannot run the daemon on the macOS host against
+    colima; the daemon must run inside the Linux VM (or a real Linux box).
+    Honored here: daemon ran inside the colima VM as root (iptables for the
+    TEPLOY-SBX INPUT chain + /var/run flock + gateway bind).
+
+Expected outcomes from code alone:
+  a. curl WITH env userinfo → Proxy-Authorization on CONNECT → 200.
+  b. curl to non-allowlisted host → 403 + remedy.
+  c. chromium env-only → either ignores env (no route/DNS on internal
+     bridge) or applies env minus userinfo → 407 at CONNECT → net error.
+  d. Playwright proxy:{server,username,password} → CDP auth handling → 200.
+
+==============================================================================
+2. ENVIRONMENT
+==============================================================================
+(host: Tyler's Mac, macOS darwin/arm64; all docker is a LOCAL VM; production
+untouched — no deploys, no infra SSH, no teploy secrets read)
+- colima (homebrew) fresh-started for this proof after the previous VM was
+  found wedged (stale lima hostagent, no instance); `colima delete -f` +
+  start. VM: Linux colima 6.8.0-117-generic aarch64 (Ubuntu), 2 CPU / 2 GiB.
+- Docker Engine 29.5.2 (server, in VM) / client 29.8.1 (Mac), cgroup v2,
+  legacy builder (no buildx in VM).
+- Mac-side docker CLI needed DOCKER_CONFIG isolated (Docker Desktop
+  credsStore absent on PATH) and DOCKER_HOST=
+  unix:///Users/tyler/.colima/default/docker.sock.
+- teploy-sandbox daemon: from the teploy-sandbox repo @ main,
+  `CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build` (go1.26.6 darwin/arm64),
+  binary piped into the VM, run there as root:
+    /tmp/teploy-sandbox serve --addr 127.0.0.1:7439 \
+        --token-file /tmp/sbx/token --cache-root ""
+- Run image: ship-sandbox-node:dev built BY images/build.sh --harness none node
+  FROM THE WORKTREE COPY of images/ (same tree as main @ 3f02871): Debian
+  trixie node:22 base (digest-pinned), apt chromium + playwright@1.63.0
+  (PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1, CHROMIUM_BIN=/usr/bin/chromium,
+  NODE_PATH=/usr/local/lib/node_modules). Baked Chromium 155.0.8059.39.
+  DEVIATION: --harness none (no claude-code/opencode baked — irrelevant to
+  the browser proof); otherwise the production Dockerfile unmodified.
+- Run: id 01M4YTVBXA3EV2SYEWRTG3A2T8, network "allowlist",
+  egressAllow ["example.com"], image ship-sandbox-node:dev, default limits.
+  Daemon log: "per-run egress proxy up" addr 172.31.99.1:39525.
+- The per-run credential shown below is REDACTED (first 4 hex + length).
+  It was minted locally for this proof, lived 4 minutes, and died with the
+  run and daemon — it is not a production secret.
+
+==============================================================================
+3. LIVE RESULTS — proxy, auth, allowlist (curl controls)
+==============================================================================
+All commands run inside the run container via POST /v1/runs/{id}/exec
+(SSE reassembled); env as injected by the daemon.
+
+In-container env (redacted):
+  HTTPS_PROXY=http://run:9122…(64 hex)@172.31.99.1:39525
+  https_proxy=http://run:9122…@172.31.99.1:39525
+  HTTP_PROXY=http://run:9122…@172.31.99.1:39525
+  http_proxy=http://run:9122…@172.31.99.1:39525
+  NO_PROXY=localhost,127.0.0.1   no_proxy=localhost,127.0.0.1
+  /dev/shm = 512M (SBX_SHM_MB default honored); /etc/resolv.conf →
+  nameserver 127.0.0.11 (docker embedded), ExtServers 192.168.5.1.
+
+A  CONTROL — curl env-proxy (honors URL userinfo) → allowlisted host:
+    $ curl -sS -o /dev/null -w '%{http_code}' https://example.com/
+    A http=200
+    $ curl -sS https://example.com/ | grep -o '<title>[^<]*</title>'
+    <title>Example Domain</title>
+  => proxy + embedded credentials + allowlist all work for proxy-aware tools.
+
+A2 AUTH FENCE — same proxy, credentials stripped from the URL:
+    $ curl -sS -x http://172.31.99.1:39525 -o /dev/null -w '%{http_code}' \
+           https://example.com/
+    curl: (56) CONNECT tunnel failed, response 407
+  => the 407 of the hypothesis, delivered on CONNECT exactly as proxy.go:275.
+
+B  ALLOWLIST FENCE — credentials present, host NOT allowlisted:
+    $ curl -sS https://www.wikipedia.org/
+    curl: (56) CONNECT tunnel failed, response 403
+  daemon log (matches):
+    WARN egress denied host=www.wikipedia.org:443 remedy="to allow it, pass
+    \"egressAllow\": [\"www.wikipedia.org\"] ... or SBX_EGRESS_ALLOW=...
+    A run created with \"network\": \"open\" bypasses this proxy entirely."
+
+==============================================================================
+4. LIVE RESULTS — Chromium WITHOUT explicit proxy credentials (the failure)
+==============================================================================
+Chromium 155.0.8059.39 (Debian trixie apt), headless=new, in-run.
+
+C1 env-only launch (exactly what a naive driver would inherit):
+  $ chromium --headless=new --no-sandbox --disable-gpu --dump-dom \
+        --virtual-time-budget=15000 https://example.com/
+  exit=0, DOM output = 0 bytes. Stderr: only container-noise dbus errors.
+  SILENT FAILURE — exit code 0 with empty output.
+
+C1 netlog (--log-net-log), the mechanism, verbatim:
+  PROXY_CONFIG_CHANGED {"new_config":{"bypass_list":["*localhost","127.0.0.1"],
+    "proxy_per_scheme":{"http":["[172.31.99.1:39525]"],
+                        "https":["[172.31.99.1:39525]"]}}}
+    => Chromium DID read the lowercase env vars and adopted the proxy —
+       but the bracket form carries NO identity: the URL userinfo was
+       STRIPPED. (no_proxy became the bypass list, as expected.)
+  HTTP_TRANSACTION_SEND_REQUEST_HEADERS
+    {"line":"CONNECT example.com:443 HTTP/1.1","headers":["Host: example.com:443",
+     "Proxy-Connection: keep-alive","User-Agent: …HeadlessChrome/155…"]}
+    => no Proxy-Authorization header on the main-frame CONNECT.
+  HTTP_TRANSACTION_READ_RESPONSE_HEADERS
+    ["HTTP/1.1 407 Proxy Authentication Required",
+     "Proxy-Authenticate: Basic realm=\"sandbox\"", …]
+    => the daemon's exact 407 (proxy.go:274-275), logged by Chromium itself.
+  HTTP_PROXY_CONNECT_JOB_CONNECT {"net_error": -3}        (ERR_ABORTED)
+  REQUEST_ALIVE               {"net_error": -111}         (ERR_TUNNEL_CONNECTION_FAILED)
+
+C2 explicit --proxy-server=http://172.31.99.1:39525 (no credentials):
+  identical outcome: PROXY_CONFIG_CHANGED single_proxy [172.31.99.1:39525],
+  CONNECT without auth → 407 → net_error -111, --dump-dom 0 bytes, exit 0.
+
+C-NAIVE the same failure through Playwright WITHOUT proxy option
+  (node -e, chromium.launch({executablePath:'/usr/bin/chromium'}) — env
+  inherited, which is precisely the "just launch it" driver):
+    page.goto: net::ERR_INVALID_AUTH_CREDENTIALS at https://example.com/
+    Call log: navigating to "https://example.com/", waiting until "load"
+  => a naive Playwright driver does not hang or time out; it fails fast
+     with ERR_INVALID_AUTH_CREDENTIALS (Chromium saw the 407 challenge it
+     cannot answer). Catchable, testable, honest.
+
+Also observed in C1/C2 netlogs (operationally relevant):
+  Chromium background services hit the proxy constantly even before the
+  navigation: clients2.google.com/time/1 (absolute-form GET through the
+  proxy), CONNECT redirector.gvt1.com:443 (spellcheck dict),
+  CONNECT update.googleapis.com:443, accounts.google.com. They all met the
+  same 407 here; WITH valid credentials they would meet 403 (not on the
+  default allowlist) — benign for navigation, but the driver should pass
+  --disable-background-networking to keep the proxy log legible.
+  DNS probes: SOCKET_CONNECT [2001:4860:4860::8888]:443 net_error -108
+  (ERR_ADDRESS_UNREACHABLE) — Chromium's DoH fallback cannot escape the
+  internal bridge either.
+
+==============================================================================
+5. LIVE RESULTS — Playwright WITH explicit proxy credentials (the fix)
+==============================================================================
+/work/proxy.mjs (pushed via the files API; full source in §7):
+  proxy server : http://172.31.99.1:39525          <- URL minus userinfo
+  proxy user    : run
+  cred (redacted): 9122… (len 64)
+  goto status  : 200
+  page title   : Example Domain
+  dom snippet  : <!DOCTYPE html><html lang="en"><head><meta charset="utf-8">…
+  wss attempt  : error (handshake refused, transport reached origin)
+  PROOF D: PASS (explicit-proxy Playwright launch reached the allowlisted host)
+
+  One rung under default limits: 1 CPU / 1024 MB / 256 pids / 512M shm —
+  no OOM, no pid exhaustion for a single page load.
+
+wss (observational, as planned): a page-level WebSocket('wss://example.com/')
+  failed FAST with onerror (not timeout), and the daemon logged NO "egress
+  denied" for it — the CONNECT tunnel was established and example.com (not a
+  ws origin) refused the upgrade. Transport-level evidence that wss rides
+  the authenticated CONNECT tunnel like any other TCP. A live websocket
+  ECHO origin was not tested (none is allowlisted; deliberately not added).
+
+DNS (observational):
+  $ getent hosts example.com   → exit 2 (no result)
+  $ curl --noproxy '*' https://example.com/ → Could not resolve host
+  => container-side external DNS is dead on the internal bridge (docker's
+     embedded resolver cannot forward); hostnames of proxied traffic are
+     resolved PROXY-side, inside the daemon. A non-proxy-aware client fails
+     at resolution before it ever touches the network — defense in depth
+     on top of the no-route bridge.
+
+==============================================================================
+6. EXACT COMMANDS (repro sketch)
+==============================================================================
+# Mac: build daemon for the VM; build the image from the WORKTREE copy
+cd Teploy/teploy-sandbox && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+    go build -o /tmp/sbx-proof/teploy-sandbox .
+colima ssh -- sudo tee /tmp/teploy-sandbox >/dev/null < …/teploy-sandbox
+cd Teploy/_worktrees/proof-proxy/images && \
+  DOCKER_HOST=unix://$HOME/.colima/default/docker.sock \
+  DOCKER_CONFIG=/tmp/sbx-proof/docker-config ./build.sh --harness none node
+# VM: daemon (root: iptables + gateway bind + /var/run flock)
+colima ssh -- 'sudo /tmp/teploy-sandbox serve --addr 127.0.0.1:7439 \
+    --token-file /tmp/sbx/token --cache-root "" &'   # health: {"status":"ok"}
+# VM: create the run, exec through the SSE API (helper exec.sh reassembles)
+curl -s -X POST localhost:7439/v1/runs -H "Authorization: Bearer $TOKEN" \
+  -d '{"image":"ship-sandbox-node:dev","network":"allowlist",
+       "egressAllow":["example.com"],"ttlSec":3600}'
+curl -sN -X POST localhost:7439/v1/runs/$ID/exec -H "Authorization: …" \
+  -d '{"cmd":"chromium --headless=new --no-sandbox --disable-gpu \
+       --log-net-log=/tmp/c1-net.json --dump-dom https://example.com/",
+       "timeoutSec":120}'
+# cleanup
+curl -X DELETE …/v1/runs/$ID ; pkill teploy-sandbox ;
+docker network rm teploy-sbx-egress-v2 ; iptables -D INPUT -i teploy-sbx1 \
+  -j TEPLOY-SBX && iptables -F TEPLOY-SBX && iptables -X TEPLOY-SBX
+
+==============================================================================
+7. CONCLUSIONS
+==============================================================================
+MEASURED (live, this proof, local VM):
+ 1. The per-run proxy URL is exactly: host 172.31.99.1:<port>, userinfo
+    "run" ":" <64-hex credential> (credential in the userinfo position)
+    (code pool.go:147; observed in-run env; port 39525 for run
+    01M4YTVBXA3EV2SYEWRTG3A2T8).
+ 2. Proxy auth is enforced on both plain absolute-form requests and CONNECT:
+    no/wrong credentials → 407 + Proxy-Authenticate: Basic realm="sandbox"
+    (code proxy.go:271-278; observed by curl A2 and in Chromium's netlog).
+ 3. The allowlist fence works: non-allowlisted host → 403 + remedy naming
+    the exact egressAllow entry (observed for www.wikipedia.org:443).
+ 4. curl (proxy-aware) reaches the allowlisted host THROUGH the env URL's
+    embedded credentials: 200, real body (A).
+ 5. Chromium headless=new on Linux READS the lowercase proxy env vars
+    (http_proxy/https_proxy; no_proxy → bypass list) — the plan's aside
+    that it "does not read http_proxy env at all" is NOT true of this
+    build — but it STRIPS the userinfo, so it uses the proxy UNAUTHENTICATED:
+    main-frame CONNECT example.com:443 went out with no Proxy-Authorization,
+    was answered 407, and the job died ERR_TUNNEL_CONNECTION_FAILED (-111)
+    with ERR_ABORTED (-3) at the connect job.
+ 6. --dump-dom makes that failure SILENT: exit code 0, zero bytes of output.
+ 7. Naive Playwright launch (no proxy option) fails fast and catchably:
+    page.goto: net::ERR_INVALID_AUTH_CREDENTIALS.
+ 8. Playwright chromium.launch with EXPLICIT proxy:{server,username,password}
+    parsed from the injected env URL reaches the allowlisted site: goto 200,
+    title "Example Domain", real DOM — under default run limits
+    (1 CPU / 1 GB / 256 pids / 512M shm).
+ 9. Container-side external DNS resolution fails on the internal bridge;
+    proxied hostnames resolve proxy-side. Direct (non-proxy) sockets have
+    no route regardless.
+10. wss: a page WebSocket through the tunnel reached the origin (fast
+    onerror, no daemon-side denial). Transport-level only.
+
+INFERRED (reasoned, not fully measured):
+ - Chromium background services with VALID credentials would draw 403s
+   (they 407'd before the allowlist check here). Adding
+   --disable-background-networking to the driver is hygiene, not security.
+ - A live websocket echo origin would succeed through the tunnel (CONNECT
+   is a bidirectional raw-TCP tunnel — io.Copy both ways, proxy.go:363-364 —
+   and TLS-through-tunnel is proven by every https request above); not
+   measured against a real ws server.
+ - The same behavior should hold for chromium-on-gVisor (runsc) since the
+   proxy interaction is userspace; not measured.
+
+WHAT THE SHIP BROWSER DRIVER MUST DO (the fix, as run in §5):
+  // allowlist tier: HTTPS_PROXY carries run:<credential>@ — decompose it,
+  // never pass it through as a URL with userinfo.
+  const raw = process.env.HTTPS_PROXY ?? process.env.https_proxy ?? "";
+  let proxy;
+  if (raw) {
+    const u = new URL(raw);                    // raw: host 172.31.99.1, userinfo run:<cred>
+    proxy = {
+      server: `${u.protocol}//${u.host}`,      // NO userinfo
+      username: decodeURIComponent(u.username),// "run"
+      password: decodeURIComponent(u.password),// per-run credential
+    };
+  }
+  const browser = await chromium.launch({
+    executablePath: process.env.CHROMIUM_BIN ?? "/usr/bin/chromium",
+    args: ["--no-sandbox", "--disable-gpu", "--disable-background-networking"],
+    proxy,                                     // undefined on the open tier —
+  });                                          // no proxy env is injected there
+  Rules that follow: treat goto() exceptions as the error surface (never a
+  dump-dom exit code); keep NO_PROXY covering localhost for in-run preview
+  servers (already injected by the daemon); on the open tier pass NO proxy
+  option at all (runtime.go:236-243 injects none, and a stale one would
+  re-impose the fence the caller opted out of).
+
+SURPRISES worth carrying into S12:
+ - env-var proxying is HALF-honored (proxy yes, credentials no) — worse than
+   plain "ignored" because the traffic still concentrates on the proxy and
+   fails closed, which is the correct security posture but a confusing UX.
+ - exit 0 on failed --dump-dom: any future driver built on raw chromium
+   flags must not trust exit codes.
+ - ERR_INVALID_AUTH_CREDENTIALS (Playwright/CDP path) vs
+   ERR_TUNNEL_CONNECTION_FAILED (raw dump-dom path) — two different net
+   errors for the same underlying 407.
+
+==============================================================================
+8. NOT PROVEN / OUT OF SCOPE HERE
+==============================================================================
+ - Image content end-to-end through the gateway (the plan's second live
+   proof — separate proof, not attempted).
+ - Headed/desktop browsing (S26), gVisor runtime, multi-page/heavy sites
+   under the 256-pid limit (one page measured only).
+ - The forge allowlist port-scoping rule (plan D3) — a policy decision,
+   not measurable here.
+
+— recorded by the proof sub-agent, 2026-10-14. Production untouched.
