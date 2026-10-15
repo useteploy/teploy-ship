@@ -28,6 +28,21 @@ import { loadManifest, stageFixture } from './eval-journeys-lib.mjs';
 const here = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(here, '..');
 
+// Browser-required scenarios (manifest `browserRequired`) are graded through
+// the grader's own headless render, so the matrix needs a real engine. The
+// discovery lives in graders/lib.mjs (one spelling of the rule); this import
+// reads the in-repo copy, which is harness code at this point, not the
+// out-of-tree copy a real baseline uses. Cached per process.
+let engineCache;
+export async function browserEngineAvailable() {
+  if (engineCache === undefined) {
+    engineCache = await import(pathToFileURL(join(REPO_ROOT, 'evals', 'product-journeys', 'graders', 'lib.mjs')).href)
+      .then(lib => lib.browserEngine())
+      .catch(() => null);
+  }
+  return engineCache !== null;
+}
+
 // Scenarios whose acceptance is read off the transcript: variants carry a
 // transcript.txt and (optionally) a tree overlay for "changed the tree".
 export const TRANSCRIPT_GRADED = ['pj-s-question', 'pj-s-plan', 'pj-c-review'];
@@ -120,6 +135,14 @@ export async function runMatrix({ repoRoot = REPO_ROOT, only = null, graderDir: 
   try {
     for (const scenario of manifest.scenarios) {
       if (only && scenario.id !== only) continue;
+      // A browser-required scenario without an engine is NOT gradeable here:
+      // report it as untested (visible, never a silent skip and never a
+      // pass/fail) rather than letting its reference fail for lack of a
+      // browser and painting the matrix red for an environmental reason.
+      if (scenario.browserRequired === true && !(await browserEngineAvailable())) {
+        untested.push({ id: scenario.id, reason: 'browserRequired scenario and no headless browser engine available (install Chrome/Chromium or set CHROME_BIN/CHROMIUM_BIN/PLAYWRIGHT_MODULE)' });
+        continue;
+      }
       const variants = variantsFor(pjRoot, scenario.id);
       if (variants.length === 0) {
         untested.push({ id: scenario.id, reason: 'no variants on disk' });
@@ -166,7 +189,10 @@ export function summarize({ rows, untested }) {
     references: correct.length,
     referencesAccepted: count(correct, 'ok'),
     referencesRejected: count(correct, 'REJECTED-GOOD'),
-    clean: rows.every(r => r.status === 'ok' || r.status === 'known-limit') && untested.length === 0
+    // An engine-less environment excludes the browserRequired scenario as
+    // untested; that is an honest environmental limit, not a dirty matrix.
+    clean: rows.every(r => r.status === 'ok' || r.status === 'known-limit')
+      && untested.every(u => u.reason.startsWith('browserRequired scenario and no headless browser engine'))
   };
 }
 
@@ -176,8 +202,7 @@ export function summarize({ rows, untested }) {
 // 2291711, with the variant set as first written (11 escapes of 60 wrong
 // variants; the feature placeholder variant was later reclassified, see below).
 export const FINDINGS = [
-  '## Grader defects this matrix found (fixed in the same change)',
-  '',
+  '## Grader defects this matrix found (fixed in the same change)',  '',
   'Run against the graders as merged at 2291711, 11 wrong variants PASSED. Ten were real grader defects and are fixed',
   '(each fix is minimal and has its exposing variant as a permanent regression test); one is a documented limit.',
   'Results already recorded under `results/` are NOT rewritten and were not re-graded: they keep the verdicts the',
@@ -208,12 +233,19 @@ export const FINDINGS = [
   'would reject the honest behaviour. The matrix pins that it still passes (a `known-limit` row turning to FAIL is',
   'flagged `LIMIT-CLOSED` so the record gets revisited).',
   '',
+  '2026-10-15: the matrix gained `pj-d-live-board` (S12 browser-required acceptance) — one correct reference and four',
+  'wrong variants, including the two explicit negative controls the acceptance section asks for: `static-guess` (edits',
+  'derived from the static files alone, quoting the stale hand-copied board line) and `self-authored-proof` (a PROOF.md',
+  'that quotes the CORRECT text but changes no page). All four were rejected on their first grading; no new grader',
+  'defects. Its grader needs a real headless engine; without one the scenario is reported untested, never passed.',
+  '',
   '## What this matrix does not prove',
   '',
-  '- The variants are hand-written and finite. A clean matrix means these 60 specific wrong fixes are rejected, not that no wrong fix can pass.',
+  '- The variants are hand-written and finite. A clean matrix means these 65 specific wrong fixes are rejected, not that no wrong fix can pass.',
   '- `pj-s-question`, `pj-s-plan`, `pj-c-review` are graded from the transcript, so their variants are wrong TRANSCRIPTS (plus tree overlays for "changed a file"). The review grader is lexical by design; a review that games the wording is not covered.',
   '- `pj-c-same-pr` content variants hold the forge evidence good; the forge checks (new PR, unmoved head, absent evidence) are covered by `scripts/eval-journeys-graders.test.mjs`.',
   '- The deploy-recovery reference migrates inside deploy.sh (what the 2026-09-24 live run did); other legitimate fixes are not enumerated.',
+  '- `pj-d-live-board` residual: an agent that re-implements the page\'s exact computation (roster + seed + the resolved board colour) outside a browser could compute the same string. The scenario requires real observation in practice; the grader\'s truth remains its own render either way.',
   '- No live agent ran. This measures graders, not Ship.',
   ''
 ];
@@ -227,7 +259,7 @@ export function renderMarkdown(matrix, { date = '2026-10-03' } = {}) {
   const s = summarize(matrix);
   const lines = [];
   lines.push(`# Grader sensitivity — ${date}`, '');
-  lines.push('Generated by `node scripts/grader-sensitivity.mjs --write evals/product-journeys/GRADER_SENSITIVITY_2026-10-03.md`.',
+  lines.push('Generated by `node scripts/grader-sensitivity.mjs --write evals/product-journeys/GRADER_SENSITIVITY_<date>.md`.',
     'Not hand-edited. Historical result records under `results/` are untouched; this',
     'matrix grades hand-written variants in `mutants/`, never a live run.', '');
   lines.push('## Totals', '');
@@ -269,13 +301,14 @@ export function renderMarkdown(matrix, { date = '2026-10-03' } = {}) {
 async function main(argv) {
   const only = argv.includes('--scenario') ? argv[argv.indexOf('--scenario') + 1] : null;
   const writeTo = argv.includes('--write') ? argv[argv.indexOf('--write') + 1] : null;
+  const date = argv.includes('--date') ? argv[argv.indexOf('--date') + 1] : undefined;
   const matrix = await runMatrix({ only });
   const s = summarize(matrix);
   for (const r of matrix.rows) {
     console.log(`${r.status.padEnd(13)} ${r.scenario.padEnd(22)} ${r.variant.padEnd(32)} ${r.kind.padEnd(8)} grader=${r.pass ? 'PASS' : 'FAIL'}`);
   }
   console.log(JSON.stringify(s));
-  if (writeTo) writeFileSync(resolve(writeTo), renderMarkdown(matrix));
+  if (writeTo) writeFileSync(resolve(writeTo), renderMarkdown(matrix, date !== undefined ? { date } : {}));
   const rowsOk = matrix.rows.every(r => r.status === 'ok' || r.status === 'known-limit');
   return only ? (rowsOk ? 0 : 1) : (s.clean ? 0 : 1);
 }

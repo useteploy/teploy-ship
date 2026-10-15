@@ -2,10 +2,11 @@
 // relative imports inside graders/ so the directory can be copied out of
 // tree and still work.
 import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync, statSync, mkdtempSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync, mkdtempSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, relative, resolve } from 'node:path';
+import { extname, join, relative, resolve, sep } from 'node:path';
 import { spawn } from 'node:child_process';
+import { createServer } from 'node:http';
 
 // 'mock-responses' holds harness-canned mock outputs inside the fixture
 // trees: never fixture content, never visible to the evaluated agent (the
@@ -153,4 +154,122 @@ export function noPublication(summary) {
 
 export function result(pass, reasons, evidence) {
   return { pass, reasons, evidence };
+}
+
+// ── browser-required grading (S12 acceptance) ─────────────────────────────
+// The pj-d-live-board grader's ground truth is its OWN headless render of the
+// served worked tree — never a grep of the files, never the agent's summary.
+// That needs a real browser engine. Discovery is honest and layered: a
+// playwright module if one is resolvable (PLAYWRIGHT_MODULE overrides the
+// name), else a Chrome/Chromium binary from CHROME_BIN/CHROMIUM_BIN or the
+// usual install paths. None found → null, and the grader says not-wired
+// rather than pretending.
+
+const CHROME_CANDIDATES = [
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  '/Applications/Chromium.app/Contents/MacOS/Chromium',
+  '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary',
+  '/usr/bin/google-chrome',
+  '/usr/bin/google-chrome-stable',
+  '/usr/bin/chromium',
+  '/usr/bin/chromium-browser',
+  '/snap/bin/chromium'
+];
+
+export function findChromeBinary() {
+  for (const candidate of [process.env.CHROME_BIN, process.env.CHROMIUM_BIN, ...CHROME_CANDIDATES]) {
+    if (candidate && existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+let playwrightProbe = null;
+export async function browserEngine() {
+  if (playwrightProbe === null) {
+    playwrightProbe = await import(process.env.PLAYWRIGHT_MODULE || 'playwright')
+      .then(() => ({ kind: 'playwright' }))
+      .catch(() => {
+        const bin = findChromeBinary();
+        return bin === null ? false : { kind: 'chrome', bin };
+      });
+  }
+  return playwrightProbe === false ? null : playwrightProbe;
+}
+
+/**
+ * Serve a directory over loopback HTTP so a page's client-side JavaScript
+ * actually runs (file:// is not a fair stand-in for the product's pages).
+ * Content types cover the fixture families; anything else is octet-stream.
+ */
+export function serveDir(dir) {
+  const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.md': 'text/plain', '.json': 'application/json' };
+  const server = createServer((req, res) => {
+    const clean = decodeURIComponent(req.url.split('?')[0]).replace(/^\//, '');
+    const file = resolve(dir, clean === '' ? 'index.html' : clean);
+    if (file !== dir && !file.startsWith(dir + sep)) {
+      res.writeHead(403);
+      res.end('forbidden');
+      return;
+    }
+    let body;
+    try {
+      body = readFileSync(file);
+    } catch {
+      res.writeHead(404);
+      res.end('not found');
+      return;
+    }
+    res.writeHead(200, { 'content-type': types[extname(file)] ?? 'application/octet-stream' });
+    res.end(body);
+  });
+  return new Promise(resolvePromise => {
+    server.listen(0, '127.0.0.1', () => resolvePromise({ port: server.address().port, stop: () => new Promise(r => server.close(r)) }));
+  });
+}
+
+/**
+ * One headless look: load the URL in a real engine, let the page's scripts
+ * run, return the serialized DOM. The chrome path uses --dump-dom with a
+ * virtual-time budget so client-side rendering settles deterministically.
+ */
+export async function renderURL(engine, url) {
+  if (engine.kind === 'playwright') {
+    const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
+    const browser = await chromium.launch({
+      ...(process.env.CHROMIUM_BIN ? { executablePath: process.env.CHROMIUM_BIN } : {}),
+      ...(process.env.CHROME_BIN ? { executablePath: process.env.CHROME_BIN } : {})
+    });
+    try {
+      const page = await browser.newPage();
+      await page.goto(url, { waitUntil: 'load', timeout: 30000 });
+      await page.waitForTimeout(500);
+      return await page.content();
+    } finally {
+      await browser.close();
+    }
+  }
+  const profile = mkdtempSync(join(tmpdir(), 'pj-grader-chrome-'));
+  const child = spawn(engine.bin, [
+    '--headless=new', '--no-sandbox', '--disable-gpu', '--no-first-run', '--disable-extensions',
+    `--user-data-dir=${profile}`, '--virtual-time-budget=8000', '--dump-dom', url
+  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = '';
+  let err = '';
+  child.stdout.on('data', d => { out += d; });
+  child.stderr.on('data', d => { err += d; });
+  const timedOut = new Promise(r => setTimeout(() => child.kill('SIGKILL'), 45000));
+  const code = await Promise.race([new Promise(r => child.on('close', r)), timedOut.then(() => 'timeout')]);
+  if (code !== 0) throw new Error(`headless chrome exited ${code}: ${err.slice(0, 300)}`);
+  return out;
+}
+
+/** The text content of one element id in a serialized DOM, or null. */
+export function elementText(html, id) {
+  const m = html.match(new RegExp(`<([a-z0-9]+)[^>]*\\bid="${id}"[^>]*>([\\s\\S]*?)</\\1>`, 'i'));
+  if (m === null) return null;
+  const decode = s => s
+    .replace(/<[^>]*>/g, '')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'").replace(/&amp;/g, '&');
+  return decode(m[2]).replace(/\s+/g, ' ').trim();
 }

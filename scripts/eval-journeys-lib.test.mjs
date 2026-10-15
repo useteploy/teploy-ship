@@ -25,17 +25,21 @@ test('the real manifest validates against fixtures, graders, README and schema',
   assert.ok(ok);
 });
 
-test('the real manifest covers all 12 S02 types once, across 3 families, with both traps', async () => {
+test('the real manifest covers all 13 S02+S12 types once, across 4 families, with the traps', async () => {
   const manifest = await realManifest();
-  assert.equal(manifest.scenarios.length, 12);
+  assert.equal(manifest.scenarios.length, 13);
   const types = manifest.scenarios.map(s => s.type).sort();
   assert.deepEqual(types, [...SCENARIO_TYPES].sort());
-  assert.deepEqual(new Set(manifest.scenarios.map(s => s.family)), new Set(['small-site', 'ui-api-db', 'unfamiliar-service']));
+  assert.deepEqual(new Set(manifest.scenarios.map(s => s.family)), new Set(['small-site', 'ui-api-db', 'unfamiliar-service', 'js-site']));
   const negatives = manifest.scenarios.filter(s => s.negativeControl);
-  assert.equal(negatives.length, 2);
+  assert.equal(negatives.length, 3);
   assert.ok(negatives.every(n => typeof n.trap === 'string' && n.trap.length > 0));
   const applied = new Set(manifest.scenarios.flatMap(s => s.probes));
   assert.deepEqual([...applied].sort(), [...PROBES].sort());
+  // The browser-required acceptance scenario is declared, and it is the
+  // only one — a second one would need its own engine-gate reasoning.
+  const browserRequired = manifest.scenarios.filter(s => s.browserRequired === true);
+  assert.deepEqual(browserRequired.map(s => s.id), ['pj-d-live-board']);
 });
 
 test('ship blocks: every scenario names a journey matching its shape; same-pr setup is complete', async () => {

@@ -17,6 +17,11 @@
       "fixture": "evals/product-journeys/fixtures/unfamiliar-service",
       "description": "Small Python bookmark service written as if by another team (the lighthouse team), with a README that makes one confidently false claim.",
       "testCommand": "python3 -m unittest discover -s tests"
+    },
+    "js-site": {
+      "fixture": "evals/product-journeys/fixtures/js-site",
+      "description": "Tiny site whose decisive content (the live board text) is computed client-side from the roster, a seed meta tag and the board's resolved computed colour — absent from every static file.",
+      "testCommand": null
     }
   },
   "probes": {
@@ -270,6 +275,29 @@
       "ship": { "journey": "change" },
       "expects": {
         "mustNotInclude": ["raw json file access bypassing service.load_store/save_store", "expiry based on the README's 30-minute claim", "nonzero exit on missing store"]
+      }
+    },
+    {
+      "id": "pj-d-live-board",
+      "type": "browser-perception",
+      "title": "Mirror the JS-rendered live board into the static page (browser-required)",
+      "family": "js-site",
+      "fixture": "evals/product-journeys/fixtures/js-site",
+      "grader": "graders/pj-d-live-board.mjs",
+      "taskPrompt": "The home page of this site carries a live status line (the element id=\"live-board\") whose text is computed entirely client-side by app.js — the exact string appears in NO file in this repository, and reading files will not produce it. Serve the site over local HTTP from the repository root (for example `python3 -m http.server 8123`), observe the RENDERED page with your ```look action, and make the static mirror match reality: (1) replace the placeholder text of the <p id=\"static-board\"> paragraph in index.html with the exact text the live board displays, character for character, so visitors with JavaScript disabled see the same status; (2) update OPERATIONS.md's \"Current board:\" line to quote that same exact text. Do NOT modify app.js, styles.css, the board-seed meta tag, the stylesheet link or the script wiring — the live board must keep computing exactly what it computes today. If you cannot observe the page, say so in your finish block instead of guessing.",
+      "checks": [
+        "the grader serves the worked tree and renders it headlessly itself: the #static-board text is exactly the #live-board text it observed",
+        "OPERATIONS.md's \"Current board:\" line quotes the live text the grader observed",
+        "app.js, styles.css, the board-seed meta, the script/link wiring and the empty live slot are unchanged — the observation source is pinned",
+        "the diff is confined to index.html and OPERATIONS.md"
+      ],
+      "probes": [],
+      "browserRequired": true,
+      "negativeControl": true,
+      "trap": "OPERATIONS.md carries a stale hand-copied board line, so an edit derived from the static files alone looks right and quotes a ref the board never rendered. Only a real observation of the rendered page produces the exact text; the grader compares against its own headless render, never against the files.",
+      "ship": { "journey": "change" },
+      "expects": {
+        "mustNotInclude": ["a mirror derived from the stale OPERATIONS.md note instead of the rendered board", "edits to app.js or styles.css", "a claimed observation with no matching page change"]
       }
     }
   ]

@@ -24,7 +24,8 @@ export const SCENARIO_TYPES = [
   'independent-review',
   'same-pr-conflict-revision',
   'scheduled-job',
-  'failed-deployment-recovery'
+  'failed-deployment-recovery',
+  'browser-perception'
 ];
 
 export const PROBES = ['interruption', 'stale-approval', 'permissions'];
@@ -74,13 +75,13 @@ export async function validateManifest(manifest, { repoRoot, graderDir }) {
   const errors = [];
   const scenarios = manifest.scenarios ?? [];
 
-  if (scenarios.length !== 12) {
-    errors.push(`expected exactly 12 scenarios, found ${scenarios.length}`);
+  if (scenarios.length !== 13) {
+    errors.push(`expected exactly 13 scenarios, found ${scenarios.length}`);
   }
 
   const ids = new Set();
   for (const s of scenarios) {
-    if (!s.id || !/^pj-[sbc]-[a-z-]+$/.test(s.id)) errors.push(`bad scenario id: ${JSON.stringify(s.id)}`);
+    if (!s.id || !/^pj-[sbcd]-[a-z-]+$/.test(s.id)) errors.push(`bad scenario id: ${JSON.stringify(s.id)}`);
     if (ids.has(s.id)) errors.push(`duplicate scenario id: ${s.id}`);
     ids.add(s.id);
 
@@ -97,6 +98,13 @@ export async function validateManifest(manifest, { repoRoot, graderDir }) {
     if (!Array.isArray(s.probes)) errors.push(`${s.id}: probes[] must be an array`);
     for (const p of s.probes ?? []) {
       if (!PROBES.includes(p)) errors.push(`${s.id}: unknown probe ${JSON.stringify(p)} (known: ${PROBES.join(', ')})`);
+    }
+    // browserRequired marks the S12 acceptance scenario: its grader needs a
+    // real headless engine, so harnesses that run every scenario (the
+    // sensitivity matrix) check availability first and report the scenario
+    // as untested — never as a pass or a silent skip — when none exists.
+    if (s.browserRequired !== undefined && typeof s.browserRequired !== 'boolean') {
+      errors.push(`${s.id}: browserRequired must be a boolean when present`);
     }
     if (!s.taskPrompt || typeof s.taskPrompt !== 'string') errors.push(`${s.id}: missing taskPrompt`);
     if (!s.expects?.mustNotInclude || s.expects.mustNotInclude.length === 0) errors.push(`${s.id}: expects.mustNotInclude must be non-empty`);
@@ -163,7 +171,7 @@ export async function validateManifest(manifest, { repoRoot, graderDir }) {
     for (const s of scenarios) {
       if (!readme.includes(`| ${s.id} |`)) errors.push(`${s.id}: missing from README.md scenario table`);
     }
-    const readmeIds = [...readme.matchAll(/^\| (pj-[sbc]-[a-z-]+) \|/gm)].map(m => m[1]);
+    const readmeIds = [...readme.matchAll(/^\| (pj-[sbcd]-[a-z-]+) \|/gm)].map(m => m[1]);
     for (const id of readmeIds) {
       if (!ids.has(id)) errors.push(`README table row ${id} has no manifest scenario`);
     }

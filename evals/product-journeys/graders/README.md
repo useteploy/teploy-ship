@@ -41,8 +41,20 @@ Rules:
    traps (`pj-b-api-defect`, `pj-c-review`) additionally verify the grader
    rejects correct-looking wrong answers (a 400 that greens the sloppy
    shipped test; an approving review of a README-aligned but wrong patch).
+   `pj-d-live-board` (browser-required) is the third trap: its ground truth
+   is the grader's own headless render, so an edit derived from the static
+   files alone (the stale hand-copied board line) or a self-authored proof
+   quoting even the CORRECT text fails — the agent authors claims, the
+   grader owns the evidence.
 4. Graders import only the Node standard library and `./lib.mjs`, so the
-   directory can be copied anywhere and still work.
+   directory can be copied anywhere and still work — with ONE documented
+   exception: `pj-d-live-board.mjs` (S12 acceptance, browser-required)
+   additionally needs a real headless engine, discovered through
+   `lib.browserEngine()` (a resolvable playwright module, or a
+   Chrome/Chromium binary via `CHROME_BIN`/`CHROMIUM_BIN` or the usual
+   install paths). With no engine it reports its checks as `not-wired`
+   (pass: false, outcome `unknown`) rather than guessing — a copied grader
+   dir on a machine without a browser degrades honestly, never silently.
 
 ## Out-of-tree grading (REQUIRED for real baselines)
 

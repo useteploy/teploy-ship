@@ -12,17 +12,21 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { REPO_ROOT, TRANSCRIPT_GRADED, classify, renderMarkdown, runMatrix, summarize, variantsFor } from './grader-sensitivity.mjs';
+import { REPO_ROOT, TRANSCRIPT_GRADED, classify, renderMarkdown, runMatrix, summarize, variantsFor, browserEngineAvailable } from './grader-sensitivity.mjs';
 import { loadManifest } from './eval-journeys-lib.mjs';
 
 const pjRoot = join(REPO_ROOT, 'evals', 'product-journeys');
-const REPORT = join(pjRoot, 'GRADER_SENSITIVITY_2026-10-03.md');
+// 2026-10-15: the committed report moves to a new dated file (13 scenarios,
+// including the browser-required pj-d-live-board) rather than rewriting the
+// 2026-10-03 record — result records are additive-only.
+const REPORT = join(pjRoot, 'GRADER_SENSITIVITY_2026-10-15.md');
 const matrix = await runMatrix();
 const summary = summarize(matrix);
+const engine = await browserEngineAvailable();
 
 test('every manifest scenario has a correct reference and at least two wrong variants', async () => {
   const manifest = await loadManifest(REPO_ROOT);
-  assert.equal(manifest.scenarios.length, 12);
+  assert.equal(manifest.scenarios.length, 13);
   for (const s of manifest.scenarios) {
     const variants = variantsFor(pjRoot, s.id);
     assert.ok(variants.filter(v => v.kind === 'correct').length >= 1, `${s.id}: at least one correct reference`);
@@ -30,7 +34,15 @@ test('every manifest scenario has a correct reference and at least two wrong var
     assert.ok(variants.every(v => ['correct', 'wrong', 'known-limit'].includes(v.kind)), `${s.id}: variant kinds`);
     assert.ok(variants.filter(v => v.kind === 'wrong').every(v => typeof v.failsWith === 'string' && v.failsWith.length > 0), `${s.id}: each wrong variant names the reason it must fail with`);
   }
-  assert.deepEqual(matrix.untested, []);
+  // Without a headless engine the browserRequired scenario is honestly
+  // untested; with one (the environment the committed report was generated
+  // in) nothing may be untested at all.
+  if (engine) {
+    assert.deepEqual(matrix.untested, []);
+  } else {
+    assert.deepEqual(matrix.untested.map(u => u.id), ['pj-d-live-board']);
+    assert.match(matrix.untested[0].reason, /browserRequired scenario and no headless browser engine/);
+  }
   for (const id of TRANSCRIPT_GRADED) assert.ok(manifest.scenarios.some(s => s.id === id));
 });
 
@@ -52,6 +64,13 @@ for (const row of matrix.rows) {
 }
 
 test('the committed report states the same totals as a fresh run', () => {
+  if (!engine) {
+    // Without a headless engine the browserRequired scenario drops out of a
+    // fresh run, so the committed (engine-present) totals cannot match here.
+    // That is an environmental limit, not a report drift; say so loudly.
+    assert.match(matrix.untested[0]?.reason ?? '', /browserRequired/, 'the only permitted mismatch cause is the missing engine');
+    return;
+  }
   const text = readFileSync(REPORT, 'utf8');
   const section = (md) => md.split('## Totals')[1].split('## Matrix')[0].trim();
   assert.equal(section(text), section(renderMarkdown(matrix)));
