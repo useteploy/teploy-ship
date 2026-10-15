@@ -4,7 +4,7 @@ import { test } from "node:test";
 import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 
 import { LOOK_HELP } from "./actions.js";
-import { LOOK_SEALED, LOOK_SESSION, describeNeedle, findMatches, lookCommand, lookStaleRef, renderLook, runLook } from "./look.js";
+import { LOOK_OPEN_PLAN, LOOK_SEALED, LOOK_SESSION, describeNeedle, findMatches, lookCommand, lookStaleRef, renderLook, runLook } from "./look.js";
 import type { LookAction } from "./look.js";
 
 /**
@@ -210,6 +210,15 @@ test("the stale-ref and sealed-egress messages tell the agent what to do next", 
   assert.match(LOOK_SEALED, /sealed/);
   assert.match(LOOK_SEALED, /```finish/);
   assert.ok(LOOK_HELP.includes("```look"), "the parse help names the action");
+});
+
+test("the open-tier refusal names the D3 rule: plan review, operator decision, no in-run workaround", () => {
+  assert.match(LOOK_OPEN_PLAN, /network tier is open/);
+  assert.match(LOOK_OPEN_PLAN, /plan an operator reviewed/);
+  assert.match(LOOK_OPEN_PLAN, /plan review/);
+  assert.match(LOOK_OPEN_PLAN, /```finish/);
+  assert.match(LOOK_OPEN_PLAN, /Nothing you do inside the run changes that/);
+  assert.match(LOOK_OPEN_PLAN, /allowlist/);
 });
 
 test("findMatches and renderLook: the shared observation helpers are self-contained", () => {
