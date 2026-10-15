@@ -42,3 +42,14 @@ say in the commit message that you did.
 `pnpm run lint`, `pnpm test`, and — if you touched `web/` — `cd web && pnpm test`
 **and** `cd web && pnpm run build`. That last one has broken silently before: the
 web test suite covers behaviour, and the break was in the browser bundle.
+
+## Two remotes — push both
+
+- `github` (github.com/useteploy/<repo>) — authoritative: PRs, CI, releases,
+  the public history tags point at.
+- `origin` (Forgejo on infra-home, `:49152`) — the private forge: issues and
+  webhooks live here.
+- When `main` moves, push BOTH (`git push github main && git push origin
+  main`); push release tags to both too. A GitHub-only push silently leaves
+  the forge stale — an entire store migration + release once landed
+  GitHub-only and the forge sat 21 commits behind until noticed.
