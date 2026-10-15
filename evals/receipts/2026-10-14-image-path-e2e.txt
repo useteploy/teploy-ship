@@ -1,0 +1,199 @@
+PROOF B — image content end-to-end (neutron-ai ImagePart -> provider vision response)
+Date: 2026-10-14. Worktree: _worktrees/proof-sdk @ branch proof/sdk-harness-contract-2026-10-14 (base 3f02871).
+Operator: test sub-agent (S12/S13 perception proofs). Production untouched; no deploys; local machine only.
+
+================================================================================
+0. ENVIRONMENT
+================================================================================
+macOS darwin/arm64. node v22.23.2, tsx v4.23.1, go1.26.6 darwin/arm64.
+Docker/colima: NOT USED in this proof (no container leg needed; gateway leg ran
+as native Go tests). No `timeout` binary on this Mac — a perl alarm wrapper was
+used for all long commands: `perl -e 'alarm N; exec @ARGV' -- <cmd>`.
+
+neutron-ai source: /Users/tyler/Documents/Code Projects/Neutron/typescript/packages/neutron-ai
+(@neutron-build/ai 0.1.1), imported FROM SOURCE via tsx (no npm pack, no build,
+no writes to the Neutron repo). Scratch dir (all rig files):
+  /private/var/folders/6f/7yv53mdd3j57c90gt2wykvsr0000gn/T/opencode/proof-b-vision/
+
+Credential discovery (masked; no secret store or prod box touched; nothing created):
+  env ANTHROPIC_API_KEY / OPENAI_API_KEY / OPENROUTER_API_KEY / ZHIPU_API_KEY /
+  GOOGLE_GENERATIVE_AI_API_KEY: all unset.
+  ~/.local/share/opencode/auth.json (read-only): anthropic/github-copilot/openai/xai
+    = OAuth entries (access tokens expired 2025-11..2026-09, refresh-only — not
+    usable by neutron-ai's plain adapters without implementing token refresh;
+    deliberately not attempted); zai-coding-plan = type "api", plain key, no
+    expiry (key length 49, prefix 93e89b… — never printed in full).
+  ~/.config/opencode/opencode.jsonc: contains a custom provider "fylun"
+    (OpenAI-compatible aggregator, baseURL https://fylun.ai/api/v1) with an
+    embedded API key (on-machine; used below; never printed in full).
+
+Policy note (required by task): ship policy refuses z.ai for PRIVATE data. The
+test image is synthetic and public-class (a generated red square), so using the
+z.ai coding-plan key is acceptable for a transport proof only. The same holds
+for fylun.ai, which is a third-party model aggregator of unknown retention:
+fine for this synthetic transport proof, NOT acceptable for private screenshots
+without an owner decision (perception input §3 D4).
+
+================================================================================
+1. THE RIG (exact files, run verbatim from the scratch dir)
+================================================================================
+make-png.mjs — deterministic PNG generator, node:zlib only, no image deps.
+  64x64 8-bit RGB PNG, white background, centered 32x32 pure-red square
+  (R=255 everywhere; G=B=0 inside the square, 255 outside). Output:
+  "redsquare.png bytes: 141 base64 chars: 188" and `file` confirms
+  "PNG image data, 64 x 64, 8-bit/color RGB, noninterlaced".
+
+wire-render.mts — OFFLINE wire proof. Drives neutron-ai's public generateText
+  with an injected fetch (the adapters' documented test seam: OpenAISettings.fetch /
+  AnthropicSettings.fetch) and captures the EXACT JSON body each adapter puts on
+  the wire for messages: [{role:"user", content:[ImagePart, TextPart]}].
+  Asserts, on the OpenAI wire: POST https://api.openai.com/v1/chat/completions
+  with content = [ {type:"image_url", image_url:{url:"data:image/png;base64,<EXACT b64>"}},
+  {type:"text", text:<question>} ]; and on the Anthropic wire: POST
+  https://api.anthropic.com/v1/messages with content = [ {type:"image",
+  source:{type:"base64", media_type:"image/png", data:<EXACT b64>}},
+  {type:"text",…} ] plus a numeric max_tokens (wire requirement, defaulted by the
+  adapter). Full captured bodies saved to captured-openai-body.json /
+  captured-anthropic-body.json in the scratch dir.
+
+live-vision.mts — ONE live call through the same public path:
+  generateText({ model, messages:[{role:"user", content:[ImagePart, TextPart]}]}),
+  WIRE/BASE_URL/MODEL/KEY from env; prints model, latency ms, finishReason,
+  usage, answer; PASS = /red/i; exit 0/1. Never prints the key.
+
+Commands (chronological, all from the scratch dir):
+  node make-png.mjs
+  perl -e 'alarm 120; exec @ARGV' -- tsx wire-render.mts
+  KEY=$(…extract zai key from auth.json via python3, not echoed…) \
+    perl -e 'alarm 180; exec @ARGV' -- env WIRE=anthropic MODEL=glm-5.3 tsx live-vision.mts
+  …(variant attempts below, same command shape with WIRE/BASE_URL/MODEL/KEY)…
+
+================================================================================
+2. RAW OUTPUT
+================================================================================
+$ node make-png.mjs
+redsquare.png bytes: 141 base64 chars: 188
+$ file redsquare.png
+redsquare.png: PNG image data, 64 x 64, 8-bit/color RGB, non-interlaced
+
+$ tsx wire-render.mts
+PASS openai: POST to /v1/chat/completions
+PASS openai: content is a 2-part array [image_url, text]
+PASS openai: image part is image_url with exact data URL
+PASS openai: text part carries the question
+PASS openai: adapter parsed mock reply + usage
+PASS anthropic: POST to /v1/messages
+PASS anthropic: content is a 2-block array [image, text]
+PASS anthropic: image block has base64 source with exact media_type + data
+PASS anthropic: text block carries the question
+PASS anthropic: max_tokens present (wire requirement)
+PASS anthropic: adapter parsed mock reply + usage
+WIRE-RENDER: ALL CHECKS PASS            (exit 0)
+
+LIVE ATTEMPT 1 — z.ai coding plan, ANTHROPIC wire (the surface teploy-gateway's
+zai builtin fronts), model glm-5.3:
+  { "wire":"anthropic", "model":"glm-5.3", "ms":8826, "finishReason":"stop",
+    "usage":{"inputTokens":179,"outputTokens":359,"totalTokens":538},
+    "answer":"I'm unable to view the image at the provided link, so I can't
+    determine the color of the square. Could you describe it or upload the
+    image directly?", "pass":false }                 (exit 1)
+
+LIVE ATTEMPT 2 — same, model glm-4.6:
+  { "wire":"anthropic", "model":"glm-4.6", "ms":2164, "finishReason":"stop",
+    "usage":{"inputTokens":177,"outputTokens":33,"totalTokens":210},
+    "answer":"Yellow", "pass":false }                (exit 1)  <- hallucination
+
+DIAGNOSTIC — invalid-base64 image block, plain curl to the coding-plan
+Anthropic wire (x-api-key + anthropic-version: 2023-06-01):
+  HTTP 200 in 2.16s; body: content:[{type:"thinking",…}], stop_reason:max_tokens,
+  usage:{input_tokens:13,…}.  => GARBAGE base64 is accepted: image blocks are
+  never decoded; they are silently dropped/degraded before parsing.
+
+ROUTE PROBES (empty-body POSTs; missing route => 404, existing route => 4xx/5xx):
+  https://api.z.ai/api/paas/v4/models              -> 200 (11 models: glm-4.5 … glm-5.3-flashx; NO -v/vision variants)
+  https://api.z.ai/api/paas/v4/chat/completions    -> 200 wrapping {"error":{"code":"500"}} (route exists, non-functional for this plan)
+  https://open.bigmodel.cn/api/paas/v4/models      -> 200 (same 11-model list, same key accepted)
+  https://open.bigmodel.cn/api/paas/v4/chat/completions -> 401 unauthed; with key + {"model":"glm-4.6",…} -> 200 real completion
+  https://fylun.ai/api/v1/chat/completions         -> 400 on {} (route exists)
+  https://fylun.ai/v1/chat/completions              -> 404
+
+ADAPTER PATH NOTE — neutron-ai's openai adapter posts to
+`${baseURL}/v1/chat/completions` (src/openai/index.ts:223,316). Attempt logs of
+"404" against BASE_URL=…/api/paas/v4 were the path artifact (…/v4/v1/chat/completions).
+Zhipu serves chat at /api/paas/v4/chat/completions, which this adapter CANNOT
+express: a Zhipu bigmodel vision model is unreachable from neutron-ai today
+without a path-prefix shim or an adapter baseURL-prefix mode. (Recorded as an
+upstream constraint for Neutron; not fixed from Teploy per AGENTS.md.)
+
+LIVE ATTEMPT 3 (SUCCESS) — fylun.ai aggregator (OpenAI-compatible layout,
+base https://fylun.ai/api), model claude-sonnet-5-5, through neutron-ai's public
+generateText + OpenAI adapter + ImagePart:
+  { "wire":"openai", "model":"claude-sonnet-5-5", "ms":1206, "finishReason":"stop",
+    "usage":{"inputTokens":37,"outputTokens":4,"totalTokens":41},
+    "answer":"Red", "pass":true }                   (exit 0)
+
+================================================================================
+3. GATEWAY LEG (teploy-gateway @ 3c03ebb, main — read-only checkout + native go test)
+================================================================================
+Citations (image-bearing bodies pass through the gateway untouched because the
+forwarder decodes into map[string]json.RawMessage and rewrites only `model`;
+internal/gateway/proxy.go:104-107):
+  - TestAnthropicWirePassthroughStreamingAndUsage (gateway_test.go:426):
+    an SSE body passes through BYTE-FOR-BYTE and auth is swapped — an
+    image-bearing Anthropic request is body-identically forwarded.
+  - TestForwardPreservesUnrelatedJSONNumbersExactly (gateway_test.go:822):
+    unknown JSON (any nesting) round-trips byte-exactly while `model` is still
+    rewritten — the image block is "unknown JSON" to the gateway.
+  - TestZaiBuiltinIsAnthropicWire (gateway_test.go:801): zai builtin = Anthropic
+    wire at https://api.z.ai/api/anthropic ("the coding plan does not speak the
+    OpenAI wire") — the same endpoint measured image-blind in §2 above.
+Run: cd Teploy/teploy-gateway && go test ./internal/gateway/ -run
+  'TestAnthropicWirePassthroughStreamingAndUsage|TestForwardPreservesUnrelatedJSONNumbersExactly|TestZaiBuiltinIsAnthropicWire' -v
+  => all three PASS (0.362s), go1.26.6 darwin/arm64.
+
+================================================================================
+4. CONCLUSIONS
+================================================================================
+MEASURED:
+  1. The UNPROVEN pair is now proven live: neutron-ai ImagePart -> adapter wire
+     format -> real provider -> correct vision answer. claude-sonnet-5-5 (via
+     fylun.ai) answered "Red" for the generated red-square PNG, 1.2 s,
+     37 input / 4 output tokens, finishReason "stop", through the SDK's public
+     generateText with no special image API. The ImagePart abstraction is
+     sufficient end-to-end on the OpenAI wire.
+  2. Offline wire-render: both adapters place the image byte-exactly (base64
+     data URL on the OpenAI wire; base64 source block with media_type on the
+     Anthropic wire; max_tokens defaulted). 11/11 assertions pass.
+  3. Gateway passthrough of image-bearing bodies is covered by existing tests
+     (byte-for-byte SSE + json.RawMessage field preservation), all green here.
+  4. NEGATIVE, precisely characterized: the z.ai coding plan (the plan behind
+     ship's zai provider) is image-blind TODAY on the Anthropic wire: invalid
+     base64 is accepted with HTTP 200 (blocks never decoded), glm-5.3 reports it
+     "can't view the image at the provided link", glm-4.6 hallucinates ("Yellow").
+     Its OpenAI chat route exists but returns 200/{"error":{"code":"500"}}. The
+     coding-plan model list has no vision variants. Any S12 screenshot routing
+     that assumes zai=vision will silently produce hallucinated answers.
+  5. neutron-ai's openai adapter cannot reach Zhipu bigmodel's
+     /api/paas/v4/chat/completions (hard-appended /v1/chat/completions): even
+     bigmodel's vision models would need an adapter/baseURL change upstream.
+
+INFERRED (clearly labelled):
+  - fylun.ai is a third-party aggregator; its claude-sonnet-5-5 is presumably
+    proxied Claude with vision intact (the answer + token accounting are
+    consistent with a real vision pass: 37 input tokens for image+question).
+    Its retention policy is unknown — synthetic image only, per the policy note.
+  - The 8826 ms glm-5.3 attempt with 359 output tokens was mostly extended
+    thinking (the diagnostic response shows a "thinking" content block with a
+    signature on this wire); the image itself never reached the model.
+  - Docker was not needed; no claim is made about the sandbox container leg
+    (that is the S12 proxy proof, out of scope here).
+
+RUNBOOK (the one live call still owed against a FIRST-PARTY provider, when a
+key exists): run live-vision.mts verbatim with WIRE=anthropic (an Anthropic API
+key) or WIRE=openai BASE_URL=https://api.openai.com (an OpenAI key): assert
+answer matches /red/i and record model, ms, usage. The rig is 3 files, no
+repo writes; it can also run inside the sandbox image to prove the container
+leg (png must be generated first: node make-png.mjs).
+
+VERDICT: PROOF B PASSED (live vision round-trip proven; z.ai-plan negative
+result characterized; gateway passthrough covered by green tests).

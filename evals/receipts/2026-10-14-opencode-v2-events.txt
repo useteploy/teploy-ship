@@ -1,0 +1,215 @@
+PROOF C — opencode v2 event contract (v2.0.26) vs the 1.x contract ship parses
+Date: 2026-10-14 (local; event timestamps are ms-epoch UTC). Worktree:
+_worktrees/proof-sdk @ branch proof/sdk-harness-contract-2026-10-14 (base 3f02871).
+Operator: test sub-agent (S12/S13 perception proofs). Local machine only; the
+throwaway dir for every run:
+  /private/var/folders/6f/7yv53mdd3j57c90gt2wykvsr0000gn/T/opencode/proof-c-HRJovF/
+No `timeout` binary on this Mac — every long command used
+`perl -e 'alarm N; exec @ARGV' -- <cmd>`.
+
+================================================================================
+0. ENVIRONMENT
+================================================================================
+opencode v2.0.26 at /opt/homebrew/bin/opencode (brew install; local, not the
+pinned 1.x that ship's sandbox image bakes via images/versions.json).
+Model actually used: zai-coding-plan/glm-5.3 (explicit --model; the local
+opencode auth store's only plain-key provider — see PROOF B receipt for the
+credential survey). node v22.23.2 / tsx v4.23.1 for the ship-parser replay.
+
+================================================================================
+1. `opencode run --help` (v2.0.26, VERBATIM, exit 0)
+================================================================================
+DESCRIPTION
+  Run OpenCode with a message
+
+USAGE
+  opencode run [flags] [<message...>]
+
+ARGUMENTS
+  message... string    Message to send (optional)
+
+FLAGS
+  --standalone            Run with a private server instead of the background service
+  --server string         Connect to a server URL instead of the background service
+  --continue, -c          Continue the last session
+  --session, -s string    Session ID to continue, or to create if it does not exist
+  --fork                  Fork the session before continuing
+  --model, -m string      Model to use in the format provider/model#variant
+  --agent string          Agent to use
+  --format choice         Output format (choices: default, json)
+  --file, -f string       File to attach to the message
+  --title string          Session title
+  --thinking              Show thinking blocks
+  --auto                  Auto-approve permissions that are not explicitly denied
+
+GLOBAL FLAGS
+  --help, -h                                                          Show help information
+  --version, -v                                                       Show version information
+  --wizard                                                            Start wizard mode for a command
+  --completions <bash|zsh|fish|sh>                                    Print shell completion script (choices: bash, zsh, fish, sh)
+  --log-level <all|trace|debug|info|warn|warning|error|fatal|none>    Sets the minimum log level (choices: all, trace, debug, info, warn, warning, error, fatal, none)
+  --print-logs                                                        Print logs to stderr (server logs require --standalone)
+
+--pure and --dir are GONE. Reproduced the current ship invocation failing
+(src/harness-external.ts SPECS.opencode.command builds
+`opencode run --format json --auto --pure --dir . …`):
+
+  $ opencode run --format json --auto --pure --dir . "ping"
+  exit 1; 34 lines of the same help/usage text; nothing runs.
+
+================================================================================
+2. THE PURE-REPLY EVENT STREAM (fresh session, --format json --auto)
+================================================================================
+Command:
+  opencode run --format json --auto --model zai-coding-plan/glm-5.3 \
+    "Reply with exactly: CONTRACT-OK"          (perl alarm 300)
+First attempt WITHOUT --model (recorded, relevant): exit 1, stream =
+  {"type":"step_start","timestamp":1792036034116,"sessionID":"ses_ec2542a35ffeOd4SukP1pZcV3y","part":{"id":"prt_13dabd644001U33APd00iGjPvB","sessionID":"ses_ec2542a35ffeOd4SukP1pZcV3y","messageID":"msg_13dabd638001KRJ8DxtcWctFsJ","type":"step-start"}}
+  {"type":"error","timestamp":1792036034649,"sessionID":"ses_ec2542a35ffeOd4SukP1pZcV3y","error":{"type":"provider.auth","message":"Provider request failed with HTTP 401","status":401,"response":{"body":"IDE token expired: unauthorized: token expired\n"}}}
+  => default-model resolution (no model configured locally) landed on a provider
+  with an expired IDE token. The failure is an in-stream `error` event + exit 1,
+  not a crash. Ship always passes --model from run config, so this path is
+  defensive knowledge.
+
+Successful run (exit 0, wall 3.4 s, 2 lines, stderr empty):
+  {"type":"step_start","timestamp":1792036067715,"sessionID":"ses_ec253b380ffe4G3XXxX9u4Zt9n","part":{"id":"prt_13dac5983001Guo0Azxo9jI56y","sessionID":"ses_ec253b380ffe4G3XXxX9u4Zt9n","messageID":"msg_13dac4cae00196O13d6CYO3mz0","type":"step-start"}}
+  {"type":"text","timestamp":1792036067734,"sessionID":"ses_ec253b380ffe4G3XXxX9u4Zt9n","part":{"id":"prt_13dac4cae00196O13d6CYO3mz0_text-0","sessionID":"ses_ec253b380ffe4G3XXxX9u4Zt9n","messageID":"msg_13dac4cae00196O13d6CYO3mz0","type":"text","text":"CONTRACT-OK","time":{"start":1792036064434,"end":1792036067734}}}
+
+  => A PURE REPLY EMITS NO step_finish (and therefore no tokens/cost anywhere in
+  the stream). Confirmed not an exit race by a second independent pure run
+  ("CONTRACT-OK-2"): also exactly {step_start, text}, exit 0.
+  => The final text lands in the LAST `text` event's part.text — same place
+  ship's parser looks. `time:{start,end}` (ms) is new metadata.
+
+================================================================================
+3. SESSION RESUME (--session) — the steering-parity hook
+================================================================================
+Attempt with a caller-chosen id NOT shaped like opencode's (recorded): 
+  --session shipproof-v2contract → exit 1, stream =
+  {"type":"error","timestamp":1792036090260,"sessionID":"","error":{"type":"unknown","message":"Expected a string starting with \"ses\"\n  at [\"sessionID\"]"}}
+  => the help text ("create if it does not exist") is misleading: the server
+  validates the id FORMAT. Caller-chosen ids must start with "ses".
+
+Run A (create): --session ses_shipproof_v2contract "Remember this codeword for
+later: ZULU-7. Reply with exactly: NOTED" → exit 0, stream {step_start, text
+"NOTED"} (sessionID ses_shipproof_v2contract on both events).
+Run B (resume, separate process): same --session, "What codeword did I ask you
+to remember, and what did I ask you in my first message? Answer in one line." →
+exit 0, stream:
+  {"type":"step_start","timestamp":1792036114146,"sessionID":"ses_shipproof_v2contract","part":{"id":"prt_13dad0ee2001pIeONlS0eVVbA5","sessionID":"ses_shipproof_v2contract","messageID":"msg_13dacfa56001Tnla33rCwbpIj9","type":"step-start"}}
+  {"type":"text","timestamp":1792036114161,"sessionID":"ses_shipproof_v2contract","part":{"id":"msg_13dacfa56001Tnla33rCwbpIj9_text-0","sessionID":"ses_shipproof_v2contract","messageID":"msg_13dacfa56001Tnla33rCwbpIj9","type":"text","text":"You asked me to remember the codeword ZULU-7 and to reply with exactly \"NOTED\".","time":{"start":1792036108892,"end":1792036114161}}}
+
+  => CONTEXT PERSISTED across processes: the model quoted BOTH the codeword and
+  the exact prior instruction. Session resume with a caller-chosen ses_-prefixed
+  id WORKS on v2.0.26. This is the hook external-harness steering parity needs
+  (perception input §5); harness-capabilities' opencode steering refusal can be
+  revisited on the v2 line.
+
+================================================================================
+4. THE TOOL-USING EVENT STREAM (vocabulary completion)
+================================================================================
+Command: "Use a shell command to list the files in the current directory, then
+tell me exactly how many files there are. Reply with just the number."
+(exit 0, 5 lines; marker.txt seeded in the cwd):
+  1 {"type":"step_start", …,"part":{"id":"prt_…","messageID":"msg_13dad4482001MqdthUwB3eTb2q","type":"step-start"}}
+  2 {"type":"tool_use","timestamp":…,"part":{"partID":"prt_13dad4fd0002912gijIv2m4dTL","messageID":"msg_13dad4482001MqdthUwB3eTb2q","type":"tool","id":"call_2e39ea5f07f14a06b848ca3f","tool":"shell","state":{"status":"completed","input":{"command":"ls -a"},"output":"…listing…","title":"shell","metadata":{…},"time":{"start":…,"end":…}}}}
+  3 {"type":"step_finish","timestamp":…,"part":{"id":"prt_13dad4fe0001PJWYJo7f2Vv65o","messageID":"msg_13dad4482001MqdthUwB3eTb2q","type":"step-finish","reason":"tool-calls","cost":0,"tokens":{"input":4861,"output":13,"reasoning":51,"cache":{"read":3584,"write":0}}}}
+  4 {"type":"step_start",…,"messageID":"msg_13dad4fe400113Qo8X3uBrsGD9",…}      (new message id)
+  5 {"type":"text",…,"text":"12","time":{…}}                                     (correct: 12 files)
+
+  => THE TOOL EVENT IS RENAMED: event.type "tool_use" (part.type stays "tool").
+     step_finish EXISTS on v2 — observed ONLY after the tool-calling step — and
+     its payload is the 1.x shape ship parses: tokens.{input,output,reasoning},
+     tokens.cache.{read,write}, cost. `reason` ("tool-calls") is visible.
+     cost:0 with the subscription provider => ship's priced=false logic still
+     behaves correctly (usage.priced false, no dollars).
+     NOTE: the terminal text step again emits NO step_finish — so usage for the
+     final model call is absent from the stream (undercount, not corruption).
+
+Observed vocabulary on v2.0.26 vs the 1.x set ship was verified against
+(1.18.21): step_start (same), text (same, +time), step_finish (same payload,
+absent on terminal pure steps), error (same role; richer fields
+{type,message,status,response}), and tool → RENAMED tool_use (part shape
+compatible otherwise: part.tool, part.state.input.command all present).
+
+================================================================================
+5. SHIP'S PARSER FED THE REAL v2 STREAMS (measured, not inferred)
+================================================================================
+Method: tsx imported the UNMODIFIED worktree functions parseOpencodeStream /
+opencodeLiveTracker from src/harness-external.ts and replayed the captured
+run1 / run4-pure2 / run3-tool / run2b streams through them.
+
+  run1 (pure):    {"summary":"CONTRACT-OK","turns":0,"usage":{all 0,"priced":false}}
+                  live: [{"phase":"harness","turn":0,"detail":"CONTRACT-OK"}]
+  run4 (pure):    {"summary":"CONTRACT-OK-2","turns":0,"usage":{all 0,"priced":false}}
+  run3 (tool):    {"summary":"12","turns":1,"usage":{"inputTokens":4861,
+                   "outputTokens":64,"totalTokens":8509,"cacheReadTokens":3584,
+                   "cacheWriteTokens":0,"priced":false}}
+                  live: [{"phase":"harness","turn":1},{"phase":"harness","turn":1,"detail":"12"}]
+  run2b (resume): {"summary":"You asked me to remember the codeword ZULU-7 and to
+                   reply with exactly \"NOTED\".","turns":0,"usage":{all 0,…}}
+
+  => Ship's parser DOES NOT CRASH on v2 output; summaries are correct in every
+     case. The degradations are precise and silent:
+       a) turns undercount: 0 for any pure reply, and (turns - 1) for tool runs
+          (only step_finish-carrying steps are counted);
+       b) usage all-zero for pure replies (no step_finish to read);
+       c) the live tracker NEVER emits tool-call detail on v2: its branch keys on
+          event.type === "tool" (src/harness-external.ts:376), v2 emits "tool_use"
+          — the `ls -a` call above produced no live update, only the turn tick
+          and the final text.
+
+================================================================================
+6. CONCLUSIONS
+================================================================================
+MEASURED:
+  1. Ship's current opencode invocation HARD-FAILS on v2.0.26 (`--pure`/`--dir`
+     removed): exit 1, usage text, nothing runs. Production is unaffected today
+     because images/versions.json pins the 1.x line; the risk is an unpinned
+     local/dev/brew binary, exactly like this machine's.
+  2. On v2.0.26 the event stream is: step_start, text, tool_use (renamed from
+     tool), step_finish (tool steps only; 1.x-compatible payload incl.
+     tokens/cache/cost), error ({type,message,status?,response?}). Exit codes
+     0/1 behave like 1.x; the final text lands in the last `text` part.
+  3. Ship's parser survives v2 output but silently degrades: zero turns/usage
+     for pure replies, undercounted turns for tool runs, invisible tool activity
+     in the live feed (the one place a rename breaks ship outright).
+  4. Session resume WORKS: caller-chosen ses_-prefixed ids persist full context
+     across processes (codeword + exact prior instruction recalled). Arbitrary
+     ids are rejected with a format error despite the help text.
+  5. Default-model resolution with no configured model can land on an
+     unauthenticated provider and surfaces as an in-stream error event (exit 1).
+
+INFERRED:
+  - The absent terminal step_finish is a v2 design change (two independent pure
+    runs + the tool run's terminal step all lack it), not a flush race; but I
+    did not observe multi-tool or error-mid-tool streams, so their interleaving
+    is uncharacterized.
+  - usage for pure replies may be recoverable from a non-stream surface (e.g.
+    the session/message API) — not investigated here; the S13 adopt path needs
+    a decision on whether zero-usage pure replies are acceptable (budget
+    accounting would undercount) or must be fetched elsewhere.
+
+RECOMMENDED S13 MOVE: PIN < 2 AT PREFLIGHT NOW; ADOPT v2 LATER AS A TRACKED CHANGE.
+  Immediate (cheap, honest): preflight asserts the opencode version is < 2 (it
+  already records the version; make >= 2 a refusal with this receipt as the
+  reason). images/versions.json already pins 1.x — keep it.
+  Adopting v2 later requires, at minimum:
+    - command: drop --pure and --dir (run in the cwd). There is no --pure
+      replacement FLAG: isolation moves to config/service level — v2 runs
+      against a shared BACKGROUND SERVICE by default; --standalone gives a
+      private per-invocation server (closest semantic to --pure's isolation,
+      at a boot cost) or the sandbox image's config must pin plugin/MCP policy.
+    - parser: accept tool_use AND tool on the live tracker's tool branch (the
+      part shape is otherwise compatible: part.tool, state.input.command);
+      count turns from messageID changes (step_start carries messageID) instead
+      of step_finish; tolerate the missing terminal step_finish; decide the
+      pure-reply usage question (accept zero vs fetch from the session API).
+    - error handling: unchanged (error.message works; richer fields available).
+    - session resume: use --session with caller-chosen ids REQUIRING the "ses"
+      prefix (e.g. ses_ship_<runId>); this unlocks the steering/follow-up
+      parity path in harness-capabilities.
+
+VERDICT: PROOF C PASSED — v2.0.26 event contract observed end-to-end, ship's
+parser compatibility measured on the real streams, resume hook proven, and the
+S13 recommendation grounded in measurement.
