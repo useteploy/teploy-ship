@@ -71,13 +71,37 @@ Ask rarely. Anything reversible, anything the code or the tests can settle, anyt
 `;
 
 /**
+ * The ```look action (S12, SHIP_LOOK), offered only when the run input
+ * admits it (durable.ts `input.look`). Text-first by design: the observation
+ * is the page's accessibility tree with [ref=eN] labels, so it flows through
+ * the same redaction and truncation as any command output, needs no vision
+ * model, and costs a fraction of the tokens of pixels. Screenshots are a
+ * future gated mode, not part of this block.
+ */
+const LOOK_ACTION = `# Looking at a web page
+
+This sandbox has its own headless-browser session, started on your first look and shared by every look in this run (one tab; it dies with the run). A look observes it as TEXT — the page's accessibility tree, each element labelled with a reusable [ref=eN]:
+
+\`\`\`look https://example.com/docs
+\`\`\`
+
+Narrow what comes back instead of re-reading a big page: find= returns only the matching lines of the current page (plain text or /regex/flags), ref= returns the subtree under one element from your last snapshot, depth= caps the tree depth.
+
+\`\`\`look find=Sign ?up
+\`\`\`
+
+A ref means something only against the page it came from — after anything navigates, take a fresh look and use ITS refs (a stale one fails loudly; copy refs exactly, f2e3 included). look is read-only: for clicks and forms, drive the page from your own code instead.
+
+`;
+
+/**
  * The CodeAct system prompt. Establishes the action protocol: think,
  * then emit exactly one fenced code block per turn; observe its output;
  * repeat; finish with a ```finish block. Kept deliberately compact — the
  * ~30% of agent quality that lives in prompt/recovery tuning is a
  * later-milestone concern, but the protocol has to be unambiguous now.
  */
-export function systemPrompt(options: { workdir: string; task: string; search?: boolean; browser?: boolean; ask?: boolean }): string {
+export function systemPrompt(options: { workdir: string; task: string; search?: boolean; browser?: boolean; ask?: boolean; look?: boolean }): string {
   // The index is PARTIAL, and the prompt has to say so.
   //
   // This block used to read "prefer this over grepping around". Measured on
@@ -161,7 +185,7 @@ Rules:
 - The filesystem always persists between actions. Python variables usually persist, but may reset after long pauses — anything important belongs in a file.
 - Prefer small, verifiable steps. Read errors and fix them.
 
-${options.browser === true ? BROWSER_PROOF : ""}${options.ask === true ? ASK_ACTION : ""}# Finishing
+${options.browser === true ? BROWSER_PROOF : ""}${options.ask === true ? ASK_ACTION : ""}${options.look === true ? LOOK_ACTION : ""}# Finishing
 
 When the task is complete and verified, emit a finish block with a short summary of what you did and the result:
 \`\`\`finish

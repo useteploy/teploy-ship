@@ -481,6 +481,10 @@ export const WORKFLOW_STEPS: readonly WorkflowStep[] = [
   { key: "step:*turn-*-critic", admits: (i) => i.critic === true },
   // The ```search action is offered on any run; deliberately ungated.
   { key: "step:*turn-*-search", admits: always },
+  // Browser perception (S12): the ```look action's driver step, admitted by
+  // the input flag SHIP_LOOK materialises at enqueue — no pre-feature log
+  // carries it, so those fingerprints are untouched.
+  { key: "step:*turn-*-look", admits: (i) => i.look === true },
   // The ```ask park (input.ask): snapshot, wait for the answer, restore. Its
   // steps share names with the approval park below; the wait is its own.
   { key: "step:*turn-*-snapshot", admits: (i) => i.ask === true },

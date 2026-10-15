@@ -1134,6 +1134,12 @@ export async function enqueueRun(
   // ...and OFF for a scan: the hold exists to catch a finish that changed
   // nothing, which is precisely what a correct scan does.
   const requireEdit = scan ? undefined : (options.requireEdit ?? (envFlagOff("SHIP_REQUIRE_EDIT") ? false : true));
+  // Browser perception (S12): the ```look action, default OFF behind
+  // SHIP_LOOK. Materialised HERE like every step-adding flag — it admits a
+  // `turn-N-look` step, and a replay must know from its log alone whether
+  // the action was offered. Off for scans, which read a repository rather
+  // than a web page.
+  const look = scan ? undefined : (envFlag("SHIP_LOOK") ? true : undefined);
   // Per-repo evidence, resolved HERE so every enqueue surface (CLI, dashboard,
   // webhook, intake sweep) gets the same treatment without each knowing about
   // the store. Materialised into the recorded input below, never re-read at
@@ -1428,6 +1434,10 @@ export async function enqueueRun(
         // offered the action; a worker that predates it feeds the block back
         // as unknown, which is the pre-feature behaviour exactly.
         ask: true,
+        // ```look (S12), from SHIP_LOOK above: default off, so the runs that
+        // do not set it enqueue exactly as they did before the action
+        // existed.
+        ...(look === true ? { look: true } : {}),
         index: true,
         guard: true,
         // The warm repo cache (SB-A). Repo runs that are not PR runs, on

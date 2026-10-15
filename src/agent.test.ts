@@ -6,6 +6,7 @@ import { test } from "node:test";
 
 import type { AdapterCallOptions, AdapterGenerateResult, ModelAdapter } from "@neutron-build/ai";
 import { LocalExecutor } from "@neutron-build/agents";
+import type { AgentExecutor } from "@neutron-build/agents";
 
 import { runAgent } from "./agent.js";
 import type { AgentEvent } from "./agent.js";
@@ -932,4 +933,119 @@ test("the clean-tree hold is bounded — it cannot loop forever", async () => {
     condense: false,
   });
   assert.equal(result.status, "finished", "a stubborn agent is eventually honoured rather than looping");
+});
+
+// --- ```look (S12) ------------------------------------------------------------
+//
+// The live loop's half of the default-off contract, mirroring the codeSearch
+// set above: the prompt seam, the real path with the flag on, and the
+// flag-off behaviour being byte-identical to a pre-look run.
+
+/** An executor whose look driver always returns this one page, and refuses any other exec. */
+function lookExecutor(snapshot: string): AgentExecutor {
+  return {
+    async exec(cmd) {
+      if (/^node \.teploy-agent\/look-/m.test(cmd)) {
+        return { exitCode: 0, stdout: snapshot, stderr: "", timedOut: false, truncated: false };
+      }
+      return { exitCode: 42, stdout: "", stderr: `not a look command: ${cmd}`, timedOut: false, truncated: false };
+    },
+    putFile: async () => {},
+    getFile: async () => {
+      throw new Error("unused");
+    },
+    destroy: async () => {},
+  };
+}
+
+test("look: a ```look turn comes back as the snapshot observation and spends a turn", async () => {
+  const snapshot = '[page] https://example.com/docs — Example Docs\n- button "Sign in" [ref=e4]';
+  const executor = lookExecutor(snapshot);
+  const { model } = scriptedModel([
+    "```look https://example.com/docs\n```",
+    // finishes ONLY if the real snapshot text arrived as the observation
+    (obs) => (obs.includes('[ref=e4]') && obs.includes("[exit 0]") ? "```finish\nsaw the Sign in button\n```" : "```bash\necho lost\n```"),
+  ]);
+  const result = await runAgent({
+    model,
+    executor,
+    task: "look at the docs page",
+    requireVerifiedFinish: false,
+    recovery: false,
+    condense: false,
+    look: true,
+  });
+  assert.equal(result.status, "finished");
+  assert.equal(result.summary, "saw the Sign in button");
+  const lookStep = result.steps.find((s) => s.action.kind === "look");
+  assert.ok(lookStep !== undefined, "the look was parsed and handled");
+  assert.match(lookStep.observation ?? "", /\[exit 0\]\nstdout:\n\[page\] https:\/\/example\.com\/docs/);
+});
+
+test("look SEAM: the prompt advertises ```look only when the option is on", async () => {
+  const script = ["```look https://example.com\n```", "```finish\ndone\n```"];
+  const withLook = scriptedModel([...script]);
+  await runAgent({
+    model: withLook.model,
+    executor: lookExecutor("- generic [ref=e1]"),
+    task: "look",
+    requireVerifiedFinish: false,
+    recovery: false,
+    condense: false,
+    look: true,
+  });
+  assert.match(String(withLook.calls[0]?.messages[0]?.content), /```look/, "with the flag the model must be told the action exists");
+
+  const without = scriptedModel([...script]);
+  await runAgent({
+    model: without.model,
+    executor: lookExecutor("- generic [ref=e1]"),
+    task: "look",
+    requireVerifiedFinish: false,
+    recovery: false,
+    condense: false,
+  });
+  const prompt = String(without.calls[0]?.messages[0]?.content);
+  assert.doesNotMatch(prompt, /```look/, "without the flag it must not be advertised — an unusable action in the prompt is a trap");
+  // The instructional bytes (everything before the task text is framed) carry
+  // no look vocabulary at all — the task itself may legitimately say "look".
+  assert.doesNotMatch(prompt.split("# Task")[0]!, /\blook\b/, "the flag-off prompt bytes carry no look vocabulary");
+  // And passing the flag as an explicit false is identical to passing nothing.
+  const off = scriptedModel(["```finish\ndone\n```"]);
+  await runAgent({
+    model: off.model,
+    executor: lookExecutor("- generic [ref=e1]"),
+    task: "look",
+    requireVerifiedFinish: false,
+    recovery: false,
+    condense: false,
+    look: false,
+  });
+  assert.equal(String(off.calls[0]?.messages[0]?.content), prompt, "look: false is byte-identical to look: undefined");
+});
+
+test("look absent: a ```look a model invents gets the pre-feature no-action nudge, byte-identical", async () => {
+  const seen: string[] = [];
+  const { model } = scriptedModel([
+    "```look https://example.com\n```",
+    (obs) => {
+      seen.push(obs);
+      return "```finish\nmoved on\n```";
+    },
+  ]);
+  const result = await runAgent({
+    model,
+    executor: lookExecutor("- generic [ref=e1]"),
+    task: "look",
+    requireVerifiedFinish: false,
+    recovery: false,
+    condense: false,
+  });
+  assert.equal(
+    seen[0],
+    "No code block found. Respond with exactly one fenced code block (bash/python/edit/create), or a ```finish block if done.",
+    "byte-identical to the pre-look refusal",
+  );
+  assert.equal(result.steps[0]?.action.kind, "none", "the look was not parsed, exactly as before the action existed");
+  assert.equal(result.status, "finished");
 });

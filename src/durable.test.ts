@@ -4638,3 +4638,142 @@ test("a warmParks run snapshots the warm workspace at the park and restores it w
   assert.ok((await store.load("run-ask-warmparks")).some((e) => e.type === "step-completed" && e.name === "turn-1-restore"));
   assert.equal((done.output as { agentSummary: string }).agentSummary, "workspace survived the park");
 });
+
+// --- ```look (S12): recorded as a step, refused when sealed, replayed from the log ---
+
+/** A provider whose executor answers look driver runs with a canned snapshot and records every command. */
+function lookProvider(snapshot: string): { provider: ExecutorProvider; lookCommands: () => string[] } {
+  const commands: string[] = [];
+  const executor: AgentExecutor = {
+    async exec(cmd) {
+      commands.push(cmd);
+      if (/^node \.teploy-agent\/look-t\d+\.mjs$/m.test(cmd)) {
+        return { exitCode: 0, stdout: snapshot, stderr: "", timedOut: false, truncated: false };
+      }
+      return { exitCode: 42, stdout: "", stderr: `not a look command: ${cmd}`, timedOut: false, truncated: false };
+    },
+    putFile: async () => {},
+    getFile: async () => {
+      throw new Error("unused");
+    },
+    destroy: async () => {},
+  };
+  return {
+    lookCommands: () => commands,
+    provider: {
+      async create() {
+        return { handle: "look-fake" };
+      },
+      attach() {
+        return executor;
+      },
+    },
+  };
+}
+
+test("a look turn records turn-N-look and feeds the snapshot back (input.look)", async () => {
+  const snapshot = '[page] https://example.com/docs — Example Docs\n- button "Sign in" [ref=e4]';
+  const { provider, lookCommands } = lookProvider(snapshot);
+  const { model } = reactiveModel([
+    "```look https://example.com/docs\n```",
+    (obs) => (obs.includes("[ref=e4]") ? "```finish\nsaw the Sign in button\n```" : "```bash\necho lost\n```"),
+  ]);
+  const store = new MemoryEventStore();
+  const outcome = await executeRun({ workflow: durableAgent({ model, executor: provider }), runId: "run-look", store, input: { task: "look", look: true } });
+  assert.equal(outcome.status, "completed");
+  const steps = (await store.load("run-look")).filter((e) => e.type === "step-completed");
+  assert.ok(steps.some((s) => s.name === "turn-0-look"), "the look runs as its own recorded step");
+  assert.ok(!steps.some((s) => s.name === "turn-0-exec"), "a look is not an exec step");
+  assert.equal(lookCommands().length, 1, "exactly one driver run");
+});
+
+test("look flag off: a ```look is the pre-feature no-action nudge and records no look step", async () => {
+  const seen: string[] = [];
+  const { provider } = lookProvider("- generic [ref=e1]");
+  const { model } = reactiveModel([
+    "```look https://example.com\n```",
+    (obs) => {
+      seen.push(obs);
+      return "```finish\nmoved on\n```";
+    },
+  ]);
+  const store = new MemoryEventStore();
+  await executeRun({ workflow: durableAgent({ model, executor: provider }), runId: "run-look-off", store, input: { task: "look" } });
+  assert.equal(
+    seen[0],
+    "No code block found. Respond with exactly one fenced code block, or a ```finish block if done.",
+    "byte-identical to the pre-look durable nudge",
+  );
+  const steps = (await store.load("run-look-off")).filter((e) => e.type === "step-completed");
+  assert.ok(!steps.some((s) => (s.name ?? "").startsWith("turn-") && (s.name ?? "").endsWith("-look")));
+});
+
+test("look refuses on a sealed run (sandboxNetwork none) with no step and no driver run", async () => {
+  const seen: string[] = [];
+  const { provider, lookCommands } = lookProvider("- generic [ref=e1]");
+  const { model } = reactiveModel([
+    "```look https://example.com\n```",
+    (obs) => {
+      seen.push(obs);
+      return "```finish\nthe run cannot see pages\n```";
+    },
+  ]);
+  const store = new MemoryEventStore();
+  const outcome = await executeRun({
+    workflow: durableAgent({ model, executor: provider }),
+    runId: "run-look-sealed",
+    store,
+    input: { task: "look", look: true, sandboxNetwork: "none" },
+  });
+  assert.equal(outcome.status, "completed");
+  assert.match(seen[0], /REFUSED: this run's sandbox network tier is sealed/);
+  const steps = (await store.load("run-look-sealed")).filter((e) => e.type === "step-completed");
+  assert.ok(!steps.some((s) => s.name === "turn-0-look"), "the refusal is a pushed message, not a step");
+  assert.equal(lookCommands().length, 0, "nothing was launched");
+});
+
+test("a replayed look returns the recorded snapshot without launching anything", async () => {
+  const snapshot = '[page] https://example.com — Example\n- link "Docs" [ref=e3]';
+  const { provider } = lookProvider(snapshot);
+  const { model, callCount } = reactiveModel([
+    "```look https://example.com\n```",
+    (obs) => (obs.includes("[ref=e3]") ? "```finish\nlooked\n```" : "```bash\necho lost\n```"),
+  ]);
+  const store = new MemoryEventStore();
+  const firstPass = await executeRun({ workflow: durableAgent({ model, executor: provider }), runId: "run-look-replay", store, input: { task: "look", look: true } });
+  assert.equal(firstPass.status, "completed");
+  const firstPassCalls = callCount();
+  assert.ok(firstPassCalls > 0, "the first pass really ran the model");
+
+  // Strip the terminal event and replay with a model and executor that must
+  // never be used — the recorded turn-0-look result is the only way the
+  // replay can answer the turn.
+  const events = await store.load("run-look-replay");
+  const stripped = new MemoryEventStore();
+  for (const event of events) {
+    if (event.type === "run-completed") continue;
+    await stripped.append("run-look-replay", event);
+  }
+  const refuse = (): never => {
+    throw new Error("the replay must reuse the recorded look result");
+  };
+  const refusing: ExecutorProvider = {
+    async create() {
+      return { handle: "refused" };
+    },
+    attach() {
+      return { exec: refuse, putFile: refuse, getFile: refuse, destroy: async () => {} };
+    },
+  };
+  const { model: deadModel } = reactiveModel([]);
+  (deadModel as { doGenerate: unknown }).doGenerate = refuse;
+  const replayed = await executeRun({ workflow: durableAgent({ model: deadModel, executor: refusing }), runId: "run-look-replay", store: stripped, input: { task: "look", look: true } });
+  assert.equal(replayed.status, "completed");
+  const replayedSteps = (await stripped.load("run-look-replay")).filter((e) => e.type === "step-completed").map((e) => e.name);
+  const recordedSteps = events.filter((e) => e.type === "step-completed").map((e) => e.name);
+  assert.deepEqual(replayedSteps, recordedSteps, "the look step and its neighbours replay unchanged");
+  assert.ok(replayedSteps.includes("turn-0-look"));
+  // The first pass's count (look + held finish + honoured finish, plus any
+  // condense) is frozen by the replay: no new model call, no exec, ever.
+  assert.equal(callCount(), firstPassCalls, "the replay made no model call the first pass did not");
+});
