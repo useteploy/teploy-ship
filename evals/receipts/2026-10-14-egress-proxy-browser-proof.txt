@@ -26,7 +26,8 @@ Proxy URL shape — internal/egress/pool.go:102-148 (OpenFor):
   - URL built at pool.go:147:
         u := &url.URL{Scheme: "http", Host: listener.Addr().String(),
                       User: url.UserPassword("run", credential)}
-    => EXACT SHAPE:  http://run:<64-hex-chars>@172.31.99.1:<ephemeral-port>
+    => EXACT SHAPE:  scheme http, host 172.31.99.1:<ephemeral-port>, userinfo
+       "run" ":" <64-hex-chars>  (credential travels as URL userinfo)
     (The SHARED deployment-wide proxy, http://172.31.99.1:7443, carries NO
      credential — Credential=="" skips the auth gate entirely, pool.go:271.)
 
@@ -256,7 +257,8 @@ docker network rm teploy-sbx-egress-v2 ; iptables -D INPUT -i teploy-sbx1 \
 7. CONCLUSIONS
 ==============================================================================
 MEASURED (live, this proof, local VM):
- 1. The per-run proxy URL is exactly http://run:<64-hex>@172.31.99.1:<port>
+ 1. The per-run proxy URL is exactly: host 172.31.99.1:<port>, userinfo
+    "run" ":" <64-hex credential> (credential in the userinfo position)
     (code pool.go:147; observed in-run env; port 39525 for run
     01M4YTVBXA3EV2SYEWRTG3A2T8).
  2. Proxy auth is enforced on both plain absolute-form requests and CONNECT:
@@ -303,7 +305,7 @@ WHAT THE SHIP BROWSER DRIVER MUST DO (the fix, as run in §5):
   const raw = process.env.HTTPS_PROXY ?? process.env.https_proxy ?? "";
   let proxy;
   if (raw) {
-    const u = new URL(raw);                    // http://run:<cred>@172.31.99.1:p
+    const u = new URL(raw);                    // raw: host 172.31.99.1, userinfo run:<cred>
     proxy = {
       server: `${u.protocol}//${u.host}`,      // NO userinfo
       username: decodeURIComponent(u.username),// "run"
