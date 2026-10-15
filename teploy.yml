@@ -65,8 +65,11 @@ platform: linux/amd64
 # deploy/vendor/ tarballs).
 
 processes:
-  web: web --store nucleus --port 7460
-  worker: worker --store nucleus --interval 5
+  # 2026-10-14: store moved Nucleus -> PostgreSQL (see docs/MIGRATE_STORE.md;
+  # data copied by scripts/migrate-store.mjs, nucleus accessory retained below
+  # as the rollback path through the burn-in window).
+  web: web --store postgres --port 7460
+  worker: worker --store postgres --interval 5
 
 # Ceiling per app container (web and worker each), not a reservation — they sit
 # at ~140 MB and ~30 MB respectively, because durable-run work happens inside
@@ -144,8 +147,26 @@ accessories:
     volumes:
       nucleus-data: /data
 
+  # 2026-10-14: the store (replaces ship-nucleus above; that accessory and
+  # its volume stay untouched as the rollback path). pgvector build so the
+  # code-index embeddings (SHIP_EMBED_MODEL) work unchanged. Password rides
+  # the same secret in POSTGRES_PASSWORD below and PGPASSWORD in env.
+  postgres:
+    image: pgvector/pgvector:0.8.0-pg17
+    port: 5432
+    memory: 1g
+    env:
+      POSTGRES_DB: ship
+      POSTGRES_USER: ship
+      POSTGRES_PASSWORD: secret:SHIP_DB_PASSWORD
+    volumes:
+      pgdata: /var/lib/postgresql/data
+
 env:
-  NUCLEUS_URL: postgres://nucleus@ship-nucleus:5432/nucleus
+  NUCLEUS_URL: postgres://ship@ship-postgres:5432/ship?sslmode=disable
+  # The password reaches web+worker as the auto-injected app secret PGPASSWORD
+  # (set via `teploy secret set PGPASSWORD=...`; node-postgres reads it, and the
+  # DSN stays password-free so URI delimiters cannot alter connection authority).
   # The trusted delivery copy (Package B): the clone mounted above. Unset
   # means the whole approved-delivery execution path is OFF and approvals
   # are held with the reason. Provisioned 2026-09-22 for the scratch

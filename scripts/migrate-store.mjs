@@ -101,6 +101,13 @@ async function copyTable(meta, target, table) {
   const insert = `INSERT INTO "${table}" (${colList}) VALUES (${placeholders})`;
   const jsonbCols = new Set(srcCols.filter((c) => c.data_type === "jsonb").map((c) => c.column_name));
 
+  // SOURCE IS AUTHORITATIVE: clear the target table first. The app's first
+  // boot on an empty store seeds default rows (fleet self-measurement,
+  // default policies, the migration ledger), and a re-run after a partial
+  // failure must not double-copy PK'd rows either — both cases collapse to
+  // "target ends up exactly equal to source", which DELETE-then-copy gives.
+  await target.query(`DELETE FROM "${table}"`);
+
   // Fresh source connection per table (see SAFETY).
   const source = await open(FROM_URL);
   let copied = 0;
@@ -143,6 +150,8 @@ async function copyStreams(target, runIds) {
       const raw = first === undefined ? null : Object.values(first)[0];
       if (raw === null || raw === undefined || raw === "") continue;
       const parsed = JSON.parse(typeof raw === "string" ? raw : JSON.stringify(raw));
+      // Idempotent re-runs: clear this stream's rows before replaying them.
+      await target.query("DELETE FROM ship_stream WHERE stream = $1", [stream]);
       for (const entry of parsed) {
         const fields =
           typeof entry.fields === "object" && entry.fields !== null ? entry.fields : { event: String(entry.fields ?? "") };

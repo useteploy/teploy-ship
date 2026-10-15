@@ -59,8 +59,17 @@ accessories:
 
 env:
   NUCLEUS_URL: postgres://ship@ship-postgres:5432/ship?sslmode=disable
-  PGPASSWORD: secret:SHIP_DB_PASSWORD
 ```
+
+Two password plumbing notes from the live cutover (2026-10-14): the
+accessory-side `secret:` ref resolves from the CLI's secret store at start
+(no vault needed), but an app-env `secret:` ref requires an OpenBao root
+token — instead set `teploy secret set PGPASSWORD=...` and let the app's
+by-name secret auto-injection carry it to web+worker (node-postgres reads
+PGPASSWORD; the DSN stays password-free). And the migrator treats the
+SOURCE as authoritative (DELETE-then-copy per table) because the app's
+first boot on an empty store seeds default rows that collide with copied
+PKs — re-running it is always safe.
 
 The `nucleus:` accessory block stays in place initially (rollback path);
 remove it after the burn-in period. Set the password once:
