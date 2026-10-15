@@ -212,6 +212,10 @@ Extend the existing lease-based terminal, editor and browser takeover into an ef
 
 Define browser-login persistence and file-transfer access. Agent and human writes use explicit ownership; observer sessions remain read-only. Execution capabilities vary by target and are surfaced honestly.
 
+Input for the agent-perception half (2026-10-14 review round, verified claims,
+text-first `look` design, rejected alternatives):
+[PERCEPTION_INPUT_S12_S13_2026-10-14.md](PERCEPTION_INPUT_S12_S13_2026-10-14.md).
+
 **Acceptance:** live acquire → human edit/test → handback → agent continuation retains edits and verified revision. Revoke, expiry, reconnect, worker restart and competing ownership fail safely. A full desktop or IDE claim requires an actual supported-target journey.
 
 ### S13 Harness capabilities and portability
@@ -221,6 +225,12 @@ Define browser-login persistence and file-transfer access. Agent and human write
 Publish capabilities for native, Claude Code and OpenCode: investigation, planning, steering, tools, browser, interruption, approvals, recovery and accounting. Run the same supported journeys across stable configurations and repair prompt/protocol assumptions revealed by differences.
 
 Design the conformance boundary so additional harnesses can join without bypassing policy. Evaluate additional adapters when they add a capability or quality advantage and can be maintained; installation alone is not support.
+
+The OpenCode adapter needs a v2 decision: v2.0.26 removed `--pure`/`--dir`
+(current invocation fails flag parse) and added `--session`/`--continue`
+(the session-resume hook for steering parity) — details and the 2026-10-14
+contract check in
+[PERCEPTION_INPUT_S12_S13_2026-10-14.md](PERCEPTION_INPUT_S12_S13_2026-10-14.md) §5.
 
 **Acceptance:** advertised configurations pass their declared journeys and correctly refuse unsupported operations. Model/harness/configuration is recorded, credential lifecycle is tested and unknown pricing stays unknown. Default selection is justified by comparative Ship results.
 
