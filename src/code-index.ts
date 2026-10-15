@@ -413,6 +413,19 @@ export class NucleusCodeIndex implements CodeSearch {
   /** The chunk table needs the embedding dimension — create on first vector. */
   #ensureChunks(dimension: number): Promise<void> {
     this.#chunksReady ??= (async () => {
+      if (this.#db.dialect === "postgres") {
+        // pgvector: the catalog install's proven-Postgres path. The docker
+        // image must carry the extension (pgvector/pgvector:pg*); the
+        // connecting user owns a fresh cluster, so CREATE EXTENSION works.
+        await this.#db.query("CREATE EXTENSION IF NOT EXISTS vector");
+        await this.#db.query(
+          `CREATE TABLE IF NOT EXISTS ship_code_chunks (id TEXT PRIMARY KEY, embedding vector(${Math.trunc(dimension)}), metadata JSONB DEFAULT '{}')`,
+        );
+        await this.#db.query(
+          "CREATE INDEX IF NOT EXISTS idx_ship_code_chunks_embedding ON ship_code_chunks USING hnsw (embedding vector_cosine_ops)",
+        );
+        return;
+      }
       await this.#db.query(
         `CREATE TABLE IF NOT EXISTS ship_code_chunks (id TEXT PRIMARY KEY, embedding VECTOR(${Math.trunc(dimension)}), metadata JSONB DEFAULT '{}')`,
       );
@@ -799,7 +812,10 @@ export class NucleusCodeIndex implements CodeSearch {
             symbols: symbolsIn(chunk.text),
           });
           await this.#db.query("DELETE FROM ship_code_chunks WHERE id = $1", [id]).catch(() => {});
-          await this.#db.query("INSERT INTO ship_code_chunks (id, embedding, metadata) VALUES ($1, VECTOR($2), $3)", [
+          // `VECTOR($2)` is Nucleus's cast; pgvector takes a plain text param
+          // with an explicit cast, which the `[1,2,…]` literal satisfies.
+          const embeddingParam = this.#db.dialect === "postgres" ? "$2::vector" : "VECTOR($2)";
+          await this.#db.query(`INSERT INTO ship_code_chunks (id, embedding, metadata) VALUES ($1, ${embeddingParam}, $3)`, [
             id,
             vectorLiteral(vector),
             meta,
@@ -876,7 +892,9 @@ export class NucleusCodeIndex implements CodeSearch {
     if (vector === undefined || vector.length === 0) return [];
     await this.#ensureChunks(vector.length);
     const k = Math.max(1, Math.trunc(limit));
-    const dist = "VECTOR_DISTANCE(embedding, VECTOR($1), 'cosine')";
+    // pgvector's `<=>` is cosine distance — the same metric the Nucleus
+    // call names explicitly. The param cast mirrors the INSERT above.
+    const dist = this.#db.dialect === "postgres" ? "embedding <=> $1::vector" : "VECTOR_DISTANCE(embedding, VECTOR($1), 'cosine')";
     const rows = await this.#db.query(
       `SELECT id, metadata, ${dist} AS distance
        FROM ship_code_chunks WHERE metadata->>'repo' = $2 ORDER BY ${dist} LIMIT ${k}`,

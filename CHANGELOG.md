@@ -2,9 +2,18 @@
 
 All notable changes to Teploy Ship are recorded here.
 
-## [Unreleased]
+## [0.3.0] - 2026-10-15
 
 ### Added
+- **PostgreSQL as a first-class store: `--store postgres`.** The shared-store
+  runtime runs unchanged against real PostgreSQL (the pgvector build of
+  postgres 17 in the catalog template): the KV and stream surfaces are backed
+  by plain SQL tables (`ship_kv`, `ship_stream`) instead of Nucleus engine
+  built-ins, and the code-index uses pgvector (hnsw, cosine operators). The
+  nucleus path is untouched. Ships with `scripts/migrate-store.mjs` +
+  `docs/MIGRATE_STORE.md`: a rehearsed, count-verified one-shot store
+  migration (tables + event streams; KV is TTL-transient by design), used to
+  move the reference deployment off Nucleus v1.1.1 on 2026-10-14.
 - **S19 tail: `teploy-ship snapshot` and `teploy-ship restore-check`, live
   doctor probes, and doctor + backup receipt in the support bundle.** The
   practiced procedure in `scripts/ship-backup.sh` is now productized where

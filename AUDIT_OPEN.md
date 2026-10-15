@@ -1,5 +1,28 @@
 # Open audit items
 
+## 2026-10-14 — Postgres store support (code; not yet released or deployed)
+
+- `--store postgres` (config, CLI flags, SHIP_STORE in the web app) runs the
+  same shared-store runtime against real PostgreSQL: `NucleusPgwire` gains a
+  dialect, and its KV and stream surfaces — Nucleus engine built-ins
+  (`KV_SETNX`/`KV_CDEL`/`KV_CEXPIRE`, `STREAM_XADD`/`STREAM_XRANGE`) — are
+  reimplemented over plain tables (`ship_kv`, `ship_stream`) on that dialect.
+  Documents/SQL were already standard. The `nucleus` dialect and path are
+  unchanged: the live infra-home instance is untouched by this change.
+- KV semantics preserved and pinned by new tests: set-if-absent with TTL
+  lapse re-opening the key, value-conditional cdel/cexpire (a rival never
+  releases another's claim), ordered per-stream reads for the SDK's
+  NucleusEventStore (append return value unused; full-range read).
+- code-index on postgres uses pgvector (CREATE EXTENSION, `vector(n)`,
+  hnsw `vector_cosine_ops`, `<=>`); the Nucleus DDL/operators are unchanged.
+- Motivation is upstream: Nucleus v1.1.1's live defects (UPSTREAM_BUGS
+  2026-09-24, recurrence 2026-10-12). No Nucleus/Neutron fix was made from
+  this repo. The catalog default flips to PostgreSQL in the templates repo,
+  gated on a teploy-ship release carrying this change.
+- Verified: `pnpm run lint`, `pnpm test` (236 pass / 1 pre-existing skip),
+  `cd web && pnpm test` (176 pass), `cd web && pnpm run build`. A live
+  run against a real Postgres has NOT happened yet — do that before release.
+
 ## 2026-10-04 — wave 5 (live: S02 batch, production upgrade, shadows on)
 
 - Production ship web+worker upgraded `dd5b13e` -> `80c9187` (coordinated

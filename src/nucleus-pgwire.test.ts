@@ -8,6 +8,127 @@ import { nucleusRuntime } from "./runtime.js";
 const MASKED = new TypeError("Cannot read properties of undefined (reading 'name')");
 
 /**
+ * A stateful stand-in for a real Postgres answering the `ship_kv` and
+ * `ship_stream` tables — enough behaviour to test the SQL KV/stream
+ * surfaces' semantics (acquire/conflict, TTL lapse, value-conditional
+ * release, ordered read-back), not just the shape of their statements.
+ */
+function pgFake() {
+  const kv = new Map<string, { value: string; expiresAt: number }>();
+  const streams: Array<{ stream: string; ms: number; fields: string }> = [];
+  const log: string[] = [];
+  let seq = 0;
+  const live = (key: string): { value: string; expiresAt: number } | undefined => {
+    const row = kv.get(key);
+    if (row === undefined) return undefined;
+    if (row.expiresAt !== Number.POSITIVE_INFINITY && row.expiresAt <= Date.now()) return undefined;
+    return row;
+  };
+  const pool: PoolLike = {
+    async query(sql, params = []) {
+      log.push(sql);
+      if (/CREATE (TABLE|INDEX|EXTENSION)/.test(sql)) return { rows: [], rowCount: 0 };
+      if (/INSERT INTO ship_kv/.test(sql)) {
+        const [key, value, expiresAt] = params as [string, string, string | Date];
+        const existing = kv.get(key);
+        // The conflict guard: acquirable again once the held row has lapsed.
+        const lapsed = existing !== undefined && typeof existing.expiresAt === "number" && existing.expiresAt <= Date.now();
+        if (existing === undefined || lapsed) {
+          kv.set(key, { value, expiresAt: expiresAt instanceof Date ? expiresAt.getTime() : Number.POSITIVE_INFINITY });
+          return { rows: [], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 0 };
+      }
+      if (/DELETE FROM ship_kv WHERE key = \$1 AND value = \$2/.test(sql)) {
+        const [key, expected] = params as [string, string];
+        const row = live(key);
+        if (row === undefined || row.value !== expected) return { rows: [], rowCount: 0 };
+        kv.delete(key);
+        return { rows: [], rowCount: 1 };
+      }
+      if (/UPDATE ship_kv SET expires_at/.test(sql)) {
+        const [key, expected, expiresAt] = params as [string, string, string | Date];
+        const row = live(key);
+        if (row === undefined || row.value !== expected) return { rows: [], rowCount: 0 };
+        row.expiresAt = expiresAt instanceof Date ? expiresAt.getTime() : Number.POSITIVE_INFINITY;
+        return { rows: [], rowCount: 1 };
+      }
+      if (/INSERT INTO ship_stream/.test(sql)) {
+        const [stream, ms, fields] = params as [string, number, string];
+        seq += 1;
+        streams.push({ stream, ms, fields });
+        return { rows: [{ id: seq }], rowCount: 1 };
+      }
+      if (/SELECT id, ms, fields FROM ship_stream/.test(sql)) {
+        const [stream, startMs, endMs] = params as [string, number, number];
+        const rows = streams
+          .filter((s) => s.stream === stream && s.ms >= startMs && s.ms <= endMs)
+          .map((s, i) => ({ id: i + 1, ms: s.ms, fields: s.fields }));
+        return { rows, rowCount: rows.length };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+    async connect() {
+      throw new Error("not needed here");
+    },
+    on() {
+      return undefined;
+    },
+    async end() {},
+  };
+  return { pool, log, kv, streams };
+}
+
+test("postgres setNX acquires once and refuses a live holder, TTL lapse re-opens the key", async () => {
+  const { pool } = pgFake();
+  const db = new NucleusPgwire("", "test", { pool, dialect: "postgres" });
+  assert.equal(await db.kv.setNX("ship:slot:0", "run-1", { ttl: 60 }), true);
+  assert.equal(await db.kv.setNX("ship:slot:0", "run-2", { ttl: 60 }), false, "a live holder blocks");
+  assert.equal(await db.kv.setNX("ship:slot:1", "run-1", { ttl: -1 }), true);
+  assert.equal(await db.kv.setNX("ship:slot:1", "run-2", { ttl: 60 }), true, "a lapsed holder does not");
+});
+
+test("postgres cdel/cexpire are value-conditional, so a rival never releases another's claim", async () => {
+  const { pool } = pgFake();
+  const db = new NucleusPgwire("", "test", { pool, dialect: "postgres" });
+  await db.kv.setNX("ship:slot:0", "run-1", { ttl: 60 });
+  assert.equal(await db.kv.cexpire("ship:slot:0", "run-2", 60), false, "a rival cannot extend");
+  assert.equal(await db.kv.cdel("ship:slot:0", "run-2"), false, "a rival cannot release");
+  assert.equal(await db.kv.cdel("ship:slot:0", "run-1"), true, "the holder can");
+  assert.equal(await db.kv.cdel("ship:slot:0", "run-1"), false, "... exactly once");
+});
+
+test("postgres streams round-trip fields in insertion order, per stream", async () => {
+  const { pool } = pgFake();
+  const db = new NucleusPgwire("", "test", { pool, dialect: "postgres" });
+  await db.streams.xadd("ship:run-a", { event: JSON.stringify({ seq: 1, kind: "started" }) });
+  await db.streams.xadd("ship:run-b", { event: JSON.stringify({ seq: 1, kind: "started" }) });
+  await db.streams.xadd("ship:run-a", { event: JSON.stringify({ seq: 2, kind: "step" }) });
+  const entries = await db.streams.xrange("ship:run-a", 0, Number.MAX_SAFE_INTEGER, 1_000_000);
+  assert.deepEqual(
+    entries.map((e) => (e.fields.event as string).length > 0 ? JSON.parse(e.fields.event as string).seq : 0),
+    [1, 2],
+    "ordered, dedupeable by seq like the Nucleus stream the SDK expects",
+  );
+  assert.equal(entries.length, 2, "the other run's stream is separate");
+  assert.ok(/^\d+-\d+$/.test(entries[0]!.id), "ids stay ms-seq shaped");
+});
+
+test("the postgres dialect reaches the store from nucleusRuntime; nucleus stays the default", async () => {
+  const pgPool = pgFake().pool;
+  const pg = await nucleusRuntime("", "test", { db: new NucleusPgwire("", "test", { pool: pgPool, dialect: "postgres" }), log: () => {} });
+  assert.equal(await pg.db.kv.setNX("ship:x", "1", { ttl: 5 }), true);
+  assert.equal(pg.db.dialect, "postgres");
+
+  const nucleusPool = pgFake().pool;
+  const nucleus = await nucleusRuntime("", "test", {
+    db: new NucleusPgwire("", "test", { pool: nucleusPool }),
+    log: () => {},
+  });
+  assert.equal(nucleus.db.dialect, "nucleus", "an unconfigured store is still the Nucleus path");
+});
+
+/**
  * A pool that can be told to reject, plus the solo connection the retry path
  * opens. The distinction is the whole point of the fixture: `pool.connect()`
  * hands back a POOLED client — very often the one that just failed — which is

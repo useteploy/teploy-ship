@@ -6,9 +6,9 @@ import type { ShipRuntime } from "teploy-ship/runtime";
 /**
  * The web app's connection to durable runs. Configured by environment —
  * `teploy-ship web` sets these from flags/config before serving:
- *   SHIP_STORE      file | nucleus            (default file)
- *   NUCLEUS_URL     postgres://…              (required for nucleus)
- *   SHIP_WEB_TOKEN  bearer/login token        (required — no default)
+ *   SHIP_STORE      file | nucleus | postgres   (default file)
+ *   NUCLEUS_URL     postgres://…                (required for nucleus|postgres)
+ *   SHIP_WEB_TOKEN  bearer/login token          (required — no default)
  *
  * One runtime per server process; loaders share it. The web surface only
  * ever reads state, enqueues runs, and delivers decisions — it never
@@ -24,10 +24,10 @@ export function shipRuntime(): Promise<ShipRuntime> {
 async function create(): Promise<ShipRuntime> {
   const kind = process.env.SHIP_STORE ?? "file";
   if (kind === "file") return fileRuntime();
-  if (kind !== "nucleus") throw new Error(`unknown SHIP_STORE: ${kind} (expected file or nucleus)`);
+  if (kind !== "nucleus" && kind !== "postgres") throw new Error(`unknown SHIP_STORE: ${kind} (expected file, nucleus, or postgres)`);
   const url = process.env.NUCLEUS_URL;
-  if (url === undefined || url === "") throw new Error("SHIP_STORE=nucleus needs NUCLEUS_URL");
-  return nucleusRuntime(url, `web-${hostname()}-${process.pid}`);
+  if (url === undefined || url === "") throw new Error(`SHIP_STORE=${kind} needs NUCLEUS_URL`);
+  return nucleusRuntime(url, `web-${hostname()}-${process.pid}`, { dialect: kind === "postgres" ? "postgres" : "nucleus" });
 }
 
 export function webToken(): string {

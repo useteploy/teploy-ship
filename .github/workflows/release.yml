@@ -31,6 +31,10 @@ jobs:
       - name: Lint + tests
         run: |
           pnpm install --frozen-lockfile
+          # The root suite includes scripts/deploy-package.test.mjs, which
+          # reads web/node_modules to verify deployment pins against the
+          # tested versions - the same ordering ci.yml has had all along.
+          pnpm --dir web install --frozen-lockfile
           pnpm run lint
           pnpm test
 

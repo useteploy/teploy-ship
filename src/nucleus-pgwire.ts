@@ -22,6 +22,24 @@ export interface QueryResultLike {
   rowCount: number | null;
 }
 
+/** The KV surface every consumer (admission, leases, done-claims) codes against. */
+export interface KvSurface {
+  setNX(key: string, value: string, opts?: { ttl?: number }): Promise<boolean>;
+  cdel(key: string, expected: string): Promise<boolean>;
+  cexpire(key: string, expected: string, seconds: number): Promise<boolean>;
+}
+
+/** The stream surface (structurally the Workflow SDK's `StreamsLike`). */
+export interface StreamsSurface {
+  xadd(stream: string, fields: Record<string, unknown>): Promise<string>;
+  xrange(
+    stream: string,
+    startMs: number,
+    endMs: number,
+    count: number,
+  ): Promise<Array<{ id: string; fields: Record<string, unknown> }>>;
+}
+
 /**
  * Optional bounds on a `document.find`.
  *
@@ -109,6 +127,18 @@ export function isTransientPoolFailure(error: unknown): boolean {
   );
 }
 
+/**
+ * Which engine answers on the other side of the wire.
+ *
+ * The SQL/document surfaces in this file are standard PostgreSQL and work
+ * against either engine. The `kv` and `streams` surfaces are NOT: Nucleus
+ * implements them as engine built-ins (`KV_SETNX`, `STREAM_XADD`, …) that
+ * real Postgres does not have, so on `postgres` they are backed by plain
+ * tables instead (`ship_kv`, `ship_stream`). Everything above this file
+ * keeps calling the same narrow interface either way.
+ */
+export type PgwireDialect = "nucleus" | "postgres";
+
 export class NucleusPgwire {
   #pool: PoolLike;
   #owner: string;
@@ -117,6 +147,10 @@ export class NucleusPgwire {
   /** How the retry path opens a connection that shares nothing with the pool. */
   #solo: (() => SoloClientLike) | null;
   #soloActive = 0;
+  #kvReady: Promise<void> | null = null;
+  #streamsReady: Promise<void> | null = null;
+  #setNXCount = 0;
+  readonly dialect: PgwireDialect;
 
   /**
    * @param owner Same identifier callers already pass to `nucleusRuntime`
@@ -124,8 +158,17 @@ export class NucleusPgwire {
    *   here as the correlation tag on pool-level log lines, since a pool
    *   'error' isn't tied to any single in-flight query/run.
    */
-  constructor(url: string, owner = "unknown", deps: { pool?: PoolLike; solo?: () => SoloClientLike } = {}) {
+  constructor(
+    url: string,
+    owner = "unknown",
+    deps: { pool?: PoolLike; solo?: () => SoloClientLike; dialect?: PgwireDialect } = {},
+  ) {
     this.#owner = owner;
+    this.dialect = deps.dialect ?? "nucleus";
+    // Chosen here (not as field initializers) because the choice reads
+    // `dialect`, which field initializers would see before this assignment.
+    this.kv = this.dialect === "postgres" ? this.#sqlKv() : this.#nucleusKv();
+    this.streams = this.dialect === "postgres" ? this.#sqlStreams() : this.#nucleusStreams();
     this.#solo = deps.solo ?? (url === "" ? null : () => new pg.Client({
       connectionString: url,
       connectionTimeoutMillis: 5_000,
@@ -287,44 +330,167 @@ export class NucleusPgwire {
     return (value ?? null) as T | null;
   }
 
-  readonly kv = {
-    // Numeric arguments are inlined: node-postgres ships parameters as
-    // text, and Nucleus's scalar functions type-check them as TEXT. All
-    // numbers here are internally generated (never user input).
-    setNX: async (key: string, value: string, opts?: { ttl?: number }): Promise<boolean> => {
-      const acquired =
-        opts?.ttl !== undefined
-          ? await this.#fetchval<boolean>(`SELECT KV_SETNX($1, $2, ${int(opts.ttl)})`, [key, value])
-          : await this.#fetchval<boolean>("SELECT KV_SETNX($1, $2)", [key, value]);
-      return acquired === true;
-    },
-    cdel: async (key: string, expected: string): Promise<boolean> =>
-      (await this.#fetchval<boolean>("SELECT KV_CDEL($1, $2)", [key, expected])) === true,
-    cexpire: async (key: string, expected: string, seconds: number): Promise<boolean> =>
-      (await this.#fetchval<boolean>(`SELECT KV_CEXPIRE($1, $2, ${int(seconds)})`, [key, expected])) === true,
-  };
+  /** The KV surface: atomic set-if-absent with TTL, value-conditional delete/extend. */
+  readonly kv: KvSurface;
 
-  readonly streams = {
-    xadd: async (stream: string, fields: Record<string, unknown>): Promise<string> => {
-      const args: unknown[] = [stream];
-      for (const [key, value] of Object.entries(fields)) args.push(key, value);
-      const placeholders = args.map((_, i) => `$${i + 1}`).join(", ");
-      return (await this.#fetchval<string>(`SELECT STREAM_XADD(${placeholders})`, args)) ?? "";
-    },
-    xrange: async (
-      stream: string,
-      startMs: number,
-      endMs: number,
-      count: number,
-    ): Promise<Array<{ id: string; fields: Record<string, unknown> }>> => {
-      const raw = await this.#fetchval<string>(
-        `SELECT STREAM_XRANGE($1, ${int(startMs)}, ${int(endMs)}, ${int(count)})`,
-        [stream],
-      );
-      if (raw === null || raw === "") return [];
-      return JSON.parse(raw) as Array<{ id: string; fields: Record<string, unknown> }>;
-    },
-  };
+  /** The stream surface: append-only, ordered read — the event log transport. */
+  readonly streams: StreamsSurface;
+
+  /** The Nucleus built-ins (`KV_SETNX` / `KV_CDEL` / `KV_CEXPIRE`). */
+  #nucleusKv(): KvSurface {
+    return {
+      // Numeric arguments are inlined: node-postgres ships parameters as
+      // text, and Nucleus's scalar functions type-check them as TEXT. All
+      // numbers here are internally generated (never user input).
+      setNX: async (key: string, value: string, opts?: { ttl?: number }): Promise<boolean> => {
+        const acquired =
+          opts?.ttl !== undefined
+            ? await this.#fetchval<boolean>(`SELECT KV_SETNX($1, $2, ${int(opts.ttl)})`, [key, value])
+            : await this.#fetchval<boolean>("SELECT KV_SETNX($1, $2)", [key, value]);
+        return acquired === true;
+      },
+      cdel: async (key: string, expected: string): Promise<boolean> =>
+        (await this.#fetchval<boolean>("SELECT KV_CDEL($1, $2)", [key, expected])) === true,
+      cexpire: async (key: string, expected: string, seconds: number): Promise<boolean> =>
+        (await this.#fetchval<boolean>(`SELECT KV_CEXPIRE($1, $2, ${int(seconds)})`, [key, expected])) === true,
+    };
+  }
+
+  /**
+   * The same semantics over a plain table, for real Postgres.
+   *
+   * `expires_at <= now()` in the conflict guard is what makes a TTL'd key
+   * acquirable again after it lapses — the row is still physically there,
+   * but it is invisible to every operation below, which is exactly the
+   * Nucleus behaviour the admission locks and done-claims were written
+   * against. `setNX` also reaps dead rows opportunistically (every 128th
+   * call): correctness never depends on the reaping, only table growth does.
+   */
+  #sqlKv(): KvSurface {
+    const expiry = (ttl?: number): string | Date => (ttl === undefined ? "infinity" : new Date(Date.now() + ttl * 1000));
+    return {
+      setNX: async (key: string, value: string, opts?: { ttl?: number }): Promise<boolean> => {
+        await this.#ensureKv();
+        const affected = await this.exec(
+          `INSERT INTO ship_kv (key, value, expires_at) VALUES ($1, $2, $3)
+           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, expires_at = EXCLUDED.expires_at
+           WHERE ship_kv.expires_at <= now()`,
+          [key, value, expiry(opts?.ttl)],
+        );
+        this.#setNXCount += 1;
+        if (this.#setNXCount % 128 === 0) {
+          // Fire-and-forget: a failed reap costs nothing, and every reader
+          // already treats an expired row as absent.
+          this.#run("DELETE FROM ship_kv WHERE expires_at <= now()").catch(() => undefined);
+        }
+        return affected === 1;
+      },
+      cdel: async (key: string, expected: string): Promise<boolean> => {
+        await this.#ensureKv();
+        return (await this.exec("DELETE FROM ship_kv WHERE key = $1 AND value = $2 AND expires_at > now()", [key, expected])) === 1;
+      },
+      cexpire: async (key: string, expected: string, seconds: number): Promise<boolean> => {
+        await this.#ensureKv();
+        return (
+          (await this.exec("UPDATE ship_kv SET expires_at = $3 WHERE key = $1 AND value = $2 AND expires_at > now()", [
+            key,
+            expected,
+            expiry(seconds),
+          ])) === 1
+        );
+      },
+    };
+  }
+
+  #ensureKv(): Promise<void> {
+    this.#kvReady ??= this.#pool
+      .query(
+        `CREATE TABLE IF NOT EXISTS ship_kv (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL,
+          expires_at TIMESTAMPTZ NOT NULL
+        )`,
+      )
+      .then(() => undefined);
+    return this.#kvReady;
+  }
+
+  /** The Nucleus built-ins (`STREAM_XADD` / `STREAM_XRANGE`). */
+  #nucleusStreams(): StreamsSurface {
+    return {
+      xadd: async (stream: string, fields: Record<string, unknown>): Promise<string> => {
+        const args: unknown[] = [stream];
+        for (const [key, value] of Object.entries(fields)) args.push(key, value);
+        const placeholders = args.map((_, i) => `$${i + 1}`).join(", ");
+        return (await this.#fetchval<string>(`SELECT STREAM_XADD(${placeholders})`, args)) ?? "";
+      },
+      xrange: async (
+        stream: string,
+        startMs: number,
+        endMs: number,
+        count: number,
+      ): Promise<Array<{ id: string; fields: Record<string, unknown> }>> => {
+        const raw = await this.#fetchval<string>(
+          `SELECT STREAM_XRANGE($1, ${int(startMs)}, ${int(endMs)}, ${int(count)})`,
+          [stream],
+        );
+        if (raw === null || raw === "") return [];
+        return JSON.parse(raw) as Array<{ id: string; fields: Record<string, unknown> }>;
+      },
+    };
+  }
+
+  /**
+   * Streams over a plain table, for real Postgres. The only consumer is the
+   * Workflow SDK's NucleusEventStore: it appends `{event: JSON.stringify(…)}`
+   * and reads the whole stream back in insertion order, deduping by seq —
+   * so the id only needs to be stable and ordered, and the fields only need
+   * to round-trip through JSON unchanged.
+   */
+  #sqlStreams(): StreamsSurface {
+    return {
+      xadd: async (stream: string, fields: Record<string, unknown>): Promise<string> => {
+        await this.#ensureStreams();
+        const ms = Date.now();
+        const id = await this.#fetchval<string | number>(
+          "INSERT INTO ship_stream (stream, ms, fields) VALUES ($1, $2, $3) RETURNING id",
+          [stream, ms, JSON.stringify(fields)],
+        );
+        return `${ms}-${id ?? ""}`;
+      },
+      xrange: async (
+        stream: string,
+        startMs: number,
+        endMs: number,
+        count: number,
+      ): Promise<Array<{ id: string; fields: Record<string, unknown> }>> => {
+        await this.#ensureStreams();
+        const rows = await this.query(
+          `SELECT id, ms, fields FROM ship_stream WHERE stream = $1 AND ms >= $2 AND ms <= $3 ORDER BY id LIMIT ${int(count)}`,
+          [stream, startMs, endMs],
+        );
+        return rows.map((row) => {
+          const fields = typeof row.fields === "string" ? row.fields : "";
+          return { id: `${row.ms}-${row.id}`, fields: fields === "" ? {} : (JSON.parse(fields) as Record<string, unknown>) };
+        });
+      },
+    };
+  }
+
+  #ensureStreams(): Promise<void> {
+    this.#streamsReady ??= this.#pool
+      .query(
+        `CREATE TABLE IF NOT EXISTS ship_stream (
+          id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+          stream TEXT NOT NULL,
+          ms BIGINT NOT NULL,
+          fields TEXT NOT NULL
+        )`,
+      )
+      .then(() => this.#pool.query("CREATE INDEX IF NOT EXISTS idx_ship_stream_stream ON ship_stream (stream, id)"))
+      .then(() => undefined);
+    return this.#streamsReady;
+  }
 
   readonly document = {
     insert: async (collection: string, doc: Record<string, unknown>): Promise<number> => {
@@ -457,7 +623,7 @@ export class NucleusPgwire {
     let destroy = false;
     try {
       await client.query("BEGIN");
-      const bound = new NucleusPgwire("", this.#owner + ":transaction", {pool:{
+      const bound = new NucleusPgwire("", this.#owner + ":transaction", {dialect: this.dialect, pool:{
         query:(sql,params)=>client.query(sql,params),
         connect:async()=>{throw new Error("Transaction cannot acquire another connection");},
         on:()=>undefined,
@@ -465,6 +631,10 @@ export class NucleusPgwire {
       }});
       bound.#inTransaction = true;
       bound.#docsReady = Promise.resolve();
+      // Same rule as docsReady: no DDL inside the open transaction. KV and
+      // streams are not part of the transactional surface anyway.
+      bound.#kvReady = Promise.resolve();
+      bound.#streamsReady = Promise.resolve();
       const value = await fn(bound);
       await client.query("COMMIT");
       return value;

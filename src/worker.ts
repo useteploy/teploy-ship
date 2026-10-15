@@ -538,13 +538,13 @@ export interface TerminalClaim {
 }
 
 export function makeTerminalClaim(
-  runtime: { kind: "file" | "nucleus"; owner: string; db?: NucleusPgwire },
+  runtime: { kind: "file" | "nucleus" | "postgres"; owner: string; db?: NucleusPgwire },
   host: string,
 ): TerminalClaim {
   const doneLocally = new Set<string>();
   const value = `${runtime.owner}:${host}`;
   const claim = (runId: string): Promise<boolean> => {
-    if (runtime.kind === "nucleus" && runtime.db !== undefined) {
+    if (runtime.kind !== "file" && runtime.db !== undefined) {
       return runtime.db.kv
         .setNX(`ship:done:${runId}`, value, { ttl: 7 * 24 * 60 * 60 })
         .catch(() => false);
@@ -554,7 +554,7 @@ export function makeTerminalClaim(
     return Promise.resolve(true);
   };
   claim.release = async (runId: string): Promise<void> => {
-    if (runtime.kind === "nucleus" && runtime.db !== undefined) {
+    if (runtime.kind !== "file" && runtime.db !== undefined) {
       await runtime.db.kv.cdel(`ship:done:${runId}`, value).catch(() => false);
       return;
     }

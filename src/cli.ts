@@ -241,8 +241,8 @@ Config: flags > env > ~/.config/teploy-ship/config.json
   (model, sandboxUrl, sandboxToken, sandboxImage, store, nucleusUrl)
 Gateway: set AI_GATEWAY_URL + AI_GATEWAY_KEY to route through teploy-gateway.
 Durable store: local files by default (${stateDir()}, override: TEPLOY_SHIP_STATE).
-  With --store nucleus (+ --nucleus-url or NUCLEUS_URL), runs live in a shared
-  Nucleus: any machine can list/approve them, and a worker completes them —
+  With --store nucleus|postgres (+ --nucleus-url or NUCLEUS_URL), runs live in a
+  shared store: any machine can list/approve them, and a worker completes them —
   approve from your laptop, close it, the worker carries the run home.`;
 
 interface Config {
@@ -330,8 +330,8 @@ function validateConfig(raw: Record<string, unknown>, path: string): Config {
     if (tier === null || tier === undefined) fail(`${path}: "sandboxNetwork" must be ${NETWORK_TIER_HELP}`);
     config.sandboxNetwork = tier;
   }
-  if (raw.store !== undefined && raw.store !== "file" && raw.store !== "nucleus") {
-    fail(`${path}: "store" must be "file" or "nucleus"`);
+  if (raw.store !== undefined && raw.store !== "file" && raw.store !== "nucleus" && raw.store !== "postgres") {
+    fail(`${path}: "store" must be "file", "nucleus", or "postgres"`);
   }
   if (raw.intake !== undefined) {
     if (typeof raw.intake !== "object" || raw.intake === null || Array.isArray(raw.intake)) {
@@ -954,12 +954,17 @@ function envNum(name: string): number | undefined {
 async function makeRuntime(args: ReturnType<typeof parseArgs>, config: Config): Promise<ShipRuntime> {
   const storeKind = (args.flags.store as string) ?? config.store ?? "file";
   if (storeKind === "file") return fileRuntime();
-  if (storeKind !== "nucleus") fail(`unknown --store: ${storeKind} (expected file or nucleus)`);
+  // "postgres" is the same shared-store runtime over a real Postgres —
+  // NucleusPgwire speaks the wire protocol either way; only the KV and
+  // stream surfaces differ (SQL tables instead of engine built-ins).
+  if (storeKind !== "nucleus" && storeKind !== "postgres") {
+    fail(`unknown --store: ${storeKind} (expected file, nucleus, or postgres)`);
+  }
   const url = (args.flags["nucleus-url"] as string) ?? process.env.NUCLEUS_URL ?? config.nucleusUrl;
   if (url === undefined || url === "") {
-    fail("--store nucleus needs --nucleus-url, NUCLEUS_URL, or nucleusUrl in config");
+    fail(`--store ${storeKind} needs --nucleus-url, NUCLEUS_URL, or nucleusUrl in config`);
   }
-  return nucleusRuntime(url, `cli-${hostname()}-${process.pid}`);
+  return nucleusRuntime(url, `cli-${hostname()}-${process.pid}`, { dialect: storeKind === "postgres" ? "postgres" : "nucleus" });
 }
 
 function durableProvider(args: ReturnType<typeof parseArgs>, config: Config): ExecutorProvider {
@@ -1021,7 +1026,7 @@ function durableProvider(args: ReturnType<typeof parseArgs>, config: Config): Ex
  */
 function resolveCodeSearch(runtime: ShipRuntime): CodeSearch | undefined {
   const modelId = process.env.SHIP_EMBED_MODEL;
-  if (modelId === undefined || modelId === "" || runtime.kind !== "nucleus") return undefined;
+  if (modelId === undefined || modelId === "" || runtime.kind === "file") return undefined;
   const baseURL = process.env.SHIP_EMBED_URL ?? process.env.AI_GATEWAY_URL;
   const apiKey = process.env.SHIP_EMBED_KEY ?? process.env.AI_GATEWAY_KEY ?? process.env.OPENAI_API_KEY;
   const provider = createOpenAI({
@@ -1248,9 +1253,9 @@ async function decideCommand(rest: string[], approved: boolean): Promise<void> {
   // whoever wins the lease continues, the other reports the handoff.
   await runtime.markWake?.(runId);
   if (args.flags.handoff === true) {
-    if (runtime.kind !== "nucleus") fail("--handoff needs --store nucleus (a worker must see the run)");
+    if (runtime.kind === "file") fail("--handoff needs a shared store (a worker must see the run)");
     process.stderr.write(
-      `${approved ? green("approved") : red("denied")} — handed to workers.\n  watch: ${bold("teploy-ship runs --store nucleus")}\n`,
+      `${approved ? green("approved") : red("denied")} — handed to workers.\n  watch: ${bold(`teploy-ship runs --store ${runtime.kind}`)}\n`,
     );
     await runtime.close();
     process.exit(0);
@@ -2117,8 +2122,9 @@ function resolveIntakePolicies(config: Config): Config["intake"] | undefined {
 async function workerCommand(rest: string[]): Promise<void> {
   const args = parseArgs(rest);
   const config = loadConfig();
-  if (((args.flags.store as string) ?? config.store) !== "nucleus") {
-    fail("worker needs the shared store: --store nucleus (+ --nucleus-url or NUCLEUS_URL)");
+  const workerStore = (args.flags.store as string) ?? config.store;
+  if (workerStore !== "nucleus" && workerStore !== "postgres") {
+    fail("worker needs the shared store: --store nucleus|postgres (+ --nucleus-url or NUCLEUS_URL)");
   }
   // Resolve and range-check everything BEFORE touching the network. A bad
   // --interval should not cost a database connection and a migration pass to
@@ -2137,7 +2143,7 @@ async function workerCommand(rest: string[]): Promise<void> {
   if (!usingSandbox) warnIfStateUnwritable();
 
   const runtime = await makeRuntime(args, config);
-  if (runtime.kind !== "nucleus") fail("worker needs --store nucleus");
+  if (runtime.kind === "file") fail("worker needs a shared store (--store nucleus or postgres)");
   // So a CLI enqueue from an operator's shell inherits this deployment's
   // evidence asks (deployment-asks.ts, F9). Best effort: a store blip here
   // must not keep the worker from starting.
@@ -2332,9 +2338,9 @@ async function webCommand(rest: string[]): Promise<void> {
     ...(args.flags.port !== undefined ? { SHIP_WEB_PORT: String(args.flags.port) } : {}),
     ...(args.flags.model !== undefined ? { SHIP_MODEL: String(args.flags.model) } : config.model !== undefined ? { SHIP_MODEL: config.model } : {}),
   };
-  if (storeKind === "nucleus") {
+  if (storeKind !== "file") {
     const url = (args.flags["nucleus-url"] as string) ?? process.env.NUCLEUS_URL ?? config.nucleusUrl;
-    if (url === undefined || url === "") fail("--store nucleus needs --nucleus-url, NUCLEUS_URL, or nucleusUrl in config");
+    if (url === undefined || url === "") fail(`--store ${storeKind} needs --nucleus-url, NUCLEUS_URL, or nucleusUrl in config`);
     env.NUCLEUS_URL = url;
   }
   // Strip what the dashboard has no business holding.
