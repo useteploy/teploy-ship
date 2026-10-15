@@ -1,0 +1,192 @@
+TOOL-VOCAB RESEARCH RECEIPT — browser perception verb inventory (2026-10-14)
+Branch: research/look-tool-vocab-2026-10-14 @ 3f02871 (base github/main, merge PR #70)
+Deliverable: docs/PERCEPTION_INPUT_ADDENDUM_TOOLVOCAB_2026-10-14.md
+
+ENVIRONMENT
+- Date: Wed Oct 14 2026, 20:43 PDT
+- Host: macOS 26.6.2 (25G83), Apple git 2.54.0
+- Tools: curl 8.7.1 (LibreSSL/3.3.6), gh 2.98.0 (authed as im-tyler)
+- Docker: client 29.8.1 present; DAEMON NOT RUNNING
+  (docker info -> "failed to connect to the docker API at
+  unix:///var/run/docker.sock ... no such file or directory").
+  Not needed for this task and not started: this round is web research +
+  local reads only; no containers, no live browser, no teploy state.
+  The documented fallback for this task shape is "local machine only,
+  network reads" — which is what was done.
+- No `timeout` binary on this Mac (handover tip confirmed earlier in-session);
+  no long-running commands were used, so no perl/gtimeout wrapper was needed.
+
+COMMANDS RUN (all from the worktree unless noted; read-only)
+# verify worktree / base
+git status; git log --oneline -3; git rev-parse HEAD
+  -> "On branch research/look-tool-vocab-2026-10-14 ... nothing to commit,
+     working tree clean" / HEAD 3f028716fdc0786729065dd23b52c107216099e3
+
+# local reads (dedicated tools, no mutation)
+read: docs/PERCEPTION_INPUT_S12_S13_2026-10-14.md, src/actions.ts,
+      src/tool-manifest.ts, evals/receipts/2026-09-24-browser-final-image.txt
+grep: src/agent.ts, src/durable.ts for parseAction/transcriptTurn/observ
+      (seam confirmed: both loops call parseAction(thought), push the
+       observation back as the next user message, truncate to maxObs;
+       agent.ts:311/424, durable.ts:1986/2298)
+
+# web research (network reads; exact URLs)
+curl https://api.github.com/repos/microsoft/playwright-mcp/git/trees/main...
+curl https://api.github.com/repos/browser-use/browser-use/git/trees/main?recursive=1
+curl https://api.github.com/repos/microsoft/playwright/git/trees/main...
+curl https://api.github.com/repos/microsoft/playwright/contents/packages/playwright-core/src/tools{,/backend,/mcp}
+curl https://api.github.com/repos/browser-use/browser-use/contents/browser_use/controller
+curl -s https://raw.githubusercontent.com/microsoft/playwright-mcp/main/README.md
+curl -s https://raw.githubusercontent.com/microsoft/playwright-mcp/main/src/README.md
+curl -s https://raw.githubusercontent.com/microsoft/playwright-mcp/main/tests/click.spec.ts
+curl -s https://raw.githubusercontent.com/microsoft/playwright/main/packages/playwright-core/src/tools/backend/{snapshot,tab,utils,response,context,common,browserModel}.ts
+curl -s https://raw.githubusercontent.com/browser-use/browser-use/main/browser_use/{README.md,tools/service.py,tools/views.py,tools/registry/service.py,actor/element.py,agent/prompts.py,integrations/anthropic/browser_use.py}
+curl -s https://raw.githubusercontent.com/ChromeDevTools/chrome-devtools-mcp/main/docs/tool-reference.md
+gh api -X GET search/code -f q='repo:microsoft/playwright ariaSnapshot path:packages/playwright-core/src/tools'   # locate ref code
+gh api -X GET search/code -f q='repo:microsoft/playwright refCounter path:packages/playwright-core/src'           # -> no hits
+
+RAW OUTPUT TAILS (selected, verbatim)
+
+--- playwright-mcp tests/click.spec.ts (element+target protocol) ---
+  expect(await client.callTool({
+    name: 'browser_click',
+    arguments: {
+      element: 'Submit button',
+      target: 'e2',
+    },
+  })).toHaveResponse({
+    code: `await page.getByRole('button', { name: 'Submit' }).click();`,
+    snapshot: expect.stringContaining(`button "Submit" [active] [ref=e2]`),
+  });
+
+--- playwright backend/tab.ts targetLocators (ref grammar + stale error) ---
+  return Promise.all(params.map(async param => {
+    if (!param.target.match(/^(f\d+)?e\d+$/)) {
+      const selector = locatorOrSelectorAsSelector('javascript', param.target, this.context.config.testIdAttribute || 'data-testid');
+      const handle = await this.page.$(selector);
+      if (!handle)
+        throw new Error(`"${param.target}" does not match any elements.`);
+      handle.dispose().catch(() => {});
+      return { locator: this.page.locator(selector), resolved: asLocator('javascript', selector), selector };
+    } else {
+      try {
+        let locator = this.page.getByRef(param.target);
+        if (param.element)
+          locator = locator.describe(param.element);
+        const resolved = await locator.normalize();
+        return { locator, resolved: resolved.toString(), selector: locatorSelector(resolved) };
+      } catch (e) {
+        throw new Error(`Ref ${param.target} not found in the current page snapshot. Try capturing new snapshot.`);
+      }
+    }
+  }));
+
+--- playwright backend/tab.ts snapshot minting ---
+  const ariaSnapshot = root
+    ? await root.ariaSnapshot({ mode: 'ai', depth, boxes })
+    : await this.page.ariaSnapshot({ mode: 'ai', depth, boxes });
+
+--- playwright backend/utils.ts waitForCompletion (settle recipe) ---
+  export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>): Promise<R> {
+    const settleMs = tab.context.config.timeouts?.settle ?? 500;
+    ...
+    result = await callback();
+    await tab.waitForTimeout(settleMs);
+    const requestedNavigation = requests.some(request => request.isNavigationRequest());
+    if (requestedNavigation) {
+      await tab.page.mainFrame().waitForLoadState('load', { timeout: 10000 }).catch(() => {});
+    // then: await response-finished for document/stylesheet/script/xhr/fetch
+
+--- playwright-mcp README (CLI-over-MCP note, fetched 2026-10-14) ---
+  "CLI: Modern coding agents increasingly favor CLI-based workflows exposed as
+  SKILLs over MCP because CLI invocations are more token-efficient: they avoid
+  loading large tool schemas and verbose accessibility trees into the model
+  context..."
+  browser_take_screenshot: "You can't perform actions based on the screenshot,
+  use browser_snapshot for actions."
+  browser_snapshot: "Capture accessibility snapshot of the current page, this
+  is better than screenshot"
+
+--- chrome-devtools-mcp docs/tool-reference.md (fetched 2026-10-14) ---
+  take_snapshot: "Take a text snapshot of the target page based on the a11y
+  tree. The snapshot lists page elements along with a unique identifier (uid).
+  Always use the latest snapshot. Prefer taking a snapshot over taking a
+  screenshot."
+  evaluate_script param: "waitForStableDom (boolean, optional): Whether to
+  wait for the DOM to settle ... Defaults to true."
+
+--- browser-use tools/views.py (element index scheme) ---
+  class ClickElementAction(BaseModel):
+      index: int | None = Field(default=None, ge=1, description='Element index from browser_state')
+      coordinate_x: int | None = Field(default=None, ...)
+      coordinate_y: int | None = Field(default=None, ...)
+  class ExtractAction(BaseModel):
+      query: str
+      start_from_char: int = Field(default=0, description='Use this for long
+        markdowns to start from a specific character (not index in browser_state)')
+      output_schema: SkipJsonSchema[dict | None] = ...
+
+--- browser-use tools/service.py registry action names (grep of @registry.action) ---
+  search navigate go_back wait click input upload_file switch close extract
+  search_page find_elements scroll send_keys find_text screenshot save_as_pdf
+  dropdown_options select_dropdown write_file replace_file read_file evaluate done
+
+--- browser-use integrations/anthropic/browser_use.py (31-action toolset) ---
+  navigate screenshot zoom left_click right_click middle_click double_click
+  triple_click hover mouse_move left_mouse_down left_mouse_up left_click_drag
+  scroll scroll_to type key hold_key form_input read_page find get_page_text
+  wait file_upload read_console read_network javascript_exec new_tab list_tabs
+  switch_tab close_tab
+
+CONCLUSIONS
+
+MEASURED (read directly in primary source/docs on 2026-10-14):
+- Playwright MCP core tool names, params, and read-only flags (README,
+  generated from source by update-readme.js; plus playwright.dev tables).
+- The element-reference protocol: `element` (human description, for
+  permission) + `target` (exact ref from the snapshot, or a unique selector);
+  ref grammar `(f\d+)?e\d+` (frame-prefixed); resolution via
+  page.getByRef(); stale ref -> explicit re-snapshot error. [tab.ts]
+- Snapshot minting: page.ariaSnapshot({mode:'ai', depth, boxes}); every
+  action response re-includes a snapshot (setIncludeSnapshot). [snapshot.ts,
+  tab.ts]
+- Settle recipe: action -> 500ms settle -> navigation 'load' wait (<=10s) ->
+  drain in-flight document/stylesheet/script/xhr/fetch. [utils.ts]
+- Token-control surfaces: browser_snapshot{target subtree, depth, filename},
+  browser_find (snippet search w/ refs), --image-responses allow|omit|only,
+  --snapshot-mode full|none, --snapshot-boxes. [README]
+- Chrome DevTools MCP: take_snapshot/uid + "prefer snapshot over screenshot";
+  waitForStableDom default true; includeSnapshot on action responses;
+  filePath saves instead of context. [docs/tool-reference.md]
+- browser-use V4 registry action list; integer-index element refs; CDP
+  backendNodeId resolution; extract = markdown + start_from_char pagination +
+  optional JSON schema. [tools/service.py, views.py, actor/element.py]
+- Anthropic browser toolset (31 actions incl. read_page/find/get_page_text)
+  as implemented by browser-use. [integrations/anthropic/browser_use.py]
+- Playwright MCP's own README recommends CLI+SKILLS over MCP for coding
+  agents on token grounds.
+
+INFERRED (reasoned from the above, not observed at runtime):
+- Runtime behavior of any of it. Nothing was executed; no browser ran, no
+  snapshot was taken, no MCP server was started. All "what happens" claims
+  are from reading code paths and rendered examples.
+- That per-snapshot minting makes refs strictly ephemeral in practice (code
+  path supports it; no live staleness test).
+- That ariaSnapshot's 'ai' mode walks iframe content with f-prefixed refs on
+  real nested-frame pages (grammar proves the naming; no live iframe page
+  was driven).
+- That ship's truncate()-based observation cap conflicts with whole-tree
+  snapshots and needs find/subtree modes (argument from the references'
+  behavior, not a ship-side experiment).
+- Whether the sandbox image's pinned Playwright 1.63.0 exposes
+  page.getByRef / ariaSnapshot 'ai' mode with the same shapes as monorepo
+  main. UNVERIFIED — check before the slice assumes it.
+
+NOT DONE / OUT OF SCOPE
+- Live proofs from plan §7.1 (Chromium-via-authenticated-proxy 407, image
+  content through the gateway): untouched by this research, still open.
+- Chrome DevTools MCP --slim tool list; Anthropic native toolset docs;
+  @isomorphic/ariaSnapshot internals. Listed as unverified in the addendum.
+
+STATUS: research round complete; addendum written; no fabrication — every
+quoted string above appears verbatim in a fetched source.
