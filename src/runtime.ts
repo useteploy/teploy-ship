@@ -72,7 +72,7 @@ import type { Actor } from "./actor.js";
 import { FileOutbox, NucleusOutbox } from "./outbox.js";
 import { FileDeliveryStore, NucleusDeliveryStore, type DeliveryStore } from "./delivery.js";
 import type { Outbox } from "./outbox.js";
-import { NucleusPgwire } from "./nucleus-pgwire.js";
+import { NucleusPgwire, type PgwireDialect } from "./nucleus-pgwire.js";
 import { migrate } from "./migrations.js";
 import { stepFingerprint } from "./step-fingerprint.js";
 import { warmCacheEnabled, warmSlugOf } from "./warm.js";
@@ -303,7 +303,7 @@ export { costUSD, pricingFor, isPricedModel, UNKNOWN_MODEL_PRICING } from "./pri
 export interface ShipRuntime {
   /** Present on both built-in runtimes; optional for legacy injected adapters. */
   launches?: LaunchJournal;
-  kind: "file" | "nucleus";
+  kind: "file" | "nucleus" | "postgres";
   store: EventStore;
   /**
    * One execution pass. Returns null when another executor holds the
@@ -509,13 +509,13 @@ export interface NucleusShipRuntime extends ShipRuntime {
 export async function nucleusRuntime(
   url: string,
   owner: string,
-  options?: { log?: (line: string) => void; db?: NucleusPgwire },
+  options?: { log?: (line: string) => void; db?: NucleusPgwire; dialect?: PgwireDialect },
 ): Promise<NucleusShipRuntime> {
   // `db` is a seam, not a feature: NucleusPgwire already takes a PoolLike so a
   // test can watch the statements it emits, and the reads this runtime issues
   // (listMeta above all) are worth asserting on rather than trusting.
   installPolicyShadowFromEnv(); // no-op unless SHIP_POLICY_SHADOW=on
-  const db = options?.db ?? new NucleusPgwire(url, owner);
+  const db = options?.db ?? new NucleusPgwire(url, owner, { dialect: options?.dialect });
   // Bring the shared schema to the shape this binary expects BEFORE handing
   // back a runtime. A rolling deploy runs old and new processes against one
   // Nucleus, so this must be safe to call concurrently (it takes a KV lock)
@@ -1506,7 +1506,7 @@ export async function enqueueRun(
   // markWake only updates an existing index record; a freshly enqueued
   // run has none, so the scheduler would never see it. record() is the
   // insert-or-update path — "wake" makes the run due immediately.
-  if (runtime.kind === "nucleus") {
+  if (runtime.kind !== "file") {
     const nucleus = runtime as NucleusShipRuntime;
     await nucleus.index.record(
       options.runId,
