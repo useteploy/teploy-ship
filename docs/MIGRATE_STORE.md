@@ -30,7 +30,8 @@ rollback is a config revert.
    # PK'd table, one STREAM_XADD), then:
    docker run --rm --network rehearse -v "$PWD":/w -w /w \
      -e FROM_URL=postgres://nucleus@nuc:5432/nucleus?sslmode=disable \
-     -e TO_URL=postgres://ship:pw@pg:5432/ship?sslmode=disable \
+     -e TO_URL=postgres://ship@pg:5432/ship?sslmode=disable \
+     -e PGPASSWORD=pw \
      node:22 node scripts/migrate-store.mjs
    ```
 
@@ -97,7 +98,8 @@ teploy secret set SHIP_DB_PASSWORD=<generated>   # openssl rand -base64 24
    ```sh
    docker run --rm --network teploy -v "$PWD":/w -w /w \
      -e FROM_URL=postgres://nucleus@ship-nucleus:5432/nucleus?sslmode=disable \
-     -e TO_URL=postgres://ship:<SHIP_DB_PASSWORD>@ship-postgres:5432/ship?sslmode=disable \
+     -e TO_URL=postgres://ship@ship-postgres:5432/ship?sslmode=disable \
+     -e PGPASSWORD=<SHIP_DB_PASSWORD> \
      node:22 node scripts/migrate-store.mjs
    ```
 

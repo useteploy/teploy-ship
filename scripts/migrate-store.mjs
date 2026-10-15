@@ -26,9 +26,11 @@
 //     defect tracks long-lived pools running many distinct statements, so
 //     the migrator never reuses one.
 //
-// USAGE (from the repo root; pg is a project dependency)
+// USAGE (from the repo root; pg is a project dependency; the target password
+// rides PGPASSWORD so no credential ever appears in a URL or argv)
 //   FROM_URL='postgres://nucleus@ship-nucleus:5432/nucleus?sslmode=disable' \
-//   TO_URL='postgres://ship:PASSWORD@ship-postgres:5432/ship?sslmode=disable' \
+//   TO_URL='postgres://ship@ship-postgres:5432/ship?sslmode=disable' \
+//   PGPASSWORD='<the ship user password>' \
 //   node scripts/migrate-store.mjs
 //
 // Exit code 0 only if every table's row count matches the source.
