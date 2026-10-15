@@ -19,8 +19,8 @@
     "preserve"
   ],
   "properties": {
-    "scenarioId": { "type": "string", "pattern": "^pj-[sbc]-[a-z-]+$" },
-    "family": { "enum": ["small-site", "ui-api-db", "unfamiliar-service"] },
+    "scenarioId": { "type": "string", "pattern": "^pj-[sbcd]-[a-z-]+$" },
+    "family": { "enum": ["small-site", "ui-api-db", "unfamiliar-service", "js-site"] },
     "runId": { "type": "string" },
     "harnessRevision": { "type": "string", "description": "git SHA of teploy-ship when the run executed" },
     "fixtureRevision": { "type": "string", "description": "git SHA or sha256 of the fixture tree used" },

@@ -1,0 +1,29 @@
+/* Harbor Lights desk board. The lamp colour is an INPUT to the board text
+   (app.js folds the resolved computed colour into its checksum) — change it
+   and the board's REF changes with it. */
+body {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  margin: 2rem auto;
+  max-width: 34rem;
+  padding: 0 1rem;
+  color: #16324a;
+  background: #f4f0e6;
+}
+
+.board {
+  color: #b0632a;
+  border: 2px solid #16324a;
+  padding: 1rem;
+}
+
+.board p[role="status"] {
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  margin: 0;
+}
+
+.static-mirror {
+  color: #4d606e;
+  font-style: italic;
+}

@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "A near-miss transcription: right condition and ref, wrong case (service fog — ref 4039a8e8) — the kind of confident sloppiness an exactness grader exists to catch.",
+  "failsWith": "static mirror reads"
+}

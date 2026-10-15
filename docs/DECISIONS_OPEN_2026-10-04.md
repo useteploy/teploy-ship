@@ -4,6 +4,18 @@ The single list of decisions only the owner can make, with the context each
 one needs. Everything else open is in [NEXT_SESSION.md](../NEXT_SESSION.md).
 When a decision is made, record it here and in the programme row it affects.
 
+## Decided 2026-10-15 (owner, relayed in session)
+
+- **Decision 3 (S12/D4 image routing — the screenshot class): DECIDED —
+  route pixel screenshots in ship's future image mode to `glm-5.3-flash`
+  on the z.ai coding plan.** Evidence: a live decode test this date
+  (2026-10-15) — a red-square PNG was answered "Red" through the plan's
+  flash model. This AMENDS the 2026-10-05 hosted-routing refusal (Decision 1
+  below) **for the screenshot class only**; private non-image data keeps the
+  refusal and the fail-closed gate. Anthropic/OpenAI remain the proven
+  end-to-end fallback (`evals/receipts/2026-10-14-image-path-e2e.txt`).
+  Revisit if dense-detail tasks need a larger model.
+
 ## Decided 2026-10-05 (owner, relayed in session)
 
 - **Decision 1 (model-routing data gates): DECIDED — do NOT assert

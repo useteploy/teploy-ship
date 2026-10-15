@@ -82,7 +82,7 @@ import type { RepoMemoryStore } from "./repo-memory.js";
 import type { SteerStore } from "./steer.js";
 import { formatSearchHits } from "./code-index.js";
 import { frameUntrusted, screenUntrusted } from "./guard.js";
-import { LOOK_SEALED, runLook } from "./look.js";
+import { LOOK_OPEN_PLAN, LOOK_SEALED, runLook } from "./look.js";
 import { networkForTrust, parseNetworkTier, wireNetwork } from "./egress.js";
 import type { NetworkTier } from "./egress.js";
 import type { CodeSearch } from "./code-index.js";
@@ -2333,6 +2333,18 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
             messages.push({ role: "user", content: LOOK_SEALED });
             continue;
           }
+          // D3's second rule, at the same seam: open tier plus a browser
+          // requires plan review. `input.plan === true` is the recorded
+          // marker of the plan park (durable.ts above): a run carrying it
+          // and still executing turns was approved there — a denial returns
+          // `plan-rejected` before the loop begins. Pure input, no step,
+          // identical refusal on replay. The allowlist tier (the worker
+          // default) is unaffected: that is the boundary the D3 rules
+          // already accept for a browser.
+          if (sandboxOverridesOf(input)?.network === "open" && input.plan !== true) {
+            messages.push({ role: "user", content: LOOK_OPEN_PLAN });
+            continue;
+          }
           // A recorded step, so a replay returns the recorded snapshot text
           // without booting a browser — the same contract turn-N-exec gives a
           // command.
@@ -2340,7 +2352,15 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
             ws.live?.({ phase: "running", turn, detail: clipDetail(describeAction(action)) });
             return runLook(ws.executor, `t${turn}`, action, config.actionTimeoutMs);
           });
-          messages.push({ role: "user", content: truncate(formatObservation(result), maxObs) });
+          // INJECTION FENCE. Unlike a command's output — which the agent chose
+          // to produce — a page's content is a channel written by whoever owns
+          // the page, arriving in a loop that holds commit authority. It gets
+          // the same <untrusted-content> frame PR review comments get (see the
+          // pr-review-comments step): delimiters the system prompt already
+          // declares as data-not-instructions, with embedded delimiters
+          // defanged. Framed AFTER truncation so the pair can never be cut
+          // apart by an oversized snapshot.
+          messages.push({ role: "user", content: frameUntrusted(truncate(formatObservation(result), maxObs)) });
           continue;
         }
 

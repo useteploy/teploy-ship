@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "THE EXPLICIT NEGATIVE CONTROL: a self-authored proof. PROOF.md claims the observation — and even quotes the CORRECT board text, as a lucky or copied guess would — but no page change backs it. The grader must not credit claims over its own render.",
+  "failsWith": "static mirror reads"
+}

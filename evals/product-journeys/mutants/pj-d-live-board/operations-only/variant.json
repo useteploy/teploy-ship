@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "Paper trail only: OPERATIONS.md quotes the CORRECT rendered text (as if observed), but the static mirror — the deliverable visitors see — still carries the placeholder. A correct claim with no matching page change must earn nothing.",
+  "failsWith": "static mirror reads"
+}

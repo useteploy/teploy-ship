@@ -1,0 +1,5 @@
+{
+  "kind": "wrong",
+  "description": "THE NEGATIVE CONTROL: edits derived from the static files alone. The mirror and OPERATIONS.md carry the stale hand-copied line OPERATIONS.md already contains (SERVICE FOG — REF 00000000) — looks diligent, quotes a ref the board never rendered. Must fail against the grader's own render.",
+  "failsWith": "static mirror reads"
+}

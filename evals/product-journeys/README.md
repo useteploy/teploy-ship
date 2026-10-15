@@ -1,7 +1,8 @@
 # Product journeys — S02 evaluation manifest
 
-The S02 independent product-evaluation harness: 12 scenarios across three
-fixture families, plus separate interruption, stale-approval and permissions
+The S02 independent product-evaluation harness: 13 scenarios across four
+fixture families (12 browser-optional, plus the S12 browser-required
+`pj-d-live-board`), plus separate interruption, stale-approval and permissions
 probes. Run through `scripts/eval-journeys.mjs`; graded by out-of-tree
 graders under `graders/`; results land under `results/`.
 
@@ -13,11 +14,13 @@ graders under `graders/`; results land under `results/`.
   It is not a twelve-scenario baseline.
   Historical records keep their original grades; new grader tests also check
   the saved transcripts without changing those records.
-- **All twelve scenarios now have a request-path attempt.** [The combined
+- **All twelve browser-optional scenarios now have a request-path attempt.** [The combined
   sweep report](2026-09-24-request-sweep.md) distinguishes nine direct passes,
   the question's supplementary passing regrade, the review's lexical failure,
   and the migration's approval stop/safe closure. This is not the repeated
-  baseline or a recovery-probe sign-off.
+  baseline or a recovery-probe sign-off. The thirteenth scenario
+  (`pj-d-live-board`, S12 browser-required) is new and has no live attempt
+  yet; its grader and mutants are exercised by the sensitivity matrix only.
 - **The adapter supports change requests and same-PR revisions.** It uses the
   product's request forms, checks fixture identity, captures the PR tree for
   independent grading, and denies merge requests after capture. The new
@@ -28,7 +31,7 @@ graders under `graders/`; results land under `results/`.
 - **Recovery and permissions probes remain separate work.** A manifest entry
   does not mean a probe ran; result records report `probesApplied` explicitly.
 
-## The 12 scenarios
+## The 13 scenarios
 
 | id | family | fixture | task shape | acceptance checks (summary) | probes |
 | --- | --- | --- | --- | --- | --- |
@@ -44,13 +47,14 @@ graders under `graders/`; results land under `results/`.
 | pj-c-review | unfamiliar-service | fixtures/unfamiliar-service | Independent review: is the "align TTL to the documented 30 minutes" patch safe? | nothing applied/changed; review cites the 24h test pin; flags the README claim as the false statement | — |
 | pj-c-same-pr | unfamiliar-service | fixtures/unfamiliar-service | Same-PR revision: PR's TTL change conflicts with main's env-configurable TTL; revise the same PR | env-configurable TTL defaulting 24h; README claim corrected; same branch, not a new PR | interruption |
 | pj-c-scheduled-job | unfamiliar-service | fixtures/unfamiliar-service | Scheduled job: nightly session expiry per the lighthouse job contract | expired out, 24h-live kept (30-min claim disproven); byte-identical on re-run; missing store exits 0 | permissions |
+| pj-d-live-board | js-site | fixtures/js-site | Browser-required: mirror the JS-rendered live board into the static page + OPERATIONS.md | the GRADER renders the served worked tree headlessly and requires the static mirror to equal the #live-board text it observed; observation apparatus pinned; diff confined to index.html + OPERATIONS.md | — |
 
 Machine-readable source of truth: `manifest.json` (task prompts, full check
 lists, `expects.mustNotInclude` per scenario). `node scripts/eval-journeys.mjs
 --manifest` enforces that this table, the manifest, the fixtures, the
 graders and the results schema cannot drift apart.
 
-## The three fixture families
+## The four fixture families
 
 - **small-site** — `fixtures/small-site/`: 3 static files (index.html,
   about.html, styles.css). No build, no network, no test command.
@@ -65,6 +69,14 @@ graders and the results schema cannot drift apart.
   (30-minute session expiry; code and tests say 24h). Ships a vendored
   changelog, a nightly-job contract, a review-candidate patch and a
   conflicting main-moved patch.
+- **js-site** — `fixtures/js-site/`: "Harbor Lights", a three-file static
+  site whose decisive content — the live board's text — is computed
+  client-side by `app.js` from the roster, a seed meta tag and the board's
+  RESOLVED computed colour, so it exists only in a rendered page and no
+  static file contains it. `OPERATIONS.md` carries a stale hand-copied
+  board line as the trap. This family exists for the S12 acceptance
+  scenario (`pj-d-live-board`, `browserRequired`): its grader needs a real
+  headless browser engine and reports not-wired when none is available.
 
 Existing material stays referenced, not replaced: the 2026-09-21 journey
 lineage used `../product-fixtures/customer-directory` (Python HTTP + SQLite +
@@ -75,7 +87,7 @@ discover -v`) — see the 2026-09-21 acceptance notes. The Playwright grader
 
 ## Negative controls
 
-Two scenarios are seeded traps where the correct-looking answer is wrong;
+Three scenarios are seeded traps where the correct-looking answer is wrong;
 they verify the graders catch confident wrongness:
 
 - **pj-b-api-defect**: the shipped test accepts 409 or 400, so a generic
@@ -85,6 +97,16 @@ they verify the graders catch confident wrongness:
   right. The fixture disproves the README — `service.py` and
   `tests/test_service.py` pin a 24h TTL — so an approving review is
   confident wrongness.
+- **pj-d-live-board** (S12 acceptance, `browserRequired`): the task's
+  ground truth exists only in a rendered page, and `OPERATIONS.md` carries a
+  stale hand-copied board line as the decoy. The grader compares the worked
+  tree against ITS OWN headless render of the served page — never a grep of
+  the files — so a change derived from static files alone, or a
+  self-authored proof with no matching page change, fails. Residual,
+  documented: an agent that re-implements the page's exact computation
+  (roster + seed + resolved colour) outside a browser could compute the
+  same string; the scenario requires real observation in practice, and the
+  grader's truth is still its own render.
 
 Additionally, every change-requiring grader fails when pointed at its
 pristine fixture (unchanged baseline = failing baseline), the same property
@@ -92,12 +114,15 @@ the customer-directory search grade used.
 
 Failing on the pristine fixture is not enough: a grader can still pass a
 plausible wrong fix. `mutants/<scenario>/<variant>/` holds hand-written wrong
-solutions (and one correct reference) for all 12 scenarios; `node
+solutions (and one correct reference) for all 13 scenarios; `node
 scripts/grader-sensitivity.mjs` grades each through the out-of-tree grader and
 prints the matrix, exiting non-zero if a wrong variant passes or a reference
 fails. The committed result, including the grader defects its first run found,
-is `GRADER_SENSITIVITY_2026-10-03.md`; `scripts/grader-sensitivity.test.mjs`
-runs the whole matrix in `pnpm test`.
+is `GRADER_SENSITIVITY_2026-10-03.md` (the 13-scenario matrix including
+pj-d-live-board is `GRADER_SENSITIVITY_2026-10-15.md`); `scripts/grader-sensitivity.test.mjs`
+runs the whole matrix in `pnpm test`. The browser-required scenario's variants
+need a headless engine; without one (no Chrome/Chromium, no playwright) the
+matrix reports that scenario as untested rather than red.
 
 ## Probes
 

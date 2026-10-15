@@ -34,6 +34,21 @@ export const LOOK_SEALED =
   "Nothing you do inside the run changes that. If the task genuinely needs to see a web page, say so in a ```finish block, naming the page — the run's network tier is an operator decision.";
 
 /**
+ * What a run on the OPEN tier is told when it looks without plan review —
+ * the perception input's D3 rule ("open tier plus a browser requires plan
+ * review"), wired at the same seam as LOOK_SEALED. "Plan review" means the
+ * run was enqueued with `input.plan` and therefore parked on PLAN_EVENT
+ * before its first turn: a run that reaches a look action with that flag
+ * has, in its own log, an approved plan behind it (a denied one ended the
+ * run at `plan-rejected` before any turn ran). Reading the flag rather
+ * than a fresh approval record keeps the gate a pure function of the
+ * recorded input, so a replay refuses identically and no step is added.
+ */
+export const LOOK_OPEN_PLAN =
+  "REFUSED: this run's sandbox network tier is open, and a browser with unrestricted egress is only permitted on a run whose plan an operator reviewed. " +
+  "This run was not enqueued with plan review, so ```look does not execute here. Nothing you do inside the run changes that. If the task genuinely needs to see a web page, say so in a ```finish block, naming the page — an operator can re-enqueue the run with plan review, or on the allowlist tier with the page's host added.";
+
+/**
  * The loud stale-ref failure (the addendum's error shape, verbatim in spirit).
  * Refs are minted per snapshot render and die with the page they came from;
  * there is no fuzzy matching, ever.

@@ -168,3 +168,41 @@ test('pj-c-same-pr: forge evidence decides same-PR; a new PR or an unmoved head 
     assert.ok(samePrReasons(none).some(x => x.startsWith('not-wired:')));
   } finally { w.cleanup(); }
 });
+
+// pj-d-live-board (S12 acceptance): the browser-required grader. Its ground
+// truth is the grader's OWN headless render of the served worked tree, so
+// these tests need a real engine; without one they degrade to an explicit
+// skip-with-reason, never a silent pass. The full mutant matrix for this
+// scenario runs in scripts/grader-sensitivity.test.mjs.
+test('pj-d-live-board: the grader renders the served tree itself — reference passes, pristine/static-guess/self-proof fail', async (t) => {
+  const { browserEngineAvailable, gradeVariant, variantsFor } = await import('./grader-sensitivity.mjs');
+  if (!(await browserEngineAvailable())) {
+    t.skip('no headless browser engine available (install Chrome/Chromium or set CHROME_BIN/PLAYWRIGHT_MODULE)');
+    return;
+  }
+  const manifest = await loadManifest(repoRoot);
+  const scenario = manifest.scenarios.find(s => s.id === 'pj-d-live-board');
+  const scratch = mkdtempSync(join(tmpdir(), 'pj-d-board-graders-'));
+  const graderDir = join(scratch, 'g');
+  cpSync(join(pjRoot, 'graders'), graderDir, { recursive: true });
+  try {
+    // Pristine fixture: a change-requiring grader must fail it. (A variant
+    // object with no files/ overlay leaves the staged tree untouched.)
+    const pristine = await gradeVariant({ pjRoot, graderDir, manifest, scenario, variant: { name: 'pristine', dir: join(scratch, 'pristine'), kind: 'wrong' } });
+    assert.equal(pristine.pass, false, 'the untouched fixture cannot pass a change-requiring grader');
+    assert.ok(pristine.reasons.some(x => x.includes('static mirror reads')), pristine.reasons.join('\n'));
+
+    for (const variant of variantsFor(pjRoot, 'pj-d-live-board')) {
+      const graded = await gradeVariant({ pjRoot, graderDir, manifest, scenario, variant });
+      if (variant.kind === 'correct') {
+        assert.equal(graded.pass, true, `${variant.name}: ${graded.reasons.join('\n')}`);
+        assert.ok(graded.evidence.some(e => e.kind === 'browser'), 'the pass is grounded in the grader\'s own render');
+      } else {
+        assert.equal(graded.pass, false, `${variant.name} passed — the grader must not credit it`);
+        assert.ok(graded.reasons.some(x => new RegExp(variant.failsWith).test(x)), `${variant.name}: wrong reason: ${graded.reasons.join('\n')}`);
+      }
+    }
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});

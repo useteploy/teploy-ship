@@ -17,6 +17,7 @@ import { workingDiff } from "./git.js";
 import { ensureKernel, installKernel, runCell, stopKernel } from "./kernel.js";
 import { condenseIfNeeded, defaultCondenseConfig } from "./memory.js";
 import type { CondenseConfig } from "./memory.js";
+import { frameUntrusted } from "./guard.js";
 import { formatObservation, systemPrompt } from "./prompt.js";
 import { scrub } from "./redact.js";
 import { runLook } from "./look.js";
@@ -452,7 +453,13 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
         emit({ type: "error", step: index, text: message });
         return { status: "error", summary: `Look failed: ${message}`, steps, messages, usage };
       }
-      const observation = truncate(formatObservation(result), maxObs);
+      // INJECTION FENCE (same as durable.ts): a page's content is written by
+      // whoever owns the page, not chosen by the agent the way a command's
+      // output is, so it enters the transcript inside the
+      // <untrusted-content> frame the system prompt declares as
+      // data-not-instructions. Framed after truncation so the delimiter pair
+      // survives any snapshot size.
+      const observation = frameUntrusted(truncate(formatObservation(result), maxObs));
       messages.push({ role: "user", content: observation });
       steps.push({ index, thought, action, result, observation });
       emit({ type: "observation", step: index, text: observation });
