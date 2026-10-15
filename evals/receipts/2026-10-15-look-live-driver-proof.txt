@@ -1,0 +1,139 @@
+RECEIPT — the S12 `look` driver against the REAL sandbox stack (text-first, default-off)
+2026-10-15 · branch feat/s12-look-action · local colima VM · production untouched
+
+==============================================================================
+0. QUESTION
+==============================================================================
+
+Does the ```look driver that src/look.ts generates actually observe a page
+with the stack the product runs — the ship-sandbox-node image's Debian
+Chromium 155.0.8059.39 and its pinned playwright@1.63.0 — over a persistent
+per-run session, with refs that resolve across turns and fail loudly when
+stale? The unit suite (src/look.test.ts) runs the generated scripts against
+a fake page; this proof ran them against the real browser.
+
+VERDICT UP FRONT: YES — 14/14 assertions passed live, including the two the
+pre-flight had to deviate for (see §2): ref resolution via the aria-ref
+selector engine (playwright 1.63.0 has no getByRef) and the fixed CDP port
+coexisting with Playwright's own pipe transport.
+
+==============================================================================
+1. ENVIRONMENT
+==============================================================================
+- Host: Tyler's Mac (darwin/arm64). Docker = colima VM (Linux 6.8, aarch64,
+  2 CPU / 2 GiB), client against unix:///Users/tyler/.colima/default/docker.sock.
+- Image: ship-sandbox-node:dev — the SAME image the 2026-10-14 egress proof
+  built from the worktree copy of images/ (Debian trixie node:22 digest pin,
+  apt chromium 155.0.8059.39, playwright@1.63.0 with
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1, CHROMIUM_BIN=/usr/bin/chromium,
+  NODE_PATH=/usr/local/lib/node_modules). Reused as-is; nothing rebuilt.
+- Container: --network none (loopback only — the proof needs no egress and
+  none was given), --shm-size 512m, --cpus 1 --memory 1024m (the daemon's
+  default run limits), no --init.
+- Page under test: a local /work/page.html served by
+  `python3 -m http.server 8777` INSIDE the container (button, link, textbox,
+  and an iframe with its own button). NO_PROXY covers 127.0.0.1 by daemon
+  design; this container had no proxy env at all.
+- Harness: node script importing the BUILT dist/look.js from the worktree,
+  calling runLook() with a docker-exec executor — i.e. the exact script
+  bytes src/look.ts generates, not a re-typed copy. The same core assertions
+  are committed as the opt-in test src/look-live.test.ts (SHIP_LOOK_LIVE=1).
+
+==============================================================================
+2. PRE-FLIGHT: playwright-core@1.63.0 API VERDICT (scratch npm install, .d.ts + lib grepped, then RUN)
+==============================================================================
+- page.ariaSnapshot({ mode: "ai", depth, boxes }) — PRESENT in 1.63.0
+  (types/types.d.ts:2101, locator variant :14517). mode:"ai" emits
+  "[ref=e2]" element references and snapshots of <iframe>s. Confirmed live.
+- page.getByRef() — ABSENT from 1.63.0 (no occurrence in types or lib).
+  DEVIATION ADOPTED (pin NOT bumped, per the slice's rule): ref resolution
+  uses the internal-but-first-class aria-ref selector engine —
+  `page.locator("aria-ref=" + ref)` — which is what 1.63's own bundled
+  tool backend uses for target resolution, down to validating
+  /^(f\d+)?e\d+$/ and jumping to the frame for f-prefixed refs
+  (coreBundle.js: _createAriaRefEngine, _jumpToAriaRefFrameIfNeeded,
+  the tools' targetLocators path). The engine resolves a ref against the
+  LAST ai snapshot rendered in the SAME connection
+  (_lastAriaSnapshotForQuery), so the driver snapshots the page first and
+  then takes the subtree — which is also the honest staleness semantic:
+  an unchanged page re-mints identical refs (deterministic traversal),
+  a changed page fails loudly. All three behaviors observed live (§3).
+- chromium.launch({args:[..., "--remote-debugging-port=9222"]}) — Playwright
+  always adds --remote-debugging-pipe for its own transport; empirically
+  Chromium 155 honours BOTH (the pipe for Playwright, the port for later
+  connectOverCDP turns). Confirmed live: /json/version answered on 9222
+  while the launcher process held the browser, and ps shows both flags.
+
+==============================================================================
+3. LIVE RESULTS (all PASS)
+==============================================================================
+1. url + snapshot      : exit 0; "[page] http://127.0.0.1:8777/page.html —
+                         Look Proof" then the a11y tree with [ref=eN] labels.
+2. iframe refs         : the nested iframe's button appears as
+                         [ref=f1e2] — the frame-prefixed grammar works.
+3. find (text)         : `find=sign in` -> '1 match for "sign in":
+                         - button "Sign in" [ref=e4]' (case-insensitive
+                         match, case-preserving quote).
+4. find (regex)        : /(?:sign in|cookies)/i -> 2 matches, one inside
+                         the frame.
+5. ref subtree         : `ref=e4` -> "subtree under e4:" + the node.
+6. frame ref           : `ref=f1e2` resolved INTO the iframe (Accept
+                         cookies button).
+7. depth cap           : depth=2 -> deepest line at 4 spaces of indent
+                         (2 levels) — structural, not post-hoc truncation.
+8. stale ref           : `ref=e9999` -> exit 1, stderr exactly
+                         "Ref e9999 not found in the current page snapshot.
+                         Take a new one (```look on its own, or with url= to
+                         navigate first) and use refs from that snapshot."
+9. session persistence : a LATER, bare `look` (separate docker exec = a
+                         fresh driver process) re-observed the same live
+                         page without any url= — the background session
+                         survived between driver turns.
+10. process tree       : one `node .teploy-agent/look-session.mjs`
+                         (PID 115, PPID 1 — detached) owning chromium
+                         (PID 127) whose args carry --headless=new,
+                         --disable-background-networking, --no-sandbox,
+                         --disable-gpu, --remote-debugging-port=9222 AND
+                         --remote-debugging-pipe. One session per run, no
+                         shared state; it dies with the container.
+11-14.                 : the compact equivalents of 1,2,5,8,9 re-run inside
+                         the committed opt-in test (src/look-live.test.ts,
+                         SHIP_LOOK_LIVE=1) against a fresh container of the
+                         same image: pass, ~4.8 s wall.
+
+Timing: first look (session boot + goto + snapshot) ~3 s; subsequent looks
+~1 s each, under the container's 1 CPU / 1 GiB defaults.
+
+==============================================================================
+4. EXACT COMMANDS (repro sketch)
+==============================================================================
+docker run -d --name s12-look-proof --shm-size 512m --network none \
+    --cpus 1 --memory 1024m ship-sandbox-node:dev sleep infinity
+docker exec s12-look-proof sh -c 'npm root -g'   # /usr/local/lib/node_modules
+# harness (scratch): node live-proof.mjs
+#   - executor.exec  = docker exec s12-look-proof sh -c <cmd>
+#   - executor.putFile = docker exec -i ... sh -c 'mkdir -p ... && cat > file'
+#   - runLook(executor, "liveN", { kind:"look", url|find|ref|depth ... })
+#     i.e. the REAL generated scripts + lookCommand from dist/look.js
+# or, the committed form:
+SHIP_LOOK_LIVE=1 node --test dist/look-live.test.js
+docker rm -f s12-look-proof
+
+==============================================================================
+5. NOT PROVEN HERE (and where they are)
+==============================================================================
+- The AUTHENTICATED-EGRESS proxy path. This container had no proxy env
+  (--network none, loopback page). The launch-side decomposition is the
+  2026-10-14 receipt's verified snippet, embedded verbatim in LOOK_SESSION
+  and pinned by a unit test (look.test.ts asserts the decompose lines and
+  flags); the live 407/200 behavior is THAT receipt's proof, not re-run
+  here. A through-the-proxy look on a real allowlisted host is the natural
+  first soak once SHIP_LOOK runs on a worker.
+- Multi-tab, dialogs, downloads, console capture, screenshots (image mode
+  is a future gated slice), and the full waitForCompletion drain recipe
+  (this slice settles 500 ms after `load` only).
+- Long-run footprint: one page measured; the session's memory over a whole
+  run is unmeasured (the container's 1 GiB limit is the backstop).
+
+— recorded by the S12 implementation sub-agent, 2026-10-15. Production
+untouched; no deploys; no teploy state changes.

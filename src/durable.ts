@@ -82,6 +82,7 @@ import type { RepoMemoryStore } from "./repo-memory.js";
 import type { SteerStore } from "./steer.js";
 import { formatSearchHits } from "./code-index.js";
 import { frameUntrusted, screenUntrusted } from "./guard.js";
+import { LOOK_SEALED, runLook } from "./look.js";
 import { networkForTrust, parseNetworkTier, wireNetwork } from "./egress.js";
 import type { NetworkTier } from "./egress.js";
 import type { CodeSearch } from "./code-index.js";
@@ -176,6 +177,16 @@ export interface DurableAgentInput {
    * the same steps whether or not the executing worker knows the action.
    */
   ask?: boolean;
+  /**
+   * Browser perception (S12): the ```look action — the run's in-sandbox
+   * browser session observed as a11y-tree text with refs (look.ts).
+   * Materialised at enqueue from SHIP_LOOK, default off, for the standing
+   * reason: it adds a recorded step (`turn-N-look`), so a run whose log
+   * predates the flag must not find a step it does not contain — and
+   * flag-off is byte-identical to a pre-look run, with the action not even
+   * parseable and the prompt not mentioning it.
+   */
+  look?: boolean;
   /**
    * Codebase indexing: repo runs refresh the Nucleus code index after
    * clone (a recorded step) and the agent gets the ```search action.
@@ -1732,11 +1743,15 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
       const p = ws.stepPrefix;
       const maxSteps = budget.maxSteps;
       const searchable = input.index === true && ws.scopeKey !== null && config.codeSearch !== undefined;
+      // S12: ```look parses only on runs whose input admits it, so a
+      // pre-feature log's turns (a model never told the action exists) parse
+      // exactly as they did when they were written.
+      const look = input.look === true;
       onEvent({ kind: "started", harness: NATIVE_HARNESS_ID });
       let messages: Message[] = [
         {
           role: "system",
-          content: systemPrompt({ workdir: ws.workdir, task: task.prompt, search: searchable, browser: input.verification?.preview !== undefined, ask: input.ask === true }),
+          content: systemPrompt({ workdir: ws.workdir, task: task.prompt, search: searchable, browser: input.verification?.preview !== undefined, ask: input.ask === true, look }),
         },
       ];
       let anySuccessfulAction = false;
@@ -1981,9 +1996,9 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
         // Trimmed at the first action block (actions.ts transcriptTurn): what
         // the model wrote after it is at best ignored and at worst its own
         // invented observation, which the next turn then reasons about.
-        messages.push({ role: "assistant", content: thought.trim() === "" ? "(no response)" : transcriptTurn(thought) });
+        messages.push({ role: "assistant", content: thought.trim() === "" ? "(no response)" : transcriptTurn(thought, { look }) });
 
-        const action = parseAction(thought);
+        const action = parseAction(thought, { look });
         // A SCAN'S FINISH GATE, and it replaces the fix-run chain below rather
         // than adding to it. Every hold in that chain asks a question about an
         // EDIT — did a command succeed, is the tree still clean, does the suite
@@ -2296,6 +2311,36 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
             }
           });
           messages.push({ role: "user", content: truncate(observation, maxObs) });
+          continue;
+        }
+
+        // Browser perception (S12, input.look). Read-only like ```search, and
+        // for the same reasons it keeps the loop's accounting untouched: a
+        // look does not clear the finish gates' evidence (reading a page is
+        // not work), does not touch the last-command verdict, and is not fed
+        // to the recovery tracker. It still spends a turn — the step cap is
+        // the budget; no look-specific cap exists in this slice.
+        if (action.kind === "look") {
+          // Egress gate. The tier is read from the RECORDED INPUT through
+          // sandboxOverridesOf — the pure funnel every workspace creation
+          // already goes through, which applies the external-task downgrade —
+          // so the refusal is a replay-safe fact of the log and records no
+          // step of its own. An input that names no tier runs the worker
+          // default (egress.ts DEFAULT_NETWORK_TIER, `allowlist`); a tier
+          // sealed only in the daemon's own env is out of this gate's reach
+          // and is named as a left-for-later in the PR.
+          if (sandboxOverridesOf(input)?.network === "none") {
+            messages.push({ role: "user", content: LOOK_SEALED });
+            continue;
+          }
+          // A recorded step, so a replay returns the recorded snapshot text
+          // without booting a browser — the same contract turn-N-exec gives a
+          // command.
+          const result = await ws.ctx.step(`${p}turn-${turn}-look`, () => {
+            ws.live?.({ phase: "running", turn, detail: clipDetail(describeAction(action)) });
+            return runLook(ws.executor, `t${turn}`, action, config.actionTimeoutMs);
+          });
+          messages.push({ role: "user", content: truncate(formatObservation(result), maxObs) });
           continue;
         }
 

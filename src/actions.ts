@@ -34,6 +34,7 @@ export type Action =
   | { kind: "edit"; edits: EditHunk[] }
   | { kind: "create"; file: string; content: string }
   | { kind: "search"; query: string } // semantic code retrieval (repo runs with an index)
+  | { kind: "look"; url?: string; ref?: string; find?: string; depth?: number } // browser perception (S12): the run's page as an a11y-tree text with refs
   | { kind: "finish"; message: string }
   | { kind: "ask"; question: string } // a question for the operator; the run parks on the answer (durable, input.ask)
   | { kind: "invalid"; message: string } // recognized but malformed — feed the error back
@@ -129,6 +130,85 @@ function hunksIn(code: string): Array<{ search: string; replace: string }> {
   return [...code.matchAll(SEARCH_REPLACE_ALL)].map((m) => ({ search: m[1]!, replace: m[2]! }));
 }
 
+/** `look` fence parameters: `key=value` tokens, whitespace-delimited. */
+const LOOK_PARAM = /(?:^|\s)(url|ref|find|depth)=/g;
+/**
+ * The element-ref grammar of Playwright's ai snapshots (tool-vocab addendum
+ * §4): `e12`, or `f2e3` for an element inside an iframe.
+ */
+const LOOK_REF = /^(f\d+)?e\d+$/;
+/** A `find=` needle wrapped as /pattern/flags is a regex; anything else is text. */
+const LOOK_FIND_RE = /^\/(.+)\/([a-z]*)$/s;
+const LOOK_DEPTH_MAX = 30;
+
+export const LOOK_HELP =
+  "```look observes the run's browser page as text (the accessibility tree, with [ref=eN] labels you can reuse):\n" +
+  "```look https://example.com/docs\n" +
+  "Narrow it instead of re-reading a big page — ```look find=Sign ?up (text or /regex/flags), ```look ref=e12 depth=3 (a subtree from your last snapshot).";
+
+/**
+ * Parse a ```look fence argument into the action. Parameters are `url=` (or a
+ * bare url before the first `key=`), `ref=`, `find=`, `depth=`; values run to
+ * the next parameter, so a find needle may contain spaces. Token control is
+ * STRUCTURAL on purpose (the tool-vocab addendum's rule): find/ref/depth
+ * decide how much of the tree is rendered at all, never a post-hoc trim of a
+ * giant blob.
+ */
+export function parseLookArgs(arg: string): Action {
+  const params = new Map<string, string>();
+  const marks = [...arg.matchAll(LOOK_PARAM)];
+  for (let i = 0; i < marks.length; i++) {
+    const mark = marks[i]!;
+    const start = mark.index! + mark[0]!.length;
+    const end = i + 1 < marks.length ? marks[i + 1]!.index : arg.length;
+    params.set(mark[1]!, arg.slice(start, end).trim());
+  }
+  // Text before the first key= is the url shorthand: ```look https://example.com
+  const lead = marks.length === 0 ? arg.trim() : arg.slice(0, marks[0]!.index).trim();
+  if (lead !== "") params.set("url", lead);
+
+  const url = params.get("url");
+  if (url === "") return { kind: "invalid", message: "```look url= is empty.\n\n" + LOOK_HELP };
+  if (url !== undefined && !/^https?:\/\//i.test(url)) {
+    return { kind: "invalid", message: `\`\`\`look url must be http(s), got: ${url}\n\n` + LOOK_HELP };
+  }
+  const ref = params.get("ref");
+  if (ref === "") return { kind: "invalid", message: "```look ref= is empty — pass a ref from your last snapshot, e.g. ref=e12.\n\n" + LOOK_HELP };
+  if (ref !== undefined && !LOOK_REF.test(ref)) {
+    return { kind: "invalid", message: `\`\`\`look ref must be an element ref from a previous snapshot (e12, or f2e3 inside an iframe), got: ${ref}\n\n` + LOOK_HELP };
+  }
+  const find = params.get("find");
+  if (find === "") return { kind: "invalid", message: "```look find= is empty.\n\n" + LOOK_HELP };
+  if (find !== undefined) {
+    const regex = LOOK_FIND_RE.exec(find);
+    if (regex !== null) {
+      try {
+        new RegExp(regex[1]!, regex[2]);
+      } catch (error) {
+        return { kind: "invalid", message: `\`\`\`look find= regex does not compile: ${error instanceof Error ? error.message : String(error)}\n\n` + LOOK_HELP };
+      }
+    }
+  }
+  if (ref !== undefined && find !== undefined) {
+    return { kind: "invalid", message: "```look ref= and find= both narrow the same snapshot — pick one.\n\n" + LOOK_HELP };
+  }
+  const depthRaw = params.get("depth");
+  let depth: number | undefined;
+  if (depthRaw !== undefined) {
+    depth = Number(depthRaw);
+    if (!Number.isInteger(depth) || depth < 1 || depth > LOOK_DEPTH_MAX) {
+      return { kind: "invalid", message: `\`\`\`look depth= must be a whole number from 1 to ${LOOK_DEPTH_MAX}, got: ${depthRaw}` };
+    }
+  }
+  return {
+    kind: "look",
+    ...(url !== undefined ? { url } : {}),
+    ...(ref !== undefined ? { ref } : {}),
+    ...(find !== undefined ? { find } : {}),
+    ...(depth !== undefined ? { depth } : {}),
+  };
+}
+
 function splitByFileHeader(code: string): Array<{ file: string; all: boolean; body: string }> {
   const sections: Array<{ file: string; all: boolean; body: string }> = [];
   let current: { file: string; all: boolean; body: string[] } | null = null;
@@ -180,24 +260,43 @@ function splitByFileHeader(code: string): Array<{ file: string; all: boolean; bo
  *
  * Pure, so a replay trims the recorded text identically.
  */
-export function transcriptTurn(text: string): string {
-  const fenced = firstFencedAction(text);
+export function transcriptTurn(text: string, dialect?: ActionDialect): string {
+  const fenced = firstFencedAction(text, dialect);
   if (fenced === null) return text;
   return text.slice(0, fenced.end).trimEnd();
 }
 
-function firstFencedAction(text: string): { end: number } | null {
+function firstFencedAction(text: string, dialect?: ActionDialect): { end: number } | null {
+  const langs = actionLangs(dialect);
   for (const match of text.matchAll(FENCE)) {
     const lang = (match[1]!.trim().split(/\s+/)[0] ?? "").toLowerCase();
-    if (ACTION_LANGS.has(lang)) return { end: match.index + match[0].length };
+    if (langs.has(lang)) return { end: match.index + match[0].length };
   }
   return null;
 }
 
 const ACTION_LANGS: ReadonlySet<string> = new Set(["finish", "edit", "create", "search", "ask", ...PYTHON_LANGS, ...BASH_LANGS]);
+/** ACTION_LANGS plus `look` — the one action whose offerance is runtime-gated. */
+const LOOK_ACTION_LANGS: ReadonlySet<string> = new Set([...ACTION_LANGS, "look"]);
 
-export function parseAction(text: string): Action {
-  const fenced = parseFencedAction(text);
+function actionLangs(dialect?: ActionDialect): ReadonlySet<string> {
+  return dialect?.look === true ? LOOK_ACTION_LANGS : ACTION_LANGS;
+}
+
+/**
+ * Which actions this session parses. `look` (S12) is the first action that is
+ * OFFERED conditionally: flag-off must be byte-identical to a pre-feature
+ * run, so a ```look block is not an action at all — it falls through the
+ * unknown-language scan and a turn containing one parses as `none`, exactly
+ * as before the action existed. Every pre-existing caller passes nothing and
+ * keeps that behaviour.
+ */
+export interface ActionDialect {
+  look?: boolean;
+}
+
+export function parseAction(text: string, dialect?: ActionDialect): Action {
+  const fenced = parseFencedAction(text, dialect);
   const xml = parseToolXmlAction(text);
   if (fenced !== null && xml !== null) {
     return fenced.index <= xml.index ? fenced.action : xml.action;
@@ -205,7 +304,7 @@ export function parseAction(text: string): Action {
   return fenced?.action ?? xml?.action ?? { kind: "none" };
 }
 
-function parseFencedAction(text: string): { index: number; action: Action } | null {
+function parseFencedAction(text: string, dialect?: ActionDialect): { index: number; action: Action } | null {
   for (const match of text.matchAll(FENCE)) {
     const index = match.index;
     const info = match[1]!.trim();
@@ -235,6 +334,9 @@ function parseFencedAction(text: string): { index: number; action: Action } | nu
       const query = code.trim();
       if (query === "") return { index, action: { kind: "invalid", message: "```search block needs a query in its body, e.g.\n```search\nwhere is retry backoff handled?\n```" } };
       return { index, action: { kind: "search", query } };
+    }
+    if (lang === "look" && dialect?.look === true) {
+      return { index, action: parseLookArgs(arg) };
     }
     if (PYTHON_LANGS.has(lang)) {
       if (code.trim() === "") return { index, action: { kind: "invalid", message: "The Python action is empty. Put the code on a new line after ```python and close the block on its own line." } };
@@ -312,6 +414,17 @@ export function describeAction(action: Action): string {
       return `create: ${action.file}`;
     case "search":
       return `search: ${firstLine(action.query)}`;
+    case "look": {
+      const where =
+        action.url !== undefined
+          ? action.url
+          : action.ref !== undefined
+            ? `ref=${action.ref}`
+            : action.find !== undefined
+              ? `find=${firstLine(action.find)}`
+              : "snapshot";
+      return `look: ${where}`;
+    }
     case "finish":
       return "finish";
     case "ask":

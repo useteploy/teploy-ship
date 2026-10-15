@@ -19,6 +19,7 @@ import { condenseIfNeeded, defaultCondenseConfig } from "./memory.js";
 import type { CondenseConfig } from "./memory.js";
 import { formatObservation, systemPrompt } from "./prompt.js";
 import { scrub } from "./redact.js";
+import { runLook } from "./look.js";
 import { RecoveryTracker, defaultRecoveryConfig } from "./recovery.js";
 import type { RecoveryConfig } from "./recovery.js";
 import { observeToolCall } from "./tool-manifest-shadow.js";
@@ -162,6 +163,15 @@ export interface RunAgentOptions {
    * matters.
    */
   codeSearch?: AgentCodeSearch;
+  /**
+   * Browser perception (S12, default off): the ```look action is parsed,
+   * advertised in the prompt, and answered with the accessibility-tree text
+   * of the run's own in-sandbox browser session (look.ts). Absent keeps the
+   * loop byte-identical to a pre-look run — the action is not parseable, so
+   * a ```look a model invents anyway falls through to the same "no code
+   * block" nudge as before, and the prompt does not mention it.
+   */
+  look?: boolean;
   onEvent?: (event: AgentEvent) => void;
   abortSignal?: AbortSignal;
 }
@@ -212,7 +222,7 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
   // `=== true`), so an option-less run's prompt is unchanged.
   const system: Message = {
     role: "system",
-    content: systemPrompt({ workdir, task: options.task, search: options.codeSearch !== undefined }),
+    content: systemPrompt({ workdir, task: options.task, search: options.codeSearch !== undefined, look: options.look === true }),
   };
   let messages: Message[] =
     options.priorMessages !== undefined && options.priorMessages.length > 0
@@ -307,8 +317,8 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
     // must be non-empty") — killing the whole run. Keep the stored turn
     // non-empty; parseAction on the empty thought yields a "none" action, so
     // the loop nudges for a real action below.
-    messages.push({ role: "assistant", content: thought.trim() === "" ? "(no response)" : transcriptTurn(thought) });
-    const action = parseAction(thought);
+    messages.push({ role: "assistant", content: thought.trim() === "" ? "(no response)" : transcriptTurn(thought, { look: options.look === true }) });
+    const action = parseAction(thought, { look: options.look === true });
     emit({ type: "thought", step: index, text: thought });
     emit({ type: "action", step: index, text: describeAction(action) });
 
@@ -423,6 +433,28 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
       observation = truncate(observation, maxObs);
       messages.push({ role: "user", content: observation });
       steps.push({ index, thought, action, observation });
+      emit({ type: "observation", step: index, text: observation });
+      continue;
+    }
+
+    // Browser perception (S12, options.look). Read-only like ```search, and
+    // for the same three reasons it keeps the loop's accounting untouched: a
+    // look does not clear the verified-finish evidence gate (reading a page
+    // is not work), does not touch the last-command verdict, and is not fed
+    // to the recovery tracker. It still spends a turn — the step cap is the
+    // budget, and no look-specific cap exists in this slice.
+    if (action.kind === "look") {
+      let result: ExecResult;
+      try {
+        result = await runLook(options.executor, `${session}-s${index}`, action, options.actionTimeoutMs);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        emit({ type: "error", step: index, text: message });
+        return { status: "error", summary: `Look failed: ${message}`, steps, messages, usage };
+      }
+      const observation = truncate(formatObservation(result), maxObs);
+      messages.push({ role: "user", content: observation });
+      steps.push({ index, thought, action, result, observation });
       emit({ type: "observation", step: index, text: observation });
       continue;
     }

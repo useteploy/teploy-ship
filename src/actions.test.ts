@@ -43,6 +43,94 @@ test("parses a search action; empty query is invalid", () => {
   assert.equal(parseAction("```search\n\n```").kind, "invalid");
 });
 
+// --- ```look (S12) ------------------------------------------------------------
+//
+// The one action whose PARSE is flag-gated. Everything above and below these
+// tests must keep passing unchanged with the dialect on, which is the point
+// of the corpus test at the end of the section.
+
+test("look: parses bare, url (shorthand and url=), find, ref and depth — values may contain spaces", () => {
+  const on = { look: true };
+  assert.deepEqual(parseAction("```look\n```", on), { kind: "look" });
+  assert.deepEqual(parseAction("```look https://example.com/docs\n```", on), { kind: "look", url: "https://example.com/docs" });
+  assert.deepEqual(parseAction("```look url=https://example.com\n```", on), { kind: "look", url: "https://example.com" });
+  assert.deepEqual(parseAction("```look find=Sign ?up\n```", on), { kind: "look", find: "Sign ?up" });
+  assert.deepEqual(parseAction("```look ref=e12 depth=3\n```", on), { kind: "look", ref: "e12", depth: 3 });
+  assert.deepEqual(parseAction("```look url=https://example.com find=/cookie(?:s)?/i\n```", on), {
+    kind: "look",
+    url: "https://example.com",
+    find: "/cookie(?:s)?/i",
+  });
+  assert.deepEqual(parseAction("```look ref=f2e3\n```", on), { kind: "look", ref: "f2e3" });
+});
+
+test("look: refuses malformed parameters loudly, with the vocabulary in the message", () => {
+  const on = { look: true };
+  const cases: Array<[string, RegExp]> = [
+    ["```look ftp://example.com\n```", /url must be http\(s\)/],
+    ["```look ref=button\n```", /element ref from a previous snapshot/],
+    ["```look ref=\n```", /ref= is empty/],
+    ["```look find=\n```", /find= is empty/],
+    ["```look ref=e1 find=x\n```", /pick one/],
+    ["```look depth=0\n```", /whole number from 1 to 30/],
+    ["```look depth=31\n```", /whole number from 1 to 30/],
+    ["```look find=/unterminated(/i\n```", /regex does not compile/],
+  ];
+  for (const [text, shape] of cases) {
+    const action = parseAction(text, on);
+    assert.equal(action.kind, "invalid", text);
+    if (action.kind === "invalid") assert.match(action.message, shape, text);
+  }
+  // No trailing slash means plain text, not a broken regex — a needle may
+  // legitimately contain slashes and parens, and it arrives verbatim.
+  assert.deepEqual(parseAction("```look find=/unterminated(\n```", on), { kind: "look", find: "/unterminated(" });
+});
+
+test("look: flag off, the action DOES NOT EXIST — flag on changes nothing else (the S12 equivalence)", () => {
+  // The corpus: one turn of every pre-look action kind, plus a ```look.
+  const corpus = [
+    "```bash\nls -la\n```",
+    "```python\nprint(1)\n```",
+    "```edit src/a.ts\n<<<<<<< SEARCH\nold\n=======\nnew\n>>>>>>> REPLACE\n```",
+    "```create b.txt\nhi\n```",
+    "```search\nwhere is it?\n```",
+    "```ask\nQuestion?\n```",
+    "```finish\ndone\n```",
+    "Thinking.\n```look https://example.com find=x\n```\nafter",
+    '<invoke name="bash"><parameter name="command">ls</parameter></invoke>',
+    "No action at all.",
+  ];
+  for (const text of corpus) {
+    // Without the dialect (every pre-existing caller): existing actions parse
+    // as themselves, and a ```look is not an action — it falls through the
+    // unknown-language scan exactly as before the action existed.
+    const off = parseAction(text);
+    assert.deepEqual(off, parseAction(text, {}), text);
+    assert.deepEqual(off, parseAction(text, { look: false }), text);
+    if (text.includes("```look")) {
+      assert.equal(off.kind, "none", `flag off, a look is not parseable: ${text}`);
+      // And the transcript is not cut at it (no fiction after the block is
+      // kept, but nothing is truncated early either).
+      assert.equal(transcriptTurn(text, {}), text, "flag off, the transcript does not cut at a look fence");
+    }
+    // With the dialect on, every OTHER action still parses identically —
+    // enabling look cannot perturb the existing action space.
+    const on = parseAction(text, { look: true });
+    if (!text.includes("```look")) assert.deepEqual(on, off, text);
+  }
+  // Flag on: the look turn parses, and the transcript now cuts at it.
+  const look = "Thinking.\n```look https://example.com\n```\nI expect to see a page.";
+  assert.deepEqual(parseAction(look, { look: true }), { kind: "look", url: "https://example.com" });
+  assert.equal(transcriptTurn(look, { look: true }), "Thinking.\n```look https://example.com\n```");
+});
+
+test("describeAction names a look's target", () => {
+  assert.equal(describeAction({ kind: "look", url: "https://example.com" }), "look: https://example.com");
+  assert.equal(describeAction({ kind: "look", ref: "f2e3" }), "look: ref=f2e3");
+  assert.equal(describeAction({ kind: "look", find: "Sign in" }), "look: find=Sign in");
+  assert.equal(describeAction({ kind: "look" }), "look: snapshot");
+});
+
 test("takes the FIRST actionable block (one action per turn)", () => {
   const action = parseAction("```bash\nfirst\n```\nthen\n```bash\nsecond\n```");
   assert.deepEqual(action, { kind: "bash", code: "first\n" });
