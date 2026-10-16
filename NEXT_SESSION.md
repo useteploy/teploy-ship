@@ -1,6 +1,6 @@
 # Next session
 
-Start with [docs/DECISIONS_OPEN_2026-10-04.md](docs/DECISIONS_OPEN_2026-10-04.md) (the two open founder calls and everything already decided), then this file. The single forward plan is [docs/SHIP_RELEASE_PROGRAMME_2026-09-21.md](docs/SHIP_RELEASE_PROGRAMME_2026-09-21.md); status lists live in its execution tables plus [AUDIT_OPEN.md](AUDIT_OPEN.md) wave-5 section. Update those rather than creating another plan.
+Start with [docs/DECISIONS_OPEN_2026-10-04.md](docs/DECISIONS_OPEN_2026-10-04.md) (everything already decided, plus open Decisions 4–10 from the programme's E6), then this file. The single forward plan is [docs/SHIP_RELEASE_PROGRAMME_2026-09-21.md](docs/SHIP_RELEASE_PROGRAMME_2026-09-21.md); status lists live in its execution tables plus [AUDIT_OPEN.md](AUDIT_OPEN.md) wave-5 section. Update those rather than creating another plan.
 
 ## Where things stand (2026-10-16, end of the perception programme)
 
@@ -23,14 +23,12 @@ opencode >= 2.0.0 preflight guard (#79), steering thread view
 delegation coordinator `SHIP_DELEGATE` (1 level, cap 2, context transfers;
 COORDINATOR_DESIGN.md) (#82), admin bootstrap (#84), plus the soak (#83).
 
-Next work, in order of value (the gap analysis vs T3/Devin-class agents,
-2026-10-16): MCP-client tools in the loop (S24 executes nothing today),
-opencode v2 adoption + session-resume steering (receipt
-2026-10-14-opencode-v2-events.txt holds the contract), event
-triggers/PR-watch (S16 continuation), delegation depth after capacity,
-Forgejo OIDC SSO wiring (DEPLOY.md documents it; bootstrap covers the
-break-glass need today), optionally a first-run UI setup wizard for the
-OSS onboarding story.
+Next work: the programme's **End state and execution backlog** section
+(E0–E6, 2026-10-16) is the single ordered queue — start at **E5 wave 6**
+(A0 backup fix, A1 `SHIP_THREAD_VIEW=on` soak, A2 shadow review, B6, C1,
+X11, G1 task capture; code lanes D1 MCP client, D2 two-way steering, D3
+follow-up continuity, X7). Owner decisions it needs are Decisions 4–10 (E6). The ordered
+lists that used to live here are folded into it.
 
 Standing follow-ups: `scripts/ship-backup.sh` predates the postgres store
 (use `teploy accessory backup` or a cold pgdata tar until fixed — see the
@@ -41,7 +39,7 @@ pattern); deploy prerequisite reminder — rerun `pnpm run build` + web
 build before EVERY `teploy deploy` (a stale dist shipped the bootstrap's
 first deploy inert; caught by its no-half-apply refusal, 2026-10-16).
 
-Landed this wave (all on green CI):
+Landed in wave 5, 2026-10-04 (history; all on green CI):
 - **S02 batch executed** (A only, coding-plan key, $0 real): 24/33 recorded, effectively 27/33 after the grader fix — see [evals/product-journeys/BATCH_2026-10-04.md](evals/product-journeys/BATCH_2026-10-04.md).
 - **Grader extraction defect fixed** (#61): the pj-s-question batch failures were layout-brittleness, not model variance; supplementary regrades PASS; matrix regenerated 61/61 + 13/13.
 - **Retained runs re-graded** (#58): current graders flip nothing on substance; only publication-evidence preservation gaps.
@@ -53,13 +51,11 @@ Landed this wave (all on green CI):
 
 ## Next work, in order
 
-1. **The z.ai terms lookup + retention stance** (DECISIONS_OPEN item 1) — a fact, then a one-line policy edit on infra-home; no image rebuild needed (the mount exists for this).
-2. **S27 live proof**: real TeployAdapter deploy against a scratch target (`SHIP_DEPLOY_ADAPTER=teploy`, off; needs a scratch destination provisioned — compute-1 is the sandbox host).
-3. **S01 live proof**: `SHIP_GIT_CREDENTIAL=env` on a real sandbox + private repo (daemon env forwarding, sandbox git >= 2.31, live proof on Forgejo+GitHub, then default-flip).
-4. **Shadow soak + review** (days of calendar time): placement/policy/budget/tool-manifest/knowledge-provenance JSONL + `placement shadow-report` / `policy shadow-report`; routing shadow selections in worker logs. No `on` flips before review.
-5. **Wave-2 code lanes** (delegate as wave 5 was): S10 follow-ups (offline/error states, other roles, screen readers), S04 preview isolation (teploy-cli repo — the AUDIT_OPEN mitigation proposal), rest of S07, S18 worker tree provisioning, S15/S17 wiring.
-6. **S12/D07**: owner call first (DECISIONS_OPEN item 2).
-7. **B-leg** of the S02 comparison: owner-gated real API spend.
+See the programme's E5 waves. Status of the former list: the z.ai retention
+stance was decided 2026-10-05 (keep the refusal; DECISIONS_OPEN) and is now
+Decision 9 / Q9; S27 and S01 live proofs are A9 and A8; the shadow review
+is A2; the wave-2 code lanes are L3, X2, X3/X4 (S15/S17), X5, and the rest of S07 is A5 (plan grounding) plus Q1 (critique) — no further S07 slice is scheduled; S12/D07 was decided
+2026-10-05 (keep the harness); the S02 B leg is Q7.
 
 ## Working rules that paid off
 
