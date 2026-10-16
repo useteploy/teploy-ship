@@ -155,12 +155,17 @@ teploy secret set SHIP_GIT_TOKEN=<forgejo/gitea deploy token>
 teploy secret set SHIP_GITHUB_TOKEN=<github token>        # only for github.com repos
 teploy secret set AI_GATEWAY_KEY=<key from teploy-gateway>  # or ANTHROPIC_API_KEY directly
 
+# optional: provision the first named admin at web boot (see "Accounts" below)
+teploy secret set SHIP_BOOTSTRAP_ADMIN_USER=<username>
+teploy secret set SHIP_BOOTSTRAP_ADMIN_PASSWORD=<at least 8 characters>
+
 teploy deploy
 ```
 
 The dashboard is at `<server>:7460` (`ingress: host` — firewall it to
 your VPN/tailnet, e.g. `ufw allow from 100.64.0.0/10 to any port 7460`).
-Log in with `SHIP_WEB_TOKEN`, then add named accounts (below) so people
+Log in with `SHIP_WEB_TOKEN` — or set the two bootstrap secrets below and
+let the first boot create a named admin — then add named accounts so people
 stop sharing it.
 
 ## 1b. Accounts and roles
@@ -179,6 +184,42 @@ Create accounts in Settings → Users (Account has self-service password
 change). Passwords are scrypt-hashed; sessions are stateless signed
 cookies and a local user's role is re-read from the store on every
 request, so a demotion takes effect immediately.
+
+### Accounts: bootstrapping the first admin
+
+A fresh install has no local account, which used to leave `SHIP_WEB_TOKEN`
+as the de-facto login. Two secrets provision the first admin instead — set
+both and the web process creates the account when it starts:
+
+```sh
+teploy secret set SHIP_BOOTSTRAP_ADMIN_USER=<username>
+teploy secret set SHIP_BOOTSTRAP_ADMIN_PASSWORD=<at least 8 characters>
+```
+
+- **Boot behavior.** At web start only (the worker never runs it): if the
+  users store holds no local principals yet, the named account is created
+  with the `admin` role, scrypt-hashed like every password. One log line
+  names the username; the password is never logged.
+- **No overwrite.** An install that already has any local account skips the
+  bootstrap entirely, however the env is set — it never touches existing
+  accounts, roles, or passwords.
+- **Once ever, atomically.** The bootstrap claims a one-time marker in the
+  store before creating anything, so two web processes starting together (a
+  rolling deploy's old and new process) cannot create two admins. Removing
+  every local account later does not re-open it while the claim stands.
+- **Idempotent.** Later boots are silent no-ops; leave the secrets set or
+  clear them, it changes nothing. Setting only one of the two is refused
+  with one log line naming the missing variable — no half-bootstrap.
+- **Alongside SSO.** Independent of OIDC: with SSO configured, the
+  bootstrapped local admin remains a break-glass account, and password
+  login stays available next to the SSO button either way.
+- **Changing the password later.** In the dashboard: an admin resets it in
+  Settings → Users, or the user changes it on Account. There is no CLI
+  command for account management yet — a known follow-up, not an oversight.
+- **If a boot dies between the claim and the account** (a narrow, once-ever
+  window), bootstrap stays closed on later boots. `SHIP_WEB_TOKEN` still
+  signs in as admin — use it to create the account by hand in Settings →
+  Users.
 
 ### Single sign-on (OIDC)
 
