@@ -987,6 +987,12 @@ with the explanation rather than with a worker that exits during startup.
 
 - `teploy deploy` redeploys; secrets persist. Run state lives in
   Nucleus (accessory volume) — containers are disposable.
+- The data volume (`/deployments/ship/volumes/ship-data`, mounted at `/data`)
+  must be owned by uid 1000. `install.sh` does it on a fresh install; a volume
+  teploy creates later is root-owned, and every file-backed shadow then
+  records nothing (2026-10-16 incident). Fix: `chown 1000:1000
+  /deployments/ship/volumes/ship-data`. Web and worker log an ERROR at
+  startup when it is wrong, and `teploy-ship doctor` fails `data-dir-writable`.
 - `teploy accessory upgrade nucleus ghcr.io/neutron-build/nucleus:latest`
   picks up engine updates.
 - CI runs on Forgejo Actions (`.forgejo/workflows/ci.yml`) with a
