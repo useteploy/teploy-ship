@@ -1,6 +1,6 @@
 import { hostname } from "node:os";
 
-import { fileRuntime, nucleusRuntime } from "teploy-ship/runtime";
+import { fileRuntime, nucleusRuntime, bootstrapAdmin } from "teploy-ship/runtime";
 import type { ShipRuntime } from "teploy-ship/runtime";
 
 /**
@@ -28,6 +28,24 @@ async function create(): Promise<ShipRuntime> {
   const url = process.env.NUCLEUS_URL;
   if (url === undefined || url === "") throw new Error(`SHIP_STORE=${kind} needs NUCLEUS_URL`);
   return nucleusRuntime(url, `web-${hostname()}-${process.pid}`, { dialect: kind === "postgres" ? "postgres" : "nucleus" });
+}
+
+// ── Initial admin bootstrap (web boot only) ────────────────────────────────
+//
+// The worker has no users and never runs this: provisioning the first local
+// account is a web-process job, so the wiring lives with the web runtime.
+// Fired here rather than inside create() so it runs at server start, not on
+// the first request — and gated on the env so every existing import of this
+// module (tests, dev) stays byte-for-byte inert until an operator actually
+// sets the secrets. bootstrapAdmin never throws and never logs the password;
+// the catch is a backstop so a broken bootstrap can never stop the dashboard
+// from serving (SHIP_WEB_TOKEN remains the admin way in regardless).
+if (process.env.SHIP_BOOTSTRAP_ADMIN_USER !== undefined || process.env.SHIP_BOOTSTRAP_ADMIN_PASSWORD !== undefined) {
+  void shipRuntime()
+    .then((rt) => bootstrapAdmin(rt, process.env, (l) => console.log(l)))
+    .catch((error: unknown) => {
+      console.error(`bootstrap admin: not applied — ${error instanceof Error ? error.message : String(error)}`);
+    });
 }
 
 export function webToken(): string {

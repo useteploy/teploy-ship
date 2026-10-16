@@ -150,8 +150,21 @@ export function renderEnvFile(env: Record<string, string>, header: string[]): st
  * on the way in rather than trusting every operator to prune the file by hand.
  * SHIP_WEB_TOKEN is used by join itself to authenticate to the controller and
  * is then dropped for the same reason — the worker never serves HTTP.
+ *
+ * The bootstrap admin pair is web-process-only by design (see
+ * bootstrap-admin.ts): the worker has no users store and never runs the
+ * bootstrap, so it has no business holding the password that provisions the
+ * dashboard's first account.
  */
-export const NOT_FOR_A_WORKER = ["SHIP_SESSION_SECRET", "SHIP_WEBHOOK_SECRET", "SHIP_WEB_TOKEN", "SHIP_SLACK_SIGNING_SECRET", "SHIP_LINEAR_SIGNING_SECRET"];
+export const NOT_FOR_A_WORKER = [
+  "SHIP_SESSION_SECRET",
+  "SHIP_WEBHOOK_SECRET",
+  "SHIP_WEB_TOKEN",
+  "SHIP_SLACK_SIGNING_SECRET",
+  "SHIP_LINEAR_SIGNING_SECRET",
+  "SHIP_BOOTSTRAP_ADMIN_USER",
+  "SHIP_BOOTSTRAP_ADMIN_PASSWORD",
+];
 
 /** Keys a worker cannot start without, with why. */
 const REQUIRED: Array<{ key: string; why: string }> = [

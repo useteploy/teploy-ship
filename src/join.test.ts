@@ -27,6 +27,8 @@ const BUNDLE = `# Teploy Ship secrets exported from 100.76.150.126 on 2026-08-26
 SHIP_WEB_TOKEN=IZpaDQZyRgJ0NXBgso0NxUhiXHe
 SHIP_SESSION_SECRET=aaaabbbbccccdddd
 SHIP_WEBHOOK_SECRET=eeeeffff00001111
+SHIP_BOOTSTRAP_ADMIN_USER=tyler
+SHIP_BOOTSTRAP_ADMIN_PASSWORD=bootstrapped-long-password
 SHIP_GIT_TOKEN=00b9493c485b7feff809be4f95461831e8b5fc8f
 SHIP_GITHUB_TOKEN=gho_830KHBJszRPep0yuAxGi5QZP3r85oa
 ANTHROPIC_API_KEY=sk-ant-abcdef0123456789
@@ -48,7 +50,7 @@ test("the bundle parses the way install.sh writes it, comments and all", () => {
   const env = parseEnvFile(BUNDLE);
   assert.equal(env.SHIP_GIT_TOKEN, "00b9493c485b7feff809be4f95461831e8b5fc8f");
   assert.equal(env.NUCLEUS_URL, "postgres://nucleus@ship-nucleus:5432/nucleus");
-  assert.equal(Object.keys(env).length, 11, "and no comment or blank became a setting");
+  assert.equal(Object.keys(env).length, 13, "and no comment or blank became a setting");
 });
 
 test("a value containing '=' survives — a base64 secret ends in padding", () => {
@@ -101,6 +103,7 @@ test("the plan summary redacts every credential in it", () => {
   const text = summarisePlan(plan());
   assert.doesNotMatch(text, /sk-ant-abcdef0123456789/);
   assert.doesNotMatch(text, /00b9493c485b7feff809be4f95461831e8b5fc8f/);
+  assert.doesNotMatch(text, /bootstrapped-long-password/, "the bootstrap password never reaches a worker, so never a summary");
   assert.match(text, /SHIP_MODEL=zai\/glm-5\.3/, "and shows what is safe to show");
 });
 

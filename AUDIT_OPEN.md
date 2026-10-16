@@ -1,5 +1,46 @@
 # Open audit items
 
+## 2026-10-16 — initial admin bootstrap (port of observe's EnsureAdmin)
+
+- `bootstrapAdmin()` (src/bootstrap-admin.ts) provisions the FIRST local
+  account from `SHIP_BOOTSTRAP_ADMIN_USER`/`SHIP_BOOTSTRAP_ADMIN_PASSWORD`
+  (teploy secrets) at WEB process boot only (web/src/lib/store.server.ts,
+  gated on the env so existing imports stay inert). Before this, nothing
+  called setPassword/create: no CLI, no bootstrap, so the break-glass
+  SHIP_WEB_TOKEN was the de-facto login on every fresh install.
+- Semantics ported from observe, adapted to ship's stores: no-overwrite
+  (any existing local principal skips it entirely), an atomic once-ever
+  claim BEFORE the create — KV setNX (`ship:bootstrap:admin`) on
+  nucleus/postgres runtimes, the delegation ledger's withFileLock +
+  runtime-config read-check-write on the file runtime — value-conditional
+  release on a failed create, validate-before-claim through the users
+  store's own (now exported) policy, one success line naming the username
+  only, and a precise one-line refusal when exactly one of the two
+  variables is set. Password is never logged.
+- ATOMICITY CEILING (stated in the module, same as everywhere else): the
+  file-runtime claim is in-process only — file mode is single-process by
+  construction; the cross-process boundary is the KV setNX on the shared
+  store. The narrow claim-then-crash window leaves bootstrap closed with
+  the master credential as the admin way in (documented in DEPLOY.md).
+- `NOT_FOR_A_WORKER` now drops the bootstrap pair from join bundles: the
+  worker never runs the bootstrap and should not hold its password.
+- Verified: `pnpm run lint`, `pnpm test` (12 new bootstrap-admin tests:
+  create+claim, idempotent second boot, no-overwrite, one-variable
+  refusal, no-password-in-logs across happy/error paths,
+  validate-before-claim, in-process file-runtime race, two-process KV
+  setNX race, value-conditional release + retry, FileUserStore interop),
+  join drop/redaction assertions, `cd web && pnpm test` and
+  `cd web && pnpm run build`. Verified LIVE against the built web server
+  (file store, isolated state dir): boot with both secrets creates the
+  admin with one log line, password login returns the admin session
+  cookie, a wrong password is refused, a second boot is a silent no-op
+  (users.json byte-identical), and the password appears in no log or
+  state file. NOT verified live: the same boot against a real
+  nucleus/postgres store — the KV setNX claim path there is seam-tested
+  only (two-runtime race over one shared KV map).
+- Still open: no CLI for account management (create/reset password from
+  the console) — dashboard-only for now, honestly noted in DEPLOY.md.
+
 ## 2026-10-15 — resource classes: browser runs admitted on their real footprint
 
 - A run whose input carries `look` (SHIP_LOOK, default off) is now a
