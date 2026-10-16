@@ -211,7 +211,9 @@ export async function action({
     // Refuse rather than store a note no executor will ever read.
     const steerInput = ((await runtime.store.load(runId)).find(e => e.type === "run-started")?.data as { input?: { harness?: { id?: unknown }; harnessAttempts?: { id?: unknown }[] } } | undefined)?.input;
     if (!harnessSupports(steerInput, "steer")) return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(STEER_UNSUPPORTED_MESSAGE)}`);
-    if (text !== "") await runtime.steer.add(runId, text);
+    // An empty note is not "sent": say so instead of confirming a no-op.
+    if (text === "") return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent("Write a message before sending.")}`);
+    await runtime.steer.add(runId, text);
     return redirectTo(`/runs/${runId}?sent=1`);
   }
   // The agent's question (an ```ask park). Answering is steering, not
