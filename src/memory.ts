@@ -75,10 +75,34 @@ export function estimateTokens(text: string): number {
 export function historyTokens(messages: Message[]): number {
   let total = 0;
   for (const message of messages) {
-    total += estimateTokens(typeof message.content === "string" ? message.content : JSON.stringify(message.content));
+    total += estimateTokens(contentForSummary(message.content));
+    // An image part is real spend the text estimator cannot see; charged
+    // flat rather than measured, because the condense budget exists to keep
+    // the TRANSCRIPT bounded, and base64 bytes are not a token estimate of
+    // the decoded pixels anyway.
+    if (typeof message.content !== "string") {
+      for (const part of message.content) {
+        if (part.type === "image") total += IMAGE_PART_TOKEN_ESTIMATE;
+      }
+    }
     total += 4; // per-message overhead, as every chat format charges something
   }
   return total;
+}
+
+/** A flat token charge per image part in history (see historyTokens). */
+const IMAGE_PART_TOKEN_ESTIMATE = 1100;
+
+/**
+ * How non-string message content is rendered for the condense transcript and
+ * the token estimate: text parts survive as text, image parts become a short
+ * placeholder. The alternative — JSON.stringify of the parts — would pour
+ * base64 pixel data into a text summarizer's prompt, which is exactly the
+ * spend condense exists to prevent, arriving as a prompt no one chose to send.
+ */
+function contentForSummary(content: Message["content"]): string {
+  if (typeof content === "string") return content;
+  return content.map((part) => (part.type === "text" ? part.text : "[image omitted from summary]")).join("\n");
 }
 
 /**
@@ -130,7 +154,7 @@ export async function condenseIfNeeded(
   }
 
   const transcript = middle
-    .map((m) => `${m.role.toUpperCase()}: ${typeof m.content === "string" ? m.content : JSON.stringify(m.content)}`)
+    .map((m) => `${m.role.toUpperCase()}: ${contentForSummary(m.content)}`)
     .join("\n\n");
   const summary = await summarize(transcript);
   if (onSummary !== undefined) {

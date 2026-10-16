@@ -1140,6 +1140,26 @@ export async function enqueueRun(
   // the action was offered. Off for scans, which read a repository rather
   // than a web page.
   const look = scan ? undefined : (envFlag("SHIP_LOOK") ? true : undefined);
+  // Image mode for ```look (S12 gated slice), materialised beside `look` and
+  // only when `look` itself is on: SHIP_LOOK_IMAGE_MODEL names the
+  // vision-capable model image looks route to (the 2026-10-15 owner call:
+  // glm-5.3-flash on the zai plan; Anthropic/OpenAI the fallback), and
+  // SHIP_LOOK_IMAGE_MAX caps screenshots per run (default 3). UNSET model
+  // means image looks refuse at execution with a message naming the env var
+  // — never a blind pixel call to a model that cannot see. Recorded in the
+  // input for the standing replay reason: it admits the
+  // `turn-N-look-image` step.
+  const lookImageModel = look === true ? (process.env.SHIP_LOOK_IMAGE_MODEL ?? "").trim() : "";
+  const lookImage =
+    lookImageModel !== ""
+      ? {
+          model: lookImageModel,
+          max: (() => {
+            const raw = Number(process.env.SHIP_LOOK_IMAGE_MAX);
+            return Number.isInteger(raw) && raw >= 1 ? raw : 3;
+          })(),
+        }
+      : undefined;
   // Per-repo evidence, resolved HERE so every enqueue surface (CLI, dashboard,
   // webhook, intake sweep) gets the same treatment without each knowing about
   // the store. Materialised into the recorded input below, never re-read at
@@ -1438,6 +1458,10 @@ export async function enqueueRun(
         // do not set it enqueue exactly as they did before the action
         // existed.
         ...(look === true ? { look: true } : {}),
+        // ...and its image mode (SHIP_LOOK_IMAGE_MODEL above), absent on any
+        // run that does not admit it — including look-off runs, whose inputs
+        // stay byte-identical to pre-image ones.
+        ...(lookImage !== undefined ? { lookImage } : {}),
         index: true,
         guard: true,
         // The warm repo cache (SB-A). Repo runs that are not PR runs, on

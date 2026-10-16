@@ -445,6 +445,20 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
     // to the recovery tracker. It still spends a turn — the step cap is the
     // budget, and no look-specific cap exists in this slice.
     if (action.kind === "look") {
+      // Image mode is the DURABLE loop's gated slice: it needs the artifact
+      // store (pixels are artifacts or they are nothing) and recorded-step
+      // replay, and this loop has neither. The param still parses, so the
+      // refusal is loud and names the fix — dropping image= — rather than
+      // the screenshot silently never arriving.
+      if (action.image === true) {
+        const refusal =
+          "REFUSED: image looks are not available in this session (no vision model is wired for it here). " +
+          "The text snapshot works exactly as before: re-run the ```look without image=.";
+        messages.push({ role: "user", content: refusal });
+        steps.push({ index, thought, action, observation: refusal });
+        emit({ type: "observation", step: index, text: refusal });
+        continue;
+      }
       let result: ExecResult;
       try {
         result = await runLook(options.executor, `${session}-s${index}`, action, options.actionTimeoutMs);

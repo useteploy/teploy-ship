@@ -1,5 +1,6 @@
 import type { AgentExecutor } from "@neutron-build/agents";
 
+import { LOOK_IMAGE_DATA_CLASS } from "./artifacts.js";
 import { frameUntrusted } from "./guard.js";
 import { forgeFetch } from "./forge-egress.js";
 import { publishLimitsFromEnv, screenPublication } from "./publish-policy.js";
@@ -822,6 +823,14 @@ export async function commentOnPr(
  * assets). Returns the URL a body can embed. GitHub has no API for this —
  * its web uploads go through an undocumented endpoint — so a GitHub run
  * records its screenshots' hashes and says they were not attached.
+ *
+ * HARD RULE (D4, perception input 2026-10-14): artifacts tagged with the
+ * look-image data class — screenshots of pages the agent observed — are
+ * NEVER attached to a pull request. A PR on a repo that mirrors publicly
+ * would republish page content the run does not own, so the boundary here
+ * refuses that class for every repo, which is stricter than the rule's
+ * minimum and simple to reason about: no repo-level "mirrors publicly" flag
+ * exists yet, and when one is added this guard can narrow to it.
  */
 export async function uploadPrAsset(options: {
   ref: RepoRef;
@@ -829,11 +838,16 @@ export async function uploadPrAsset(options: {
   pr: number;
   name: string;
   bytes: Uint8Array;
+  /** The artifact's data-class tag, when the caller knows it (artifacts.ts). */
+  dataClass?: string;
   fetchImpl?: typeof fetch;
 }): Promise<string> {
   const { ref, token, pr, name, bytes } = options;
   const fetchImpl = options.fetchImpl ?? forgeFetch;
   if (ref.kind === "github") throw new Error("GitHub has no API for attaching a file to a pull request");
+  if (options.dataClass === LOOK_IMAGE_DATA_CLASS) {
+    throw new Error("look screenshots are never attached to pull requests (public-mirror rule, docs/PERCEPTION_INPUT_S12_S13_2026-10-14.md D4)");
+  }
   const form = new FormData();
   form.append("attachment", new Blob([Buffer.from(bytes)], { type: name.endsWith(".webm") ? "video/webm" : "image/png" }), name);
   const response = await fetchImpl(`${ref.base}/api/v1/repos/${ref.owner}/${ref.repo}/issues/${pr}/assets?name=${encodeURIComponent(name)}`, {

@@ -481,9 +481,16 @@ export const WORKFLOW_STEPS: readonly WorkflowStep[] = [
   { key: "step:*turn-*-critic", admits: (i) => i.critic === true },
   // The ```search action is offered on any run; deliberately ungated.
   { key: "step:*turn-*-search", admits: always },
-  // Browser perception (S12): the ```look action's driver step, admitted by
-  // the input flag SHIP_LOOK materialises at enqueue — no pre-feature log
-  // carries it, so those fingerprints are untouched.
+  // Browser perception (S12): the image mode's step (text + screenshot +
+  // artifact, in that order in the branch), admitted by input.lookImage alone
+  // (SHIP_LOOK_IMAGE_MODEL at enqueue) — a look run without it can never
+  // record one, and a pre-image log replays untouched. Listed BEFORE the
+  // text-look entry because the table is position-checked against the
+  // compiled source order, and the image branch runs first in the code.
+  { key: "step:*turn-*-look-image", admits: (i) => i.lookImage !== undefined },
+  // ...and the ```look action's driver step itself, admitted by the input
+  // flag SHIP_LOOK materialises at enqueue — no pre-feature log carries it,
+  // so those fingerprints are untouched.
   { key: "step:*turn-*-look", admits: (i) => i.look === true },
   // The ```ask park (input.ask): snapshot, wait for the answer, restore. Its
   // steps share names with the approval park below; the wait is its own.

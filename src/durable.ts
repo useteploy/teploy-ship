@@ -6,7 +6,7 @@ import { prepareEnvironment, type EnvironmentPreparation } from "./environment.j
 import type { RunOrigin } from "./notify.js";
 import { akirooTrailersFrom } from "./akiroo.js";
 import { generateText } from "@neutron-build/ai";
-import type { Message, ModelAdapter } from "@neutron-build/ai";
+import type { ImagePart, Message, ModelAdapter, UserContentPart } from "@neutron-build/ai";
 import { SandboxExecutor } from "@neutron-build/agents";
 import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 import { isSuspension, workflow } from "@neutron-build/workflow";
@@ -82,7 +82,7 @@ import type { RepoMemoryStore } from "./repo-memory.js";
 import type { SteerStore } from "./steer.js";
 import { formatSearchHits } from "./code-index.js";
 import { frameUntrusted, screenUntrusted } from "./guard.js";
-import { LOOK_OPEN_PLAN, LOOK_SEALED, runLook } from "./look.js";
+import { LOOK_IMAGE_NO_MODEL, LOOK_IMAGE_NO_STORE, LOOK_OPEN_PLAN, LOOK_SEALED, lookImageCap, runLook, runLookImage } from "./look.js";
 import { networkForTrust, parseNetworkTier, wireNetwork } from "./egress.js";
 import type { NetworkTier } from "./egress.js";
 import type { CodeSearch } from "./code-index.js";
@@ -187,6 +187,18 @@ export interface DurableAgentInput {
    * parseable and the prompt not mentioning it.
    */
   look?: boolean;
+  /**
+   * Image mode for ```look (S12 gated slice): the vision model image looks
+   * route to, plus the per-run screenshot cap. Materialised at enqueue from
+   * SHIP_LOOK_IMAGE_MODEL (+ SHIP_LOOK_IMAGE_MAX, default 3) and only when
+   * `look` itself is on — an input that never admitted looks cannot have
+   * offered image ones. Absent means image looks REFUSE at execution with a
+   * message naming the env var, never a blind pixel call to a model that
+   * cannot see: the refusal is a pure function of the recorded input, so a
+   * replay refuses identically. Adds the recorded `turn-N-look-image` step,
+   * which is why the upgrade fence admits that step on this field alone.
+   */
+  lookImage?: { model: string; max: number };
   /**
    * Codebase indexing: repo runs refresh the Nucleus code index after
    * clone (a recorded step) and the agent gets the ```search action.
@@ -808,6 +820,17 @@ export interface DurableAgentConfig {
    */
   modelId?: string;
   /**
+   * Builds the adapter an image look's model call routes to, from the model
+   * id the RUN INPUT recorded (input.lookImage.model — SHIP_LOOK_IMAGE_MODEL
+   * at enqueue). Worker wiring, like `model` itself: the input says WHICH
+   * model a run admitted, only the operator says how this worker reaches
+   * one. Absent on a worker that cannot reach a vision model, in which case
+   * an image look refuses honestly rather than sending pixels to
+   * config.model blind. Deliberately a FACTORY per run, so the adapter
+   * always matches the recorded id, not whatever the env says today.
+   */
+  lookImageModel?: (modelId: string) => ModelAdapter;
+  /**
    * Hard per-run spend ceiling in USD (0 or absent disables it). Turn count is
    * a poor proxy for cost — one turn can carry a huge context, a condensation
    * call and a critic pass — so a run that is expensive rather than long was
@@ -990,6 +1013,53 @@ export interface ApprovalDecisionPayload {
    * field existed would diverge.
    */
   by?: string;
+}
+
+/**
+ * How many image-look observations stay in live history as ImageParts. The
+ * rest collapse to their text placeholder + digest (pruneLookImageHistory):
+ * pixels are supplementary (D2), each one is full-price input on every later
+ * turn, and a page two screenshots ago is usually already acted on.
+ */
+const LOOK_IMAGE_HISTORY = 2;
+
+/** The image parts of a user message, when it carries any. */
+function lookImagePartsOf(message: Message): UserContentPart[] | null {
+  if (message.role !== "user" || typeof message.content === "string") return null;
+  return message.content.some((part) => part.type === "image") ? message.content : null;
+}
+
+/** Does this history still carry pixels — i.e. must the next call see them? */
+function historyCarriesImage(messages: Message[]): boolean {
+  return messages.some((m) => lookImagePartsOf(m) !== null);
+}
+
+/**
+ * Collapse every image-look observation but the newest LOOK_IMAGE_HISTORY to
+ * its text placeholder: the digest stays quotable, the base64 leaves the
+ * transcript. In place, on the loop's own messages array — a re-derivation
+ * from recorded steps, never persisted as state of its own.
+ */
+function pruneLookImageHistory(messages: Message[]): void {
+  const at: number[] = [];
+  messages.forEach((m, i) => {
+    if (lookImagePartsOf(m) !== null) at.push(i);
+  });
+  for (const i of at.slice(0, -LOOK_IMAGE_HISTORY)) {
+    const parts = lookImagePartsOf(messages[i]!)!;
+    const text = parts
+      .filter((part): part is Extract<UserContentPart, { type: "text" }> => part.type === "text")
+      .map((part) => part.text)
+      .join("\n");
+    const digest = /\[screenshot: sha256:([0-9a-f]{64})/.exec(text)?.[1] ?? "";
+    messages[i] = {
+      role: "user",
+      content: text.replace(
+        /\n\[screenshot: sha256:[0-9a-f]{64}, \d+ bytes — attached as the next content part\]$/,
+        `\n[screenshot: sha256:${digest} — pruned from history; only the latest screenshots stay]`,
+      ),
+    };
+  }
 }
 
 /**
@@ -1747,11 +1817,19 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
       // pre-feature log's turns (a model never told the action exists) parse
       // exactly as they did when they were written.
       const look = input.look === true;
+      // ...and image looks only on runs whose input admits THOSE: the model
+      // id is part of the recorded contract (which model saw the pixels),
+      // so the adapter is resolved from the input, never the live env.
+      const lookImage = input.lookImage;
+      const lookImageAdapter =
+        lookImage !== undefined && config.lookImageModel !== undefined ? config.lookImageModel(lookImage.model) : undefined;
+      /** Image looks executed this run, for the input.lookImage.max cap. */
+      let imageLooks = 0;
       onEvent({ kind: "started", harness: NATIVE_HARNESS_ID });
       let messages: Message[] = [
         {
           role: "system",
-          content: systemPrompt({ workdir: ws.workdir, task: task.prompt, search: searchable, browser: input.verification?.preview !== undefined, ask: input.ask === true, look }),
+          content: systemPrompt({ workdir: ws.workdir, task: task.prompt, search: searchable, browser: input.verification?.preview !== undefined, ask: input.ask === true, look, lookImage: lookImage !== undefined }),
         },
       ];
       let anySuccessfulAction = false;
@@ -1980,11 +2058,21 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
         // without re-calling the model. Logs from before telemetry
         // recorded the bare text — both shapes replay.
         onEvent({ kind: "turn", turn });
+        // Vision routing (S12 image mode): a call whose history carries an
+        // ImagePart goes to the adapter the run input named, because the
+        // main model may not be vision-capable and a blind pixel call is a
+        // hallucination generator, not a fallback. Computed per turn from
+        // the message array as it stands AFTER condense (a summary that
+        // folded the images away is text again, and routes back). Pricing
+        // note: usage stays priced at the main modelId — the flash-class
+        // look model is cheaper, so the cost ceiling over-estimates and
+        // stops early rather than late, which is the safe direction.
+        const turnModel = lookImageAdapter !== undefined && historyCarriesImage(messages) ? lookImageAdapter : config.model;
         const generatedStep = await ws.ctx.step(`${p}turn-${turn}-think`, async () => {
           // Inside the step, so a replay (which returns the recorded result
           // without running this body) never writes a stale "thinking".
           ws.live?.({ phase: "thinking", turn });
-          const generated = await generateText({ model: config.model, messages, maxOutputTokens: config.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS });
+          const generated = await generateText({ model: turnModel, messages, maxOutputTokens: config.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS });
           return { text: generated.text, usage: generated.usage };
         });
         const step = typeof generatedStep === "string" ? { text: generatedStep, usage: undefined } : generatedStep;
@@ -2343,6 +2431,74 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
           // already accept for a browser.
           if (sandboxOverridesOf(input)?.network === "open" && input.plan !== true) {
             messages.push({ role: "user", content: LOOK_OPEN_PLAN });
+            continue;
+          }
+          // IMAGE MODE (S12 gated slice): same tier rules as text — the two
+          // gates above already refused sealed and open-without-plan, so
+          // everything below runs on a tier D3 accepts for a browser. The
+          // image-specific gates are, in order: the run's input must admit
+          // a vision model (absent = SHIP_LOOK_IMAGE_MODEL was not set at
+          // enqueue — refuse, never a blind call), the executing worker
+          // must carry the wiring to honour it, and the per-run cap
+          // (input.lookImage.max, default 3) must not be spent. All three
+          // are pure functions of input-or-config state that replay
+          // re-derives identically, and none records a step.
+          if (action.image === true) {
+            if (lookImage === undefined) {
+              messages.push({ role: "user", content: LOOK_IMAGE_NO_MODEL });
+              continue;
+            }
+            if (lookImageAdapter === undefined) {
+              messages.push({ role: "user", content: LOOK_IMAGE_NO_MODEL });
+              continue;
+            }
+            if (config.artifacts === undefined) {
+              messages.push({ role: "user", content: LOOK_IMAGE_NO_STORE });
+              continue;
+            }
+            if (imageLooks >= lookImage.max) {
+              messages.push({ role: "user", content: lookImageCap(lookImage.max) });
+              continue;
+            }
+            // A recorded step (its own name — the upgrade fence admits it on
+            // input.lookImage alone), so a replay returns the recorded text
+            // and artifact reference without booting a browser. The artifact
+            // PUT happens inside the step: same content hashes to the same
+            // bytes, so a crash between put and record re-runs idempotently.
+            const result = await ws.ctx.step(`${p}turn-${turn}-look-image`, () => {
+              ws.live?.({ phase: "running", turn, detail: clipDetail(describeAction(action)) });
+              return runLookImage(ws.executor, `t${turn}`, action, config.artifacts!, config.actionTimeoutMs);
+            });
+            imageLooks += 1;
+            // Text first, exactly like a text look: framed after truncation
+            // so the delimiters survive any snapshot size.
+            const text = frameUntrusted(truncate(formatObservation(result), maxObs));
+            const shot = result.image;
+            if (shot === undefined) {
+              // The driver's text observation succeeded but no screenshot
+              // came back (runLookImage says so on stderr, inside the frame)
+              // — deliver the honest text rather than failing the turn.
+              messages.push({ role: "user", content: text });
+              continue;
+            }
+            // The pixels come from the STORE, not the step: replay re-reads
+            // the artifact by id (below) instead of re-screenshotting. A
+            // temporary artifact past its retention reads as null — then
+            // the observation degrades to text plus the digest pointer,
+            // which is the documented replay behaviour for pixels older
+            // than the screenshot retention window.
+            const artifact = await config.artifacts.get(shot.artifact).catch(() => null);
+            const note =
+              artifact !== null
+                ? `[screenshot: sha256:${shot.digest}, ${shot.bytes} bytes — attached as the next content part]`
+                : `[screenshot: sha256:${shot.digest} — no longer retrievable from the artifact store; the text snapshot above is the observation]`;
+            if (artifact === null) {
+              messages.push({ role: "user", content: `${text}\n${note}` });
+            } else {
+              const image: ImagePart = { type: "image", mediaType: artifact.mime, data: artifact.data };
+              messages.push({ role: "user", content: [{ type: "text", text: `${text}\n${note}` }, image] });
+              pruneLookImageHistory(messages);
+            }
             continue;
           }
           // A recorded step, so a replay returns the recorded snapshot text
@@ -3551,19 +3707,23 @@ async function runLadderLegs(
  * Where the ladder's screenshots go: the pull request's assets, when there is
  * a pull request and the forge takes them. The upload runs inside the step
  * that captured the picture, so its URL is recorded once and never re-sent
- * on replay.
+ * on replay. `dataClass` rides through to the attachment boundary (git.ts
+ * uploadPrAsset), which refuses the look-image class — the hard rule that
+ * page screenshots never land on a pull request. A tagged upload skips the
+ * artifact-store path too: that path's return value is a URL for the PR
+ * body, and a link is an attachment for the purposes of the rule.
  */
 function assetSink(ref: RepoRef, token: string, pr: number | undefined, artifacts?: ArtifactStore): AssetSink | undefined {
   if (pr === undefined && artifacts === undefined) return undefined;
-  return { async upload(name, bytes) {
-    if (artifacts) {
+  return { async upload(name, bytes, dataClass) {
+    if (artifacts && dataClass === undefined) {
       try {
         const id = await artifacts.put(name, bytes);
         const base = (process.env.SHIP_PUBLIC_URL ?? "").replace(/\/$/, "");
         return `${base}/api/artifacts/${id}`;
       } catch { /* fallback to forge attachment if storage is unavailable */ }
     }
-    if (pr !== undefined) return uploadPrAsset({ ref, token, pr, name, bytes });
+    if (pr !== undefined) return uploadPrAsset({ ref, token, pr, name, bytes, ...(dataClass !== undefined ? { dataClass } : {}) });
     throw new Error("Artifact storage unavailable");
   } };
 }

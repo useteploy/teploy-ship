@@ -2163,6 +2163,10 @@ async function workerCommand(rest: string[]): Promise<void> {
     runtime: runtime as import("./runtime.js").NucleusShipRuntime,
     model: resolveModel(modelId),
     modelId,
+    // Vision routing for image looks (S12): the same resolution path as the
+    // main model, so retries/timeouts/routing-fallback apply; the id always
+    // comes from the run input (SHIP_LOOK_IMAGE_MODEL at enqueue).
+    lookImageModel: resolveModel,
     executor: durableProvider(args, config),
     workdir: usingSandbox ? "/work" : ".",
     ...(codeSearch !== undefined ? { codeSearch } : {}),

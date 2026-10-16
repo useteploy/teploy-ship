@@ -11,14 +11,24 @@ export interface Artifact {
   mime: "image/png" | "image/jpeg" | "video/webm";
   data: string;
   bytes: number;
+  /**
+   * Data-class tag (D4, perception input): where these pixels came from and
+   * what may be done with them. `"look-image"` marks a screenshot of a page
+   * the agent's ```look observed — page content the run does not own, which
+   * is exactly the class the PR-attachment boundary refuses (git.ts
+   * uploadPrAsset). Absent on every pre-tag artifact.
+   */
+  dataClass?: string;
 }
 export interface ArtifactStore {
-  put(name: string, bytes: Uint8Array): Promise<string>;
+  put(name: string, bytes: Uint8Array, dataClass?: string): Promise<string>;
   get(id: string): Promise<Artifact | null>;
-  putTemporary?(name: string, bytes: Uint8Array): Promise<string>;
+  putTemporary?(name: string, bytes: Uint8Array, dataClass?: string): Promise<string>;
   pruneExpired?(): Promise<void>;
 }
-function artifact(name: string, bytes: Uint8Array): Artifact {
+/** The data class of a ```look screenshot — page-derived pixels (D4). */
+export const LOOK_IMAGE_DATA_CLASS = "look-image";
+function artifact(name: string, bytes: Uint8Array, dataClass?: string): Artifact {
   if (bytes.length > 4 * 1024 * 1024 || !bytes.length)
     throw new Error("Artifact must be between 1 byte and 4 MiB");
   const png = Buffer.from(bytes.subarray(0, 8)).equals(
@@ -37,12 +47,13 @@ function artifact(name: string, bytes: Uint8Array): Artifact {
     mime: png ? "image/png" : jpeg ? "image/jpeg" : "video/webm",
     data: Buffer.from(bytes).toString("base64"),
     bytes: bytes.length,
+    ...(dataClass !== undefined ? { dataClass } : {}),
   };
 }
 export const SCREENSHOT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 type StoredArtifact = Artifact & { digest?: string; expiresAt?: string };
-function temporary(name: string, bytes: Uint8Array): StoredArtifact {
-  const a = artifact(name, bytes);
+function temporary(name: string, bytes: Uint8Array, dataClass?: string): StoredArtifact {
+  const a = artifact(name, bytes, dataClass);
   // A distinct identity prevents expiry from deleting a permanent artifact
   // with identical pixels, or a newer capture with a different expiry.
   return { ...a, digest: a.id,
@@ -53,13 +64,13 @@ const expired = (a: StoredArtifact) => a.expiresAt !== undefined && Date.parse(a
 const validId = (id: string) => /^[a-f0-9]{64}$/.test(id);
 export class FileArtifacts implements ArtifactStore {
   constructor(private dir = join(stateDir(), "artifacts")) {}
-  async put(name: string, bytes: Uint8Array): Promise<string> {
-    const a = artifact(name, bytes);
+  async put(name: string, bytes: Uint8Array, dataClass?: string): Promise<string> {
+    const a = artifact(name, bytes, dataClass);
     await writeJsonFile(join(this.dir, a.id + ".json"), a);
     return a.id;
   }
-  async putTemporary(name: string, bytes: Uint8Array): Promise<string> {
-    const a = temporary(name, bytes);
+  async putTemporary(name: string, bytes: Uint8Array, dataClass?: string): Promise<string> {
+    const a = temporary(name, bytes, dataClass);
     await writeJsonFile(join(this.dir, a.id + ".json"), a);
     return a.id;
   }
@@ -127,8 +138,8 @@ export class NucleusArtifacts implements ArtifactStore {
       ? r[0].artifact_value
       : null;
   }
-  async put(name: string, bytes: Uint8Array): Promise<string> {
-    return this.store(artifact(name, bytes));
+  async put(name: string, bytes: Uint8Array, dataClass?: string): Promise<string> {
+    return this.store(artifact(name, bytes, dataClass));
   }
   private async store(a: StoredArtifact): Promise<string> {
     await this.ensure();
@@ -139,8 +150,8 @@ export class NucleusArtifacts implements ArtifactStore {
     await this.write(a.id, JSON.stringify({ ...a, data: "", chunks }));
     return a.id;
   }
-  async putTemporary(name: string, bytes: Uint8Array): Promise<string> {
-    const a = temporary(name, bytes);
+  async putTemporary(name: string, bytes: Uint8Array, dataClass?: string): Promise<string> {
+    const a = temporary(name, bytes, dataClass);
     await this.ensureExpiry();
     // Index first so even a partial chunk write can be collected later.
     await this.db.query("INSERT INTO ship_artifact_expiry (artifact_id, expires_at, chunks) VALUES ($1, $2, $3)",
