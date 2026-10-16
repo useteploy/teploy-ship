@@ -13,7 +13,8 @@ import type { HarnessAdapter, HarnessResult, HarnessStatus, HarnessUsage } from 
  * docs/adapters.md.
  *
  * Each attempt is TWO recorded steps: `harness-preflight` (is the binary
- * there, which version) and `harness-run` (the one exec, its parsed result).
+ * there, which version, and is that a version this adapter can drive) and
+ * `harness-run` (the one exec, its parsed result).
  * The run step is a single exec because the sandbox API is request/response —
  * output arrives when the process ends — so the "coarse progress" an external
  * harness reports is started / completed plus the turn count parsed from its
@@ -99,6 +100,12 @@ export interface Preflight {
   expected?: string;
   /** Does the installed binary report `expected`? Absent when nothing to compare. */
   pinned?: boolean;
+  /**
+   * Set when the found binary's version is one this adapter refuses to drive
+   * (opencode >= 2). Same shape as a missing binary: recorded here, the run
+   * stops before `harness-run`, nothing executes.
+   */
+  refused?: string;
 }
 
 /**
@@ -119,7 +126,42 @@ export function missingHarnessHelp(id: string, binary: string): string {
   );
 }
 
-async function preflight(executor: AgentExecutor, id: string, binary: string): Promise<Preflight> {
+/**
+ * The major version in a `--version` first line, when the line carries an
+ * x.y.z. Undefined when it carries no such token — an unparseable version is
+ * recorded, never guessed at (the same rule `pinned` follows below).
+ */
+export function versionMajor(version: string): number | undefined {
+  const match = /(\d+)\.(\d+)\.(\d+)/.exec(version);
+  return match === null ? undefined : Number(match[1]);
+}
+
+/**
+ * Why an opencode >= 2.0.0 is refused rather than run (S13). The 2.x line
+ * removed `--pure` and `--dir`, so the invocation this adapter builds fails
+ * flag-parse and prints usage — nothing would run — and its event stream
+ * renamed `tool` to `tool_use` and dropped the terminal `step_finish`, which
+ * the live feed and the turn/usage counts silently misread. The v2 contract,
+ * measured against real 2.0.26 streams, and what adopting it needs are in
+ * evals/receipts/2026-10-14-opencode-v2-events.txt; until that tracked work
+ * lands, the refusal is the honest outcome.
+ */
+export function opencodeV2Refusal(version: string, expected?: string): string {
+  return (
+    `opencode reports ${version}, which is the 2.x line, and ship's opencode adapter drives the 1.x contract: v2 removed --pure and --dir (this invocation fails flag-parse; nothing would run) and renamed the tool event the live feed reads. ` +
+    (expected !== undefined
+      ? `images/versions.json pins opencode-ai@${expected} — an unpinned binary (local, dev, brew) is how a 2.x arrives; run an image that bakes the pin (images/build.sh --harness opencode). `
+      : "") +
+    `Adopting v2 is tracked work; the measured contract and the adoption list are in evals/receipts/2026-10-14-opencode-v2-events.txt.`
+  );
+}
+
+async function preflight(
+  executor: AgentExecutor,
+  id: string,
+  binary: string,
+  refuseVersion?: (version: string, expected?: string) => string | undefined,
+): Promise<Preflight> {
   const expected = HARNESS_PACKAGES[id]?.version;
   try {
     const probe = await executor.exec(`command -v ${binary} >/dev/null 2>&1 && ${binary} --version 2>&1 | head -n 1`, { timeoutMs: 60_000 });
@@ -127,6 +169,7 @@ async function preflight(executor: AgentExecutor, id: string, binary: string): P
       return { found: false, version: "", detail: missingHarnessHelp(id, binary), ...(expected !== undefined ? { expected } : {}) };
     }
     const version = probe.stdout.trim().slice(0, 120);
+    const refusal = refuseVersion?.(version, expected);
     return {
       found: true,
       version,
@@ -134,8 +177,11 @@ async function preflight(executor: AgentExecutor, id: string, binary: string): P
       // Recorded, NOT enforced. Refusing here would take a working deployment
       // offline the moment images/versions.json moved ahead of the image on
       // the box; what an operator actually needs is the log to say which binary
-      // wrote the tree, which this gives them.
+      // wrote the tree, which this gives them. The one exception is a major
+      // the adapter cannot drive at all (refuseVersion): that binary cannot
+      // run the invocation, so refusing beats a run that dies in flag-parse.
       ...(expected !== undefined ? { pinned: version.includes(expected) } : {}),
+      ...(refusal !== undefined ? { refused: refusal } : {}),
     };
   } catch (error) {
     return { found: false, version: "", detail: error instanceof Error ? error.message : String(error), ...(expected !== undefined ? { expected } : {}) };
@@ -395,6 +441,12 @@ interface CommandSpec {
   parse: (exec: ExecResult, priced: boolean) => { status: HarnessStatus; summary: string; turns: number; usage: HarnessUsage };
   /** Is the usage this harness reports billed per token under the forwarded credentials? */
   priced: (forwarded: string[]) => boolean;
+  /**
+   * Refuse a found binary whose resolved version this adapter cannot drive,
+   * returning the reason (undefined = run it). The recorded preflight value
+   * carries the refusal, so replay takes the same branch.
+   */
+  refuseVersion?: (version: string, expected?: string) => string | undefined;
 }
 
 const SPECS: Record<string, CommandSpec> = {
@@ -446,6 +498,14 @@ const SPECS: Record<string, CommandSpec> = {
     // Decided per run from the cost opencode reports (parseOpencodeStream).
     priced: () => true,
     live: opencodeLiveTracker,
+    // S13 major-version guard: 2.0.0 removed --pure and --dir (this command
+    // fails flag-parse) and renamed tool -> tool_use in the stream the live
+    // tracker reads. An unparseable version stays a recorded `pinned: false`,
+    // never a refusal — same behaviour as before the guard.
+    refuseVersion: (version, expected) => {
+      const major = versionMajor(version);
+      return major !== undefined && major >= 2 ? opencodeV2Refusal(version, expected) : undefined;
+    },
   },
 };
 
@@ -459,9 +519,17 @@ export function externalAdapter(id: "claude-code" | "opencode", options: Externa
     async run(task, ws, budget, onEvent): Promise<HarnessResult> {
       const p = ws.stepPrefix;
       onEvent({ kind: "started", harness: id });
-      const pre = await ws.ctx.step(`${p}harness-preflight`, () => preflight(ws.executor, id, spec.binary));
+      const pre = await ws.ctx.step(`${p}harness-preflight`, () => preflight(ws.executor, id, spec.binary, spec.refuseVersion));
       if (!pre.found) {
         const result = errorResult(`${pre.detail ?? `${spec.binary} was not found`} Nothing ran.`);
+        onEvent({ kind: "completed", status: result.status });
+        return result;
+      }
+      // A version this adapter refuses (opencode >= 2) is the same shape as a
+      // missing binary: the reason is on the recorded preflight step, the run
+      // stops here, and the binary never executes.
+      if (pre.refused !== undefined) {
+        const result = errorResult(`${pre.refused} Nothing ran.`);
         onEvent({ kind: "completed", status: result.status });
         return result;
       }
