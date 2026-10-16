@@ -61,6 +61,7 @@ import {
   sandboxLimitsFor,
 } from "./host-load.js";
 import type { Capacity, HostHold, HostLimits, HostLoad } from "./host-load.js";
+import { classAwareMemoryMB, classMemoryDeltaMB, resourceClassOf, type ResourceClass } from "./resource-class.js";
 import { autoAllowedNow, formatWindow, windowFor } from "./governance.js";
 import type { Windows } from "./governance.js";
 import { makeObserveEmitter } from "./observe.js";
@@ -625,6 +626,17 @@ export function repoLockKeyOf(events: readonly WorkflowEvent[]): string | undefi
 }
 
 /**
+ * The run's resource class (resource-class.ts), read from its recorded input
+ * the same way repoLockKeyOf reads the repo: a fact of the log, so admission
+ * accounting and a replay always agree on what a run is.
+ */
+export function runResourceClassOf(events: readonly WorkflowEvent[]): ResourceClass {
+  const started = events.find((e) => e.type === "run-started");
+  const input = (started as { data?: { input?: { look?: boolean } } } | undefined)?.data?.input;
+  return resourceClassOf(input);
+}
+
+/**
  * Launch due runs up to the concurrency ceiling, and no further.
  *
  * This is the P3-4 seam: behaviour AT the cap is QUEUE, never drop — the runs
@@ -716,6 +728,31 @@ export async function releaseUpgradeHolds(deps: UpgradeHoldDeps): Promise<string
 }
 
 /**
+ * The limits a create carries, resolved per field: the run's own (project
+ * record, materialised into the input at enqueue) win, the host-derived fill
+ * what they did not say, and a browser-class run's memory carries the browser
+ * delta on top of the base (resource-class.ts) — including a pinned base,
+ * because the daemon's Limits.MemoryMB is a hard container cap and the
+ * browser's footprint does not care who chose the base. Plain runs resolve
+ * exactly the numbers they resolved before resource classes existed.
+ *
+ * Pure and extracted so the precedence and the class raise are pinnable
+ * without a running worker; hostSizedOverrides inside startWorker is this
+ * over the host's current derived numbers.
+ */
+export function resolveSandboxLimits(
+  o: Pick<SandboxOverrides, "limits" | "resourceClass"> | undefined,
+  derived: { memoryMb: number; cpus: number },
+): { memoryMb: number; cpus: number; pids?: number } {
+  const base = o?.limits?.memoryMb ?? derived.memoryMb;
+  return {
+    memoryMb: o?.resourceClass === "browser" ? classAwareMemoryMB(base, "browser") : base,
+    cpus: o?.limits?.cpus ?? derived.cpus,
+    ...(o?.limits?.pids !== undefined ? { pids: o.limits.pids } : {}),
+  };
+}
+
+/**
  * The resident worker: executes due durable runs under leases, bounded by the
  * concurrency ceiling. Safe to run alongside CLI invocations and other workers
  * — a run someone else holds is simply skipped; crash recovery is the event
@@ -755,23 +792,17 @@ export function startWorker(options: WorkerOptions): {
    * default (1 CPU / 1 GB) whatever the box was — starving a 16 GB builder and
    * over-committing a 2 GB VM.
    *
-   * Precedence is unchanged and explicit per field: the project record wins
-   * (projects.ts sandboxLimits, materialised into the run input at enqueue and
-   * arriving here via sandboxOverridesOf), and the derived value only fills in
-   * what it did not say. Filling in HERE rather than at enqueue is deliberate:
-   * the sandbox step records the container handle, not the overrides, so this
-   * changes nothing about a replay's step sequence.
+   * Precedence is unchanged and explicit per field (resolveSandboxLimits): the
+   * project record wins (projects.ts sandboxLimits, materialised into the run
+   * input at enqueue and arriving here via sandboxOverridesOf), the derived
+   * value fills what it did not say, and a browser-class run's memory carries
+   * the class delta on top. Filling in HERE rather than at enqueue is
+   * deliberate: the sandbox step records the container handle, not the
+   * overrides, so this changes nothing about a replay's step sequence.
    */
   function hostSizedOverrides(o?: SandboxOverrides): SandboxOverrides {
     const derived = sandboxLimitsFor(lastLoad, capacity.maxConcurrent, sandboxHost);
-    return {
-      ...(o ?? {}),
-      limits: {
-        memoryMb: o?.limits?.memoryMb ?? derived.memoryMb,
-        cpus: o?.limits?.cpus ?? derived.cpus,
-        ...(o?.limits?.pids !== undefined ? { pids: o.limits.pids } : {}),
-      },
-    };
+    return { ...(o ?? {}), limits: resolveSandboxLimits(o, derived) };
   }
   // Forwarded call-by-call rather than spread, so the source provider keeps its
   // own `this`, and the optional members stay ABSENT when the source has none
@@ -879,6 +910,18 @@ export function startWorker(options: WorkerOptions): {
   // lease is won (which never added) is a harmless no-op delete.
   const inflight = new Set<string>();
   /**
+   * RESOURCE CLASSES (resource-class.ts): host memory this worker's executing
+   * runs commit BEYOND the PER_RUN_MB the capacity plan already debits each
+   * of them — today, a look run's browser delta. Scoped to the execution
+   * await in driveOne (set only after every admission gate has passed,
+   * deleted in the same finally that releases the repo lock), so an entry
+   * cannot outlive the run or leak past a gate that refused.
+   */
+  const inflightExtraMB = new Map<string, number>();
+  /** The class deltas the capacity plan must subtract for runs still executing here. */
+  const committedExtraMB = (): number =>
+    [...inflightExtraMB.entries()].filter(([id]) => inflight.has(id)).reduce((sum, [, mb]) => sum + mb, 0);
+  /**
    * Detached completion work still running: spend settlement, the notification,
    * the Observe emit, the meta write.
    *
@@ -914,6 +957,8 @@ export function startWorker(options: WorkerOptions): {
   const failedAttempts = new Map<string, number>();
   /** Runs currently held by a workspace takeover — so the hold logs once, not every tick. */
   const takeoverHoldLogged = new Set<string>();
+  /** Runs currently held for want of browser-class memory — same log-once rule. */
+  const classHoldLogged = new Set<string>();
   const handleError = (runId: string, error: unknown): void => {
     inflight.delete(runId);
     const consecutive = (failedAttempts.get(runId) ?? 0) + 1;
@@ -1292,6 +1337,11 @@ export function startWorker(options: WorkerOptions): {
     const next = capacityPlan(lastLoad, {
       limits: hostLimits,
       activeRuns: inflight.size,
+      // Class-aware (resource-class.ts): each in-flight browser run's delta
+      // is memory the box has already paid and the run count does not show,
+      // so it comes off the free term — the ceiling drops for the runs that
+      // are actually aboard, and comes back as they finish.
+      activeExtraMB: committedExtraMB(),
       ...(maxConcurrentOverride !== undefined ? { override: maxConcurrentOverride } : {}),
     });
     if (next.maxConcurrent !== capacity.maxConcurrent || next.binding !== capacity.binding) {
@@ -1397,7 +1447,34 @@ export function startWorker(options: WorkerOptions): {
         return false; // another run is executing against this repo right now
       }
       try {
+        // RESOURCE CLASSES (resource-class.ts): a browser run's footprint is
+        // bigger than the plain-run memory floor admits. hostOk's minFreeMB
+        // floor is "one plain run plus headroom"; for a run whose class
+        // commits more, the floor rises by exactly that much. Checked from
+        // the run's own recorded input, and only when the delta is nonzero,
+        // so a plain run's path here is byte-identical to before. Refusing
+        // keeps the run due — the same queue the takeover hold uses — and it
+        // launches when a finish frees the room; other plain runs are not
+        // held behind it.
+        const classExtraMB = classMemoryDeltaMB(runResourceClassOf(events));
+        if (classExtraMB > 0) {
+          const classHold = hostHold(lastLoad, hostLimits, classExtraMB);
+          if (classHold !== null) {
+            if (!classHoldLogged.has(runId)) {
+              classHoldLogged.add(runId);
+              log(
+                `[worker] ${runId} held: a browser-class run wants ${hostLimits.minFreeMB + classExtraMB} MB free ` +
+                  `(${classHold} hold) and the box has ${lastLoad.freeMemMB} MB; staying due until a run frees room`,
+              );
+            }
+            return false;
+          }
+          classHoldLogged.delete(runId);
+        }
         if (sleeping) await completeSleep(options.runtime.store, runId);
+        // Committed for exactly as long as this run executes below (see
+        // inflightExtraMB): the capacity plan's free-memory term debits it.
+        if (classExtraMB > 0) inflightExtraMB.set(runId, classExtraMB);
         const outcome = await executeRunExclusive({
           workflow: wf,
           runId,
@@ -1411,6 +1488,7 @@ export function startWorker(options: WorkerOptions): {
         handleComplete(runId, outcome);
         return true;
       } finally {
+        inflightExtraMB.delete(runId);
         if (repoLock !== undefined) await admission.releaseRepo(runId).catch(() => {});
       }
     } catch (error) {

@@ -131,6 +131,43 @@ test("browser: a headed-browser run on a pool that picks the browserless host fi
   assert.equal(wouldTarget(r), "http://h1:7439");
 });
 
+test("resource class: a browser-class run (input look) requires a headless browser; a plain run requires nothing", async () => {
+  // The class arrives on the SandboxOverrides from sandboxOverridesOf — the
+  // same funnel the worker's create actually uses — and requirementOf turns
+  // it into the run's placement requirement. An undeclared host answers
+  // "none", so today (no host declares a browser) a look run is recorded as
+  // placed-unsuitable: honest, and exactly what S26's shadow exists to show.
+  const f = fleet([{ arch: "amd64" }, { arch: "amd64", browser: "headless" }]);
+  await f.pool.create({ resourceClass: "browser", limits: { memoryMb: 1536, cpus: 2 } });
+  await flushPlacementShadow();
+  const lookRun = last(f);
+  assert.equal(lookRun.disagreement, "chosen-unsuitable");
+  assert.equal(lookRun.requirement.browser, "headless");
+  assert.match(String(lookRun.chosenRejections?.[0]?.detail), /needs headless browser, target has none/);
+  assert.equal(wouldTarget(lookRun), "http://h1:7439", "the shadow names the host that can actually take it");
+  assert.equal(lookRun.requirement.memMB, 1536, "the raised memory limit is the requirement's memory");
+
+  // A plain run on the same pool: no browser requirement, no disagreement,
+  // exactly the record shape the shadow wrote before classes existed.
+  await f.pool.create({ limits: { memoryMb: 1024, cpus: 2 } });
+  await flushPlacementShadow();
+  const plainRun = last(f);
+  assert.equal(plainRun.disagreement, null);
+  assert.equal(plainRun.requirement.browser, undefined);
+  assert.equal(plainRun.requirement.memMB, 1024);
+});
+
+test("resource class: a deployment-wide headed requirement is not relaxed by a browser-class run", async () => {
+  const f = fleet([{ arch: "amd64", browser: "headed" }], { require: { browser: "headed" } });
+  await f.pool.create({ resourceClass: "browser" });
+  await flushPlacementShadow();
+  const r = last(f);
+  // headless would have been satisfied by a headed host either way; the
+  // stronger deployment-wide demand stays, and nothing silently widens.
+  assert.equal(r.requirement.browser, "headed");
+  assert.equal(r.disagreement, null);
+});
+
 test("draining: the pool has no drain concept, so it places on a draining host; the shadow flags it", async () => {
   const declared = fleet([{ draining: true }, {}]);
   await declared.pool.create();

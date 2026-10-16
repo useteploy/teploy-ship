@@ -24,11 +24,13 @@
  * manufacture disagreements. They are finite so utilisation (live / maxRuns)
  * orders hosts exactly as the pool's own live count does.
  *
- * WHAT THE REQUIREMENT IS. Ship records no per-run arch/browser/etc today, so
- * the requirement is: `limits` and `warm.repo` from the run's SandboxOverrides
+ * WHAT THE REQUIREMENT IS. Ship records no per-run arch today, so the
+ * requirement is: `limits` and `warm.repo` from the run's SandboxOverrides
  * (cpu, memory, project/warm repo), merged over an operator-declared
  * deployment-wide `SHIP_PLACEMENT_REQUIRE` (JSON; e.g. every run here needs
- * arm64). `os` defaults to linux and every record says so.
+ * arm64). `os` defaults to linux and every record says so. One per-run
+ * capability IS recorded now: a browser-class run (resource-class.ts, from
+ * input `look`) requires `browser: "headless"`.
  *
  * WHAT IS NOT KNOWN. Draining: the pool has no drain concept, so draining
  * comes only from `SHIP_PLACEMENT_TARGETS` (`"draining": true`) or the
@@ -209,6 +211,13 @@ export function requirementOf(overrides: SandboxOverrides | undefined, base: Par
     os: base.os ?? "linux",
     ...(cpu !== undefined ? { cpu } : {}),
     ...(memMB !== undefined ? { memMB } : {}),
+    // A browser-class run (resource-class.ts, from the run's input look)
+    // needs a browser: the class becomes a REQUIREMENT, so a host that never
+    // declared one is recorded as unsuitable for it. It never relaxes a
+    // stricter deployment-wide declaration: `SHIP_PLACEMENT_REQUIRE` browser
+    // "headed" stays "headed" (headless is satisfied by a headed target, the
+    // weaker demand loses to the stronger).
+    ...(base.browser === undefined && overrides?.resourceClass === "browser" ? { browser: "headless" as const } : {}),
     ...(repo !== undefined ? { warmRepo: repo } : {}),
   };
   if (repo === undefined) defaults.push("project=(unknown)");
