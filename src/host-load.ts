@@ -144,13 +144,19 @@ export type HostHold = "memory" | "load" | "disk";
  * a small box. Being out of memory delays work and the kernel resolves it;
  * being out of disk breaks the docker daemon for every tenant on the box and
  * needs a human. The cheaper failure yields to the more expensive one.
+ *
+ * `launchExtraMB` makes the memory floor class-aware for the run being
+ * admitted (resource-class.ts): minFreeMB is "one plain run plus headroom",
+ * and a run that commits more than a plain one must clear a floor raised by
+ * exactly that much. Absent/0 — every caller before resource classes — is
+ * the same check as before.
  */
-export function hostHold(load: HostLoad, limits: HostLimits): HostHold | null {
+export function hostHold(load: HostLoad, limits: HostLimits, launchExtraMB = 0): HostHold | null {
   if (load.disk !== undefined) {
     if (limits.minFreeDiskMB > 0 && load.disk.freeMB < limits.minFreeDiskMB) return "disk";
     if (limits.maxInodeUsedPct > 0 && load.disk.inodeUsedPct > limits.maxInodeUsedPct) return "disk";
   }
-  if (limits.minFreeMB > 0 && load.freeMemMB < limits.minFreeMB) return "memory";
+  if (limits.minFreeMB + launchExtraMB > 0 && load.freeMemMB < limits.minFreeMB + launchExtraMB) return "memory";
   if (limits.maxLoadPerCpu > 0 && load.load1 / load.cpus > limits.maxLoadPerCpu) return "load";
   return null;
 }
@@ -188,6 +194,15 @@ export interface CapacityInput {
   limits: HostLimits;
   /** Runs already in flight here. Their memory and disk are ALREADY in the sensed numbers. */
   activeRuns: number;
+  /**
+   * Host memory in-flight runs commit BEYOND the PER_RUN_MB each already
+   * costs: the class deltas of active browser runs (resource-class.ts). The
+   * free-memory term subtracts it, because MemAvailable has already paid it
+   * while the run count has not — a box holding one browser and one plain
+   * run has less room for the next one than "two runs" says. Absent/0 is
+   * exactly the class-blind plan of before.
+   */
+  activeExtraMB?: number;
   /** SHIP_MAX_CONCURRENT_RUNS / --max-concurrent. Wins outright when set. */
   override?: number;
 }
@@ -224,7 +239,13 @@ export function capacityPlan(load: HostLoad, input: CapacityInput): Capacity {
   const activeRuns = Math.max(0, input.activeRuns);
   const cpu = Math.max(1, load.cpus);
   const byTotalMem = Math.floor((load.totalMemMB - BASE_RESERVE_MB) / PER_RUN_MB);
-  const byFreeMem = activeRuns + Math.floor((load.freeMemMB - Math.max(0, input.limits.minFreeMB)) / PER_RUN_MB);
+  // The class deltas of active runs (resource-class.ts) come OFF the free
+  // term: each browser run's extra memory is already gone from MemAvailable,
+  // and not subtracting it here would credit the box with room those runs
+  // have already spent — over-admission, the failure this term exists to
+  // prevent. Clamped at 0 below so a big delta cannot wrap the floor upward.
+  const activeExtraMB = Math.max(0, input.activeExtraMB ?? 0);
+  const byFreeMem = activeRuns + Math.floor((load.freeMemMB - Math.max(0, input.limits.minFreeMB) - activeExtraMB) / PER_RUN_MB);
   const memory = Math.min(byTotalMem, byFreeMem);
   const disk =
     load.disk === undefined

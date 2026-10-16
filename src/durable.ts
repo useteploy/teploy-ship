@@ -65,6 +65,7 @@ import { compareAroundNow, effectiveTelemetryTarget, telemetryAppliesTo, telemet
 import { spliceVerification, verificationSection, type Evidence } from "./verification.js";
 import { surfacedTestIntegrity } from "./test-integrity-surface.js";
 import { shortHash, warmClient, warmSlugOf, type WarmState } from "./warm.js";
+import { resourceClassOf, type ResourceClass } from "./resource-class.js";
 import { mergeFact, verificationSummary, type VerificationFacts } from "./verification-summary.js";
 import { preExisting, runTests, testComment, testTargetFromInput, testsFailedNudge, type TestOutcome, type TestTarget } from "./tests.js";
 import { detectFromWorkspace } from "./test-detect.js";
@@ -723,6 +724,17 @@ export interface SandboxOverrides {
    * exactly what the original run asked for.
    */
   warm?: { repo: string; path?: string };
+  /**
+   * The run's resource class (resource-class.ts): "browser" on a run whose
+   * input admits ```look. PLACEMENT-SIDE ONLY — it never reaches the daemon
+   * (definedOverrides drops it before the wire; the daemon rejects unknown
+   * fields), it exists so the worker's limit sizing and the pool's
+   * requirement derivation can see the footprint the run actually has.
+   * Derived purely from the recorded input in sandboxOverridesOf, so a
+   * replay asks for exactly the class the original asked for. Absent on
+   * every plain run, so their overrides are byte-identical to before.
+   */
+  resourceClass?: ResourceClass;
 }
 
 export interface ExecutorProvider {
@@ -4162,6 +4174,10 @@ export function sandboxProvider(options: {
 }
 
 function definedOverrides(o?: SandboxOverrides): SandboxOverrides {
+  // `resourceClass` is deliberately NOT copied: it is placement-side only
+  // (resource-class.ts) and the daemon rejects unknown fields — letting it
+  // reach the wire would make every look run's create fail with an
+  // unhelpful 400 instead of admitting a bigger footprint.
   return {
     ...(o?.image !== undefined ? { image: o.image } : {}),
     ...(o?.network !== undefined ? { network: o.network } : {}),
@@ -4217,12 +4233,21 @@ export function sandboxOverridesOf(input: DurableAgentInput): SandboxOverrides |
   // the open network, whatever the project record says. See networkForTrust.
   const { network } = networkForTrust(declared, input.trust);
   const egressAllow = input.sandboxEgressAllow;
+  // The resource class (resource-class.ts) rides the SAME funnel for the same
+  // reason the tier does: every workspace creation — sandbox, plan-restore,
+  // turn-N-restore, merge-restore — passes through here, so a run enqueued by
+  // an older binary or a surface that forgot still gets its class from its
+  // recorded input, and a replay asks for exactly what the original asked.
+  // Set only when the class is not plain, so plain runs' overrides are
+  // byte-identical to before this field existed.
+  const resourceClass = resourceClassOf(input) === "browser" ? ("browser" as const) : undefined;
   if (
     input.sandboxImage === undefined &&
     network === undefined &&
     egressAllow === undefined &&
     input.sandboxLimits === undefined &&
-    warm === null
+    warm === null &&
+    resourceClass === undefined
   ) {
     return undefined;
   }
@@ -4232,6 +4257,7 @@ export function sandboxOverridesOf(input: DurableAgentInput): SandboxOverrides |
     ...(egressAllow !== undefined ? { egressAllow } : {}),
     ...(input.sandboxLimits !== undefined ? { limits: input.sandboxLimits } : {}),
     ...(warm !== null ? { warm: { repo: warm } } : {}),
+    ...(resourceClass !== undefined ? { resourceClass } : {}),
   };
 }
 

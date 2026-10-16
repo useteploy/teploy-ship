@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { sweepIntake, makeTerminalClaim, launchDueBounded, repoLockKeyOf, retrying } from "./worker.js";
+import { sweepIntake, makeTerminalClaim, launchDueBounded, repoLockKeyOf, retrying, runResourceClassOf } from "./worker.js";
 import type { IntakeSweepDeps } from "./worker.js";
 import type { IntakeTask } from "./intake.js";
 import type { RunUsage } from "./durable.js";
@@ -677,6 +677,18 @@ test("C7: repoLockKeyOf reads the repo off the run's own log, normalised, and ex
     "an unparseable repo still serialises on its raw form — the key only has to be consistent",
   );
   assert.equal(repoLockKeyOf([]), undefined, "an empty log is nobody's to lock");
+});
+
+// --- resource classes: the run's class off its own log --------------------------
+
+test("runResourceClassOf reads the class off the run's own log, like repoLockKeyOf reads the repo", () => {
+  const started = (input: unknown): WorkflowEvent[] => [
+    { v: 1, seq: 0, type: "run-started", at: "2026-10-15T00:00:00Z", data: { workflow: "coding-agent", input } },
+  ];
+  assert.equal(runResourceClassOf(started({ task: "t", look: true })), "browser", "a look run is a browser run");
+  assert.equal(runResourceClassOf(started({ task: "t", look: false })), "plain");
+  assert.equal(runResourceClassOf(started({ task: "t" })), "plain", "a pre-look log is a plain run, never a guess");
+  assert.equal(runResourceClassOf([]), "plain", "an empty log admits no class — and no delta");
 });
 
 // --- contract 2: the verification block off the event log ---------------------

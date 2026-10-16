@@ -164,6 +164,49 @@ test("capacityPlan: a memory-squeezed box lowers the ceiling without an operator
   assert.equal(running.maxConcurrent, 8, "three of its own runs in flight, same ceiling");
 });
 
+test("capacityPlan is resource-class aware: one browser and one plain run commit more than two plain runs", () => {
+  // Resource classes (resource-class.ts). Same box in both plans: 8 cpu,
+  // 8 GB, MemAvailable already down to 2000 MB by the co-tenant AND the two
+  // runs in flight — one plain (400 MB), one browser (400 + 512 MB).
+  const roomy = { freeMB: 200_000, usedPct: 20, inodeUsedPct: 10 };
+  const box = load({ totalMemMB: 8192, freeMemMB: 2000, cpus: 8, disk: roomy });
+  // Class-blind (what the worker did before classes): each run only ever
+  // cost PER_RUN_MB, so the browser run's 512 MB of real commitment read
+  // as room for one more run than the box has.
+  const blind = capacityPlan(box, { activeRuns: 2, limits: LIMITS });
+  assert.equal(blind.maxConcurrent, 5, "2 + (2000-600)/400 = 5: the class-blind over-admission");
+  // Class-aware: the browser delta comes off the free term, and the same box
+  // admits one fewer run. Conservative direction: over-reserve, never under.
+  const aware = capacityPlan(box, { activeRuns: 2, limits: LIMITS, activeExtraMB: 512 });
+  assert.equal(aware.maxConcurrent, 4, "2 + (2000-600-512)/400 = 4");
+  assert.equal(aware.binding, "memory");
+  // The ceiling returns as the browser run finishes: subtracting the delta is
+  // accounting, not a new permanent floor.
+  const finished = capacityPlan(load({ totalMemMB: 8192, freeMemMB: 2000 + 912, cpus: 8, disk: roomy }), { activeRuns: 1, limits: LIMITS });
+  assert.ok(finished.maxConcurrent > aware.maxConcurrent, "room comes back with the run");
+});
+
+test("capacityPlan: absent and zero class deltas are the same plan (flag-off equivalence)", () => {
+  const roomy = { freeMB: 200_000, usedPct: 20, inodeUsedPct: 10 };
+  const box = load({ totalMemMB: 8192, freeMemMB: 5000, cpus: 4, disk: roomy });
+  assert.deepEqual(
+    capacityPlan(box, { activeRuns: 2, limits: LIMITS }),
+    capacityPlan(box, { activeRuns: 2, limits: LIMITS, activeExtraMB: 0 }),
+    "a caller that knows nothing about classes gets the class-blind plan exactly",
+  );
+});
+
+test("hostHold: the memory floor is class-aware for the run being admitted", () => {
+  // minFreeMB (600) is "one PLAIN run plus headroom". At 700 MB free a plain
+  // run launches; a browser run, which commits 512 MB more than a plain one,
+  // does not — until the box has the raised floor.
+  assert.equal(hostHold(load({ freeMemMB: 700 }), LIMITS), null, "a plain run still launches");
+  assert.equal(hostHold(load({ freeMemMB: 700 }), LIMITS, 512), "memory", "a browser run is held on the same box");
+  assert.equal(hostHold(load({ freeMemMB: 600 + 512 }), LIMITS, 512), null, "exactly at the raised floor still launches");
+  // Disk still outranks memory, and the raised floor cannot mask a full disk.
+  assert.equal(hostHold(load({ freeMemMB: 100, disk: { freeMB: 900, usedPct: 99, inodeUsedPct: 41 } }), LIMITS, 512), "disk");
+});
+
 test("capacityPlan never returns 0 — a 0 ceiling wedges the worker; holding is hostHold's job", () => {
   const dead = load({ totalMemMB: 1024, freeMemMB: 100, cpus: 1, disk: { freeMB: 10, usedPct: 100, inodeUsedPct: 99 } });
   const plan = capacityPlan(dead, { activeRuns: 0, limits: LIMITS });
