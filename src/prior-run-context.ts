@@ -13,7 +13,11 @@
  *    how the run ended, what was pushed, what the suite said).
  *  - "claim" lines were written by a model (the earlier agent, the critic, a
  *    scan's findings). They may be wrong, and every line of them is quoted
- *    with a "> " prefix so a claim cannot forge a "Recorded" header.
+ *    with a "> " prefix so a claim cannot forge a "Recorded" header. Text is
+ *    line-normalised before quoting (CR, NEL, LS/PS, VT/FF become "> "-prefixed
+ *    lines too; other C0 and bidi controls are dropped) and run through
+ *    scrub(), so nothing recognised as a secret is copied into a follow-up's
+ *    task.
  *
  * Replay-safe by construction: the caller materialises the result into the
  * follow-up's run input at enqueue, so a replay reads the recorded text and
@@ -22,6 +26,7 @@
  */
 import type { WorkflowEvent } from "@neutron-build/workflow";
 import { PLAN_EVENT } from "./plan.js";
+import { scrub } from "./redact.js";
 import { verificationFactsFromEvents } from "./verification-summary.js";
 import type { TestOutcome } from "./tests.js";
 
@@ -44,6 +49,12 @@ export interface PriorContextOptions {
   /** The PR head the forge reported when the follow-up was launched. */
   prHead?: string;
   maxChars?: number;
+  /** Ancestors the history walk did not read because of its 20-run bound. */
+  omittedAncestors?: number;
+  /** …and the count hit its own cap: there are more ancestors than the number. */
+  omittedAncestorsCapped?: boolean;
+  /** The history walk stopped at this ancestor: it belongs to a different repository/project. */
+  crossProjectCutAt?: string;
 }
 
 function rec(value: unknown): Record<string, unknown> | undefined {
@@ -54,12 +65,37 @@ function clip(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)} [truncated]` : text;
 }
 
+/**
+ * Line separators other than "\n" (CR, NEL, U+2028/U+2029 LS/PS, VT, FF)
+ * render as a break in enough consumers that text after one shows up at
+ * column 0 — without the quote prefix — and can pose as a "Recorded"
+ * header. Normalise them to "\n" before splitting; drop the other C0
+ * controls (except tab) and the bidi overrides, which reorder rather than
+ * break lines but serve the same forgery.
+ */
+function normaliseLines(text: string): string {
+  return text
+    .replace(/\r\n?|[\u2028\u2029\u0085\u000B\u000C]/g, "\n")
+    .replace(/[\u0000-\u0008\u000E-\u001F]/g, "")
+    .replace(/[\u202A-\u202E\u2066-\u2069]/g, "");
+}
+
 /** Quote untrusted or historical text so no line of it can pose as a header. */
 function quote(text: string, max: number): string {
-  return clip(text.trim(), max)
+  return clip(normaliseLines(text).trim(), max)
     .split("\n")
     .map((line) => `  > ${line}`)
     .join("\n");
+}
+
+/**
+ * An untrusted reason interpolated INSIDE a "Recorded" line: collapsed to a
+ * single line, because a raw newline would start a fresh column-0 line that
+ * reads as a forged header. scrub() first — error and failure text is where
+ * tools print credentials, and this text leaves the run's own log.
+ */
+function inline(text: string, max: number): string {
+  return clip(scrub(text).replace(/\s+/g, " ").trim(), max);
 }
 
 function testLine(label: string, o: TestOutcome | undefined): string | undefined {
@@ -70,9 +106,9 @@ function testLine(label: string, o: TestOutcome | undefined): string | undefined
     case "failed":
       return `${label} FAILED, exit ${o.exitCode} (${o.command})`;
     case "errored":
-      return `${label} could not run: ${clip(o.reason, 200)}`;
+      return `${label} could not run: ${inline(o.reason, 200)}`;
     case "disabled":
-      return `${label} not run: ${clip(o.reason, 200)}`;
+      return `${label} not run: ${inline(o.reason, 200)}`;
   }
 }
 
@@ -104,14 +140,14 @@ export function renderPriorRun(run: PriorRun, label: string, options: PriorConte
   const output = terminal?.type === "run-completed" ? rec(rec(terminal.data)?.output) : undefined;
   if (terminal === undefined) lines.push("Recorded outcome: not finished when this follow-up started.");
   else if (terminal.type === "run-completed") lines.push(`Recorded outcome: completed${typeof output?.status === "string" ? ` (${output.status})` : ""}.`);
-  else if (terminal.type === "run-failed") lines.push("Recorded outcome: FAILED. Error:", quote(errorText(rec(terminal.data)?.error), CAP.error));
+  else if (terminal.type === "run-failed") lines.push("Recorded outcome: FAILED. Error:", quote(scrub(errorText(rec(terminal.data)?.error)), CAP.error));
   else {
     const reason = rec(terminal.data)?.reason;
-    lines.push(`Recorded outcome: cancelled${typeof reason === "string" && reason !== "" ? ` (${clip(reason, 300)})` : ""}.`);
+    lines.push(`Recorded outcome: cancelled${typeof reason === "string" && reason !== "" ? ` (${inline(reason, 300)})` : ""}.`);
   }
   if (terminal !== undefined && terminal.type !== "run-completed") {
     const failed = [...events].reverse().find((e) => e.type === "step-failed");
-    if (failed !== undefined) lines.push(`Recorded failing step: ${failed.name ?? "(unnamed)"}:`, quote(errorText(rec(failed.data)?.error), CAP.error));
+    if (failed !== undefined) lines.push(`Recorded failing step: ${failed.name ?? "(unnamed)"}:`, quote(scrub(errorText(rec(failed.data)?.error)), CAP.error));
   }
 
   // The plan: the operator's edited text when they edited it, else the
@@ -122,7 +158,7 @@ export function renderPriorRun(run: PriorRun, label: string, options: PriorConte
     const planStep = [...events].reverse().find((e) => e.type === "step-completed" && /(^|-)plan-think$/.test(e.name ?? ""));
     const planText = rec(rec(planStep?.data)?.result)?.text;
     if (payload?.approved === false) {
-      lines.push(`Recorded plan decision: rejected${typeof payload.reason === "string" && payload.reason !== "" ? ` (${clip(payload.reason, 300)})` : ""}.`);
+      lines.push(`Recorded plan decision: rejected${typeof payload.reason === "string" && payload.reason !== "" ? ` (${inline(payload.reason, 300)})` : ""}.`);
     } else if (typeof payload?.plan === "string" && payload.plan.trim() !== "") {
       lines.push("Recorded plan (edited and approved by the operator):", quote(payload.plan, CAP.plan));
     } else if (typeof planText === "string" && planText.trim() !== "") {
@@ -160,18 +196,18 @@ export function renderPriorRun(run: PriorRun, label: string, options: PriorConte
   const checks = [testLine("Baseline suite", facts.baseline), testLine("Build", facts.build), testLine("Test suite", facts.tests)].filter((l): l is string => l !== undefined);
   if (facts.fixExhausted !== undefined) checks.push(`Fix attempts exhausted after ${facts.fixExhausted.attempts}`);
   if (checks.length > 0) lines.push(`Recorded verification: ${checks.join("; ")}.`);
-  if (facts.tests?.kind === "failed" && facts.tests.output.trim() !== "") lines.push("Recorded failing suite output (tail):", quote(facts.tests.output.slice(-CAP.testOutput), CAP.testOutput));
+  if (facts.tests?.kind === "failed" && facts.tests.output.trim() !== "") lines.push("Recorded failing suite output (tail):", quote(scrub(facts.tests.output.slice(-CAP.testOutput)), CAP.testOutput));
 
   const summary = typeof output?.agentSummary === "string" ? output.agentSummary : typeof output?.summary === "string" ? output.summary : "";
-  if (summary.trim() !== "") lines.push("Earlier agent's claim (its final summary):", quote(summary, CAP.summary));
-  if (facts.critic !== undefined) lines.push(`Critic's claim (${facts.critic.approved ? "approved" : "changes requested"}):`, quote(facts.critic.notes, CAP.critic));
+  if (summary.trim() !== "") lines.push("Earlier agent's claim (its final summary):", quote(scrub(summary), CAP.summary));
+  if (facts.critic !== undefined) lines.push(`Critic's claim (${facts.critic.approved ? "approved" : "changes requested"}):`, quote(scrub(facts.critic.notes), CAP.critic));
   const findingsStep = [...events].reverse().find((e) => e.type === "step-completed" && e.name === "scan-findings");
   const findings = rec(rec(findingsStep?.data)?.result)?.findings;
   if (Array.isArray(findings) && findings.length > 0) {
     lines.push(`Scan's claim (${findings.length} finding${findings.length === 1 ? "" : "s"}):`);
     for (const f of findings.slice(0, CAP.findings)) {
       const r = rec(f);
-      lines.push(quote(`[${String(r?.severity ?? "?")}] ${String(r?.title ?? "")}${typeof r?.file === "string" ? ` (${r.file})` : ""}`, 300));
+      lines.push(quote(scrub(`[${String(r?.severity ?? "?")}] ${String(r?.title ?? "")}${typeof r?.file === "string" ? ` (${r.file})` : ""}`), 300));
     }
     if (findings.length > CAP.findings) lines.push(`  (${findings.length - CAP.findings} more findings omitted)`);
   }
@@ -185,8 +221,19 @@ export function renderPriorRun(run: PriorRun, label: string, options: PriorConte
  */
 export function priorRunContext(chain: readonly PriorRun[], options: PriorContextOptions = {}): string {
   const max = options.maxChars ?? PRIOR_CONTEXT_MAX_CHARS;
+  // The head-move comparison uses the most recent push ANYWHERE in the chain,
+  // not only the last run's: a follow-up often pushes nothing itself (an
+  // investigation, a refused or empty push) while an earlier run's push is
+  // still the PR head the forge reports.
+  let pushIndex = -1;
+  for (let i = chain.length - 1; i >= 0; i--) {
+    if (verificationFactsFromEvents(chain[i]!.events as WorkflowEvent[]).push?.kind === "pushed") {
+      pushIndex = i;
+      break;
+    }
+  }
   const sections = chain.map((run, i) =>
-    renderPriorRun(run, i === chain.length - 1 ? `${i + 1} of ${chain.length}, the run this follows up` : `${i + 1} of ${chain.length}`, i === chain.length - 1 ? options : {}),
+    renderPriorRun(run, i === chain.length - 1 ? `${i + 1} of ${chain.length}, the run this follows up` : `${i + 1} of ${chain.length}`, pushIndex === i ? options : {}),
   );
   let kept = sections;
   let omitted = 0;
@@ -195,6 +242,11 @@ export function priorRunContext(chain: readonly PriorRun[], options: PriorContex
     kept = kept.slice(1);
     omitted += 1;
   }
-  const body = [PRIOR_CONTEXT_HEADER, ...(omitted > 0 ? [`(${omitted} earlier run${omitted === 1 ? "" : "s"} omitted to stay within the size bound)`] : []), ...kept].join("\n\n");
+  const notes: string[] = [];
+  if (omitted > 0) notes.push(`(${omitted} earlier run${omitted === 1 ? "" : "s"} omitted to stay within the size bound)`);
+  const unread = options.omittedAncestors ?? 0;
+  if (unread > 0) notes.push(`(${options.omittedAncestorsCapped === true ? "more than " : ""}${unread} earlier run${unread === 1 && options.omittedAncestorsCapped !== true ? "" : "s"} omitted: only the 20 most recent runs are read)`);
+  if (options.crossProjectCutAt !== undefined) notes.push(`(earlier runs omitted at ${options.crossProjectCutAt}: that run is in a different repository/project, so its history is not carried)`);
+  const body = [PRIOR_CONTEXT_HEADER, ...notes, ...kept].join("\n\n");
   return clip(body, max);
 }

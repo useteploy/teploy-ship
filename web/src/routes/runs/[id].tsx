@@ -169,9 +169,16 @@ export async function action({
     }
     // D3: a structured, bounded digest of each earlier run (recorded facts vs
     // model claims), materialised into this run's input at enqueue so a replay
-    // reads the text it was launched with.
-    const history = await threadHistory(runtime, runId);
-    const task = `${message}\n\n${priorRunContext(history, prHead !== undefined ? { prHead } : {})}`;
+    // reads the text it was launched with. The history walk reports what it
+    // did not carry (its 20-run bound; a parent in another repo/project), and
+    // the digest says so instead of dropping runs silently.
+    const thread = await threadHistory(runtime, runId);
+    const task = `${message}\n\n${priorRunContext(thread.history, {
+      ...(prHead !== undefined ? { prHead } : {}),
+      ...(thread.olderOmitted > 0 ? { omittedAncestors: thread.olderOmitted } : {}),
+      ...(thread.olderOmittedCapped ? { omittedAncestorsCapped: true } : {}),
+      ...(thread.crossProjectCutAt !== undefined ? { crossProjectCutAt: thread.crossProjectCutAt } : {}),
+    })}`;
     const replacingReview = reviewing && !readOnly;
     if (replacingReview && String(form.get("eventName") ?? "") !== MERGE_EVENT) return redirectTo(`/runs/${runId}?decision=taken`);
     try {
