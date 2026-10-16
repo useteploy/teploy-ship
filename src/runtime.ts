@@ -69,6 +69,21 @@ import type { UserStore } from "./users.js";
 import { FileDeliveryLog, NucleusDeliveryLog } from "./deliveries.js";
 import type { DeliveryLog } from "./deliveries.js";
 import type { Actor } from "./actor.js";
+import type { NetworkTier } from "./egress.js";
+import { withFileLock } from "./file-store.js";
+import {
+  DELEGATION_INDEX_KEY,
+  childTaskPrompt,
+  clampDelegateTask,
+  delegateCapMessage,
+  delegateMaxChildren,
+  delegatedChildRunId,
+  delegationKey,
+  parseDelegationRecord,
+  registerDelegateControl,
+  transferFromEvents,
+} from "./delegate.js";
+import type { DelegateControl, DelegateSpawnOutcome, DelegationEntry, DelegationRecord } from "./delegate.js";
 import { FileOutbox, NucleusOutbox } from "./outbox.js";
 import { FileDeliveryStore, NucleusDeliveryStore, type DeliveryStore } from "./delivery.js";
 import type { Outbox } from "./outbox.js";
@@ -449,7 +464,13 @@ export function fileRuntime(): ShipRuntime {
   const meta = new RunMetaStore();
   const projects = new FileProjectStore();
   let runtime: ShipRuntime;
-  return runtime = {
+  // Delegation (S20/S22): register this process's control BEFORE the runtime
+  // is handed back, so a worker built on it can spawn children immediately.
+  // The registration seam — rather than a `delegate:` field in worker.ts's
+  // durableAgent config — keeps this branch off the worker/cli dirty lane;
+  // see docs/COORDINATOR_DESIGN.md. registerDelegateControl is idempotent per
+  // process and the slot is read only on runs whose input admits the action.
+  const built: ShipRuntime = {
     kind: "file",
     launches: new FileLaunchJournal(store, meta, undefined, intent => finishReviewReplacement(runtime, intent)),
     bulletin: new FileBulletinStore(),
@@ -490,6 +511,9 @@ export function fileRuntime(): ShipRuntime {
     },
     close: async () => {},
   };
+  runtime = built;
+  registerDelegateControl(delegateControlFromRuntime(runtime));
+  return runtime;
 }
 
 const META_COLLECTION = "ship_meta";
@@ -568,7 +592,9 @@ export async function nucleusRuntime(
 
   const projects = new NucleusProjectStore(db);
   let runtime: NucleusShipRuntime;
-  return runtime = {
+  // Same registration seam as fileRuntime above (S20/S22): the worker runs in
+  // this process, so its runs find the control without worker.ts wiring.
+  const built: NucleusShipRuntime = {
     kind: "nucleus",
     launches: new NucleusLaunchJournal(db, store, intent => finishReviewReplacement(runtime, intent)),
     bulletin: new NucleusBulletinStore(db),
@@ -687,6 +713,9 @@ export async function nucleusRuntime(
     },
     close: () => db.close(),
   };
+  runtime = built;
+  registerDelegateControl(delegateControlFromRuntime(runtime));
+  return runtime;
 }
 
 /**
@@ -1062,6 +1091,20 @@ export async function enqueueRun(
      * and the dashboard's new-run form) can say so explicitly.
      */
     trust?: RepoTrust;
+    /**
+     * The DECLARED network tier for this run's sandbox, overriding the
+     * project record's. Delegation-only in practice (delegate.ts): a child
+     * copies its parent's recorded tier so it can never be looser, and the
+     * copy has to ride the enqueue like every other fact a replay reads.
+     */
+    sandboxNetwork?: NetworkTier;
+    /**
+     * Marks a run spawned by a ```delegate action (S20/S22). Internal to the
+     * delegation control — never a surface option. Suppresses `delegate`
+     * below (children do not delegate) and records the lineage marker the
+     * loop's one-level refusal reads.
+     */
+    delegateChild?: boolean;
   },
 ): Promise<EnqueueReport | undefined> {
   const journey = options.journey === undefined ? undefined : parseJourney(options.journey);
@@ -1140,6 +1183,14 @@ export async function enqueueRun(
   // the action was offered. Off for scans, which read a repository rather
   // than a web page.
   const look = scan ? undefined : (envFlag("SHIP_LOOK") ? true : undefined);
+  // Bounded child work (S20/S22): the ```delegate action, default OFF behind
+  // SHIP_DELEGATE. Materialised HERE like every step-adding flag — the
+  // delegate branch records `turn-N-delegate-*` steps and parks on sleeps, so
+  // a replay must know from its log alone whether the action was offered.
+  // Suppressed on scans (a scan holds no publish authority to hand down) and
+  // on delegation CHILDREN: one level is the whole v1 bound, and the child's
+  // refusal has to be a fact of its recorded input, not a worker's env.
+  const delegate = scan || options.delegateChild === true ? undefined : (envFlag("SHIP_DELEGATE") ? true : undefined);
   // Image mode for ```look (S12 gated slice), materialised beside `look` and
   // only when `look` itself is on: SHIP_LOOK_IMAGE_MODEL names the
   // vision-capable model image looks route to (the 2026-10-15 owner call:
@@ -1438,6 +1489,11 @@ export async function enqueueRun(
         // external-task downgrade at execution, so the declaration and the
         // downgrade both stay readable.
         ...(project?.sandboxNetwork !== undefined ? { sandboxNetwork: project.sandboxNetwork } : {}),
+        // A delegation child's inherited tier (see the option): recorded
+        // AFTER the project line so an explicit copy always wins, and absent
+        // whenever the caller did not state one — the project default then
+        // resolves exactly as it did for the parent.
+        ...(options.sandboxNetwork !== undefined ? { sandboxNetwork: options.sandboxNetwork } : {}),
         // Plus, for a project that declares a preview, the preview target's
         // host derived from this deployment's SHIP_PREVIEW_TAILNET_IP (and
         // main's host for the visual rung): the preview rungs run behind the
@@ -1462,6 +1518,12 @@ export async function enqueueRun(
         // run that does not admit it — including look-off runs, whose inputs
         // stay byte-identical to pre-image ones.
         ...(lookImage !== undefined ? { lookImage } : {}),
+        // ```delegate (S20/S22), from SHIP_DELEGATE above: default off, so a
+        // run that does not set it enqueues exactly as it did before the
+        // action existed — and the child marker, recorded only on spawned
+        // children, whose own inputs never admit delegation.
+        ...(delegate === true ? { delegate: true } : {}),
+        ...(options.delegateChild === true ? { delegateChild: true } : {}),
         index: true,
         guard: true,
         // The warm repo cache (SB-A). Repo runs that are not PR runs, on
@@ -1549,4 +1611,139 @@ export async function enqueueRun(
     );
   }
   return report;
+}
+
+// ------------------------------------------------------------- delegation (S20/S22)
+
+/**
+ * The runtime half of the delegate control (delegate.ts holds the pure half).
+ * spawn claims a child in the task root's ledger and enqueues an ORDINARY
+ * run carrying the parent's lineage and gates; outcome projects a child's log
+ * into a transfer. Everything here runs INSIDE the parent's recorded
+ * `turn-N-delegate-spawn` / `-wait` steps, so every store read it makes is
+ * replay-safe by the same contract those steps already carry.
+ *
+ * GATES: the child copies trust, the declared network tier and the plan flag
+ * from the parent's RECORDED input, and its spend settles into the parent's
+ * (source, day) bucket because the source is copied too — the cap sees
+ * delegation without a second ledger. The repo hint from the fence is
+ * verified against the parent's own repo; a workspace run cannot grant one.
+ */
+export function delegateControlFromRuntime(runtime: ShipRuntime): DelegateControl {
+  return {
+    async spawn(request): Promise<DelegateSpawnOutcome> {
+      // The parent's own log is the authority for lineage and gates: it was
+      // recorded by the enqueue this run came from, so it is immutable for
+      // the run's whole life.
+      const events = (await runtime.store.load(request.parentRunId)) as Array<{ type: string; data?: unknown }>;
+      const started = events.find((e) => e.type === "run-started")?.data as
+        | { taskRootRunId?: unknown; input?: { repo?: unknown; trust?: unknown; plan?: unknown; sandboxNetwork?: unknown } }
+        | undefined;
+      if (started === undefined) return { ok: false, reason: `delegation unavailable: run ${request.parentRunId} has no recorded input` };
+      const input = started.input ?? {};
+      const taskRootRunId = typeof started.taskRootRunId === "string" && started.taskRootRunId !== "" ? started.taskRootRunId : request.parentRunId;
+      const meta = await runtime.loadMeta(request.parentRunId);
+      const model = meta?.model ?? "";
+      if (model === "") return { ok: false, reason: "delegation unavailable: the parent run's model could not be resolved from its meta" };
+      // Scope hints are narrowed, never widened: repo= must name exactly the
+      // parent's repository, and a parent with no repository cannot grant one.
+      const parentRepo = typeof input.repo === "string" && input.repo !== "" ? input.repo : undefined;
+      if (request.repoHint !== undefined) {
+        if (parentRepo === undefined) {
+          return { ok: false, reason: "delegation refused: this run has no repository, so it cannot scope a child to one — leave repo= off" };
+        }
+        const canonical = canonicalRepositoryURL(request.repoHint);
+        const parentCanonical = canonicalRepositoryURL(parentRepo);
+        if (canonical === null || canonical !== parentCanonical) {
+          return { ok: false, reason: "delegation refused: repo= must name this run's own repository (a delegation cannot target another repository)" };
+        }
+      }
+      const task = childTaskPrompt({
+        parentRunId: request.parentRunId,
+        turn: request.turn,
+        task: request.task,
+        ...(parentRepo !== undefined ? { repo: parentRepo } : {}),
+        ...(request.pathHint !== undefined ? { path: request.pathHint } : {}),
+      });
+      const max = delegateMaxChildren();
+      const key = delegationKey(taskRootRunId);
+      // Idempotency first: a step re-run after a crash before it recorded
+      // finds its OWN entry and republishes the same child (the launch
+      // journal turns the re-enqueue into a republish), never a second run.
+      let existing: DelegationEntry | undefined;
+      await withFileLock(key, async () => {
+        const record = parseDelegationRecord(await runtime.config.get(key), taskRootRunId) ?? { taskRootRunId, entries: [] };
+        existing = record.entries.find((e) => e.parentRunId === request.parentRunId && e.turn === request.turn);
+        if (existing !== undefined) return;
+        if (record.entries.length >= max) return;
+        const entry: DelegationEntry = {
+          index: record.entries.length + 1,
+          parentRunId: request.parentRunId,
+          turn: request.turn,
+          childRunId: delegatedChildRunId(taskRootRunId, record.entries.length + 1),
+          task: clampDelegateTask(request.task),
+          at: new Date().toISOString(),
+        };
+        const next: DelegationRecord = { taskRootRunId, entries: [...record.entries, entry] };
+        await runtime.config.set(key, JSON.stringify(next), "delegation");
+        const ids = readDelegationIndex(await runtime.config.get(DELEGATION_INDEX_KEY));
+        if (!ids.includes(taskRootRunId)) {
+          await runtime.config.set(DELEGATION_INDEX_KEY, JSON.stringify([...ids, taskRootRunId]), "delegation");
+        }
+        existing = entry;
+      });
+      if (existing === undefined) {
+        return { ok: false, reason: delegateCapMessage(max) };
+      }
+      const entry = existing;
+      try {
+        await enqueueRun(runtime, {
+          runId: entry.childRunId,
+          task,
+          model,
+          ...(parentRepo !== undefined ? { repo: parentRepo } : {}),
+          // Conversation lineage (task-session.ts): the child threads under
+          // the parent, inherits the task root, and shows in the thread view.
+          parentRunId: request.parentRunId,
+          ...(typeof input.trust === "string" && (input.trust === "operator" || input.trust === "external") ? { trust: input.trust } : {}),
+          ...(input.plan === true ? { plan: true } : {}),
+          ...(typeof input.sandboxNetwork === "string" && input.sandboxNetwork !== "" ? { sandboxNetwork: input.sandboxNetwork as NetworkTier } : {}),
+          ...(meta?.source !== undefined && meta.source !== "" ? { source: meta.source } : {}),
+          ...(meta?.actor !== undefined && meta.actor !== "" && meta.actorKind !== undefined
+            ? { actor: { id: meta.actor, kind: meta.actorKind } as Actor }
+            : {}),
+          delegateChild: true,
+        });
+      } catch (error) {
+        // The enqueue refused (budget, allowlist): give the claim back so the
+        // SAME index is retried, exactly coordination.ts's launchChild revert.
+        const message = error instanceof Error ? error.message : String(error);
+        await withFileLock(key, async () => {
+          const record = parseDelegationRecord(await runtime.config.get(key), taskRootRunId);
+          if (record === null) return;
+          if (!record.entries.some((e) => e.childRunId === entry.childRunId && e.parentRunId === request.parentRunId && e.turn === request.turn)) return;
+          await runtime.config.set(key, JSON.stringify({ taskRootRunId, entries: record.entries.filter((e) => e.childRunId !== entry.childRunId) }), "delegation");
+        }).catch(() => {});
+        return { ok: false, reason: `delegation refused: the child run could not be enqueued (${message})` };
+      }
+      return { ok: true, childRunId: entry.childRunId };
+    },
+    async outcome(childRunId) {
+      const events = (await runtime.store.load(childRunId)) as Array<{ type: string; data?: unknown }>;
+      if (events.length === 0) return null;
+      return transferFromEvents(childRunId, events);
+    },
+  };
+}
+
+/** The delegation index: roots with a ledger. Same tolerant shape as coordination.ts's readIndex. */
+function readDelegationIndex(raw: string | undefined): string[] {
+  if (raw === undefined || raw === "") return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((id): id is string => typeof id === "string" && /^[A-Za-z0-9._-]+$/.test(id));
+  } catch {
+    return [];
+  }
 }

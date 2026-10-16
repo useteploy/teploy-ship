@@ -107,13 +107,33 @@ const LOOK_IMAGE_SENTENCE =
   "A look with image=on also attaches a PNG screenshot of the page as it was, alongside the text snapshot (a few per run; only the latest stay in history).";
 
 /**
+ * The ```delegate action (S20/S22, SHIP_DELEGATE), offered only when the run
+ * input admits it (durable.ts `input.delegate`). The framing makes the COST
+ * visible — the turn is spent waiting, the child draws on the same budget —
+ * because an agent that delegates every subtask is one that multiplies spend
+ * and hides work, which is the failure mode the hard per-root cap exists to
+ * bound.
+ */
+const DELEGATE_ACTION = `# Delegating work
+
+You may split off ONE self-contained piece of work as a child run. The child is an ordinary run in this repository with the same permissions as yours; it cannot delegate further. Your turn PAUSES until the child finishes, and its final report comes back to you as your next observation.
+
+\`\`\`delegate path=src/foo
+Make the foo parser accept RFC 3339 durations. Add tests for the edge cases.
+\`\`\`
+
+Write the child's task as a complete, standalone brief — it does not see your conversation. Scope it with path= when the work belongs to one area. Delegate only work you do not need to interleave with your own: while the child runs you do nothing. The number of children this task may spawn in total is small and hard-capped; a refused delegation tells you so.
+
+`;
+
+/**
  * The CodeAct system prompt. Establishes the action protocol: think,
  * then emit exactly one fenced code block per turn; observe its output;
  * repeat; finish with a ```finish block. Kept deliberately compact — the
  * ~30% of agent quality that lives in prompt/recovery tuning is a
  * later-milestone concern, but the protocol has to be unambiguous now.
  */
-export function systemPrompt(options: { workdir: string; task: string; search?: boolean; browser?: boolean; ask?: boolean; look?: boolean; lookImage?: boolean }): string {
+export function systemPrompt(options: { workdir: string; task: string; search?: boolean; browser?: boolean; ask?: boolean; look?: boolean; lookImage?: boolean; delegate?: boolean }): string {
   // The index is PARTIAL, and the prompt has to say so.
   //
   // This block used to read "prefer this over grepping around". Measured on
@@ -197,7 +217,7 @@ Rules:
 - The filesystem always persists between actions. Python variables usually persist, but may reset after long pauses — anything important belongs in a file.
 - Prefer small, verifiable steps. Read errors and fix them.
 
-${options.browser === true ? BROWSER_PROOF : ""}${options.ask === true ? ASK_ACTION : ""}${options.look === true ? (options.lookImage === true ? `${LOOK_ACTION}${LOOK_IMAGE_SENTENCE}\n\n` : LOOK_ACTION) : ""}# Finishing
+${options.browser === true ? BROWSER_PROOF : ""}${options.ask === true ? ASK_ACTION : ""}${options.look === true ? (options.lookImage === true ? `${LOOK_ACTION}${LOOK_IMAGE_SENTENCE}\n\n` : LOOK_ACTION) : ""}${options.delegate === true ? DELEGATE_ACTION : ""}# Finishing
 
 When the task is complete and verified, emit a finish block with a short summary of what you did and the result:
 \`\`\`finish

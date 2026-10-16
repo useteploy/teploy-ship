@@ -35,6 +35,7 @@ export type Action =
   | { kind: "create"; file: string; content: string }
   | { kind: "search"; query: string } // semantic code retrieval (repo runs with an index)
   | { kind: "look"; url?: string; ref?: string; find?: string; depth?: number; image?: boolean } // browser perception (S12): the run's page as an a11y-tree text with refs; image=on adds a PNG screenshot (gated slice)
+  | { kind: "delegate"; task: string; repo?: string; path?: string } // bounded child work (S20/S22): spawn one child run, park, merge its result back as an observation
   | { kind: "finish"; message: string }
   | { kind: "ask"; question: string } // a question for the operator; the run parks on the answer (durable, input.ask)
   | { kind: "invalid"; message: string } // recognized but malformed — feed the error back
@@ -224,6 +225,61 @@ export function parseLookArgs(arg: string): Action {
   };
 }
 
+/**
+ * `delegate` fence parameters: `key=value` tokens before the body, like
+ * `look`'s. Only two exist in v1 and both are scope HINTS, never authority:
+ * `repo=` must name the parent's own repository (the loop enforces that —
+ * the parser only checks the shape), `path=` narrows where the child works.
+ */
+const DELEGATE_PARAM = /(?:^|\s)(repo|path)=/g;
+
+/** The task prompt carried in the body is clamped here, before it reaches a run. */
+export const DELEGATE_TASK_MAX = 8000;
+
+export const DELEGATE_HELP =
+  "```delegate spawns ONE child run with a task and waits for its result:\n" +
+  "```delegate path=src/foo\nMake the foo parser accept RFC 3339 durations. Add tests.\n```\n" +
+  "Use it to split off self-contained work you do not need to interleave with your own. " +
+  "The child is an ordinary run with the same permissions as this one; it cannot delegate further.";
+
+/**
+ * Parse a ```delegate fence. The body is the child's task (required); the
+ * fence argument carries the optional `repo=` / `path=` hints. Deliberately
+ * no other parameters in v1 — budget, model and gates are inherited, not
+ * chosen by the model.
+ */
+export function parseDelegateArgs(arg: string, code: string): Action {
+  const params = new Map<string, string>();
+  const marks = [...arg.matchAll(DELEGATE_PARAM)];
+  for (let i = 0; i < marks.length; i++) {
+    const mark = marks[i]!;
+    const start = mark.index! + mark[0]!.length;
+    const end = i + 1 < marks.length ? marks[i + 1]!.index : arg.length;
+    params.set(mark[1]!, arg.slice(start, end).trim());
+  }
+  const repo = params.get("repo");
+  if (repo === "") return { kind: "invalid", message: "```delegate repo= is empty — pass the repository's full clone URL, or leave it off to use this run's repository.\n\n" + DELEGATE_HELP };
+  if (repo !== undefined && !/^(https?|file|ssh|git):\/\/|^git@/.test(repo)) {
+    return { kind: "invalid", message: `\`\`\`delegate repo= must be a full clone URL, got: ${repo}\n\n` + DELEGATE_HELP };
+  }
+  const path = params.get("path");
+  if (path === "") return { kind: "invalid", message: "```delegate path= is empty — pass the subdirectory to scope the child to, or leave it off.\n\n" + DELEGATE_HELP };
+  if (path !== undefined) {
+    const bad = validateActionPath(path);
+    if (bad !== null) return { kind: "invalid", message: `cannot scope delegation to ${path}: ${bad}` };
+  }
+  const task = code.trim();
+  if (task === "") {
+    return { kind: "invalid", message: "```delegate block needs the child's task in its body, e.g.\n```delegate path=src/foo\nMake the foo parser accept RFC 3339 durations. Add tests.\n```" };
+  }
+  return {
+    kind: "delegate",
+    task: task.length > DELEGATE_TASK_MAX ? `${task.slice(0, DELEGATE_TASK_MAX)}\n…(task clamped at ${DELEGATE_TASK_MAX} chars)` : task,
+    ...(repo !== undefined ? { repo } : {}),
+    ...(path !== undefined ? { path } : {}),
+  };
+}
+
 function splitByFileHeader(code: string): Array<{ file: string; all: boolean; body: string }> {
   const sections: Array<{ file: string; all: boolean; body: string }> = [];
   let current: { file: string; all: boolean; body: string[] } | null = null;
@@ -293,8 +349,11 @@ function firstFencedAction(text: string, dialect?: ActionDialect): { end: number
 const ACTION_LANGS: ReadonlySet<string> = new Set(["finish", "edit", "create", "search", "ask", ...PYTHON_LANGS, ...BASH_LANGS]);
 /** ACTION_LANGS plus `look` — the one action whose offerance is runtime-gated. */
 const LOOK_ACTION_LANGS: ReadonlySet<string> = new Set([...ACTION_LANGS, "look"]);
+/** ...plus `delegate` (S20/S22): offered only where the run input admits delegation. */
+const DELEGATE_ACTION_LANGS: ReadonlySet<string> = new Set([...LOOK_ACTION_LANGS, "delegate"]);
 
 function actionLangs(dialect?: ActionDialect): ReadonlySet<string> {
+  if (dialect?.delegate === true) return DELEGATE_ACTION_LANGS;
   return dialect?.look === true ? LOOK_ACTION_LANGS : ACTION_LANGS;
 }
 
@@ -304,10 +363,15 @@ function actionLangs(dialect?: ActionDialect): ReadonlySet<string> {
  * run, so a ```look block is not an action at all — it falls through the
  * unknown-language scan and a turn containing one parses as `none`, exactly
  * as before the action existed. Every pre-existing caller passes nothing and
- * keeps that behaviour.
+ * keeps that behaviour. `delegate` (S20/S22) follows the same rule, with one
+ * deliberate widening: a DELEGATION CHILD parses the action too
+ * (input.delegateChild), so a child that tries to delegate is REFUSED with a
+ * clear message by the loop rather than being told "no code block found" —
+ * the one-level limit is a policy answer, not a parse accident.
  */
 export interface ActionDialect {
   look?: boolean;
+  delegate?: boolean;
 }
 
 export function parseAction(text: string, dialect?: ActionDialect): Action {
@@ -352,6 +416,9 @@ function parseFencedAction(text: string, dialect?: ActionDialect): { index: numb
     }
     if (lang === "look" && dialect?.look === true) {
       return { index, action: parseLookArgs(arg) };
+    }
+    if (lang === "delegate" && dialect?.delegate === true) {
+      return { index, action: parseDelegateArgs(arg, code) };
     }
     if (PYTHON_LANGS.has(lang)) {
       if (code.trim() === "") return { index, action: { kind: "invalid", message: "The Python action is empty. Put the code on a new line after ```python and close the block on its own line." } };
@@ -442,6 +509,8 @@ export function describeAction(action: Action): string {
     }
     case "finish":
       return "finish";
+    case "delegate":
+      return `delegate: ${firstLine(action.task)}`;
     case "ask":
       return `ask: ${firstLine(action.question)}`;
     case "invalid":

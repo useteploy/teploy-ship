@@ -492,6 +492,18 @@ export const WORKFLOW_STEPS: readonly WorkflowStep[] = [
   // flag SHIP_LOOK materialises at enqueue — no pre-feature log carries it,
   // so those fingerprints are untouched.
   { key: "step:*turn-*-look", admits: (i) => i.look === true },
+  // Bounded child work (S20/S22): the ```delegate action's steps, in the
+  // branch's source order (spawn, snapshot, wait, restore). Admitted by
+  // input.delegate alone — a delegation CHILD (input.delegateChild) parses
+  // the action but is refused before any step, and every other run never
+  // reaches the branch. The snapshot/restore pair shares the ask park's
+  // over-admitting condition (executor capability is a worker fact, not an
+  // input one); the wait step repeats once per poll and the park rides
+  // ctx.sleep, which the extractor does not track.
+  { key: "step:*turn-*-delegate-spawn", admits: (i) => i.delegate === true },
+  { key: "step:*turn-*-delegate-snapshot", admits: (i) => i.delegate === true },
+  { key: "step:*turn-*-delegate-wait", admits: (i) => i.delegate === true },
+  { key: "step:*turn-*-delegate-restore", admits: (i) => i.delegate === true },
   // The ```ask park (input.ask): snapshot, wait for the answer, restore. Its
   // steps share names with the approval park below; the wait is its own.
   { key: "step:*turn-*-snapshot", admits: (i) => i.ask === true },
