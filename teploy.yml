@@ -166,7 +166,13 @@ env:
   # box, and src/colocation.ts refuses to start the worker if a sandbox daemon
   # ever resolves to the same machine as the forge. Comma-separate to add more
   # compute; each run is placed on the least-loaded healthy daemon.
-  SHIP_SANDBOX_URL: http://100.107.192.39:7439
+  # compute-2 (100.85.188.104, 3 vCPU / 7.8 GB) joined 2026-10-16 (owner
+  # Decision 4): same daemon binary, token, gVisor runtime and egress allowlist
+  # as compute-1, the same four sandbox images, ufw open only on tailscale0
+  # for :7439 and from the sandbox bridge to the egress proxy :7443.
+  # SHIP_SANDBOX_HOST_CPUS / _MEMORY_MB (app secrets) size every sandbox from
+  # ONE host figure, so they are set to the smaller box (3 cpu).
+  SHIP_SANDBOX_URL: http://100.107.192.39:7439,http://100.85.188.104:7439
   SHIP_SANDBOX_IMAGE: ship-sandbox-harness:dev
   SHIP_SANDBOX_NETWORK: egress
 
