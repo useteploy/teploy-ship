@@ -3,8 +3,11 @@
 # in as an operator-grade artifact instead of living in private handoff docs.
 #
 # Two stores, one discipline. The script detects which store the install uses
-# (or takes --store / SHIP_STORE): the writers' own `--store` args, then
-# $SHIP_ROOT/teploy.yml, then the accessory containers and data dirs present.
+# (or takes --store / SHIP_STORE, which states the answer and skips
+# detection): the writers' own `--store` args and $SHIP_ROOT/teploy.yml are
+# CROSS-CHECKED — the two naming different stores is a refusal, never a
+# first-source-wins guess — and only when neither config source names a kind
+# do the accessory containers and data dirs present settle it.
 # Signals that disagree are a refusal, never a guess.
 #
 # Invariants, all of them load-bearing:
@@ -23,8 +26,10 @@
 #     deletes a backup. Retention is the operator's alone: backups are kept
 #     forever unless the operator deletes them. There is no automation for
 #     deletion and none will be added. The one removal is a FAILED pg_dump's
-#     own just-created output dir, so a failure does not occupy the
-#     label+date slot forever (the same rule `teploy-ship snapshot` has).
+#     own partial output — its archive file plus the dir leaf that run just
+#     atomically claimed (never anything else the dir may hold) — so a
+#     failure does not occupy the label+date slot forever (the same rule
+#     `teploy-ship snapshot` has).
 #   - `restore` only ever unpacks into an empty, ISOLATED directory (tar
 #     archives) or into a NEW scratch postgres container (pg_dump archives),
 #     and refuses any target that is — or contains — a live store. Restoring
@@ -85,7 +90,8 @@ backup   nucleus: tar the engine data dir ($SHIP_ROOT/accessories/nucleus/
          while ship-* containers (incl. ship-postgres) run.
          Every archive gets a .sha256 sidecar and a manifest.txt.
 verify   checksum-match the sidecar, then gzip -t (tar archives) or the PGDMP
-         header + pg_restore --list when a pg_restore is available (dumps).
+         header + pg_restore --list via the live container, its manifest
+         image, or a host client — in that order (dumps).
 restore  tar: unpack into an empty, isolated dir. dump: pg_restore into a NEW
          scratch postgres container (loopback port), check counts against the
          manifest, and leave it running for inspection. Never the live store.
@@ -153,9 +159,12 @@ store_kinds_in() {
 }
 
 # Prints "kind<TAB>evidence". The writers' args are what the store actually
-# IS; teploy.yml is what it is configured to be; accessories are what is left
-# lying around (a burn-in box can hold both). First source that names exactly
-# one kind wins; a source naming both is ambiguous and refuses.
+# IS; teploy.yml is what it is configured to be; the two are cross-checked
+# and must agree — writers naming one kind and teploy.yml naming the other
+# refuses (a stated --store / SHIP_STORE overrides the check). A source
+# naming both kinds is itself ambiguous and refuses. Accessories are what is
+# left lying around (a burn-in box can hold both) and only settle the
+# question when neither config source names a kind.
 detect_store() {
   local stated="${1:-}"
   if [ -n "$stated" ]; then
@@ -164,7 +173,7 @@ detect_store() {
       *) die "unknown store: $stated (expected nucleus or postgres)" ;;
     esac
   fi
-  local kinds evidence
+  local kinds yml_kinds="" evidence=""
 
   if command -v docker >/dev/null 2>&1 && docker ps >/dev/null 2>&1; then
     local writers
@@ -178,8 +187,8 @@ detect_store() {
       kinds="$(for w in $writers; do docker inspect --format '{{.Path}} {{join .Args " "}}' "$w" 2>/dev/null || true; done | store_kinds_in)"
       evidence="writer args ($(echo $writers))"
       case "$(printf '%s\n' "$kinds" | grep -c .)" in
-        1) printf '%s\t%s\n' "$kinds" "$evidence"; return 0 ;;
-        0) ;;
+        1) ;;
+        0) kinds="" ;;
         *) die "ambiguous store: $evidence name both nucleus and postgres — pass --store" ;;
       esac
     fi
@@ -187,13 +196,20 @@ detect_store() {
 
   local yml="${SHIP_TEPLOY_YML:-$SHIP_ROOT/teploy.yml}"
   if [ -f "$yml" ]; then
-    kinds="$(store_kinds_in <"$yml")"
-    case "$(printf '%s\n' "$kinds" | grep -c .)" in
-      1) printf '%s\t%s\n' "$kinds" "teploy.yml processes ($yml)"; return 0 ;;
-      0) ;;
+    yml_kinds="$(store_kinds_in <"$yml")"
+    case "$(printf '%s\n' "$yml_kinds" | grep -c .)" in
+      1) ;;
+      0) yml_kinds="" ;;
       *) die "ambiguous store: $yml names both nucleus and postgres — pass --store" ;;
     esac
   fi
+
+  if [ -n "$kinds" ] && [ -n "$yml_kinds" ] && [ "$kinds" != "$yml_kinds" ]; then
+    die "store signals disagree: the writers' args say $kinds but $yml says $yml_kinds — pass --store nucleus|postgres to choose"
+  fi
+
+  if [ -n "$kinds" ]; then printf '%s\t%s\n' "$kinds" "$evidence"; return 0; fi
+  if [ -n "$yml_kinds" ]; then printf '%s\t%s\n' "$yml_kinds" "teploy.yml processes ($yml)"; return 0; fi
 
   local found="" why=""
   if [ -d "$SHIP_ROOT/$NUCLEUS_DATA_REL" ]; then found="$found nucleus"; why="$why $NUCLEUS_DATA_REL"; fi
@@ -266,10 +282,29 @@ manifest_containers() {
 }
 
 check_label() {
-  case "$1" in
-    [A-Za-z0-9][A-Za-z0-9._-]*) ;;
-    *) die "label must start alphanumeric and contain only [A-Za-z0-9._-]: $1" ;;
-  esac
+  # A regex, not a case glob: a glob's `*` matches '/' too, so pinning the
+  # first two characters still let `ab/../../x` through — a label names ONE
+  # path segment under $SHIP_BACKUP_DIR, never a path.
+  [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
+    || die "label must start alphanumeric and contain only [A-Za-z0-9._-]: $1"
+}
+
+# The dest slot every backup path claims: create the parent, then take the
+# leaf ATOMICALLY — plain mkdir (no -p) fails if anything, including a rival
+# same-label invocation that won the race, already created the dir, so two
+# backups can never both believe they own the slot.
+claim_dest() {
+  mkdir -p "$SHIP_BACKUP_DIR" || die "cannot create backup dir: $SHIP_BACKUP_DIR"
+  mkdir "$1" || die "refusing to overwrite existing backup dir: $1 (backups are never overwritten)"
+}
+
+# Remove ONLY what this invocation created: its own partial archive, plus the
+# leaf dir it atomically claimed — and rmdir refuses when the dir holds
+# anything else, so a failed run can never delete another backup's finished
+# output even if files appeared there after the claim.
+discard_own_partial() {
+  rm -f "$1"
+  rmdir "$2" 2>/dev/null || true
 }
 
 # The live postgres data dir: the accessory's mount, else the teploy layout.
@@ -284,6 +319,15 @@ pg_live_data_dir() {
 
 pg_container_env() {
   docker exec "$PG_CONTAINER" printenv "$1" 2>/dev/null || true
+}
+
+# Same lookups via docker inspect, so they also work when the accessory is
+# STOPPED — exactly the cold-tar case that must record database/user for the
+# rehearse to use.
+pg_config_env() {
+  command -v docker >/dev/null 2>&1 || return 0
+  docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$PG_CONTAINER" 2>/dev/null \
+    | awk -F= -v k="$1" '$1 == k { print substr($0, length(k) + 2) }'
 }
 
 # Exact per-table row counts of a custom-format dump, read from the dump:
@@ -351,8 +395,7 @@ backup_nucleus() {
     exit 0
   fi
 
-  if [ -e "$dest" ]; then die "refusing to overwrite existing backup dir: $dest (backups are never overwritten)"; fi
-  mkdir -p "$dest"
+  claim_dest "$dest"
   local archive="$dest/$ARCHIVE_NAME"
   tar czf "$archive" -C "$(dirname "$data_dir")" "$(basename "$data_dir")"
 
@@ -408,21 +451,20 @@ backup_pg_dump() {
     exit 0
   fi
 
-  if [ -e "$dest" ]; then die "refusing to overwrite existing backup dir: $dest (backups are never overwritten)"; fi
-  mkdir -p "$dest"
+  claim_dest "$dest"
   local archive="$dest/$PG_DUMP_NAME"
   # Unix-socket connection inside the container: the official image trusts
   # local connections, so no password crosses this script.
   if ! docker exec "$PG_CONTAINER" pg_dump -Fc -U "$user" -d "$db" >"$archive"; then
-    rm -rf "$dest"
-    die "pg_dump failed inside $PG_CONTAINER (removed only this run's own partial output: $dest)"
+    discard_own_partial "$archive" "$dest"
+    die "pg_dump failed inside $PG_CONTAINER (removed only this run's own partial output)"
   fi
-  is_pg_dump "$archive" || { rm -rf "$dest"; die "pg_dump produced no custom-format archive (removed only this run's own partial output: $dest)"; }
+  is_pg_dump "$archive" || { discard_own_partial "$archive" "$dest"; die "pg_dump produced no custom-format archive (removed only this run's own partial output)"; }
 
   local counts server_version digest bytes
   if ! counts="$(dump_row_counts "$PG_CONTAINER" <"$archive")"; then
-    rm -rf "$dest"
-    die "could not read row counts back from the dump (removed only this run's own partial output: $dest)"
+    discard_own_partial "$archive" "$dest"
+    die "could not read row counts back from the dump (removed only this run's own partial output)"
   fi
   server_version="$(docker exec "$PG_CONTAINER" psql -U "$user" -d "$db" -tAc 'SHOW server_version' 2>/dev/null | tr -d '\r' || true)"
   digest="$(hash_of "$archive")"
@@ -485,8 +527,7 @@ backup_pg_cold() {
     exit 0
   fi
 
-  if [ -e "$dest" ]; then die "refusing to overwrite existing backup dir: $dest (backups are never overwritten)"; fi
-  mkdir -p "$dest"
+  claim_dest "$dest"
   local archive="$dest/$PG_COLD_NAME" image=""
   # Rooted at "pgdata/" whatever the source dir is called, so restore and
   # rehearse find it in one place.
@@ -506,6 +547,12 @@ backup_pg_cold() {
   bytes="$(wc -c <"$archive" | tr -d ' ')"
   printf '%s  %s\n' "$digest" "$PG_COLD_NAME" >"$archive.sha256"
 
+  # The rehearse of a cold archive cannot ask a RUNNING accessory who it is;
+  # the manifest must carry it (inspect still sees a stopped container).
+  local db user
+  db="${SHIP_PG_DB:-$(pg_config_env POSTGRES_DB)}"; db="${db:-ship}"
+  user="${SHIP_PG_USER:-$(pg_config_env POSTGRES_USER)}"; user="${user:-ship}"
+
   {
     echo "ship-backup manifest (script version $VERSION)"
     echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -516,6 +563,8 @@ backup_pg_cold() {
     echo "data-dir: $data_dir"
     echo "pg-container: $PG_CONTAINER"
     echo "pg-image: ${image:-unknown}"
+    echo "database: $db"
+    echo "user: $user"
     echo "archive: $PG_COLD_NAME"
     echo "bytes: $bytes"
     echo "sha256: $digest"
@@ -533,8 +582,12 @@ backup_pg_cold() {
 # verify
 # ---------------------------------------------------------------------------
 
-# Checksum, the PGDMP header, and — when any pg_restore is at hand — the
-# archive's table of contents. Prints how far it got.
+# Checksum, the PGDMP header, and — when a pg_restore is at hand — the
+# archive's table of contents. Prints how far it got. The pg_restore ORDER is
+# load-bearing: the LIVE container's client first (it matches the server the
+# dump came from — an older HOST client can reject a valid newer dump and
+# fail a backup that is actually fine), then the manifest image's client,
+# and only then whatever pg_restore happens to be on the host.
 verify_pg_dump() {
   local archive="$1" sidecar="${1}.sha256"
   [ -f "$archive" ] || die "no such archive: $archive"
@@ -543,14 +596,19 @@ verify_pg_dump() {
   is_pg_dump "$archive" || die "not a pg_dump custom-format archive (no PGDMP header): $archive"
   local image
   image="${SHIP_PG_IMAGE:-$(manifest_value "$archive" pg-image)}"
-  if command -v pg_restore >/dev/null 2>&1; then
-    pg_restore --list "$archive" >/dev/null || die "pg_restore cannot read the archive's table of contents: $archive"
-    VERIFY_DEPTH="pg_restore --list"
+  if command -v docker >/dev/null 2>&1 && docker ps >/dev/null 2>&1 \
+    && [ "$(docker inspect --format '{{.State.Running}}' "$PG_CONTAINER" 2>/dev/null || true)" = "true" ]; then
+    docker exec -i "$PG_CONTAINER" pg_restore --list <"$archive" >/dev/null \
+      || die "pg_restore (inside $PG_CONTAINER) cannot read the archive's table of contents: $archive"
+    VERIFY_DEPTH="pg_restore --list (docker exec $PG_CONTAINER)"
   elif command -v docker >/dev/null 2>&1 && docker ps >/dev/null 2>&1 && [ -n "$image" ] && [ "$image" != "unknown" ] \
     && docker image inspect "$image" >/dev/null 2>&1; then
     docker run --rm -i --entrypoint pg_restore "$image" --list <"$archive" >/dev/null \
       || die "pg_restore ($image) cannot read the archive's table of contents: $archive"
     VERIFY_DEPTH="pg_restore --list ($image)"
+  elif command -v pg_restore >/dev/null 2>&1; then
+    pg_restore --list "$archive" >/dev/null || die "pg_restore cannot read the archive's table of contents: $archive"
+    VERIFY_DEPTH="pg_restore --list (host pg_restore — may be older than the dump's server)"
   else
     VERIFY_DEPTH="header only — no pg_restore available to list the contents"
   fi
@@ -620,7 +678,18 @@ pg_scratch_tables() {
     ORDER BY 1" | tr -d '\r' | grep . | sort || true
 }
 
+# A manifest is data: its table names go into SQL, so they must be plain
+# identifiers — [A-Za-z_][A-Za-z0-9_]*, optionally schema-qualified with the
+# same shape — and nothing else is ever executed.
+pg_table_name_ok() {
+  local re='^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$'
+  [[ $1 =~ $re ]] || die "refusing: table name from the manifest is not a plain (optionally schema-qualified) identifier: $1"
+}
+
 pg_scratch_count() {
+  # Defence in depth on top of the call-site checks: never build SQL from a
+  # name that is not a plain identifier.
+  pg_table_name_ok "$4"
   docker exec "$1" psql -h 127.0.0.1 -U "$2" -d "$3" -tAc "SELECT count(*) FROM $4" | tr -d '\r'
 }
 
@@ -639,6 +708,10 @@ pg_compare_counts() {
   fi
   while IFS=$'\t' read -r table want; do
     [ -n "$table" ] || continue
+    # Validate in the MAIN shell: a die inside the $( ) below would exit only
+    # the subshell (and its message is dropped by 2>/dev/null), turning a
+    # refusal into a mere count mismatch.
+    pg_table_name_ok "$table"
     got="$(pg_scratch_count "$name" "$user" "$db" "$table" 2>/dev/null || echo "?")"
     if [ "$got" = "$want" ]; then
       say "  ok        $table  $got"
@@ -772,6 +845,9 @@ cmd_rehearse() {
   # when its locals no longer exist (same shape as scripts/smoke-image.sh).
   rehearsal="$SHIP_BACKUP_DIR/rehearsals/rehearse-$(date -u +%Y%m%dT%H%M%SZ)-$$"
   name="ship-backup-proof-$$"
+  # Same ownership check as the pg paths, BEFORE arming the trap: never
+  # arm a cleanup for a container name this run does not exclusively own.
+  pg_scratch_name_ok "$name"
   mkdir -p "$rehearsal"
   cleanup() {
     docker rm -f "$name" >/dev/null 2>&1 || true
@@ -894,6 +970,7 @@ rehearse_pg_cold() {
   tables="$(pg_scratch_tables "$name" "$user" "$db")"
   [ -n "$tables" ] || die "the restored cluster has no user tables in $db — this archive is not proven"
   while read -r table; do
+    pg_table_name_ok "$table"   # main shell: the die must refuse, not vanish in a $( )
     n="$(pg_scratch_count "$name" "$user" "$db" "$table")" || die "could not count $table in the restored copy"
     say "  $table  $n"
     total=$((total + 1))
