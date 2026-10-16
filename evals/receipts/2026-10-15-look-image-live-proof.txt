@@ -1,0 +1,102 @@
+RECEIPT — S12 image mode: the real screenshot -> artifact -> digest round-trip
+2026-10-15 · branch feat/s12-look-image · local colima VM · production untouched
+
+===============================================================================
+0. QUESTION
+===============================================================================
+
+Does the image look (```look image=on) that src/look.ts generates actually
+capture PIXELS with the stack the product runs — the ship-sandbox-node
+image's Debian Chromium 155.0.8059.39 over its pinned playwright@1.63.0,
+on the same persistent per-run session the text look uses — and does the
+screenshot land in the artifact store with the data-class tag, the sha256
+digest, and decodable PNG bytes the durable loop would build an ImagePart
+from? The unit suite (src/look.test.ts, src/durable.test.ts) runs the
+generated scripts against a fake page and a fake store; this proof ran
+them against the real browser and the real FileArtifacts store.
+
+VERDICT UP FRONT: YES — every assertion passed live, including the one
+that pins the capture is REAL pixels (the page paints a #ff0055 rectangle
+onto a <canvas>; exactly 1200 pixels of that colour — a 60x20 fill —
+appear in the decoded screenshot). The committed opt-in form of the same
+proof is test 2 of src/look-live.test.ts (SHIP_LOOK_LIVE=1).
+
+===============================================================================
+1. ENVIRONMENT
+===============================================================================
+- Host: Tyler's Mac (darwin/arm64). Docker = colima VM, client against
+  unix:///Users/tyler/.colima/default/docker.sock.
+- Image: ship-sandbox-node:dev — the SAME image the 2026-10-15 text-look
+  proof used (Debian trixie node:22, apt chromium 155.0.8059.39,
+  playwright@1.63.0, CHROMIUM_BIN=/usr/bin/chromium). Reused as-is.
+- Container: --network none (loopback only; the proof needs no egress and
+  none was given), --shm-size 512m, --cpus 1 --memory 1024m.
+- Page under test: local /work/page.html served by python3 http.server
+  INSIDE the container — background #204060, an <h1>, and a <canvas> whose
+  script fills a 60x20 rectangle with #ff0055 (content the a11y tree
+  cannot carry; exactly what an image look exists for).
+- Harness: scratch node script importing the BUILT dist/look.js and
+  dist/artifacts.js from the worktree — the exact script bytes src/look.ts
+  generates and the exact store the worker wires — via a docker-exec
+  executor (exec / putFile / getFile).
+
+===============================================================================
+2. LIVE RESULTS (all PASS)
+===============================================================================
+1. text first          : stdout opens "[page] http://127.0.0.1:8777/page.html
+                          — Image Look" followed by the a11y tree with
+                          [ref=eN] labels — image mode ADDS pixels, it does
+                          not replace the text.
+2. capture             : the driver's page.screenshot wrote the viewport PNG
+                          to .teploy-agent/look-shot-proof0.png (the path the
+                          harness reads back over getFile).
+3. artifact            : FileArtifacts.putTemporary stored it — id
+                          c8e8e9e32d81749d… (temporary identity), 5878
+                          bytes, mime image/png, dataClass "look-image".
+4. digest              : the recorded digest equals sha256 of the stored
+                          bytes (e8ec7e7c65a54ed2…), so the transcript
+                          placeholder names a verifiable fact.
+5. real pixels         : PNG.sync.read decodes 780x493; scanning the buffer
+                          finds EXACTLY 1200 pixels of #ff0055 — the 60x20
+                          canvas fill — so the screenshot is the rendered
+                          page, not a blank viewport.
+6. same session        : a second, bare image look 0.5s later on the SAME
+                          background session captured its own artifact
+                          (distinct id), no re-navigation.
+7. timings             : session boot + goto + snapshot + screenshot 1.7s;
+                          subsequent image look 0.5s, under 1 CPU / 1 GiB.
+
+===============================================================================
+3. EXACT COMMANDS (repro sketch)
+===============================================================================
+docker run -d --name s12-look-image-proof --shm-size 512m --network none \
+    --cpus 1 --memory 1024m ship-sandbox-node:dev sleep infinity
+# harness (scratch, in the worktree so pngjs resolves): node scratch-proof.mjs
+#   - runLookImage(dockerExecExecutor, "proof0",
+#       { kind: "look", url: "http://127.0.0.1:8777/page.html", image: true },
+#       new FileArtifacts(mkdtemp(...)))
+#   - i.e. the REAL generated driver + lookCommand + store from dist/
+# or, the committed form:
+SHIP_LOOK_LIVE=1 node --test dist/look-live.test.js    # test 2, ~3s
+docker rm -f s12-look-image-proof
+
+===============================================================================
+4. NOT PROVEN HERE (and where they are)
+===============================================================================
+- A live MODEL call with the ImagePart (any provider). The wire path is the
+  2026-10-14 receipt (evals/receipts/2026-10-14-image-path-e2e.txt):
+  neutron-ai's ImagePart maps through the anthropic and openai adapters and
+  the gateway preserves it byte-for-byte. The routing seam here (which
+  adapter a pixel-carrying turn goes to) is unit-tested in durable.test.ts;
+  wiring SHIP_LOOK_IMAGE_MODEL=glm-5.3-flash against the zai plan is the
+  first soak once a worker runs image mode.
+- The authenticated-egress proxy path (this container had no proxy env) —
+  same status as the text-look receipt.
+- NucleusArtifacts as the store (FileArtifacts proven here; the Nucleus
+  store's chunking + integrity check is covered by its own suite).
+- Screenshot of a page taller than the viewport (the capture is the
+  viewport, deliberately: a fullPage capture can exceed the 4 MiB artifact
+  cap on long pages and fail loudly).
+
+— recorded by the S12 image-mode implementation sub-agent, 2026-10-15.
+Production untouched; no deploys; no model calls; no teploy state changes.

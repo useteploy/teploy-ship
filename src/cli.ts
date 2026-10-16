@@ -1050,6 +1050,9 @@ async function executePass(
   const provider = durableProvider(args, config);
   const wf = durableAgent({
     model: resolveModel(modelId),
+    // Image looks route through the same resolution path (the model id comes
+    // from the run input; an input that never admitted one never asks).
+    lookImageModel: resolveModel,
     executor: provider,
     projects: runtime.projects,
     artifacts: runtime.artifacts,
