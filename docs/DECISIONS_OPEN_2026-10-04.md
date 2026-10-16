@@ -6,6 +6,29 @@ execution backlog" section (E6); everything else open is reached from
 [NEXT_SESSION.md](../NEXT_SESSION.md).
 When a decision is made, record it here and in the programme row it affects.
 
+## Decided 2026-10-16 (owner, relayed in session)
+
+- **Decision 9 (private-data destination): DECIDED — the z.ai coding plan
+  may receive `private` data.** This supersedes Decision 1's refusal. Applied
+  the same day on infra-home: `/srv/ship-config/routing-policy.json` sets
+  `retention: "none"` on every `api.z.ai` candidate, version
+  `2026-10-16.1-decision9-zai-retention-none` (validated with the repo's
+  `loadRoutingPolicy`; previous file kept as `routing-policy.json.bak-2026-10-16-pre-d9`).
+  Basis: the 2026-10-04 terms lookup below (DPA §4(b), Privacy Policy §3/§5).
+  Re-check trigger: any z.ai privacy-policy date bump (checked 2025-09-29).
+  Unblocks Q9 (routing `on`), Q1 on private repositories and remote MCP
+  servers (D1) for z.ai destinations; other remote destinations still need
+  their own retention entry.
+- **Decision 4 (second sandbox host): DECIDED — use the existing compute-2.**
+  Ship was wired to compute-1 only (`SHIP_SANDBOX_URL` held one host);
+  compute-2 (3 vCPU, 7.8 GB, Debian 13) was idle on the tailnet. It gets the
+  same teploy-sandbox daemon, token, gVisor runtime and egress rule as
+  compute-1, then joins `SHIP_SANDBOX_URL`.
+- **Decision 7 (Slack/Linear): DECIDED — not wired for the owner.** Tyler
+  does not use Slack or Linear; they are features for self-hosting users. B6
+  becomes "prove the intake end to end with signed payloads and document the
+  user setup", not a live workspace connection.
+
 ## Decided 2026-10-15 (owner, relayed in session)
 
 - **Decision 3 (S12/D4 image routing — the screenshot class): DECIDED —
