@@ -27,6 +27,7 @@ import { currentUser } from "../../lib/session.server.js";
 import { may } from "../../lib/authority.server.js";
 import { itemClass, since, took } from "../../lib/timeline.js";
 import { resolveNavUrl, clickPoint } from "../../lib/browser-tab.js";
+import { LIVE_POLL_MS, diffView, terminalView, type DiffTone, type LiveBody } from "../../lib/live-view.js";
 // Type-only: the thread view's shape ships in the loader payload's flag, and
 // the projection itself lives server-side (thread-chain.server.ts).
 import type { ThreadRunView, ThreadView } from "../../lib/thread-chain.server.js";
@@ -319,6 +320,68 @@ const SEVERITY_COLOR: Record<string, string> = { high: "var(--red)", med: "var(-
 /** Status -> the word plus a colour already used for verdicts; the word carries the label, colour only echoes it. */
 const GROUNDING_STATUS_CLASS: Record<string, string> = { ungrounded: "bad", grounded: "good", proposed: "meta", unchecked: "meta" };
 
+const DIFF_TONE: Record<DiffTone, string> = { add: "var(--green)", del: "var(--red)", hunk: "var(--blue)", file: "var(--dim)", "": "inherit" };
+
+/**
+ * Live view (D5, SHIP_LIVE_VIEW=on): the active run's terminal tail and its
+ * running diff, polled from /api/runs/<id>/live. Read-only by construction —
+ * no form, no input, nothing it can submit.
+ */
+function LiveViewPanel({ runId }: { runId: string }) {
+  const [body, setBody] = useState<LiveBody | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    let stopped = false, busy = false;
+    const controller = new AbortController();
+    async function poll() {
+      if (busy || document.hidden) return;
+      busy = true;
+      try {
+        const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/live`, { signal: controller.signal });
+        if (!response.ok) throw new Error("live view unavailable");
+        const next = (await response.json()) as LiveBody;
+        if (!stopped) { setBody(next); setFailed(false); setNow(Date.now()); }
+      } catch { if (!stopped) setFailed(true); }
+      finally { busy = false; }
+    }
+    void poll();
+    const timer = setInterval(poll, LIVE_POLL_MS);
+    return () => { stopped = true; controller.abort(); clearInterval(timer); };
+  }, [runId]);
+  const terminal = body === null ? null : terminalView(body.output, now);
+  const diff = body === null ? null : diffView(body.diff);
+  return (
+    <section class="card" style="margin:12px 0" id="live-view" aria-label="Live view">
+      <div class="kind" style="margin-bottom:6px">Live <span class="meta">read-only · refreshes every {LIVE_POLL_MS / 1000}s{failed ? " · updates interrupted, retrying" : ""}</span></div>
+      <h3 class="meta" style="margin:8px 0 4px;font-size:inherit">Terminal</h3>
+      {terminal === null ? (
+        <p class="meta" style="margin:0">No command output recorded yet. Output appears while the agent runs a shell command.</p>
+      ) : (
+        <>
+          <p class="meta" style="margin:0 0 4px"><code>{terminal.header}</code> · {terminal.status}{terminal.note ? ` · ${terminal.note}` : ""}</p>
+          <pre aria-label="Live terminal output" tabIndex={0} style="white-space:pre-wrap;margin:0;max-height:280px;overflow:auto">{terminal.text}</pre>
+        </>
+      )}
+      <h3 class="meta" style="margin:12px 0 4px;font-size:inherit">Running diff</h3>
+      {diff === null ? (
+        <p class="meta" style="margin:0">Waiting for the worker's first workspace snapshot.</p>
+      ) : (
+        <>
+          <p class="meta" style="margin:0 0 4px">{diff.instant}{diff.partial ? " · partial" : ""}</p>
+          {diff.error !== undefined && <p class="notice bad" style="margin:0">{diff.error}</p>}
+          {diff.empty && <p class="meta" style="margin:0">No changes against the base at this snapshot.</p>}
+          {diff.lines.length > 0 && (
+            <pre aria-label="Running diff" tabIndex={0} style="white-space:pre-wrap;margin:0;max-height:360px;overflow:auto">
+              {diff.lines.map((line, i) => <span key={i} style={`display:block;color:${DIFF_TONE[line.tone]}`}>{line.text === "" ? " " : line.text}</span>)}
+            </pre>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
 /** Advisory plan grounding (S07) at the plan park. Wording comes from the projection; see lib/plan-grounding-view.ts. */
 function PlanGroundingNotice({ grounding }: { grounding: PlanGroundingView }) {
   return (
@@ -450,6 +513,7 @@ export default function RunDetail({ data: initialData }: { data: RunData }) {
               <script dangerouslySetInnerHTML={{ __html: NOW_TICK }} />
             </div>
           )}
+          {active && data.liveView === true && <LiveViewPanel runId={data.runId} />}
           {data.question !== undefined && data.meta.eventName !== undefined && isAskEvent(data.meta.eventName) && (
             <div class="card attn" style="margin:12px 0">
               <div class="kind" style="margin-bottom:8px">The agent has a question — the run is parked until you answer</div>
