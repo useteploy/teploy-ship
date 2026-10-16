@@ -220,7 +220,9 @@ export async function action({
     if (mode !== "steer" && mode !== "queue" && mode !== "interrupt") return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent("Unknown message mode.")}`);
     if (mode !== "steer" && steerInput?.steerReply !== true) return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(STEER_REPLY_UNSUPPORTED_MESSAGE)}`);
     if (mode === "interrupt") await runtime.steer.add(runId, text, "interrupt");
-    else if (text !== "") await runtime.steer.add(runId, text, mode);
+    // An empty note is not "sent": say so instead of confirming a no-op.
+    else if (text === "") return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent("Write a message before sending.")}`);
+    else await runtime.steer.add(runId, text, mode);
     return redirectTo(`/runs/${runId}?sent=1`);
   }
   // The agent's question (an ```ask park). Answering is steering, not

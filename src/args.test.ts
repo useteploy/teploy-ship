@@ -67,3 +67,10 @@ test("every command in the usage table has a schema", () => {
     assert.ok(COMMAND_FLAGS[command] !== undefined, `${command} needs a flag schema`);
   }
 });
+
+test("enqueue accepts --scan, which its usage text and handler both document", () => {
+  // Regression, live 2026-10-16: `enqueue --scan` died with "unknown flag".
+  const parsed = parseArgs(["fix it", "--repo", "https://example.com/r.git", "--scan"], COMMAND_FLAGS.enqueue);
+  assert.equal(parsed.flags.scan, true);
+  assert.throws(() => parseArgs(["fix it", "--scna"], COMMAND_FLAGS.enqueue), ArgError);
+});

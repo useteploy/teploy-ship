@@ -292,3 +292,42 @@ test("execStream routes by the handle's tag and falls back to a host's plain exe
   assert.deepEqual(chunks, ["hello\n"], "a host that cannot stream delivers at exit, through its plain exec");
   assert.deepEqual(seen, ["stream:s-run:ls", "exec:p-run:ls"]);
 });
+
+test("concurrent creates spread across hosts (slot reserved before the daemon answers)", async () => {
+  // Regression, live 2026-10-16: two runs picked up in one tick both landed on
+  // host 0 because the count only moved after the create resolved.
+  const slow = (name: string) => {
+    let creates = 0;
+    const provider: ExecutorProvider = {
+      isolated: true,
+      async create() {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        creates += 1;
+        return { handle: `${name}-run-${creates}` };
+      },
+      attach(handle: string) {
+        return { handle } as unknown as AgentExecutor;
+      },
+      async destroy() {},
+    };
+    return { provider, creates: () => creates };
+  };
+  const a = slow("a");
+  const b = slow("b");
+  const pool = new SandboxPool({ hosts: [{ url: "a", provider: a.provider }, { url: "b", provider: b.provider }] });
+
+  const handles = await Promise.all([pool.create(), pool.create()]);
+  assert.deepEqual(handles.map((h) => h.handle.split("@")[0]).sort(), ["0", "1"]);
+  assert.equal(a.creates(), 1);
+  assert.equal(b.creates(), 1);
+  assert.deepEqual(pool.state().map((s) => s.live), [1, 1]);
+});
+
+test("a refused create releases its reserved slot", async () => {
+  const a = daemon("a", { refuse: true });
+  const b = daemon("b");
+  const pool = new SandboxPool({ hosts: [{ url: "a", provider: a.provider }, { url: "b", provider: b.provider }], log: () => {} });
+
+  await pool.create();
+  assert.deepEqual(pool.state().map((s) => s.live), [0, 1], "the refusing host keeps no phantom reservation");
+});
