@@ -1,10 +1,30 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 
 import { LOOK_HELP } from "./actions.js";
-import { LOOK_OPEN_PLAN, LOOK_SEALED, LOOK_SESSION, describeNeedle, findMatches, lookCommand, lookStaleRef, renderLook, runLook } from "./look.js";
+import { FileArtifacts, LOOK_IMAGE_DATA_CLASS, type Artifact, type ArtifactStore } from "./artifacts.js";
+import {
+  LOOK_IMAGE_NO_MODEL,
+  LOOK_IMAGE_NO_STORE,
+  LOOK_OPEN_PLAN,
+  LOOK_SEALED,
+  LOOK_SESSION,
+  describeNeedle,
+  findMatches,
+  lookCommand,
+  lookImageCap,
+  lookShotPath,
+  lookStaleRef,
+  renderLook,
+  runLook,
+  runLookImage,
+} from "./look.js";
 import type { LookAction } from "./look.js";
 
 /**
@@ -43,18 +63,23 @@ interface FakeLookRun {
   commands: string[];
   files: Map<string, string>;
   /** Every action the fake driver executed, parsed out of the written scripts. */
-  actions: Array<Record<string, string | number | undefined>>;
+  actions: Array<Record<string, string | number | boolean | undefined>>;
 }
+
+/** A PNG with the right magic: passes the artifact store's allowlist. */
+const FAKE_PNG = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 1, 2, 3, 4, 5]);
 
 /**
  * The fake executor: putFile records, exec answers `node .teploy-agent/look-*`
  * with the real renderLook over fixture pages, and refuses anything else
- * loudly (a look turn must run nothing but the driver).
+ * loudly (a look turn must run nothing but the driver). getFile answers the
+ * screenshot path an image look's driver writes — the browser half of the
+ * capture is faked exactly like the navigation half is.
  */
 function fakeLookDriver(): FakeLookRun {
   const commands: string[] = [];
   const files = new Map<string, string>();
-  const actions: Array<Record<string, string | number | undefined>> = [];
+  const actions: Array<Record<string, string | number | boolean | undefined>> = [];
   let page: { url: string; title: string; snapshot: string } | undefined;
   const exec = async (cmd: string): Promise<ExecResult> => {
     commands.push(cmd);
@@ -67,10 +92,19 @@ function fakeLookDriver(): FakeLookRun {
     // The ACTION literal is the contract between look.ts and the driver it
     // generates; reading it back here pins that the parameters actually ride
     // the script rather than some parallel channel.
-    const action = JSON.parse((/^const ACTION = (\{.*?\});$/m.exec(script)?.[1] ?? "null") as string) as Record<string, string | number | undefined>;
+    const action = JSON.parse((/^const ACTION = (\{.*?\});$/m.exec(script)?.[1] ?? "null") as string) as Record<string, string | number | boolean | undefined>;
     actions.push(action);
     assert.match(script, /function findMatches/, "the driver embeds the real findMatches source");
     assert.match(script, /function renderLook/, "the driver embeds the real renderLook source");
+    if (action.image === true) {
+      // The capture call must be IN the script the sandbox would run, after
+      // the snapshot — text and pixels describe one render.
+      assert.match(script, /await page\.ariaSnapshot/, "the text snapshot is taken");
+      assert.ok(script.indexOf("await page.ariaSnapshot") < script.indexOf("await page.screenshot"), "the screenshot follows the a11y snapshot of the same render");
+      assert.ok(script.includes(JSON.stringify(lookShotPath(String(run[1])))), "the screenshot writes to the path the harness will read");
+    } else {
+      assert.ok(!script.includes("page.screenshot"), "a text look's driver never captures pixels");
+    }
     if (typeof action.url === "string") {
       const next = PAGES[action.url];
       assert.ok(next !== undefined, `fixture page exists for ${action.url}`);
@@ -118,8 +152,9 @@ function fakeLookDriver(): FakeLookRun {
       putFile: async (path, data) => {
         files.set(path, typeof data === "string" ? data : new TextDecoder().decode(data));
       },
-      getFile: async () => {
-        throw new Error("unused");
+      getFile: async (path) => {
+        if (/^\.teploy-agent\/look-shot-\S+\.png$/.test(path)) return FAKE_PNG;
+        throw new Error(`unused: ${path}`);
       },
       destroy: async () => {},
     },
@@ -240,3 +275,93 @@ test("findMatches and renderLook: the shared observation helpers are self-contai
   const mixed = evald.renderLook({ find: "Sign In" }, { url: "u", title: "" }, snapshot);
   assert.equal(mixed.replace(/for "Sign In"/, 'for "sign in"'), lower);
 });
+
+// --- image mode (S12 gated slice): screenshot, artifact, refusals ---
+
+test("an image look rides image: true on the ACTION and screenshots the same render as the text", async () => {
+  const fake = fakeLookDriver();
+  const result = await runLookImage(fake.executor, "t0", { kind: "look", url: "https://example.com/docs", image: true }, memoryArtifacts().store);
+  assert.equal(result.exitCode, 0);
+  assert.match(result.stdout, /^\[page\] https:\/\/example\.com\/docs — Example Docs/);
+  // The ACTION contract: image rides the script like every other parameter.
+  assert.equal(fake.actions.at(-1)?.image, true, "the driver was told to capture");
+  assert.ok(result.image !== undefined, "the screenshot came back as an artifact reference");
+});
+
+test("runLookImage stores the PNG as a look-image artifact and records its digest", async () => {
+  const fake = fakeLookDriver();
+  const { store, ids } = memoryArtifacts();
+  const result = await runLookImage(fake.executor, "t7", { kind: "look", url: "https://example.com/docs", image: true }, store);
+  const shot = result.image;
+  assert.ok(shot !== undefined);
+  assert.equal(shot.digest, createHash("sha256").update(FAKE_PNG).digest("hex"), "the digest is the sha256 of the captured bytes");
+  assert.equal(shot.bytes, FAKE_PNG.length);
+  const artifact = await store.get(shot.artifact);
+  assert.ok(artifact !== null, "the artifact is retrievable by the recorded id");
+  assert.equal(artifact.dataClass, LOOK_IMAGE_DATA_CLASS, "the data-class tag rides the artifact");
+  assert.equal(artifact.mime, "image/png");
+  assert.equal(artifact.bytes, FAKE_PNG.length);
+  assert.deepEqual(ids(), [shot.artifact], "exactly one artifact per image look");
+});
+
+test("runLookImage prefers the store's temporary retention when it has one", async () => {
+  const fake = fakeLookDriver();
+  const dir = await mkdtemp(join(tmpdir(), "look-image-artifacts-"));
+  const store = new FileArtifacts(dir);
+  const result = await runLookImage(fake.executor, "t0", { kind: "look", url: "https://example.com/docs", image: true }, store);
+  const shot = result.image;
+  assert.ok(shot !== undefined);
+  const artifact = await store.get(shot.artifact);
+  assert.ok(artifact !== null);
+  assert.equal(artifact.dataClass, LOOK_IMAGE_DATA_CLASS, "the class survives the temporary path too");
+});
+
+test("a failed driver turn returns the text failure with no image half", async () => {
+  const fake = fakeLookDriver();
+  const { store } = memoryArtifacts();
+  // A stale ref fails loudly before any screenshot is taken.
+  await runLook(fake.executor, "t0", { kind: "look", url: "https://example.com/pricing" });
+  const result = await runLookImage(fake.executor, "t1", { kind: "look", ref: "e9999", image: true }, store);
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.image, undefined, "no artifact is minted for a failed capture");
+});
+
+test("the image refusals name the env var, the cap, and the fix — never a silent downgrade", () => {
+  assert.match(LOOK_IMAGE_NO_MODEL, /REFUSED/);
+  assert.match(LOOK_IMAGE_NO_MODEL, /SHIP_LOOK_IMAGE_MODEL/, "the no-model refusal names the env var");
+  assert.match(LOOK_IMAGE_NO_MODEL, /without image=/, "it says what still works");
+  assert.match(lookImageCap(3), /REFUSED/);
+  assert.match(lookImageCap(3), /3 screenshots per run/);
+  assert.match(lookImageCap(3), /SHIP_LOOK_IMAGE_MAX/, "the cap refusal names the env var");
+  assert.match(lookImageCap(1), /1 screenshot per run/, "the singular form reads like a person wrote it");
+  assert.match(LOOK_IMAGE_NO_STORE, /REFUSED/);
+  assert.match(LOOK_IMAGE_NO_STORE, /artifact store/);
+  assert.ok(LOOK_HELP.includes("image=on"), "the parse help documents the parameter");
+});
+
+/** A minimal in-memory ArtifactStore: put/get plus a record of what landed. */
+function memoryArtifacts(): { store: ArtifactStore; ids: () => string[] } {
+  const byId = new Map<string, Artifact>();
+  const order: string[] = [];
+  return {
+    ids: () => order,
+    store: {
+      async put(name, bytes, dataClass) {
+        const artifact: Artifact = {
+          id: createHash("sha256").update(bytes).digest("hex"),
+          name,
+          mime: "image/png",
+          data: Buffer.from(bytes).toString("base64"),
+          bytes: bytes.length,
+          ...(dataClass !== undefined ? { dataClass } : {}),
+        };
+        byId.set(artifact.id, artifact);
+        order.push(artifact.id);
+        return artifact.id;
+      },
+      async get(id) {
+        return byId.get(id) ?? null;
+      },
+    },
+  };
+}

@@ -86,6 +86,28 @@ test("look: refuses malformed parameters loudly, with the vocabulary in the mess
   assert.deepEqual(parseAction("```look find=/unterminated(\n```", on), { kind: "look", find: "/unterminated(" });
 });
 
+test("look: image= parses on the look dialect — on-words set it, off-words leave it absent, junk refuses", () => {
+  const on = { look: true };
+  // The on-words.
+  for (const word of ["on", "true", "1", "yes", "ON"]) {
+    assert.deepEqual(parseAction(`\`\`\`look image=${word}\n\`\`\``, on), { kind: "look", image: true }, word);
+  }
+  // Composes with the narrowing parameters, in either order.
+  assert.deepEqual(parseAction("```look url=https://example.com image=on\n```", on), { kind: "look", url: "https://example.com", image: true });
+  assert.deepEqual(parseAction("```look image=on find=Sign ?up\n```", on), { kind: "look", image: true, find: "Sign ?up" });
+  // Explicit off is the same as absent — the action shape stays the text one.
+  for (const word of ["off", "false", "0", "no"]) {
+    assert.deepEqual(parseAction(`\`\`\`look image=${word}\n\`\`\``, on), { kind: "look" }, word);
+  }
+  // Anything else is malformed, loudly, with the help text.
+  const bad = parseAction("```look image=maybe\n```", on);
+  assert.equal(bad.kind, "invalid");
+  if (bad.kind === "invalid") {
+    assert.match(bad.message, /image= must be on or off, got: maybe/);
+    assert.match(bad.message, /image=on/, "the help names the working form");
+  }
+});
+
 test("look: flag off, the action DOES NOT EXIST — flag on changes nothing else (the S12 equivalence)", () => {
   // The corpus: one turn of every pre-look action kind, plus a ```look.
   const corpus = [

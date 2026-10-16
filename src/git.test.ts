@@ -37,6 +37,7 @@ import {
   WORKING_DIFF_MAX_CHARS,
   uploadPrAsset,
 } from "./git.js";
+import { LOOK_IMAGE_DATA_CLASS } from "./artifacts.js";
 import { credentialFor } from "./repo-policy.js";
 
 test("assertGitSafe rejects shell-active refs (command-injection defense)", () => {
@@ -798,6 +799,26 @@ test("uploadPrAsset posts multipart to Forgejo's issue assets and returns the do
   );
   const failImpl = (async () => new Response("quota", { status: 413 })) as typeof fetch;
   await assert.rejects(() => uploadPrAsset({ ref: forgejo, token: "t", pr: 1, name: "x.png", bytes: new Uint8Array([1]), fetchImpl: failImpl }), /413/);
+});
+
+test("the D4 hard rule: a look-image artifact is never attached to a pull request, tagged or not", async () => {
+  // The boundary refuses the CLASS before any network: a PR on a repo that
+  // mirrors publicly would republish page content the run does not own.
+  const calls: unknown[] = [];
+  const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+    calls.push({ url: String(url), init: init ?? {} });
+    return new Response(JSON.stringify({ id: 9, name: "preview.png", browser_download_url: "http://forge.example:3000/attachments/uuid-look" }), { status: 201 });
+  }) as typeof fetch;
+  const forgejo = parseRepoUrl("http://forge.example:3000/Tyler/app");
+  await assert.rejects(
+    () => uploadPrAsset({ ref: forgejo, token: "t", pr: 7, name: "look-t0.png", bytes: new Uint8Array([137, 80, 78, 71]), dataClass: LOOK_IMAGE_DATA_CLASS, fetchImpl }),
+    /look screenshots are never attached to pull requests/,
+  );
+  assert.equal(calls.length, 0, "the refusal happens before any request — the forge never sees the bytes");
+  // The untagged path is unchanged: ordinary evidence still attaches.
+  const url = await uploadPrAsset({ ref: forgejo, token: "t", pr: 7, name: "preview.png", bytes: new Uint8Array([137, 80, 78, 71]), fetchImpl });
+  assert.match(url, /attachments/);
+  assert.equal(calls.length, 1, "only the untagged upload reached the forge");
 });
 
 test("S01: a failed authenticated fetch leaves no token in .git/config and none in the error", async () => {

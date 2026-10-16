@@ -111,6 +111,13 @@ export interface WorkerOptions {
   model: ModelAdapter;
   /** Model id recorded on runs the intake sweep launches (also prices their spend). */
   modelId?: string;
+  /**
+   * Builds the vision-model adapter an image look routes to, from the model
+   * id the run input recorded (SHIP_LOOK_IMAGE_MODEL at enqueue). Wired by
+   * the CLI like `model` itself; absent on a worker that cannot reach a
+   * vision model, where image looks refuse honestly (see durable.ts).
+   */
+  lookImageModel?: (modelId: string) => ModelAdapter;
   executor: ExecutorProvider;
   /** The agent's working directory inside its executor. */
   workdir: string;
@@ -794,6 +801,7 @@ export function startWorker(options: WorkerOptions): {
     ...(maxSteps !== undefined ? { maxSteps } : {}),
     model: options.model,
     ...(options.modelId !== undefined ? { modelId: options.modelId } : {}),
+    ...(options.lookImageModel !== undefined ? { lookImageModel: options.lookImageModel } : {}),
     // Per-run cost ceiling (SHIP_MAX_RUN_COST_USD). Off unless configured —
     // the daily caps remain the primary bound; this stops ONE pathological run.
     maxRunCostUSD: options.maxRunCostUSD ?? envNum("SHIP_MAX_RUN_COST_USD") ?? 0,

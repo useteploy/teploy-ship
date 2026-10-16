@@ -34,7 +34,7 @@ export type Action =
   | { kind: "edit"; edits: EditHunk[] }
   | { kind: "create"; file: string; content: string }
   | { kind: "search"; query: string } // semantic code retrieval (repo runs with an index)
-  | { kind: "look"; url?: string; ref?: string; find?: string; depth?: number } // browser perception (S12): the run's page as an a11y-tree text with refs
+  | { kind: "look"; url?: string; ref?: string; find?: string; depth?: number; image?: boolean } // browser perception (S12): the run's page as an a11y-tree text with refs; image=on adds a PNG screenshot (gated slice)
   | { kind: "finish"; message: string }
   | { kind: "ask"; question: string } // a question for the operator; the run parks on the answer (durable, input.ask)
   | { kind: "invalid"; message: string } // recognized but malformed — feed the error back
@@ -131,7 +131,7 @@ function hunksIn(code: string): Array<{ search: string; replace: string }> {
 }
 
 /** `look` fence parameters: `key=value` tokens, whitespace-delimited. */
-const LOOK_PARAM = /(?:^|\s)(url|ref|find|depth)=/g;
+const LOOK_PARAM = /(?:^|\s)(url|ref|find|depth|image)=/g;
 /**
  * The element-ref grammar of Playwright's ai snapshots (tool-vocab addendum
  * §4): `e12`, or `f2e3` for an element inside an iframe.
@@ -144,15 +144,16 @@ const LOOK_DEPTH_MAX = 30;
 export const LOOK_HELP =
   "```look observes the run's browser page as text (the accessibility tree, with [ref=eN] labels you can reuse):\n" +
   "```look https://example.com/docs\n" +
-  "Narrow it instead of re-reading a big page — ```look find=Sign ?up (text or /regex/flags), ```look ref=e12 depth=3 (a subtree from your last snapshot).";
+  "Narrow it instead of re-reading a big page — ```look find=Sign ?up (text or /regex/flags), ```look ref=e12 depth=3 (a subtree from your last snapshot).\n" +
+  "```look image=on additionally captures a PNG screenshot of the page alongside the text (offered only when the run admits image looks).";
 
 /**
  * Parse a ```look fence argument into the action. Parameters are `url=` (or a
- * bare url before the first `key=`), `ref=`, `find=`, `depth=`; values run to
- * the next parameter, so a find needle may contain spaces. Token control is
- * STRUCTURAL on purpose (the tool-vocab addendum's rule): find/ref/depth
- * decide how much of the tree is rendered at all, never a post-hoc trim of a
- * giant blob.
+ * bare url before the first `key=`), `ref=`, `find=`, `depth=`, `image=`;
+ * values run to the next parameter, so a find needle may contain spaces.
+ * Token control is STRUCTURAL on purpose (the tool-vocab addendum's rule):
+ * find/ref/depth decide how much of the tree is rendered at all, never a
+ * post-hoc trim of a giant blob.
  */
 export function parseLookArgs(arg: string): Action {
   const params = new Map<string, string>();
@@ -200,12 +201,26 @@ export function parseLookArgs(arg: string): Action {
       return { kind: "invalid", message: `\`\`\`look depth= must be a whole number from 1 to ${LOOK_DEPTH_MAX}, got: ${depthRaw}` };
     }
   }
+  // image= parses wherever the look dialect is on, so a run that admits looks
+  // but not pixels can REFUSE the image loudly at execution (durable.ts names
+  // SHIP_LOOK_IMAGE_MODEL) rather than the param silently vanishing — the
+  // refusal is the honest shape for "parseable but not offered here".
+  const imageRaw = params.get("image");
+  let image: boolean | undefined;
+  if (imageRaw !== undefined) {
+    if (/^(on|true|1|yes)$/i.test(imageRaw)) image = true;
+    else if (/^(off|false|0|no)$/i.test(imageRaw)) image = undefined;
+    else {
+      return { kind: "invalid", message: `\`\`\`look image= must be on or off, got: ${imageRaw}\n\n` + LOOK_HELP };
+    }
+  }
   return {
     kind: "look",
     ...(url !== undefined ? { url } : {}),
     ...(ref !== undefined ? { ref } : {}),
     ...(find !== undefined ? { find } : {}),
     ...(depth !== undefined ? { depth } : {}),
+    ...(image !== undefined ? { image } : {}),
   };
 }
 
@@ -423,7 +438,7 @@ export function describeAction(action: Action): string {
             : action.find !== undefined
               ? `find=${firstLine(action.find)}`
               : "snapshot";
-      return `look: ${where}`;
+      return `look: ${where}${action.image === true ? " +image" : ""}`;
     }
     case "finish":
       return "finish";

@@ -248,6 +248,53 @@ test("enqueueRun bakes stuck detection into the run INPUT — on by default with
   assert.equal(viaEnv.settle, true);
 });
 
+test("enqueueRun bakes look image mode into the run INPUT — SHIP_LOOK_IMAGE_MODEL admits it, unset never does", async () => {
+  // The same inputOf seam as the recovery test above: the decision must land
+  // in the log, because input.lookImage admits the turn-N-look-image step and
+  // a replay must know from its log alone whether image looks were offered.
+  const dir = await mkdtemp(join(tmpdir(), "ship-enqueue-"));
+  const store = new FileEventStore(dir);
+  const runtime = { kind: "file" as const, store, saveMeta: async () => {} };
+  let n = 0;
+  const inputOf = async (env: Record<string, string>): Promise<Record<string, unknown>> => {
+    const runId = `r-look-image-${n++}`;
+    const saved = { ...process.env };
+    Object.assign(process.env, env);
+    try {
+      await enqueueRun(runtime as unknown as Parameters<typeof enqueueRun>[0], { runId, task: "t", model: "m" });
+    } finally {
+      for (const key of Object.keys(env)) delete process.env[key];
+      Object.assign(process.env, saved);
+    }
+    const started = (await store.load(runId)).find((e) => e.type === "run-started");
+    return (started?.data as { input: Record<string, unknown> }).input;
+  };
+
+  // Model set, cap default: { model, max: 3 } rides the input.
+  const withModel = await inputOf({ SHIP_LOOK: "1", SHIP_LOOK_IMAGE_MODEL: "glm-5.3-flash" });
+  assert.deepEqual(withModel.lookImage, { model: "glm-5.3-flash", max: 3 }, "model + the default cap, materialised");
+  assert.equal(withModel.look, true);
+
+  // Both knobs honoured.
+  const withCap = await inputOf({ SHIP_LOOK: "1", SHIP_LOOK_IMAGE_MODEL: "glm-5.3-flash", SHIP_LOOK_IMAGE_MAX: "5" });
+  assert.deepEqual(withCap.lookImage, { model: "glm-5.3-flash", max: 5 });
+
+  // Junk cap falls back to the default, not to refusal — the cap is a bound,
+  // and an unparsable bound should not silently disable the mode.
+  const junkCap = await inputOf({ SHIP_LOOK: "1", SHIP_LOOK_IMAGE_MODEL: "glm-5.3-flash", SHIP_LOOK_IMAGE_MAX: "many" });
+  assert.deepEqual(junkCap.lookImage, { model: "glm-5.3-flash", max: 3 });
+
+  // Model unset: NO lookImage, even under SHIP_LOOK=on — the execution-time
+  // refusal (naming the env var) is the contract, never a blind pixel call.
+  const noModel = await inputOf({ SHIP_LOOK: "1" });
+  assert.equal("lookImage" in noModel, false, "SHIP_LOOK alone does not admit image looks");
+
+  // Look off: no look vocabulary at all in the input, model set or not.
+  const lookOff = await inputOf({ SHIP_LOOK_IMAGE_MODEL: "glm-5.3-flash" });
+  assert.equal("look" in lookOff, false);
+  assert.equal("lookImage" in lookOff, false, "image mode cannot precede the action itself");
+});
+
 // SEAM: --settle must actually reach the durable run input.
 //
 // Deleting the one spread that joins the flag to the input left 319/319 green

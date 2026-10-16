@@ -1,19 +1,40 @@
 // S12 — the ```look perception action's driver. The browser lives in the
 // run's own sandbox container (the plan's D1): a background Playwright-owned
 // chromium started on first use, driven over CDP, dying with the container.
-// The observation is TEXT — the page's accessibility tree with [ref=eN]
-// labels — never pixels in this slice (image mode is a future gated slice).
+// The observation is TEXT FIRST — the page's accessibility tree with
+// [ref=eN] labels — and image mode (`image=on`, the gated slice) adds a PNG
+// screenshot of the same render IN ADDITION to the text, never instead of
+// it (pixels supplementary, D2's convention).
 //
 // Everything here runs through the executor, so the observation arrives as an
 // ordinary ExecResult and flows through the same scrub()/truncate() as a bash
 // observation, and the durable loop records it as a step a replay returns
-// without launching anything.
+// without launching anything. The screenshot of an image look is the one
+// addition: it lands in the run's artifact store (artifacts.ts — mime
+// allowlist, sha256, retention) tagged with the look-image data class, and
+// the durable step records the digest so replay can rebuild the ImagePart
+// from the store without re-screenshotting.
+
+import { createHash } from "node:crypto";
 
 import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 
+import { LOOK_IMAGE_DATA_CLASS, type ArtifactStore } from "./artifacts.js";
 import type { Action } from "./actions.js";
 
 export type LookAction = Extract<Action, { kind: "look" }>;
+
+/** What one image look records: the text ExecResult plus its screenshot artifact. */
+export interface LookImageResult extends ExecResult {
+  /**
+   * Present when the driver captured and stored the screenshot. The durable
+   * step result carries it, so a replay re-reads the artifact by id instead
+   * of re-running the browser. `digest` is the sha256 of the PNG bytes —
+   * for a temporary artifact the store's own id is random, so this is the
+   * stable name the transcript's placeholders quote.
+   */
+  image?: { artifact: string; digest: string; bytes: number };
+}
 
 /** Harness scratch the scripts live in — the same convention as kernel cells. */
 const LOOK_DIR = ".teploy-agent";
@@ -23,6 +44,10 @@ const LOOK_DIR = ".teploy-agent";
  * per-run container can never collide on, unlike a host port.
  */
 const LOOK_CDP_PORT = 9222;
+/** Where the driver writes an image look's PNG, inside the same scratch dir. */
+export function lookShotPath(scriptSuffix: string): string {
+  return `${LOOK_DIR}/look-shot-${scriptSuffix}.png`;
+}
 
 /**
  * What a sealed run is told. The egress gate that emits it reads the tier
@@ -47,6 +72,41 @@ export const LOOK_SEALED =
 export const LOOK_OPEN_PLAN =
   "REFUSED: this run's sandbox network tier is open, and a browser with unrestricted egress is only permitted on a run whose plan an operator reviewed. " +
   "This run was not enqueued with plan review, so ```look does not execute here. Nothing you do inside the run changes that. If the task genuinely needs to see a web page, say so in a ```finish block, naming the page — an operator can re-enqueue the run with plan review, or on the allowlist tier with the page's host added.";
+
+/**
+ * What an image look is told when no vision model is admitted for the run
+ * (input.lookImage absent — i.e. SHIP_LOOK_IMAGE_MODEL was not set at
+ * enqueue, even under SHIP_LOOK=on). Refusing beats a blind call: sending
+ * pixels to a model that cannot see them would return a confident
+ * hallucination about the page, which is worse than no screenshot. The
+ * refusal names the env var because only an operator can set it.
+ */
+export const LOOK_IMAGE_NO_MODEL =
+  "REFUSED: an image look attaches a PNG screenshot, and this run has no vision-capable model configured to receive one (set SHIP_LOOK_IMAGE_MODEL on the deployment — the operator's decision, nothing inside the run changes it). " +
+  "The text snapshot works exactly as before: re-run the ```look without image= and read the accessibility tree.";
+
+/**
+ * What an image look is told once the run's per-run image budget is spent
+ * (SHIP_LOOK_IMAGE_MAX, materialised as input.lookImage.max). Loud on
+ * purpose: a silent downgrade to text would read as "the screenshot
+ * feature is flaky" and invite retries that spend turns.
+ */
+export function lookImageCap(max: number): string {
+  return `REFUSED: this run's image-look budget is spent (${max} screenshot${max === 1 ? "" : "s"} per run, SHIP_LOOK_IMAGE_MAX). ` +
+    "The text snapshot works exactly as before: re-run the ```look without image=. If the task needs more pixels, say so in a ```finish block — the cap is an operator decision.";
+}
+
+/**
+ * What an image look is told when the run input admits image mode but the
+ * EXECUTING worker cannot honour it — no artifact store configured, so the
+ * screenshot would have nowhere honest to land. The look slice's hard rule
+ * is that pixels are artifacts (mime-allowed, hashed, retained, tagged) or
+ * they are nothing; an in-message screenshot with no artifact behind it
+ * would be unauditable page content in the transcript.
+ */
+export const LOOK_IMAGE_NO_STORE =
+  "REFUSED: this worker has no artifact store configured, so an image look has nowhere to record its screenshot (a pixels-as-artifacts rule — see the run's operator). " +
+  "The text snapshot works exactly as before: re-run the ```look without image=.";
 
 /**
  * The loud stale-ref failure (the addendum's error shape, verbatim in spirit).
@@ -152,8 +212,23 @@ setInterval(() => {}, 1 << 30);
  * the subtree — which is also the honest semantics: the ref names an element
  * of the page as it is NOW, and fails loudly when that element is gone.
  */
-function lookDriverScript(action: LookAction): string {
-  const params = { url: action.url, ref: action.ref, find: action.find, depth: action.depth };
+function lookDriverScript(action: LookAction, shotPath?: string): string {
+  // image rides only when true, so a text look's script bytes are exactly
+  // what they were before image mode existed (the ACTION literal is pinned
+  // by tests on both sides).
+  const params = {
+    url: action.url,
+    ref: action.ref,
+    find: action.find,
+    depth: action.depth,
+    ...(action.image === true ? { image: true } : {}),
+  };
+  // The screenshot is taken AFTER the a11y snapshot of the SAME settled
+  // render, so text and pixels describe one page state — never a second
+  // navigation or a fresh settle between them.
+  const shot = shotPath !== undefined
+    ? `  if (ACTION.image === true) {\n    await page.screenshot({ path: ${JSON.stringify(shotPath)} }); // viewport-sized PNG, same render as the text\n  }\n`
+    : "";
   return `import { chromium } from "playwright";
 const ACTION = ${JSON.stringify(params)};
 ${describeNeedle}
@@ -212,7 +287,7 @@ try {
   } else {
     snapshot = await page.ariaSnapshot({ mode: "ai", ...depth });
   }
-  const out = renderLook(ACTION, { url: page.url(), title: await page.title() }, snapshot);
+${shot}  const out = renderLook(ACTION, { url: page.url(), title: await page.title() }, snapshot);
   // Exit explicitly — the CDP socket would otherwise hold the process open —
   // but only once stdout has flushed: a pipe cut mid-observation loses the
   // tail of the tree, which is the part a depth-capped look kept.
@@ -248,6 +323,41 @@ export function lookCommand(scriptSuffix: string): string {
  */
 export async function runLook(executor: AgentExecutor, scriptSuffix: string, action: LookAction, timeoutMs?: number): Promise<ExecResult> {
   await executor.putFile(`${LOOK_DIR}/look-session.mjs`, LOOK_SESSION);
-  await executor.putFile(`${LOOK_DIR}/look-${scriptSuffix}.mjs`, lookDriverScript(action));
+  await executor.putFile(`${LOOK_DIR}/look-${scriptSuffix}.mjs`, lookDriverScript(action, action.image === true ? lookShotPath(scriptSuffix) : undefined));
   return executor.exec(lookCommand(scriptSuffix), timeoutMs !== undefined ? { timeoutMs } : {});
+}
+
+/**
+ * Run one IMAGE look: the same driver turn (text snapshot PLUS a viewport
+ * PNG of the same render), then pull the screenshot out of the sandbox and
+ * store it as a look-image artifact — temporary, so the store's screenshot
+ * retention applies, and tagged, so every PR-attachment boundary refuses it
+ * (git.ts uploadPrAsset; the public-mirror hard rule).
+ *
+ * The step's recorded result carries the artifact id and digest; the bytes
+ * stay in the store. On replay the step returns without running this body,
+ * and the caller rebuilds the ImagePart from the store — or, if retention
+ * has taken the artifact, degrades to text plus the digest pointer.
+ *
+ * A failed driver turn returns the ExecResult WITHOUT an image field: the
+ * observation (exit code, stderr) is the honest failure the agent reads,
+ * same as a text look.
+ */
+export async function runLookImage(executor: AgentExecutor, scriptSuffix: string, action: LookAction, artifacts: ArtifactStore, timeoutMs?: number): Promise<LookImageResult> {
+  const result = await runLook(executor, scriptSuffix, { ...action, image: true }, timeoutMs);
+  if (result.exitCode !== 0 || result.truncated) return result;
+  let bytes: Uint8Array;
+  try {
+    bytes = await executor.getFile(lookShotPath(scriptSuffix));
+  } catch {
+    // The text observation succeeded but the screenshot never came back —
+    // report that as part of the observation rather than failing the turn.
+    return { ...result, stderr: result.stderr === "" ? "look: the screenshot capture failed (no PNG came back from the sandbox)" : `${result.stderr}\nlook: the screenshot capture failed (no PNG came back from the sandbox)` };
+  }
+  const put =
+    artifacts.putTemporary !== undefined
+      ? artifacts.putTemporary.bind(artifacts)
+      : (name: string, b: Uint8Array, dataClass?: string) => artifacts.put(name, b, dataClass);
+  const artifact = await put(`look-${scriptSuffix}.png`, bytes, LOOK_IMAGE_DATA_CLASS);
+  return { ...result, image: { artifact, digest: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length } };
 }

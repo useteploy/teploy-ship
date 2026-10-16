@@ -44,7 +44,7 @@ import {
  * rung; the evidence is the capture, the attachment is its delivery.
  */
 export interface AssetSink {
-  upload(name: string, bytes: Uint8Array): Promise<string>;
+  upload(name: string, bytes: Uint8Array, dataClass?: string): Promise<string>;
 }
 
 /** The most screenshots one step attaches; a flow that writes more keeps the first N by name. */
