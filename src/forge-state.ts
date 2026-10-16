@@ -10,6 +10,15 @@ export interface ForgeState {
   url: string;
   title: string;
   draft: boolean;
+  /** The PR's head branch name, when the forge reported one (B1 PR watch: Ship's own PRs ride `ship/…`). */
+  headRef?: string;
+  /**
+   * Whether the forge says the PR merges cleanly. `null` = the forge has not
+   * computed it yet (GitHub answers null while it works); absent = not reported.
+   */
+  mergeable?: boolean | null;
+  /** GitHub's `mergeable_state` (`dirty` = conflicts). Absent on Forgejo. */
+  mergeableState?: string;
   checks: { name: string; state: string; url?: string }[];
   reviews: { author: string; state: string; body: string }[];
   /**
@@ -78,6 +87,9 @@ export async function readForgeState(
     url: `${ref.base}/${ref.owner}/${ref.repo}/${github ? "pull" : "pulls"}/${pr}`,
     title: safeForDisplay(String(p.title ?? ""), 300),
     draft: p.draft === true || /^(WIP|\[WIP\]):?\s/i.test(p.title ?? ""),
+    ...(typeof p.head?.ref === "string" ? { headRef: p.head.ref.slice(0, 255) } : {}),
+    ...(typeof p.mergeable === "boolean" || p.mergeable === null ? { mergeable: p.mergeable } : {}),
+    ...(typeof p.mergeable_state === "string" ? { mergeableState: p.mergeable_state.slice(0, 40) } : {}),
     checks: [],
     reviews: [],
     warnings: [],
