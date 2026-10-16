@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { AdapterGenerateResult, ModelAdapter } from "@neutron-build/ai";
+import type { AdapterGenerateResult, Message, ModelAdapter, UserContentPart } from "@neutron-build/ai";
 import { LocalExecutor } from "@neutron-build/agents";
 import type { AgentExecutor } from "@neutron-build/agents";
 import { MemoryEventStore, cancelRun, deliverEvent, executeRun } from "@neutron-build/workflow";
 
+import type { ArtifactStore } from "./artifacts.js";
 import { CHANGE_EVENT, MERGE_EVENT, PLAN_EVENT, approvalEvent, askEvent, durableAgent, livenessProbeTarget } from "./durable.js";
 import type { CommandRunner, PreviewTarget } from "./deploy.js";
 import type { TelemetryTarget } from "./observe.js";
@@ -4869,4 +4871,369 @@ test("a replayed look returns the recorded snapshot without launching anything",
   // The first pass's count (look + held finish + honoured finish, plus any
   // condense) is frozen by the replay: no new model call, no exec, ever.
   assert.equal(callCount(), firstPassCalls, "the replay made no model call the first pass did not");
+});
+
+// --- ```look image mode (S12 gated slice): artifact, ImagePart, routing, caps, replay ---
+
+/** A PNG with the right magic to pass the artifact store's allowlist. */
+const LOOK_PNG = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 7, 7, 7, 7, 1, 2, 3]);
+
+/** The image-capable variant of lookProvider: same canned snapshot, plus getFile for the shot. */
+function imageLookProvider(snapshot: string): { provider: ExecutorProvider; lookCommands: () => string[] } {
+  const commands: string[] = [];
+  const executor: AgentExecutor = {
+    async exec(cmd) {
+      commands.push(cmd);
+      if (/^node \.teploy-agent\/look-t\d+\.mjs$/m.test(cmd)) {
+        return { exitCode: 0, stdout: snapshot, stderr: "", timedOut: false, truncated: false };
+      }
+      return { exitCode: 42, stdout: "", stderr: `not a look command: ${cmd}`, timedOut: false, truncated: false };
+    },
+    putFile: async () => {},
+    getFile: async (path) => {
+      if (/^\.teploy-agent\/look-shot-t\d+\.png$/.test(path)) return LOOK_PNG;
+      throw new Error(`unused: ${path}`);
+    },
+    destroy: async () => {},
+  };
+  return {
+    lookCommands: () => commands,
+    provider: {
+      async create() {
+        return { handle: "look-image-fake" };
+      },
+      attach() {
+        return executor;
+      },
+    },
+  };
+}
+
+/** A model that records the FULL message arrays it was called with. */
+function capturingModel(turns: Array<string | ((messages: Message[]) => string)>): { model: ModelAdapter; calls: Array<Message[]> } {
+  const calls: Array<Message[]> = [];
+  let index = 0;
+  return {
+    calls,
+    model: {
+      provider: "captured",
+      modelId: "cap",
+      async doGenerate(options): Promise<AdapterGenerateResult> {
+        calls.push(options.messages);
+        const turn = turns[index++] ?? "```finish\nout of script\n```";
+        const text = typeof turn === "function" ? turn(options.messages) : turn;
+        return { content: [{ type: "text", text }], finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, raw: null };
+      },
+      async *doStream() {
+        throw new Error("unused");
+      },
+    },
+  };
+}
+
+/** The image parts across a message list — what routing and pruning key on. */
+function imageParts(messages: Message[]): Array<Extract<UserContentPart, { type: "image" }>> {
+  const out: Array<Extract<UserContentPart, { type: "image" }>> = [];
+  for (const m of messages) {
+    if (m.role !== "user" || typeof m.content === "string") continue;
+    for (const part of m.content) {
+      if (part.type === "image") out.push(part);
+    }
+  }
+  return out;
+}
+
+/** An in-memory artifact store: put/get, records ids, and can be emptied to simulate expiry. */
+function memoryArtifacts(): { store: ArtifactStore; ids: () => string[]; empty: () => void } {
+  const byId = new Map<string, { id: string; name: string; mime: "image/png"; data: string; bytes: number; dataClass?: string }>();
+  const order: string[] = [];
+  return {
+    ids: () => order,
+    empty: () => {
+      byId.clear();
+    },
+    store: {
+      async put(name, bytes, dataClass) {
+        const artifact = {
+          id: createHash("sha256").update(bytes).digest("hex"),
+          name,
+          mime: "image/png" as const,
+          data: Buffer.from(bytes).toString("base64"),
+          bytes: bytes.length,
+          ...(dataClass !== undefined ? { dataClass } : {}),
+        };
+        byId.set(artifact.id, artifact);
+        order.push(artifact.id);
+        return artifact.id;
+      },
+      async get(id) {
+        return byId.get(id) ?? null;
+      },
+    },
+  };
+}
+
+test("an image look records turn-N-look-image, stores a tagged artifact, and sends text + ImagePart", async () => {
+  const snapshot = '[page] https://example.com — Example\n- heading "Hello" [ref=e1]';
+  const { provider, lookCommands } = imageLookProvider(snapshot);
+  const main = capturingModel(["```look url=https://example.com image=on\n```"]);
+  const artifacts = memoryArtifacts();
+  const vision = capturingModel(["```finish\nsaw the pixels\n```"]);
+  const store = new MemoryEventStore();
+  const outcome = await executeRun({
+    workflow: durableAgent({
+      model: main.model,
+      executor: provider,
+      artifacts: artifacts.store,
+      lookImageModel: (id) => {
+        assert.equal(id, "vision-x", "the factory receives the model id the input recorded");
+        return vision.model;
+      },
+    }),
+    runId: "run-look-image",
+    store,
+    input: { task: "look", look: true, lookImage: { model: "vision-x", max: 3 } },
+  });
+  assert.equal(outcome.status, "completed");
+  const steps = (await store.load("run-look-image")).filter((e) => e.type === "step-completed");
+  assert.ok(steps.some((s) => s.name === "turn-0-look-image"), "the image look runs as its own recorded step");
+  assert.ok(!steps.some((s) => s.name === "turn-0-look"), "it is not the text-look step name");
+  assert.equal(lookCommands().length, 1, "exactly one driver run");
+  assert.deepEqual(artifacts.ids().length, 1, "exactly one artifact");
+  // The observation message the vision model actually received: fenced text
+  // plus the ImagePart built from the stored bytes, in that order.
+  const visionMessages = vision.calls[0] ?? [];
+  const parts = imageParts(visionMessages);
+  assert.equal(parts.length, 1, "exactly one ImagePart");
+  assert.equal(parts[0]?.mediaType, "image/png");
+  assert.equal(parts[0]?.data, Buffer.from(LOOK_PNG).toString("base64"), "the part carries the stored artifact bytes");
+  const obsMessage = [...visionMessages].reverse().find((m) => m.role === "user" && typeof m.content !== "string");
+  assert.ok(obsMessage !== undefined, "the image observation is a parts array");
+  if (obsMessage !== undefined && typeof obsMessage.content !== "string") {
+    const text = obsMessage.content[0];
+    assert.equal(text?.type, "text", "text first — pixels are supplementary");
+    assert.match(text?.type === "text" ? text.text : "", /<untrusted-content>/, "the text half is injection-fenced");
+    assert.match(text?.type === "text" ? text.text : "", /\[screenshot: sha256:[0-9a-f]{64}, \d+ bytes — attached as the next content part\]/, "the placeholder names the digest");
+  }
+});
+
+test("image-look routing: the turn that carries pixels goes to the vision adapter, later turns go back", async () => {
+  const snapshot = '[page] https://example.com — Example\n- heading "Hello" [ref=e1]';
+  const { provider } = imageLookProvider(snapshot);
+  const main = capturingModel(["```look url=https://example.com image=on\n```"]);
+  const artifacts = memoryArtifacts();
+  const vision = capturingModel(["```look url=https://example.com image=on\n```", "```finish\ndone\n```"]);
+  const store = new MemoryEventStore();
+  await executeRun({
+    workflow: durableAgent({ model: main.model, executor: provider, artifacts: artifacts.store, lookImageModel: () => vision.model }),
+    runId: "run-look-image-route",
+    store,
+    input: { task: "look", look: true, lookImage: { model: "vision-x", max: 3 } },
+  });
+  assert.equal(main.calls.length, 1, "the main model served only the turn before the image arrived");
+  assert.ok(vision.calls.length >= 2, "every turn after the pixels arrived routed to the vision adapter");
+  for (const call of main.calls) {
+    assert.equal(imageParts(call).length, 0, "a call without pixels in history never goes to the vision adapter");
+  }
+  for (const call of vision.calls) {
+    assert.ok(imageParts(call).length > 0, "every vision-adapter call carried pixels in its history");
+  }
+});
+
+test("image look refuses when input.lookImage is absent — even under look: true — naming SHIP_LOOK_IMAGE_MODEL", async () => {
+  const seen: string[] = [];
+  const { provider, lookCommands } = imageLookProvider("- generic [ref=e1]");
+  const { model } = reactiveModel([
+    "```look url=https://example.com image=on\n```",
+    (obs) => {
+      seen.push(obs);
+      return "```finish\nno pixels here\n```";
+    },
+  ]);
+  const store = new MemoryEventStore();
+  await executeRun({ workflow: durableAgent({ model, executor: provider }), runId: "run-look-image-nomodel", store, input: { task: "look", look: true } });
+  assert.match(seen[0] ?? "", /REFUSED: an image look attaches a PNG screenshot/);
+  assert.match(seen[0] ?? "", /SHIP_LOOK_IMAGE_MODEL/, "the refusal names the env var");
+  const steps = (await store.load("run-look-image-nomodel")).filter((e) => e.type === "step-completed");
+  assert.ok(!steps.some((s) => (s.name ?? "").endsWith("-look-image")), "the refusal records no step");
+  assert.equal(lookCommands().length, 0, "nothing was launched — never a blind call");
+});
+
+test("image look refuses at the per-run cap (input.lookImage.max), loudly, naming SHIP_LOOK_IMAGE_MAX", async () => {
+  const snapshot = '[page] https://example.com — Example\n- heading "Hello" [ref=e1]';
+  const { provider, lookCommands } = imageLookProvider(snapshot);
+  const main = capturingModel(["```look url=https://example.com image=on\n```"]);
+  const artifacts = memoryArtifacts();
+  const seen: string[] = [];
+  const vision = capturingModel([
+    "```look url=https://example.com image=on\n```",
+    (messages) => {
+      const last = [...messages].reverse().find((m) => m.role === "user");
+      if (typeof last?.content === "string") seen.push(last.content);
+      return "```finish\ncapped\n```";
+    },
+  ]);
+  const store = new MemoryEventStore();
+  await executeRun({
+    workflow: durableAgent({ model: main.model, executor: provider, artifacts: artifacts.store, lookImageModel: () => vision.model }),
+    runId: "run-look-image-cap",
+    store,
+    input: { task: "look", look: true, lookImage: { model: "vision-x", max: 1 } },
+  });
+  assert.equal(lookCommands().length, 1, "the first image look ran");
+  assert.match(seen[0] ?? "", /REFUSED: this run's image-look budget is spent/);
+  assert.match(seen[0] ?? "", /1 screenshot per run/);
+  assert.match(seen[0] ?? "", /SHIP_LOOK_IMAGE_MAX/, "the cap refusal names the env var");
+  const steps = (await store.load("run-look-image-cap")).filter((e) => e.type === "step-completed");
+  assert.ok(steps.filter((s) => (s.name ?? "").endsWith("-look-image")).length === 1, "the capped look recorded no second step");
+});
+
+test("image look on the OPEN tier without plan review refuses exactly like a text look (D3 first)", async () => {
+  const seen: string[] = [];
+  const { provider, lookCommands } = imageLookProvider("- generic [ref=e1]");
+  const { model } = reactiveModel([
+    "```look url=https://example.com image=on\n```",
+    (obs) => {
+      seen.push(obs);
+      return "```finish\nopen tier still needs a plan\n```";
+    },
+  ]);
+  const store = new MemoryEventStore();
+  await executeRun({
+    workflow: durableAgent({ model, executor: provider }),
+    runId: "run-look-image-open",
+    store,
+    input: { task: "look", look: true, lookImage: { model: "vision-x", max: 3 }, sandboxNetwork: "open", trust: "operator" },
+  });
+  assert.match(seen[0] ?? "", /REFUSED: this run's sandbox network tier is open/, "the tier gate fires before anything image-specific");
+  assert.match(seen[0] ?? "", /plan an operator reviewed/);
+  assert.equal(lookCommands().length, 0, "nothing was launched");
+});
+
+test("image history pruning: only the last 2 screenshots stay as ImageParts, older collapse to digest placeholders", async () => {
+  const snapshot = '[page] https://example.com — Example\n- heading "Hello" [ref=e1]';
+  const { provider } = imageLookProvider(snapshot);
+  const main = capturingModel(["```look url=https://example.com image=on\n```"]);
+  const artifacts = memoryArtifacts();
+  const vision = capturingModel([
+    "```look url=https://example.com image=on\n```",
+    "```look url=https://example.com image=on\n```",
+    "```finish\nthree pages seen\n```",
+  ]);
+  const store = new MemoryEventStore();
+  await executeRun({
+    workflow: durableAgent({ model: main.model, executor: provider, artifacts: artifacts.store, lookImageModel: () => vision.model }),
+    runId: "run-look-image-prune",
+    store,
+    input: { task: "look", look: true, lookImage: { model: "vision-x", max: 3 } },
+  });
+  assert.equal(artifacts.ids().length, 3, "all three screenshots were stored — pruning touches history, never the store");
+  const last = vision.calls[2] ?? [];
+  assert.equal(imageParts(last).length, 2, "exactly the last 2 screenshots are still ImageParts");
+  const collapsed = last.find((m) => {
+    if (m.role !== "user" || typeof m.content !== "string") return false;
+    return m.content.includes("pruned from history");
+  });
+  assert.ok(collapsed !== undefined, "the oldest image observation collapsed to a text placeholder");
+  assert.match(typeof collapsed?.content === "string" ? collapsed.content : "", /\[screenshot: sha256:[0-9a-f]{64} — pruned from history; only the latest screenshots stay\]/, "the placeholder keeps the digest quotable");
+});
+
+test("a replayed image look rebuilds the ImagePart from the store, or degrades to text + digest once the store is empty", async () => {
+  const snapshot = '[page] https://example.com — Example\n- heading "Hello" [ref=e1]';
+  const { provider } = imageLookProvider(snapshot);
+  const main = capturingModel(["```look url=https://example.com image=on\n```"]);
+  const artifacts = memoryArtifacts();
+  const vision = capturingModel(["```finish\nreplayed\n```"]);
+  const store = new MemoryEventStore();
+  const firstPass = await executeRun({
+    workflow: durableAgent({ model: main.model, executor: provider, artifacts: artifacts.store, lookImageModel: () => vision.model }),
+    runId: "run-look-image-replay",
+    store,
+    input: { task: "look", look: true, lookImage: { model: "vision-x", max: 3 } },
+  });
+  assert.equal(firstPass.status, "completed");
+  const firstVisionCalls = vision.calls.length;
+
+  // Replay with a model and executor that must never be used: the recorded
+  // step result plus the STORE are the only inputs.
+  const events = await store.load("run-look-image-replay");
+  const stripped = new MemoryEventStore();
+  for (const event of events) {
+    if (event.type === "run-completed") continue;
+    await stripped.append("run-look-image-replay", event);
+  }
+  const refuse = (): never => {
+    throw new Error("the replay must reuse the recorded look-image result");
+  };
+  const refusing: ExecutorProvider = {
+    async create() {
+      return { handle: "refused" };
+    },
+    attach() {
+      return { exec: refuse, putFile: refuse, getFile: refuse, destroy: async () => {} };
+    },
+  };
+  const { model: deadModel } = reactiveModel([]);
+  (deadModel as { doGenerate: unknown }).doGenerate = refuse;
+  const replayVision = capturingModel([]);
+  const replayed = await executeRun({
+    workflow: durableAgent({ model: deadModel, executor: refusing, artifacts: artifacts.store, lookImageModel: () => replayVision.model }),
+    runId: "run-look-image-replay",
+    store: stripped,
+    input: { task: "look", look: true, lookImage: { model: "vision-x", max: 3 } },
+  });
+  assert.equal(replayed.status, "completed");
+  assert.equal(vision.calls.length, firstVisionCalls, "no live model was touched");
+  assert.equal(replayVision.calls.length, 0, "a dead think step replays without any model call, vision included");
+
+  // And with the store EMPTIED (retention took the artifact): the same log
+  // still completes — the observation degrades to text plus the digest.
+  artifacts.empty();
+  const stripped2 = new MemoryEventStore();
+  for (const event of events) {
+    if (event.type === "run-completed") continue;
+    await stripped2.append("run-look-image-replay", event);
+  }
+  const degraded = await executeRun({
+    workflow: durableAgent({ model: deadModel, executor: refusing, artifacts: artifacts.store, lookImageModel: () => replayVision.model }),
+    runId: "run-look-image-replay",
+    store: stripped2,
+    input: { task: "look", look: true, lookImage: { model: "vision-x", max: 3 } },
+  });
+  assert.equal(degraded.status, "completed", "the degraded replay still completes — text + pointer, documented");
+});
+
+test("the prompt mentions image mode only when the input admits it (durable equivalence)", async () => {
+  const snapshot = '[page] https://example.com — Example\n- heading "Hello" [ref=e1]';
+  const withImage = capturingModel(["```finish\nprompt seen\n```"]);
+  await executeRun({
+    workflow: durableAgent({ model: withImage.model, executor: imageLookProvider(snapshot).provider, artifacts: memoryArtifacts().store, lookImageModel: () => capturingModel([]).model }),
+    runId: "run-look-image-prompt-on",
+    store: new MemoryEventStore(),
+    input: { task: "look", look: true, lookImage: { model: "vision-x", max: 3 } },
+  });
+  const onPrompt = String(withImage.calls[0]?.[0]?.content);
+  assert.match(onPrompt, /image=on also attaches a PNG screenshot/, "one sentence, when the flag is on");
+
+  const without = capturingModel(["```finish\nprompt seen\n```"]);
+  await executeRun({
+    workflow: durableAgent({ model: without.model, executor: imageLookProvider(snapshot).provider }),
+    runId: "run-look-image-prompt-off",
+    store: new MemoryEventStore(),
+    input: { task: "look", look: true },
+  });
+  const offPrompt = String(without.calls[0]?.[0]?.content);
+  assert.ok(!offPrompt.includes("image=on"), "a look-only run's prompt carries no image vocabulary");
+  assert.ok(!offPrompt.includes("PNG screenshot"), "not even the noun");
+  // And the flag-off run's prompt is byte-identical to a look-off run's: the
+  // sentence is the ONLY image-mode addition to the prompt.
+  const neither = capturingModel(["```finish\nprompt seen\n```"]);
+  await executeRun({
+    workflow: durableAgent({ model: neither.model, executor: imageLookProvider(snapshot).provider }),
+    runId: "run-look-image-prompt-neither",
+    store: new MemoryEventStore(),
+    input: { task: "look" },
+  });
+  const barePrompt = String(neither.calls[0]?.[0]?.content);
+  assert.ok(!barePrompt.includes("```look"), "look off: no look vocabulary at all");
 });

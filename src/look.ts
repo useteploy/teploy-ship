@@ -213,7 +213,16 @@ setInterval(() => {}, 1 << 30);
  * of the page as it is NOW, and fails loudly when that element is gone.
  */
 function lookDriverScript(action: LookAction, shotPath?: string): string {
-  const params = { url: action.url, ref: action.ref, find: action.find, depth: action.depth, image: action.image === true };
+  // image rides only when true, so a text look's script bytes are exactly
+  // what they were before image mode existed (the ACTION literal is pinned
+  // by tests on both sides).
+  const params = {
+    url: action.url,
+    ref: action.ref,
+    find: action.find,
+    depth: action.depth,
+    ...(action.image === true ? { image: true } : {}),
+  };
   // The screenshot is taken AFTER the a11y snapshot of the SAME settled
   // render, so text and pixels describe one page state — never a second
   // navigation or a fresh settle between them.
@@ -345,7 +354,10 @@ export async function runLookImage(executor: AgentExecutor, scriptSuffix: string
     // report that as part of the observation rather than failing the turn.
     return { ...result, stderr: result.stderr === "" ? "look: the screenshot capture failed (no PNG came back from the sandbox)" : `${result.stderr}\nlook: the screenshot capture failed (no PNG came back from the sandbox)` };
   }
-  const put = artifacts.putTemporary ?? ((name: string, b: Uint8Array, dataClass?: string) => artifacts.put(name, b, dataClass));
+  const put =
+    artifacts.putTemporary !== undefined
+      ? artifacts.putTemporary.bind(artifacts)
+      : (name: string, b: Uint8Array, dataClass?: string) => artifacts.put(name, b, dataClass);
   const artifact = await put(`look-${scriptSuffix}.png`, bytes, LOOK_IMAGE_DATA_CLASS);
   return { ...result, image: { artifact, digest: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length } };
 }
