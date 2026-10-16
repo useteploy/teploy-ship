@@ -84,6 +84,14 @@ import type { SteerStore } from "./steer.js";
 import { formatSearchHits } from "./code-index.js";
 import { frameUntrusted, screenUntrusted } from "./guard.js";
 import { LOOK_IMAGE_NO_MODEL, LOOK_IMAGE_NO_STORE, LOOK_OPEN_PLAN, LOOK_SEALED, lookImageCap, runLook, runLookImage } from "./look.js";
+import {
+  DELEGATE_CHILD_REFUSED,
+  DELEGATE_POLL_MS,
+  DELEGATE_UNAVAILABLE,
+  delegateControl,
+  transferObservation,
+} from "./delegate.js";
+import type { DelegateControl, DelegateSpawnOutcome, DelegateTransfer } from "./delegate.js";
 import { networkForTrust, parseNetworkTier, wireNetwork } from "./egress.js";
 import type { NetworkTier } from "./egress.js";
 import type { CodeSearch } from "./code-index.js";
@@ -200,6 +208,27 @@ export interface DurableAgentInput {
    * which is why the upgrade fence admits that step on this field alone.
    */
   lookImage?: { model: string; max: number };
+  /**
+   * Bounded child work (S20/S22): the ```delegate action — spawn one child
+   * run, park until it finishes, merge its result back as an observation.
+   * Materialised at enqueue from SHIP_DELEGATE, default off, for the
+   * standing reason with a sharper edge than usual: the delegate branch
+   * adds recorded steps (`turn-N-delegate-spawn` / `-snapshot` / `-wait` /
+   * `-restore`) AND parks on sleeps, so a worker that decided "delegate"
+   * from its own env would request a step sequence an older log does not
+   * contain and a park it cannot replay. Flag-off is byte-identical to a
+   * pre-delegate run — the action is not parseable, the prompt does not
+   * mention it, and the branch is unreachable.
+   */
+  delegate?: boolean;
+  /**
+   * Marks a run SPAWNED by a ```delegate action. Never admits the action
+   * itself (enqueueRun suppresses `delegate` for children): one level of
+   * delegation is the v1 bound. The marker is on the input — rather than
+   * inferring depth from parentRunId, which conversation follow-ups also
+   * carry — so the loop's one-level refusal is a fact of the recorded log.
+   */
+  delegateChild?: boolean;
   /**
    * Codebase indexing: repo runs refresh the Nucleus code index after
    * clone (a recorded step) and the agent gets the ```search action.
@@ -921,6 +950,17 @@ export interface DurableAgentConfig {
    */
   steer?: Pick<SteerStore, "drain">;
   /**
+   * The delegation control behind ```delegate (S20/S22, delegate.ts): spawns
+   * children and reads their terminal state. The EXPLICIT seam — tests pass
+   * it directly. The product path resolves it through the runtime
+   * constructors' registration (runtime.ts) when the field is absent, so a
+   * worker built on any runtime gets delegation without worker.ts wiring;
+   * absent entirely, a ```delegate action is refused with DELEGATE_UNAVAILABLE
+   * rather than failing the run — the same degrade-not-break rule as steer
+   * and codeSearch.
+   */
+  delegate?: DelegateControl;
+  /**
    * The Nucleus code index behind ```search and the repo-index refresh.
    * Like steer, its ABSENCE never changes the step sequence — steps run
    * whenever input.index is set and record "unavailable" results.
@@ -972,7 +1012,11 @@ export interface DurableAgentConfig {
  * with no restore yet, the replay is about to restore from that snapshot, so
  * there is nothing live to probe at all.
  *
- * Main-workspace names only: `attempt-N-*` groups own their containers.
+ * Main-workspace names only: `attempt-N-*` groups own their containers. The
+ * optional `-delegate` segment covers the delegation park's snapshot/restore
+ * (S20/S22), which must read exactly like the ask park's to the probe: a
+ * parent mid-park has a snapshot with no restore yet, so there is nothing
+ * live to probe — probing the superseded container would fail a healthy run.
  */
 export function livenessProbeTarget(
   events: readonly { type: string; name?: string; data?: unknown }[],
@@ -981,14 +1025,14 @@ export function livenessProbeTarget(
   let snapshotAfter = false;
   for (const e of events) {
     if (e.type !== "step-completed" || e.name === undefined) continue;
-    if (e.name === "sandbox" || /^(plan|merge|turn-\d+)-restore$/.test(e.name)) {
+    if (e.name === "sandbox" || /^(plan|merge|turn-\d+(?:-delegate)?)-restore$/.test(e.name)) {
       const result = (e.data as { result?: unknown } | undefined)?.result;
       const handle = typeof result === "string" ? result : (result as { handle?: unknown } | undefined)?.handle;
       if (typeof handle === "string") {
         latest = handle;
         snapshotAfter = false;
       }
-    } else if (/^(plan|merge|turn-\d+)-snapshot$/.test(e.name) && latest !== undefined) {
+    } else if (/^(plan|merge|turn-\d+(?:-delegate)?)-snapshot$/.test(e.name) && latest !== undefined) {
       snapshotAfter = true;
     }
   }
@@ -1829,6 +1873,12 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
       // pre-feature log's turns (a model never told the action exists) parse
       // exactly as they did when they were written.
       const look = input.look === true;
+      // S20/S22: ```delegate parses where the input admits it — and, one
+      // deliberate widening over `look`, on DELEGATION CHILDREN too, so a
+      // child that tries to delegate is refused BY NAME (the one-level rule,
+      // DELEGATE_CHILD_REFUSED) instead of being told "no code block found".
+      // Pre-feature and flag-off runs keep parsing exactly as before.
+      const delegate = input.delegate === true || input.delegateChild === true;
       // ...and image looks only on runs whose input admits THOSE: the model
       // id is part of the recorded contract (which model saw the pixels),
       // so the adapter is resolved from the input, never the live env.
@@ -1841,7 +1891,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
       let messages: Message[] = [
         {
           role: "system",
-          content: systemPrompt({ workdir: ws.workdir, task: task.prompt, search: searchable, browser: input.verification?.preview !== undefined, ask: input.ask === true, look, lookImage: lookImage !== undefined }),
+          content: systemPrompt({ workdir: ws.workdir, task: task.prompt, search: searchable, browser: input.verification?.preview !== undefined, ask: input.ask === true, look, lookImage: lookImage !== undefined, delegate: input.delegate === true }),
         },
       ];
       let anySuccessfulAction = false;
@@ -2096,9 +2146,9 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
         // Trimmed at the first action block (actions.ts transcriptTurn): what
         // the model wrote after it is at best ignored and at worst its own
         // invented observation, which the next turn then reasons about.
-        messages.push({ role: "assistant", content: thought.trim() === "" ? "(no response)" : transcriptTurn(thought, { look }) });
+        messages.push({ role: "assistant", content: thought.trim() === "" ? "(no response)" : transcriptTurn(thought, { look, delegate }) });
 
-        const action = parseAction(thought, { look });
+        const action = parseAction(thought, { look, delegate });
         // A SCAN'S FINISH GATE, and it replaces the fix-run chain below rather
         // than adding to it. Every hold in that chain asks a question about an
         // EDIT — did a command succeed, is the tree still clean, does the suite
@@ -2529,6 +2579,99 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
           // defanged. Framed AFTER truncation so the pair can never be cut
           // apart by an oversized snapshot.
           messages.push({ role: "user", content: frameUntrusted(truncate(formatObservation(result), maxObs)) });
+          continue;
+        }
+
+        // Bounded child work (S20/S22, input.delegate). The T3-reference data
+        // plane in one branch: spawn one child (an ordinary run carrying this
+        // run's lineage and gates), PARK until its log holds a terminal event,
+        // and merge its result back as the next observation — a CONTEXT
+        // TRANSFER recorded on the wait step, so a replay reads the recorded
+        // transfer without touching the child (which has its own log and is
+        // never re-run).
+        //
+        // The park is the ask machinery's shape over the engine's sleeping
+        // run: snapshot before (when the executor supports park snapshots),
+        // a RECORDED wait step whose result is either "still running" (then
+        // ctx.sleep parks the run; the worker's existing sleeping-run wake
+        // re-executes it at the deadline, releasing the slot and the repo
+        // lock for the child to use) or the transfer, then restore. Each poll
+        // is a recorded step so replay re-derives the same iteration count;
+        // a terminal child log is immutable, so live and replay read the
+        // same transfer by construction.
+        //
+        // Accounting, deliberately identical to ```search and ```look: a
+        // delegation clears no finish gate (waiting is not work), touches no
+        // last-command verdict, and is not fed to the recovery tracker. It
+        // spends the turn — the step cap is the budget on this side, the
+        // per-root SHIP_DELEGATE_MAX cap on the other.
+        if (action.kind === "delegate") {
+          // The one-level rule, refused BY NAME on children (see the dialect
+          // note above) rather than as a parse accident.
+          if (input.delegate !== true) {
+            messages.push({ role: "user", content: DELEGATE_UNAVAILABLE });
+            continue;
+          }
+          if (input.delegateChild === true) {
+            messages.push({ role: "user", content: DELEGATE_CHILD_REFUSED });
+            continue;
+          }
+          const control = config.delegate ?? delegateControl();
+          if (control === undefined) {
+            messages.push({ role: "user", content: DELEGATE_UNAVAILABLE });
+            continue;
+          }
+          // The spawn is a recorded step whose result is the outcome — a
+          // refusal (cap, bad scope hint, refused enqueue) is data for the
+          // model, never a step failure that would end the run. Idempotent
+          // per (parentRunId, turn) inside the control: a re-run after a
+          // crash before this step recorded republishes the same child.
+          const spawn: DelegateSpawnOutcome = await ws.ctx.step(`${p}turn-${turn}-delegate-spawn`, async () => {
+            try {
+              return await control.spawn({
+                parentRunId: ws.ctx.runId,
+                turn,
+                task: action.task,
+                ...(action.repo !== undefined ? { repoHint: action.repo } : {}),
+                ...(action.path !== undefined ? { pathHint: action.path } : {}),
+              });
+            } catch (error) {
+              return { ok: false, reason: `delegation failed: ${error instanceof Error ? error.message : String(error)}` };
+            }
+          });
+          if (!spawn.ok) {
+            messages.push({ role: "user", content: spawn.reason });
+            continue;
+          }
+          const canSnapshot = parkCanSnapshot(config, input);
+          let parkImage: string | undefined;
+          if (canSnapshot) {
+            parkImage = await ws.ctx.step(`${p}turn-${turn}-delegate-snapshot`, () => config.executor.snapshot!(ws.handle));
+          }
+          ws.live?.({ phase: "delegating", turn, detail: clipDetail(`waiting for child ${spawn.childRunId}`) });
+          let transfer: DelegateTransfer | null = null;
+          while (transfer === null) {
+            // Errors are caught INSIDE the step so it always records a value
+            // — a step that throws would re-run on replay and could branch
+            // differently, the same rule the fingerprint step states. A
+            // child whose log cannot be read yet is simply not terminal.
+            transfer = await ws.ctx.step(`${p}turn-${turn}-delegate-wait`, async () => {
+              try {
+                return (await control.outcome(spawn.childRunId)) ?? null;
+              } catch {
+                return null;
+              }
+            });
+            if (transfer === null) await ws.ctx.sleep(DELEGATE_POLL_MS);
+          }
+          if (parkImage !== undefined) {
+            const superseded = ws.handle;
+            ws.handle = await ws.ctx.step(`${p}turn-${turn}-delegate-restore`, async () => (await restoreChecked(config, input, parkImage)).handle);
+            ws.executor = config.executor.attach(ws.handle);
+            Object.assign(ws, liveWiring(config, ws.ctx.runId, ws.handle, p));
+            if (superseded !== ws.handle) await dispose(config, superseded);
+          }
+          messages.push({ role: "user", content: truncate(transferObservation(transfer), maxObs) });
           continue;
         }
 

@@ -34,7 +34,9 @@ export type LivePhase =
   /** Ship's own evidence legs: the suite, the build, the preview. */
   | "verifying"
   /** The agent has asked the operator something and is parked on the answer. */
-  | "asking";
+  | "asking"
+  /** A delegated child run holds the turn (S20/S22): the parent parks on its result. */
+  | "delegating";
 
 export interface LiveState {
   runId: string;
@@ -79,7 +81,7 @@ export function clipDetail(text: string, max = 160): string {
   return line.length > max ? `${line.slice(0, max - 3)}...` : line;
 }
 
-const PHASES: ReadonlySet<string> = new Set(["thinking", "running", "harness", "verifying", "asking"]);
+const PHASES: ReadonlySet<string> = new Set(["thinking", "running", "harness", "verifying", "asking", "delegating"]);
 
 function readState(runId: string, raw: Record<string, unknown>): LiveState | null {
   const phase = String(raw.phase ?? "");

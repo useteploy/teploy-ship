@@ -21,6 +21,7 @@ import { frameUntrusted } from "./guard.js";
 import { formatObservation, systemPrompt } from "./prompt.js";
 import { scrub } from "./redact.js";
 import { runLook } from "./look.js";
+import { DELEGATE_UNAVAILABLE } from "./delegate.js";
 import { RecoveryTracker, defaultRecoveryConfig } from "./recovery.js";
 import type { RecoveryConfig } from "./recovery.js";
 import { observeToolCall } from "./tool-manifest-shadow.js";
@@ -504,6 +505,16 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
       messages.push({ role: "user", content: ASK_UNAVAILABLE });
       steps.push({ index, thought, action });
       emit({ type: "observation", step: index, text: ASK_UNAVAILABLE });
+      continue;
+    }
+
+    // The live loop has no children to spawn and no park to hold them on:
+    // the durable loop is where ```delegate waits (durable.ts). Same shape
+    // as ```ask one branch up.
+    if (action.kind === "delegate") {
+      messages.push({ role: "user", content: DELEGATE_UNAVAILABLE });
+      steps.push({ index, thought, action });
+      emit({ type: "observation", step: index, text: DELEGATE_UNAVAILABLE });
       continue;
     }
 
