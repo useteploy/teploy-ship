@@ -44,7 +44,12 @@ follow-up composer outside the scrolling history.
 6. Review Changes and Verification. Activity retains detailed command output
    and the recorded-step index.
 7. On a completed, failed or cancelled run, start a follow-up. Earlier requests
-   and results remain in the conversation (up to 20 runs of context). Choose
+   and results remain in the conversation (up to 20 runs of context). The
+   follow-up's input carries a bounded digest of each earlier run: request,
+   outcome (including a failure's error), plan, delivered steering notes,
+   pushed commit and PR, changed files and suite results as recorded facts,
+   and the earlier agent's summary, critic notes and findings labelled as
+   claims. Choose
    the existing PR or current default branch. The worker checks PR state before
    launch, then checks again at checkout; a closed or merged PR requires the
    default-branch choice. This starts a fresh sandbox, with bounded conversation
