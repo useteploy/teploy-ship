@@ -91,11 +91,22 @@ export async function verifyPassword(password: string, stored: string): Promise<
   return derived.length === expected.length && timingSafeEqual(derived, expected);
 }
 
-function validatePassword(password: string): void {
+/**
+ * The single password policy for every entry point that sets one — account
+ * creation, admin reset, self-service change, and the bootstrap admin. Exported
+ * so the bootstrap can apply it BEFORE taking its once-ever claim (a too-short
+ * password must refuse without claiming); a second, driftier minimum elsewhere
+ * is exactly the AUD-009 shape observe closed.
+ */
+export function validatePassword(password: string): void {
   if (password.length < 8) throw new Error("password must be at least 8 characters");
 }
 
-function validateUsername(username: string): string {
+/**
+ * The single username policy. Returns the trimmed, usable form. Exported for
+ * the bootstrap's validate-before-claim pass; see validatePassword.
+ */
+export function validateUsername(username: string): string {
   const u = username.trim();
   if (u === "") throw new Error("username is required");
   // "token" is the reserved identity of the SHIP_WEB_TOKEN master credential.

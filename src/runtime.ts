@@ -257,6 +257,9 @@ export type { Outbox, OutboxEntry } from "./outbox.js";
 export { FileOutbox, NucleusOutbox, flushOutbox, notificationId } from "./outbox.js";
 export { FileDeliveryLog, NucleusDeliveryLog, DELIVERY_TTL_S } from "./deliveries.js";
 export type { UserStore, ShipUser, UserView, Role } from "./users.js";
+export { validatePassword, validateUsername } from "./users.js";
+export { BOOTSTRAP_ADMIN_CLAIM_KEY, bootstrapAdmin } from "./bootstrap-admin.js";
+export type { BootstrapAdminResult, BootstrapAdminOutcome, BootstrapRuntime } from "./bootstrap-admin.js";
 export type { Actor, ActorKind } from "./actor.js";
 export {
   UNKNOWN_ACTOR,
