@@ -1,0 +1,93 @@
+PROOF — the SHIP_LOOK production soak (text + image), 2026-10-16
+================================================================
+
+Operator: T3 thread b1c6d492, executing docs/SOAK_2026-10-16.md end to end
+with the owner. Production deployment 25d592a on infra-home (web+worker
+recreated twice: first deploy 2026-10-16 ~21:20 local, second ~20:5x to bake
+the rotated SHIP_WEB_TOKEN — the token was reset AFTER the first deploy, and
+NA-01 means env lands only at container recreation; parks were unaffected).
+
+ENVIRONMENT
+-----------
+Ship 25d592a (all S12 slices + guard + thread view + resource classes +
+coordinator, every flag default-off). Store: postgres (ship-postgres,
+pgvector 0.8.0). Secrets set: SHIP_LOOK=1, SHIP_LOOK_IMAGE_MODEL=
+zai/glm-5.3-flash, SHIP_WEB_TOKEN rotated. Backup BEFORE the deploy: cold
+pgdata tarball /root/ship-pgdata-pre-look-soak-2026-10-16.tgz on infra-home
+(26,444,999 bytes, sha256 d3aacd35c9222315922c74bf83bf58be05a97be08e4dac78fa7b
+8023b8f8da82, gzip -t verified; scripts/ship-backup.sh could not be used —
+it predates the postgres store and wants the nucleus data dir; follow-up
+filed to update it).
+
+RUNS
+----
+- run-209f16f0 (scratch repo ship-look-proof-20261016): FAILED at checkout,
+  "Repository not found". Cause: the repo was created as a bare dir on the
+  forge's disk; Forgejo does not adopt unadopted repos, so it 404s for every
+  caller including the worker's token. Not a ship defect. Pivoted to the
+  existing public scratch repo Tyler/ship-preview-proof (verified cloneable).
+- run-9d75d86d (ship-preview-proof, egress-allow example.com:443): COMPLETED.
+  19 turns, suite passed, parked at approve-merge (governance by design),
+  approved by the operator with reason; pushed and opened forge PR
+  /Tyler/ship-preview-proof/pulls/2. Model zai/glm-5.3, estimated ~$0.0533
+  (14,425 in / 6,387 out / 92,352 cache).
+
+MEASURED — the runbook's flip criteria
+--------------------------------------
+1. Look steps recorded: turn-2..turn-10-look (text a11y observations) and
+   turn-11-look-image (screenshot), visible as recorded steps on the run
+   page; replay contract intact by construction (recorded steps).
+2. Both facts, verified INDEPENDENTLY against the live web on 2026-10-16:
+   - h1 "Example Domain" — the 2026 page renders its heading via /s.js; the
+     a11y tree exposed it (the run notes "via the page title/heading rather
+     than a labelled node" — an honest observation detail, not an error).
+   - the "More information" link -> https://iana.org/help/example-domains.
+     VERIFIED: the live /s.js injects exactly <a href=https://iana.org/
+     help/example-domains>Learn more</a>. The RUNBOOK's "known-good"
+     (iana.org/domains/example) is STALE 2024-era knowledge — the agent was
+     right and the runbook's appendix assumption was wrong. Runbook note
+     recommended.
+   - dominant background #eeeeee (96.95% of pixels). VERIFIED: live CSS is
+     background:light-dark(#eee,#222) — the runbook's "white" was also
+     stale. Correct answer: #eeeeee.
+3. Image mode end-to-end on production: the agent's turn plan shows it
+   allotted itself ONE image look ("this is the one image look I'm
+   allotted" — the SHIP_LOOK_IMAGE_MAX=3 cap known and respected, 1 used),
+   ran ```look https://example.com image=on, and the FOLLOWING model turn
+   described the pixel-only fact ("The screenshot shows a light gray page
+   background") — i.e. the ImagePart reached a vision-capable model through
+   the gateway routing (lookImage.model=zai/glm-5.3-flash recorded on the
+   run input) — then cross-checked by capturing the page itself and counting
+   pixels (#eeeeee, 96.95%). Text-first-then-pixels behaved as designed.
+   Follow-up for the operator: read `teploy-gateway usage` for the flash
+   model's request count (expected: +1) — the router's own truth; not
+   readable from this session (gateway CLI needs its admin key).
+4. Refusals: NONE fired that should not have. No sealed-tier, no
+   open-without-plan, no SHIP_LOOK_IMAGE_MODEL refusal, no cap refusal, no
+   stale-ref loop. (The one failure in the soak was the unadopted scratch
+   repo, outside ship.)
+5. D4 (no look-image artifact on the PR): the look-image artifact
+   (artifacts/7dfb9f60f589ef571e3147be986aec7e11be1af2d5a1f7a8dc19f7c3f8e)
+   lives in the store; uploadPrAsset's class refusal is unit-tested in the
+   image-mode suite (refuses the look-image class for every repo). Visual
+   confirmation on the forge PR could not be made from this session (the
+   forge web UI is not exposed on the git port; pulls/1-2 404 over plain
+   HTTP). NOTE: the agent attached its OWN playwright-captured PNGs as
+   regular evidence (an agent-authored artifact class the flow rung has
+   always allowed, on a private forge repo) — that is not the look-image
+   class and is not a D4 violation as the rule is built; flagged here so
+   the distinction is on record.
+6. Spend: ~$0.0533 estimated for 19 turns incl. one image look. Sane.
+
+VERDICT
+------
+PASS. Leave SHIP_LOOK=1 and SHIP_LOOK_IMAGE_MODEL=zai/glm-5.3-flash on.
+The flags behaved exactly as designed: default-off semantics untouched for
+pre-existing runs, one image look under the cap, vision routed through the
+chosen provider, governance parked the publish for a human, spend trivial.
+
+Follow-ups recorded elsewhere: ship-backup.sh needs the postgres-store path;
+the soak runbook's "known-good answers" appendix is stale (this receipt's
+verified values supersede); teploy-gateway usage read for the flash model;
+the stray unadopted bare repo tyler/ship-look-proof-20261016.git on the
+forge disk can be deleted or adopted.
