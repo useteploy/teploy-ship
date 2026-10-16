@@ -273,7 +273,7 @@ export async function runData({ params, request }: { params: { id: string }; req
       const principal = await currentUser(request);
       if (principal) await refreshForgeIfStale(runtime, runId, principal.user).catch(() => {});
     }
-    const history = await threadHistory(runtime, runId);
+    const { history } = await threadHistory(runtime, runId);
     const forgeRaw = await runtime.config.get("SHIP_FORGE_STATE_" + runId);
     // The reverse link a newer revision left when it removed this run's
     // preview (preview-supersede.ts). Advisory: unreadable means "not marked".
