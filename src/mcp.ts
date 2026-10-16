@@ -63,6 +63,8 @@ export interface McpRunInput {
   manifestMode: ToolManifestMode;
   /** SHIP_MCP_REMOTE_HOSTS at enqueue. */
   remoteHosts: string[];
+  /** SHIP_MCP_REMOTE_PORTS at enqueue: ports beyond the scheme default (443/80) a remote server may be contacted on. */
+  remotePorts: number[];
   /** SHIP_MCP_REMOTE_PRIVATE=allow at enqueue — owner Decision 6, unset by default. */
   remotePrivate?: true;
   servers: McpServer[];
@@ -189,10 +191,12 @@ export function materialiseMcp(config: McpProjectConfig | undefined, env: NodeJS
   if (!mcpEnabled(env) || config === undefined || config.servers.length === 0) return undefined;
   const mode = (env.SHIP_TOOL_MANIFEST ?? "").trim().toLowerCase();
   const remoteHosts = (env.SHIP_MCP_REMOTE_HOSTS ?? "").split(",").map((h) => h.trim().toLowerCase()).filter((h) => h !== "");
+  const remotePorts = (env.SHIP_MCP_REMOTE_PORTS ?? "").split(",").map((p) => Number.parseInt(p.trim(), 10)).filter((p) => Number.isInteger(p) && p >= 1 && p <= 65_535);
   return {
     dataClass: config.dataClass ?? "private",
     manifestMode: mode === "shadow" || mode === "on" ? mode : "off",
     remoteHosts,
+    remotePorts,
     ...((env.SHIP_MCP_REMOTE_PRIVATE ?? "").trim().toLowerCase() === "allow" ? { remotePrivate: true as const } : {}),
     servers: config.servers,
   };
@@ -206,6 +210,14 @@ export function remoteRefusal(server: McpServer, input: McpRunInput): string | n
   const host = new URL(server.url).hostname.toLowerCase();
   if (!input.remoteHosts.some((h) => h === host || hostCovered(h, host))) {
     return `${host} is not on this deployment's remote MCP allowlist (SHIP_MCP_REMOTE_HOSTS) — an operator decision`;
+  }
+  // The project's grant is the second wall, and it gates CONTACT, not just
+  // the offer: a server whose hosts the administrator never granted does not
+  // get so much as an initialize/tools/list. Without this the deployment
+  // allowlist alone decided whether the server was reached.
+  const grant = server.grant ?? READ_ONLY_GRANT;
+  if (!server.manifest.tools.some((t) => t.permissions.hosts.some((h) => grant.hosts.some((g) => hostCovered(g, h))))) {
+    return `no host of server "${server.name}" is covered by the project's grant (its tools declare ${host}) — the administrator's grant decides which hosts a remote server may be contacted on`;
   }
   const accepts = server.dataClasses ?? ["public"];
   if (!accepts.includes(input.dataClass)) {
@@ -273,6 +285,7 @@ export interface McpTransportDeps {
 
 /** Run inside the `mcp-tools` step. Never throws: every outcome is data. */
 export async function listMcpTools(input: McpRunInput, deps: McpTransportDeps): Promise<ServerListing[]> {
+  const env = deps.env ?? process.env;
   const out: ServerListing[] = [];
   for (const server of input.servers) {
     const refused = remoteRefusal(server, input);
@@ -281,14 +294,22 @@ export async function listMcpTools(input: McpRunInput, deps: McpTransportDeps): 
       continue;
     }
     const timeoutMs = Math.max(...server.manifest.tools.map((t) => t.timeoutMs), 10_000);
+    // The listing is authenticated exactly like a call: the bearer is read
+    // from worker env inside this step, sent on initialize and tools/list,
+    // scrubbed from any error, and never recorded.
+    const secret = server.transport === "http" && server.authSecret !== undefined ? env[secretEnvName(server.authSecret)] : undefined;
+    const secretValues = secret !== undefined && secret !== "" ? [secret] : [];
     try {
       const reply = server.transport === "stdio"
         ? await stdioExchange(deps.executor, server, { op: "list" }, `${deps.suffix}-${server.name}`, timeoutMs)
-        : await httpExchange(server, input, { op: "list" }, timeoutMs, deps);
-      if (!reply.ok) out.push({ server: server.name, status: "error", detail: scrub(reply.error ?? "unknown error").slice(0, 2000) });
+        : await httpExchange(server, input, { op: "list" }, timeoutMs, deps, secret);
+      // The detail is OPERATOR data: server-controlled text, scrubbed and
+      // recorded on the mcp-tools step. It is never copied into anything the
+      // model reads — refusal messages carry fixed reasons only.
+      if (!reply.ok) out.push({ server: server.name, status: "error", detail: scrubSecret(reply.error ?? "unknown error", secretValues, env).slice(0, 2000) });
       else out.push({ server: server.name, status: "ok", tools: clampListedTools(reply.tools) });
     } catch (error) {
-      out.push({ server: server.name, status: "error", detail: scrub(error instanceof Error ? error.message : String(error)).slice(0, 2000) });
+      out.push({ server: server.name, status: "error", detail: scrubSecret(error instanceof Error ? error.message : String(error), secretValues, env).slice(0, 2000) });
     }
   }
   return out;
@@ -324,7 +345,19 @@ export function offerTools(input: McpRunInput, listings: readonly ServerListing[
   for (const server of input.servers) {
     const listing = listings.find((l) => l.server === server.name);
     if (listing === undefined || listing.status !== "ok") {
-      offer.unavailable.push({ server: server.name, reason: listing === undefined ? "not listed" : `${listing.status}: ${listing.detail ?? ""}`.trim() });
+      // Fixed wording only. This reason reaches the model inside refusal
+      // messages, OUTSIDE any untrusted frame, and a failed listing's detail
+      // is server-controlled text (stderr, an HTTP body, a JSON-RPC error
+      // message); the scrubbed detail stays on the recorded mcp-tools step
+      // for the operator instead.
+      offer.unavailable.push({
+        server: server.name,
+        reason: listing === undefined
+          ? "it was not listed in this run"
+          : listing.status === "refused"
+            ? "this run may not contact that server; the recorded mcp-tools step carries the reason"
+            : "the server failed to answer its tools/list request; its error text is recorded on the mcp-tools step, not shown here",
+      });
       continue;
     }
     const listed = new Map((listing.tools ?? []).map((t) => [t.name, t]));
@@ -353,6 +386,15 @@ export function offerTools(input: McpRunInput, listings: readonly ServerListing[
       const write = isWriteTool(decl);
       if (decl.approval === "always" || (decl.approval === "on-write" && write)) {
         offer.withheld.push({ id, reason: `requires per-call approval (approval: ${decl.approval}), which this slice does not offer` });
+        continue;
+      }
+      // The server's own annotations are data, but they are BELIEVED the
+      // safe way: a tool the server itself calls destructive is never
+      // offered on a read-only declaration, whatever SHIP_TOOL_MANIFEST is
+      // set to (the mode gates conformance findings; this gates the offer).
+      const serverSaysWrite = tool.annotations?.readOnlyHint === false || tool.annotations?.destructiveHint === true;
+      if (!write && serverSaysWrite) {
+        offer.withheld.push({ id, reason: "the server lists this tool as writing (readOnlyHint: false / destructiveHint: true) while the project declares it read-only, so it is not offered regardless of SHIP_TOOL_MANIFEST" });
         continue;
       }
       offer.offered.push({ id, server: server.name, tool: decl.name, write, declared: decl, listed: tool });
@@ -464,7 +506,10 @@ export function prepareMcpCall(input: McpRunInput, offer: McpOffer, action: { to
     };
   }
   const bad = argsError(offered, action.args);
-  if (bad !== null) return { refusal: `${action.tool}: ${bad}. Input schema: ${JSON.stringify(schemaOf(offered))}` };
+  // The schema may be the SERVER's listed one (the declaration's input is
+  // empty), so it is untrusted text: framed like every other server-supplied
+  // string, never bare in a message to the model.
+  if (bad !== null) return { refusal: `${action.tool}: ${bad}. Input schema: ${frameUntrusted(JSON.stringify(schemaOf(offered)))}` };
   const findings = input.manifestMode === "off" ? [] : conformanceChecks(server.manifest, observedMcpCall(offered, server, action.args));
   if (input.manifestMode === "on" && findings.length > 0) {
     return { refusal: `REFUSED: ${action.tool} contradicts its declaration (${findings.map((f) => f.detail).join("; ")}). SHIP_TOOL_MANIFEST=on enforces declared effects for MCP tools.` };
@@ -599,8 +644,9 @@ const DRIVER_DIR = ".teploy-agent";
 
 /**
  * The in-sandbox stdio driver: spawn the declared server in the workdir,
- * initialize, list or call, print ONE JSON line, kill the server. Exported
- * only so tests can pin it.
+ * initialize, list or call, print ONE JSON line, kill the server's whole
+ * process GROUP (a server that spawned helpers must not leave them behind).
+ * Exported only so tests can pin it.
  */
 export const MCP_DRIVER = `import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -612,13 +658,14 @@ function finish(o) {
   if (done) return;
   done = true;
   clearTimeout(timer);
+  try { if (child && child.pid !== undefined) process.kill(-child.pid, "SIGKILL"); } catch {}
   try { child && child.kill("SIGKILL"); } catch {}
   process.stdout.write(JSON.stringify(o) + "\\n", () => process.exit(0));
 }
 const timer = setTimeout(() => finish({ ok: false, timedOut: true, error: "timed out after " + REQ.timeoutMs + " ms" }), REQ.timeoutMs);
 let stderr = "";
 try {
-  child = spawn(REQ.command[0], REQ.command.slice(1), { stdio: ["pipe", "pipe", "pipe"] });
+  child = spawn(REQ.command[0], REQ.command.slice(1), { stdio: ["pipe", "pipe", "pipe"], detached: true });
 } catch (e) {
   finish({ ok: false, error: "the MCP server could not be started: " + String(e && e.message || e) });
 }
@@ -657,10 +704,11 @@ child.stdout.on("data", (d) => {
   if (REQ.op === "list") {
     const tools = [];
     let cursor;
-    for (let page = 0; page < 10; page++) {
+    for (let page = 0; page < 10 && tools.length < REQ.maxTools; page++) {
       const r = await request("tools/list", cursor ? { cursor } : {});
       if (r.error) return finish({ ok: false, error: "tools/list failed: " + r.error.message });
       tools.push(...((r.result && r.result.tools) || []));
+      if (tools.length > REQ.maxTools) tools.length = REQ.maxTools;
       cursor = r.result && r.result.nextCursor;
       if (!cursor) break;
     }
@@ -676,7 +724,7 @@ child.stdout.on("data", (d) => {
 async function stdioExchange(executor: AgentExecutor, server: McpServer, exchange: Exchange, suffix: string, timeoutMs: number): Promise<DriverReply> {
   const reqPath = `${DRIVER_DIR}/mcp-req-${suffix}.json`;
   await executor.putFile(`${DRIVER_DIR}/mcp-driver.mjs`, MCP_DRIVER);
-  await executor.putFile(reqPath, JSON.stringify({ ...exchange, command: server.command, timeoutMs, protocolVersion: MCP_PROTOCOL_VERSION }));
+  await executor.putFile(reqPath, JSON.stringify({ ...exchange, command: server.command, timeoutMs, maxTools: MAX_TOOLS_PER_SERVER, protocolVersion: MCP_PROTOCOL_VERSION }));
   const result = await executor.exec(
     `command -v node >/dev/null 2>&1 || { echo "mcp: this sandbox has no node to run the MCP driver" >&2; exit 4; }\nnode ${DRIVER_DIR}/mcp-driver.mjs ${reqPath}`,
     { timeoutMs: timeoutMs + 5000 },
@@ -752,9 +800,12 @@ async function httpExchange(server: McpServer, input: McpRunInput, exchange: Exc
   const decision = await validateRetrievalTarget(url, {
     resolve: http.resolve ?? systemResolve,
     allowHosts: input.remoteHosts,
+    // Only the scheme default (443/80) plus what SHIP_MCP_REMOTE_PORTS
+    // materialised at enqueue; never the URL's own port, which would let a
+    // project record open any port it liked.
+    allowPorts: input.remotePorts,
     ...(http.allowPrivate === true ? { allowPrivate: true } : {}),
     ...(http.allowHttp === true ? { allowHttp: true } : {}),
-    ...(url.port !== "" ? { allowPorts: [Number(url.port)] } : {}),
   });
   if (!decision.allowed) return { ok: false, error: `remote MCP target refused (${decision.reason}: ${decision.detail})` };
   const doFetch = http.fetch ?? pinnedFetch;
@@ -791,15 +842,16 @@ async function httpExchange(server: McpServer, input: McpRunInput, exchange: Exc
     if (exchange.op === "list") {
       const tools: unknown[] = [];
       let cursor: string | undefined;
-      for (let page = 0; page < 10; page++) {
+      for (let page = 0; page < 10 && tools.length < MAX_TOOLS_PER_SERVER; page++) {
         const r = await request("tools/list", cursor !== undefined ? { cursor } : {});
         if (isObject(r.error)) return { ok: false, error: `tools/list failed: ${String(r.error.message)}` };
         const result = isObject(r.result) ? r.result : {};
         if (Array.isArray(result.tools)) tools.push(...result.tools);
+        if (tools.length >= MAX_TOOLS_PER_SERVER) break;
         cursor = typeof result.nextCursor === "string" && result.nextCursor !== "" ? result.nextCursor : undefined;
         if (cursor === undefined) break;
       }
-      return { ok: true, tools };
+      return { ok: true, tools: tools.slice(0, MAX_TOOLS_PER_SERVER) };
     }
     const r = await request("tools/call", { name: exchange.tool, arguments: exchange.args });
     if (isObject(r.error)) {

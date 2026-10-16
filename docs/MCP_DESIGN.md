@@ -45,8 +45,9 @@ On the project record (`src/projects.ts`, field `mcp`), validated at save by
 
 At enqueue (`src/runtime.ts`), with `SHIP_MCP=on` and at least one declared
 server, the record is materialised into `input.mcp` together with the
-deployment facts the gates read: the data class, `SHIP_MCP_REMOTE_HOSTS`, the
-`SHIP_TOOL_MANIFEST` mode and `SHIP_MCP_REMOTE_PRIVATE`. Every gate that
+deployment facts the gates read: the data class, `SHIP_MCP_REMOTE_HOSTS`,
+`SHIP_MCP_REMOTE_PORTS`, the `SHIP_TOOL_MANIFEST` mode and
+`SHIP_MCP_REMOTE_PRIVATE`. Every gate that
 decides whether a step exists is a pure function of that recorded input, so a
 replay refuses or proceeds identically after the record or env is edited.
 Scans get no MCP (they read the repository, like `look`).
@@ -57,7 +58,9 @@ Scans get no MCP (they read the repository, like `look`).
   command: a self-contained driver (`.teploy-agent/mcp-driver.mjs`, needs
   `node` in the image) spawns the declared command in the workdir, does
   `initialize` → `notifications/initialized` → `tools/list` or `tools/call`
-  over newline-delimited JSON-RPC, prints one JSON line and kills the server.
+  over newline-delimited JSON-RPC, prints one JSON line and kills the server's
+  whole process group (spawned detached, killed by pgid, so a server that
+  left helpers behind cannot outlive the call).
   The server therefore has exactly the sandbox's filesystem, egress tier and
   limits — no more. Consequence stated plainly: a stdio server is no more
   trusted than the agent's own `bash`, so its write gate is policy, not a
@@ -68,9 +71,14 @@ Scans get no MCP (they read the repository, like `look`).
   honoured) is called from the WORKER. A call is allowed only when the URL's
   host is on `SHIP_MCP_REMOTE_HOSTS` (deployment) AND covered by the server's
   grant hosts (project), and the tool declares the `network` effect for it.
-  The target goes through `validateRetrievalTarget` (resolved-address check,
-  no userinfo, no private or metadata addresses) and `pinnedFetch` (no DNS
-  rebinding between check and connect); redirects are refused.
+  The gate decides CONTACT, not just the offer: a server whose hosts the
+  grant does not cover gets no `initialize`/`tools/list` at all. Its URL's
+  port must be the scheme default or one `SHIP_MCP_REMOTE_PORTS` named. The
+  listing is authenticated like a call (the bearer rides `initialize` and
+  `tools/list`). The target goes through `validateRetrievalTarget`
+  (resolved-address check, no userinfo, no private or metadata addresses)
+  and `pinnedFetch` (no DNS rebinding between check and connect); redirects
+  are refused.
 
 ## Data class (remote only)
 
@@ -128,6 +136,13 @@ the output withholds it.
 - Injection: the observation is scrubbed, then `frameUntrusted`; the
   injection screen's flags are added outside the frame. Authority comes only
   from the recorded input, so text in a tool result cannot unlock a tool.
+  Server-controlled text reaches the model ONLY inside that frame: a failed
+  listing's error detail (stderr, an HTTP body, a JSON-RPC error message)
+  stays on the recorded `mcp-tools` step for the operator, and the refusal
+  the model sees carries fixed reasons. A tool the server itself annotates
+  as writing (`readOnlyHint: false`, `destructiveHint: true`) is never
+  offered on a read-only declaration, whatever `SHIP_TOOL_MANIFEST` is set
+  to. Listings stop at 64 tools per server.
 
 ## Recording, replay, cost
 
