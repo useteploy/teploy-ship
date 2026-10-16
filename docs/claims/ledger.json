@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "preamble": "Each claim states what it covers, what kind of evidence stands behind it, and what it does not show. Evidence classes: implementation (the code or document exists), automated (a test or probe in this repository), system (observed in a real system), human (a recorded observation), comparative (matched measurement against an alternative). A claim is `supported` only with automated or system evidence; it is marked verified only with system evidence at an exact revision. Automated evidence carries the commit at which its tests were last run green; any later change to its cited path makes it a candidate for re-running (`node scripts/claim-ledger.mjs --check --stale`). No claim in the first seeding has system-class evidence at a known revision, so none is marked verified. Publication, tag and visibility decisions are not made by this file.",
+  "preamble": "Each claim states what it covers, what kind of evidence stands behind it, and what it does not show. Evidence classes: implementation (the code or document exists), automated (a test or probe in this repository), system (observed in a real system), human (a recorded observation), comparative (matched measurement against an alternative). A claim is `supported` only with automated or system evidence; it is marked verified only with system evidence at an exact revision. Automated evidence carries the commit at which its tests were last run green; any later change to its cited path makes it a candidate for re-running (`node scripts/claim-ledger.mjs --check --stale`). No claim in the first seeding had system-class evidence at a known revision. The 2026-10-16 re-check (X7) re-ran every cited test at 477529a and added claims for later work at the level reached; three carry production evidence at an exact revision and are marked verified. The check runs in CI. Publication, tag and visibility decisions are not made by this file.",
   "claims": [
     {
       "id": "model.default-id",
@@ -9,11 +9,27 @@
       "status": "supported",
       "owner": "teploy-ship",
       "evidence": [
-        { "class": "implementation", "path": "src/model-id.ts" },
-        { "class": "automated", "path": "src/model-id.test.ts", "test": "flag wins over env and config", "revision": "dd682c7acc4ee63ffe2e33a8246574778de87c9a" },
-        { "class": "automated", "path": "src/model-id.test.ts", "test": "an empty SHIP_MODEL falls through to config, then the default", "revision": "dd682c7acc4ee63ffe2e33a8246574778de87c9a" }
+        {
+          "class": "implementation",
+          "path": "src/model-id.ts"
+        },
+        {
+          "class": "automated",
+          "path": "src/model-id.test.ts",
+          "test": "flag wins over env and config",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        },
+        {
+          "class": "automated",
+          "path": "src/model-id.test.ts",
+          "test": "an empty SHIP_MODEL falls through to config, then the default",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        }
       ],
-      "limitations": ["Resolution of the id string only; whether the configured gateway serves it is not checked."]
+      "limitations": [
+        "Resolution of the id string only; whether the configured gateway serves it is not checked."
+      ],
+      "notes": "Re-checked 2026-10-16 (X7) against origin/main 477529a: DEFAULT_MODEL_ID is still zai/glm-5.3 (src/model-id.ts); both cited tests re-run green."
     },
     {
       "id": "model.default-quality",
@@ -22,31 +38,70 @@
       "status": "provisional",
       "owner": "teploy-ship",
       "evidence": [
-        { "class": "implementation", "path": "docs/MODELS.md" },
-        { "class": "system", "path": "evals/2026-08-16-swebench-lite-50-glm53.md", "revisionUnknown": true }
+        {
+          "class": "implementation",
+          "path": "docs/MODELS.md"
+        },
+        {
+          "class": "system",
+          "path": "evals/2026-08-16-swebench-lite-50-glm53.md",
+          "revisionUnknown": true
+        }
       ],
       "limitations": [
         "The writeup does not pin a Ship commit; the system evidence is therefore not counted.",
         "Other models have little or no evidence: claude-haiku-4-5 was 1/9 on a hand-picked set with prompts tuned against GLM; claude-sonnet-5 3/3 and 6/6 on small saturated in-house suites; none for OpenAI-shaped, Gemini, DeepSeek, Opus or local models.",
         "Not the product path, so it does not support any claim about Ship tasks."
-      ]
+      ],
+      "notes": "Re-checked 2026-10-16 (X7) against origin/main 477529a: the writeup still pins no Ship commit, so the system evidence stays uncounted and the claim stays provisional. Not upgraded."
     },
     {
       "id": "harness.native-steering",
       "claim": "Steering notes are offered and accepted only for runs whose harness can consume them, which is the native harness only.",
       "scope": "The capability table in src/harness-capabilities.ts, as consulted by the run page and the steering route.",
-      "status": "provisional",
+      "status": "supported",
       "owner": "teploy-ship",
       "evidence": [
-        { "class": "implementation", "path": "src/harness-capabilities.ts" },
-        { "class": "automated", "path": "src/harness-capabilities.test.ts", "test": "S13: only the native harness takes steering notes", "revision": "dd682c7acc4ee63ffe2e33a8246574778de87c9a" },
-        { "class": "automated", "path": "src/harness-capabilities.test.ts", "test": "S13: a multi-harness run supports a capability only if every attempt does", "revision": "dd682c7acc4ee63ffe2e33a8246574778de87c9a" }
+        {
+          "class": "implementation",
+          "path": "src/harness-capabilities.ts"
+        },
+        {
+          "class": "automated",
+          "path": "src/harness-capabilities.test.ts",
+          "test": "S13: only the native harness takes steering notes",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        },
+        {
+          "class": "automated",
+          "path": "src/harness-capabilities.test.ts",
+          "test": "S13: a multi-harness run supports a capability only if every attempt does",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        },
+        {
+          "class": "automated",
+          "path": "web/src/lib/steer-refusal.test.ts",
+          "test": "steering a run on an external harness is refused and nothing is stored",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        },
+        {
+          "class": "automated",
+          "path": "web/src/lib/steer-refusal.test.ts",
+          "test": "steering a native run is accepted and queued (negative control for the refusal)",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        },
+        {
+          "class": "automated",
+          "path": "web/src/lib/steer-refusal.test.ts",
+          "test": "the run page does not offer a steer box for an external-harness run",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        }
       ],
       "limitations": [
-        "The table is tested; the route refusal itself has no automated test.",
         "No live steering of a real native run is recorded.",
         "External harnesses (claude-code, opencode) cannot be steered; that is a gap, not a feature."
-      ]
+      ],
+      "notes": "Re-checked 2026-10-16 (X7) against origin/main 477529a: the route refusal now has automated tests (web/src/lib/steer-refusal.test.ts, with a native negative control), which removes the limitation that kept this provisional. Upgraded to supported on automated evidence; still not verified live."
     },
     {
       "id": "harness.external-refuse-plan-review",
@@ -55,14 +110,32 @@
       "status": "supported",
       "owner": "teploy-ship",
       "evidence": [
-        { "class": "implementation", "path": "src/runtime.ts" },
-        { "class": "implementation", "path": "src/harness-external.ts" },
-        { "class": "automated", "path": "src/harness-external.test.ts", "test": "direct external execution cannot bypass requested plan review", "revision": "dd682c7acc4ee63ffe2e33a8246574778de87c9a" }
+        {
+          "class": "implementation",
+          "path": "src/runtime.ts"
+        },
+        {
+          "class": "implementation",
+          "path": "src/harness-external.ts"
+        },
+        {
+          "class": "automated",
+          "path": "src/harness-external.test.ts",
+          "test": "direct external execution cannot bypass requested plan review",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        },
+        {
+          "class": "automated",
+          "path": "web/src/lib/workspace-actions.test.ts",
+          "test": "an external harness cannot silently bypass requested plan approval",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        }
       ],
       "limitations": [
-        "The test drives a fake claude binary; the admission-time check in src/runtime.ts has no dedicated cited test here.",
+        "The workflow test drives a fake claude binary; the admission check is pinned through enqueueRun in the web suite (nothing recorded on refusal), not through the CLI.",
         "No real external harness run was observed."
-      ]
+      ],
+      "notes": "Re-checked 2026-10-16 (X7) against origin/main 477529a: flagged stale (src/harness-external.test.ts changed after dd682c7); the cited test re-run green, and the admission-time refusal now has a cited test."
     },
     {
       "id": "delivery.stale-executing",
@@ -71,14 +144,28 @@
       "status": "supported",
       "owner": "teploy-ship",
       "evidence": [
-        { "class": "implementation", "path": "src/delivery.ts" },
-        { "class": "automated", "path": "src/delivery.test.ts", "test": "isStaleExecuting keys on state and age, above the execution ceiling", "revision": "dd682c7acc4ee63ffe2e33a8246574778de87c9a" },
-        { "class": "automated", "path": "src/delivery.test.ts", "test": "gap: stale rollback reconciliation reads the target", "revision": "dd682c7acc4ee63ffe2e33a8246574778de87c9a" }
+        {
+          "class": "implementation",
+          "path": "src/delivery.ts"
+        },
+        {
+          "class": "automated",
+          "path": "src/delivery.test.ts",
+          "test": "isStaleExecuting keys on state and age, above the execution ceiling",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        },
+        {
+          "class": "automated",
+          "path": "src/delivery.test.ts",
+          "test": "gap: stale rollback reconciliation reads the target",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        }
       ],
       "limitations": [
         "No live forge or deployment target was exercised.",
         "The stale window is a fixed 35 minutes by default."
-      ]
+      ],
+      "notes": "Re-checked 2026-10-16 (X7) against origin/main 477529a: the 35-minute default is still the staleMs default of isStaleExecuting / isStaleRollbackExecuting (src/delivery.ts); cited tests re-run green."
     },
     {
       "id": "git.credential-scrub-same-shell",
@@ -87,13 +174,22 @@
       "status": "supported",
       "owner": "teploy-ship",
       "evidence": [
-        { "class": "implementation", "path": "src/git.ts" },
-        { "class": "automated", "path": "src/git.test.ts", "test": "S01: authenticated clone and fetch scrub the remote in the same shell invocation as the credential", "revision": "dd682c7acc4ee63ffe2e33a8246574778de87c9a" }
+        {
+          "class": "implementation",
+          "path": "src/git.ts"
+        },
+        {
+          "class": "automated",
+          "path": "src/git.test.ts",
+          "test": "S01: authenticated clone and fetch scrub the remote in the same shell invocation as the credential",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        }
       ],
       "limitations": [
         "The sequencing test fails on the previous code; the failed-fetch probe on a real checkout is a regression pin only (the old path also scrubbed).",
         "Not proven through the Sandbox daemon or a live private repository."
-      ]
+      ],
+      "notes": "Re-checked 2026-10-16 (X7) against origin/main 477529a: flagged stale (src/git.test.ts changed after dd682c7); the cited test re-run green."
     },
     {
       "id": "git.env-credential-mode",
@@ -102,15 +198,29 @@
       "status": "provisional",
       "owner": "teploy-ship",
       "evidence": [
-        { "class": "implementation", "path": "src/git.ts" },
-        { "class": "automated", "path": "src/git.test.ts", "test": "S01: env credential mode keeps the token out of argv and the URL, argv mode does not", "revision": "dd682c7acc4ee63ffe2e33a8246574778de87c9a" },
-        { "class": "automated", "path": "src/git.test.ts", "test": "S01: a real git clone in env mode sends the credential as a header and never puts it in argv or config", "revision": "dd682c7acc4ee63ffe2e33a8246574778de87c9a" }
+        {
+          "class": "implementation",
+          "path": "src/git.ts"
+        },
+        {
+          "class": "automated",
+          "path": "src/git.test.ts",
+          "test": "S01: env credential mode keeps the token out of argv and the URL, argv mode does not",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        },
+        {
+          "class": "automated",
+          "path": "src/git.test.ts",
+          "test": "S01: a real git clone in env mode sends the credential as a header and never puts it in argv or config",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        }
       ],
       "limitations": [
         "Unproven live: the Sandbox daemon must forward per-exec env, and the sandbox git must be 2.31 or later.",
         "No private-repo clone or push on Forgejo or GitHub through the real sandbox has been run.",
         "Default unchanged; see AUDIT_OPEN.md before flipping it."
-      ]
+      ],
+      "notes": "Re-checked 2026-10-16 (X7) against origin/main 477529a: flagged stale; both cited tests re-run green. AUDIT_OPEN's S01 open list (daemon env forwarding, sandbox git version, live private-repo clone and push) is unchanged, so it stays provisional."
     },
     {
       "id": "eval.retained-recount",
@@ -119,15 +229,30 @@
       "status": "supported",
       "owner": "teploy-ship",
       "evidence": [
-        { "class": "implementation", "path": "evals/product-journeys/BASELINE_RECOUNT_2026-10-03.md" },
-        { "class": "automated", "path": "scripts/eval-report.test.mjs", "test": "each outcome class is counted exactly once and unknown is neither pass nor fail", "revision": "dd682c7acc4ee63ffe2e33a8246574778de87c9a" },
-        { "class": "automated", "path": "scripts/eval-report.test.mjs", "test": "negative control: an unknown record is in no pass or fail count and no denominator", "revision": "dd682c7acc4ee63ffe2e33a8246574778de87c9a" }
+        {
+          "class": "implementation",
+          "path": "evals/product-journeys/BASELINE_RECOUNT_2026-10-03.md"
+        },
+        {
+          "class": "automated",
+          "path": "scripts/eval-report.test.mjs",
+          "test": "each outcome class is counted exactly once and unknown is neither pass nor fail",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        },
+        {
+          "class": "automated",
+          "path": "scripts/eval-report.test.mjs",
+          "test": "negative control: an unknown record is in no pass or fail count and no denominator",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        }
       ],
       "limitations": [
         "The counting rules are tested on synthetic trees; the figures themselves are the generated report, not a separate test.",
         "Costs: 12 records priced, 16 unknown; the priced sum is a lower bound.",
-        "Supplements (one regrade, one reclassification) are listed but not applied."
-      ]
+        "Supplements (one regrade, one reclassification) are listed but not applied.",
+        "The 2026-10-04 S02 batch and its supplementary regrades added records under evals/product-journeys/results, so the current tree no longer reproduces these figures; they describe the 2026-10-03 recount only. The batch's own result is in evals/product-journeys/BATCH_2026-10-04.md and is not claimed here."
+      ],
+      "notes": "Re-checked 2026-10-16 (X7) against origin/main 477529a: counting-rule tests re-run green; scope limitation added for records added after the recount."
     },
     {
       "id": "eval.headline-21-13-2",
@@ -136,12 +261,16 @@
       "status": "disclaimed",
       "owner": "teploy-ship",
       "evidence": [
-        { "class": "implementation", "path": "evals/product-journeys/BASELINE_RECOUNT_2026-10-03.md" }
+        {
+          "class": "implementation",
+          "path": "evals/product-journeys/BASELINE_RECOUNT_2026-10-03.md"
+        }
       ],
       "limitations": [
         "Do not quote 21/13/2. Use eval.retained-recount, with its scope.",
         "Not shown to be wrong either: the missing records were not checked."
-      ]
+      ],
+      "notes": "Re-checked 2026-10-16 (X7) against origin/main 477529a: still disclaimed; nothing new recovers the missing attempts."
     },
     {
       "id": "preview.egress-unrestricted",
@@ -150,12 +279,16 @@
       "status": "open",
       "owner": "teploy-cli",
       "evidence": [
-        { "class": "implementation", "path": "AUDIT_OPEN.md" }
+        {
+          "class": "implementation",
+          "path": "AUDIT_OPEN.md"
+        }
       ],
       "limitations": [
         "No Ship-side change made; any isolation claim for previews is withheld until the CLI change and a live proof on the preview target exist.",
         "A successful preview is not evidence that production isolation guarantees exist."
-      ]
+      ],
+      "notes": "Re-checked 2026-10-16 (X7) against origin/main 477529a: still open; the teploy-cli plan in AUDIT_OPEN (2026-09-24) has no landed change or live proof recorded."
     },
     {
       "id": "authority.command-regex-advisory",
@@ -164,13 +297,17 @@
       "status": "open",
       "owner": "teploy-ship",
       "evidence": [
-        { "class": "implementation", "path": "AUDIT_OPEN.md" }
+        {
+          "class": "implementation",
+          "path": "AUDIT_OPEN.md"
+        }
       ],
       "limitations": [
         "Equivalent operations through other commands, APIs, indirection or argument forms may not be recognised.",
         "Deferred as a design project: capability-scoped executor boundaries and a policy corpus of equivalent spellings are not built.",
         "This is not evidence of an escape from the separate sandbox implementation."
-      ]
+      ],
+      "notes": "Re-checked 2026-10-16 (X7) against origin/main 477529a: still open; teploy-ship-04 remains DEFERRED (design) in AUDIT_OPEN's resolution log."
     },
     {
       "id": "comparative.superiority",
@@ -179,9 +316,242 @@
       "status": "disclaimed",
       "owner": "teploy-ship",
       "evidence": [
-        { "class": "implementation", "path": "docs/SHIP_RELEASE_PROGRAMME_2026-09-21.md" }
+        {
+          "class": "implementation",
+          "path": "docs/SHIP_RELEASE_PROGRAMME_2026-09-21.md"
+        }
       ],
-      "limitations": ["A superiority claim needs matched direct comparative evidence on named dimensions; none exists."]
+      "limitations": [
+        "A superiority claim needs matched direct comparative evidence on named dimensions; none exists."
+      ],
+      "notes": "Re-checked 2026-10-16 (X7) against origin/main 477529a: still disclaimed; no comparative evidence exists."
+    },
+    {
+      "id": "perception.look-live",
+      "claim": "With SHIP_LOOK=1 and SHIP_LOOK_IMAGE_MODEL=zai/glm-5.3-flash, a production run recorded text accessibility look steps and one image look under the cap, and the facts it reported matched the live page.",
+      "scope": "One completed soak run (run-9d75d86d) against example.com on the production instance at the receipt's revision, native harness, zai/glm-5.3, postgres store, publication parked at approve-merge and approved by the operator.",
+      "status": "supported",
+      "verified": true,
+      "owner": "teploy-ship",
+      "evidence": [
+        {
+          "class": "implementation",
+          "path": "src/look.ts"
+        },
+        {
+          "class": "automated",
+          "path": "src/look.test.ts",
+          "test": "runLook: url then snapshot comes back as the observation, parameters riding the script",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        },
+        {
+          "class": "automated",
+          "path": "src/look.test.ts",
+          "test": "the open-tier refusal names the D3 rule: plan review, operator decision, no in-run workaround",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        },
+        {
+          "class": "system",
+          "path": "evals/receipts/2026-10-16-look-soak.txt",
+          "revision": "25d592a0ac0e58ec28bbf65f687e2ac8d71e9d60"
+        }
+      ],
+      "limitations": [
+        "n = 1 completed run on one public page; not a quality or reliability measure.",
+        "Vision routing is inferred from the next model turn describing a pixel-only fact; the gateway's own usage count for the flash model was not read.",
+        "The no-PR-attachment rule for look screenshots (D4) is unit-tested only; it was not visually confirmed on the forge PR.",
+        "Production now runs a later revision (03748ab) than the one soaked; the look code did not change between them, but that run was not repeated."
+      ]
+    },
+    {
+      "id": "resource.browser-class",
+      "claim": "A run whose recorded input carries look is admitted as a browser resource class: its memory limit is raised by the measured browser delta and admission accounts for it, while plain runs are unchanged.",
+      "scope": "src/resource-class.ts and the worker's admission seams. Applies only to runs enqueued with SHIP_LOOK set.",
+      "status": "provisional",
+      "owner": "teploy-ship",
+      "evidence": [
+        {
+          "class": "implementation",
+          "path": "src/resource-class.ts"
+        },
+        {
+          "class": "automated",
+          "path": "src/resource-class.test.ts",
+          "test": "a browser run's resolved limit carries the delta on every base, a plain run's is unchanged",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        },
+        {
+          "class": "automated",
+          "path": "src/resource-class.test.ts",
+          "test": "flag-off equivalence: a plain run's overrides carry no class and are shape-identical to before",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        },
+        {
+          "class": "automated",
+          "path": "src/resource-class.test.ts",
+          "test": "the raised limit reaches the daemon and the class itself never does",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        }
+      ],
+      "limitations": [
+        "Not verified live on a memory-squeezed host. The soak's look run was admitted with this code present, but the receipt does not record the raised limit or any hold.",
+        "The 512 MB delta is the top of one measured page's overhead, not a measured ceiling; the pids limit is unchanged and unmeasured for multi-page sites.",
+        "Placement enforcement is still shadow-only."
+      ]
+    },
+    {
+      "id": "delegate.coordinator",
+      "claim": "With SHIP_DELEGATE set at enqueue, a native run can delegate one level of child runs (cap 2 per task root) that inherit its gates, and each child's terminal result returns to the parent as an observation.",
+      "scope": "src/delegate.ts and the durable delegate action. Default off; scans and children never get delegation.",
+      "status": "provisional",
+      "owner": "teploy-ship",
+      "evidence": [
+        {
+          "class": "implementation",
+          "path": "src/delegate.ts"
+        },
+        {
+          "class": "automated",
+          "path": "src/delegate.test.ts",
+          "test": "spawn is idempotent per (parent, turn) and the cap is hard per task root",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        },
+        {
+          "class": "automated",
+          "path": "src/delegate.test.ts",
+          "test": "a delegate action parks on the child and merges its transfer back as the observation",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        },
+        {
+          "class": "automated",
+          "path": "src/delegate.test.ts",
+          "test": "enqueue materialises SHIP_DELEGATE and suppresses it for scans and children",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        }
+      ],
+      "limitations": [
+        "Merged but not enabled in production; no live delegation run is recorded.",
+        "Tests use scripted models and in-memory stores."
+      ]
+    },
+    {
+      "id": "thread.view",
+      "claim": "With SHIP_THREAD_VIEW=on, the run page and API show a follow-up chain as one read-only thread with each run's steering notes and ask parks; with it off, the payload is unchanged.",
+      "scope": "web/src/lib/thread-chain.server.ts and the thread API route. Read-only; no write surface.",
+      "status": "provisional",
+      "owner": "teploy-ship",
+      "evidence": [
+        {
+          "class": "implementation",
+          "path": "web/src/lib/thread-chain.server.ts"
+        },
+        {
+          "class": "automated",
+          "path": "web/src/lib/thread-view.test.ts",
+          "test": "flag off (the default): the API says it is disabled, and the run page payload is unchanged",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        },
+        {
+          "class": "automated",
+          "path": "web/src/lib/thread-chain.test.ts",
+          "test": "the thread contract: chain ordered by follow-up, per-run steer notes and ask parks",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        },
+        {
+          "class": "automated",
+          "path": "web/src/lib/thread-chain.test.ts",
+          "test": "negative control: a run whose parent chain leaves the family is not a member",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        }
+      ],
+      "limitations": [
+        "Merged but not enabled in production; its one-run flip (backlog A1) has not happened.",
+        "Descendants are found in a bounded recent-run window; a full window reports truncated."
+      ]
+    },
+    {
+      "id": "auth.admin-bootstrap",
+      "claim": "On a store with no local accounts, the web process creates the first admin from SHIP_BOOTSTRAP_ADMIN_USER and SHIP_BOOTSTRAP_ADMIN_PASSWORD exactly once, never overwrites an existing principal, and never logs the password.",
+      "scope": "src/bootstrap-admin.ts at web boot. File, nucleus and postgres runtimes.",
+      "status": "supported",
+      "verified": true,
+      "owner": "teploy-ship",
+      "evidence": [
+        {
+          "class": "implementation",
+          "path": "src/bootstrap-admin.ts"
+        },
+        {
+          "class": "automated",
+          "path": "src/bootstrap-admin.test.ts",
+          "test": "an install with existing principals is skipped entirely, even with the env set",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        },
+        {
+          "class": "automated",
+          "path": "src/bootstrap-admin.test.ts",
+          "test": "the password never appears in any log line, result, or refusal reason",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        },
+        {
+          "class": "automated",
+          "path": "src/bootstrap-admin.test.ts",
+          "test": "nucleus runtime: two web processes on one store — the KV setNX decides, the loser creates nothing",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        },
+        {
+          "class": "system",
+          "path": "AUDIT_OPEN.md",
+          "revision": "03748ab2bc870ef1ad5bc27a3e4a56b6f40f51d2"
+        }
+      ],
+      "limitations": [
+        "The live evidence is the production observation recorded in AUDIT_OPEN (2026-10-16 bootstrap entry: one log line naming the user, on the postgres store), not a standalone receipt file.",
+        "The cross-process race is seam-tested over a shared KV map, not raced live.",
+        "No CLI for account management exists."
+      ]
+    },
+    {
+      "id": "store.postgres",
+      "claim": "Ship runs its shared-store runtime on PostgreSQL: KV claims, run event streams and documents work on plain tables, with Nucleus left as the default dialect.",
+      "scope": "--store postgres / SHIP_STORE=postgres (src/nucleus-pgwire.ts postgres dialect). Production web and worker run on it.",
+      "status": "supported",
+      "verified": true,
+      "owner": "teploy-ship",
+      "evidence": [
+        {
+          "class": "implementation",
+          "path": "src/nucleus-pgwire.ts"
+        },
+        {
+          "class": "automated",
+          "path": "src/nucleus-pgwire.test.ts",
+          "test": "postgres setNX acquires once and refuses a live holder, TTL lapse re-opens the key",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        },
+        {
+          "class": "automated",
+          "path": "src/nucleus-pgwire.test.ts",
+          "test": "postgres streams round-trip fields in insertion order, per stream",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        },
+        {
+          "class": "automated",
+          "path": "src/nucleus-pgwire.test.ts",
+          "test": "the postgres dialect reaches the store from nucleusRuntime; nucleus stays the default",
+          "revision": "477529a602c02c38573316d50a8a6012bd3d938f"
+        },
+        {
+          "class": "system",
+          "path": "evals/receipts/2026-10-16-look-soak.txt",
+          "revision": "25d592a0ac0e58ec28bbf65f687e2ac8d71e9d60"
+        }
+      ],
+      "limitations": [
+        "The system evidence is a production soak whose subject was perception: a full run with a park and approval on the postgres store, not a store load or failure test.",
+        "scripts/ship-backup.sh does not support the postgres layout yet (AUDIT_OPEN 2026-10-16); backups need teploy accessory backup or a cold pgdata tar.",
+        "The pgvector code-index path is not exercised by the receipt."
+      ]
     }
   ]
 }
