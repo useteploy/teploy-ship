@@ -14,6 +14,69 @@ whose signed `webhookTimestamp` is more than 5 minutes off. Self-hoster guide:
 `docs/INTEGRATIONS_SLACK_LINEAR.md`. Still open: a real Slack app / Linear
 webhook pointed at production (B6's live half; needs the public HTTPS route
 for `/hooks/*`), and threaded Slack results (B4).
+||||||| 477529a
+## 2026-10-16 — D3 (S03) follow-up continuity: measured, context gap fixed
+
+Read end to end on `477529a` (web composer → `runs/[id].tsx` follow-up
+action → `enqueueRun` → durable `repo-setup` → prompt → publish). Line
+numbers are on `477529a`.
+
+| Question | Before | Evidence |
+| --- | --- | --- |
+| (a) prior transcript / faithful summary | **Gap.** Context was each ancestor's request plus `agentSummary ?? summary`, up to 20 runs, tail-sliced to 36k chars. A failed or cancelled run (no `run-completed`) contributed the literal "No final result recorded" — exactly the runs most likely to be followed up. No plan, no verification results, no pushed head or changed files, no critic notes, no scan findings. Prior agent claims were not distinguished from recorded facts. | `web/src/routes/runs/[id].tsx:160-162`; `web/src/lib/workspace.server.ts:38,44-51` |
+| (b) recorded head/branch, not main | **Correct for the branch; head is the PR's current tip.** With a PR the action resolves it live (`freshForge`) and enqueues `pr`; the worker fetches the PR head branch and checks it out (`setupRepoForPr`), so the follow-up builds on the earlier run's pushed commits, not main. The commit is whatever the PR head is at checkout, which differs from the earlier run's recorded push if anyone pushed since; nothing told the agent that. | `runs/[id].tsx:164-170`; `src/runtime.ts:1426-1427`; `src/durable.ts:1287-1295`; `src/git.ts:746,766-794` |
+| (c) same PR updated, no new PR | **Correct.** `input.pr` takes the review-follow-up publish branch: push to the PR branch, `repo-comment` on the same PR, amended Verification section, no `repo-pr`, no auto-merge. Closed/merged PRs are refused at launch and again at checkout (`requireOpenPr`). Forge review comments on the PR are read into the prompt (`pr-review-comments`). | `src/durable.ts:1454-1470,3127-3171`; `src/git.ts:746` |
+| (d) prior steering notes | **Gap.** Drained notes live as `turn-N-steer` step results; nothing carried them into the follow-up. | `web/src/lib/thread-chain.server.ts:115-137` (where they are read for the view only) |
+
+Fixed (branch `fix/followup-continuity`): `src/prior-run-context.ts` renders
+a bounded digest per ancestor from its own event log — request, outcome
+(incl. the run-failed error and the failing step), approved/edited/rejected
+plan, delivered steering notes, push sha + PR, changed files from the pushed
+diff, baseline/build/suite results (+ failing output tail), then the agent's
+final summary, critic notes and scan findings under explicit "claim" labels.
+Every quoted line is prefixed `> ` so a claim cannot forge a "Recorded"
+header. Whole block capped at 36k chars, oldest runs dropped first. The PR
+head the forge reports at launch is compared with the recorded push and a
+move is stated. It is materialised into `input.task` at enqueue (as before),
+so replay reads recorded text; no step was added (fingerprint unchanged).
+
+Tests: `src/prior-run-context.test.ts` (real durable path: an ordinary run
+opens PR #1, then a follow-up with the materialised input checks out the
+same branch at the recorded head, pushes on top of it, comments on PR #1,
+opens no PR, and its first prompt carries the block; the ordinary run is the
+negative control with no block; forgery negative control; size bound; head
+move) and `web/src/lib/workspace-actions.test.ts` (failed parent → error and
+steering note reach the child's input; "No final result recorded" gone).
+
+Still open (bounded, not fixed here): ask-park questions/answers are not
+carried (the thread view shows them); a run that pushed but never opened a
+PR offers no PR target, so its follow-up starts from the default branch and
+loses the pushed commits; the follow-up's head is the PR's current tip by
+design (now reported when it moved), not pinned to the recorded sha.
+
+## 2026-10-16 — X7 (S20) claim ledger in CI, seeded claims re-checked
+
+- `node scripts/claim-ledger.mjs --check` now runs in CI: a `claims` job in
+  `.github/workflows/ci.yml` and a step in `.forgejo/workflows/ci.yml`.
+- Every cited automated test was re-run green at `477529a` and its revision
+  updated. Changes of status: `harness.native-steering` provisional ->
+  supported (the route refusal it lacked now has tests,
+  `web/src/lib/steer-refusal.test.ts`); `harness.external-refuse-plan-review`
+  gained the admission-time test. `model.default-quality` and
+  `git.env-credential-mode` stay provisional (no pinned commit; S01 live items
+  open); the two open and two disclaimed claims are unchanged.
+- Added at the level reached: `perception.look-live`, `store.postgres` and
+  `auth.admin-bootstrap` are supported and verified on production evidence at
+  an exact revision (look soak receipt at `25d592a`; the bootstrap's recorded
+  production log line at `03748ab`). `resource.browser-class`,
+  `delegate.coordinator` and `thread.view` are provisional: tested, not
+  enabled or not proven live.
+- Still open: `--stale` compares the cited PATH at the evidence revision, so
+  system evidence whose receipt was written after the observed revision is
+  always reported stale (3 such entries now). CI runs `--check` only; the
+  stale report needs a per-evidence "recorded at" field before it can gate.
+  Tests are still cited by name only (the script checks the name exists, not
+  that it ran).
 
 ## 2026-10-16 — ship-backup.sh predates the postgres store
 
@@ -103,6 +166,10 @@ cold tar of the bind mount) with the same verify/rehearse discipline.
   (the receipt's 256-pid limit under multi-page sites is unmeasured).
 
 ## 2026-10-14 — Postgres store support (code; not yet released or deployed)
+
+**Update 2026-10-16:** released and live. Production web and worker run on
+the postgres store (look soak receipt at `25d592a`, then `03748ab`); see the
+`store.postgres` claim in docs/CLAIM_LEDGER.md. The heading is historical.
 
 - `--store postgres` (config, CLI flags, SHIP_STORE in the web app) runs the
   same shared-store runtime against real PostgreSQL: `NucleusPgwire` gains a
