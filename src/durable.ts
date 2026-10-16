@@ -2612,6 +2612,15 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
             messages.push({ role: "user", content: DELEGATE_UNAVAILABLE });
             continue;
           }
+          // Belt to enqueueRun's scan suppression, for the same reason the
+          // scan's edit refusal is in the loop and not only in the prompt: a
+          // scan holds no publish authority, and a child of a scan would be
+          // an ordinary change run against the same repository — authority
+          // the parent does not have. Enforcement here, never cooperation.
+          if (scanRun) {
+            messages.push({ role: "user", content: DELEGATE_UNAVAILABLE });
+            continue;
+          }
           if (input.delegateChild === true) {
             messages.push({ role: "user", content: DELEGATE_CHILD_REFUSED });
             continue;

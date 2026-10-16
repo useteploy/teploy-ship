@@ -26,6 +26,7 @@ import {
   delegatedChildRunId,
   delegationKey,
   parseDelegationRecord,
+  registerDelegateControl,
   transferFromEvents,
   transferObservation,
 } from "./delegate.js";
@@ -476,16 +477,24 @@ test("a delegation child is refused BY NAME, without recording a delegate step",
 });
 
 test("without a control the action degrades to a refusal, never a failed run", async () => {
-  const { model } = reactiveModel([
-    "```delegate\nAnything.\n```",
-    (obs) => (obs === DELEGATE_UNAVAILABLE ? "```bash\necho fallback\n```" : "```bash\necho wrong\n```"),
-    "```finish\nDone without delegating.\n```",
-  ]);
-  const provider = await localProvider();
-  const wf = durableAgent({ model, executor: provider }); // no delegate anywhere
-  const store = new MemoryEventStore();
-  const done = await executeRun({ workflow: wf, runId: "run-x", store, input: { task: "t", delegate: true } });
-  assert.equal(done.status, "completed");
+  // Hermetic: earlier tests in this file registered a runtime control, and
+  // this one must prove the NO-control degradation, not accidentally exercise
+  // a stale registration pointing at another store.
+  registerDelegateControl(undefined);
+  try {
+    const { model } = reactiveModel([
+      "```delegate\nAnything.\n```",
+      (obs) => (obs === DELEGATE_UNAVAILABLE ? "```bash\necho fallback\n```" : "```bash\necho wrong\n```"),
+      "```finish\nDone without delegating.\n```",
+    ]);
+    const provider = await localProvider();
+    const wf = durableAgent({ model, executor: provider }); // no delegate anywhere
+    const store = new MemoryEventStore();
+    const done = await executeRun({ workflow: wf, runId: "run-x", store, input: { task: "t", delegate: true } });
+    assert.equal(done.status, "completed");
+  } finally {
+    registerDelegateControl(undefined);
+  }
 });
 
 test("a refused spawn (the cap) reaches the model as an observation and the run continues", async () => {
@@ -510,4 +519,20 @@ test("a refused spawn (the cap) reaches the model as an observation and the run 
   const names = (await store.load("run-x")).filter((e) => e.type === "step-completed").map((e) => e.name);
   assert.ok(names.includes("turn-0-delegate-spawn"));
   assert.ok(!names.some((n) => n === "turn-0-delegate-wait"), "a refused spawn never waits");
+});
+
+test("the scan belt refuses delegation even on a hand-crafted scan input", async () => {
+  const { model } = reactiveModel([
+    "```delegate\nShould not happen.\n```",
+    (obs) => (obs === DELEGATE_UNAVAILABLE ? `Scanned nothing.\n\nFINDINGS_JSON\n[]` : `Wrong.\n\nFINDINGS_JSON\n[]`),
+  ]);
+  const provider = await localProvider();
+  const fake = fakeControl();
+  const wf = durableAgent({ model, executor: provider, delegate: fake.control });
+  const store = new MemoryEventStore();
+  const done = await executeRun({ workflow: wf, runId: "run-scan", store, input: { task: "t", delegate: true, mode: "scan" } });
+  assert.equal(done.status, "completed");
+  assert.equal(fake.spawnCount(), 0);
+  const names = (await store.load("run-scan")).filter((e) => e.type === "step-completed").map((e) => e.name);
+  assert.ok(!names.some((n) => n?.includes("delegate")), "a scan delegates nothing");
 });
