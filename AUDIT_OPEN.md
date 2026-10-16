@@ -1,5 +1,15 @@
 # Open audit items
 
+## 2026-10-16 — ship-backup.sh predates the postgres store
+
+`scripts/ship-backup.sh` tars `accessories/nucleus/nucleus-data`, which no
+longer exists on a postgres-store install (it dies with "engine data dir
+not found"). Until fixed: use `teploy accessory backup postgres --bucket …`
+(S3 path) or a cold pgdata tar of the bind dir — the soak's pattern
+(`/root/ship-pgdata-pre-look-soak-2026-10-16.tgz`, sha256 sidecar, gzip -t).
+Fix = teach the script the postgres layout (pg_dump of the accessory or
+cold tar of the bind mount) with the same verify/rehearse discipline.
+
 ## 2026-10-16 — initial admin bootstrap (port of observe's EnsureAdmin)
 
 - `bootstrapAdmin()` (src/bootstrap-admin.ts) provisions the FIRST local
@@ -38,6 +48,10 @@
   state file. NOT verified live: the same boot against a real
   nucleus/postgres store — the KV setNX claim path there is seam-tested
   only (two-runtime race over one shared KV map).
+  **Update 2026-10-16:** LIVE-PROVEN on production — the bootstrap ran at
+  first correctly-built boot on the postgres store (atomic claim → create →
+  once-ever; log line `bootstrap admin: created initial admin user "Tyler"`).
+  The gap is closed; only the no-CLI note below remains.
 - Still open: no CLI for account management (create/reset password from
   the console) — dashboard-only for now, honestly noted in DEPLOY.md.
 
