@@ -471,9 +471,16 @@ export const WORKFLOW_STEPS: readonly WorkflowStep[] = [
   { key: "wait:PLAN_EVENT", admits: (i) => i.plan === true },
   { key: "step:*plan-restore", admits: (i) => i.plan === true },
   { key: "step:*turn-*-steer", admits: (i) => i.steer === true },
+  // Two-way steering (D2): the turn-boundary claim of held operator messages
+  // (interrupts every turn, queued messages at a reply checkpoint). Admitted
+  // by input.steerReply alone (SHIP_STEER_REPLY=on at enqueue) — no earlier
+  // log carries the field, so no in-flight fingerprint moves.
+  { key: "step:*turn-*-held", admits: (i) => i.steerReply === true },
   // No input gate: condensing fires on transcript size.
   { key: "step:*turn-*-condense", admits: always },
   { key: "step:*turn-*-think", admits: always },
+  // ...and the finish checkpoint's claim (D2), same gate.
+  { key: "step:*turn-*-finish-held", admits: (i) => i.steerReply === true },
   { key: "step:*turn-*-finish-tree", admits: (i) => i.requireEdit === true },
   // Iterate-until-green's exhaustion record: only a run given a bound can hit it.
   { key: "step:*turn-*-fix-exhausted", admits: (i) => i.fixRetries !== undefined },

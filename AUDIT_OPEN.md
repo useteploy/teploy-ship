@@ -931,3 +931,26 @@ locks; run `node scripts/refresh-framework-locks.mjs` after the core/CLI/create
 release becomes available, then install/test/build before integrating this branch.
 No production rollout or browser acceptance is claimed. See
 [FRAMEWORK_UPGRADE.md](docs/FRAMEWORK_UPGRADE.md) for validation and rollback.
+
+## 2026-10-16 — D2 two-way steering (`SHIP_STEER_REPLY`, default off)
+
+Built behind the flag (default off, pending review and a soak): agent
+```reply into the thread, steer/queue modes, operator interrupt at safe
+points, thread-view rendering. Design and replay semantics in
+[STEERING_DESIGN.md](docs/STEERING_DESIGN.md).
+
+Open, deliberately not in the slice:
+
+- **A running bash command cannot be interrupted.** The executor contract
+  (`@neutron-build/agents` `ExecOptions`) has no abort, and what the sandbox
+  daemon does when an exec stream is dropped is unverified. So an interrupt
+  that lands during bash lets the command finish and records effect `done`.
+  The fix belongs upstream (an exec abort plus a daemon-side kill of the
+  process group), followed by a Ship change that passes the signal through
+  `runAction`'s bash branch. Only python kernel cells are cancelled mid-flight
+  today.
+- The kernel cancel issues a second exec while the first (the blocked waiter)
+  is still running. Proven on `LocalExecutor`, not yet against the live
+  sandbox daemon.
+- No live soak yet. The flag earns its own one-run flip (web + worker, both
+  enqueue) on the 2026-10-16 pattern.

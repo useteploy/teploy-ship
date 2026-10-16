@@ -62,7 +62,7 @@ function actionOf(text: string): string {
 
 /** Step names that are per-turn bookkeeping rather than something to read. */
 function turnMatch(name: string): { index: number; part: string } | null {
-  const m = /^turn-(\d+)-(think|exec|steer|search)$/.exec(name);
+  const m = /^turn-(\d+)-(think|exec|steer|search|held|finish-held)$/.exec(name);
   if (m === null) return null;
   return { index: Number(m[1]), part: m[2] ?? "" };
 }

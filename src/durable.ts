@@ -13,7 +13,8 @@ import { isSuspension, workflow } from "@neutron-build/workflow";
 import type { WorkflowContext, WorkflowDefinition } from "@neutron-build/workflow";
 
 import { DEFAULT_MAX_OUTPUT_TOKENS, executeAction, workspaceFingerprint } from "./agent.js";
-import { FINISH_NUDGE_CLEAN_TREE, FINISH_NUDGE_FAILED, FINISH_NUDGE_NO_EVIDENCE, FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, describeAction, parseAction, transcriptTurn } from "./actions.js";
+import { FINISH_NUDGE_CLEAN_TREE, FINISH_NUDGE_FAILED, FINISH_NUDGE_NO_EVIDENCE, FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, describeAction, parseAction, parseReply, transcriptTurn } from "./actions.js";
+import type { ActionDialect } from "./actions.js";
 import { ASK_UNAVAILABLE, askAnswerMessage, askEvent } from "./ask.js";
 import type { AskDecisionPayload } from "./ask.js";
 import { clipDetail, liveSink } from "./live.js";
@@ -81,6 +82,16 @@ import { loadRepoContext, runNote } from "./repo-memory.js";
 import type { ProjectStore } from "./projects.js";
 import type { RepoMemoryStore } from "./repo-memory.js";
 import type { SteerStore } from "./steer.js";
+import {
+  FINISH_HELD_FOR_OPERATOR,
+  REPLY_POSTED,
+  boundaryInterruptMessage,
+  fenceOperatorLines,
+  interruptObservation,
+  queuedMessage,
+  runInterruptible,
+} from "./steer-reply.js";
+import type { HeldItem, InterruptibleResult } from "./steer-reply.js";
 import { formatSearchHits } from "./code-index.js";
 import { frameUntrusted, screenUntrusted } from "./guard.js";
 import { LOOK_IMAGE_NO_MODEL, LOOK_IMAGE_NO_STORE, LOOK_OPEN_PLAN, LOOK_SEALED, lookImageCap, runLook, runLookImage } from "./look.js";
@@ -178,6 +189,17 @@ export interface DurableAgentInput {
    * replay without a step-sequence mismatch on any executor.
    */
   steer?: boolean;
+  /**
+   * Two-way steering (D2, S03/S13): the agent may post a ```reply into the
+   * operator's thread (read off the recorded think text, no step of its own),
+   * operator messages may be QUEUED for the agent's next checkpoint, and an
+   * operator INTERRUPT stops the in-flight action at its next safe point.
+   * Materialised at enqueue from SHIP_STEER_REPLY=on, default off: it adds
+   * the recorded `turn-N-held` / `turn-N-finish-held` steps, so the upgrade
+   * fence admits those on this field alone, and flag-off is byte-identical
+   * (prompt, parse, steps). docs/STEERING_DESIGN.md.
+   */
+  steerReply?: boolean;
   /**
    * The ```ask action: the agent may stop with a question for the operator
    * and park on the answer (`askEvent(turn)`), the way an approval-required
@@ -948,7 +970,12 @@ export interface DurableAgentConfig {
    * store + steer-enabled input just drains empty — the step sequence
    * stays identical across executors regardless of their wiring.
    */
-  steer?: Pick<SteerStore, "drain">;
+  steer?: Pick<SteerStore, "drain"> & Partial<Pick<SteerStore, "claimHeld">>;
+  /**
+   * How often the in-flight interrupt poller reads the steer store while an
+   * action runs (input.steerReply only). Default 2000 ms; tests shorten it.
+   */
+  interruptPollMs?: number;
   /**
    * The delegation control behind ```delegate (S20/S22, delegate.ts): spawns
    * children and reads their terminal state. The EXPLICIT seam — tests pass
@@ -1879,6 +1906,32 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
       // DELEGATE_CHILD_REFUSED) instead of being told "no code block found".
       // Pre-feature and flag-off runs keep parsing exactly as before.
       const delegate = input.delegate === true || input.delegateChild === true;
+      // D2 two-way steering (input.steerReply): ```reply parses, operator
+      // messages may be queued for a checkpoint, interrupts land at safe
+      // points. Absent from the input, every byte below is pre-feature:
+      // the dialect carries no `reply` key, the prompt has no reply block,
+      // no held step runs and observations are not re-framed.
+      const steerReply = input.steerReply === true;
+      const dialect: ActionDialect = steerReply ? { look, delegate, reply: true } : { look, delegate };
+      /** Untrusted observation text, re-framed only on steerReply runs (fenceOperatorLines). */
+      const untrusted = (text: string): string => (steerReply ? fenceOperatorLines(text) : text);
+      /** The previous turn posted a ```reply — this turn's top is a queue checkpoint. */
+      let repliedLastTurn = false;
+      /** Claim held operator messages of both kinds; called only inside a recorded step. */
+      const claimHeld = async (key: string, includeQueued: boolean): Promise<HeldItem[]> => {
+        const steerStore = config.steer;
+        if (steerStore?.claimHeld === undefined) return [];
+        const runId = ws.ctx.runId;
+        const queued = includeQueued ? await steerStore.claimHeld(runId, "queue", `q:${key}`).catch(() => [] as string[]) : [];
+        const interrupts = await steerStore.claimHeld(runId, "interrupt", `i:${key}`).catch(() => [] as string[]);
+        return [...queued.map((text): HeldItem => ({ mode: "queue", text })), ...interrupts.map((text): HeldItem => ({ mode: "interrupt", text }))];
+      };
+      const heldMessages = (items: HeldItem[]): Message[] => {
+        const out: Message[] = items.filter((h) => h.mode === "queue").map((h): Message => ({ role: "user", content: queuedMessage(h.text) }));
+        const interrupts = items.filter((h) => h.mode === "interrupt").map((h) => h.text);
+        if (interrupts.length > 0) out.push({ role: "user", content: boundaryInterruptMessage(interrupts) });
+        return out;
+      };
       // ...and image looks only on runs whose input admits THOSE: the model
       // id is part of the recorded contract (which model saw the pixels),
       // so the adapter is resolved from the input, never the live env.
@@ -1891,7 +1944,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
       let messages: Message[] = [
         {
           role: "system",
-          content: systemPrompt({ workdir: ws.workdir, task: task.prompt, search: searchable, browser: input.verification?.preview !== undefined, ask: input.ask === true, look, lookImage: lookImage !== undefined, delegate: input.delegate === true }),
+          content: systemPrompt({ workdir: ws.workdir, task: task.prompt, search: searchable, browser: input.verification?.preview !== undefined, ask: input.ask === true, look, lookImage: lookImage !== undefined, delegate: input.delegate === true, ...(steerReply ? { reply: true } : {}) }),
         },
       ];
       let anySuccessfulAction = false;
@@ -2076,6 +2129,19 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
           }
         }
 
+        // D2 (input.steerReply): the turn boundary is a safe point for an
+        // interrupt that arrived while nothing was running, and — when the
+        // previous turn posted a ```reply — a CHECKPOINT where queued operator
+        // messages are released. One recorded step per turn; whether it
+        // claims queued messages is a function of the replayed think text
+        // (repliedLastTurn), so a replay asks the same question.
+        if (steerReply) {
+          const checkpoint = repliedLastTurn;
+          repliedLastTurn = false;
+          const held = await ws.ctx.step(`${p}turn-${turn}-held`, async () => claimHeld(`${turn}`, checkpoint));
+          messages.push(...heldMessages(held));
+        }
+
         // The write-up deadline. Ship's own steer, not the operator's, and
         // deliberately NOT routed through the steer store: it is a property of
         // the mode, must not depend on a store being configured, and must not
@@ -2146,9 +2212,35 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
         // Trimmed at the first action block (actions.ts transcriptTurn): what
         // the model wrote after it is at best ignored and at worst its own
         // invented observation, which the next turn then reasons about.
-        messages.push({ role: "assistant", content: thought.trim() === "" ? "(no response)" : transcriptTurn(thought, { look, delegate }) });
+        messages.push({ role: "assistant", content: thought.trim() === "" ? "(no response)" : transcriptTurn(thought, dialect) });
 
-        const action = parseAction(thought, { look, delegate });
+        const action = parseAction(thought, dialect);
+        // D2: a ```reply before the action is the agent's message into the
+        // operator's thread. It needs no step — the think step already holds
+        // its bytes — and it does not end the turn: the action after it runs
+        // as usual. A turn that is ONLY a reply is acknowledged and the run
+        // goes on (the turn is spent, as any action spends one).
+        if (steerReply && parseReply(thought, dialect) !== null) {
+          repliedLastTurn = true;
+          if (action.kind === "none") {
+            messages.push({ role: "user", content: REPLY_POSTED });
+            continue;
+          }
+        }
+        // D2 queue checkpoint #2: the agent tried to finish. Operator messages
+        // queued (or an interrupt raised) while it worked are released here
+        // and HOLD the finish — a queued "when you are done, also ..." must not
+        // be dropped because the run ended first. Never on the last turn,
+        // where a finish is honoured unconditionally, and it never consumes
+        // one of the finish gates' own holds.
+        if (steerReply && action.kind === "finish" && turn + 1 < maxSteps) {
+          const held = await ws.ctx.step(`${p}turn-${turn}-finish-held`, async () => claimHeld(`${turn}:finish`, true));
+          if (held.length > 0) {
+            messages.push(...heldMessages(held));
+            messages.push({ role: "user", content: FINISH_HELD_FOR_OPERATOR });
+            continue;
+          }
+        }
         // A SCAN'S FINISH GATE, and it replaces the fix-run chain below rather
         // than adding to it. Every hold in that chain asks a question about an
         // EDIT — did a command succeed, is the tree still clean, does the suite
@@ -2460,7 +2552,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
               return `Code search failed (${error instanceof Error ? error.message : String(error)}). Use grep/rg via \`\`\`bash instead.`;
             }
           });
-          messages.push({ role: "user", content: truncate(observation, maxObs) });
+          messages.push({ role: "user", content: truncate(untrusted(observation), maxObs) });
           continue;
         }
 
@@ -2534,7 +2626,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
             imageLooks += 1;
             // Text first, exactly like a text look: framed after truncation
             // so the delimiters survive any snapshot size.
-            const text = frameUntrusted(truncate(formatObservation(result), maxObs));
+            const text = frameUntrusted(truncate(untrusted(formatObservation(result)), maxObs));
             const shot = result.image;
             if (shot === undefined) {
               // The driver's text observation succeeded but no screenshot
@@ -2578,7 +2670,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
           // declares as data-not-instructions, with embedded delimiters
           // defanged. Framed AFTER truncation so the pair can never be cut
           // apart by an oversized snapshot.
-          messages.push({ role: "user", content: frameUntrusted(truncate(formatObservation(result), maxObs)) });
+          messages.push({ role: "user", content: frameUntrusted(truncate(untrusted(formatObservation(result)), maxObs)) });
           continue;
         }
 
@@ -2680,7 +2772,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
             Object.assign(ws, liveWiring(config, ws.ctx.runId, ws.handle, p));
             if (superseded !== ws.handle) await dispose(config, superseded);
           }
-          messages.push({ role: "user", content: truncate(transferObservation(transfer), maxObs) });
+          messages.push({ role: "user", content: truncate(untrusted(transferObservation(transfer)), maxObs) });
           continue;
         }
 
@@ -2748,14 +2840,37 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
           }
         }
 
-        const result = await ws.ctx.step(`${p}turn-${turn}-exec`, () => {
+        const steerStore = steerReply ? config.steer : undefined;
+        const result: InterruptibleResult = await ws.ctx.step(`${p}turn-${turn}-exec`, () => {
           ws.live?.({ phase: "running", turn, detail: clipDetail(describeAction(action)) });
+          // D2: the interrupt protocol rides INSIDE the exec step (no new
+          // step): its result, interrupt record included, is what replays.
+          if (steerStore?.claimHeld !== undefined) {
+            return runInterruptible({
+              claim: (runId, kind, key) => steerStore.claimHeld!(runId, kind, key),
+              runId: ws.ctx.runId,
+              turn: `${turn}`,
+              action,
+              pollMs: config.interruptPollMs ?? 2000,
+              run: (signal) => executeAction(ws.executor, action, config.actionTimeoutMs, `t${turn}`, true, signal),
+            });
+          }
           return executeAction(ws.executor, action, config.actionTimeoutMs, `t${turn}`);
         });
+        if (result.interrupt?.at === "before") {
+          // Never ran: no verdict, no evidence, nothing for the recovery
+          // tracker — the turn is spent and the agent is told why.
+          messages.push({ role: "user", content: interruptObservation(result.interrupt, action.kind) });
+          continue;
+        }
         if (result.exitCode === 0) anySuccessfulAction = true;
         execsSinceNudge += 1;
         lastExecFailed = result.exitCode !== 0;
-        messages.push({ role: "user", content: truncate(formatObservation(result), maxObs) });
+        const observed = truncate(untrusted(formatObservation(result)), maxObs);
+        messages.push({
+          role: "user",
+          content: result.interrupt !== undefined ? `${observed}\n\n${interruptObservation(result.interrupt, action.kind)}` : observed,
+        });
 
         // Recovery: break loops, thrashing and busywork before they burn the
         // turn budget. The progress fingerprint is what turns "the command

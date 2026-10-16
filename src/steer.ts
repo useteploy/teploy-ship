@@ -22,8 +22,27 @@ export interface SteerNote {
   createdAt: string;
 }
 
+/**
+ * How an operator message is applied (D2, SHIP_STEER_REPLY). `steer` is the
+ * original behaviour — drained at the next turn boundary. `queue` is HELD
+ * until the agent's next checkpoint (the turn after it posts a ```reply, or
+ * its next ```finish). `interrupt` asks the loop to stop the in-flight action
+ * at its next safe point. Only `steer` lives in the original store (the
+ * ship_steer table / `<run>.jsonl`); the other two live in their own
+ * (`ship_steer_held` / `<run>.held.jsonl`), so a run without the flag reads
+ * exactly the rows it always read. See docs/STEERING_DESIGN.md.
+ */
+export type SteerMode = "steer" | "queue" | "interrupt";
+export type HeldKind = Exclude<SteerMode, "steer">;
+
+/** A held (queue / interrupt) message still waiting for its checkpoint. */
+export interface HeldNote extends SteerNote {
+  mode: HeldKind;
+}
+
 export interface SteerStore {
-  add(runId: string, text: string): Promise<void>;
+  /** Mode defaults to `steer` — every pre-D2 caller keeps its behaviour. */
+  add(runId: string, text: string, mode?: SteerMode): Promise<void>;
   /**
    * Consume the run's pending notes for a given TURN, oldest first.
    *
@@ -38,6 +57,15 @@ export interface SteerStore {
   drain(runId: string, turn: number): Promise<string[]>;
   /** Still-pending (undrained) notes — the dashboard shows what hasn't landed yet. */
   pending(runId: string): Promise<SteerNote[]>;
+  /**
+   * Claim every pending held message of one kind under `key`, oldest first.
+   * Same idempotency contract as drain: called inside a recorded step, so a
+   * repeated call with the same key returns exactly what the first claimed,
+   * and anything newly arrived stays pending for a later key.
+   */
+  claimHeld(runId: string, kind: HeldKind, key: string): Promise<string[]>;
+  /** Held messages not yet claimed by any checkpoint. */
+  pendingHeld(runId: string): Promise<HeldNote[]>;
 }
 
 /** File-backed steering: one JSONL per run + a consumed-count cursor file. */
@@ -66,11 +94,57 @@ export class FileSteerStore implements SteerStore {
     return notes;
   }
 
-  async add(runId: string, text: string): Promise<void> {
+  async add(runId: string, text: string, mode: SteerMode = "steer"): Promise<void> {
     await mkdir(this.#dir, { recursive: true });
-    const note: SteerNote = { runId, text, createdAt: new Date().toISOString() };
     const { appendFile } = await import("node:fs/promises");
+    if (mode !== "steer") {
+      const held: HeldNote = { runId, text, createdAt: new Date().toISOString(), mode };
+      await appendFile(this.#heldFile(runId), JSON.stringify(held) + "\n");
+      return;
+    }
+    const note: SteerNote = { runId, text, createdAt: new Date().toISOString() };
     await appendFile(this.#file(runId), JSON.stringify(note) + "\n");
+  }
+
+  #heldFile(runId: string): string {
+    return this.#file(runId).replace(/\.jsonl$/, ".held.jsonl");
+  }
+
+  async #held(runId: string): Promise<HeldNote[]> {
+    const raw = await readFile(this.#heldFile(runId), "utf8").catch(() => "");
+    return this.#parse(raw, runId).filter((n): n is HeldNote => {
+      const mode = (n as Partial<HeldNote>).mode;
+      return mode === "queue" || mode === "interrupt";
+    });
+  }
+
+  /** Claim key -> the held-line indices it consumed. */
+  async #heldClaims(runId: string): Promise<Record<string, number[]>> {
+    return readJsonFile<Record<string, number[]>>(`${this.#heldFile(runId)}.claims`, {});
+  }
+
+  async claimHeld(runId: string, kind: HeldKind, key: string): Promise<string[]> {
+    const notes = await this.#held(runId);
+    let claimed: number[] = [];
+    await updateJsonFile<Record<string, number[]>>(`${this.#heldFile(runId)}.claims`, {}, (all) => {
+      const existing = all[key];
+      if (existing !== undefined) {
+        claimed = existing;
+        return all;
+      }
+      const taken = new Set(Object.values(all).flat());
+      claimed = notes.flatMap((n, i) => (n.mode === kind && !taken.has(i) ? [i] : []));
+      // An empty claim is not written: the key must stay open for a later
+      // call (the in-flight interrupt poller reuses one key per action).
+      return claimed.length === 0 ? all : { ...all, [key]: claimed };
+    });
+    return claimed.map((i) => notes[i]!.text);
+  }
+
+  async pendingHeld(runId: string): Promise<HeldNote[]> {
+    const notes = await this.#held(runId);
+    const taken = new Set(Object.values(await this.#heldClaims(runId)).flat());
+    return notes.filter((_, i) => !taken.has(i));
   }
 
   /**
@@ -111,6 +185,7 @@ export class FileSteerStore implements SteerStore {
 export class NucleusSteerStore implements SteerStore {
   #db: NucleusPgwire;
   #ready: Promise<void> | null = null;
+  #heldReady: Promise<void> | null = null;
 
   constructor(db: NucleusPgwire) {
     this.#db = db;
@@ -138,7 +213,36 @@ export class NucleusSteerStore implements SteerStore {
     return this.#ready;
   }
 
-  async add(runId: string, text: string): Promise<void> {
+  #ensureHeld(): Promise<void> {
+    this.#heldReady ??= this.#db
+      .query(
+        `CREATE TABLE IF NOT EXISTS ship_steer_held (
+          note_id TEXT,
+          run_id TEXT,
+          kind TEXT,
+          text TEXT,
+          created_at TEXT,
+          consumed TEXT,
+          consumed_key TEXT
+        )`,
+      )
+      .then(() => undefined)
+      .catch((error: unknown) => {
+        this.#heldReady = null;
+        throw error;
+      });
+    return this.#heldReady;
+  }
+
+  async add(runId: string, text: string, mode: SteerMode = "steer"): Promise<void> {
+    if (mode !== "steer") {
+      await this.#ensureHeld();
+      await this.#db.query(
+        "INSERT INTO ship_steer_held (note_id, run_id, kind, text, created_at, consumed) VALUES ($1, $2, $3, $4, $5, '0')",
+        [`held-${randomUUID().slice(0, 8)}`, runId, mode, text, new Date().toISOString()],
+      );
+      return;
+    }
     await this.#ensure();
     await this.#db.query(
       "INSERT INTO ship_steer (note_id, run_id, text, created_at, consumed) VALUES ($1, $2, $3, $4, '0')",
@@ -185,5 +289,30 @@ export class NucleusSteerStore implements SteerStore {
 
   async pending(runId: string): Promise<SteerNote[]> {
     return (await this.#unconsumed(runId)).map((n) => ({ runId, text: n.text, createdAt: n.createdAt }));
+  }
+
+  /** Stamp-then-read under the claim key — drain's idempotency shape. */
+  async claimHeld(runId: string, kind: HeldKind, key: string): Promise<string[]> {
+    await this.#ensureHeld();
+    await this.#db.query(
+      "UPDATE ship_steer_held SET consumed = '1', consumed_key = $1 WHERE run_id = $2 AND kind = $3 AND consumed = '0'",
+      [key, runId, kind],
+    );
+    const rows = await this.#db.query("SELECT * FROM ship_steer_held WHERE run_id = $1 AND consumed_key = $2 AND kind = $3", [
+      runId,
+      key,
+      kind,
+    ]);
+    return this.#sort(rows).map((n) => n.text);
+  }
+
+  async pendingHeld(runId: string): Promise<HeldNote[]> {
+    await this.#ensureHeld();
+    const rows = await this.#db.query("SELECT * FROM ship_steer_held WHERE run_id = $1 AND consumed = '0'", [runId]);
+    const kinds = new Map(rows.map((row) => [String(row.note_id), String(row.kind)]));
+    return this.#sort(rows).flatMap((n): HeldNote[] => {
+      const mode = kinds.get(n.id);
+      return mode === "queue" || mode === "interrupt" ? [{ runId, text: n.text, createdAt: n.createdAt, mode }] : [];
+    });
   }
 }

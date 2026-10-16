@@ -19,7 +19,7 @@ import { PLAN_EVENT, MERGE_EVENT } from "teploy-ship/plan";
 // the park's event name without reaching runtime.ts.
 import { isAskEvent } from "teploy-ship/ask";
 import { UPGRADE_HOLD_EVENT } from "teploy-ship/fence";
-import { harnessSupports, STEER_UNSUPPORTED_MESSAGE } from "teploy-ship/harness-capabilities";
+import { harnessSupports, STEER_REPLY_UNSUPPORTED_MESSAGE, STEER_UNSUPPORTED_MESSAGE } from "teploy-ship/harness-capabilities";
 
 
 import { shipRuntime } from "../../lib/store.server.js";
@@ -30,6 +30,7 @@ import { resolveNavUrl, clickPoint } from "../../lib/browser-tab.js";
 // Type-only: the thread view's shape ships in the loader payload's flag, and
 // the projection itself lives server-side (thread-chain.server.ts).
 import type { ThreadRunView, ThreadView } from "../../lib/thread-chain.server.js";
+import { SteerComposer, ThreadHistory, utcStamp } from "../../views/steer-thread.js";
 
 export const config = { mode: "app" };
 
@@ -185,7 +186,7 @@ export async function action({
   // Authority (governance.ts) on top of the layout's role gate: steer/cancel
   // and approve/deny are separate grants an admin can narrow or widen per
   // role or per named user.
-  if ((intent === "cancel" || intent === "steer" || intent === "answer") && !(await may("steer", me))) return redirectTo(`/runs/${runId}?denied=steer`);
+  if ((intent === "cancel" || intent === "steer" || intent === "interrupt" || intent === "answer") && !(await may("steer", me))) return redirectTo(`/runs/${runId}?denied=steer`);
   if ((intent === "approve" || intent === "deny") && !(await may("approve", me))) return redirectTo(`/runs/${runId}?denied=approve`);
   if (active && intent === "cancel") {
     // Only claim what actually happened. The old code swallowed a failed
@@ -204,13 +205,22 @@ export async function action({
     return redirectTo(`/runs/${runId}`);
   }
   // Mid-run steering: queue a note; the run's next turn drains it.
-  if (active && intent === "steer") {
+  // D2 (SHIP_STEER_REPLY): an additive `mode` field picks steer (the
+  // default, and the only behaviour an old client can ask for) or queue; the
+  // `interrupt` intent asks the loop to stop the in-flight action. Both new
+  // shapes are refused on a run whose recorded input never admitted them —
+  // no executor of that run would ever claim them.
+  if (active && (intent === "steer" || intent === "interrupt")) {
     const text = String(form.get("steer") ?? "").trim();
     if (text.length > 12000) return redirectTo(`/runs/${runId}?messageError=Message+must+be+under+12000+characters`);
     // Refuse rather than store a note no executor will ever read.
-    const steerInput = ((await runtime.store.load(runId)).find(e => e.type === "run-started")?.data as { input?: { harness?: { id?: unknown }; harnessAttempts?: { id?: unknown }[] } } | undefined)?.input;
+    const steerInput = ((await runtime.store.load(runId)).find(e => e.type === "run-started")?.data as { input?: { steerReply?: boolean; harness?: { id?: unknown }; harnessAttempts?: { id?: unknown }[] } } | undefined)?.input;
     if (!harnessSupports(steerInput, "steer")) return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(STEER_UNSUPPORTED_MESSAGE)}`);
-    if (text !== "") await runtime.steer.add(runId, text);
+    const mode = intent === "interrupt" ? "interrupt" : String(form.get("mode") ?? "steer");
+    if (mode !== "steer" && mode !== "queue" && mode !== "interrupt") return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent("Unknown message mode.")}`);
+    if (mode !== "steer" && steerInput?.steerReply !== true) return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(STEER_REPLY_UNSUPPORTED_MESSAGE)}`);
+    if (mode === "interrupt") await runtime.steer.add(runId, text, "interrupt");
+    else if (text !== "") await runtime.steer.add(runId, text, mode);
     return redirectTo(`/runs/${runId}?sent=1`);
   }
   // The agent's question (an ```ask park). Answering is steering, not
@@ -808,7 +818,7 @@ function RunComposer({data}: {data: RunData}) {
  const reviewing = data.meta?.status === "waiting" && data.meta.eventName === MERGE_EVENT;
  if (!data.meta) return null;
  return <>
-          {active && !reviewing && data.steerable && data.canSteer && (
+          {active && !reviewing && data.steerable && data.canSteer && data.steerReply !== true && (
             <form class="message-composer" method="post" style="margin:12px 0">
               <label class="field">Message the agent<textarea name="steer" rows={3} maxLength={12000} required placeholder="Add context, ask a question, or redirect the work." /></label>
               <button type="submit" name="intent" value="steer">
@@ -816,9 +826,15 @@ function RunComposer({data}: {data: RunData}) {
               </button>
             </form>
           )}
+          {active && !reviewing && data.steerable && data.canSteer && data.steerReply === true && <SteerComposer />}
           {data.steerPending.length > 0 && (
             <p class="meta" style="margin:4px 0 0">
               Messages queued for the next turn: {data.steerPending.join(" · ")}
+            </p>
+          )}
+          {data.heldPending !== undefined && data.heldPending.length > 0 && (
+            <p class="meta" style="margin:4px 0 0">
+              Waiting for a checkpoint: {data.heldPending.map((h) => (h.mode === "interrupt" ? `interrupt${h.text !== "" ? ` (${h.text})` : ""}` : h.text)).join(" · ")}
             </p>
           )}
           {(!active || reviewing && data.canSteer) && data.meta.status !== 'cancelling' && data.canLaunch && <form method="post" class="message-composer"><input type="hidden" name="requestId" value={followRequestId}/><input type="hidden" name="eventName" value={followEvent}/>{reviewing && <p class="notice">Request changes on this PR before merging. A change request cancels this run’s pending merge decision and starts a linked run; the PR stays open. Read-only investigations leave the merge decision pending.</p>}<label class="field">Continue this work<textarea name="message" rows={3} required maxLength={12000} placeholder="What should Ship change or investigate next?" /></label>{data.hasPr && <label class="field">Start from<select name="target"><option value="pr">Existing pull request (checked before launch)</option><option value="base">Current default branch</option></select></label>}<label class="field">What should happen next?<select name="journey" value={followJourney} onChange={e => setFollowJourney(e.currentTarget.value)}>{JOURNEYS.map(j => <option value={j.id}>{j.label}</option>)}</select></label>{followJourney === "change" && data.requirePlanReview && <p class="notice">This project requires plan approval before code changes. The native harness is required; merge and deployment permissions remain separate.</p>}{followJourney === "change" && !data.requirePlanReview && (data.planSupported ? <label class="check-field"><input type="checkbox" name="plan" checked={followPlan} onInput={e => setFollowPlan(e.currentTarget.checked)} />Review the plan before code changes</label> : <p class="meta">This project uses an external harness, which starts work immediately. For plan review, select the native harness in Project settings before launching.</p>)}<button type="submit" name="intent" value="follow-up">Start follow-up</button><p class="meta">Keeps the conversation history and starts a fresh sandbox. The existing pull request is checked with the forge before launch. Current project approvals and budgets apply.</p></form>}
@@ -1381,10 +1397,6 @@ function TaskStatePanel({ data }: { data: RunData }) {
   </section>;
 }
 
-/** "2026-10-15 09:41 UTC" — the dashboard's established timestamp rendering. */
-function utcStamp(at: string): string {
-  return `${at.replace("T", " ").slice(0, 16)} UTC`;
-}
 
 /** A chain entry's hover text: what ran, when, on what — bounded. */
 function threadTitle(run: ThreadRunView): string {
@@ -1427,55 +1439,5 @@ function ThreadStrip({ thread, runId }: { thread: ThreadView; runId: string }) {
         </span>
       )}
     </nav>
-  );
-}
-
-/**
- * The current run's steer/ask history (steering slice B), folded like the
- * ancestors above it. The conversation interleaves these as messages; this
- * card is the operator-shaped cut — every note with its state (queued for
- * the next turn vs delivered to one), every question the agent parked on
- * with the answer that resumed it, timestamps on all of it. Rendered only
- * when there is something to show.
- */
-function ThreadHistory({ run }: { run: ThreadRunView }) {
-  if (run.steers.length === 0 && run.asks.length === 0) return null;
-  return (
-    <details class="disclosure">
-      <summary>
-        Steering and questions on this run ({run.steers.length + run.asks.length})
-      </summary>
-      <ul style="margin:0;padding-left:0;list-style:none">
-        {run.steers.map((s, i) => (
-          <li key={`steer-${i}`} style={i === 0 ? "padding:8px 0" : "padding:8px 0;border-top:1px solid var(--line)"}>
-            <div class="row-actions" style="gap:8px;align-items:baseline;flex-wrap:wrap">
-              <span class="chip">{s.state === "pending" ? "queued" : `delivered turn ${s.turn}`}</span>
-              <span class="meta">{utcStamp(s.at)}</span>
-            </div>
-            <pre style="white-space:pre-wrap;margin:4px 0 0">{s.text}</pre>
-          </li>
-        ))}
-        {run.asks.map((a, i) => (
-          <li key={`ask-${i}`} style="padding:8px 0;border-top:1px solid var(--line)">
-            <div class="row-actions" style="gap:8px;align-items:baseline;flex-wrap:wrap">
-              <span class="chip">{a.answer === null ? "waiting for an answer" : "answered"}</span>
-              <span class="meta">{utcStamp(a.at)}</span>
-            </div>
-            <pre style="white-space:pre-wrap;margin:4px 0 0">{a.question ?? "(the question could not be read from the run's log)"}</pre>
-            {a.answer !== null && (
-              <div style="margin-top:4px">
-                <span class="meta">
-                  {utcStamp(a.answer.at)}
-                  {a.answer.by !== undefined ? ` · ${a.answer.by}` : ""} —{" "}
-                </span>
-                {a.answer.text !== null
-                  ? a.answer.text
-                  : "no answer recorded — the agent was told to decide for itself"}
-              </div>
-            )}
-          </li>
-        ))}
-      </ul>
-    </details>
   );
 }

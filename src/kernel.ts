@@ -127,6 +127,7 @@ export async function runCell(
   cellId: string,
   code: string,
   timeoutMs = 120_000,
+  signal?: AbortSignal,
 ): Promise<ExecResult> {
   await executor.putFile(`${DIR}/cell-${cellId}.py`, code);
   const iterations = Math.max(1, Math.ceil(timeoutMs / 100));
@@ -134,7 +135,21 @@ export async function runCell(
     `i=0; while [ ! -f ${DIR}/done-${cellId} ] && [ "$i" -lt ${iterations} ]; do sleep 0.1; i=$((i+1)); done; ` +
     `if [ ! -f ${DIR}/done-${cellId} ]; then exit 124; fi; ` +
     `cat ${DIR}/out-${cellId}.txt; exit "$(cat ${DIR}/exit-${cellId})"`;
-  const result = await executor.exec(waiter, { timeoutMs: timeoutMs + 10_000 });
+  // An operator interrupt (D2) uses the same cancel marker the timeout path
+  // does: the kernel raises KeyboardInterrupt in the cell, the cell writes its
+  // done marker, and the waiter below returns with the traceback. The marker
+  // is dropped by a second, concurrent exec while the waiter is still blocked.
+  const cancel = (): void => {
+    void executor.exec(`touch ${DIR}/cancel-${cellId}`, { timeoutMs: 10_000 }).catch(() => {});
+  };
+  if (signal?.aborted === true) cancel();
+  else signal?.addEventListener("abort", cancel, { once: true });
+  let result: ExecResult;
+  try {
+    result = await executor.exec(waiter, { timeoutMs: timeoutMs + 10_000 });
+  } finally {
+    signal?.removeEventListener("abort", cancel);
+  }
   if (result.exitCode !== 124) return result;
 
   // Timed out: interrupt the cell and give it a moment to unwind.
