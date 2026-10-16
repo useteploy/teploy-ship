@@ -596,7 +596,7 @@ so interactive work lands there first; harness adapters follow.
 | B3 | `at` schedule UI and API (maths exists, `src/schedule-time.ts`) | S16 | A6 | none | Create/edit/pause an `at` schedule; DST case correct | S |
 | B4 | Slack thread conversation: replies in the thread steer the bound run; results post back to the thread | S04, S25 | D2, B6, Slack-user to Ship-user mapping with revocation | none | A mapped user's thread reply reaches the run as steering; an unmapped or revoked user's reply is refused; result appears in thread | M |
 | B5 | Standing tasks: reusable maintenance templates (dependency updates, flaky-test triage) | S16, S24 | B2 | none | A standing task runs on schedule, delivers, and can be paused/retired | M |
-| B6 | Point a real Slack app and Linear webhook at the existing intake; set `SHIP_SLACK_WEBHOOK_URL` | S04 | Decision 7 | none | One Slack mention and one labelled Linear issue each become a task | S |
+| B6 | Slack/Linear as user features (Decision 7, 2026-10-16: not wired for the owner): real-path proof of both intakes with signed payloads and the outbound Slack webhook, plus a user setup guide (app scopes, URLs, secrets) | S04 | none | none | A signed Slack mention and a signed labelled Linear issue each become exactly one task through the real routes; a bad signature is refused; the guide is followed verbatim on a fresh install | S |
 
 **C — capacity and compute.**
 
@@ -733,14 +733,14 @@ one-run soak after its merge.
 Numbered to continue `docs/DECISIONS_OPEN_2026-10-04.md` (Decisions 1–3 are
 already taken there) and recorded in that file when made.
 
-4. Which Proxmox node hosts the second sandbox (C1), and whether elastic VMs
+4. **Decided 2026-10-16: compute-2.** Which Proxmox node hosts the second sandbox (C1), and whether elastic VMs
    (C3, deferred) may consume cluster capacity unattended.
 5. Spend for the G1 T3 re-run and diagnostic arm, and the S02 B leg (Q7).
 6. Whether remote MCP servers (D1) may receive `private` repository data, or
    inherit the routing data-class gate as proposed.
-7. Slack workspace and Linear team to wire (B6).
+7. **Decided 2026-10-16: not wired for the owner; user feature only.** Slack workspace and Linear team to wire (B6).
 8. Windows/macOS/mobile targets (C6, C7): schedule this year or keep deferred.
-9. A destination permitted for `private` data (Q9): a provider whose terms
+9. **Decided 2026-10-16: the z.ai coding plan** (routing policy updated on infra-home). A destination permitted for `private` data (Q9): a provider whose terms
    state no retention, local inference on the cluster, or keep routing
    shadow-only. Decision 1 (2026-10-05) stands until this is made; it blocks
    Q1 on private repositories and routing `on`.
