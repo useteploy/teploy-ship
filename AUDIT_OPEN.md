@@ -1,5 +1,37 @@
 # Open audit items
 
+## 2026-10-15 — resource classes: browser runs admitted on their real footprint
+
+- A run whose input carries `look` (SHIP_LOOK, default off) is now a
+  **resource class** (`src/resource-class.ts`), not only a prompt capability:
+  its create carries `Limits.MemoryMB` raised by `BROWSER_MEMORY_DELTA_MB`
+  (512 MB — the top of the measured ~300-500 MB browser overhead from
+  `evals/receipts/2026-10-14-egress-proxy-browser-proof.txt`, on top of
+  docs/capacity.md's 400 MB plain run), its placement requirement (the S26
+  requirement seam in placement-shadow.ts) demands `browser: "headless"`,
+  and admission accounts its real footprint: `capacityPlan`'s free-memory
+  term subtracts in-flight browser deltas, and a browser run launches only
+  above a memory floor raised by the same delta (`hostHold`'s third
+  parameter, checked in `driveOne`; the run stays due — the takeover-hold
+  queue shape, and plain runs are not held behind it).
+- Wired through the EXISTING funnel, no parallel admission path: the class
+  rides `sandboxOverridesOf` beside the network tier (create and every
+  restore path), `definedOverrides` drops it before the daemon wire (the
+  daemon rejects unknown fields), and the limit raise lands in the worker's
+  host-sized seam (`resolveSandboxLimits`, exported so precedence and the
+  raise are pinnable without a running worker).
+- Default-off: plain runs resolve byte-identical overrides, limits and plans
+  (pinned per seam); no run carries the class unless SHIP_LOOK was set at
+  enqueue. Placement enforcement is still shadow-only — S26's status is
+  unchanged by this.
+- Verified: `pnpm run lint`, `pnpm test` (2257 runtime + 242 scripts pass,
+  0 fail; the three grader-matrix scripts failures seen in one intermediate
+  run fail identically on pristine main when they appear — the documented
+  agent-sandbox flake). NOT verified live: a real look run admitted on a
+  squeezed box; the delta's adequacy beyond one page (512 is the daemon's
+  shm quantum, not a measured browser-RSS ceiling); `pids` left untouched
+  (the receipt's 256-pid limit under multi-page sites is unmeasured).
+
 ## 2026-10-14 — Postgres store support (code; not yet released or deployed)
 
 - `--store postgres` (config, CLI flags, SHIP_STORE in the web app) runs the
