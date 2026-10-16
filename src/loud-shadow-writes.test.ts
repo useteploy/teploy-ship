@@ -18,7 +18,7 @@ import type { PlacementRecord } from "./placement-shadow.js";
 import { flushShadow, installPolicyShadow, installPolicyShadowFromEnv, fileSink as policyFileSink, readShadowSummary, renderShadowReport } from "./policy-shadow.js";
 import type { ShadowRecord } from "./policy-shadow.js";
 import { checkRecordDirsAtStartup, recordDirs, resetRecordDirCheck } from "./record-dirs.js";
-import { appendRecordLine, resetWriteFailures, writeFailures } from "./record-writes.js";
+import { appendRecordLine, chownHint, resetWriteFailures, writeFailures } from "./record-writes.js";
 import { FileRepoMemory } from "./repo-memory.js";
 import { ScopedRepoMemory } from "./scoped-repo-memory.js";
 import { setShadowObserver } from "./shadow-hook.js";
@@ -33,6 +33,8 @@ import { observeToolCall, resetToolManifestShadow } from "./tool-manifest-shadow
 
 const IS_ROOT = process.getuid?.() === 0;
 const SKIP = IS_ROOT ? "running as root: chmod 555 does not stop root writing, so the read-only directory cannot be simulated" : false;
+/** The chown command for THIS process, as the remedies interpolate it (1000:1000 is only the teploy default). */
+const ownChown = (): string => `chown ${process.getuid?.()}:${process.getgid?.()} `;
 
 // Wrapped in describe(): the suite runs with --experimental-test-isolation=none, so top-level hooks would fire around every other file's tests too.
 describe("loud shadow writes (2026-10-16 root-owned volume)", () => {
@@ -85,7 +87,7 @@ test("a failed record write warns ONCE per file, counts every failure, never thr
   assert.match(w, new RegExp(file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.match(w, /EACCES/);
   assert.match(w, new RegExp(`uid ${process.getuid?.()}`));
-  assert.match(w, /chown 1000:1000/);
+  assert.ok(w.includes(ownChown()), `remedy names this process's ids: ${w}`);
   const f = mine();
   assert.equal(f.length, 1);
   assert.equal(f[0]!.count, 3);
@@ -176,7 +178,7 @@ test("startup: a read-only data dir logs ONE error naming the chown fix, and doe
   assert.equal(probes[0]!.status, "not-writable");
   assert.equal(logs.length, 1);
   assert.match(logs[0]!, /ERROR: data dir .* is not writable/);
-  assert.match(logs[0]!, /chown 1000:1000/);
+  assert.ok(logs[0]!.includes(ownChown()), `fix names this process's ids: ${logs[0]!}`);
   await checkRecordDirsAtStartup({} as NodeJS.ProcessEnv, log);
   assert.equal(logs.length, 1, "once per process");
   assert.deepEqual(await readdir(ro), []);
@@ -197,6 +199,31 @@ test("record dirs: the data dir always, an enabled shadow's override dir too, a 
   assert.deepEqual(recordDirs({ SHIP_POLICY_SHADOW: "off", SHIP_POLICY_SHADOW_FILE: "/elsewhere/p.jsonl" } as NodeJS.ProcessEnv), [rw]);
 });
 
+test("startup: an env that cannot even be parsed probes nothing, logs once, and never rejects", async () => {
+  process.env.TEPLOY_SHIP_STATE = rw;
+  // The dir parsers read the env; a value (or parser) that throws must not
+  // reject the probe — the cli awaits this at worker startup and web voids it
+  // (an unhandled rejection), so neither may see a throw.
+  const env = {} as NodeJS.ProcessEnv;
+  Object.defineProperty(env, "SHIP_POLICY_SHADOW", { get() { throw new Error("bad env value"); } });
+  const probe = checkRecordDirsAtStartup(env, log);
+  await assert.doesNotReject(probe);
+  assert.deepEqual(await probe, []);
+  assert.equal(logs.length, 1);
+  assert.match(logs[0]!, /could not determine the record directories/);
+  assert.match(logs[0]!, /Ship keeps running/);
+  // Memoized: a second call neither rejects nor logs again.
+  await assert.doesNotReject(checkRecordDirsAtStartup({} as NodeJS.ProcessEnv, log));
+  assert.equal(logs.length, 1);
+});
+
+test("chown hint names THIS process's uid/gid, with 1000:1000 noted as the teploy default", () => {
+  const hint = chownHint("/data");
+  assert.ok(hint.includes(ownChown()), `the command interpolates the real ids: ${hint}`);
+  assert.match(hint, /teploy default: 1000:1000/);
+  assert.ok(hint.includes("/data"), "the bound dir is named");
+});
+
 // ── doctor ────────────────────────────────────────────────────────────────
 
 const byId = (r: Awaited<ReturnType<typeof runDoctor>>, id: string) => r.checks.find((c) => c.id === id)!;
@@ -205,7 +232,7 @@ test("doctor: a read-only data dir fails data-dir-writable with the chown remedy
   const r = await runDoctor(defaultProbes({ env: {}, stateDir: ro, recordDirs: [ro], webPort: 0, nodeVersion: process.version }));
   const c = byId(r, "data-dir-writable");
   assert.equal(c.status, "fail");
-  assert.match(c.remedy ?? "", /chown 1000:1000/);
+  assert.ok((c.remedy ?? "").includes(ownChown()), `remedy names this process's ids: ${c.remedy}`);
   assert.equal(byId(r, "state-dir-writable").status, "fail");
   assert.equal(r.verdict, "not-ready");
 });
@@ -230,7 +257,7 @@ test("policy shadow-report: missing file in an unwritable dir says permission, n
   const file = join(ro, "policy-shadow.jsonl");
   const out = renderShadowReport(await readShadowSummary(file), file);
   assert.match(out, /could not write here \(permission\)/);
-  assert.match(out, /chown 1000:1000/);
+  assert.ok(out.includes(ownChown()), `fix names this process's ids: ${out}`);
   assert.doesNotMatch(out, /has not recorded anything/);
 });
 

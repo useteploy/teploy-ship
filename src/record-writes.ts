@@ -34,14 +34,23 @@ const PERMISSION_CODES = new Set(["EACCES", "EPERM", "EROFS"]);
 
 export const uidOf = (): string => String(process.getuid?.() ?? "?");
 
+export const gidOf = (): string => String(process.getgid?.() ?? "?");
+
 export function errnoOf(error: unknown): string {
   const code = (error as NodeJS.ErrnoException | undefined)?.code;
   return typeof code === "string" && code !== "" ? code : "unknown";
 }
 
-/** The operator's fix, naming the in-container dir and the teploy host path it is usually bound from. */
+/**
+ * The operator's fix, naming the in-container dir and the teploy host path it
+ * is usually bound from. The ids interpolated are THIS process's own — the
+ * directory must end up owned by whoever actually writes here. 1000:1000 is
+ * the teploy default (web and worker run as `node`), which is what the deploy
+ * example names, but a non-default deployment needs the real ids, not the
+ * default ones.
+ */
 export function chownHint(dir: string): string {
-  return `chown 1000:1000 <host path bound to ${dir}> (teploy deploy: chown 1000:1000 /deployments/ship/volumes/ship-data on the server)`;
+  return `chown ${uidOf()}:${gidOf()} <host path bound to ${dir}> (teploy default: 1000:1000 — teploy deploy: chown 1000:1000 /deployments/ship/volumes/ship-data on the server)`;
 }
 
 /**
