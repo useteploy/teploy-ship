@@ -466,6 +466,10 @@ export const WORKFLOW_STEPS: readonly WorkflowStep[] = [
   { key: "step:*files", admits: multiAttempt },
   { key: "step:attempt-*", admits: multiAttempt },
   { key: "step:harness-pick", admits: multiAttempt },
+  // The MCP client's tools/list (D1): once per harness run, before the
+  // prompt is built. Admitted by input.mcp alone (SHIP_MCP + declared servers
+  // at enqueue) — no pre-MCP log carries it, so those fingerprints hold.
+  { key: "step:*mcp-tools", admits: (i) => i.mcp !== undefined },
   { key: "step:*plan-think", admits: (i) => i.plan === true },
   { key: "step:*plan-snapshot", admits: (i) => i.plan === true },
   { key: "wait:PLAN_EVENT", admits: (i) => i.plan === true },
@@ -492,6 +496,8 @@ export const WORKFLOW_STEPS: readonly WorkflowStep[] = [
   // flag SHIP_LOOK materialises at enqueue — no pre-feature log carries it,
   // so those fingerprints are untouched.
   { key: "step:*turn-*-look", admits: (i) => i.look === true },
+  // ...and one MCP tool call (D1), admitted by the same input field.
+  { key: "step:*turn-*-mcp", admits: (i) => i.mcp !== undefined },
   // Bounded child work (S20/S22): the ```delegate action's steps, in the
   // branch's source order (spawn, snapshot, wait, restore). Admitted by
   // input.delegate alone — a delegation CHILD (input.delegateChild) parses

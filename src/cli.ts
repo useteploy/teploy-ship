@@ -47,6 +47,8 @@ import { assertRepoAllowed, credentialFor, policyFromEnv } from "./repo-policy.j
 import { placementShadowFile, placementShadowFromEnv, readPlacementSummary, renderPlacementReport } from "./placement-shadow.js";
 import { readShadowSummary, renderShadowReport, shadowFile } from "./policy-shadow.js";
 import { dryRunManifest, parseGrant, renderDryRun } from "./tool-manifest-shadow.js";
+import { normalizeMcp } from "./mcp.js";
+import type { McpProjectConfig } from "./mcp.js";
 import { detectRepository } from "./stack-import.js";
 import { renderProposal, stackDetectEnabled } from "./stack-propose.js";
 import type { RepoPolicyConfig } from "./repo-policy.js";
@@ -1482,6 +1484,7 @@ const PROJECT_USAGE =
   "           [--observe-service <svc>] [--label <text>]\n" +
   "           [--build <cmd>] [--preview-app <app>] [--preview-smoke <cmd>] [--visual on|off] [--observe-window <min>]\n" +
   "           [--authority propose|send|auto_trivial|auto_normal|none] [--never-auto on|off]\n" +
+  "           [--mcp <json|file>]  MCP servers + manifests + grants for SHIP_MCP (docs/MCP_DESIGN.md); --mcp \"\" clears\n" +
   "       teploy-ship project list [--json]\n       teploy-ship project remove <repo>";
 
 /**
@@ -1530,6 +1533,10 @@ async function projectCommand(rest: string[]): Promise<void> {
         }
         if (p.authority !== undefined || p.neverAuto === true) {
           process.stdout.write(`  authority: ${p.authority ?? "(autoMerge flag)"}${p.neverAuto === true ? " (never-auto)" : ""}\n`);
+        }
+        if (p.mcp !== undefined) {
+          const servers = p.mcp.servers.map((s) => `${s.name} (${s.transport}, ${s.manifest.tools.length} declared)`);
+          process.stdout.write(`  mcp:      ${servers.join(", ")} [data class ${p.mcp.dataClass ?? "private"}]\n`);
         }
       }
     } finally {
@@ -1608,6 +1615,20 @@ async function projectCommand(rest: string[]): Promise<void> {
     ) {
       fail(`--authority must be propose, send, auto_trivial, auto_normal or none, got: ${authority}`);
     }
+    // MCP servers (D1): the whole block, validated by normalizeMcp before the
+    // save. Pass to replace, omit to keep, empty to clear — like every field.
+    let mcp: McpProjectConfig | null | undefined;
+    if (args.flags.mcp !== undefined) {
+      const raw = args.flags.mcp === true ? "" : String(args.flags.mcp);
+      if (raw.trim() === "") mcp = null;
+      else {
+        try {
+          mcp = normalizeMcp(JSON.parse(raw.trimStart().startsWith("{") ? raw : readFileSync(raw, "utf8"))) ?? null;
+        } catch (error) {
+          fail(`--mcp: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    }
     const windowRaw = args.flags["observe-window"];
     const observeWindow = windowRaw === undefined ? undefined : Number(windowRaw);
     if (observeWindow !== undefined && (!Number.isFinite(observeWindow) || observeWindow < 0 || !Number.isInteger(observeWindow))) {
@@ -1618,7 +1639,8 @@ async function projectCommand(rest: string[]): Promise<void> {
       // A clone URL as the target sets --url too; a bare slug needs --url to join the allowlist.
       const url = str("url") ?? (/^[a-z]+:\/\//i.test(target) || target.startsWith("git@") ? target : undefined);
       const existing = (await runtime.projects.forRepo(target)) ?? { repo: target, autoMerge: false, autoDeploy: false };
-      const { sourcePolicy: _p, ...keep } = {...existing,repo:existing.url ?? existing.repo};
+      const { sourcePolicy: _p, ...kept } = {...existing,repo:existing.url ?? existing.repo};
+      const { mcp: storedMcp, ...keep } = kept;
       const build = str("build");
       const previewApp = str("preview-app");
       const previewSmoke = str("preview-smoke");
@@ -1660,6 +1682,7 @@ async function projectCommand(rest: string[]): Promise<void> {
         ...(verification !== undefined ? { verification } : {}),
         ...(authority !== undefined ? (authority === "none" ? {} : { authority: authority as Project["authority"] }) : {}),
         ...(neverAuto !== undefined ? (neverAuto ? { neverAuto: true } : {}) : {}),
+        ...(mcp === undefined ? (storedMcp !== undefined ? { mcp: storedMcp } : {}) : mcp === null ? {} : { mcp }),
       };
       await runtime.projects.set(next);
     } finally {

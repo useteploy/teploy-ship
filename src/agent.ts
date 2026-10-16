@@ -22,6 +22,7 @@ import { formatObservation, systemPrompt } from "./prompt.js";
 import { scrub } from "./redact.js";
 import { runLook } from "./look.js";
 import { DELEGATE_UNAVAILABLE } from "./delegate.js";
+import { MCP_UNAVAILABLE } from "./mcp.js";
 import { RecoveryTracker, defaultRecoveryConfig } from "./recovery.js";
 import type { RecoveryConfig } from "./recovery.js";
 import { observeToolCall } from "./tool-manifest-shadow.js";
@@ -515,6 +516,16 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
       messages.push({ role: "user", content: DELEGATE_UNAVAILABLE });
       steps.push({ index, thought, action });
       emit({ type: "observation", step: index, text: DELEGATE_UNAVAILABLE });
+      continue;
+    }
+
+    // Unreachable today (this loop never parses ```mcp), and kept refusing so
+    // a future dialect change cannot turn a tool call into a shell command.
+    // MCP calls are recorded steps; the durable loop is where they run.
+    if (action.kind === "mcp") {
+      messages.push({ role: "user", content: MCP_UNAVAILABLE });
+      steps.push({ index, thought, action });
+      emit({ type: "observation", step: index, text: MCP_UNAVAILABLE });
       continue;
     }
 
