@@ -164,8 +164,16 @@ export class SandboxPool implements ExecutorProvider {
           throw new Error(`this run's snapshot is on host #${index}, which is no longer configured`);
         }
         const shadowDone = this.#shadow?.begin("createFrom", this.#view(), overrides, index);
-        const created = await host.provider.createFrom(inner, overrides);
+        // Same reserve-before-await rule as create() (the host is fixed here,
+        // but the count still has to be right for the next concurrent create).
         this.#live[index] += 1;
+        let created: { handle: string };
+        try {
+          created = await host.provider.createFrom(inner, overrides);
+        } catch (error) {
+          this.#live[index] = Math.max(0, this.#live[index]! - 1);
+          throw error;
+        }
         shadowDone?.(index);
         this.#track(poolHandle(index, created.handle), index, overrides);
         return { handle: poolHandle(index, created.handle) };
@@ -251,8 +259,18 @@ export class SandboxPool implements ExecutorProvider {
     // Shadow: decided from the state BEFORE the attempt, recorded after it.
     const shadowDone = this.#shadow?.begin("create", this.#view(), overrides);
     return this.#place("start a sandbox", async (host, index) => {
-      const created = await host.provider.create(overrides);
+      // Reserve the slot BEFORE awaiting the daemon. Counting only after the
+      // create resolved let concurrent creates all read the same counts and
+      // pile onto host 0 (the tie-break): live on 2026-10-16, two runs picked
+      // up in the same tick both landed on compute-1 with compute-2 idle.
       this.#live[index] += 1;
+      let created: { handle: string };
+      try {
+        created = await host.provider.create(overrides);
+      } catch (error) {
+        this.#live[index] = Math.max(0, this.#live[index]! - 1);
+        throw error;
+      }
       shadowDone?.(index);
       this.#track(poolHandle(index, created.handle), index, overrides);
       return { handle: poolHandle(index, created.handle) };
