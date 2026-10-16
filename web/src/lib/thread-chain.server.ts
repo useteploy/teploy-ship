@@ -268,7 +268,10 @@ export async function runThread(deps: ThreadDeps, runId: string): Promise<Thread
     const events = await loadEvents(candidate.runId);
     const started = startedOf(events);
     if (started === undefined) continue;
-    if (started.data?.taskRootRunId === root || members.has(String(started.data?.input?.parentRunId))) {
+    const parent = started.data?.input?.parentRunId;
+    // A member either names the anchor (runs since taskRootRunId existed)
+    // or hangs off a member by parentRunId (legacy chains).
+    if (started.data?.taskRootRunId === root || (typeof parent === "string" && members.has(parent))) {
       members.add(candidate.runId);
     }
   }

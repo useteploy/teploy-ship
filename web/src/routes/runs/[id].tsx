@@ -27,6 +27,9 @@ import { currentUser } from "../../lib/session.server.js";
 import { may } from "../../lib/authority.server.js";
 import { itemClass, since, took } from "../../lib/timeline.js";
 import { resolveNavUrl, clickPoint } from "../../lib/browser-tab.js";
+// Type-only: the thread view's shape ships in the loader payload's flag, and
+// the projection itself lives server-side (thread-chain.server.ts).
+import type { ThreadRunView, ThreadView } from "../../lib/thread-chain.server.js";
 
 export const config = { mode: "app" };
 
@@ -360,6 +363,23 @@ export default function RunDetail({ data: initialData }: { data: RunData }) {
     return () => { stopped = true; controller.abort(); clearInterval(timer); };
   }, [initialData.runId, initialData.view]);
   const [followJourney, setFollowJourney] = useState(data.journey === "plan" ? "plan" : data.isScan ? "investigate" : "change");
+  // The steering thread (SHIP_THREAD_VIEW=on): fetched once per run id, not
+  // on the 4s refresh tick — the chain only changes through actions that
+  // navigate to the new run's page, and the read scans recent runs' logs.
+  // Advisory: a failed fetch renders nothing, like the takeover reply read.
+  const [thread, setThread] = useState<ThreadView | null>(null);
+  useEffect(() => {
+    if (initialData.threadView !== true) return;
+    let stopped = false;
+    setThread(null);
+    fetch(`/api/runs/${encodeURIComponent(initialData.runId)}/thread`)
+      .then((response) => (response.ok ? (response.json() as Promise<ThreadView>) : null))
+      .then((view) => {
+        if (!stopped && view !== null && Array.isArray(view.runs)) setThread(view);
+      })
+      .catch(() => {});
+    return () => { stopped = true; };
+  }, [initialData.runId, initialData.threadView]);
  const active = data.meta !== null && !["completed", "failed", "cancelled", "cancelling"].includes(data.meta.status);
   const decision = data.decision;
   return (
@@ -399,6 +419,7 @@ export default function RunDetail({ data: initialData }: { data: RunData }) {
       <div class="eyebrow"><a href="/runs">All runs</a> / {data.runId}</div>
       {data.parentRunId && <p class="meta">Continues <a href={`/runs/${encodeURIComponent(data.parentRunId)}`}>{data.parentRunId}</a></p>}
       {data.taskRootRunId && data.taskRootRunId !== data.runId && <p class="meta">Original request: <a href={`/runs/${encodeURIComponent(data.taskRootRunId)}`}>{data.taskRootRunId}</a></p>}
+      {data.threadView === true && thread !== null && thread.runs.length > 1 && <ThreadStrip thread={thread} runId={data.runId} />}
       {data.messageError && <p class="notice bad" role="alert">{data.messageError}</p>}
       <h1 class="page">{data.meta ? taskTitle(data.userMessage ?? data.meta.task) : "Run details"}</h1>
       {data.meta && data.meta.task.length > 110 && <details class="disclosure"><summary>Read the full task</summary><p style="white-space:pre-wrap">{data.userMessage ?? data.meta.task}</p></details>}
@@ -605,6 +626,10 @@ export default function RunDetail({ data: initialData }: { data: RunData }) {
           <nav class="settings-nav" aria-label="Run workspace">{['conversation','review','changes','verification','files','activity'].map(view=><a key={view} href={`/runs/${data.runId}?view=${view}`} class={data.view===view?'active':undefined} aria-current={data.view===view?'page':undefined}>{view.charAt(0).toUpperCase()+view.slice(1)}</a>)}</nav>
           {['conversation','review'].includes(data.view) && <div class={data.view === 'review' ? 'run-review-grid' : ''}><div>
             {data.ancestors.map(h => <details class="disclosure"><summary>Earlier: {h.task.slice(0,100)} · {h.runId}</summary><a href={`/runs/${h.runId}`}>Open run</a><Conversation messages={h.messages}/></details>)}
+            {data.threadView === true && thread !== null && (() => {
+              const mine = thread.runs.find(r => r.runId === data.runId);
+              return mine === undefined ? null : <ThreadHistory run={mine} />;
+            })()}
             <div class="conversation-scroll" role="region" tabIndex={0} aria-label="Conversation history"><Conversation messages={data.messages} /></div><div id="reply"><RunComposer data={data}/></div>
           </div>{data.view === 'review' && <aside class="review-evidence"><ForgePanel data={data}/><Changes snapshots={data.snapshots} pr={data.evidence.pr} sha={data.evidence.sha}/><Verification data={data.evidence} preview={data.previewPanel} testIntegrity={data.testIntegrity}/></aside>}</div>}
           {data.view === 'files' && <section><h2 class="section">Repository files</h2><details class="disclosure"><summary>Workspace recovery</summary><p class="meta">{data.recovery?.snapshotAt ? `Last recorded snapshot: ${data.recovery.snapshotAt}. Retention has not been checked.` : "No workspace snapshot is recorded."}</p><p class="meta">{data.recovery?.restoredAt ? `Last restored: ${data.recovery.restoredAt}. ${data.recovery.checked ? "Repository validation passed." : "Repository validation was not recorded for this run."}` : "No workspace restore is recorded."}</p>{data.recovery?.warm && <p class="meta">This run uses a warm volume. Container snapshots do not establish recovery of that volume.</p>}</details><p class="meta">Inspect up to 200 tracked file names and the first 10,000 characters of a file at the workspace’s current HEAD. Inspect live changes to see tracked edits and untracked file names. This is a read-only observation while the agent may still be working. Availability depends on sandbox retention.</p><form method="post" class="row-actions"><button name="intent" value="changes">Inspect live changes</button><button name="intent" value="files">List files</button><input name="path" placeholder="src/example.ts" aria-label="Repository file path"/><button name="intent" value="file">Read file</button></form>{data.workspace && <p class="meta">Last inspection: {data.workspace.kind ?? "file"}{data.workspace.path ? ` · ${data.workspace.path}` : ""} · {data.workspace.at}{data.workspace.truncated ? " · partial output" : ""}</p>}{data.workspace?.error && <p class="notice bad">{data.workspace.error}</p>}{data.workspace?.output !== undefined && <pre class="workspace-file" tabIndex={0}>{data.workspace.output}</pre>}<p class="meta">Requests are handled by the worker; refresh to see the result.</p><a href={`/runs/${data.runId}?view=files`}>Refresh files</a></section>}
@@ -1354,4 +1379,103 @@ function TaskStatePanel({ data }: { data: RunData }) {
     <ul>{t.notRecorded.map((n) => <li>{n}</li>)}</ul>
     {t.anomalies.length > 0 && <><h3 class="ts-sub">Anomalies in the records</h3><ul role="list">{t.anomalies.map((a) => <li>{a}</li>)}</ul></>}
   </section>;
+}
+
+/** "2026-10-15 09:41 UTC" — the dashboard's established timestamp rendering. */
+function utcStamp(at: string): string {
+  return `${at.replace("T", " ").slice(0, 16)} UTC`;
+}
+
+/** A chain entry's hover text: what ran, when, on what — bounded. */
+function threadTitle(run: ThreadRunView): string {
+  const line = (run.summary ?? "").split("\n")[0] ?? "";
+  return [utcStamp(run.createdAt), run.model, run.harness, line !== "" ? line.slice(0, 200) : ""].filter((s) => s !== "").join(" · ");
+}
+
+/**
+ * The thread strip (steering slice B): the chain of runs this task is made
+ * of, root first, every member clickable except the one being read. Fed by
+ * the same /api/runs/:id/thread the API serves — the page owns no separate
+ * projection. Rendered only when the chain has more than one run: a
+ * single-run task gets exactly the page it had before this view existed.
+ */
+function ThreadStrip({ thread, runId }: { thread: ThreadView; runId: string }) {
+  return (
+    <nav class="settings-nav" aria-label="Task thread">
+      <span class="meta">Thread</span>
+      {thread.runs.map((run, i) => {
+        const label = `#${i + 1} ${run.status}`;
+        // The current run is rendered the way the workspace nav renders the
+        // active view: a link with class active, so one style rule covers
+        // both and the strip never invents its own chrome.
+        return (
+          <a
+            key={run.runId}
+            class={run.runId === runId ? "active" : undefined}
+            aria-current={run.runId === runId ? "step" : undefined}
+            href={`/runs/${encodeURIComponent(run.runId)}`}
+            title={threadTitle(run)}
+          >
+            {label}
+            {run.runId === runId && <span class="meta"> ({run.runId})</span>}
+          </a>
+        );
+      })}
+      {thread.truncated && (
+        <span class="meta" title="the chain is longer than the recent-run window reads — newest members only">
+          … may be cut off
+        </span>
+      )}
+    </nav>
+  );
+}
+
+/**
+ * The current run's steer/ask history (steering slice B), folded like the
+ * ancestors above it. The conversation interleaves these as messages; this
+ * card is the operator-shaped cut — every note with its state (queued for
+ * the next turn vs delivered to one), every question the agent parked on
+ * with the answer that resumed it, timestamps on all of it. Rendered only
+ * when there is something to show.
+ */
+function ThreadHistory({ run }: { run: ThreadRunView }) {
+  if (run.steers.length === 0 && run.asks.length === 0) return null;
+  return (
+    <details class="disclosure">
+      <summary>
+        Steering and questions on this run ({run.steers.length + run.asks.length})
+      </summary>
+      <ul style="margin:0;padding-left:0;list-style:none">
+        {run.steers.map((s, i) => (
+          <li key={`steer-${i}`} style={i === 0 ? "padding:8px 0" : "padding:8px 0;border-top:1px solid var(--line)"}>
+            <div class="row-actions" style="gap:8px;align-items:baseline;flex-wrap:wrap">
+              <span class="chip">{s.state === "pending" ? "queued" : `delivered turn ${s.turn}`}</span>
+              <span class="meta">{utcStamp(s.at)}</span>
+            </div>
+            <pre style="white-space:pre-wrap;margin:4px 0 0">{s.text}</pre>
+          </li>
+        ))}
+        {run.asks.map((a, i) => (
+          <li key={`ask-${i}`} style="padding:8px 0;border-top:1px solid var(--line)">
+            <div class="row-actions" style="gap:8px;align-items:baseline;flex-wrap:wrap">
+              <span class="chip">{a.answer === null ? "waiting for an answer" : "answered"}</span>
+              <span class="meta">{utcStamp(a.at)}</span>
+            </div>
+            <pre style="white-space:pre-wrap;margin:4px 0 0">{a.question ?? "(the question could not be read from the run's log)"}</pre>
+            {a.answer !== null && (
+              <div style="margin-top:4px">
+                <span class="meta">
+                  {utcStamp(a.answer.at)}
+                  {a.answer.by !== undefined ? ` · ${a.answer.by}` : ""} —{" "}
+                </span>
+                {a.answer.text !== null
+                  ? a.answer.text
+                  : "no answer recorded — the agent was told to decide for itself"}
+              </div>
+            )}
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
 }

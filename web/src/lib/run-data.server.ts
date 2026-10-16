@@ -40,6 +40,7 @@ import { harnessIdentityView } from "./harness-identity-view.js";
 import type { HarnessIdentityView } from "./harness-identity-view.js";
 import { taskStateView } from "./task-state.js";
 import type { TaskStateView } from "./task-state.js";
+import { threadViewEnabled } from "./thread-chain.server.js";
 
 export interface RunData {
   followUpRequestId: string;
@@ -162,6 +163,12 @@ export interface RunData {
   };
   /** ?takeover=pending — a takeover operation was requested; the worker answers within a sweep. */
   takeoverPending: boolean;
+  /**
+   * SHIP_THREAD_VIEW=on only: the run page may fetch the thread strip.
+   * Absent (flag off, the default) the page renders exactly as before —
+   * the key is additive and nothing else reads it.
+   */
+  threadView?: true;
   /** ?tab= — the workspace panel tab the holder had open (console/editor/browser/changes/handback). */
   takeoverTab: "console" | "editor" | "browser" | "changes" | "handback";
   /** The signed-in user's name, so the card can say "held by you". */
@@ -418,6 +425,7 @@ export async function runData({ params, request }: { params: { id: string }; req
         ...(typeof testsCommand === "string" && testsCommand !== "" ? { testsCommand } : {}),
       },
       takeoverPending: query.get("takeover") === "pending",
+      ...(threadViewEnabled() ? { threadView: true } : {}),
       takeoverTab: (["console", "editor", "browser", "changes", "handback"] as const).includes(
         (query.get("tab") ?? "console") as "console",
       )
