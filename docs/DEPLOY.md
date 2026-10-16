@@ -370,6 +370,10 @@ not just a complaint.
 
 ### Slack and Linear
 
+Step-by-step guide for self-hosters (Slack app manifest, scopes, Linear
+webhook, the public HTTPS requirement, troubleshooting):
+**[INTEGRATIONS_SLACK_LINEAR.md](INTEGRATIONS_SLACK_LINEAR.md)**. Summary:
+
 - **Slack**: create an app with an `app_mention` event subscription
   pointed at `/hooks/slack`, set `SHIP_SLACK_SIGNING_SECRET` (the app's
   signing secret), and invite the bot. `@ship fix the flaky test
@@ -378,6 +382,8 @@ not just a complaint.
 - **Linear**: add a webhook for Issue events at `/hooks/linear` with
   `SHIP_LINEAR_SIGNING_SECRET`. Issues labeled `ship` become tasks;
   put `repo:<clone-url>` in the description to bind a repository.
+  Deliveries whose signed `webhookTimestamp` is over 5 minutes off are
+  refused (replay bound).
 - **Notifications**: set `SHIP_SLACK_WEBHOOK_URL` (an incoming-webhook
   URL) and `SHIP_PUBLIC_URL` — Ship pings the channel when a run parks
   for approval/plan review and when it completes or fails, with a link.

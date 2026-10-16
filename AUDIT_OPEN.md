@@ -1,5 +1,20 @@
 # Open audit items
 
+## 2026-10-16 — B6: Slack/Linear intake proven; Linear replay gap closed
+
+Owner Decision 7 (2026-10-16): Slack and Linear are user features for
+self-hosters, not the owner's workflow. Real-path tests now drive the actual
+`/hooks/slack` and `/hooks/linear` route handlers with correctly signed
+payloads (`web/src/lib/slack-linear-hooks.test.ts`) and the outbound Slack
+incoming webhook over a loopback socket (`src/notify-slack-loopback.test.ts`).
+Defect found and fixed: the Linear receiver's replay protection rested on the
+`Linear-Delivery` header, which the signature does not cover — a captured
+body re-sent under a fresh delivery id was accepted. It now refuses a body
+whose signed `webhookTimestamp` is more than 5 minutes off. Self-hoster guide:
+`docs/INTEGRATIONS_SLACK_LINEAR.md`. Still open: a real Slack app / Linear
+webhook pointed at production (B6's live half; needs the public HTTPS route
+for `/hooks/*`), and threaded Slack results (B4).
+
 ## 2026-10-16 — ship-backup.sh predates the postgres store
 
 `scripts/ship-backup.sh` tars `accessories/nucleus/nucleus-data`, which no
