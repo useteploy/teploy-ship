@@ -24,8 +24,15 @@ baseline the adapters are compared against.
 
 Two recorded steps, both of which always record a value:
 
-1. `harness-preflight` — is the binary on PATH in the sandbox image, and which
-   version. A missing binary is a recorded `error` result; nothing runs.
+1. `harness-preflight` — is the binary on PATH in the sandbox image, which
+   version, and is that a version this adapter can drive. A missing binary is
+   a recorded `error` result; nothing runs. A version the adapter cannot
+   drive is the same shape: opencode **>= 2.0.0 is refused** (2.x removed
+   `--pure` and `--dir`, so the invocation cannot start, and renamed the
+   `tool` event the live feed reads; measured in
+   `evals/receipts/2026-10-14-opencode-v2-events.txt`, which also carries
+   what adopting v2 needs). A minor drift from the pin is recorded, not
+   enforced — only a known-incompatible major refuses.
 2. `harness-run` — one `exec` in the sandbox: the prompt is written to
    `.teploy-agent/harness-prompt.md` (git-excluded), the forwarded credentials
    to `.teploy-agent/harness.env` which the command sources and deletes before
@@ -143,6 +150,19 @@ opencode run --format json --auto --pure --dir . [--model <provider/model>] "$(c
 
 fylun-code is an opencode overlay (a plugin), so it is driven through this
 same adapter; nothing in it changes the headless contract.
+
+**Version guard (S13).** The adapter refuses an opencode whose resolved
+version is >= 2.0.0, at the preflight step, with a message naming the pin
+(`opencode-ai@1.18.23` in `images/versions.json`) and the tracked v2
+adoption work. Why a refusal rather than a run: v2.0.26 removed `--pure`
+and `--dir`, so the invocation above fails flag-parse and prints usage
+before anything runs, and its event stream renamed `tool` to `tool_use` and
+dropped the terminal `step_finish` — degradations that would be silent if
+the flags were patched. The v2 contract, measured against real 2.0.26
+streams, and the adoption list (flags, parser, tracker, session resume) are
+in `evals/receipts/2026-10-14-opencode-v2-events.txt`. Production is safe
+today because the image bakes the 1.x pin; the guard catches the unpinned
+binary (local, dev, brew) before it wastes a run.
 
 ## Cost honesty under a subscription (P5-3)
 

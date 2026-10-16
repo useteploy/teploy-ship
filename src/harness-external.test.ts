@@ -11,7 +11,7 @@ import { MemoryEventStore, executeRun } from "@neutron-build/workflow";
 import { durableAgent } from "./durable.js";
 import type { DurableAgentOutput, ExecutorProvider } from "./durable.js";
 import { FileRepoMemory } from "./repo-memory.js";
-import { envFile, externalAdapters, externalHarnessConfig, externalPrompt, parseClaudeStream, parseOpencodeStream, shq } from "./harness-external.js";
+import { envFile, externalAdapters, externalHarnessConfig, externalPrompt, opencodeV2Refusal, parseClaudeStream, parseOpencodeStream, shq, versionMajor } from "./harness-external.js";
 
 const neverModel: ModelAdapter = {
   provider: "never",
@@ -233,6 +233,106 @@ test("a missing binary is a recorded error result, not a thrown step", async () 
   assert.match(out.summary, /opencode-ai@/);
   const steps = (await store.load("run-nobin")).filter((e) => e.type === "step-completed").map((e) => e.name);
   assert.deepEqual(steps, ["sandbox", "harness-preflight"]);
+});
+
+test("versionMajor reads the major out of a --version line, or nothing", () => {
+  assert.equal(versionMajor("opencode 1.18.23"), 1);
+  assert.equal(versionMajor("1.2.3"), 1);
+  assert.equal(versionMajor("opencode 2.0.26 (brew)"), 2);
+  assert.equal(versionMajor("2.0.0-beta.4"), 2, "a 2.0.0 pre-release is still the 2.x contract");
+  assert.equal(versionMajor("opencode (custom build)"), undefined, "no x.y.z, no guess");
+  assert.equal(versionMajor(""), undefined);
+});
+
+test("opencodeV2Refusal names the resolved version, the pin, and the tracked adoption receipt", () => {
+  const message = opencodeV2Refusal("opencode 2.0.26", "1.18.23");
+  assert.match(message, /2\.0\.26/);
+  assert.match(message, /opencode-ai@1\.18\.23/);
+  assert.match(message, /images\/versions\.json/);
+  assert.match(message, /--pure/);
+  assert.match(message, /evals\/receipts\/2026-10-14-opencode-v2-events\.txt/);
+  // No pin known (no images/versions.json entry): still refuses, still points
+  // at the receipt — the guard must not depend on the pin being present.
+  const unpinned = opencodeV2Refusal("opencode 2.0.26");
+  assert.match(unpinned, /2\.0\.26/);
+  assert.match(unpinned, /2026-10-14-opencode-v2-events\.txt/);
+  assert.doesNotMatch(unpinned, /versions\.json/);
+});
+
+/** A fake `opencode` whose --version line the caller picks; records whether its run path ever executed. */
+async function workspaceWithFakeOpencode(opts: { recordTo: string; versionLine: string; stream: string }): Promise<ExecutorProvider> {
+  const bin = await mkdtemp(join(tmpdir(), "fake-oc-bin-"));
+  await fakeBin(
+    bin,
+    "opencode",
+    [
+      `if [ "$1" = "--version" ]; then printf '%s\\n' ${shq(opts.versionLine)}; exit 0; fi`,
+      `echo run >> ${shq(join(opts.recordTo, "runs"))}`,
+      `echo edited > edited.txt`,
+      `cat <<'EOF'\n${opts.stream}\nEOF`,
+    ].join("\n"),
+  );
+  const work = await mkdtemp(join(tmpdir(), "fake-oc-work-"));
+  const executor = new LocalExecutor({ root: work, env: { PATH: `${bin}:${process.env.PATH ?? ""}` } });
+  return { isolated: true, async create() { return { handle: work }; }, attach: () => executor };
+}
+
+const OPENCODE_OK_STREAM = [
+  JSON.stringify({ type: "step_start", part: {} }),
+  JSON.stringify({ type: "text", part: { type: "text", text: "Done: fixed lib.ts" } }),
+  JSON.stringify({ type: "step_finish", part: { type: "step-finish", tokens: { input: 5, output: 1, reasoning: 0, cache: { read: 0, write: 0 } }, cost: 0 } }),
+].join("\n");
+
+test("opencode adapter refuses a >= 2.0.0 binary at preflight: recorded error with the named pin and receipt, nothing runs, replay agrees", async () => {
+  const recordTo = await mkdtemp(join(tmpdir(), "oc-v2-rec-"));
+  const runs = async () => (await readFile(join(recordTo, "runs"), "utf8").catch(() => "")).split("\n").filter((l) => l === "run").length;
+  const provider = await workspaceWithFakeOpencode({ recordTo, versionLine: "opencode 2.0.26", stream: OPENCODE_OK_STREAM });
+  const wf = durableAgent({ model: neverModel, executor: provider, workdir: ".", harnesses: externalAdapters({ env: {} }) });
+  const store = new MemoryEventStore();
+  const input = { task: "t", harness: { id: "opencode", version: "1" } };
+  const outcome = await executeRun({ workflow: wf, runId: "run-oc-v2", store, input });
+  assert.equal(outcome.status, "completed", JSON.stringify(outcome));
+  const out = outcome.output as DurableAgentOutput;
+  assert.equal(out.status, "error");
+  assert.match(out.summary, /2\.0\.26/);
+  assert.match(out.summary, /opencode-ai@1\.18\.23/);
+  assert.match(out.summary, /evals\/receipts\/2026-10-14-opencode-v2-events\.txt/);
+  assert.match(out.summary, /Nothing ran\./);
+  const steps = (await store.load("run-oc-v2")).filter((e) => e.type === "step-completed").map((e) => e.name);
+  assert.deepEqual(steps, ["sandbox", "harness-preflight"], "no harness-run step: the refusal stops the attempt where the missing-binary one does");
+  // The refusal is on the recorded preflight value, so the version the guard
+  // saw is in the log even without the summary.
+  const preStep = (await store.load("run-oc-v2")).find((e) => e.type === "step-completed" && e.name === "harness-preflight");
+  const pre = preStep?.data as { result: { found: boolean; version: string; expected: string; pinned: boolean; refused: string } };
+  assert.equal(pre.result.found, true);
+  assert.equal(pre.result.version, "opencode 2.0.26");
+  assert.equal(pre.result.pinned, false);
+  assert.match(pre.result.refused, /2\.0\.26/);
+  assert.equal(await runs(), 0, "the binary's run path must never execute");
+  const replay = await executeRun({ workflow: wf, runId: "run-oc-v2", store, input });
+  assert.equal((replay.output as DurableAgentOutput).status, "error");
+  assert.equal(await runs(), 0, "replay must not re-run the harness");
+});
+
+test("opencode adapter runs a 1.x binary and an unparseable-version binary exactly as before the guard", async () => {
+  for (const [runId, versionLine, label] of [
+    ["run-oc-pass-v1", "1.18.23", "v1.x version string passes"],
+    ["run-oc-pass-noversion", "opencode (source build)", "missing version info behaves as today"],
+  ] as const) {
+    const recordTo = await mkdtemp(join(tmpdir(), "oc-v1-rec-"));
+    const runs = async () => (await readFile(join(recordTo, "runs"), "utf8").catch(() => "")).split("\n").filter((l) => l === "run").length;
+    const provider = await workspaceWithFakeOpencode({ recordTo, versionLine, stream: OPENCODE_OK_STREAM });
+    const wf = durableAgent({ model: neverModel, executor: provider, workdir: ".", harnesses: externalAdapters({ env: {} }) });
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({ workflow: wf, runId, store, input: { task: "t", harness: { id: "opencode", version: "1" } } });
+    assert.equal(outcome.status, "completed", JSON.stringify(outcome));
+    const out = outcome.output as DurableAgentOutput;
+    assert.equal(out.status, "finished", label);
+    assert.equal(out.agentSummary, "Done: fixed lib.ts");
+    assert.equal(await runs(), 1, `${label}: the binary ran`);
+    const steps = (await store.load(runId)).filter((e) => e.type === "step-completed").map((e) => e.name);
+    assert.deepEqual(steps, ["sandbox", "harness-preflight", "harness-run"], label);
+  }
 });
 
 test("opencode adapter on a repo run: the tree it leaves goes through Ship's publish gate", async () => {
