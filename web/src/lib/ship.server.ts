@@ -72,6 +72,7 @@ export {
 export { cancelRun, deliverEvent } from "@neutron-build/workflow";
 
 export { verificationFactsFromEvents } from "../../../dist/verification-summary.js";
+export { priorRunContext } from "../../../dist/prior-run-context.js";
 
 export { projectReference, ProjectIdentityError } from "../../../dist/projects.js";
 

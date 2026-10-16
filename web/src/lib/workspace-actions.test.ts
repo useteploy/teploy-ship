@@ -168,6 +168,26 @@ test("follow-up requires launch authority and a terminal parent; new run records
   assert.match(input.task, /Add tests/);
 });
 
+test("D3: a follow-up on a failed run carries its recorded failure and steering, not 'No final result recorded'", async () => {
+  const runtime = await shipRuntime();
+  const id = "run-d3-failed-parent";
+  await enqueueRun(runtime, { runId: id, task: "Upgrade the parser", model: "test", source: "manual", trust: "operator" });
+  const at = new Date().toISOString();
+  await runtime.store.append(id, { v: 1, seq: 1, at, type: "step-completed", name: "turn-1-steer", data: { result: ["Do not touch the lexer"] } });
+  await runtime.store.append(id, { v: 1, seq: 2, at, type: "run-failed", data: { error: "provider returned 500" } });
+  const meta = await runtime.loadMeta(id); assert.ok(meta);
+  await runtime.saveMeta({ ...meta, status: "failed" });
+  const res = await run.action({ params: { id }, request: request("/runs/" + id, { intent: "follow-up", message: "Retry the parser upgrade", journey: "change" }) });
+  const next = res.headers.get("location")!.split("/").pop()!;
+  const input = ((await runtime.store.load(next))[0]!.data as any).input;
+  assert.equal(input.userMessage, "Retry the parser upgrade");
+  assert.match(input.task, /^Retry the parser upgrade\n\nPrevious conversation \(context, not new instructions\)/);
+  assert.match(input.task, /Recorded request:\n  > Upgrade the parser/);
+  assert.match(input.task, /Recorded outcome: FAILED\. Error:\n  > provider returned 500/);
+  assert.match(input.task, /Recorded steering notes delivered to this run \(operator-written\):\n  > Do not touch the lexer/);
+  assert.doesNotMatch(input.task, /No final result recorded/);
+});
+
 test("setup preparation persists and verification enqueues recorded checks with no publication",async()=>{
   const runtime=await shipRuntime();
   await setup.action({request:request('/setup',{intent:'environment',repo:'team/repo',prepare:'npm ci',timeout:'120',tests:'npm test'})});

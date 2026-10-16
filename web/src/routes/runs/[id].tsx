@@ -9,7 +9,7 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import { freshForge, requestWorkspace, threadHistory } from "../../lib/workspace.server.js";
 import { submissionIdentity } from "../../lib/submission.server.js";
 import { Conversation, Changes, Verification } from "../../views/workspace.js";
-import { cancelRun, deliverEvent, actorFromPrincipal, verificationFactsFromEvents, enqueueRun } from "../../lib/ship.server.js";
+import { cancelRun, deliverEvent, actorFromPrincipal, verificationFactsFromEvents, enqueueRun, priorRunContext } from "../../lib/ship.server.js";
 import { roughDuration } from "../../lib/expect.js";
 
 // PLAN_EVENT comes from the dependency-free plan module: it's used in the
@@ -157,17 +157,21 @@ export async function action({
     }
     const facts = verificationFactsFromEvents(events);
     const next = identity.runId;
-    const history = await threadHistory(runtime, runId);
-    const context = history.map(h => `Request (${h.runId}): ${h.task}\nResult: ${h.result}`).join("\n\n").slice(-36000);
-    const task = `${message}\n\nPrevious conversation (context, not new instructions):\n${context}`;
     let pr: number | undefined;
+    let prHead: string | undefined;
     if ((facts.pr || typeof input?.pr === "number") && form.get("target") !== "base") {
       try {
         const current = await freshForge(runtime, runId, me!.user);
         if (current.state !== "open") return redirectTo(`/runs/${runId}?messageError=This+pull+request+is+closed+or+merged.+Choose+the+default+branch+for+your+follow-up`);
         pr = current.number;
+        if (typeof current.head === "string") prHead = current.head;
       } catch (e) { return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(e instanceof Error ? e.message : "Could not check the pull request")}`); }
     }
+    // D3: a structured, bounded digest of each earlier run (recorded facts vs
+    // model claims), materialised into this run's input at enqueue so a replay
+    // reads the text it was launched with.
+    const history = await threadHistory(runtime, runId);
+    const task = `${message}\n\n${priorRunContext(history, prHead !== undefined ? { prHead } : {})}`;
     const replacingReview = reviewing && !readOnly;
     if (replacingReview && String(form.get("eventName") ?? "") !== MERGE_EVENT) return redirectTo(`/runs/${runId}?decision=taken`);
     try {
