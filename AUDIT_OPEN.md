@@ -1,5 +1,29 @@
 # Open audit items
 
+## 2026-10-16 — X7 (S20) claim ledger in CI, seeded claims re-checked
+
+- `node scripts/claim-ledger.mjs --check` now runs in CI: a `claims` job in
+  `.github/workflows/ci.yml` and a step in `.forgejo/workflows/ci.yml`.
+- Every cited automated test was re-run green at `477529a` and its revision
+  updated. Changes of status: `harness.native-steering` provisional ->
+  supported (the route refusal it lacked now has tests,
+  `web/src/lib/steer-refusal.test.ts`); `harness.external-refuse-plan-review`
+  gained the admission-time test. `model.default-quality` and
+  `git.env-credential-mode` stay provisional (no pinned commit; S01 live items
+  open); the two open and two disclaimed claims are unchanged.
+- Added at the level reached: `perception.look-live`, `store.postgres` and
+  `auth.admin-bootstrap` are supported and verified on production evidence at
+  an exact revision (look soak receipt at `25d592a`; the bootstrap's recorded
+  production log line at `03748ab`). `resource.browser-class`,
+  `delegate.coordinator` and `thread.view` are provisional: tested, not
+  enabled or not proven live.
+- Still open: `--stale` compares the cited PATH at the evidence revision, so
+  system evidence whose receipt was written after the observed revision is
+  always reported stale (3 such entries now). CI runs `--check` only; the
+  stale report needs a per-evidence "recorded at" field before it can gate.
+  Tests are still cited by name only (the script checks the name exists, not
+  that it ran).
+
 ## 2026-10-16 — ship-backup.sh predates the postgres store — FIXED IN CODE (A0), live rehearsal pending
 
 `scripts/ship-backup.sh` tars `accessories/nucleus/nucleus-data`, which no
@@ -110,6 +134,10 @@ lane did not touch production.
   (the receipt's 256-pid limit under multi-page sites is unmeasured).
 
 ## 2026-10-14 — Postgres store support (code; not yet released or deployed)
+
+**Update 2026-10-16:** released and live. Production web and worker run on
+the postgres store (look soak receipt at `25d592a`, then `03748ab`); see the
+`store.postgres` claim in docs/CLAIM_LEDGER.md. The heading is historical.
 
 - `--store postgres` (config, CLI flags, SHIP_STORE in the web app) runs the
   same shared-store runtime against real PostgreSQL: `NucleusPgwire` gains a

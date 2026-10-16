@@ -9,6 +9,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Claim ledger check (S20)
+        run: node scripts/claim-ledger.mjs --check
+
       - name: Install pnpm
         run: npm install -g pnpm@10
 
