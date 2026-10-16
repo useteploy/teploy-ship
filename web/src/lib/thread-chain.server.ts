@@ -31,8 +31,10 @@ import type { SteerNote } from "teploy-ship/runtime";
 import type { RunMeta } from "teploy-ship/runtime";
 import type { WorkflowEvent } from "@neutron-build/workflow";
 
-/** on/off gate, same shape as missionViewEnabled (mission-view.ts). */
-export function threadViewEnabled(env: Pick<NodeJS.ProcessEnv, "SHIP_THREAD_VIEW"> = process.env): boolean {
+/** on/off gate, same shape as missionViewEnabled (mission-view.ts), but
+ * self-typed: web's ProcessEnv declares no keys, so a Pick<> would demand an
+ * ambient augmentation this package does not carry. */
+export function threadViewEnabled(env: { SHIP_THREAD_VIEW?: string } = process.env): boolean {
   return (env.SHIP_THREAD_VIEW ?? "").trim().toLowerCase() === "on";
 }
 

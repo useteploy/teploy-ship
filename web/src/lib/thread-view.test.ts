@@ -34,19 +34,27 @@ async function launch(runId: string, parentRunId?: string): Promise<void> {
   });
 }
 
+
+/** LoaderArgs carries a context the runtime fills; tests have none to give. */
+const loaderArgsFrom = (get: (id: string) => Request, id: string) =>
+  ({ request: get(id), params: { id }, context: undefined }) as unknown as Parameters<typeof threadRoute.loader>[0];
+
+const loaderArgs = (url: string, id: string) =>
+  ({ request: new Request(url), params: { id }, context: undefined }) as unknown as Parameters<typeof threadRoute.loader>[0];
+
 test("unauthenticated reads are refused before anything else", async () => {
-  const res = await threadRoute.loader({ request: new Request("http://localhost/api/runs/x/thread"), params: { id: "x" } });
+  const res = await threadRoute.loader(loaderArgs("http://localhost/api/runs/x/thread", "x"));
   assert.equal(res.status, 401);
 });
 
 test("flag off (the default): the API says it is disabled, and the run page payload is unchanged", async () => {
   await launch("tv-root");
-  const res = await threadRoute.loader({ request: get("tv-root"), params: { id: "tv-root" } });
+  const res = await threadRoute.loader(loaderArgsFrom(get, "tv-root"));
   assert.equal(res.status, 503);
   assert.match(String((await res.json()).error), /SHIP_THREAD_VIEW/);
   // Equivalence: flag off, the run page loader carries no thread key at all —
   // the page renders exactly what it rendered before this view existed.
-  const off = await runRoute.loader({ params: { id: "tv-root" }, request: new Request("http://localhost/runs/tv-root") });
+  const off = await runRoute.loader(({ request: new Request("http://localhost/runs/tv-root"), params: { id: "tv-root" }, context: undefined }) as unknown as Parameters<typeof runRoute.loader>[0]);
   assert.equal("threadView" in off, false);
 });
 
@@ -57,7 +65,7 @@ test("flag on: the API returns the whole chain for any member, root first", asyn
     await launch("tv-b", "tv-a");
     await launch("tv-c", "tv-b");
     await launch("tv-unrelated");
-    const res = await threadRoute.loader({ request: get("tv-b"), params: { id: "tv-b" } });
+    const res = await threadRoute.loader(loaderArgsFrom(get, "tv-b"));
     assert.equal(res.status, 200);
     assert.equal(res.headers.get("cache-control"), "no-store");
     const body = await res.json();
@@ -88,7 +96,7 @@ test("flag on: the API returns the whole chain for any member, root first", asyn
 test("flag on: an unknown run id is a 404, not an empty chain", async () => {
   process.env.SHIP_THREAD_VIEW = "on";
   try {
-    const res = await threadRoute.loader({ request: get("tv-missing"), params: { id: "tv-missing" } });
+    const res = await threadRoute.loader(loaderArgsFrom(get, "tv-missing"));
     assert.equal(res.status, 404);
     assert.match(String((await res.json()).error), /no such run/);
   } finally {
