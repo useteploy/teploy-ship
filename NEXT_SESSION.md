@@ -30,9 +30,10 @@ X11, G1 task capture; code lanes D1 MCP client, D2 two-way steering, D3
 follow-up continuity, X7). Owner decisions it needs are Decisions 4–10 (E6). The ordered
 lists that used to live here are folded into it.
 
-Standing follow-ups: `scripts/ship-backup.sh` predates the postgres store
-(use `teploy accessory backup` or a cold pgdata tar until fixed — see the
-soak receipt); the soak runbook's stale known-good answers are corrected
+Standing follow-ups: `scripts/ship-backup.sh` now handles the postgres store
+(A0: online `pg_dump` + manifest row counts + scratch-container rehearsal,
+`--cold` for the pgdata tar — docs/BACKUP.md); its first LIVE run + rehearsal
+on infra-home is still owed (A0's exit receipt); the soak runbook's stale known-good answers are corrected
 in the receipt; `SHIP_THREAD_VIEW`/`SHIP_DELEGATE` are merged but NOT yet
 enabled in production (each earns its own one-run flip, the soak's
 pattern); deploy prerequisite reminder — rerun `pnpm run build` + web

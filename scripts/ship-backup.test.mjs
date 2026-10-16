@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
@@ -19,6 +19,11 @@ const script = join(root, "scripts", "ship-backup.sh");
  * where a refusal depends on it seeing a running container. The rehearsal's
  * data recovery needs a real engine and belongs to the operator's live pass.
  * A separate fake checks readiness ordering, without claiming a restore proof.
+ *
+ * The postgres store (A0) is the exception: one real-path test starts a
+ * throwaway pgvector container (never anything named like ship's own) when
+ * docker is reachable and the image is already local — CI without the image
+ * skips it, and the fake-docker tests pin the same commands without it.
  */
 function run(args, env = {}) {
   return spawnSync("bash", [script, ...args], { encoding: "utf8", env: { ...process.env, ...env } });
@@ -243,4 +248,341 @@ echo preflight-after-sql > "$PREFLIGHT_RECEIPT"
   });
   assert.equal(res.status, 0, res.stdout + res.stderr);
   assert.equal(readFileSync(receipt, "utf8").trim(), "preflight-after-sql");
+});
+
+// ---------------------------------------------------------------------------
+// A0: the postgres store. Production runs `--store postgres` (teploy.yml);
+// before this the script died "engine data dir not found" on such an install.
+// ---------------------------------------------------------------------------
+
+/**
+ * A fake docker that records every invocation and plays a running postgres
+ * accessory: pg_dump emits a PGDMP-headed blob, pg_restore --data-only emits
+ * COPY blocks (one with an escaped newline row, which must count as one row).
+ */
+function fakePgDocker(dir, over = {}) {
+  const bin = join(dir, "fakebin");
+  mkdirSync(bin, { recursive: true });
+  const log = join(dir, "docker.log");
+  writeFileSync(
+    join(bin, "docker"),
+    `#!/bin/sh
+printf '%s\\n' "$*" >> "${log}"
+case "$1" in
+  ps)
+    if [ "$2" = "-a" ]; then printf '%b' "\${FAKE_PSA:-}"; else printf '%b' "\${FAKE_PS:-}"; fi ;;
+  inspect)
+    case "$*" in
+      *State.Running*) echo "\${FAKE_PG_RUNNING:-true}" ;;
+      *Config.Image*) echo "pgvector/pgvector:0.8.0-pg17" ;;
+      *Mounts*) echo "" ;;
+      *.Path*) echo "\${FAKE_WRITER_ARGS:-}" ;;
+      *) exit 1 ;;
+    esac ;;
+  image) exit 0 ;;
+  run) cat >/dev/null; exit 0 ;;
+  exec)
+    case "$*" in
+      *"printenv POSTGRES_DB"*) echo ship ;;
+      *"printenv POSTGRES_USER"*) echo ship ;;
+      *pg_dump*) [ -z "\${FAKE_PG_DUMP_FAIL:-}" ] || exit 3; printf 'PGDMP\\001\\016\\000fake-custom-format-body' ;;
+      *"pg_restore --data-only"*)
+        cat >/dev/null
+        printf 'SET x = 1;\\nCOPY public.ship_docs (id, body) FROM stdin;\\na\\t{}\\nb\\tline1\\\\nline2\\n\\\\.\\n\\nCOPY public.ship_stream (id) FROM stdin;\\n\\\\.\\n' ;;
+      *"SHOW server_version"*) echo "17.6 (Debian 17.6-1.pgdg120+1)" ;;
+      *) exit 9 ;;
+    esac ;;
+  *) exit 1 ;;
+esac
+`,
+  );
+  chmodSync(join(bin, "docker"), 0o755);
+  // Shadow any host pg_restore: the fake dump body is not a real archive.
+  writeFileSync(join(bin, "pg_restore"), `#!/bin/sh\nprintf 'pg_restore %s\\n' "$*" >> "${log}"\n[ "$1" = "--list" ]\n`);
+  chmodSync(join(bin, "pg_restore"), 0o755);
+  return { env: { PATH: `${bin}:${process.env.PATH}`, ...over }, log };
+}
+
+test("postgres (fake docker): online pg_dump inside the accessory, counts read back from the archive, no stop asked", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ship-backup-pg-"));
+  try {
+    writeFileSync(join(dir, "teploy.yml"), "processes:\n  # web: web --store nucleus (old)\n  web: web --store postgres --port 7460\n");
+    // A running writer must NOT block an online dump (pg_dump is one snapshot).
+    const fake = fakePgDocker(dir, { FAKE_PS: "ship-web-abc\\tship:v1\\tc1\\nship-postgres\\tpgvector/pgvector:0.8.0-pg17\\tc2\\n" });
+    const res = run(["backup", "--label", "pg"], { SHIP_ROOT: dir, ...fake.env });
+    assert.equal(res.status, 0, res.stderr);
+    assert.match(res.stderr, /store: postgres/);
+    const calls = readFileSync(fake.log, "utf8");
+    assert.match(calls, /^exec ship-postgres pg_dump -Fc -U ship -d ship$/m, "pg_dump runs inside the accessory, custom format");
+    assert.doesNotMatch(calls, /\bstop\b|\brm\b/, "an online dump stops and removes nothing");
+    const found = readdirSync(join(dir, "_backups"));
+    assert.equal(found.length, 1);
+    const dest = join(dir, "_backups", found[0]);
+    assert.ok(existsSync(join(dest, "ship-pg.dump.sha256")));
+    const manifest = readFileSync(join(dest, "manifest.txt"), "utf8");
+    assert.match(manifest, /^store: postgres$/m);
+    assert.match(manifest, /^pg-image: pgvector\/pgvector:0\.8\.0-pg17$/m);
+    assert.match(manifest, /^database: ship$/m);
+    assert.match(manifest, /^  public\.ship_docs  2$/m, "an escaped-newline row is still one row");
+    assert.match(manifest, /^  public\.ship_stream  0$/m, "empty tables are recorded, not dropped");
+    assert.match(manifest, /ship-web-abc\s+ship:v1/, "manifest records the containers docker saw");
+
+    const verified = run(["verify", join(dest, "ship-pg.dump")], { SHIP_ROOT: dir, ...fake.env });
+    assert.equal(verified.status, 0, verified.stderr);
+    assert.match(verified.stdout, /PGDMP header/);
+
+    // NEGATIVE CONTROL: a flipped byte fails the checksum, PGDMP header or not.
+    const bytes = readFileSync(join(dest, "ship-pg.dump"));
+    bytes[bytes.length - 1] ^= 0xff;
+    writeFileSync(join(dest, "ship-pg.dump"), bytes);
+    const bad = run(["verify", join(dest, "ship-pg.dump")], { SHIP_ROOT: dir, ...fake.env });
+    assert.notEqual(bad.status, 0);
+    assert.match(bad.stderr, /checksum mismatch/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("postgres (fake docker): a failed pg_dump leaves no backup dir behind and exits non-zero", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ship-backup-pg-"));
+  try {
+    const fake = fakePgDocker(dir, { FAKE_PG_DUMP_FAIL: "1" });
+    const res = run(["backup", "--label", "pg", "--store", "postgres"], { SHIP_ROOT: dir, ...fake.env });
+    assert.notEqual(res.status, 0);
+    assert.match(res.stderr, /pg_dump failed/);
+    assert.deepEqual(readdirSync(join(dir, "_backups")), [], "the failed run's own partial output is removed so the slot is free");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("postgres (fake docker): a stopped accessory refuses the online dump and names --cold", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ship-backup-pg-"));
+  try {
+    const fake = fakePgDocker(dir, { FAKE_PG_RUNNING: "false" });
+    const res = run(["backup", "--store", "postgres"], { SHIP_ROOT: dir, ...fake.env });
+    assert.notEqual(res.status, 0);
+    assert.match(res.stderr, /not running.*--cold/);
+    assert.ok(!existsSync(join(dir, "_backups")));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("postgres --cold refuses while ship containers (incl. the engine) run, like the nucleus tar", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ship-backup-pg-"));
+  try {
+    mkdirSync(join(dir, "accessories", "postgres", "pgdata"), { recursive: true });
+    writeFileSync(join(dir, "accessories", "postgres", "pgdata", "PG_VERSION"), "17\n");
+    const fake = fakePgDocker(dir, { FAKE_PS: "ship-postgres\\tpgvector/pgvector:0.8.0-pg17\\tc2\\n" });
+    const refused = run(["backup", "--cold"], { SHIP_ROOT: dir, ...fake.env });
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, /docker stop ship-postgres/);
+    assert.ok(!existsSync(join(dir, "_backups")));
+    const attested = run(["backup", "--cold", "--label", "cold", "--i-stopped-writers"], { SHIP_ROOT: dir, ...fake.env });
+    assert.equal(attested.status, 0, attested.stderr);
+    const archive = join(dir, "_backups", readdirSync(join(dir, "_backups"))[0], "pgdata-full.tgz");
+    const listing = spawnSync("tar", ["-tzf", archive], { encoding: "utf8" }).stdout;
+    assert.match(listing, /^pgdata\/PG_VERSION$/m, "cold archive roots at pgdata/");
+    assert.equal(run(["verify", archive], { SHIP_ROOT: dir, ...fake.env }).status, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("store detection: writer args beat leftover accessories; conflicting accessories refuse; nothing found refuses", () => {
+  const { dir } = makeFakeRoot(); // has the nucleus data dir
+  try {
+    // A burn-in box: nucleus data still on disk, but the writers run postgres.
+    const fake = fakePgDocker(dir, {
+      FAKE_PS: "ship-web-new\\tship:v2\\tc1\\n",
+      FAKE_WRITER_ARGS: "teploy-ship web --store postgres --port 7460",
+    });
+    const dry = run(["backup", "--dry-run"], { SHIP_ROOT: dir, ...fake.env });
+    assert.equal(dry.status, 0, dry.stderr);
+    assert.match(dry.stderr, /store: postgres — writer args \(ship-web-new\)/);
+    assert.match(dry.stdout, /ship-pg\.dump/);
+
+    mkdirSync(join(dir, "accessories", "postgres", "pgdata"), { recursive: true });
+    const noWriters = fakePgDocker(dir, {});
+    const ambiguous = run(["backup", "--dry-run"], { SHIP_ROOT: dir, ...noWriters.env });
+    assert.notEqual(ambiguous.status, 0);
+    assert.match(ambiguous.stderr, /ambiguous store.*--store/);
+    const stated = run(["backup", "--dry-run", "--store", "nucleus"], { SHIP_ROOT: dir, ...noWriters.env });
+    assert.equal(stated.status, 0, stated.stderr);
+    assert.match(stated.stdout, /nucleus-data-full\.tgz/);
+
+    const empty = mkdtempSync(join(tmpdir(), "ship-backup-empty-"));
+    try {
+      const none = run(["backup", "--dry-run"], { SHIP_ROOT: empty, ...fakePgDocker(empty, {}).env });
+      assert.notEqual(none.status, 0);
+      assert.match(none.stderr, /could not tell which store/);
+    } finally {
+      rmSync(empty, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("NEGATIVE CONTROL: the nucleus path is unchanged under the same fake docker — no pg_dump, same archive and manifest shape", () => {
+  const { dir } = makeFakeRoot();
+  try {
+    const fake = fakePgDocker(dir, {});
+    const res = run(["backup", "--label", "proof"], { SHIP_ROOT: dir, ...fake.env });
+    assert.equal(res.status, 0, res.stderr);
+    assert.doesNotMatch(res.stderr, /store: postgres/);
+    assert.doesNotMatch(readFileSync(fake.log, "utf8"), /pg_dump|pg_restore/);
+    const archive = onlyArchive(join(dir, "_backups"));
+    const manifest = readFileSync(join(dirname(archive), "manifest.txt"), "utf8");
+    assert.deepEqual(
+      manifest.split("\n").map((l) => l.split(":")[0]).filter((k) => /^[a-z0-9-]+$/.test(k)),
+      ["date", "hostname", "ship-root", "data-dir", "archive", "bytes", "sha256"],
+      "the nucleus manifest keys are exactly the pre-A0 set (no store/method lines added)",
+    );
+    assert.match(res.stdout, /^backup complete: .*nucleus-data-full\.tgz \(\d+ bytes, sha256 [0-9a-f]{64}\)$/m);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- real path: a throwaway postgres in docker ------------------------------
+
+const PG_IMAGE = "pgvector/pgvector:0.8.0-pg17";
+
+function dockerReady() {
+  if (spawnSync("docker", ["info"], { stdio: "ignore" }).status !== 0) return "docker not reachable";
+  if (process.env.SHIP_BACKUP_PG_IT !== "1" && spawnSync("docker", ["image", "inspect", PG_IMAGE], { stdio: "ignore" }).status !== 0) {
+    return `${PG_IMAGE} not present locally (set SHIP_BACKUP_PG_IT=1 to pull it)`;
+  }
+  return undefined;
+}
+
+function docker(args, input) {
+  return spawnSync("docker", args, { encoding: "utf8", input });
+}
+
+function psql(container, sql) {
+  const res = docker(["exec", "-i", container, "psql", "-v", "ON_ERROR_STOP=1", "-h", "127.0.0.1", "-U", "ship", "-d", "ship", "-tA"], sql);
+  assert.equal(res.status, 0, res.stderr);
+  return res.stdout.trim();
+}
+
+function waitForPg(container) {
+  for (let i = 0; i < 120; i++) {
+    if (docker(["exec", container, "psql", "-h", "127.0.0.1", "-U", "ship", "-d", "ship", "-tAc", "SELECT 1"]).status === 0) return;
+    spawnSync("sleep", ["1"]);
+  }
+  throw new Error(`${container} did not come up`);
+}
+
+function proofContainers() {
+  return docker(["ps", "-a", "--format", "{{.Names}}"]).stdout.split("\n").filter((n) => n.startsWith("ship-backup-proof-"));
+}
+
+test("postgres REAL PATH: dump a live throwaway postgres, verify, rehearse, restore; tampered manifest fails; cold tar boots", (t) => {
+  const why = dockerReady();
+  if (why !== undefined) {
+    t.skip(why);
+    return;
+  }
+  // Bind mounts need a host path the docker VM can see: on macOS the VM
+  // (colima, Docker Desktop) shares $HOME, not the /var/folders tmpdir.
+  const base = process.env.SHIP_BACKUP_IT_TMP ?? (process.platform === "darwin" ? join(homedir(), ".cache", "ship-backup-it") : tmpdir());
+  mkdirSync(base, { recursive: true });
+  const dir = mkdtempSync(join(base, "ship-backup-pg-it-"));
+  const live = `ship-backup-it-pg-${process.pid}`;
+  const pgdata = join(dir, "accessories", "postgres", "pgdata");
+  mkdirSync(pgdata, { recursive: true });
+  const before = new Set(proofContainers());
+  let restored;
+  try {
+    const up = docker(["run", "-d", "--name", live, "-e", "POSTGRES_DB=ship", "-e", "POSTGRES_USER=ship", "-e", "POSTGRES_PASSWORD=pw", "-v", `${pgdata}:/var/lib/postgresql/data`, PG_IMAGE]);
+    assert.equal(up.status, 0, up.stderr);
+    waitForPg(live);
+    psql(
+      live,
+      `CREATE EXTENSION vector;
+       CREATE TABLE ship_docs (id text PRIMARY KEY, body jsonb);
+       INSERT INTO ship_docs SELECT 'd' || g, jsonb_build_object('n', g) FROM generate_series(1, 5) g;
+       INSERT INTO ship_docs VALUES ('multi', '{"note": "line1\\nline2"}');
+       CREATE TABLE ship_kv (k text PRIMARY KEY, v text);
+       INSERT INTO ship_kv VALUES ('a', E'has\\nnewline'), ('b', 'tab\there');
+       CREATE TABLE ship_stream (id bigserial PRIMARY KEY, payload text);
+       CREATE TABLE ship_vec (id int PRIMARY KEY, embedding vector(3));
+       INSERT INTO ship_vec VALUES (1, '[1,2,3]'), (2, '[4,5,6]'), (3, '[7,8,9]');`,
+    );
+    writeFileSync(join(dir, "teploy.yml"), "processes:\n  web: web --store postgres --port 7460\n");
+    const bin = join(dir, "bin");
+    mkdirSync(bin);
+    const preflightLog = join(dir, "preflight.log");
+    writeFileSync(join(bin, "ship-proof"), `#!/bin/sh\nprintf '%s|%s|%s\\n' "$*" "$NUCLEUS_URL" "\${PGPASSWORD:+set}" > "${preflightLog}"\n`);
+    chmodSync(join(bin, "ship-proof"), 0o755);
+    const env = { SHIP_ROOT: dir, SHIP_PG_CONTAINER: live, SHIP_BIN: join(bin, "ship-proof"), SHIP_REHEARSE_TIMEOUT_S: "120" };
+
+    const backup = run(["backup", "--label", "pg"], env);
+    assert.equal(backup.status, 0, backup.stdout + backup.stderr);
+    assert.match(backup.stderr, /store: postgres — teploy\.yml/);
+    const dest = join(dir, "_backups", readdirSync(join(dir, "_backups"))[0]);
+    const dump = join(dest, "ship-pg.dump");
+    const manifest = readFileSync(join(dest, "manifest.txt"), "utf8");
+    for (const [table, n] of [["ship_docs", 6], ["ship_kv", 2], ["ship_stream", 0], ["ship_vec", 3]]) {
+      assert.match(manifest, new RegExp(`^  public\\.${table}  ${n}$`, "m"), `${table} count ${n} in manifest`);
+    }
+    assert.match(manifest, /^pg-server-version: 17\./m);
+
+    const verified = run(["verify", dump], env);
+    assert.equal(verified.status, 0, verified.stderr);
+    assert.match(verified.stdout, /pg_restore --list/, "verify listed the TOC with a real pg_restore");
+
+    const rehearsed = run(["rehearse", dump], env);
+    assert.equal(rehearsed.status, 0, rehearsed.stdout + rehearsed.stderr);
+    assert.match(rehearsed.stdout, /ok\s+public\.ship_docs\s+6/);
+    assert.match(rehearsed.stdout, /ok\s+public\.ship_vec\s+3/);
+    assert.match(rehearsed.stdout, /rehearsal passed/);
+    const pf = readFileSync(preflightLog, "utf8");
+    assert.match(pf, /^preflight --store postgres\|postgres:\/\/ship@127\.0\.0\.1:\d+\/ship\?sslmode=disable\|set$/m, "preflight ran against the scratch copy, password via PGPASSWORD not the URL");
+    assert.deepEqual(proofContainers().filter((n) => !before.has(n)), [], "rehearse removed its proof container");
+
+    // NEGATIVE CONTROL: the same dump against a manifest that claims one more row.
+    const tampered = join(dir, "tampered");
+    mkdirSync(tampered);
+    copyFileSync(dump, join(tampered, "ship-pg.dump"));
+    copyFileSync(`${dump}.sha256`, join(tampered, "ship-pg.dump.sha256"));
+    writeFileSync(join(tampered, "manifest.txt"), manifest.replace(/^  public\.ship_docs  6$/m, "  public.ship_docs  7"));
+    const caught = run(["rehearse", join(tampered, "ship-pg.dump")], env);
+    assert.notEqual(caught.status, 0, "a count mismatch must fail the rehearsal");
+    assert.match(caught.stderr, /MISMATCH\s+public\.ship_docs\s+manifest 7, restored 6/);
+    assert.deepEqual(proofContainers().filter((n) => !before.has(n)), [], "a failed rehearsal still removes its proof container");
+
+    // restore: a NEW scratch container, left running, never the live one.
+    const refusedLive = run(["restore", dump, "--name", live], env);
+    assert.notEqual(refusedLive.status, 0);
+    assert.match(refusedLive.stderr, /IS the live postgres accessory/);
+    const res = run(["restore", dump], env);
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    restored = /NEW scratch container: (\S+)/.exec(res.stdout)?.[1];
+    assert.ok(restored, res.stdout);
+    assert.equal(psql(restored, "SELECT count(*) FROM ship_kv WHERE v LIKE E'has\\n%'"), "1", "row content survives, not just counts");
+    assert.equal(psql(live, "SELECT count(*) FROM ship_docs"), "6", "the live store is untouched");
+
+    // cold: refuse while the engine runs, then tar the stopped pgdata and boot it.
+    const coldRefused = run(["backup", "--cold", "--label", "cold"], env);
+    assert.notEqual(coldRefused.status, 0);
+    assert.match(coldRefused.stderr, new RegExp(`docker stop .*${live}`));
+    assert.equal(docker(["stop", live]).status, 0);
+    const cold = run(["backup", "--cold", "--label", "cold", "--i-stopped-writers"], env);
+    assert.equal(cold.status, 0, cold.stdout + cold.stderr);
+    const coldArchive = join(dir, "_backups", `cold-${readdirSync(join(dir, "_backups")).find((d) => d.startsWith("cold-")).slice(5)}`, "pgdata-full.tgz");
+    const coldRehearsed = run(["rehearse", coldArchive], env);
+    assert.equal(coldRehearsed.status, 0, coldRehearsed.stdout + coldRehearsed.stderr);
+    assert.match(coldRehearsed.stdout, /public\.ship_docs\s+6/);
+    assert.deepEqual(proofContainers().filter((n) => !before.has(n)), []);
+  } finally {
+    docker(["rm", "-f", live]);
+    if (restored !== undefined) docker(["rm", "-f", restored]);
+    // pgdata is owned by the container's uid; remove through a container.
+    docker(["run", "--rm", "-v", `${dir}:/w`, "--entrypoint", "sh", PG_IMAGE, "-c", "rm -rf /w/accessories /w/_backups"]);
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
