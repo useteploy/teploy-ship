@@ -1,6 +1,6 @@
 # Teploy Ship capability and improvement plan
 
-Updated September 30, 2026.
+Updated September 30, 2026. End state and execution backlog added October 16, 2026 (see "End state and execution backlog").
 
 Build Ship into the most capable agnostic software engineering system we can reasonably design and maintain. It should understand software, answer questions, plan, create and improve applications, review changes, coordinate work, operate tools and computers, deliver releases and investigate failures. These are all first-class capabilities. The product direction is broad; the implementation sequence follows dependencies and evidence.
 
@@ -461,6 +461,291 @@ Use capability flags and staged rollout for material runtime, model and policy c
 **Lifecycle and organisation gate:** supported delivery/telemetry paths, incident recovery, organisation authority and heterogeneous execution are demonstrated under normal and failure conditions.
 
 These gates define supported capabilities, not product scope cuts. A public “most capable” claim requires evidence against the relevant alternatives on named dimensions. The design ambition itself needs no competitor accounts, and optional head-to-head trials do not block implementation.
+
+## End state and execution backlog (2026-10-16)
+
+This section turns S01–S28 into a ranked, dependency-ordered backlog with
+concrete slices, flags, soaks and gates. It is part of this plan, not a second
+one: every slice names the package it advances, and results are recorded in
+the execution tables below and in `AUDIT_OPEN.md` as before. Slice IDs here
+(A/D/B/C/Q/L/O/X/G) are backlog handles; the package (Sxx) remains the unit of
+record. Each slice gets a full specification under "Slice specifications"
+when it is picked up (slice discipline above), and that specification freezes
+its numeric thresholds and rubric before any acceptance run. The rows here
+are the scaffold for that, not a substitute.
+
+Source state at writing: origin/main `dfc7920`, production web+worker
+`03748ab` (postgres store), one sandbox host in `SHIP_SANDBOX_URL`,
+`SHIP_MAX_RUN_COST_USD` unset (no per-run cap), harness unset (= native), live
+flags `SHIP_LOOK=1` + `SHIP_LOOK_IMAGE_MODEL=zai/glm-5.3-flash`, shadows
+(`SHIP_BUDGET_RESERVATION`, `SHIP_MODEL_ROUTING`, `SHIP_PLACEMENT`,
+`SHIP_TOOL_MANIFEST`, `SHIP_KNOWLEDGE_PROVENANCE`, `SHIP_POLICY_SHADOW`)
+recording since 2026-10-04. Slack and Linear signing secrets are set on
+production; whether a Slack app or Linear webhook targets them is unverified.
+Flag value grammar differs by flag (`SHIP_THREAD_VIEW` accepts only `on`;
+`SHIP_DELEGATE` accepts only `1`/`true`/`yes`); every row below states the
+value the parser accepts.
+
+### E0 The end state, defined so it can be measured
+
+Ship's end state is one product serving three modes from the same task,
+authority and evidence records. Each mode has its own gate; "done" means the
+gate passes, not that features exist.
+
+| Mode | What it means | Gate |
+| --- | --- | --- |
+| Interactive daily driver | Tyler's repo-bound work moves from T3 Code to Ship: ask, steer mid-run, follow up, see the app, merge | G1 daily-driver parity gate (E4) |
+| Unattended background agent | Tickets, events and schedules become merged changes without plumbing interventions | G2 overseer metrics. Provisional targets from the private umbrella note `../_internal/ORCHESTRATION_TARGET_STATE.md`: >70% of sent items closed with zero human edits (merged, not reverted in 7 days); <10 interventions per week; auto-merge revert rate <3%; cost per merged PR known per repo. A four-week baseline is measured first and the targets are re-frozen against it (evaluation rules above) |
+| Delivery loop | Task → PR → preview → perception check → approved deploy → observation → rollback, with receipts | G3 flagship journey receipt (L4) plus S14/S15/S27 acceptance |
+
+Non-goals for this backlog: non-repo desktop automation for its own sake
+(computer use exists to verify software Ship builds), a sidebar/sans-serif
+redesign (rejected 2026-09-19), and building a feature because a competitor
+names it (slice discipline). Cross-provider fan-out and simulator/device work
+stay in T3 Code for now: simulator/device targets (C6, C7) wait on Decision 8,
+and wider agent coverage (D8) and per-child model routes (C4 after Q9) wait
+on evidence.
+
+### E1 Competitive position, verified 2026-10-16
+
+Ship side verified against source at `dfc7920` and production; competitor
+side from official docs and releases checked 2026-10-16 (Devin release notes
+Jul 1 – Oct 14 2026 and docs; Vorflux landing page only, it publishes no docs
+or changelog; T3 Code repo and v0.1.0 release of 2026-10-15). Competitor
+documentation is a reference capability, not measured quality.
+
+| Dimension | Ship today | Devin | Vorflux | T3 Code |
+| --- | --- | --- | --- | --- |
+| MCP client | None in the loop; S24 manifest is shadow-only | Yes, org config, one-click OAuth servers, admin allowlist | Unverified | Yes (client and server) |
+| Mid-run steering | One-way notes into the native loop (`durable.ts:2066`); refused for claude-code/opencode | Side chats, Slack thread follow-ups, voice, terminal tab | Unverified | Steer-or-queue server queue |
+| Delegation | `SHIP_DELEGATE` off; depth 1, cap 2 (ceiling 16), one box | Nested sub-sessions inheriting context | Parallel sub-agents, cross-lab planner/reviewer | `delegate_task` to any provider/model, fork/merge-back |
+| Compute | Static Linux container pool, one host | Cloud VMs XS–XL, Windows (limited), macOS, Outposts | Dedicated cloud machines priced per hour | The user's own machines |
+| Integrations | Slack/Linear/GitHub/Forgejo/Observe intake; Slack/webhook out | Slack, Teams, Linear, Jira, GitHub/GitLab/Bitbucket/Azure, PagerDuty | Slack, Linear, GitHub, Jira, Sentry, Datadog | GitHub PRs incl. stacked |
+| Skills/knowledge | Per-repo playbook (`SHIP.md`/`AGENTS.md`/`CLAUDE.md`, 4k chars) + run notes; S21 provenance shadow | Skills, playbooks, memory with nightly consolidation | Harness practices + memory | The provider's own |
+| Event triggers | CI failure on Ship PRs, PR comments/reviews, labelled issues, Observe alerts, interval/`at` schedules | Schedules, webhooks, GitLab/Jira/PagerDuty/Slack triggers, PR autoreview | Schedules, webhooks, Sentry | Schedules, webhooks, PR watch |
+| Perception | Browser text + image `look` live; takeover console/editor/browser | Linux desktop + Windows desktop computer use, recordings | Browser QA with video on the PR | Browser preview tools, simulator/emulator control |
+| Harnesses | native, claude-code, opencode 1.x (v2 refused); no Codex | Devin only | Own harness; Codex subscription accepted | Claude Code, Codex, Cursor, OpenCode 2, Grok, Pi, any ACP agent |
+| Governance/evidence | Plan parks, merge gates, exact-revision evidence, graders, receipts, routing data gates | Admin controls, autoreview | Merge-risk score with block threshold | None of its own |
+| Self-host | Full control plane | Enterprise VPC, Outposts (sales-gated) | Not found | Local, MIT |
+| Cost | ~$0.012–0.127 per run priced on glm-5.3, compute excluded | ACU plans | Server per hour + per-token platform fee | Free; bring subscriptions |
+
+Ship leads on governance/evidence and full self-hosted control, and is the
+only one that owns a deploy path. It trails T3 Code on interactive control
+and harness breadth (T3's v0.1.0 shipped steering, cross-provider delegation,
+PR watch and webhooks on 2026-10-15), and trails Devin on compute targets,
+trigger breadth and skills.
+
+### E2 Activation ladder — turning on what is already built
+
+A large part of the end state is merged code that is off. Each flip below
+earns its own one-run soak on the 2026-10-16 pattern (`docs/SOAK_2026-10-16.md`
+§7): verified backup, rebuilt `dist` and web build, coordinated redeploy (env
+is baked at container create), waiting runs intact, a receipt under
+`evals/receipts/`. Revert is always unsetting the flag and redeploying.
+
+| ID | Flag or item | Package | Prerequisite | One-run soak | Pass criteria |
+| --- | --- | --- | --- | --- | --- |
+| A0 | `scripts/ship-backup.sh` postgres support | S19 | none | Back up and rehearse a restore of the live store | Archive + sha256 + rehearsal receipt; every later flip depends on it |
+| A1 | `SHIP_THREAD_VIEW=on` (web only; `1` leaves it off) | S03 | A0 | One task, two steering notes mid-run | Thread API no longer 503; notes and agent turns in order; worker logs unchanged |
+| A2 | Shadow review: policy, placement, tool manifest, knowledge provenance, budget reservation, model routing | S11, S21, S23–S26 | 12+ days of shadow logs | `policy shadow-report`, `placement shadow-report`, worker-log routing selections, provenance/manifest JSONL | A written disposition per shadow (stay shadow / build the missing piece / promote). Two are pre-decided: `SHIP_BUDGET_RESERVATION=on` is refused off the file runtime, so it stays shadow until C8; `SHIP_MODEL_ROUTING=on` would refuse every private-repo run under Decision 1, so it stays shadow until Q9 (Decision 1 here is the existing 2026-10-05 routing decision) |
+| A3 | `SHIP_SAFE_FETCH=on` (default is shadow) | S01 | A2 log review | One run that fetches from a forge | No false refusals in the reviewed shadow log; real forge calls pass |
+| A4 | `SHIP_MAX_RUN_COST_USD` set, `SHIP_MAX_CONCURRENT_RUNS` pinned, then `SHIP_DELEGATE=1` on web and worker (materialised at enqueue, and the web container enqueues UI tasks), `SHIP_DELEGATE_MAX=2` | S22, S11 | A0 | One task that splits into two independent parts | Two children run in turn (a delegate action spawns one child and the parent parks, releasing its slot, `docs/DEPLOY.md` `SHIP_DELEGATE`); each child is a browser-class run while `SHIP_LOOK=1` (~0.9 GB, `src/resource-class.ts:36,41`) and the parked parent's container can stay on the host until restore (`durable.ts:2681`) while admission counts only in-flight runs, so sandbox host free memory is sampled through the run and never falls below 300 MB; a forced grandchild attempt refused (`DELEGATE_CHILD_REFUSED`); child results arrive as context transfers; each run under the cap (the cap is per run, so a tree can spend 3× it until C8 adds child scopes); the parent's PR parks at approve-merge and any child PRs are listed in the receipt |
+| A5 | `SHIP_PLAN_GROUNDING=on`, `SHIP_FINDING_CONTINUITY=on`, `SHIP_TEST_INTEGRITY_SURFACING=shadow`→`on` | S07–S09 | A0 | One plan-parked change run; two review runs on successive revisions of one PR (continuity only affects review runs); replay of a run parked at approve-merge from before the change | Advisory blocks render with correct content; continuity classifies the second review against the first; the pre-change parked run resumes and completes. Surfacing reads the environment at publish rather than from the run input (`durable.ts:3258`) and can add a `verification` step the fingerprint check admits unflagged, so that replay is the check that matters; integrity shadow log reviewed before `on` |
+| A6 | `SHIP_SCHEDULE_OVERLAP=on` | S16 | A0 | One schedule whose interval is shorter than its run | Overlap `skip` observed; no duplicate run |
+| A7 | `SHIP_MISSION_VIEW=on`, `SHIP_STACK_DETECT=on`, `SHIP_HARNESS_RECORD=on` | S22, S05, S13 | A0 | Open a coordination page, a setup page, one run page | Read-only views render on real data; no behaviour change |
+| A8 | `SHIP_GIT_CREDENTIAL=env` live proof then default flip | S01 | teploy-sandbox daemon per-exec env forwarding and sandbox image git ≥ 2.31 (verify; fix in teploy-sandbox if absent — wave 7 ops) | Private-repo clone + push on Forgejo and GitHub | Token absent from argv, config, logs and snapshot (existing S01 spec) |
+| A9 | `SHIP_DEPLOY_ADAPTER=teploy` live proof | S27 | scratch destination provisioned on compute-1 (wave 7 ops) | One approved deploy + readback + rollback | Approved bytes reach the target and read back (existing S27 row) |
+
+Needing code before any flip: `SHIP_INTEGRATION_CHECK` (worker tree
+provisioning, X5), `SHIP_TOOL_MANIFEST=on` (executor must report host/secret
+effects; folds into D1), `SHIP_MODEL_ROUTING=on` (Q9). Preview is requested
+by `SHIP_PREVIEW` (environment or published deployment asks) or by
+`project.verification.preview` (`src/runtime.ts:1242`), and only runs with
+`SHIP_PREVIEW_DIR` on the worker; until L3 lands, withhold all three.
+
+### E3 Build backlog
+
+Size is a rough guide (S under a day, M a few days, L a week or more of
+agent-lane work); it is replaced by the slice specification's own estimate.
+"Verify first" means part of it may exist and the slice starts by measuring
+the gap. New flag names were checked against source on 2026-10-16 and do not
+collide; where a near-neighbour exists the slice extends it.
+
+**D — interactive daily driver (gate G1).** Production runs the native loop,
+so interactive work lands there first; harness adapters follow.
+
+| ID | Slice | Package | Depends | Flag | Acceptance | Size |
+| --- | --- | --- | --- | --- | --- | --- |
+| D1 | MCP client in the native loop: servers declared per project through the S24 manifest (stdio inside the sandbox, remote HTTP through the egress allowlist), tools exposed with declared effects; read-only by default, write tools need a grant; secrets via the credential layer; remote servers inherit the routing data-class gate | S24, S13, S01 | A2; Decision 6 for remote servers | `SHIP_MCP` | A run calls a declared MCP tool; an undeclared tool and an injected instruction in tool output are refused; per-call latency/cost recorded; default-off equivalence | L |
+| D2 | Two-way steering: the agent can reply into the thread; each operator message is steer-now or queue-for-next-turn; interrupt the current action | S03, S13 | A1 | `SHIP_STEER_REPLY` | A mid-run question is answered without restarting the run; a queued message is applied at the next turn and not before; an interrupt during a command leaves the run in a state whose external effects are read back and recorded as done, not done or unknown (S11) | M |
+| D3 | Follow-up continuity (verify first: follow-ups exist and target the existing PR, `docs/WORKSPACE.md:46-50`): measure whether the follow-up carries enough prior context | S03 | none | none expected | A follow-up on a finished run edits the same PR from the recorded head without the requester restating context; gap list recorded if not | S–M |
+| D4 | Interactive latency: extend `SHIP_WARM_CACHE`/`SHIP_WARM_PARKS` into a warm workspace per thread; record time-to-first-edit and wall time (S28). Plan review is unchanged for change tasks; only read-only modes may run without a plan park, under an explicit project policy, never by classifying the request | S06, S11, S28 | none | extends existing warm flags | Wall time to a correct result on the G1 set within the E4 threshold; plan floor unchanged for every change task (negative control: a "trivial" change request still parks) | M |
+| D5 | Live view: read-only terminal stream and running diff on the run page | S12, S10 | A1 | none (read-only) | p95 delay from sandbox output to page ≤ 5 s on the soak run; diff matches the workspace tree at the same instant | M |
+| D6 | OpenCode v2 adapter + `--session` resume steering (contract in `evals/receipts/2026-10-14-opencode-v2-events.txt`) | S13 | none | per-project harness | v2 passes the declared journeys; steering consumed via session resume; v1 path retained until parity | M |
+| D7 | Claude Code steering through session resume | S13 | D2 | per-project harness | Steering notes reach a claude-code run; capability table updated from `refused` | S–M |
+| D9 | Fork a run and stacked PRs | S03, S09 | D3 | none | A fork keeps its parent's history; a stacked PR rebases correctly when its base merges | M |
+| D10 | Mobile-usable run/thread pages + push notifications for parks and finished runs | S04, S10 | A1 | none | 390px run/thread journey passes `ui-audit`; a park notification arrives and its deep link opens the decision | S–M |
+| D11 | User-facing live preview of the app under change | S08, S04 | L3 | `SHIP_PREVIEW_VIEW` | Revision-bound preview reachable only by project members; stale preview refused | M |
+
+**B — background autonomy and events (gate G2).**
+
+| ID | Slice | Package | Depends | Flag | Acceptance | Size |
+| --- | --- | --- | --- | --- | --- | --- |
+| B1 | PR watch (verify first: CI-failure and review intake exist): add conflicts and check status on Ship's own open PRs waking the owning task, with bounded polling for forges without webhooks | S16, S09 | none | `SHIP_PR_WATCH` | A merge conflict and a failing check each produce exactly one revision on the same PR; zero model calls while a watched PR is idle | M |
+| B2 | Generic event rules: typed event → condition → task template, dedupe/debounce, dry run; signed intake reuses the `SHIP_EVENT_ENVELOPE` format | S16, S24 | B1 | `SHIP_EVENT_RULES` | Duplicate and out-of-order events produce one task; dry run shows the would-be task | M–L |
+| B3 | `at` schedule UI and API (maths exists, `src/schedule-time.ts`) | S16 | A6 | none | Create/edit/pause an `at` schedule; DST case correct | S |
+| B4 | Slack thread conversation: replies in the thread steer the bound run; results post back to the thread | S04, S25 | D2, B6, Slack-user to Ship-user mapping with revocation | none | A mapped user's thread reply reaches the run as steering; an unmapped or revoked user's reply is refused; result appears in thread | M |
+| B5 | Standing tasks: reusable maintenance templates (dependency updates, flaky-test triage) | S16, S24 | B2 | none | A standing task runs on schedule, delivers, and can be paused/retired | M |
+| B6 | Point a real Slack app and Linear webhook at the existing intake; set `SHIP_SLACK_WEBHOOK_URL` | S04 | Decision 7 | none | One Slack mention and one labelled Linear issue each become a task | S |
+
+**C — capacity and compute.**
+
+| ID | Slice | Package | Depends | Flag | Acceptance | Size |
+| --- | --- | --- | --- | --- | --- | --- |
+| C1 | Second sandbox host (Proxmox VM) added to `SHIP_SANDBOX_URL` | S26 | Decision 4 | none | Least-loaded placement uses both; one host down still admits work | S |
+| C2 | Host drain; liveness failure distinguished from TTL expiry | S26 | C1 | none | Draining host finishes runs and takes no new ones; dead host is reported as such | M |
+| C4 | Delegation depth 2 and children across hosts; per-child model route once Q9 lands | S22, S23 | A4, C1, C8; Q9 for model routes | `SHIP_DELEGATE_DEPTH` | Measured against the serial baseline before any default change (S22 acceptance) | M |
+| C5 | Linux desktop target (Xvfb + VNC) for computer use beyond the browser | S12, S26 | C1 | target capability | A desktop-app journey completes with perception evidence | L |
+| C8 | Cross-process budget reservation on the postgres store (conditional write), with parent/child scopes and lease fencing | S11 | none | `SHIP_BUDGET_RESERVATION=on` | Two workers cannot double-reserve; a delegation tree is bounded by one reservation | M |
+
+**Q — quality and verification depth.**
+
+| ID | Slice | Package | Depends | Flag | Acceptance | Size |
+| --- | --- | --- | --- | --- | --- | --- |
+| Q1 | Cross-vendor critique: a second model from a different vendor reviews the plan at the park and the diff before the merge park (S07 "independent critiques when they improve measured outcomes") | S07, S09, S23 | Q9 for private repos | `SHIP_CROSS_REVIEW` | Measured on the S02 set against single-model; promoted only if first-attempt pass count rises with no added false holds | M |
+| Q3 | Session recordings as revision-bound run artifacts the PR links to (S08 "tie previews, screenshots and recordings to the actual revision"). Never uploaded to the PR: the look-image class is refused by `uploadPrAsset` and an image on a PR is a soak defect | S08 | none | `SHIP_LOOK_RECORD` | Recording bound to the revision and visible only to project members; retention rule applies; PR body carries a link, no asset | S–M |
+| Q4 | Skills registry across repositories: versioned instruction skills with provenance and per-project enablement; skills never grant authority | S24, S21 | D1 | none | A skill applies in two repos; a skill instructing a privileged action is refused | M |
+| Q5 | Memory consolidation of run notes into verified/decided/tentative knowledge | S21 | A2 | `SHIP_KNOWLEDGE_PROVENANCE=on` | Per S21 acceptance, against a retrieval baseline measured before the change on a frozen question set | M |
+| Q6 | Stored requirements write path, accept/waive (existing S03 spec) | S03 | none | none | Per the S03 slice specification | M |
+| Q7 | Held-out evaluation set and the B leg of S02 | S02 | Decision 5 | none | Per S02 acceptance | M |
+| Q9 | Routing `on`: the tool-call journal from `durable.ts` (mid-run switches) and a destination permitted for `private` data (a provider with explicit no-retention terms, or local inference) | S23 | Decision 9 | `SHIP_MODEL_ROUTING=on` | A private-repo run routes to a permitted destination; a disallowed destination is refused; fixed-vs-routed comparison per S23 | M |
+
+**L — delivery loop (the lead no competitor has).**
+
+| ID | Slice | Package | Depends | Flag | Acceptance | Size |
+| --- | --- | --- | --- | --- | --- | --- |
+| L1 | = A8 (git credential) | S01 | | | | |
+| L2 | = A9 (TeployAdapter live) | S27 | | | | |
+| L3 | Preview isolation in teploy-cli (AUDIT_OPEN mitigation proposal) | S04, S01 | none | none | Preview egress and lateral probes pass under declared policy | M |
+| L4 | Flagship journey: task → PR → preview → `look` check → approved deploy → observation → rollback, one receipt | S14, S15, S27 | L1–L3 | existing flags | One end-to-end receipt with exact revisions and readback, including an injected regression rolled back | M |
+
+**O — organisation and distribution.**
+
+| ID | Slice | Package | Depends | Flag | Acceptance | Size |
+| --- | --- | --- | --- | --- | --- | --- |
+| O1 | Forgejo OIDC SSO wiring (documented in `docs/DEPLOY.md`) | S25 | none | existing OIDC config | Login through Forgejo; role mapping applied; bootstrap stays break-glass | S |
+| O2 | First-run setup wizard for self-hosters | S05, S19 | none | none | Fresh install reaches a first useful task through the UI (S05 acceptance) | M |
+| O3 | Streaming lifecycle API: subscribe with cursor/reconnect (today `docs/HTTP_CLIENT.md` is a recorded view, not a stream) | S24 | none | none | An independent client follows a run live and resumes after disconnect | M |
+| O4 | Generated flag reference: a flag is an environment key the code reads (~163 such names on 2026-10-16, against 93 mentioned in `docs/DEPLOY.md`) | S19 | none | none | CI fails when a read environment key has no reference entry | S |
+
+**X — remaining package acceptance with no slice yet.** These are required
+by the package text above and were unscheduled; each needs its own slice
+specification when picked up.
+
+| ID | Slice | Package | Depends | Size |
+| --- | --- | --- | --- | --- |
+| X1 | Two-user project isolation, hostile imported context (repo, web page, issue, tool response, memory) and secret-exfiltration probes | S01 | D1 (MCP adds a context source) | M |
+| X2 | Offline/error states, other roles, screen readers; five real-user observations including three less-technical users | S10 | D10 | M |
+| X3 | The outstanding extended deployment observation | S15 | L4 | S |
+| X4 | Incident loop wiring: `recovery-compat.ts` and `incident-evidence.ts` into the Observe intake path, one seeded incident to verified recovery | S17 | L4 | M |
+| X5 | Worker tree provisioning for `SHIP_INTEGRATION_CHECK`, then one recorded producer/consumer run | S18 | none | M |
+| X6 | Fresh-machine install to first verified work, and an off-host restore | S19 | A0, O2 | M |
+| X7 | Claim ledger check in CI (`scripts/claim-ledger.mjs --check`) and the seeded claims verified or withdrawn | S20 | none | S |
+| X8 | One multi-repository mission with integration evidence | S22 | C4, X5 | L |
+| X9 | Policy inheritance enforcement at the decision points the shadow covers | S25 | A2 | M |
+| X10 | Recipe acceptance: fresh and cached setup, startup, tests, preview, cleanup per advertised recipe | S05, S06 | A7 | M |
+| X11 | Postgres-move leftovers: correct the stale 2026-10-14 AUDIT_OPEN line (production now runs postgres), `doctor` store probes keyed on `NUCLEUS_URL`, the templates catalog default flip | S19 | none | S |
+| X12 | G2 telemetry: intervention log with a frozen plumbing/non-plumbing rubric, seven-day revert tracking per merged PR, and enabling auto-merge/governance auto windows on one repo so a revert rate exists | S28, S09 | A0, Decision 10 | M |
+
+**Deferred** — in scope for the product, not scheduled; each is picked up
+only after its E6 decision or the named evidence: C3 elastic Proxmox
+provisioning (Decision 4, after C2); C6 Windows then macOS targets and C7
+mobile simulator/emulator (Decision 8); D8 ACP adapter covering further
+agents (after D6 shows adapter cost); L5 an external delivery adapter (after
+L4); Q2 merge-risk score (only if Q1 data shows reviewers need a summary
+score — no missing responsibility is demonstrated today); Q8 controlled
+self-improvement on teploy-ship (after Q7 provides a held-out set).
+
+**G — gates.**
+
+| ID | Gate | Depends | Acceptance |
+| --- | --- | --- | --- |
+| G1 | Daily-driver parity gate (E4) | D1–D5 on; D7 on for the diagnostic arm's steering task | Frozen spec, receipts for every arm |
+| G2 | Overseer metrics on the Projects page | X12, four-week baseline | Values trace to recorded attempts; missing telemetry shown as unknown; targets re-frozen after baseline, then met four consecutive weeks |
+| G3 | Flagship receipt | L4 | As L4 |
+| G4 | Competitive refresh each quarter into E1 | none | E1 re-dated with sources |
+
+### E4 Daily-driver parity gate (G1)
+
+Freeze before running, per the evaluation rules above.
+
+- **Task capture (now, before D-track work can tune to it):** 12 tasks from
+  Tyler's last 30 days of T3 Code threads across at least four repositories
+  (teploy-ship, akiroo, Neutron, one site): two questions, three bug fixes,
+  three features, one refactor, two UI changes with a visual check, one
+  multi-file change that needed mid-run steering. Capture per task: the
+  starting commit, the opening prompt, every later operator message from the
+  T3 thread as a numbered steering script, and acceptance checks written
+  from the resolving commit before any arm runs.
+- **Arms:** T3 Code re-run fresh on the starting commit with the agent Tyler
+  used (not historical results). **Primary Ship arm:** native on `glm-5.3`
+  (the production configuration Tyler would use daily). **Diagnostic arm:**
+  Ship with the claude-code harness on the T3 model, to separate product
+  from model; it applies only when that model has a Ship harness, and its
+  steering task waits for D7.
+- **Steering rule:** an arm may receive only messages from the task's
+  steering script, at most once each. "Steering need resolved" means the arm
+  reached a correct result using script messages only; any other operator
+  input is an intervention.
+- **Grading:** acceptance checks run where they exist. For the rest, a model
+  from a vendor not used by any arm grades diffs normalised to remove arm
+  identity (Verification sections, branch names, commit trailers stripped)
+  against the frozen checks; Tyler reviews the same normalised diffs. Both
+  verdicts are recorded; disagreement is kept.
+- **Measures:** correctness per task; wall time to a correct result
+  (primary time measure); time-to-first-edit (diagnostic); steering messages
+  used; interventions; priced and unpriced cost.
+- **Pass (primary arm against T3):** correct on at least 10/12; paired
+  outcome counts reported (both correct / Ship only / T3 only / neither) with
+  "Ship only" ≥ "T3 only"; median wall time to a correct result ≤ 1.5× T3;
+  zero interventions on tasks graded correct. Raw counts only at n=12; no
+  significance claims.
+- **Spend:** the T3 re-run and the diagnostic arm use real subscription or
+  API quota and are owner-gated like the S02 B leg (Decision 5).
+
+### E5 Waves
+
+Each wave runs as parallel worktree lanes under the working rules in
+`NEXT_SESSION.md` (one branch and PR per slice, merge on green CI, default-off
+equivalence, real-path test, negative control). A slice's flip is a separate
+one-run soak after its merge.
+
+| Wave | Activation and ops | Code lanes | Exit |
+| --- | --- | --- | --- |
+| 6 | A0, A1, A2, B6, C1, X11; capture the G1 task set | D1, D2, D3, X7 | A1 receipt; A2 dispositions; D1/D2 merged off |
+| 7 | A3, A4, A5, A6, A7; flip D1, D2; ops for A8/A9 prerequisites | D4, D5, B1, C8, X5, X12 | A4 receipt; D1/D2 soak receipts |
+| 8 | A8, A9; flip D3 (if any code), D4, D5, B1, C8 (`SHIP_BUDGET_RESERVATION=on`) | D6, D7, B2, B3, Q1 (public repos until Q9), Q3, L3, Q9 | D-track flips' receipts; G2 baseline starts |
+| 9 | flip D6, D7, B2, Q9 | L4, B4, C2, C4, Q6, O1, O3, X1, X9, X10 | D7 flip receipt before the **G1 run**; **G3 flagship receipt** |
+| 10+ | as earned, including measured flips of Q1 and Q3 | C5, D9, D10, D11, Q4, Q5, Q7, B5, O2, O4, X2, X3, X4, X6, X8; deferred items once unblocked | G2 targets met over four consecutive weeks |
+
+### E6 Owner decisions this backlog needs
+
+Numbered to continue `docs/DECISIONS_OPEN_2026-10-04.md` (Decisions 1–3 are
+already taken there) and recorded in that file when made.
+
+4. Which Proxmox node hosts the second sandbox (C1), and whether elastic VMs
+   (C3, deferred) may consume cluster capacity unattended.
+5. Spend for the G1 T3 re-run and diagnostic arm, and the S02 B leg (Q7).
+6. Whether remote MCP servers (D1) may receive `private` repository data, or
+   inherit the routing data-class gate as proposed.
+7. Slack workspace and Linear team to wire (B6).
+8. Windows/macOS/mobile targets (C6, C7): schedule this year or keep deferred.
+9. A destination permitted for `private` data (Q9): a provider whose terms
+   state no retention, local inference on the cluster, or keep routing
+   shadow-only. Decision 1 (2026-10-05) stands until this is made; it blocks
+   Q1 on private repositories and routing `on`.
+10. Which repository gets auto-merge/governance auto windows first (X12), so
+   the G2 revert-rate measure has data.
 
 ## Evidence and source references
 

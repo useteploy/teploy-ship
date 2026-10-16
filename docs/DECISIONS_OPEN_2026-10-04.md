@@ -1,7 +1,9 @@
 # Open founder decisions — 2026-10-04
 
 The single list of decisions only the owner can make, with the context each
-one needs. Everything else open is in [NEXT_SESSION.md](../NEXT_SESSION.md).
+one needs. Open Decisions 4–10 are listed in the programme's "End state and
+execution backlog" section (E6); everything else open is reached from
+[NEXT_SESSION.md](../NEXT_SESSION.md).
 When a decision is made, record it here and in the programme row it affects.
 
 ## Decided 2026-10-15 (owner, relayed in session)
