@@ -200,6 +200,7 @@ export const HARNESS_VERSIONS: Record<string, string> = {
   [NATIVE_HARNESS_ID]: "1",
   "claude-code": "1",
   opencode: "1",
+  codex: "1",
 };
 
 /** The vendor binary an external adapter drives, at the version Ship bakes. */
@@ -233,6 +234,7 @@ export interface HarnessPackage {
 export const HARNESS_PACKAGES: Record<string, HarnessPackage> = {
   "claude-code": { npm: "@anthropic-ai/claude-code", version: "2.1.246", binary: "claude" },
   opencode: { npm: "opencode-ai", version: "1.18.23", binary: "opencode" },
+  codex: { npm: "@openai/codex", version: "0.163.0", binary: "codex" },
 };
 
 /**

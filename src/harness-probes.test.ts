@@ -12,7 +12,7 @@ import type { HarnessDeclaration } from "./harness-capabilities.js";
 import { externalAdapters } from "./harness-external.js";
 import { PROBED_OPERATIONS, credentialResidue, fakeExternalHarness, probeHarness, probeOperation } from "./harness-probes.js";
 
-const IDS = ["native", "claude-code", "opencode"] as const;
+const IDS = ["native", "claude-code", "opencode", "codex"] as const;
 
 test("S13 probes: every declared harness conforms to its own declaration under real adapter probes", async () => {
   for (const id of IDS) {
@@ -31,7 +31,7 @@ test("S13 probes: observations are what the adapters really did, not what the ta
   assert.equal((await n("steer")).honoured, true);
   assert.equal((await n("investigate")).honoured, true);
 
-  for (const id of ["claude-code", "opencode"] as const) {
+  for (const id of ["claude-code", "opencode", "codex"] as const) {
     // Plan review: the adapter throws before putFile/exec, so no agent starts and nothing is edited.
     const plan = await probeOperation(id, "plan-review");
     assert.equal(plan.accepted, false);
@@ -132,5 +132,5 @@ test("credential lifecycle negative control: a credential in the executor's own 
 });
 
 test("declared harness packages exist for every external probe id", () => {
-  for (const id of ["claude-code", "opencode"]) assert.ok(HARNESS_PACKAGES[id]);
+  for (const id of ["claude-code", "opencode", "codex"]) assert.ok(HARNESS_PACKAGES[id]);
 });

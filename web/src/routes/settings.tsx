@@ -22,7 +22,7 @@ export const config = { mode: "app" };
 // Mirrors HARNESS_PACKAGES (src/harness.ts), which mirrors images/versions.json
 // under a test. Named here rather than imported because this route is SSR'd
 // from source and the value is display copy, not behaviour.
-const BAKED_HARNESSES = "claude-code 2.1.246, opencode 1.18.23 — images/build.sh --harness <id>";
+const BAKED_HARNESSES = "claude-code 2.1.246, opencode 1.18.23, codex 0.163.0 — images/build.sh --harness <id>";
 
 interface Row {
   label: string;
@@ -216,7 +216,7 @@ export async function loader({ request }: { request: Request }): Promise<Setting
       {
         title: "Harness",
         rows: [
-          { label: "harness", value: (process.env.SHIP_HARNESS ?? "").trim() || "native", ok: true, hint: "SHIP_HARNESS — the worker-wide DEFAULT: native (Ship's loop) | claude-code | opencode. A project record's harness field wins for that repo. Recorded on each run at enqueue, so a replay runs under the program that wrote its log." },
+          { label: "harness", value: (process.env.SHIP_HARNESS ?? "").trim() || "native", ok: true, hint: "SHIP_HARNESS — the worker-wide DEFAULT: native (Ship's loop) | claude-code | opencode | codex. A project record's harness field wins for that repo. Recorded on each run at enqueue, so a replay runs under the program that wrote its log." },
           {
             label: "baked harnesses",
             value: BAKED_HARNESSES,

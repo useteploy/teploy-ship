@@ -52,7 +52,7 @@ const AUTHORITIES = ["", "legacy", "propose", "send", "auto_trivial", "auto_norm
 // the runtime package for a four-entry list is not worth the coupling.
 // normalizeProject refuses an id this list does not contain, so a drift here
 // surfaces as a rejected save rather than a broken run.
-const HARNESSES = ["", "native", "claude-code", "opencode"] as const;
+const HARNESSES = ["", "native", "claude-code", "opencode", "codex"] as const;
 
 interface ProjectsData {
   view: "repos";

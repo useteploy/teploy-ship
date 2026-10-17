@@ -27,6 +27,7 @@ import { externalAdapters, shq } from "./harness-external.js";
  *   native       durableAgent + a scripted ModelAdapter + LocalExecutor
  *   claude-code  durableAgent + the real externalAdapters() + a fake `claude`
  *   opencode     durableAgent + the real externalAdapters() + a fake `opencode`
+ *   codex        durableAgent + the real externalAdapters() + a fake `codex`
  *
  * The fake binary is the only stand-in: the adapter code, the executor
  * abstraction, the command line, the prompt file and the env file are the
@@ -42,7 +43,7 @@ import { externalAdapters, shq } from "./harness-external.js";
 
 export const PROBED_OPERATIONS: readonly HarnessOperation[] = ["plan-review", "steer", "investigate"];
 
-type ProbedId = "native" | "claude-code" | "opencode";
+type ProbedId = "native" | "claude-code" | "opencode" | "codex";
 
 export interface ProbeOptions {
   /**
@@ -83,6 +84,8 @@ export interface FakeExternalRig {
   runs(): Promise<number>;
   /** Everything the binary was invoked with (one argument per line). */
   args(): Promise<string>;
+  /** Whatever arrived on the binary's stdin (codex receives its prompt there). */
+  stdin(): Promise<string>;
   /** The binary's environment as it saw it. */
   seenEnv(): Promise<string>;
   /** The binary's view of .teploy-agent/ at the moment it started. */
@@ -95,6 +98,14 @@ const OPENCODE_STREAM = [
   JSON.stringify({ type: "text", part: { type: "text", text: "done" } }),
   JSON.stringify({ type: "step_finish", part: { tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } }, cost: 0 } }),
 ].join("\n");
+// The codex exec --json contract (codex-rs/exec/src/exec_events.rs at the
+// pinned tag; see evals/receipts/2026-10-16-codex-exec-json-contract.txt).
+const CODEX_STREAM = [
+  JSON.stringify({ type: "thread.started", thread_id: "0199a213-81c0-7800-8aa1-bbab2a035a53" }),
+  JSON.stringify({ type: "turn.started" }),
+  JSON.stringify({ type: "item.completed", item: { id: "item_2", type: "agent_message", text: "done" } }),
+  JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0 } }),
+].join("\n");
 
 /**
  * A fake vendor binary on the sandbox PATH. It records how it was invoked,
@@ -103,20 +114,24 @@ const OPENCODE_STREAM = [
  * the stream (a harness that misbehaves, for the negative controls).
  */
 export async function fakeExternalHarness(
-  id: "claude-code" | "opencode",
+  id: "claude-code" | "opencode" | "codex",
   opts: { extraScript?: string[]; exitCode?: number } = {},
 ): Promise<FakeExternalRig> {
   const bin = await mkdtemp(join(tmpdir(), "probe-bin-"));
   const root = await mkdtemp(join(tmpdir(), "probe-work-"));
   const rec = await mkdtemp(join(tmpdir(), "probe-rec-"));
   const binary = HARNESS_PACKAGES[id]!.binary;
-  const stream = id === "claude-code" ? CLAUDE_STREAM : OPENCODE_STREAM;
+  const stream = id === "claude-code" ? CLAUDE_STREAM : id === "opencode" ? OPENCODE_STREAM : CODEX_STREAM;
   await mkdir(bin, { recursive: true });
   const script = [
     "#!/bin/sh",
     `if [ "$1" = "--version" ]; then echo "${HARNESS_PACKAGES[id]!.version} (probe)"; exit 0; fi`,
     `echo run >> ${shq(join(rec, "runs"))}`,
     `printf '%s\\n' "$@" > ${shq(join(rec, "args"))}`,
+    // claude and opencode get their prompt as an argument; codex reads it from
+    // stdin (`codex exec -`). Record both so "what the harness received" is
+    // the whole input, whichever side of the boundary it arrived on.
+    `cat > ${shq(join(rec, "stdin"))}`,
     `env > ${shq(join(rec, "env"))}`,
     `ls -a .teploy-agent > ${shq(join(rec, "agentdir"))} 2>&1`,
     `echo edited > edited.txt`,
@@ -135,6 +150,7 @@ export async function fakeExternalHarness(
     root,
     runs: async () => (await read("runs")).split("\n").filter((l) => l === "run").length,
     args: () => read("args"),
+    stdin: () => read("stdin"),
     seenEnv: () => read("env"),
     seenAgentDir: () => read("agentdir"),
     edited: async () => (await stat(join(root, "edited.txt")).then(() => true, () => false)),
@@ -200,8 +216,9 @@ export async function probeOperation(id: ProbedId, operation: HarnessOperation, 
   else started = native!.model.calls() > 0;
   if (!started && out?.status === "error") message = out.summary;
 
-  // What the harness actually RECEIVED, as opposed to what Ship was handed.
-  const received = external ? `${await rig!.args()}\n${await rig!.seenEnv()}` : native!.model.seen();
+  // What the harness actually RECEIVED, as opposed to what Ship was handed:
+  // argv, stdin (where codex's prompt arrives) and environment.
+  const received = external ? `${await rig!.args()}\n${await rig!.stdin()}\n${await rig!.seenEnv()}` : native!.model.seen();
   if (operation === "plan-review") honoured = outcome.status === "waiting" && outcome.eventName === PLAN_EVENT;
   if (operation === "investigate") honoured = /read-only/i.test(received);
   if (operation === "steer") honoured = received.includes(note);
