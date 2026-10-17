@@ -27,18 +27,38 @@ Two recorded steps, both of which always record a value:
 1. `harness-preflight` — is the binary on PATH in the sandbox image, which
    version, and is that a version this adapter can drive. A missing binary is
    a recorded `error` result; nothing runs. A version the adapter cannot
-   drive is the same shape: opencode **>= 2.0.0 is refused** (2.x removed
-   `--pure` and `--dir`, so the invocation cannot start, and renamed the
-   `tool` event the live feed reads; measured in
-   `evals/receipts/2026-10-14-opencode-v2-events.txt`, which also carries
-   what adopting v2 needs). A minor drift from the pin is recorded, not
-   enforced — only a known-incompatible major refuses.
+   drive is the same shape: an opencode **past the 2.x line is refused**
+   (1.x and 2.x are measured contracts; a 3.x would be a guess — and the
+   measured failure mode of guessing at this binary's flags is silence: v2
+   silently under-counted turns and hid tool activity from the live feed
+   under the v1 parser, which is why the 2.x contract was measured before it
+   was driven, in `evals/receipts/2026-10-14-opencode-v2-events.txt`). A
+   minor drift from the pin is recorded, not enforced — only a known-
+   incompatible line refuses.
 2. `harness-run` — one `exec` in the sandbox: the prompt is written to
    `.teploy-agent/harness-prompt.md` (git-excluded), the forwarded credentials
    to `.teploy-agent/harness.env` which the command sources and deletes before
    the binary starts, and the binary's event stream is parsed when it exits.
    The recorded step carries exit code, status, summary, turn count, usage,
-   the NAMES of the forwarded variables (never values) and a stderr tail.
+   the NAMES of the forwarded variables (never values), a stderr tail and —
+   since the contract-2 adapters — the **vendor session id** the run drove
+   (claude's `session_id`, opencode's `ses_…`), which is what steering
+   resumes.
+3. `harness-steer-N` / `harness-resume-N` — only when the run's input asked
+   for steering (`steer: true`, set at enqueue like every capability): after
+   each vendor process exits, pending operator notes are drained as a
+   recorded step, and if any are pending they are delivered as ONE more exec
+   that resumes the recorded session — `claude --resume <id>` or
+   `opencode run --session <id>` — each note framed the way the native loop
+   frames it ("Operator steering — adjust course accordingly: …"). A
+   "turn boundary" for an external harness is therefore a process exit: the
+   sandbox exec API is request/response, so notes that arrive while the
+   vendor runs are delivered by the next process. Bounded
+   (`STEER_ROUNDS_MAX`); the loop stops on its own when no notes are pending
+   or a resume timed out. The steps are input-gated in the step fingerprint,
+   so a run enqueued without `steer` keeps the exact two-step sequence every
+   earlier external log carries, and a replay walks the recorded rounds
+   without starting a vendor process.
 
 The recorded step is the exit — one step, one result — but the run is not a
 blank while it executes: on a sandbox executor the exec is streamed
@@ -76,7 +96,7 @@ version its log did not record.
 | `SHIP_HARNESS_ATTEMPTS` | Comma list of harness ids. When it names two or more, every new run tries each in its own workspace and the critic picks one to publish (P5-4). Off by default. |
 | `SHIP_HARNESS_MODEL` | Model id passed to the harness (`--model`). Absent = the harness's own default. |
 | `SHIP_HARNESS_ENV` | Comma list of worker env var NAMES forwarded into the harness process. Overrides the per-adapter default below. |
-| `SHIP_HARNESS_TIMEOUT_MS` | Whole-attempt deadline. Default 1800000. |
+| `SHIP_HARNESS_TIMEOUT_MS` | Per-exec deadline for each vendor process. Default 1800000. A steered attempt runs at most `1 + STEER_ROUNDS_MAX` execs (main + resume rounds), each bounded by this. |
 | `SHIP_CLAUDE_BARE` | `1` adds `--bare` to claude: API-key auth only, no host context (hooks, CLAUDE.md, MCP). |
 
 Default forwarded variables: claude-code `CLAUDE_CODE_OAUTH_TOKEN`,
@@ -118,6 +138,14 @@ IS_SANDBOX=1 claude -p "$(cat .teploy-agent/harness-prompt.md)" \
   proxy or gateway. https://code.claude.com/docs/en/env-vars
 - `total_cost_usd` is a client-side estimate, not billing data.
   https://code.claude.com/docs/en/agent-sdk/cost-tracking
+- **Steering (D7).** The stream's `session_id` (on the `result` event, with
+  the init event as fallback) is recorded on the run step, and pending
+  operator notes are delivered as further `-p … --resume <session_id>` execs
+  at process boundaries — the CLI shape of the session-resume steering the
+  T3 Code adapter does through the Agent SDK. The same flags as the main run
+  (`--permission-mode bypassPermissions`, `--max-turns`, `--model`, budget)
+  ride along, so a steered continuation is governed exactly like the run it
+  continues.
 
 Verified against Claude Code 2.1.243 on 2026-08-24: a one-turn `-p` run
 under a subscription login still reports `total_cost_usd` (0.29 for a
@@ -126,17 +154,46 @@ see cost honesty below.
 
 ## opencode
 
-Invocation:
+The adapter is **version-aware**: the preflight's resolved major picks the
+invocation, and both lines stay driven.
+
+**2.x (the pin since D6):**
+
+```
+opencode run --format json --auto --session ses_ship_<run>[:<attempt>] [--model <provider/model>] "$(cat .teploy-agent/harness-prompt.md)"
+```
+
+- `--pure` and `--dir` are GONE in 2.x (the 1.x invocation fails flag-parse
+  there); there is no `--pure` replacement — plugin policy moved to config,
+  and the sandbox remains the isolation boundary. `run` talks to a background
+  service inside the ephemeral container; it dies with the container.
+- `--session` is caller-chosen and deterministic (`ses_ship_<runId>`; the
+  `ses` prefix is required — arbitrary ids are rejected despite the help
+  text), so the id is a function of the run rather than a stream parse, and
+  steering resumes exactly it. The session store lives on the container's
+  disk, which is what makes one-shot resume work across execs.
+- Events (measured against real 2.0.26 streams,
+  `evals/receipts/2026-10-14-opencode-v2-events.txt`): `step_start` (carries
+  `part.messageID` — turns count messageIDs, because…), `text` (the final
+  text lands in the last one), `tool_use` (renamed from 1.x `tool`; part
+  shape otherwise compatible), `step_finish` (TOOL STEPS ONLY — the payload
+  is the 1.x shape: `tokens.{input,output,reasoning}`,
+  `tokens.cache.{read,write}`, `cost`; a pure reply emits none, so a pure
+  reply honestly records zero usage), `error` (richer fields, same role).
+  Every event names the `sessionID`, which is recorded on the run step.
+  https://opencode.ai/docs/cli/
+- The npm package moved: the 1.x `opencode-ai` line ends at 1.19.3 and the
+  2.x CLI is **`@opencode/cli`** — `images/versions.json` pins
+  `@opencode/cli@2.0.26`, the exact build the receipt measured (2.0.32 was
+  the line's latest when the pin was set).
+
+**1.x (kept: an image that still bakes it keeps working until it is
+rebuilt, and the runs it records replay unchanged):**
 
 ```
 opencode run --format json --auto --pure --dir . [--model <provider/model>] "$(cat .teploy-agent/harness-prompt.md)"
 ```
 
-- `opencode run [message..]` is the non-interactive mode; `--format json`
-  prints raw JSON events, one per line; `--auto` auto-approves permissions
-  not explicitly denied; `--pure` runs without external plugins; `--model`
-  takes `provider/model`; `--dir` sets the working directory.
-  https://opencode.ai/docs/cli/
 - Events observed from opencode 1.18.21 on 2026-08-24: `step_start`, `text`
   (`part.text`), `tool_use`, `step_finish` (`part.tokens.{input,output,
   reasoning,cache.{read,write}}`, `part.cost`), `error`. There is no terminal
@@ -144,6 +201,13 @@ opencode run --format json --auto --pure --dir . [--model <provider/model>] "$(c
   the last `text` part as the summary and sums `step_finish` tokens.
   Source: `packages/opencode/src/cli/cmd/run.ts` in
   https://github.com/anomalyco/opencode
+- No session id in the stream → **1.x runs cannot be steered**: a note that
+  reaches one anyway (a 2-contract run on an old image) is consumed with a
+  recorded delivery refusal, never silently dropped.
+
+An **opencode past 2.x** is refused at preflight rather than driven on a
+guess; the message names the pin and the receipt.
+
 - Provider credentials are the provider's own environment variables
   (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...) or an `OPENCODE_CONFIG_CONTENT`
   JSON. https://opencode.ai/docs/config/
@@ -151,18 +215,11 @@ opencode run --format json --auto --pure --dir . [--model <provider/model>] "$(c
 fylun-code is an opencode overlay (a plugin), so it is driven through this
 same adapter; nothing in it changes the headless contract.
 
-**Version guard (S13).** The adapter refuses an opencode whose resolved
-version is >= 2.0.0, at the preflight step, with a message naming the pin
-(`opencode-ai@1.18.23` in `images/versions.json`) and the tracked v2
-adoption work. Why a refusal rather than a run: v2.0.26 removed `--pure`
-and `--dir`, so the invocation above fails flag-parse and prints usage
-before anything runs, and its event stream renamed `tool` to `tool_use` and
-dropped the terminal `step_finish` — degradations that would be silent if
-the flags were patched. The v2 contract, measured against real 2.0.26
-streams, and the adoption list (flags, parser, tracker, session resume) are
-in `evals/receipts/2026-10-14-opencode-v2-events.txt`. Production is safe
-today because the image bakes the 1.x pin; the guard catches the unpinned
-binary (local, dev, brew) before it wastes a run.
+**Steering (D6).** opencode v2 steering is session resume: notes queued while
+a vendor process runs are delivered by the next `opencode run --session <id>`
+exec. The capability table (`src/harness-capabilities.ts`) declares steering
+supported — the admission gate additionally requires the run's recorded
+harness contract to be 2 or later, so pre-D6 logs keep their refusal.
 
 ## Cost honesty under a subscription (P5-3)
 

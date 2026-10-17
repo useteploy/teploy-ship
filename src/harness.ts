@@ -198,8 +198,12 @@ export interface HarnessAdapter {
  */
 export const HARNESS_VERSIONS: Record<string, string> = {
   [NATIVE_HARNESS_ID]: "1",
-  "claude-code": "1",
-  opencode: "1",
+  // 2 = the session-resume contracts (D6/D7): the run step records the vendor
+  // session id and steer notes are delivered into it as resume execs. Bumped
+  // from 1 deliberately — selectAdapter refuses a 1-contract log under this
+  // program, which is the point: the recorded steps now mean different things.
+  "claude-code": "2",
+  opencode: "2",
 };
 
 /** The vendor binary an external adapter drives, at the version Ship bakes. */
@@ -232,7 +236,10 @@ export interface HarnessPackage {
  */
 export const HARNESS_PACKAGES: Record<string, HarnessPackage> = {
   "claude-code": { npm: "@anthropic-ai/claude-code", version: "2.1.246", binary: "claude" },
-  opencode: { npm: "opencode-ai", version: "1.18.23", binary: "opencode" },
+  // v2 moved to a scoped package: the 1.x `opencode-ai` line ends at 1.19.3,
+  // the 2.x CLI is `@opencode/cli`. 2.0.26 is the exact build the measured
+  // v2 event contract was taken from (evals/receipts/2026-10-14-opencode-v2-events.txt).
+  opencode: { npm: "@opencode/cli", version: "2.0.26", binary: "opencode" },
 };
 
 /**

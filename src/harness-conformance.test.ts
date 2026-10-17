@@ -27,7 +27,10 @@ test("S13: every declared-refused operation has a refusal message; supported and
   }
   assert.match(refusalFor("claude-code", "plan-review")!, /^Plan review requires the native harness/);
   assert.equal(refusalFor("native", "plan-review"), undefined);
-  assert.ok(refusalFor("opencode", "steer"));
+  // D6/D7: steering is supported on the external contracts now — the refusal
+  // lives in the version gate (harnessSupports), not the declaration.
+  assert.equal(refusalFor("opencode", "steer"), undefined);
+  assert.equal(refusalFor("claude-code", "steer"), undefined);
 });
 
 test("S13: an unknown harness id supports nothing and is refused everything", () => {
@@ -50,9 +53,13 @@ test("S13 conformance: a harness that accepts steer and silently drops the note 
   const r = conformanceCheck(native, { operation: "steer", accepted: true, sideEffects: true, honoured: false });
   assert.equal(r.ok, false);
   assert.equal(r.mismatches[0]!.kind, "silently-dropped");
-  // The behaviour the external adapters had before the route refused.
-  const old = conformanceCheck(cc, { operation: "steer", accepted: true, sideEffects: true, honoured: false });
-  assert.equal(old.mismatches[0]!.kind, "accepted-unsupported");
+  // The behaviour the pre-D6/D7 external declaration refused: a note
+  // accepted under a refusal is "accepted-unsupported", the same observable
+  // against the current supported declaration is the drop. Both must flag.
+  const v1 = structuredClone(cc);
+  v1.capabilities.steering = { status: "refused", reason: "the 1.x contract reads only its starting prompt" };
+  assert.equal(conformanceCheck(v1, { operation: "steer", accepted: true, sideEffects: true, honoured: false }).mismatches[0]!.kind, "accepted-unsupported");
+  assert.equal(conformanceCheck(cc, { operation: "steer", accepted: true, sideEffects: true, honoured: false }).mismatches[0]!.kind, "silently-dropped");
 });
 
 test("S13 conformance: declared-refused that starts work, or refuses silently, is flagged", () => {
@@ -83,6 +90,9 @@ test("S13 conformance: honest behaviour passes, including the real refusal text"
 });
 
 test("S13 conformance: a newcomer declaring a refusal cannot pass by accepting it", () => {
+  // cc still declares plan-review refused; an unknown id accepting it cannot
+  // pass. (Steering flipped to supported in D6/D7, so it no longer carries
+  // this case — the plan refusal does.)
   const newcomer: HarnessDeclaration = { ...cc, id: "newcomer" };
-  assert.equal(conformanceCheck(newcomer, { operation: "steer", accepted: true, sideEffects: true, honoured: true }).ok, false);
+  assert.equal(conformanceCheck(newcomer, { operation: "plan-review", accepted: true, sideEffects: true }).ok, false);
 });

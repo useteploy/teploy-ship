@@ -6,8 +6,8 @@ import { MemoryEventStore, executeRun } from "@neutron-build/workflow";
 
 import { durableAgent } from "./durable.js";
 import type { DurableAgentOutput } from "./durable.js";
-import { HARNESS_PACKAGES } from "./harness.js";
-import { STEER_UNSUPPORTED_MESSAGE, declarationFor } from "./harness-capabilities.js";
+import { HARNESS_PACKAGES, HARNESS_VERSIONS } from "./harness.js";
+import { declarationFor } from "./harness-capabilities.js";
 import type { HarnessDeclaration } from "./harness-capabilities.js";
 import { externalAdapters } from "./harness-external.js";
 import { PROBED_OPERATIONS, credentialResidue, fakeExternalHarness, probeHarness, probeOperation } from "./harness-probes.js";
@@ -37,39 +37,48 @@ test("S13 probes: observations are what the adapters really did, not what the ta
     assert.equal(plan.accepted, false);
     assert.equal(plan.sideEffects, false, "a refused plan review must not have launched the agent");
     assert.match(plan.refusalMessage ?? "", /Plan review requires the native harness\. No external agent was started/);
-    // Steer: refused at the gate with the real message, nothing stored.
-    assert.deepEqual(await probeOperation(id, "steer"), { operation: "steer", accepted: false, sideEffects: false, refusalMessage: STEER_UNSUPPORTED_MESSAGE });
+    // Steer (D6/D7): the note is accepted and DELIVERED — the fake binary is
+    // invoked a second time resuming the recorded session with the note text.
+    const steer = await probeOperation(id, "steer");
+    assert.equal(steer.accepted, true, id);
+    assert.equal(steer.sideEffects, true, id);
+    assert.equal(steer.honoured, true, `${id}: the note text must reach the harness`);
     // Scan: the vendor agent really got the read-only framing.
     assert.deepEqual(await probeOperation(id, "investigate"), { operation: "investigate", accepted: true, sideEffects: true, honoured: true });
   }
 });
 
-test("S13 probes: an adapter that accepts a steering note and drops it is caught, whichever way the table is wrong", async () => {
-  // The gate lets the note through (a table that claims support). The external
-  // adapter reads only its starting prompt, so the note never reaches the binary.
-  const dropped = await probeOperation("claude-code", "steer", { admitSteer: () => true });
+test("S13 probes: a 1.x opencode that accepts a note it cannot deliver is caught as a silent drop", async () => {
+  // The gate admits the note (the run is on the 2 contract); the 1.x binary
+  // records no session, so delivery is refused on the record. Against the
+  // published declaration — steering supported — that observable is a drop,
+  // and conformanceCheck must say so: this is the transitional gap the
+  // declaration's reason names, and a probe that could not see it would be
+  // vouching for a table entry no 1.x-image deployment can honour.
+  const report = await probeHarness("opencode", { versionLine: "1.18.23 (probe)" });
+  const steer = report.results.find((r) => r.operation === "steer")!;
+  assert.equal(steer.observed.accepted, true);
+  assert.equal(steer.observed.honoured, false, "the note never reached the 1.x binary");
+  assert.deepEqual(steer.mismatches.map((m) => m.kind), ["silently-dropped"]);
+});
+
+test("S13 probes: a harness forced to take a note with no delivery path is caught, whichever way the table is wrong", async () => {
+  // The gate lets the note through on an adapter whose stream records no
+  // session (a claude with no session_id to resume): accepted, dropped.
+  const noSession = JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, result: "done", usage: { input_tokens: 1, output_tokens: 1 } });
+  const dropped = await probeOperation("claude-code", "steer", { admitSteer: () => true, stream: noSession });
   assert.equal(dropped.accepted, true);
   assert.equal(dropped.honoured, false, "the note text must not appear in what the harness received");
 
-  // Against the published declaration (steering refused): accepted a refused op.
-  const real = await probeHarness("claude-code", { admitSteer: () => true });
-  assert.deepEqual(real.results.find((r) => r.operation === "steer")!.mismatches.map((m) => m.kind), ["accepted-unsupported"]);
-
-  // Against a declaration that CLAIMS steering is supported: the silent drop.
+  // Against a declaration that claims steering is supported: the silent drop.
   const claim: HarnessDeclaration = structuredClone(declarationFor("claude-code")!);
   claim.capabilities.steering = { status: "supported", reason: "claimed, not true" };
-  const lying = await probeHarness("claude-code", { declaration: claim, admitSteer: () => true });
+  const lying = await probeHarness("claude-code", { declaration: claim, admitSteer: () => true, stream: noSession });
   assert.equal(lying.ok, false);
   assert.deepEqual(lying.results.find((r) => r.operation === "steer")!.mismatches.map((m) => m.kind), ["silently-dropped"]);
 
   // Negative control: the same override on the harness that DOES read notes is clean.
   assert.equal((await probeHarness("native", { admitSteer: () => true })).ok, true);
-
-  // And the same for opencode, so the finding is not specific to one adapter.
-  const oc: HarnessDeclaration = structuredClone(declarationFor("opencode")!);
-  oc.capabilities.steering = { status: "supported", reason: "claimed, not true" };
-  const ocReport = await probeHarness("opencode", { declaration: oc, admitSteer: () => true });
-  assert.deepEqual(ocReport.results.find((r) => r.operation === "steer")!.mismatches.map((m) => m.kind), ["silently-dropped"]);
 });
 
 test("S13 probes: a table that claims plan review for an external harness is caught as a refusal of a supported op", async () => {
@@ -92,7 +101,7 @@ async function runWithCredential(opts: { extraScript?: string[]; exitCode?: numb
     harnesses: externalAdapters({ env: { CLAUDE_CODE_OAUTH_TOKEN: SECRET } }),
   });
   const store = new MemoryEventStore();
-  const outcome = await executeRun({ workflow: wf, runId: "cred", store, input: { task: "t", harness: { id: "claude-code", version: "1" } } });
+  const outcome = await executeRun({ workflow: wf, runId: "cred", store, input: { task: "t", harness: { id: "claude-code", version: HARNESS_VERSIONS["claude-code"] } } });
   return { rig, out: outcome.output as DurableAgentOutput, events: await store.load("cred") };
 }
 

@@ -6,10 +6,13 @@
  * ACCEPT, from the same table.
  *
  * Why it exists: every new run records `steer: true`, and the run page offered
- * a steer box on that flag alone. But only the native loop drains steering
- * notes — external adapters read nothing but `prompt` (harness.ts HarnessTask).
- * A note sent to an external-harness run was stored, acknowledged ("sent"), and
- * never read. An instruction nobody will read must be refused, not accepted.
+ * a steer box on that flag alone. But for a long time only the native loop
+ * drained steering notes — external adapters read nothing but `prompt`
+ * (harness.ts HarnessTask), so a note sent to one was stored, acknowledged
+ * ("sent"), and never read. An instruction nobody will read must be refused,
+ * not accepted. Since D6/D7 the external contracts steer too (session
+ * resume), but only from adapter contract 2 on — a 1-contract run is still
+ * refused everything it cannot read.
  *
  * S13: the table is now a full declaration (DECLARATIONS below) — every
  * capability carries a status and a stated reason that cites the source it
@@ -85,7 +88,11 @@ const DECLARATIONS: Record<string, HarnessDeclaration> = {
     capabilities: {
       investigation: { status: "supported", reason: "scan prompt framing (harness-external.ts:177-185)" },
       planning: { status: "refused", reason: "plan review requires the native harness (harness-external.ts:475)" },
-      steering: { status: "refused", reason: "reads only its starting prompt (harness.ts HarnessTask.input comment)" },
+      steering: {
+        status: "supported",
+        reason:
+          "session resume (D7): the run records claude's session_id and pending notes are delivered into it as `--resume` execs at process boundaries (harness-external.ts harness-steer/harness-resume)",
+      },
       tools: { status: "partial", reason: `vendor tools inside the sandbox, not Ship's tool layer; ${EXTERNAL_BYPASS}` },
       browser: { status: "refused", reason: "no browser wiring in the adapter (harness-external.ts)" },
       interruption: {
@@ -106,7 +113,11 @@ const DECLARATIONS: Record<string, HarnessDeclaration> = {
     capabilities: {
       investigation: { status: "supported", reason: "scan prompt framing (harness-external.ts:177-185)" },
       planning: { status: "refused", reason: "plan review requires the native harness (harness-external.ts:475)" },
-      steering: { status: "refused", reason: "reads only its starting prompt (harness.ts HarnessTask.input comment)" },
+      steering: {
+        status: "supported",
+        reason:
+          "v2 line only (D6): the run drives a caller-chosen `--session` and pending notes are resumed into it at process boundaries (harness-external.ts harness-steer/harness-resume); the 1.x line records no session — a note on such a run is consumed with a recorded delivery refusal, never silently dropped",
+      },
       tools: { status: "partial", reason: `vendor tools inside the sandbox, not Ship's tool layer; ${EXTERNAL_BYPASS}` },
       browser: { status: "refused", reason: "no browser wiring in the adapter (harness-external.ts)" },
       interruption: { status: "partial", reason: "only the exec timeout (harness-external.ts:66,481,502, default 30 min); no turn or budget flag is passed" },
@@ -114,7 +125,7 @@ const DECLARATIONS: Record<string, HarnessDeclaration> = {
       recovery: { status: "refused", reason: "no stuck detection or settle for external runs" },
       accounting: {
         status: "partial",
-        reason: "priced or unpriced is decided per run from the reported cost; 0 means unpriced (harness-external.ts:300-306)",
+        reason: "priced or unpriced is decided per run from the reported cost; 0 means unpriced (parseOpencodeStream / parseOpencode2Stream)",
       },
     },
   },
@@ -165,7 +176,7 @@ export const PLAN_REVIEW_REFUSAL = "Plan review requires the native harness.";
 
 /** Message shown when a steer is refused on a run that cannot consume it. */
 export const STEER_UNSUPPORTED_MESSAGE =
-  "This run uses an external harness, which reads only its starting prompt and cannot take mid-run messages. Cancel it and start a follow-up instead.";
+  "This run's harness cannot take mid-run messages: it is on the 1.x external contract, which reads only its starting prompt (the 2.x contracts steer by session resume). Cancel it and start a follow-up instead.";
 
 const REFUSALS: Record<HarnessOperation, string> = {
   "plan-review": PLAN_REVIEW_REFUSAL,
@@ -250,22 +261,44 @@ export function conformanceCheck(
 }
 
 interface RecordedHarness {
-  harness?: { id?: unknown } | undefined;
-  harnessAttempts?: readonly { id?: unknown }[] | undefined;
+  harness?: { id?: unknown; version?: unknown } | undefined;
+  harnessAttempts?: readonly { id?: unknown; version?: unknown }[] | undefined;
+}
+
+/** Harness refs a recorded run input commits to (single harness and/or attempts). */
+function recordedHarnessRefs(input: RecordedHarness | undefined): Array<{ id: string; version: string }> {
+  const refs: Array<{ id: string; version: string }> = [];
+  // Runs recorded before harnesses were pluggable carry no `harness`: native.
+  if (input?.harness === undefined) refs.push({ id: "native", version: "1" });
+  else
+    refs.push({
+      id: typeof input.harness.id === "string" ? input.harness.id : "",
+      version: typeof input.harness.version === "string" ? input.harness.version : "",
+    });
+  for (const attempt of input?.harnessAttempts ?? [])
+    refs.push({ id: typeof attempt.id === "string" ? attempt.id : "", version: typeof attempt.version === "string" ? attempt.version : "" });
+  return refs;
 }
 
 /** Harness ids a recorded run input commits to (single harness and/or attempts). */
 export function recordedHarnessIds(input: RecordedHarness | undefined): string[] {
-  const ids: string[] = [];
-  // Runs recorded before harnesses were pluggable carry no `harness`: native.
-  if (input?.harness === undefined) ids.push("native");
-  else ids.push(typeof input.harness.id === "string" ? input.harness.id : "");
-  for (const attempt of input?.harnessAttempts ?? []) ids.push(typeof attempt.id === "string" ? attempt.id : "");
-  return ids;
+  return recordedHarnessRefs(input).map((ref) => ref.id);
 }
 
-/** True only when EVERY harness the run may execute under supports the capability. */
+/**
+ * True only when EVERY harness the run may execute under supports the capability.
+ *
+ * For steering (the one capability today), an external harness supports it
+ * only from adapter contract 2 on: the @1 adapters read nothing but the
+ * starting prompt, and a note accepted for one of their runs would be stored,
+ * acknowledged and never read — the exact bug this gate exists to prevent. A
+ * missing version means a pre-contract log (or a hand-built input), which is
+ * refused: the safe answer for a run whose program is unknown.
+ */
 export function harnessSupports(input: RecordedHarness | undefined, capability: HarnessCapability): boolean {
   void capability; // only "steer" exists today; it maps to the declared steering capability
-  return recordedHarnessIds(input).every((id) => capabilityOf(id, "steering").status === "supported");
+  return recordedHarnessRefs(input).every((ref) => {
+    if (ref.id === "native") return capabilityOf(ref.id, "steering").status === "supported";
+    return ref.version !== "" && ref.version !== "1" && capabilityOf(ref.id, "steering").status === "supported";
+  });
 }

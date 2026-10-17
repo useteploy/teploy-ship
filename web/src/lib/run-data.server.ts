@@ -226,8 +226,9 @@ export async function runData({ params, request }: { params: { id: string }; req
     const outcome = runOutcome(events);
     const cost = costUSD(meta?.model ?? "", outcome.usage);
     const started = events.find((e) => e.type === "run-started");
-    // Offered only when the run's harness can read a steering note: the native
-    // loop does, external adapters read nothing but their starting prompt.
+    // Offered when the run's harness can read a steering note: the native
+    // loop drains notes each turn, and the contract-2 external adapters
+    // deliver them into the recorded vendor session by resume (D6/D7).
     const startedInput = (started?.data as { input?: { steer?: boolean; harness?: { id?: unknown }; harnessAttempts?: { id?: unknown }[] } } | undefined)?.input;
     const steerable = startedInput?.steer === true && harnessSupports(startedInput, "steer");
     const plan = planFrom(events);

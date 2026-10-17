@@ -557,6 +557,13 @@ export const WORKFLOW_STEPS: readonly WorkflowStep[] = [
   { key: "step:*tests", admits: (i) => i.tests === true },
   { key: "step:*harness-preflight", admits: externalHarness },
   { key: "step:*harness-run", admits: externalHarness },
+  // D6/D7: steering an external harness by session resume. Two steps per
+  // delivered batch — the drain (always one per round, matching the native
+  // loop's turn-steer step) and the resume exec — admitted by the same
+  // input flag the native steer steps use, so a run enqueued without it
+  // keeps the exact two-step external sequence every earlier log carries.
+  { key: "step:*harness-steer-*", admits: (i) => i.steer === true && externalHarness(i) },
+  { key: "step:*harness-resume-*", admits: (i) => i.steer === true && externalHarness(i) },
   // The ladder's own steps (ladder-steps.js, third module above), in that
   // file's source order. Each is admitted by the rung it records, all off
   // `verification` — a field no pre-ladder log carries, so those runs'

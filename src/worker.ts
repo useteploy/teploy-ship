@@ -859,7 +859,9 @@ export function startWorker(options: WorkerOptions): {
     ...(options.codeSearch !== undefined ? { codeSearch: options.codeSearch } : {}),
     // External harnesses (claude-code, opencode). Always carried; whether the
     // binary is in the sandbox image is a recorded preflight step per run.
-    harnesses: externalAdapters(),
+    // The steer store rides along so steering-capable lines (D6/D7) can drain
+    // operator notes between vendor processes; an absent store drains empty.
+    harnesses: externalAdapters({ steer: options.runtime.steer }),
     // Where this worker may deploy previews (SHIP_PREVIEW_DIR and friends).
     // Absent on a worker that has no app checkout to run the CLI in; a run
     // that asked for a preview then records the step as disabled rather than

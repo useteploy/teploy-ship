@@ -34,8 +34,13 @@ export interface SteerStore {
    * consumed, and the operator's instruction vanished from the reconstructed
    * transcript. Stamping notes with the turn that claimed them makes the call
    * idempotent — a replay of turn N re-selects exactly the notes stamped N.
+   *
+   * The turn key is a string or a number: the native loop passes its turn
+   * number, the external adapters pass a prefixed round key
+   * (`harness-external.ts`) so the attempts of one run — which may mix native
+   * and external harnesses — never claim each other's notes.
    */
-  drain(runId: string, turn: number): Promise<string[]>;
+  drain(runId: string, turn: string | number): Promise<string[]>;
   /** Still-pending (undrained) notes — the dashboard shows what hasn't landed yet. */
   pending(runId: string): Promise<SteerNote[]>;
 }
@@ -81,7 +86,7 @@ export class FileSteerStore implements SteerStore {
     return readJsonFile<Record<string, [number, number]>>(`${this.#file(runId)}.claims`, {});
   }
 
-  async drain(runId: string, turn: number): Promise<string[]> {
+  async drain(runId: string, turn: string | number): Promise<string[]> {
     const raw = await readFile(this.#file(runId), "utf8").catch(() => "");
     const notes = this.#parse(raw, runId);
     const claims = await this.#claims(runId);
@@ -169,7 +174,7 @@ export class NucleusSteerStore implements SteerStore {
    * in the window consumed the notes without ever delivering them, and did it
    * one row at a time so a prefix could be lost on its own.
    */
-  async drain(runId: string, turn: number): Promise<string[]> {
+  async drain(runId: string, turn: string | number): Promise<string[]> {
     await this.#ensure();
     const stamp = String(turn);
     await this.#db.query(
