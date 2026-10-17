@@ -1,0 +1,31 @@
+2026-10-17 production harness soak: claude-code + opencode v2 steering, :h2 image promotion
+
+Image: ship-sandbox-harness:h2 built on compute-1 with images/build.sh --tag h2 go node
+(versions.json pins: claude-code 2.1.246, @opencode/cli 2.0.26, codex 0.163.0), verified
+in-container (claude 2.1.246, opencode v2.0.26, codex-cli 0.163.0, node 22, git 2.47,
+chromium), copied to compute-2 (identical image id 6b0aeb59d5c4).
+
+Scratch project tyler/ship-preview-proof, investigate journey, read-only.
+
+claude-code (z.ai Anthropic-compatible endpoint, model glm-5.3, no API spend)
+- run-request-ea604c67…: FAILED — sandbox egress allowlist denied api.z.ai:443 (external
+  harnesses call the model from inside the sandbox). Fix applied: project
+  sandboxEgressAllow ["api.z.ai"]. Product follow-up: derive the provider host automatically.
+- run-request-9a9f707a… on dfaaf32: harness ran 5 turns and answered; steering refused
+  ("external harness ... cannot take mid-run messages") — dfaaf32 predates #101.
+- run-request-a00ee662… on 627a370: PASS — steer note delivered via session resume;
+  answer ends with CC-STEER-OK.
+
+opencode v2 (zai-coding-plan/glm-5.3 via ZHIPU_API_KEY; per-harness model #105)
+- run-request-c723bce8… on f2fa3d3: PASS — steer note delivered via --session resume;
+  answer ends with OC-STEER-OK.
+
+native on :h2
+- run-b1e7f2cb (scan): completed, $0.0200.
+
+Promotion: on both compute hosts ship-sandbox-{harness,node,go}:dev retagged to the :h2
+images; previous images kept as :dev-pre-h2 (rollback = retag back).
+
+codex: not live-proven. The adapter routes through AI_GATEWAY_URL, which is
+http://ship-gateway:8089 on infra-home's teploy network and unreachable from sandboxes
+on compute hosts; the alternative is an OpenAI key (API spend, owner decision).
