@@ -44,6 +44,7 @@ import { createServer } from "node:net";
 import { join } from "node:path";
 
 import { NucleusPgwire, type PgwireDialect } from "./nucleus-pgwire.js";
+import { chownHint, uidOf } from "./record-writes.js";
 import { RedactionGate } from "./support.js";
 
 export type CheckStatus = "pass" | "fail" | "unknown";
@@ -76,6 +77,8 @@ export interface DoctorProbes {
   /** The resolved store URL (flag > NUCLEUS_URL > config). Unset falls back to env.NUCLEUS_URL. */
   storeUrl?: string;
   stateDir: string;
+  /** Directories the file-backed shadows/records write into (record-dirs.ts). Absent: the state dir alone. */
+  recordDirs?: string[];
   webPort: number;
   /** Real write+remove of a scratch file in the state dir. Throws on failure. */
   writeProbe?: (dir: string) => Promise<void>;
@@ -121,8 +124,36 @@ export async function checkStateWritable(p: DoctorProbes): Promise<DoctorCheck> 
     await p.writeProbe(p.stateDir);
     return check("state-dir-writable", "pass", `wrote and removed a scratch file in ${p.stateDir}`);
   } catch (e) {
-    return check("state-dir-writable", "fail", `cannot write to ${p.stateDir}: ${errMessage(e)}`, "create the directory and give the service user write access (TEPLOY_SHIP_STATE)");
+    return check("state-dir-writable", "fail", `cannot write to ${p.stateDir} as uid ${uidOf()}: ${errMessage(e)}`, `create the directory and give the service user write access (TEPLOY_SHIP_STATE): ${chownHint(p.stateDir)}`);
   }
+}
+
+/**
+ * The data dir as the shadows see it: every directory a file-backed shadow or
+ * record writes into. A root-owned volume made every shadow write fail for 12
+ * days (2026-10-16) while nothing said so. Any probe failure is fail; no probe
+ * is unknown, never pass.
+ */
+export async function checkRecordDirsWritable(p: DoctorProbes): Promise<DoctorCheck> {
+  const dirs = p.recordDirs !== undefined && p.recordDirs.length > 0 ? p.recordDirs : [p.stateDir];
+  if (p.writeProbe === undefined) return check("data-dir-writable", "unknown", "no write probe available", `check by hand that uid ${uidOf()} can write ${dirs.join(", ")}`);
+  const failed: string[] = [];
+  for (const dir of dirs) {
+    try {
+      await p.writeProbe(dir);
+    } catch (e) {
+      failed.push(`${dir} (${errMessage(e)})`);
+    }
+  }
+  if (failed.length > 0) {
+    return check(
+      "data-dir-writable",
+      "fail",
+      `shadows and records cannot write: ${failed.join("; ")} as uid ${uidOf()}; every file-backed shadow there records nothing`,
+      chownHint(dirs.length === 1 ? dirs[0]! : "<each dir above>"),
+    );
+  }
+  return check("data-dir-writable", "pass", `wrote and removed a scratch file in ${dirs.join(", ")}`);
 }
 
 export async function checkStateSpace(p: DoctorProbes): Promise<DoctorCheck> {
@@ -299,6 +330,7 @@ export async function runDoctor(p: DoctorProbes): Promise<DoctorReport> {
   const checks: DoctorCheck[] = [
     checkNode(p.nodeVersion),
     await checkStateWritable(p),
+    await checkRecordDirsWritable(p),
     await checkStateSpace(p),
     await checkPort(p),
     ...checkEnv(p.env),
@@ -332,7 +364,7 @@ export function formatDoctor(report: DoctorReport): string {
 }
 
 /** Real probes. Local filesystem and loopback only; no outbound network. */
-export function defaultProbes(base: Pick<DoctorProbes, "env" | "stateDir" | "webPort" | "nodeVersion">): DoctorProbes {
+export function defaultProbes(base: Pick<DoctorProbes, "env" | "stateDir" | "webPort" | "nodeVersion" | "recordDirs">): DoctorProbes {
   return {
     ...base,
     nowMs: Date.now(),

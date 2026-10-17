@@ -46,6 +46,7 @@ import type { RepoRef } from "./git.js";
 import { assertRepoAllowed, credentialFor, policyFromEnv } from "./repo-policy.js";
 import { placementShadowFile, placementShadowFromEnv, readPlacementSummary, renderPlacementReport } from "./placement-shadow.js";
 import { readShadowSummary, renderShadowReport, shadowFile } from "./policy-shadow.js";
+import { checkRecordDirsAtStartup, recordDirs } from "./record-dirs.js";
 import { dryRunManifest, parseGrant, renderDryRun } from "./tool-manifest-shadow.js";
 import { detectRepository } from "./stack-import.js";
 import { renderProposal, stackDetectEnabled } from "./stack-propose.js";
@@ -2146,6 +2147,8 @@ async function workerCommand(rest: string[]): Promise<void> {
   const usingSandbox = resolveSandbox(args, config) !== undefined;
   warnIfUnsandboxed(usingSandbox);
   if (!usingSandbox) warnIfStateUnwritable();
+  // Every worker, sandboxed or not: shadows write to the data dir (2026-10-16 root-owned volume). Logs, never stops.
+  await checkRecordDirsAtStartup();
 
   const runtime = await makeRuntime(args, config);
   if (runtime.kind === "file") fail("worker needs a shared store (--store nucleus or postgres)");
@@ -2492,6 +2495,7 @@ function doctorProbes(flags: Record<string, unknown>, config: Config): ReturnTyp
   const probes = defaultProbes({
     env: process.env,
     stateDir: stateDir(),
+    recordDirs: recordDirs(),
     webPort: Number.isInteger(port) ? port : 7460,
     nodeVersion: process.version,
   });

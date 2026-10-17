@@ -1,5 +1,38 @@
 # Open audit items
 
+## 2026-10-16 — shadows wrote nothing for 12 days (root-owned data volume)
+
+Found live 2026-10-16: on production the bind volume
+`/deployments/ship/volumes/ship-data -> /data` was `root:root 755` while web and
+worker run as uid 1000 (`node`). Root cause: the volume teploy created for the
+new deploy was root-owned, and nothing re-owned it. Every file-backed shadow
+(`policy-shadow.jsonl`, `placement-shadow.jsonl`, the tool-manifest shadow,
+the budget-reservation file ledger, file-mode knowledge provenance) failed
+every write from 2026-10-04 and logged nothing an operator would see — the
+writers swallowed the error (tool manifest, provenance) or logged only per run
+in lines nobody watched (budget ledger) — so the A2 "shadow soak" produced no
+data, and `policy shadow-report` said "no record file ... unknown", which read
+as a quiet shadow, not a broken one. The `warnIfStateUnwritable` startup check
+existed but only ran for UNSANDBOXED workers, so production never ran it.
+
+- Hand fix applied 2026-10-16 by the operator: `chown 1000:1000
+  /deployments/ship/volumes/ship-data` on the server.
+- Code fix (branch `fix/loud-shadow-writes`): every shadow/record writer goes
+  through `src/record-writes.ts` — never throws into the run path, ONE loud
+  warning per process per file (path, errno, uid, the chown fix), every failure
+  counted (`writeFailures()`); worker and web probe the data dir and each
+  enabled shadow's record dir at startup (`src/record-dirs.ts`) and log an
+  ERROR naming the fix without stopping; `teploy-ship doctor` gains
+  `data-dir-writable` (fail / unknown, never pass on unknown); the policy and
+  placement shadow reports say "the shadow could not write here (permission)"
+  when the file is missing and the dir is not writable.
+- Consequence for A2: the shadow review clock restarts from the 2026-10-16
+  chown. Nothing recorded before it is evidence of agreement.
+- Still open: `install.sh` chowns the volume on a fresh install, but a volume
+  teploy creates on a later deploy (as here) is not re-owned; making teploy or
+  the image entrypoint own that step is a teploy-cli question.
+  the image entrypoint own that step is a teploy-cli question.
+||||||| 1c460ba
 ## 2026-10-16 — D3 (S03) follow-up continuity: measured, context gap fixed
 
 Read end to end on `477529a` (web composer → `runs/[id].tsx` follow-up
@@ -61,6 +94,7 @@ design (now reported when it moved), not pinned to the recorded sha.
   always reported stale (3 such entries now). CI runs `--check` only; the
   stale report needs a per-evidence "recorded at" field before it can gate.
   Tests are still cited by name only (the script checks the name exists, not
+  that it ran).
   that it ran).
 
 ## 2026-10-16 — ship-backup.sh predates the postgres store — FIXED IN CODE (A0), live rehearsal pending
