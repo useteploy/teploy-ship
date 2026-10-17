@@ -21,6 +21,11 @@ import type { AdminGrant, ConformanceFinding, Effect, ObservedCall, ToolManifest
  * scope and the executor's own controls (egress allowlist, read-only mounts),
  * which is what manifest rule 3 says a declaration is not.
  *
+ * MCP tools are the exception (D1, src/mcp.ts): there the manifest IS the
+ * project's declaration, the mode is materialised into the run input at
+ * enqueue, and `on` refuses a call that contradicts it. This module only
+ * supplies the shared record file (`recordToolFindings`).
+ *
  * WHICH MANIFEST. Ship has no installed-tool registry, so there is nothing to
  * look a manifest up in. The operator names one file, `SHIP_TOOL_MANIFEST_FILE`,
  * that declares Ship's own loop actions as tools (`bash`, `python`, `edit`,
@@ -119,6 +124,22 @@ export function observeToolCall(action: { kind: string; code?: string }, env: No
     return Promise.all(pending.map((p) => p.catch(() => {}))).then(() => {});
   } catch {
     // The shadow must never fail the call it is watching.
+    return Promise.resolve();
+  }
+}
+
+/**
+ * Record findings about a call made OUTSIDE the loop's own actions (the MCP
+ * client, src/mcp.ts), in the same file and record shape as observeToolCall.
+ * Same contract: never throws; the returned promise exists only for tests.
+ */
+export function recordToolFindings(tool: string, findings: ConformanceFinding[], env: NodeJS.ProcessEnv = process.env): Promise<void> {
+  if (findings.length === 0) return Promise.resolve();
+  try {
+    const file = toolManifestShadowFile(env);
+    const at = new Date().toISOString();
+    return Promise.all(findings.map((finding) => record(file, { at, kind: "finding", tool, finding }).catch(() => {}))).then(() => {});
+  } catch {
     return Promise.resolve();
   }
 }

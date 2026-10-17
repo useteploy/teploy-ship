@@ -105,6 +105,9 @@ import {
   transferObservation,
 } from "./delegate.js";
 import type { DelegateControl, DelegateSpawnOutcome, DelegateTransfer } from "./delegate.js";
+import { callMcpTool, listMcpTools, mcpObservation, offerTools, prepareMcpCall, renderMcpSection } from "./mcp.js";
+import type { McpHttpDeps, McpOffer, McpRunInput } from "./mcp.js";
+import { recordToolFindings } from "./tool-manifest-shadow.js";
 import { networkForTrust, parseNetworkTier, wireNetwork } from "./egress.js";
 import type { NetworkTier } from "./egress.js";
 import type { CodeSearch } from "./code-index.js";
@@ -253,6 +256,16 @@ export interface DurableAgentInput {
    * carry — so the loop's one-level refusal is a fact of the recorded log.
    */
   delegateChild?: boolean;
+  /**
+   * The MCP client (D1, SHIP_MCP; docs/MCP_DESIGN.md): the project's declared
+   * servers plus the deployment facts the gates read (data class, remote host
+   * allowlist, SHIP_TOOL_MANIFEST mode, the Decision 6 switch), materialised
+   * at enqueue. Present only when SHIP_MCP was on AND the project declared a
+   * server, for the standing reason: it admits the `mcp-tools` and
+   * `turn-N-mcp` steps. Absent is byte-identical to a pre-MCP run — the
+   * action does not parse and the prompt does not mention it.
+   */
+  mcp?: McpRunInput;
   /**
    * Codebase indexing: repo runs refresh the Nucleus code index after
    * clone (a recorded step) and the agent gets the ```search action.
@@ -896,6 +909,13 @@ export interface DurableAgentConfig {
    */
   lookImageModel?: (modelId: string) => ModelAdapter;
   /**
+   * Worker wiring for remote (streamable-HTTP) MCP servers: resolver/fetch
+   * overrides and the address-rule loosening tests need to reach a loopback
+   * server. Absent = production rules (resolved-address check, pinned fetch,
+   * https only, no private addresses).
+   */
+  mcpHttp?: McpHttpDeps;
+  /**
    * Hard per-run spend ceiling in USD (0 or absent disables it). Turn count is
    * a poor proxy for cost — one turn can carry a huge context, a condensation
    * call and a critic pass — so a run that is expensive rather than long was
@@ -996,8 +1016,8 @@ export interface DurableAgentConfig {
    */
   codeSearch?: CodeSearch;
   /**
-   * External harness adapters this worker can execute (claude-code, opencode —
-   * see harness-external.ts). The native loop is always available and is not
+   * External harness adapters this worker can execute (claude-code, opencode,
+   * codex — see harness-external.ts). The native loop is always available and is not
    * listed here. Selection is by the run INPUT, never by this list.
    */
   harnesses?: HarnessAdapter[];
@@ -1921,7 +1941,6 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
       // the dialect carries no `reply` key, the prompt has no reply block,
       // no held step runs and observations are not re-framed.
       const steerReply = input.steerReply === true;
-      const dialect: ActionDialect = steerReply ? { look, delegate, reply: true } : { look, delegate };
       /** Untrusted observation text, re-framed only on steerReply runs (fenceOperatorLines). */
       const untrusted = (text: string, marker?: string, anchored?: boolean): string =>
         steerReply ? fenceOperatorLines(text, marker, { anchored: anchored === true }) : text;
@@ -1958,6 +1977,19 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
       /** Image looks executed this run, for the input.lookImage.max cap. */
       let imageLooks = 0;
       onEvent({ kind: "started", harness: NATIVE_HARNESS_ID });
+      // D1: the MCP client. Present only on runs whose input carries `mcp`
+      // (SHIP_MCP at enqueue, servers declared); absent leaves the dialect,
+      // the prompt and the step sequence exactly as before. The listing is a
+      // recorded step, so the offer below is a pure function of the log.
+      const mcpInput = input.mcp;
+      let mcpOffer: McpOffer | undefined;
+      if (mcpInput !== undefined) {
+        const listings = await ws.ctx.step(`${p}mcp-tools`, () => listMcpTools(mcpInput, { executor: ws.executor, suffix: "list", ...(config.mcpHttp !== undefined ? { http: config.mcpHttp } : {}) }));
+        mcpOffer = offerTools(mcpInput, listings);
+      }
+      // One dialect for both optional surfaces; flag-off runs get exactly
+      // { look, delegate }, as before either feature existed.
+      const dialect: ActionDialect = { look, delegate, ...(steerReply ? { reply: true } : {}), ...(mcpInput !== undefined ? { mcp: true } : {}) };
       let messages: Message[] = [
         {
           role: "system",
@@ -1966,7 +1998,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
           // are re-framed like any other untrusted text, so a crafted issue
           // cannot smuggle "Operator steering — ..." into the one section the
           // model reads as its orders. Flag-off bytes are unchanged.
-          content: systemPrompt({ workdir: ws.workdir, task: untrusted(task.prompt, "[task text, not the operator]", true), search: searchable, browser: input.verification?.preview !== undefined, ask: input.ask === true, look, lookImage: lookImage !== undefined, delegate: input.delegate === true, ...(steerReply ? { reply: true } : {}) }),
+          content: systemPrompt({ workdir: ws.workdir, task: untrusted(task.prompt, "[task text, not the operator]", true), search: searchable, browser: input.verification?.preview !== undefined, ask: input.ask === true, look, lookImage: lookImage !== undefined, delegate: input.delegate === true, ...(steerReply ? { reply: true } : {}), ...(mcpOffer !== undefined ? { mcp: renderMcpSection(mcpOffer) } : {}) }),
         },
       ];
       let anySuccessfulAction = false;
@@ -2705,6 +2737,36 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
           // defanged. Framed AFTER truncation so the pair can never be cut
           // apart by an oversized snapshot.
           messages.push({ role: "user", content: frameUntrusted(truncate(untrusted(formatObservation(result)), maxObs)) });
+          continue;
+        }
+
+        // An MCP tool call (D1, input.mcp). Every refusal here — malformed
+        // name, unknown server, remote host or data-class gate, undeclared or
+        // unlisted tool, permission excess over the grant, missing required
+        // argument, and (SHIP_TOOL_MANIFEST=on) a call that contradicts its
+        // declaration — is a pure function of the recorded input, the
+        // recorded listing and the action, so it records no step and a replay
+        // refuses identically. The call itself is a recorded step: replay
+        // returns its result and never contacts the server again.
+        //
+        // Accounting like ```search and ```look: a tool call clears no finish
+        // gate, touches no last-command verdict and is not fed to recovery.
+        if (action.kind === "mcp") {
+          if (mcpInput === undefined || mcpOffer === undefined) {
+            messages.push({ role: "user", content: "MCP tools are not available in this run." });
+            continue;
+          }
+          const prepared = prepareMcpCall(mcpInput, mcpOffer, action);
+          if ("refusal" in prepared) {
+            messages.push({ role: "user", content: prepared.refusal });
+            continue;
+          }
+          const result = await ws.ctx.step(`${p}turn-${turn}-mcp`, () => {
+            ws.live?.({ phase: "running", turn, detail: clipDetail(describeAction(action)) });
+            if (mcpInput.manifestMode === "shadow") void recordToolFindings(action.tool, prepared.findings);
+            return callMcpTool(mcpInput, prepared, action.args, { executor: ws.executor, suffix: `t${turn}`, ...(config.mcpHttp !== undefined ? { http: config.mcpHttp } : {}) });
+          });
+          messages.push({ role: "user", content: mcpObservation(action.tool, result, maxObs) });
           continue;
         }
 

@@ -13,6 +13,7 @@ import type { EvidenceStore, RepoEvidence } from "./evidence.js";
 import type { IntakePolicy } from "./intake.js";
 import { NETWORK_TIER_HELP, normalizeEgressAllow, parseNetworkTier } from "./egress.js";
 import type { NetworkTier } from "./egress.js";
+import { normalizeMcp, type McpProjectConfig } from "./mcp.js";
 
 /**
  * One record per repository: everything Ship needs to know about a repo, in
@@ -128,6 +129,13 @@ export interface Project {
   weeklyBudgetUSD?: number;
   /** Present when Akiroo manages this record (L8, contract 1). See managedDrift. */
   managedBy?: ManagedBy;
+  /**
+   * MCP servers for this repo's runs (D1, docs/MCP_DESIGN.md): each with its
+   * S24 manifest and the administrator's grant. Validated at save
+   * (mcp.ts normalizeMcp); read only at enqueue, and only under SHIP_MCP,
+   * where it is materialised into the run input.
+   */
+  mcp?: McpProjectConfig;
 }
 
 /** The fields Akiroo owns on a managed project, as it last applied them. */
@@ -277,6 +285,8 @@ export function normalizeProject(input: Project): Project {
     const out = (v ?? []).map((s) => s.trim()).filter((s) => s !== "");
     return out.length > 0 ? out : undefined;
   };
+  // Throws on a server a run could not act on; undefined clears the field.
+  const mcp = normalizeMcp(input.mcp);
   return {
     repo,
     ...(url !== undefined ? { url } : {}),
@@ -310,6 +320,7 @@ export function normalizeProject(input: Project): Project {
     ...(input.requirePlanReview === true ? { requirePlanReview: true } : {}),
     ...(num(input.weeklyBudgetUSD) !== undefined ? { weeklyBudgetUSD: num(input.weeklyBudgetUSD) } : {}),
     ...(input.managedBy !== undefined ? { managedBy: input.managedBy } : {}),
+    ...(mcp !== undefined ? { mcp } : {}),
   };
 }
 

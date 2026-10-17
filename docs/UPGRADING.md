@@ -163,8 +163,8 @@ on 1.24 every Go pull request arrived marked `tests: failed`.
 
 **Projects have a `harness` field.** Absent means "inherit `SHIP_HARNESS`",
 which is what every existing record does, so nothing changes until you set one.
-Setting it to `claude-code` or `opencode` requires the sandbox image that repo
-boots to already carry the binary — build it with
+Setting it to `claude-code`, `opencode`, or `codex` requires the sandbox image
+that repo boots to already carry the binary — build it with
 `images/build.sh --harness <id>`. Nothing installs a harness at run time.
 
 ## 1c. Upgrading past the upgrade-fence release

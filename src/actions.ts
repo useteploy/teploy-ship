@@ -36,6 +36,7 @@ export type Action =
   | { kind: "search"; query: string } // semantic code retrieval (repo runs with an index)
   | { kind: "look"; url?: string; ref?: string; find?: string; depth?: number; image?: boolean } // browser perception (S12): the run's page as an a11y-tree text with refs; image=on adds a PNG screenshot (gated slice)
   | { kind: "delegate"; task: string; repo?: string; path?: string } // bounded child work (S20/S22): spawn one child run, park, merge its result back as an observation
+  | { kind: "mcp"; tool: string; args: Record<string, unknown> } // a declared MCP tool (D1, input.mcp): mcp.<server>.<tool> + JSON arguments
   | { kind: "finish"; message: string }
   | { kind: "ask"; question: string } // a question for the operator; the run parks on the answer (durable, input.ask)
   | { kind: "invalid"; message: string } // recognized but malformed — feed the error back
@@ -280,6 +281,33 @@ export function parseDelegateArgs(arg: string, code: string): Action {
   };
 }
 
+/** An ```mcp block's body is capped before it is parsed or sent anywhere. */
+export const MCP_ARGS_MAX = 64_000;
+
+/**
+ * Parse a ```mcp fence: the tool id on the fence (`mcp.<server>.<tool>`), a
+ * JSON object of arguments in the body (empty body = no arguments). Shape only:
+ * whether the tool is offered, granted and conforming is the loop's decision
+ * (mcp.ts prepareMcpCall), never the parser's.
+ */
+export function parseMcpBlock(arg: string, code: string): Action {
+  const tool = arg.trim();
+  if (!/^mcp\.[a-z][a-z0-9_-]*\.\S+$/.test(tool)) {
+    return { kind: "invalid", message: "```mcp needs the tool on the fence, exactly as listed: ```mcp mcp.server.tool, with a JSON object of arguments in the body." };
+  }
+  const body = code.trim();
+  if (body.length > MCP_ARGS_MAX) return { kind: "invalid", message: `\`\`\`mcp arguments are limited to ${MCP_ARGS_MAX} characters.` };
+  if (body === "") return { kind: "mcp", tool, args: {} };
+  let args: unknown;
+  try {
+    args = JSON.parse(body);
+  } catch (error) {
+    return { kind: "invalid", message: `\`\`\`mcp arguments must be one JSON object: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  if (typeof args !== "object" || args === null || Array.isArray(args)) return { kind: "invalid", message: "```mcp arguments must be one JSON object, e.g. {\"query\": \"retry\"}." };
+  return { kind: "mcp", tool, args: args as Record<string, unknown> };
+}
+
 function splitByFileHeader(code: string): Array<{ file: string; all: boolean; body: string }> {
   const sections: Array<{ file: string; all: boolean; body: string }> = [];
   let current: { file: string; all: boolean; body: string[] } | null = null;
@@ -353,6 +381,13 @@ const LOOK_ACTION_LANGS: ReadonlySet<string> = new Set([...ACTION_LANGS, "look"]
 const DELEGATE_ACTION_LANGS: ReadonlySet<string> = new Set([...LOOK_ACTION_LANGS, "delegate"]);
 
 function actionLangs(dialect?: ActionDialect): ReadonlySet<string> {
+  // `mcp` (D1) widens whichever set applies; absent, the sets are exactly the
+  // pre-MCP ones, so flag-off transcripts trim identically.
+  if (dialect?.mcp === true) return new Set([...actionLangsBase(dialect), "mcp"]);
+  return actionLangsBase(dialect);
+}
+
+function actionLangsBase(dialect?: ActionDialect): ReadonlySet<string> {
   if (dialect?.delegate === true) return DELEGATE_ACTION_LANGS;
   return dialect?.look === true ? LOOK_ACTION_LANGS : ACTION_LANGS;
 }
@@ -378,6 +413,8 @@ export interface ActionDialect {
    * so the turn's real action (if any) still runs; read it with parseReply.
    */
   reply?: boolean;
+  /** ```mcp (D1): parsed only where the run input carries `mcp`. */
+  mcp?: boolean;
 }
 
 /** Longest reply kept; a reply is a message to a person, not a report. */
@@ -457,6 +494,9 @@ function parseFencedAction(text: string, dialect?: ActionDialect): { index: numb
     }
     if (lang === "delegate" && dialect?.delegate === true) {
       return { index, action: parseDelegateArgs(arg, code) };
+    }
+    if (lang === "mcp" && dialect?.mcp === true) {
+      return { index, action: parseMcpBlock(arg, code) };
     }
     if (PYTHON_LANGS.has(lang)) {
       if (code.trim() === "") return { index, action: { kind: "invalid", message: "The Python action is empty. Put the code on a new line after ```python and close the block on its own line." } };
@@ -549,6 +589,8 @@ export function describeAction(action: Action): string {
       return "finish";
     case "delegate":
       return `delegate: ${firstLine(action.task)}`;
+    case "mcp":
+      return `mcp: ${action.tool}`;
     case "ask":
       return `ask: ${firstLine(action.question)}`;
     case "invalid":

@@ -114,6 +114,7 @@ behind one interface, and a run's harness is recorded in its input at enqueue:
 SHIP_HARNESS=native        # default: Ship's own loop — no binary needed, air-gapped
 SHIP_HARNESS=claude-code   # `claude -p`, headless, inside the sandbox
 SHIP_HARNESS=opencode      # `opencode run`, headless, inside the sandbox
+SHIP_HARNESS=codex         # `codex exec --json`, one-shot, inside the sandbox
 SHIP_HARNESS_ATTEMPTS=native,claude-code   # every harness tries; the critic picks
 ```
 

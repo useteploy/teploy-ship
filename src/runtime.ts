@@ -101,6 +101,7 @@ import { FileEventStore, RunMetaStore } from "./run-store.js";
 import { askEnv, readDeploymentAsks } from "./deployment-asks.js";
 import { installPolicyShadowFromEnv } from "./policy-shadow.js";
 import { shadowObserve } from "./shadow-hook.js";
+import { materialiseMcp } from "./mcp.js";
 import type { RunMeta } from "./run-store.js";
 
 export type { RunMeta } from "./run-store.js";
@@ -1235,6 +1236,13 @@ export async function enqueueRun(
   // limits are copied into the input so the run boots the image the log was
   // written under, whatever the worker's SHIP_SANDBOX_IMAGE says today.
   const project = options.repo !== undefined ? await runtime.projects.forRepo(options.repo) : null;
+  // The MCP client (D1): SHIP_MCP plus at least one server on the project
+  // record, materialised with the deployment facts its gates read (data
+  // class, SHIP_MCP_REMOTE_HOSTS, SHIP_TOOL_MANIFEST mode, the Decision 6
+  // switch). It admits the `mcp-tools` / `turn-N-mcp` steps, so it rides the
+  // input like every step-adding flag — and the record is editable, so the
+  // log must carry the servers the run was offered. Off for scans, like look.
+  const mcp = scan ? undefined : materialiseMcp(project?.mcp);
   // The evidence asks below read the enqueueing process's env, falling back
   // to what the deployment's worker published (deployment-asks.ts, F9): a CLI
   // enqueue from an operator's shell otherwise records no ask at all.
@@ -1538,6 +1546,10 @@ export async function enqueueRun(
         // it enqueues exactly as before. Materialised for the standing
         // reason — it admits the turn-N-held / turn-N-finish-held steps.
         ...(steerReplyEnabled() ? { steerReply: true } : {}),
+        // The MCP client (D1), from SHIP_MCP + the project record above:
+        // absent on every run that does not admit it, so those inputs stay
+        // byte-identical to pre-MCP ones.
+        ...(mcp !== undefined ? { mcp } : {}),
         index: true,
         guard: true,
         // The warm repo cache (SB-A). Repo runs that are not PR runs, on

@@ -216,7 +216,7 @@ export interface ToolEffective {
   excess: Excess;
 }
 
-function hostCovered(grantHost: string, host: string): boolean {
+export function hostCovered(grantHost: string, host: string): boolean {
   if (grantHost === host) return true;
   // "*.example.com" covers subdomains of example.com, not example.com itself
   // and not another wildcard (a manifest cannot widen itself by asking for "*.").

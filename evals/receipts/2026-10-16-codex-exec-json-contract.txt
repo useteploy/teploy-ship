@@ -1,0 +1,119 @@
+codex exec --json event contract — sources, and what is NOT yet verified live
+Date: 2026-10-16. Worktree: /tmp/harness-codex @ feat/harness-codex (base
+github/main). Adapter: src/harness-external.ts SPECS.codex; pin
+@openai/codex@0.163.0 (images/versions.json, the current `npm view
+@openai/codex version` stable).
+
+This receipt records where the event encoding ship's parser and tests
+replay CAME FROM, because the fake `codex` binary in
+src/harness-external.test.ts and src/harness-probes.ts encodes an external
+system's semantics — a claim needing verification (CLAUDE.md). Everything
+below was verified against published sources at the pinned tag; nothing
+here ran a real codex binary against a live model.
+
+================================================================================
+1. SOURCES THE CONTRACT WAS READ FROM (all at the tag, not the moving default)
+================================================================================
+
+- github.com/openai/codex @ tag rust-v0.163.0
+  codex-rs/exec/src/exec_events.rs — the ThreadEvent enum and every item
+  payload. Verbatim field names the parser reads:
+    ThreadStartedEvent { thread_id }
+    TurnCompletedEvent { usage: Usage }
+    Usage { input_tokens, cached_input_tokens, cache_write_input_tokens
+            (serde default), output_tokens, reasoning_output_tokens }
+    TurnFailedEvent { error: ThreadErrorEvent { message } }
+    ThreadErrorEvent { message }            (the bare `error` event)
+    ThreadItem { id, #[serde(flatten)] details }
+    ThreadItemDetails (tag "type", snake_case):
+      agent_message      { text }
+      reasoning          { text }
+      command_execution  { command, aggregated_output, exit_code: Option<i32>,
+                           status: in_progress|completed|failed|declined }
+      file_change        { changes: Vec<FileUpdateChange{path, kind}>,
+                           status }   // kind: add|delete|update; comment in
+                                      // source: "emitted only as a completed
+                                      // event once the patch succeeds or fails"
+      mcp_tool_call, collab_tool_call, web_search, todo_list, error { message }
+  Event tags (serde rename): thread.started, turn.started, turn.completed,
+  turn.failed, item.started, item.updated, item.completed, error.
+
+- Same tag, codex-rs/exec/src/cli.rs — flags verified present at 0.163.0:
+  --json (alias --experimental-json), --skip-git-repo-check, --ephemeral,
+  --ignore-user-config, --ignore-rules, --output-last-message/-o, prompt
+  positional with `-` = read the prompt from stdin.
+
+- Same tag, codex-rs/utils/cli/src/shared_options.rs —
+  --dangerously-bypass-approvals-and-sandbox, help text verbatim:
+  "Skip all confirmation prompts and execute commands without sandboxing.
+   EXTREMELY DANGEROUS. Intended solely for running in environments that are
+   externally sandboxed." (Ship's sandbox container is that environment.)
+
+- Same tag, codex-rs/utils/cli/src/config_override.rs — `-c key=value`: the
+  value is parsed as TOML, with a raw-string fallback on parse failure
+  ("This allows convenient usage such as `-c model=o3` without the quotes").
+  Ship still quotes every literal it passes.
+
+- Same tag, codex-rs/model-provider-info/src/lib.rs — custom providers take
+  base_url + env_key (codex reads the named env var itself); default wire_api
+  is Responses; `wire_api = "chat"` is rejected with
+  CHAT_WIRE_API_REMOVED_ERROR pointing at openai/codex#7782. This is why the
+  teploy-gateway route documents a Responses-compatibility requirement.
+
+- developers.openai.com/codex/noninteractive (2026-10-16) — documents the
+  same JSONL shapes with a sample stream, CODEX_API_KEY for automation auth,
+  `codex exec resume --last`/`<SESSION_ID>`, and the read-only default
+  sandbox. developers.openai.com/codex/environment-variables — CODEX_API_KEY,
+  CODEX_ACCESS_TOKEN, CODEX_HOME; provider keys come from the variable named
+  by env_key, not a fixed codex variable.
+
+- Upstream T3 Code nightly (MIT, read-only reference; adapted logic
+  attributed): packages/effect-codex-app-server (app-server JSON-RPC schema —
+  the protocol ship deliberately did NOT adopt, see docs/adapters.md) and
+  apps/server/src/provider/CodexTurnTokenUsage.ts:164 ("Codex counts cache
+  reads and writes inside inputTokens") — the nesting rule ship's
+  totalTokens = input_tokens + output_tokens follows; and
+  apps/server/src/textGeneration/CodexTextGeneration.ts — the codex exec
+  invocation pattern (stdin prompt via `-`, -s/--sandbox, --skip-git-repo-check,
+  --model, -c overrides) that ship's one-shot command adapts.
+
+================================================================================
+2. WHAT THE TESTS' FAKE BINARY ENCODES
+================================================================================
+
+- thread.started(thread_id) -> recorded as HarnessRunRecord.threadId
+- turn.started -> turn count (1 per exec)
+- item.completed agent_message.text -> summary (last wins)
+- item.completed command_execution -> commands count (started does not count)
+- item.completed file_change.changes[] -> "<kind> <path>" entries, capped 200
+- turn.completed usage -> usage fields, priced:false always (no dollars exist
+  in the exec stream)
+- turn.failed / error -> status error with the message
+- no turn.completed -> error "codex produced no turn.completed event"
+- junk lines skipped (claude/opencode parsers behave the same)
+
+================================================================================
+3. NOT VERIFIED HERE — needs a live credential
+================================================================================
+
+- No real @openai/codex 0.163.0 binary was installed or run (no OpenAI
+  credential in this session). The following are source-verified but
+  live-unverified: the exact `codex --version` first line (pinned is checked
+  by substring, so any "codex[-cli] 0.163.0" form passes); that the npm
+  package's postinstall fetch of the platform binary works inside the
+  sandbox image build (same class of step as every other baked npm harness);
+  that `codex exec` as root in the trixie container accepts
+  --dangerously-bypass-approvals-and-sandbox without a TTY (the flag skips
+  sandbox construction entirely, so no Landlock/Seatbelt path is exercised);
+  and the live shape of a real stream (e.g. whether 0.163.0 emits item.updated
+  for agent messages mid-turn — the parser tolerates both presence and
+  absence).
+- First live run should be a one-instance canary (CLAUDE.md benchmarking
+  gotcha) with SHIP_HARNESS=codex, CODEX_API_KEY set, and a trivial task;
+  compare the recorded harness-run step against section 2, then update this
+  receipt. If the live stream differs, fix parseCodexExecStream before any
+  batch.
+- Gateway route is additionally unverified end to end: teploy-gateway must
+  expose a Responses-compatible endpoint (/v1/responses) for codex to use it
+  (source: CHAT_WIRE_API_REMOVED_ERROR above). No live gateway+codex round
+  trip was performed.

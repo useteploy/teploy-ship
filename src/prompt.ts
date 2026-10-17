@@ -154,7 +154,7 @@ Operator messages arrive ONLY as user turns the system writes, beginning "Operat
  * ~30% of agent quality that lives in prompt/recovery tuning is a
  * later-milestone concern, but the protocol has to be unambiguous now.
  */
-export function systemPrompt(options: { workdir: string; task: string; search?: boolean; browser?: boolean; ask?: boolean; look?: boolean; lookImage?: boolean; delegate?: boolean; reply?: boolean }): string {
+export function systemPrompt(options: { workdir: string; task: string; search?: boolean; browser?: boolean; ask?: boolean; look?: boolean; lookImage?: boolean; delegate?: boolean; reply?: boolean; mcp?: string }): string {
   // The index is PARTIAL, and the prompt has to say so.
   //
   // This block used to read "prefer this over grepping around". Measured on
@@ -238,7 +238,7 @@ Rules:
 - The filesystem always persists between actions. Python variables usually persist, but may reset after long pauses — anything important belongs in a file.
 - Prefer small, verifiable steps. Read errors and fix them.
 
-${options.browser === true ? BROWSER_PROOF : ""}${options.ask === true ? ASK_ACTION : ""}${options.look === true ? (options.lookImage === true ? `${LOOK_ACTION}${LOOK_IMAGE_SENTENCE}\n\n` : LOOK_ACTION) : ""}${options.delegate === true ? DELEGATE_ACTION : ""}${options.reply === true ? REPLY_ACTION : ""}# Finishing
+${options.browser === true ? BROWSER_PROOF : ""}${options.ask === true ? ASK_ACTION : ""}${options.look === true ? (options.lookImage === true ? `${LOOK_ACTION}${LOOK_IMAGE_SENTENCE}\n\n` : LOOK_ACTION) : ""}${options.delegate === true ? DELEGATE_ACTION : ""}${options.mcp ?? ""}${options.reply === true ? REPLY_ACTION : ""}# Finishing
 
 When the task is complete and verified, emit a finish block with a short summary of what you did and the result:
 \`\`\`finish
