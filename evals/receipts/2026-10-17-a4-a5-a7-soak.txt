@@ -30,3 +30,10 @@ A6 — SHIP_SCHEDULE_OVERLAP=on; A7 — SHIP_MISSION_VIEW=on, SHIP_STACK_DETECT=
   the second recorded continuity against the first (same revision e307778): still-open 1,
   new 2, superseded 1. PASS.
 - Test-integrity surfacing stays shadow until its log is reviewed.
+
+A4 re-soak after #111 (read-only children) — production b8a58bb, SHIP_DELEGATE=1 again
+- run-request-9e443d34… (change journey): two children run-del-dfc91cf9… and
+  run-del-b666b6c5…, both recorded mode=scan, no repo-pr step (no PR), completed with no
+  human decision; the parent wrote DELEGATE-SUMMARY.md and opened ONE PR (#8), then
+  parked at approve-merge (denied, scratch). Children cost $0.0058 + $0.0127. PASS.
+- SHIP_DELEGATE stays on (cap SHIP_MAX_RUN_COST_USD=1.00, SHIP_DELEGATE_WAIT_MS default 30 min).
