@@ -498,7 +498,7 @@ gate passes, not that features exist.
 | Unattended background agent | Tickets, events and schedules become merged changes without plumbing interventions | G2 overseer metrics. Provisional targets from the private umbrella note `../_internal/ORCHESTRATION_TARGET_STATE.md`: >70% of sent items closed with zero human edits (merged, not reverted in 7 days); <10 interventions per week; auto-merge revert rate <3%; cost per merged PR known per repo. A four-week baseline is measured first and the targets are re-frozen against it (evaluation rules above) |
 | Delivery loop | Task → PR → preview → perception check → approved deploy → observation → rollback, with receipts | G3 flagship journey receipt (L4) plus S14/S15/S27 acceptance |
 
-Non-goals for this backlog: non-repo desktop automation for its own sake
+Non-goals for this backlog (amended by E7, 2026-10-17): non-repo desktop automation for its own sake
 (computer use exists to verify software Ship builds), a sidebar/sans-serif
 redesign (rejected 2026-09-19), and building a feature because a competitor
 names it (slice discipline). Cross-provider fan-out and simulator/device work
@@ -746,6 +746,176 @@ already taken there) and recorded in that file when made.
    Q1 on private repositories and routing `on`.
 10. Which repository gets auto-merge/governance auto windows first (X12), so
    the G2 revert-rate measure has data.
+
+### E7 Design round 2026-10-17: harness breadth, cross-provider delegation, triggers, perception, latency, skills
+
+Owner direction 2026-10-17: Ship should serve other people's agents and
+workflows, not only the owner's. Harness breadth (Cursor, Grok Build, Pi,
+Gemini CLI, any ACP agent) and cross-provider delegation are in scope now; the
+Observe incident loop leads the trigger work; T3 Code (MIT) is the reference
+architecture, ported with attribution where it fits a remote, sandboxed
+server. Five design notes were written against source (Ship at `4b13601`,
+T3 Code nightly `v0.1.1-nightly.20261016.3218`, teploy-observe main) and
+spot-checked by the coordinator; their slice tables are condensed here. The
+full notes are private (`_internal/ship-design-2026-10-17/`).
+
+This section amends E0, E3 and E5 where it says so. The end-state non-goal
+"cross-provider fan-out stays in T3 Code" is withdrawn.
+
+#### E7.1 Corrections to earlier sections
+
+- **E0/E3 D4:** plan parks are not the latency floor. A change run parks only
+  when the project or task asks (`requirePlanReview`), and scans never park
+  (`src/runtime.ts:1397`). Latency is setup: worker poll, sandbox create,
+  clone, index, baseline tests. No phase timing exists yet, so D4 starts by
+  measuring.
+- **Follow-ups are always cold.** Every follow-up boots a fresh sandbox and
+  the warm cache is off for runs on an existing PR (`src/runtime.ts:1425`),
+  which is what a follow-up is. This is the largest single daily-driver gap.
+- **Per-child model choice does not need Q9.** Choosing a child's model is a
+  fresh selection; the destination and retention gate (`whyNot`) already
+  exists and can run per child with routing off. Q9's journal is only for
+  mid-run switches. The real prerequisite: a native worker runs every run on
+  one model built at start (`src/cli.ts:2195`); the run's model is used only
+  for pricing. DT1 fixes that.
+- **T3's merge-back merges conversation context, not code.** Ship's context
+  transfer already does that; merging child diffs into one PR is Ship's own
+  design (DT6).
+- **The workspace snapshot is host-local** (`docker commit` on one sandbox
+  host); `src/snapshot.ts` is the store backup tool. Fork inherits through git.
+- **The delegation ledger claim locks within one process** (`withFileLock`);
+  it moves to the store's `setNX` before depth 2 (DT5).
+- **Observe intake does not match the live sender.** Observe's outbox sends
+  `NotificationPayload` (`kind`, `incident_id`, `rule_id`, no `alert_id`;
+  `teploy-observe/internal/platform/notify_outbox.go:720`) with an
+  `X-Observe-Delivery` id. `/hooks/observe` skips payloads without
+  `alert_id` (`web/src/routes/hooks/observe.tsx:78`), and the incident
+  receiver ignores `kind`, so a recovery notice reads as a re-fire. EV0.
+- **Artifacts and recordings.** The flow rung already records WebM against the
+  exact preview revision (`src/ladder-steps.ts:380`). Artifacts carry no run
+  or revision binding, and when the artifact store fails, untagged assets fall
+  back to forge PR attachments (`src/durable.ts:4146`). Q3a.
+- **External harness credentials** travel through a workspace file sourced and
+  removed in one command (`src/harness-external.ts:1218-1220`), and output
+  scrubbing is pattern-based (`src/redact.ts`), so a bare provider key in a
+  shape no rule knows is not scrubbed. H1.
+- **E1 harness row is stale:** codex and opencode v2 adapters are merged
+  (#100, #101); steering is live for native, claude-code and opencode v2.
+
+#### E7.2 Slices
+
+Sizes and acceptance are the design notes'; each slice still gets a frozen
+specification when picked up. Flag names were grepped clean across `src`,
+`web/src`, `scripts` and `docs`. "Neg" lists the negative controls that must
+pass.
+
+**W0 — fixes and measurement, no new behaviour flag**
+
+| ID | Slice | Depends | Acceptance (Neg) | Size |
+| --- | --- | --- | --- | --- |
+| EV0 | Both Observe receivers correct against the live outbox: key `observe:rule:<rule_id>:<incident_id>`, dedupe on `X-Observe-Delivery`, honour `kind` | none | A real `incident_opened` creates one task; five retries of one delivery create one. Neg: `incident_recovered` creates no task and never reopens; wrong secret 401; outside the 300 s window 401 | S |
+| Q3a | Bind artifacts to run and revision, a `recording` data class `uploadPrAsset` refuses, no forge fallback for media, one run-access check on the download route, `no-store` | none | A new recording carries runId and revision and is linked, not attached. Neg: a user without access to the run gets 404; a store failure fails the upload instead of attaching; pre-binding artifacts are admin-only | S–M |
+| H1 | Harness credentials by exec env (daemon already accepts `env`; the `@neutron-build/agents` executor must send it), exact-value scrub of harness stdout/stderr before parse, record and live view | none | Token absent from workspace files, argv, event log, live view and snapshot on a run that prints `env`. Neg: a planted bare key in output is scrubbed | M |
+| D4-a | Phase timing, time to first token (TTFT) and first edit (TTFE), worker claim time | none | Fixture logs give exact phase gaps; a missing timestamp yields null with a reason, never 0; then a cold vs warm-template baseline receipt on the G1 repos | S |
+| D4-b | Plan-floor pins (tests only) | none | With `requirePlanReview`, "fix a typo" still parks, including with thread warmth present; a scan never parks | S |
+| DT1 | Per-run model for the native harness, materialised at enqueue like `lookImage` | none | A run with `input.model` executes and is priced on it. Neg: a run without it is byte-identical (fingerprint pinned) | S |
+
+**W1 — daily driver**
+
+| ID | Slice | Flag | Depends | Acceptance (Neg) | Size |
+| --- | --- | --- | --- | --- | --- |
+| D4-c | Thread snapshot at end of turn; follow-up boots from it, fetches instead of cloning; cold fallback on any mismatch | `SHIP_WARM_THREAD`, `SHIP_WARM_THREAD_TTL_SEC` | D4-a, D4-b | TTFT improves against the baseline. Neg: a credential file in the workspace means no snapshot; removed host, expired record or egress digest mismatch each give a cold run that completes; flag off byte-identical. First test: snapshot retains `.git` and an uncommitted file under gVisor (the sandbox README and commit `2a89f72` disagree on warm volumes) | M |
+| DT2 | Delegate targets: `target=` from `SHIP_DELEGATE_TARGETS` ∩ project list, per-child destination/retention gate run whatever the routing mode, host check for external harnesses | `SHIP_DELEGATE_TARGETS` | DT1 | Allowed target spawns with a routing segment. Neg: unlisted target, disallowed destination, unknown retention for private data, no policy file, harness host mismatch: each refused by name | M |
+| DT3 | Child cap = min(per-run cap, parent remaining), narrow only | under `SHIP_DELEGATE` | DT2 | Neg: an input cap above config never widens; a parent with nothing left gets `budget-insufficient` | S |
+| DT4 | Child `needs-input` relayed to the parent as an observation | under `SHIP_DELEGATE` | none | Neg: child `ask` still refused; no child park recorded | S |
+| DF1 | Fork a run: source history via follow-up context, new branch from the source's pushed SHA, own PR | `SHIP_FORK` | D3 | Neg: forking an in-flight run refused; source PR untouched | M |
+| DS1 | Stacked PRs: open against `ship/<base>`; when the base squash-merges, retarget and `rebase --onto` the recorded old base head | `SHIP_STACKED_PRS` | B1 | Diff holds only its own commits. Neg: conflict aborts and parks with files; base closed unmerged proposes nothing; duplicate sweep one task | M |
+| Q3b | Look-session CDP screencast as a run-page recording (context, not PR proof: `look` cannot click and runs before commit) | `SHIP_LOOK_RECORD` | Q3a | Recording bound to the snapshot it observed, ≤ 4 MiB, 7-day retention. Neg: never linked from the PR as verification | M |
+| Q3c | Withhold any recording whose page text contains a configured secret value | rides Q3a/Q3b | Q3a | Neg: a page printing a seeded secret yields no stored recording and a recorded refusal | S |
+| Q4-a | Skills registry: SKILL.md format, version-pinned, per-project enablement, permission-granting frontmatter stripped and recorded, materialised at enqueue | `SHIP_SKILLS` | A2 S21 disposition | One skill in two projects at the pinned version; not in a third. Neg: editing a skill does not change an in-flight run; flag off byte-identical | M |
+| Q4-b | Native progressive loading: index in context, body via a `skill` action inside the turn step | `SHIP_SKILLS` | Q4-a | Neg: a skill saying "push to main" fails for want of a credential; a skill asking to print keys finds nothing; logs without skills parse as before | M |
+| Q4-c | claude-code pass-through via `--plugin-dir` (probe-gated); record repo `.claude/skills` loading, which happens unmanaged today | `SHIP_SKILLS` | Q4-a | A registry skill invocable in a live claude-code run. Neg: `repoSkills: "deny"` with claude-code refused at enqueue | S |
+
+**W2 — triggers and the Observe loop**
+
+| ID | Slice | Flag | Depends | Acceptance (Neg) | Size |
+| --- | --- | --- | --- | --- | --- |
+| EV1 | teploy-observe: `issue_new`, `issue_regression`, `issue_spike` notices on the signed outbox with fingerprint, release, environment, counts, first/last seen, scrubbed stack ≤ 2 KB; an issue read endpoint for recovery checks | Observe webhook `kinds` | none | One seeded error, one `issue_new`; resolve and re-error, one regression; a burst, at most one spike per hour. Neg: a webhook without `issue_*` kinds gets none; Slack never gets a stack; full emitter drops and counts, ingest latency unchanged | M |
+| EV5 | Wire `incident-evidence.ts` into diagnosis; deploy correlation as hypothesis only | `SHIP_INCIDENT_EVIDENCE` | EV0 | Facts, hypotheses, unknowns framed. Neg: another service's numbers set aside; an uncited causal claim downgraded; two-project attribution parks | M |
+| EV6 | Reproducing-test gate on remediation: test fails on base, passes on head | `SHIP_INCIDENT_FIX` | EV5 | Neg: no test change held; passes on base held; no test command held as unavailable; pre-flag runs replay byte-identically | M |
+| EV2 | Event-rule engine in front of existing intake: typed event, condition, task template; dedupe at delivery id, episode key and task claim; stale ordering recorded not acted on; dry run; per-source HMAC and replay window; rate limits | `SHIP_EVENT_RULES=off\|shadow\|on` | B1 | One task per duplicate or re-delivered event; resolved-before-triggered gives zero. Neg: bad signature or stale timestamp 401, nothing stored; over-rate parks; shared-secret source with an `auto` rule refused at save | M–L |
+| EV3 | Built-in sources (Slack, Linear, CI, review, Observe, schedules) as rule sources in shadow | `SHIP_EVENT_RULES=shadow` | EV2 | One week with zero diffs against today's path. Neg: an injected divergence is logged and the old path wins | M |
+| EV4 | Vendor adapters as payload mappers: Sentry, Datadog, PagerDuty v3, Jira, GitLab | under `SHIP_EVENT_RULES` | EV2 | Each vendor's documented example verifies and maps. Neg: mutated body 401; payload without a dedupe id 400; stale secondary delivery ignored | M |
+| EV9 | Standing tasks (B5): templates on schedules, pause, retire | none | EV2 | Fires, plan-parks, digest lists the PR. Neg: paused slot creates nothing; two failures of one test fire flaky triage once | M |
+
+**W3 — harness breadth**
+
+| ID | Slice | Flag | Depends | Acceptance (Neg) | Size |
+| --- | --- | --- | --- | --- | --- |
+| H0 | Contract receipts per agent at pinned versions (`initialize` and a full session), egress measured from an empty allowlist; records D6 adapter cost (opens D8) | none | D6 | Receipts under `evals/receipts/` | S |
+| H2 | Sealed credential store per project and profile, refused at enqueue when missing or when encryption is unset; data-destination gate at enqueue for every external harness, existing ones included | `SHIP_HARNESS_CRED` | H1 | Neg: missing credential refused at enqueue; destination outside policy refused | M |
+| H3 | `ship-acp` in-sandbox driver plus `src/harness-acp.ts`: the whole ACP session runs inside one exec (exec has no stdin), permission requests answered by a ported policy (workspace writes only, symlink-safe, never allow-always), non-root agent user | `SHIP_ACP_HARNESS` | H0, H1 | Declared journey on a mock peer and one real agent. Neg: a write outside the workspace denied; allow-always never granted | L |
+| H4 | Gemini CLI and Grok profiles, API keys | under `SHIP_ACP_HARNESS` | H2, H3 | Declared journey per agent on real binaries | M |
+| H5 | Steering via ACP `session/load`, interrupt via control file | `SHIP_ACP_CONTROL` | H3, D2 | Steer reaches the agent at the next boundary; interrupt leaves effects recorded | M |
+| H6 | Cursor (ACP if H0 confirms, else stream-json) with dashboard login minting a Cursor API key; Pi over RPC in the same driver | under `SHIP_ACP_HARNESS` | H4 | Declared journeys | M |
+| H8 | ACP plan phase under a read-only policy, satisfying `requirePlanReview` | `SHIP_ACP_PLAN` | H3 | Plan parks before any write | M |
+| H9 | ACP registry agents at image build time; Antigravity image if Decision 20 says so | none | H3 | Build test lists the pinned agents | S–M |
+| H7 | Subscription credentials: Ship-owned login in a throwaway sandbox, sealed, leased per run, digest-gated write-back, swept before snapshot | `SHIP_HARNESS_CRED` + profile opt-in | H2, H5, Decision 11 | Neg: two runs never share a lease; credential file absent from every snapshot | M |
+
+**W4 — gated on other work**
+
+| ID | Slice | Waits on |
+| --- | --- | --- |
+| EV7 | Delivery to recovery verdict: verified-recovered only when Observe shows the fix release with no events of the fingerprint for the window; otherwise reopen | EV1, EV6, A9 |
+| EV8 | Policy-driven remediation authorisation (high confidence, ≤ 3 files, exact attribution; still plan-parks) | EV7, Decision 13 |
+| X4′ | Live receipt: seeded incident to verified recovery, then a seeded regression reopens | EV1–EV7 |
+| DT6 | Write children on `ship/<child>` branches merged into the parent's single PR by a recorded merge step; conflict parks, never force-resolves | DT2, DT3 soaked |
+| DT5 | Delegation depth 2 with a store-backed ledger claim | C8, DT2 |
+| D11 | Preview on its own domain behind `forward_auth`, cookie bound to run and revision; superseded revision 410 | L3 |
+| D4-d, D4-e | Hot hold (new daemon TTL route) and per-project pool | D4-a measurement after D4-c |
+| Q5-a..c | Frozen 40-question retrieval set and baseline, consolidator in shadow, consolidated retrieval on | A2 S21 disposition |
+| Q4-d | opencode 2 and codex skill pass-through | Q4-c, codex live proof |
+| C5 | Desktop target: headless Sway + wayvnc + grim (Tebian runs Sway), Xvfb fallback, `desktop` resource class, VNC never published | C5 spike under gVisor, C1 |
+
+#### E7.3 Order
+
+1. W0 first. EV0, Q3a and H1 are fixes to live paths; D4-a, D4-b and DT1 are
+   prerequisites with no behaviour change.
+2. W1 and W2 in parallel lanes (daily driver; triggers). EV1 is a
+   teploy-observe release and can start immediately.
+3. W3 after H1 lands; H0 can run alongside W1.
+4. The existing E5 items continue: A8 git credential proof, D1 MCP soak,
+   A2/A3 shadow review, G1 once D4-c and DF1 are on.
+
+Lane routing: GLM lanes implement; Claude reviews EV0, Q3a, H1, H2, H3, H7,
+DT2 and EV6 before merge (credentials, authority and access boundaries).
+
+#### E7.4 Owner decisions added (continuing E6)
+
+Defaults are applied unless the owner overrules; only 11 blocks work.
+
+11. **Subscription credentials on a server (H7).** Whether Ship may run a
+    user's personal subscription login (Gemini, Grok, Pi, Antigravity) on a
+    self-hosted server. Vendor terms were not checked. API keys need no
+    decision. Blocks H7 only.
+12. Unsigned or shared-secret sources (Datadog, legacy Sentry, plain-token
+    GitLab) may not use `auto` rules. Default: refused.
+13. Remediation authorisation in v1 is explicit approval only; EV8's project
+    policy ships later. Default: explicit only.
+14. Retire `/hooks/observe` once EV0 lands so Observe has one receiver
+    (`/api/incidents/intake`). Default: retire.
+15. TTFT target: follow-up median ≤ 20 s and at least 3× faster than cold,
+    re-frozen after the D4-a baseline.
+16. Warm-thread TTL 2 h and a per-project snapshot cap of 5 per host, revised
+    from measured disk use.
+17. `repoSkills: "deny"` refuses claude-code runs (it loads repo skills
+    unmanaged). Default: refuse.
+18. External-harness provider keys move behind a credential proxy before
+    skills ship to external harnesses. Default: H1 first, proxy considered
+    with H2.
+19. An operator-interrupted external run ends `cancelled` with its effects
+    recorded. Default: cancelled.
+20. Antigravity's separate image waits for user demand. Default: wait.
 
 ## Evidence and source references
 
