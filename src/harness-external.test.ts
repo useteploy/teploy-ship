@@ -1339,3 +1339,11 @@ test("external drain keys never collide with D2's held-claim keys or the native 
   assert.deepEqual(await store.drain("r", 0), [], "native turn key 0 does not re-claim what ext-0 took");
   assert.deepEqual(await store.claimHeld("r", "queue", "q:0"), ["queued"], "idempotent replay of the held key");
 });
+
+test("SHIP_HARNESS_MODEL_<ID> overrides the shared model for that harness only", () => {
+  const env = { SHIP_HARNESS_MODEL: "glm-5.3", SHIP_HARNESS_MODEL_OPENCODE: "zai-coding-plan/glm-5.3" };
+  assert.equal(externalHarnessConfig("opencode", env).model, "zai-coding-plan/glm-5.3");
+  assert.equal(externalHarnessConfig("claude-code", env).model, "glm-5.3", "other harnesses keep the shared default");
+  assert.equal(externalHarnessConfig("claude-code", { ...env, SHIP_HARNESS_MODEL_CLAUDE_CODE: "glm-5.3-flash" }).model, "glm-5.3-flash", "dash maps to underscore");
+  assert.equal(externalHarnessConfig("opencode", { SHIP_HARNESS_MODEL_OPENCODE: "  " }).model, undefined, "blank override falls back (here to nothing)");
+});
