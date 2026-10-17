@@ -2,29 +2,34 @@
 
 Start with [docs/DECISIONS_OPEN_2026-10-04.md](docs/DECISIONS_OPEN_2026-10-04.md) (everything already decided, plus open Decisions 4–10 from the programme's E6), then this file. The single forward plan is [docs/SHIP_RELEASE_PROGRAMME_2026-09-21.md](docs/SHIP_RELEASE_PROGRAMME_2026-09-21.md); status lists live in its execution tables plus [AUDIT_OPEN.md](AUDIT_OPEN.md) wave-5 section. Update those rather than creating another plan.
 
-## Live session state (2026-10-17) — resume here
+## Live session state (2026-10-17, evening) — resume here
 
-Private detail: `../_internal/SHIP_SESSION_STATE_2026-10-16.md` (read first).
+Private detail: `../_internal/SHIP_SESSION_STATE_2026-10-16.md` and
+`../_internal/SHIP_SESSION_STATE_2026-10-17-design.md` (read first). Design notes
+behind E7: `../_internal/ship-design-2026-10-17/`.
 
-- **Production:** web+worker `15d36ef`. On: `SHIP_LOOK`, `SHIP_THREAD_VIEW`,
-  `SHIP_STEER_REPLY`, `SHIP_LIVE_VIEW`, `SHIP_PR_WATCH`. Sandboxes compute-1 +
-  compute-2 on the `:h2` image (claude-code 2.1.246, opencode 2.0.26, codex 0.163.0;
-  rollback tag `:dev-pre-h2`). Routing Decision 9 live. No open PRs.
-- **Proven live this wave** (receipts in `evals/receipts/2026-10-1[67]-*`): A0 backup,
-  A1 thread view, C1 second host, D2 steer reply + queue, D5 live view, B1 PR watch,
-  claude-code and opencode v2 session-resume steering, derived provider egress.
-- **Built, merged, NOT yet enabled/proven:** D1 MCP client (`SHIP_MCP`), codex adapter
-  (gateway unreachable from compute sandboxes; or an OpenAI key — owner call).
-- **Next (E5 order):** A2 shadow review (clock restarted 2026-10-16, needs days of
-  runs); A4 `SHIP_DELEGATE=1` with `SHIP_MAX_RUN_COST_USD`; A3/A5-A7 flips; A8
-  `SHIP_GIT_CREDENTIAL=env` live proof (prereqs now met: per-exec env forwarding, git
-  2.47); Q9 routing `on` (unblocked by Decision 9); D1 MCP soak; D4 interactive
-  latency; G1 parity run (task set frozen in `_internal`); then L3/L4 flagship
-  delivery journey.
-- **Owner:** dismiss the 24 stale PR-watch proposals in the Inbox; Decisions 5, 6,
-  8, 10 (programme E6).
-- **Lane routing:** workhorse lanes on opencode `zai-coding-plan/glm-5.3` (max) —
-  note production shares that quota; Claude for security review.
+- **Production:** web+worker `4b13601`. On: `SHIP_LOOK`, `SHIP_THREAD_VIEW`,
+  `SHIP_STEER_REPLY`, `SHIP_LIVE_VIEW`, `SHIP_PR_WATCH`, `SHIP_DELEGATE=1`
+  (`SHIP_DELEGATE_MAX=2`, `SHIP_MAX_RUN_COST_USD=1.00`), `SHIP_PLAN_GROUNDING`,
+  `SHIP_FINDING_CONTINUITY`, `SHIP_SCHEDULE_OVERLAP`, `SHIP_MISSION_VIEW`,
+  `SHIP_STACK_DETECT`, `SHIP_HARNESS_RECORD`; `SHIP_TEST_INTEGRITY_SURFACING=shadow`.
+  Sandboxes compute-1 + compute-2 on `:h2` (rollback `:dev-pre-h2`).
+- **Proven live** (receipts `evals/receipts/2026-10-1[67]-*`): A0, A1, C1, D2, D5, B1,
+  claude-code and opencode v2 steering, derived provider egress, A4 delegation with
+  read-only children, A5 grounding + continuity, A6, A7.
+- **Built, not enabled/proven:** D1 MCP (`SHIP_MCP`), codex adapter.
+- **The plan now continues in programme E7** (design round 2026-10-17: harness
+  breadth, cross-provider delegation, Observe loop and event rules, recordings,
+  warm follow-ups, skills). Start with E7 W0: EV0 (Observe receivers do not match
+  the live outbox), Q3a (artifact binding and access), H1 (harness credential
+  delivery and exact-value scrub), D4-a, D4-b, DT1. Then W1 and W2 in parallel.
+- **Still pending from E5:** A8 git credential proof (needs a private scratch repo on
+  Forgejo and GitHub; GitHub creation needs owner OK), D1 MCP soak, A2/A3 shadow
+  review, G1.
+- **Quota:** the z.ai coding plan 5-hour limit was hit 2026-10-17 (reset reported
+  2026-10-18 08:11); it is shared with production runs. Keep GLM lanes to 2-3 at once.
+- **Owner:** dismiss the 24 stale PR-watch proposals; Decisions 5, 6, 8, 10 (E6) and
+  11 (E7.4, subscription credentials on a server; the rest of E7.4 have defaults).
 
 ## Where things stand (2026-10-16, end of the perception programme)
 
