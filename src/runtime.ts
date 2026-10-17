@@ -103,6 +103,7 @@ import { shadowObserve } from "./shadow-hook.js";
 import type { RunMeta } from "./run-store.js";
 
 export type { RunMeta } from "./run-store.js";
+export { checkRecordDirsAtStartup } from "./record-dirs.js";
 export type { IntakeStore, IntakeTask, ProposeInput } from "./intake.js";
 export { FileIntakeStore, NucleusIntakeStore } from "./intake.js";
 export type { SpendStore, SpendEntry, UnpricedRunStore, UnpricedRunEntry } from "./spend.js";
