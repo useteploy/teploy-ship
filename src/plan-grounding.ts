@@ -50,6 +50,8 @@ export interface PlanRef {
   line: number;
   /** True when the plan line says it creates/adds this thing. */
   creates: boolean;
+  /** Present only on refs read as bare prose tokens (not backtick spans or fenced lines). Additive. */
+  origin?: "prose";
 }
 
 export interface RefResult extends PlanRef {
@@ -115,6 +117,32 @@ function looksLikePath(s: string): boolean {
   return new RegExp(`^[A-Za-z0-9_.-]+\\.${FILE_EXT}$`).test(bare);
 }
 
+/** Last dot-segment is a known file extension, not a TLD-like `.com`/`.org`/`.io`/`.ai`. */
+const ENDS_WITH_EXT = new RegExp(`\\.${FILE_EXT}$`);
+/** Hostname shape: `api.z.ai`, `example.com` — alnum first label, dot-separated labels, no leading dot. */
+const HOSTNAME_LIKE = /^[A-Za-z0-9][A-Za-z0-9-]*(?:\.[A-Za-z0-9-]+)+$/;
+
+/**
+ * A bare file-path token from prose (the text between fences and backtick
+ * spans): GLM-5.3 and other models name files in plain sentences, and those
+ * claims are exactly what grounding exists to check. The bar is
+ * `looksLikePath` with surrounding punctuation stripped, plus exclusions for
+ * things prose commonly contains and code spans do not: emails, `1.2.3`-style
+ * versions, and hostnames — a dot-suffix that is not a known FILE_EXT is a
+ * TLD-like token, so `example.com` and `api.z.ai` (with or without a path)
+ * are refused, and URLs are refused by `looksLikePath` itself. Files only:
+ * symbols and commands are never taken from prose.
+ */
+function proseFilePath(token: string): string | undefined {
+  const t = token.replace(/^[(\[{"']+/, "").replace(/[.,;:)\]"']+$/, "");
+  if (t === "" || t.includes("@")) return undefined; // empty, or an email address
+  if (/^\d+(?:\.\d+)+$/.test(t)) return undefined; // version: 1.2.3
+  if (!t.includes("/")) return looksLikePath(t) ? t : undefined; // known extension only (refuses example.com, api.z.ai)
+  const first = t.split("/")[0]!;
+  if (HOSTNAME_LIKE.test(first) && !ENDS_WITH_EXT.test(first)) return undefined; // api.z.ai/v1, example.com/a/b.ts
+  return looksLikePath(t) ? t : undefined;
+}
+
 function looksLikeSymbol(s: string): string | undefined {
   const t = s.replace(/\(\s*\)$/, "").replace(/\(.*\)$/, "");
   const hadCall = t !== s;
@@ -139,11 +167,21 @@ function commandOf(s: string): string | undefined {
 export function extractRefs(plan: string): PlanRef[] {
   const out: PlanRef[] = [];
   const seen = new Set<string>();
-  const push = (kind: RefKind, name: string, line: number, creates: boolean) => {
+  const push = (kind: RefKind, name: string, line: number, creates: boolean, origin?: "prose") => {
     const key = `${kind}\0${name}`;
     if (seen.has(key) || out.length >= MAX_REFS) return;
     seen.add(key);
-    out.push({ kind, name, line, creates });
+    out.push({ kind, name, line, creates, ...(origin !== undefined ? { origin } : {}) });
+  };
+  // Bare file-path tokens from a prose stretch (outside fences and backtick spans). Files only.
+  const scanProse = (gap: string, line: number, creates: boolean) => {
+    for (const tok of gap.split(/\s+/)) {
+      const t = proseFilePath(tok);
+      if (t === undefined) continue;
+      const p = normPath(t);
+      // Keep an out-of-repo path as a ref so it is reported `unchecked`, not silently dropped.
+      push("file", p ?? t, line, creates, "prose");
+    }
   };
   const lines = plan.split(/\r?\n/);
   let fenced = false;
@@ -156,7 +194,12 @@ export function extractRefs(plan: string): PlanRef[] {
       if (cmd !== undefined) push("command", cmd, line, false);
       return;
     }
+    // Walk the line left to right so prose tokens and backtick spans keep source order.
+    let cursor = 0;
     for (const m of text.matchAll(/`([^`\n]+)`/g)) {
+      const at = m.index ?? 0;
+      scanProse(text.slice(cursor, at), line, creates);
+      cursor = at + m[0].length;
       const span = m[1]!.trim();
       const cmd = commandOf(span);
       if (cmd !== undefined) { push("command", cmd, line, false); continue; }
@@ -169,6 +212,7 @@ export function extractRefs(plan: string): PlanRef[] {
       const sym = looksLikeSymbol(span);
       if (sym !== undefined) push("symbol", sym, line, creates);
     }
+    scanProse(text.slice(cursor), line, creates);
   });
   return out;
 }
@@ -263,7 +307,7 @@ export function renderGrounding(report: GroundingReport): string {
   if (report.revisionMismatch) out.push(`REVISION MISMATCH: plan is about ${report.revisionMismatch.expected}, tree is at ${report.revisionMismatch.actual.slice(0, 12)}; no reference was checked`);
   if (report.refs.length === 0) out.push("The plan names no files, symbols or commands, so there was nothing to ground.");
   const order: RefStatus[] = ["ungrounded", "unchecked", "proposed", "grounded"];
-  for (const s of order) for (const x of report.refs.filter((y) => y.status === s)) out.push(`  [${s}] ${x.kind} ${JSON.stringify(x.name)} (plan line ${x.line}): ${x.detail}`);
+  for (const s of order) for (const x of report.refs.filter((y) => y.status === s)) out.push(`  [${s}] ${x.kind} ${JSON.stringify(x.name)} (plan line ${x.line}${x.origin === "prose" ? ", prose" : ""}): ${x.detail}`);
   return out.join("\n");
 }
 
