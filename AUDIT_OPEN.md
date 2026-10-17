@@ -1,5 +1,19 @@
 # Open audit items
 
+## 2026-10-16 — B6: Slack/Linear intake proven; Linear replay gap closed
+
+Owner Decision 7 (2026-10-16): Slack and Linear are user features for
+self-hosters, not the owner's workflow. Real-path tests now drive the actual
+`/hooks/slack` and `/hooks/linear` route handlers with correctly signed
+payloads (`web/src/lib/slack-linear-hooks.test.ts`) and the outbound Slack
+incoming webhook over a loopback socket (`src/notify-slack-loopback.test.ts`).
+Defect found and fixed: the Linear receiver's replay protection rested on the
+`Linear-Delivery` header, which the signature does not cover — a captured
+body re-sent under a fresh delivery id was accepted. It now refuses a body
+whose signed `webhookTimestamp` is more than 5 minutes off. Self-hoster guide:
+`docs/INTEGRATIONS_SLACK_LINEAR.md`. Still open: a real Slack app / Linear
+webhook pointed at production (B6's live half; needs the public HTTPS route
+for `/hooks/*`), and threaded Slack results (B4).
 ## 2026-10-16 — shadows wrote nothing for 12 days (root-owned data volume)
 
 Found live 2026-10-16: on production the bind volume
@@ -32,7 +46,6 @@ existed but only ran for UNSANDBOXED workers, so production never ran it.
   teploy creates on a later deploy (as here) is not re-owned; making teploy or
   the image entrypoint own that step is a teploy-cli question.
   the image entrypoint own that step is a teploy-cli question.
-||||||| 1c460ba
 ## 2026-10-16 — D3 (S03) follow-up continuity: measured, context gap fixed
 
 Read end to end on `477529a` (web composer → `runs/[id].tsx` follow-up
