@@ -6,21 +6,25 @@ Start with [docs/DECISIONS_OPEN_2026-10-04.md](docs/DECISIONS_OPEN_2026-10-04.md
 
 Private detail: `../_internal/SHIP_SESSION_STATE_2026-10-16.md` (read first).
 
-- **Production:** web+worker `dfaaf32` with `SHIP_THREAD_VIEW`, `SHIP_STEER_REPLY`,
-  `SHIP_LIVE_VIEW`, `SHIP_PR_WATCH` = on; compute-1 + compute-2 sandboxes; routing
-  Decision 9 live. Receipts: `2026-10-16-a1-c1-soak.txt`, `2026-10-17-a0-live-backup.txt`.
-- **Merged this wave:** #86-#100 except #101 (D1 MCP, D2 steering, D3 follow-ups,
-  D5 live view, B1 PR watch, B6 Slack/Linear proof, A0 backup, H loud shadows,
-  X7 claims CI, codex adapter, pool race fix, main-red fix #102).
-- **Open:** #101 OpenCode v2 + Claude Code session-resume steering (fixes landed,
-  round-2 review pending).
-- **Blocked until the z.ai quota resets (2026-10-17 12:00):** production runs fail
-  at the first model call (`[1308] Usage limit reached for 5 hour`) — the GLM
-  workhorse lanes and Ship production share one coding-plan quota. Then run the
-  owed one-run soaks: D2 (steer reply + queue), D5 (live view), B1 (PR watch).
-- **Then:** merge #101; rebuild sandbox images for opencode 2.0.26 + codex pins
-  (`images/build.sh`, both compute hosts) and one real steered run per harness;
-  A4 `SHIP_DELEGATE=1` with `SHIP_MAX_RUN_COST_USD` set.
+- **Production:** web+worker `15d36ef`. On: `SHIP_LOOK`, `SHIP_THREAD_VIEW`,
+  `SHIP_STEER_REPLY`, `SHIP_LIVE_VIEW`, `SHIP_PR_WATCH`. Sandboxes compute-1 +
+  compute-2 on the `:h2` image (claude-code 2.1.246, opencode 2.0.26, codex 0.163.0;
+  rollback tag `:dev-pre-h2`). Routing Decision 9 live. No open PRs.
+- **Proven live this wave** (receipts in `evals/receipts/2026-10-1[67]-*`): A0 backup,
+  A1 thread view, C1 second host, D2 steer reply + queue, D5 live view, B1 PR watch,
+  claude-code and opencode v2 session-resume steering, derived provider egress.
+- **Built, merged, NOT yet enabled/proven:** D1 MCP client (`SHIP_MCP`), codex adapter
+  (gateway unreachable from compute sandboxes; or an OpenAI key — owner call).
+- **Next (E5 order):** A2 shadow review (clock restarted 2026-10-16, needs days of
+  runs); A4 `SHIP_DELEGATE=1` with `SHIP_MAX_RUN_COST_USD`; A3/A5-A7 flips; A8
+  `SHIP_GIT_CREDENTIAL=env` live proof (prereqs now met: per-exec env forwarding, git
+  2.47); Q9 routing `on` (unblocked by Decision 9); D1 MCP soak; D4 interactive
+  latency; G1 parity run (task set frozen in `_internal`); then L3/L4 flagship
+  delivery journey.
+- **Owner:** dismiss the 24 stale PR-watch proposals in the Inbox; Decisions 5, 6,
+  8, 10 (programme E6).
+- **Lane routing:** workhorse lanes on opencode `zai-coding-plan/glm-5.3` (max) —
+  note production shares that quota; Claude for security review.
 
 ## Where things stand (2026-10-16, end of the perception programme)
 
