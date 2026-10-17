@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { MAX_CLOCK_SKEW_MS, defaultProbes, engineOf, formatDoctor, nucleusProbes, renderDoctor, resolveDoctorStore, runDoctor } from "./install-doctor.js";
+import { MAX_CLOCK_SKEW_MS, checkHarnessEgress, defaultProbes, engineOf, formatDoctor, nucleusProbes, renderDoctor, resolveDoctorStore, runDoctor } from "./install-doctor.js";
 import type { DoctorProbes, StoreQueryClient } from "./install-doctor.js";
 
 // Fake secrets assembled at runtime so no secret-shaped literal sits in source.
@@ -38,6 +38,31 @@ test("every probe answering well is the only way to be ready", async () => {
   const r = await runDoctor(allGood());
   assert.equal(r.verdict, "ready");
   assert.equal(r.counts.fail + r.counts.unknown, 0);
+});
+
+test("harness-egress: native records no check; an external harness records the derived provider hosts", async () => {
+  // Native (unset SHIP_HARNESS) has no check at all — the loop calls the model from the worker.
+  assert.equal(checkHarnessEgress({}), undefined);
+  assert.equal(checkHarnessEgress({ SHIP_HARNESS: "native" }), undefined);
+  // The live 2026-10-17 shape: claude under a base URL names the derived host.
+  const derived = checkHarnessEgress({ SHIP_HARNESS: "claude-code", ANTHROPIC_BASE_URL: "https://api.z.ai/api/anthropic" })!;
+  assert.equal(derived.status, "pass");
+  assert.match(derived.detail, /api\.z\.ai:443/);
+  assert.ok(!derived.remedy);
+  // Materialised through runDoctor, so `teploy-ship doctor` prints it.
+  const r = await runDoctor(allGood({ env: { ...allGood().env, SHIP_HARNESS: "claude-code", ANTHROPIC_BASE_URL: "https://api.z.ai/api/anthropic" } }));
+  assert.equal(byId(r, "harness-egress").status, "pass");
+  assert.match(byId(r, "harness-egress").detail, /api\.z\.ai:443/);
+});
+
+test("harness-egress: nothing derivable is unknown with the remedy, and a broken harness id is a fail", () => {
+  const oauth = checkHarnessEgress({ SHIP_HARNESS: "claude-code", CLAUDE_CODE_OAUTH_TOKEN: "tok" })!;
+  assert.equal(oauth.status, "unknown");
+  assert.match(oauth.detail, /no provider host could be derived/);
+  assert.match(oauth.remedy!, /egress allowlist/);
+  const broken = checkHarnessEgress({ SHIP_HARNESS: "claude-code,codex" })!;
+  assert.equal(broken.status, "fail");
+  assert.match(broken.detail, /not usable/);
 });
 
 test("unknown is not pass: no probes at all is incomplete, never ready", async () => {

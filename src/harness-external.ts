@@ -6,6 +6,7 @@ import type { SteerStore } from "./steer.js";
 import { clipDetail } from "./live.js";
 import type { LiveUpdate } from "./live.js";
 import type { HarnessAdapter, HarnessResult, HarnessStatus, HarnessUsage } from "./harness.js";
+import { MAX_EGRESS_ALLOW_ENTRIES, egressEntryError, normalizeEgressAllow } from "./egress.js";
 
 /**
  * External harness adapters (P5-2): Ship drives a vendor coding agent that is
@@ -133,6 +134,167 @@ export function externalHarnessConfig(id: string, env: NodeJS.ProcessEnv = proce
 /** Shell-quote one argument for POSIX sh. */
 export function shq(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+// ---------------------------------------------------------------------------
+// Provider egress (P5-2 follow-up, 2026-10-17)
+// ---------------------------------------------------------------------------
+
+/**
+ * Which vendor API endpoint an external harness dials, per forwarded
+ * credential — the table behind `providerEgressAllow`.
+ *
+ * An external harness calls its model API from INSIDE the sandbox (the native
+ * loop calls from the worker), so on the allowlist tier the vendor host has to
+ * be on the run's own egress list or every call dies with the daemon's
+ * `egress denied by the sandbox allowlist: <host>` — which is exactly the
+ * production failure of 2026-10-17: a claude-code run under
+ * `ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic` was refused
+ * `api.z.ai:443` until the operator added the host to the project record by
+ * hand. The table says, per harness, which base-URL variable reroutes the
+ * provider (its host replaces the vendor default) and which key variables
+ * select a vendor default.
+ *
+ * claude's OAuth token (`CLAUDE_CODE_OAUTH_TOKEN`, the subscription path) and
+ * codex's `CODEX_ACCESS_TOKEN` are deliberately NOT key variables: a
+ * subscription dials the vendor host too, but Ship cannot see which, and
+ * guessing a host onto an allowlist is a security decision an env var should
+ * not make. Those deployments put the host on the project record; the doctor's
+ * `harness-egress` line says so.
+ */
+interface ProviderEgressSpec {
+  /** Forwarded base-URL variables, each replacing one vendor default host. */
+  bases: ReadonlyArray<{ env: string; replaces: string }>;
+  /**
+   * Vendor default hosts a forwarded key selects. `modelPrefixes` gates a
+   * default on the model Ship will pass the harness — opencode's model ids
+   * name their provider (`zai-coding-plan/glm-5.3`, `zhipu/…`), so the z.ai
+   * key only means api.z.ai when the model actually routes there.
+   */
+  keys: ReadonlyArray<{ envs: readonly string[]; host: string; modelPrefixes?: readonly string[] }>;
+}
+
+const PROVIDER_EGRESS: Record<string, ProviderEgressSpec> = {
+  "claude-code": {
+    bases: [{ env: "ANTHROPIC_BASE_URL", replaces: "api.anthropic.com" }],
+    keys: [{ envs: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"], host: "api.anthropic.com" }],
+  },
+  codex: {
+    // AI_GATEWAY_URL is the teploy-gateway route (codexGatewayConfigFlags);
+    // OPENAI_BASE_URL is the generic OpenAI-compatible override.
+    bases: [
+      { env: "AI_GATEWAY_URL", replaces: "api.openai.com" },
+      { env: "OPENAI_BASE_URL", replaces: "api.openai.com" },
+    ],
+    keys: [{ envs: ["CODEX_API_KEY", "OPENAI_API_KEY"], host: "api.openai.com" }],
+  },
+  opencode: {
+    bases: [
+      { env: "ANTHROPIC_BASE_URL", replaces: "api.anthropic.com" },
+      { env: "OPENAI_BASE_URL", replaces: "api.openai.com" },
+    ],
+    keys: [
+      // z.ai per models.dev: the zhipu key serves the zai-coding-plan and
+      // zhipu provider ids, so the model has to name one of them.
+      { envs: ["ZHIPU_API_KEY"], host: "api.z.ai", modelPrefixes: ["zai-coding-plan/", "zhipu"] },
+      { envs: ["ANTHROPIC_API_KEY"], host: "api.anthropic.com" },
+      { envs: ["OPENAI_API_KEY"], host: "api.openai.com" },
+      { envs: ["OPENROUTER_API_KEY"], host: "openrouter.ai" },
+    ],
+  },
+};
+
+/** One base-URL value as a daemon egress entry: `host:443`, or `host:port` when the URL names one. */
+function egressEntryForBaseURL(raw: string): string | undefined {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return undefined;
+  }
+  if (url.hostname === "") return undefined;
+  const entry = `${url.hostname.toLowerCase()}${url.port !== "" ? `:${url.port}` : ":443"}`;
+  return egressEntryError(entry) === null ? entry : undefined;
+}
+
+/**
+ * The provider API hosts a set of harness refs will call from inside the
+ * sandbox, derived from the worker's own environment — the same forward list
+ * (`externalHarnessConfig`) and the same variables the harness will read
+ * after `harness.env` is sourced. Hosts only, port 443 (the URL's own port
+ * when it names one — the daemon's grammar admits 80 and 443 portless and
+ * nothing else without it), de-duplicated, order preserved. Native and
+ * unknown ids derive nothing: the native loop calls the model from the
+ * worker, outside every sandbox.
+ *
+ * A base URL that is set but unusable (unparseable, no host) still suppresses
+ * the vendor default it replaces: the harness will dial the configured URL,
+ * not `api.*`, and guessing the vendor host would be wrong in the other
+ * direction. Nothing is derived from it and the doctor's `harness-egress`
+ * line shows the gap.
+ */
+export function providerEgressAllow(refs: readonly { id: string }[], env: NodeJS.ProcessEnv = process.env): string[] {
+  const out: string[] = [];
+  const push = (entry: string): void => {
+    if (!out.includes(entry)) out.push(entry);
+  };
+  for (const ref of refs) {
+    const spec = PROVIDER_EGRESS[ref.id];
+    if (spec === undefined) continue;
+    const config = externalHarnessConfig(ref.id, env);
+    // "Forwarded" is envFile's own rule: on the harness's forward list AND
+    // set to a non-empty value on the worker.
+    const held = (name: string): string | undefined => {
+      if (!config.forward.includes(name)) return undefined;
+      const value = (env[name] ?? "").trim();
+      return value === "" ? undefined : value;
+    };
+    const rerouted = new Set<string>();
+    for (const base of spec.bases) {
+      const value = held(base.env);
+      if (value === undefined) continue;
+      const entry = egressEntryForBaseURL(value);
+      if (entry !== undefined) push(entry);
+      rerouted.add(base.replaces);
+    }
+    const model = (config.model ?? "").toLowerCase();
+    for (const key of spec.keys) {
+      if (rerouted.has(key.host)) continue;
+      if (key.modelPrefixes !== undefined && !key.modelPrefixes.some((prefix) => model.startsWith(prefix))) continue;
+      if (key.envs.some((name) => held(name) !== undefined)) push(`${key.host}:443`);
+    }
+  }
+  return out;
+}
+
+/**
+ * A run's explicit (project + preview) egress allowlist with the harness's
+ * derived provider hosts appended — `withPreviewEgress`'s merge discipline,
+ * for the same reason: explicit entries always survive, and when both
+ * together would fail validation or pass the daemon's entry bound the derived
+ * ones are dropped rather than refusing the enqueue. A derived `host:443` is
+ * also skipped when the explicit list already carries the bare host: a
+ * portless entry admits 80 and 443 (egress.ts), so the narrower copy beside
+ * it is noise. Nothing derived returns `explicit` unchanged — byte-identical,
+ * which is the fence that keeps native runs' inputs exactly as they were.
+ */
+export function withProviderEgress(
+  explicit: string[] | undefined,
+  refs: readonly { id: string }[],
+  env: NodeJS.ProcessEnv = process.env,
+): string[] | undefined {
+  const derived = providerEgressAllow(refs, env);
+  if (derived.length === 0) return explicit;
+  const bare = new Set((explicit ?? []).map((entry) => entry.split(":")[0]!.trim().toLowerCase()).filter((host) => host !== ""));
+  const add = derived.filter((entry) => !bare.has(entry.split(":")[0]!.toLowerCase()));
+  if (add.length === 0) return explicit;
+  let merged: string[] | undefined;
+  try {
+    merged = normalizeEgressAllow([...(explicit ?? []), ...add]);
+  } catch {
+    return explicit;
+  }
+  return merged !== undefined && merged.length <= MAX_EGRESS_ALLOW_ENTRIES ? merged : explicit;
 }
 
 /** The env file the harness sources: NAME='value' lines, sh-quoted. */

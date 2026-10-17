@@ -100,12 +100,14 @@ and writes no live row. A whole-attempt deadline bounds the exec
 error, and whatever tree exists goes through the publish gate as incomplete.
 
 The external harness must reach its model vendor, so the run needs the
-`allowlist` tier (the default) or `open`, and the vendor host has to be on the
-allowlist — either on the repo's own list (Projects page, or `teploy-ship
-project set <repo> --egress-allow api.z.ai:443`), which widens nothing else on
-the box, or host-wide via `SBX_EGRESS_ALLOW` on teploy-sandbox. E.g.
-`api.z.ai:443,models.opencode.ai:443` for opencode on z.ai, `api.anthropic.com:443`
-for claude. The binary has to be in `SHIP_SANDBOX_IMAGE`. Neither is checked at enqueue — a run asking for a
+`allowlist` tier (the default) or `open`. Since 2026-10-17 the vendor host
+itself is derived at enqueue from the same forwarded env the harness will
+read (see "Egress for external harnesses" below) and added to the run's own
+`sandboxEgressAllow` — the repo's own list (Projects page, or `teploy-ship
+project set <repo> --egress-allow api.z.ai:443`) widens nothing else on the
+box and stays for hosts the derivation does not cover; host-wide there is
+`SBX_EGRESS_ALLOW` on teploy-sandbox. The binary has to be in
+`SHIP_SANDBOX_IMAGE`. The image is not checked at enqueue — a run asking for a
 harness the image lacks fails at preflight, on the run's own timeline, with the
 build command in the message.
 
@@ -139,6 +141,68 @@ variable that is unset on the worker is simply not forwarded.
 Per-repo evidence config (`teploy-ship evidence set`) is harness-independent
 by design; the harness is chosen per deployment through the environment, not
 per repo, so the two matrices never tangle.
+
+## Egress for external harnesses
+
+The native loop calls its model from the **worker**. An external harness calls
+its model from **inside the sandbox** — the vendor binary runs there, so its
+API traffic leaves through the sandbox's egress boundary, and on the
+`allowlist` tier (the default) a vendor host that is not on the run's
+allowlist means every model call dies with the daemon's
+`egress denied by the sandbox allowlist: <host>`. That was a production
+failure on 2026-10-17: a claude-code run under
+`ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic` was refused
+`api.z.ai:443` and the operator had to add the host to the project record by
+hand.
+
+Since that finding, `enqueueRun` derives the provider API hosts and adds them
+to the run input's `sandboxEgressAllow` — materialised at enqueue like every
+other capability, so replays boot the container the log was written under.
+The derivation (`providerEgressAllow`, src/harness-external.ts) reads the
+worker's own environment through the same forward list the harness will
+receive (`externalHarnessConfig`):
+
+- **A forwarded base URL wins**: the host of `ANTHROPIC_BASE_URL` (claude-code,
+  and opencode when `SHIP_HARNESS_ENV` forwards it), `OPENAI_BASE_URL`
+  (opencode, codex), and `AI_GATEWAY_URL` (codex's teploy-gateway route) —
+  host only, port 443, or the URL's own port when it names one (a portless
+  entry admits only 80 and 443, so `host:8443` is the only spelling that
+  opens 8443).
+- **Else the vendor default for a forwarded key**: `api.anthropic.com:443` for
+  claude-code under `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`;
+  `api.openai.com:443` for codex under `CODEX_API_KEY`/`OPENAI_API_KEY`; for
+  opencode, `api.z.ai:443` when `ZHIPU_API_KEY` is forwarded **and** the model
+  (`SHIP_HARNESS_MODEL_OPENCODE`/`SHIP_HARNESS_MODEL`) starts with
+  `zai-coding-plan/` or `zhipu`, plus `api.anthropic.com:443`,
+  `api.openai.com:443` and `openrouter.ai:443` under their matching keys.
+
+Deliberately NOT derived: subscription credentials. claude under
+`CLAUDE_CODE_OAUTH_TOKEN` and codex under `CODEX_ACCESS_TOKEN` dial a vendor
+host too, but which host is the vendor's own routing — guessing a host onto a
+security allowlist from a token Ship cannot read through is not this
+derivation's call. Those deployments put the host on the project record
+(`teploy-ship project set <repo> --egress-allow api.anthropic.com:443`) or on
+`SBX_EGRESS_ALLOW` at the daemon. A base URL that is set but unparseable also
+derives nothing — and still suppresses the vendor default it replaces,
+because the harness will dial the configured URL, not `api.*`.
+
+Merge semantics (`withProviderEgress`): hosts only, port 443, de-duplicated,
+appended after the project's own entries, which always survive. A derived
+`host:443` is skipped when the explicit list already carries the bare host (a
+portless entry admits 443). If the merged list would fail validation or pass
+the daemon's 64-entry bound, the derived entries are dropped rather than the
+enqueue refused — the same discipline the preview hosts follow
+(`withPreviewEgress`, deploy.ts).
+
+The fence: nothing is derived for native runs, or for an external run with
+nothing derivable, and those inputs are byte-identical to what this build's
+predecessors recorded. The field admits no recorded step, so no step
+fingerprint moves — the upgrade fence treats it as data, not behaviour.
+
+`teploy-ship doctor` prints what this machine's `SHIP_HARNESS` configuration
+derives as the `harness-egress` line — pass with the host list, or UNKNOWN
+with the remedy when an external harness is configured but nothing can be
+derived from the forwarded credentials.
 
 ## claude-code
 

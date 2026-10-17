@@ -44,6 +44,7 @@ import type { RepoStatsStore } from "./repo-stats.js";
 import { attemptsCount, harnessAttempts, harnessRef } from "./harness.js";
 import { PLAN_REVIEW_REFUSAL, refusalFor } from "./harness-capabilities.js";
 import { harnessIdentity, harnessRecordEnabled } from "./harness-identity.js";
+import { withProviderEgress } from "./harness-external.js";
 import type { HarnessRef } from "./harness.js";
 import type { EvidenceStore } from "./evidence.js";
 import { FileProjectStore, NucleusProjectStore, ProjectEvidenceStore } from "./projects.js";
@@ -1426,8 +1427,22 @@ export async function enqueueRun(
     ...(options.repo !== undefined ? { repo: options.repo } : {}),
   });
   // The project's allowlist plus the entries its declared preview needs
-  // (deploy.ts previewEgressAllow). Scans preview nothing.
-  const sandboxEgressAllow = scan ? project?.sandboxEgressAllow : withPreviewEgress(project?.sandboxEgressAllow, project?.verification);
+  // (deploy.ts previewEgressAllow). Scans preview nothing. On top of both,
+  // the harness's provider hosts (harness-external.ts providerEgressAllow):
+  // an external harness calls its model API from INSIDE the sandbox — the
+  // native loop calls from the worker — so on the allowlist tier the vendor
+  // host has to be on the run's own list or every model call dies at the
+  // proxy (production, 2026-10-17: `api.z.ai:443` refused under
+  // ANTHROPIC_BASE_URL). Derived from the same forwarded env the harness will
+  // read, materialised HERE for the standard replay reason: the log has to
+  // say which hosts the container was actually allowed. Native (and an
+  // external run with nothing derivable) records exactly what it did before
+  // this existed — byte-identical inputs, and no step is admitted by the
+  // field, so fingerprints do not move.
+  const sandboxEgressAllow = withProviderEgress(
+    scan ? project?.sandboxEgressAllow : withPreviewEgress(project?.sandboxEgressAllow, project?.verification),
+    [harness, ...attempts],
+  );
   // Hoisted out of the append below so the upgrade fence can fingerprint the
   // exact object the log will carry, rather than a reconstruction of it.
   const input = {
@@ -1514,7 +1529,11 @@ export async function enqueueRun(
         // Plus, for a project that declares a preview, the preview target's
         // host derived from this deployment's SHIP_PREVIEW_TAILNET_IP (and
         // main's host for the visual rung): the preview rungs run behind the
-        // same allowlist, and no per-project hand entry should be needed.
+        // same allowlist, and no per-project hand entry should be needed. And
+        // for an external harness, the provider API hosts it will call from
+        // inside the sandbox (see the sandboxEgressAllow resolution above) —
+        // same principle: no per-project hand entry for a host this
+        // deployment itself configured the harness to dial.
         ...(sandboxEgressAllow !== undefined ? { sandboxEgressAllow } : {}),
         ...(project?.sandboxLimits !== undefined ? { sandboxLimits: project.sandboxLimits } : {}),
         // Every newly-enqueued run is steerable and index-eligible; runs
