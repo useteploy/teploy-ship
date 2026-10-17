@@ -173,7 +173,9 @@ detect_store() {
       *) die "unknown store: $stated (expected nucleus or postgres)" ;;
     esac
   fi
-  local kinds yml_kinds="" evidence=""
+  # kinds must start empty: under set -u an unset local made the cross-check
+  # below die ("kinds: unbound variable") whenever no writer container was found.
+  local kinds="" yml_kinds="" evidence=""
 
   if command -v docker >/dev/null 2>&1 && docker ps >/dev/null 2>&1; then
     local writers
