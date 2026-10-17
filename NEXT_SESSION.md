@@ -2,28 +2,25 @@
 
 Start with [docs/DECISIONS_OPEN_2026-10-04.md](docs/DECISIONS_OPEN_2026-10-04.md) (everything already decided, plus open Decisions 4–10 from the programme's E6), then this file. The single forward plan is [docs/SHIP_RELEASE_PROGRAMME_2026-09-21.md](docs/SHIP_RELEASE_PROGRAMME_2026-09-21.md); status lists live in its execution tables plus [AUDIT_OPEN.md](AUDIT_OPEN.md) wave-5 section. Update those rather than creating another plan.
 
-## Live session state (2026-10-16, evening) — resume here
+## Live session state (2026-10-17) — resume here
 
-A wave-6 session is mid-flight. Private detail (review findings for unmerged
-PRs, worktree paths, provisioning notes) is in
-`../_internal/SHIP_SESSION_STATE_2026-10-16.md`; read it before continuing.
+Private detail: `../_internal/SHIP_SESSION_STATE_2026-10-16.md` (read first).
 
-- **Production:** web+worker `1c460ba`. `SHIP_THREAD_VIEW=on` (A1 soak PASS),
-  compute-2 joined `SHIP_SANDBOX_URL` (C1 soak PASS after the placement-race fix
-  #95), routing policy carries owner Decision 9 (z.ai permitted for private
-  data). Receipt: `evals/receipts/2026-10-16-a1-c1-soak.txt`.
-- **Merged today:** #86, #87, #88, #89, #93, #95.
-- **Open, reviewed, fixes pending before merge:** #90 (B1 PR watch), #91 (A0
-  backup/postgres), #92 (D1 MCP client — Claude re-review after fixes), #94
-  (loud shadow writes), #96 (D5 live view), #97 (D2 two-way steering — Claude
-  re-review after fixes), #98 (B6 Slack/Linear proof). None has a blocker.
-- **Not started:** harness lanes — D6 OpenCode v2 + session-resume steering,
-  D7 Claude Code steering, a new Codex adapter. Reference implementation:
-  upstream T3 Code nightly `v0.1.1-nightly.20261016.3218` (MIT).
-- **Then:** redeploy, one-run soaks for `SHIP_STEER_REPLY`, `SHIP_LIVE_VIEW`,
-  `SHIP_PR_WATCH`, then A4 `SHIP_DELEGATE=1` with `SHIP_MAX_RUN_COST_USD` set.
-- **Lane routing:** workhorse lanes on opencode `zai-coding-plan/glm-5.3`
-  (max; flash for vision); Claude for security-critical review only.
+- **Production:** web+worker `dfaaf32` with `SHIP_THREAD_VIEW`, `SHIP_STEER_REPLY`,
+  `SHIP_LIVE_VIEW`, `SHIP_PR_WATCH` = on; compute-1 + compute-2 sandboxes; routing
+  Decision 9 live. Receipts: `2026-10-16-a1-c1-soak.txt`, `2026-10-17-a0-live-backup.txt`.
+- **Merged this wave:** #86-#100 except #101 (D1 MCP, D2 steering, D3 follow-ups,
+  D5 live view, B1 PR watch, B6 Slack/Linear proof, A0 backup, H loud shadows,
+  X7 claims CI, codex adapter, pool race fix, main-red fix #102).
+- **Open:** #101 OpenCode v2 + Claude Code session-resume steering (fixes landed,
+  round-2 review pending).
+- **Blocked until the z.ai quota resets (2026-10-17 12:00):** production runs fail
+  at the first model call (`[1308] Usage limit reached for 5 hour`) — the GLM
+  workhorse lanes and Ship production share one coding-plan quota. Then run the
+  owed one-run soaks: D2 (steer reply + queue), D5 (live view), B1 (PR watch).
+- **Then:** merge #101; rebuild sandbox images for opencode 2.0.26 + codex pins
+  (`images/build.sh`, both compute hosts) and one real steered run per harness;
+  A4 `SHIP_DELEGATE=1` with `SHIP_MAX_RUN_COST_USD` set.
 
 ## Where things stand (2026-10-16, end of the perception programme)
 
