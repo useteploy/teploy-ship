@@ -46,6 +46,8 @@ import { join } from "node:path";
 import { NucleusPgwire, type PgwireDialect } from "./nucleus-pgwire.js";
 import { chownHint, uidOf } from "./record-writes.js";
 import { RedactionGate } from "./support.js";
+import { NATIVE_HARNESS_ID, harnessAttempts, harnessRef } from "./harness.js";
+import { providerEgressAllow } from "./harness-external.js";
 
 export type CheckStatus = "pass" | "fail" | "unknown";
 
@@ -200,6 +202,48 @@ export function checkEnv(env: DoctorProbes["env"]): DoctorCheck[] {
 }
 
 /**
+ * The doctor line for provider egress under an external harness
+ * (docs/adapters.md "Egress for external harnesses"): an external harness
+ * calls its model vendor from INSIDE the sandbox, and since 2026-10-17
+ * `enqueueRun` derives the vendor hosts from the same forwarded env the
+ * harness will read and adds them to every run's sandboxEgressAllow. This
+ * check NAMES what this machine's SHIP_HARNESS configuration derives, so the
+ * operator can see the list without enqueueing a run.
+ *
+ * Native records no check at all: it calls the model from the worker. An
+ * external harness with nothing derivable (no base URL, no recognised API
+ * key — e.g. claude under an OAuth subscription token, whose host this
+ * derivation deliberately does not guess) is UNKNOWN, not pass: whether its
+ * runs can reach the vendor depends on the project allowlist or
+ * SBX_EGRESS_ALLOW, which this check cannot see.
+ */
+export function checkHarnessEgress(env: DoctorProbes["env"]): DoctorCheck | undefined {
+  let refs: { id: string }[];
+  try {
+    refs = [harnessRef(env.SHIP_HARNESS), ...harnessAttempts(env.SHIP_HARNESS_ATTEMPTS)];
+  } catch (error) {
+    return check(
+      "harness-egress",
+      "fail",
+      `harness configuration is not usable: ${errMessage(error)}`,
+      "fix SHIP_HARNESS / SHIP_HARNESS_ATTEMPTS — every enqueue on this machine refuses them (see docs/adapters.md)",
+    );
+  }
+  const external = [...new Set(refs.filter((r) => r.id !== NATIVE_HARNESS_ID).map((r) => r.id))];
+  if (external.length === 0) return undefined;
+  const derived = providerEgressAllow(refs, env);
+  if (derived.length > 0) {
+    return check("harness-egress", "pass", `harness ${external.join(", ")}: provider egress derived at enqueue and added to each run's allowlist: ${derived.join(", ")}`);
+  }
+  return check(
+    "harness-egress",
+    "unknown",
+    `harness ${external.join(", ")}: no provider host could be derived from the forwarded credentials (no base URL, no recognised API key)`,
+    "external harness runs still need their vendor host on the sandbox allowlist — add it to the project's egress allowlist or SBX_EGRESS_ALLOW on the daemon (docs/adapters.md \"Egress for external harnesses\")",
+  );
+}
+
+/**
  * The store doctor checks, resolved the way the runtime resolves it
  * (`makeRuntime` in cli.ts): kind = --store > SHIP_STORE > config.store,
  * url = --nucleus-url > NUCLEUS_URL > config.nucleusUrl. Both shared stores
@@ -339,6 +383,8 @@ export async function runDoctor(p: DoctorProbes): Promise<DoctorReport> {
   ];
   const engine = await checkStoreEngine(p);
   if (engine !== undefined) checks.push(engine);
+  const harnessEgress = checkHarnessEgress(p.env);
+  if (harnessEgress !== undefined) checks.push(harnessEgress);
   checks.push(await checkClock(p));
   const counts: Record<CheckStatus, number> = { pass: 0, fail: 0, unknown: 0 };
   for (const c of checks) counts[c.status]++;

@@ -35,6 +35,43 @@ harmless (each due watch costs forge reads only, capped per sweep), but
 an operator `teploy` command to prune watch rows by age would be nicer
 than waiting.
 
+## 2026-10-17 — external harnesses died at the egress allowlist calling their own model vendor — FIXED IN CODE, live confirmation owed
+
+Found live 2026-10-17 (production): an external-harness run (claude-code,
+`ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic`) failed with
+`API Error: 403 egress denied by the sandbox allowlist: api.z.ai:443`.
+External harnesses call their model API from INSIDE the sandbox; the native
+loop calls from the worker. The sandbox's allowlist carried only the forge,
+so every model call died at the proxy until the operator added api.z.ai to
+the project's `sandboxEgressAllow` by hand.
+
+- Code fix (branch `fix/harness-provider-egress`): `enqueueRun` derives the
+  provider API hosts from the same forwarded env the harness will read
+  (`providerEgressAllow`, src/harness-external.ts — a forwarded base URL wins:
+  `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `AI_GATEWAY_URL` for codex's
+  gateway; else the vendor default per forwarded key: `api.anthropic.com` for
+  claude under `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`, `api.openai.com`
+  for codex under `CODEX_API_KEY`/`OPENAI_API_KEY`, and for opencode
+  `api.z.ai` when `ZHIPU_API_KEY` is forwarded and the model starts with
+  `zai-coding-plan/` or `zhipu`, plus `api.anthropic.com`/`api.openai.com`/
+  `openrouter.ai` under their matching keys) and merges them into the run
+  input's `sandboxEgressAllow` (`withProviderEgress`): materialised at
+  enqueue so replays are stable, hosts only on port 443, de-duplicated,
+  project entries surviving. Native derives nothing and an external run with
+  nothing derivable records byte-identical inputs; the field admits no step,
+  so no step fingerprint moves. `teploy-ship doctor` gained the
+  `harness-egress` line naming what the machine's configuration derives.
+  Deliberately NOT derived: subscription credentials
+  (`CLAUDE_CODE_OAUTH_TOKEN`, `CODEX_ACCESS_TOKEN`) — those dial a vendor
+  host too, but guessing a host onto a security allowlist from a token Ship
+  cannot read through is not the derivation's call; those deployments keep
+  adding the host by hand, and the doctor line says so.
+- Still open: one live external run (the 2026-10-17 shape or any other) to
+  confirm the derived entry reaches the daemon's proxy allowlist end to end.
+  The tests cover the derivation, the enqueue materialisation, and the merge
+  with the project's own list; `sandboxOverridesOf` already passes
+  `input.sandboxEgressAllow` to the daemon unchanged.
+
 ## 2026-10-16 — codex harness adapter: event contract source-verified, live run still owed
 
 The `codex` adapter (src/harness-external.ts, pin @openai/codex@0.163.0)
