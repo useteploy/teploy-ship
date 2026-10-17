@@ -321,6 +321,21 @@ no longer replace the displayed inspection. The recovery disclosure shows
 recorded snapshots/restores and repository validation without asserting that a
 snapshot still exists or that warm-volume edits are recoverable.
 
+## Live view
+
+With `SHIP_LIVE_VIEW=on` (web and worker), an active run's page shows a
+**Live** card under **Now**: the output of the shell command the agent is
+running, as it arrives, and a running diff of the workspace against the run's
+base. Both refresh every 2 seconds while the page is open. It is read-only:
+there is nothing to type into, and observing never takes the workspace or the
+git index. The diff header states the instant it describes (sandbox clock),
+HEAD at that instant, the base it is against and a digest of the bytes;
+untracked files appear as new files, ignored files are never read, output is
+redacted and bounded (partial snapshots say so). Python cells, external
+harnesses and Ship's own test/preview legs are not streamed; their output
+still lands in Activity when the step records. The diff pauses while a person
+holds the workspace through takeover.
+
 ## Preview revision and recovery boundaries
 
 New pushed-change previews fetch the exact recorded commit into an isolated
