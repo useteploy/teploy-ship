@@ -190,13 +190,27 @@ there is one task per issue.
 
 - `Linear-Signature` must be `hex(HMAC-SHA256(signing secret, raw body))`.
   Anything else gets `401`.
-- **Replay window:** Linear puts `webhookTimestamp` inside the signed body.
-  Ship refuses a delivery whose timestamp is more than 5 minutes from its clock
-  (`401 stale linear webhookTimestamp`). The `Linear-Delivery` header is not
-  covered by the signature, so this timestamp is what stops a captured payload
-  being replayed under a new delivery id.
+- **Replay window:** Linear puts `webhookTimestamp` inside the signed body,
+  and it is **required**: a body without a numeric `webhookTimestamp` gets
+  `401` rather than passing without a freshness check. A timestamp more than
+  5 minutes from Ship's clock is refused (`401 stale linear webhookTimestamp`).
+  The `Linear-Delivery` header is not covered by the signature, so this
+  timestamp is what stops a captured payload being replayed under a new
+  delivery id.
 - **Duplicates:** a repeated `Linear-Delivery` id gets `200 duplicate
-  delivery`. Any later event for the same issue maps to the same task.
+  delivery`, and so does the same exact body under a fresh delivery id —
+  Ship records the sha256 of the signed bytes, because the header alone is
+  unsigned and a replay could pick a new one. Any later event for the same
+  issue (a different body) maps to the same task.
+- **Retry limit:** Linear retries a delivery that failed, but the retry
+  carries the ORIGINAL body and its `webhookTimestamp`, so a retry that
+  arrives more than 5 minutes after the event is refused as stale. Linear's
+  own retry schedule can run longer than that window, which means Ship's
+  delivery guarantee from Linear is effectively "within 5 minutes": if the
+  endpoint is down or returning errors for longer, the last retries are
+  dropped on purpose (the alternative is accepting unbounded replays). Check
+  the webhook's delivery log in Linear; re-send from there, or edit the
+  issue (or re-add the `ship` label) to trigger a fresh event.
 - Ignored with `200`, creating no task: issues without the `ship` label,
   events that aren't Issue events (comments, projects, and so on), and Issue
   `remove` events.
@@ -269,6 +283,7 @@ unless the channel membership is the trust boundary you want.
 | Mentions do nothing and no request shows in the web log | The bot isn't in the channel (`/invite @ship`), `app_mention` isn't subscribed, or the app wasn't reinstalled after a scope change. |
 | Ship answers `403 repository not allowed` (visible in a Linear delivery's response, or by replaying the request) | The `repo:` URL isn't in `SHIP_REPO_ALLOWLIST` and isn't a registered project. Add it, or register the project. |
 | A Linear issue doesn't appear | It has no `ship` label, the webhook doesn't include **Issues**, or the issue's team isn't selected in the webhook. Linear shows each delivery and its response code on the webhook page. |
-| Linear deliveries get `401 stale linear webhookTimestamp` | The server clock is off. Enable NTP. |
+| Linear deliveries get `401 stale linear webhookTimestamp` | The server clock is off. Enable NTP. Also expected for a Linear RETRY that arrives more than 5 minutes after the event: the 5-minute replay window is also the retry limit (see "Retry limit" above) — re-send from Linear's delivery log or edit the issue. |
+| A Linear delivery gets `401 missing or invalid linear webhookTimestamp` | The body carried no numeric `webhookTimestamp`, so it was not a Linear webhook (or was hand-rolled). Genuine Linear deliveries always carry one. |
 | Task appears but never runs | The source is on `propose`: launch it from the Inbox, or set the source to `auto`. |
 | No Slack messages when runs finish | `SHIP_SLACK_WEBHOOK_URL` isn't set on the **worker**, or the URL was revoked (the worker log shows `[notify] slack webhook 4xx`). Messages carry bare run ids when `SHIP_PUBLIC_URL` is unset. |

@@ -232,3 +232,48 @@ test("linear: intake is off (503) when the signing secret is unset", async () =>
     process.env.SHIP_LINEAR_SIGNING_SECRET = saved;
   }
 });
+
+test("linear: the same signed body under a FRESH delivery id is a duplicate (dedupe on the body hash, not the unsigned header)", async () => {
+  const id = randomUUID();
+  const body = issueEvent({ id });
+  const first = await linear.action({ request: linearRequest(body, { delivery: randomUUID() }) });
+  assert.equal(first.status, 201);
+  // A captured body re-sent under a fresh delivery id: the Linear-Delivery
+  // header is unsigned, so its claim passes and only the hash of the signed
+  // bytes can refuse the replay.
+  const replay = await linear.action({ request: linearRequest(body, { delivery: randomUUID() }) });
+  assert.equal(replay.status, 200);
+  assert.match(JSON.stringify(await replay.json()), /duplicate delivery/);
+  const tasks = (await tasksFrom("linear")).filter((t) => t.dedupeKey === `linear:${id}`);
+  assert.equal(tasks.length, 1, "the replayed body never becomes a second task");
+});
+
+test("linear: webhookTimestamp is required — a body without one, or with a non-numeric one, gets 401", async () => {
+  const before = (await tasksFrom("linear")).length;
+  const without = JSON.parse(issueEvent()) as Record<string, unknown>;
+  delete without.webhookTimestamp;
+  const missing = await linear.action({ request: linearRequest(JSON.stringify(without)) });
+  assert.equal(missing.status, 401);
+  assert.match(JSON.stringify(await missing.json()), /webhookTimestamp/);
+  const notNumber = JSON.parse(issueEvent()) as { webhookTimestamp: unknown };
+  notNumber.webhookTimestamp = "just now";
+  const textual = await linear.action({ request: linearRequest(JSON.stringify(notNumber)) });
+  assert.equal(textual.status, 401);
+  assert.match(JSON.stringify(await textual.json()), /webhookTimestamp/);
+  assert.equal((await tasksFrom("linear")).length, before, "nothing written");
+});
+
+test("slack: a signature header whose UTF-8 bytes differ in length is a 401, never a crash", async () => {
+  // 67 characters — the same STRING length as a v0 signature — but each é is
+  // two UTF-8 bytes, so the buffers differ in length and a byte-blind
+  // timingSafeEqual compare would throw (a 500 from an unsigned request).
+  const res = await slack.action({ request: slackRequest(mention("<@U0SHIP> crash probe", "1760600008.000900"), { signature: `v0=${"é".repeat(64)}` }) });
+  assert.equal(res.status, 401);
+});
+
+test("linear: a signature header whose UTF-8 bytes differ in length is a 401, never a crash", async () => {
+  // 64 characters — the same STRING length as a Linear signature — of
+  // two-byte é: the buffers differ in length; the compare must not throw.
+  const res = await linear.action({ request: linearRequest(issueEvent(), { signature: "é".repeat(64) }) });
+  assert.equal(res.status, 401);
+});
