@@ -167,6 +167,10 @@ test("a missing engine data dir and a bad label are refusals", async () => {
   const empty = mkdtempSync(join(tmpdir(), "ship-snapshot-empty-"));
   try {
     await assert.rejects(produce(empty), /engine data dir not found/);
+    // A postgres-store install gets pointed at the script, not a bare "not found".
+    mkdirSync(join(empty, "accessories", "postgres", "pgdata"), { recursive: true });
+    await assert.rejects(produce(empty), /postgres store.*scripts\/ship-backup\.sh backup/);
+    assert.ok(!existsSync(join(empty, "_backups")), "the refusal writes nothing");
     const root = fakeShipRoot();
     try {
       await assert.rejects(produce(root, { label: "../evil" }), /label must start alphanumeric/);

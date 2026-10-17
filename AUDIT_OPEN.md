@@ -19,6 +19,20 @@ sandbox image build, `codex exec` as root under
 until a measured incompatible major exists, same standard S13 set for
 opencode.
 
+## 2026-10-16 — B6: Slack/Linear intake proven; Linear replay gap closed
+
+Owner Decision 7 (2026-10-16): Slack and Linear are user features for
+self-hosters, not the owner's workflow. Real-path tests now drive the actual
+`/hooks/slack` and `/hooks/linear` route handlers with correctly signed
+payloads (`web/src/lib/slack-linear-hooks.test.ts`) and the outbound Slack
+incoming webhook over a loopback socket (`src/notify-slack-loopback.test.ts`).
+Defect found and fixed: the Linear receiver's replay protection rested on the
+`Linear-Delivery` header, which the signature does not cover — a captured
+body re-sent under a fresh delivery id was accepted. It now refuses a body
+whose signed `webhookTimestamp` is more than 5 minutes off. Self-hoster guide:
+`docs/INTEGRATIONS_SLACK_LINEAR.md`. Still open: a real Slack app / Linear
+webhook pointed at production (B6's live half; needs the public HTTPS route
+for `/hooks/*`), and threaded Slack results (B4).
 ## 2026-10-16 — shadows wrote nothing for 12 days (root-owned data volume)
 
 Found live 2026-10-16: on production the bind volume
@@ -49,7 +63,6 @@ existed but only ran for UNSANDBOXED workers, so production never ran it.
   chown. Nothing recorded before it is evidence of agreement.
 - Still open: `install.sh` chowns the volume on a fresh install, but a volume
   teploy creates on a later deploy (as here) is not re-owned; making teploy or
-  the image entrypoint own that step is a teploy-cli question.
   the image entrypoint own that step is a teploy-cli question.
 ## 2026-10-16 — D3 (S03) follow-up continuity: measured, context gap fixed
 
@@ -113,9 +126,8 @@ design (now reported when it moved), not pinned to the recorded sha.
   stale report needs a per-evidence "recorded at" field before it can gate.
   Tests are still cited by name only (the script checks the name exists, not
   that it ran).
-  that it ran).
 
-## 2026-10-16 — ship-backup.sh predates the postgres store
+## 2026-10-16 — ship-backup.sh predates the postgres store — FIXED IN CODE (A0), live rehearsal pending
 
 `scripts/ship-backup.sh` tars `accessories/nucleus/nucleus-data`, which no
 longer exists on a postgres-store install (it dies with "engine data dir
@@ -124,6 +136,28 @@ not found"). Until fixed: use `teploy accessory backup postgres --bucket …`
 (`/root/ship-pgdata-pre-look-soak-2026-10-16.tgz`, sha256 sidecar, gzip -t).
 Fix = teach the script the postgres layout (pg_dump of the accessory or
 cold tar of the bind mount) with the same verify/rehearse discipline.
+
+**Update 2026-10-16 (A0, branch `fix/backup-postgres`):** fixed in code.
+The script detects the store (writer `--store` args > `$SHIP_ROOT/teploy.yml`
+> accessory containers/dirs; disagreement refuses; `--store`/`SHIP_STORE`
+override). Postgres default = `pg_dump -Fc` via `docker exec` into
+`ship-postgres` (online, one snapshot, no stop), `.sha256` sidecar, manifest
+with per-table row counts read back from the archive; `verify` = checksum +
+PGDMP header + `pg_restore --list`; `restore` = NEW scratch container +
+count check (left running); `rehearse` = scratch postgres, `pg_restore
+--exit-on-error`, table set + every count must equal the manifest, then
+`preflight --store postgres` when a teploy-ship is available. `--cold` = the
+soak's pgdata tar under the nucleus stop rule, rehearsed by booting a
+scratch postgres on the copy. Nucleus path unchanged (its tests pass
+unmodified; a negative control pins its manifest keys and no pg calls).
+`teploy-ship snapshot` now refuses on a postgres install with a pointer to
+the script instead of a bare "not found". Verified locally against a real
+throwaway `pgvector/pgvector:0.8.0-pg17` (backup, verify, rehearse incl. a
+tampered-manifest negative control, restore, cold tar + boot) and manually
+with the REAL `teploy-ship preflight --store postgres` on a rehearsed copy.
+**Still open:** the live rehearsal on infra-home against the production
+store (archive + sha256 + rehearsal receipt — A0's exit criterion); this
+lane did not touch production.
 
 ## 2026-10-16 — initial admin bootstrap (port of observe's EnsureAdmin)
 
@@ -228,6 +262,17 @@ the postgres store (look soak receipt at `25d592a`, then `03748ab`); see the
 - Verified: `pnpm run lint`, `pnpm test` (236 pass / 1 pre-existing skip),
   `cd web && pnpm test` (176 pass), `cd web && pnpm run build`. A live
   run against a real Postgres has NOT happened yet — do that before release.
+- **Correction 2026-10-16 (X11):** the line above is stale. The postgres
+  store was released and deployed on 2026-10-14 (docs/MIGRATE_STORE.md;
+  data copied by scripts/migrate-store.mjs) and production has run on it
+  since — web+worker `03748ab` (store: postgres) per NEXT_SESSION.md; the
+  nucleus accessory was retired 2026-10-15 (teploy.yml). The entry is kept
+  as written; this note supersedes its "not yet released or deployed" and
+  "has NOT happened yet". `teploy-ship doctor` now answers for the postgres
+  store too (`--store`/`SHIP_STORE`/config: kind-labelled store checks, a
+  shared store with no URL fails, and a `store-engine` check that fails a
+  kind/engine mismatch via `SELECT version()` and stays unknown when the
+  engine does not identify itself).
 
 ## 2026-10-04 — wave 5 (live: S02 batch, production upgrade, shadows on)
 
