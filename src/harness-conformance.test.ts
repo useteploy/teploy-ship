@@ -44,6 +44,7 @@ test("S13: accounting honesty is declared, and unknown pricing is not priced", (
   assert.equal(declarationFor("native")!.accounting, "priced");
   assert.equal(declarationFor("claude-code")!.accounting, "unpriced-under-oauth");
   assert.equal(declarationFor("opencode")!.accounting, "unknown");
+  assert.equal(declarationFor("codex")!.accounting, "unknown");
 });
 
 const native = declarationFor("native")!;

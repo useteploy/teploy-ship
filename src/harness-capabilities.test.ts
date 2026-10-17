@@ -20,6 +20,7 @@ test("S13/D6/D7: steering is supported by every current contract and refused for
   // answer for a run whose program is unknown.
   assert.equal(harnessSupports({ harness: { id: "claude-code" } }, "steer"), false);
   assert.equal(harnessSupports({ harness: { id: "opencode" } }, "steer"), false);
+  assert.equal(harnessSupports({ harness: { id: "codex" } }, "steer"), false);
 });
 
 test("S13: a run with no harness field is native, unknown harnesses and malformed refs support nothing", () => {

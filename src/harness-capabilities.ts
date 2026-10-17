@@ -129,6 +129,36 @@ const DECLARATIONS: Record<string, HarnessDeclaration> = {
       },
     },
   },
+  codex: {
+    id: "codex",
+    accounting: "unknown",
+    capabilities: {
+      investigation: { status: "supported", reason: "scan prompt framing (harness-external.ts externalPrompt)" },
+      planning: { status: "refused", reason: "plan review requires the native harness (harness-external.ts:544)" },
+      steering: {
+        status: "refused",
+        reason:
+          "reads only its starting prompt (harness.ts HarnessTask.input comment); codex's continuation path is `codex exec resume <thread-id>`, which a note cannot reach inside the one exec that IS the run step",
+      },
+      tools: {
+        status: "partial",
+        reason:
+          "vendor tools inside the sandbox, not Ship's tool layer; --dangerously-bypass-approvals-and-sandbox (harness-external.ts SPECS.codex), the vendor's flag for externally-sandboxed environments",
+      },
+      browser: { status: "refused", reason: "no browser wiring in the adapter (harness-external.ts)" },
+      interruption: {
+        status: "partial",
+        reason: "only the exec timeout (harness-external.ts externalHarnessConfig, default 30 min); codex exec has no turn- or dollar-cap flag to pass",
+      },
+      approvals: { status: "refused", reason: "no park; approvals are `never` by the one flag the command sets" },
+      recovery: { status: "refused", reason: "no stuck detection or settle for external runs" },
+      accounting: {
+        status: "partial",
+        reason:
+          "tokens recorded from turn.completed, never dollars — codex exec reports no cost, so every run is counted, not priced (harness-external.ts parseCodexExecStream)",
+      },
+    },
+  },
 };
 
 /** The declaration for a harness id, or undefined for an unknown one. */

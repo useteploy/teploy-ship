@@ -8,6 +8,7 @@ recorded in its input at enqueue, exactly like every other capability:
 SHIP_HARNESS=native        # default — Ship's own CodeAct loop (src/durable.ts)
 SHIP_HARNESS=claude-code   # `claude -p`, headless, in the sandbox
 SHIP_HARNESS=opencode      # `opencode run`, headless, in the sandbox
+SHIP_HARNESS=codex         # `codex exec --json`, one-shot, in the sandbox
 ```
 
 What stays Ship's whichever harness runs: intake and policies, approvals,
@@ -92,7 +93,7 @@ version its log did not record.
 
 | variable | meaning |
 |---|---|
-| `SHIP_HARNESS` | `native` (default), `claude-code`, `opencode`. The worker-wide default; a project record's `harness` field wins for that repo. Read at enqueue on every surface (CLI, dashboard, webhook, sweep); recorded on the run. |
+| `SHIP_HARNESS` | `native` (default), `claude-code`, `opencode`, `codex`. The worker-wide default; a project record's `harness` field wins for that repo. Read at enqueue on every surface (CLI, dashboard, webhook, sweep); recorded on the run. |
 | `SHIP_HARNESS_ATTEMPTS` | Comma list of harness ids. When it names two or more, every new run tries each in its own workspace and the critic picks one to publish (P5-4). Off by default. |
 | `SHIP_HARNESS_MODEL` | Model id passed to the harness (`--model`). Absent = the harness's own default. |
 | `SHIP_HARNESS_ENV` | Comma list of worker env var NAMES forwarded into the harness process. Overrides the per-adapter default below. |
@@ -102,8 +103,10 @@ version its log did not record.
 Default forwarded variables: claude-code `CLAUDE_CODE_OAUTH_TOKEN`,
 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`; opencode
 `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `ZHIPU_API_KEY`
-(z.ai, per models.dev), `GOOGLE_GENERATIVE_AI_API_KEY`, `OPENCODE_CONFIG_CONTENT`. A variable that is
-unset on the worker is simply not forwarded.
+(z.ai, per models.dev), `GOOGLE_GENERATIVE_AI_API_KEY`, `OPENCODE_CONFIG_CONTENT`; codex
+`CODEX_API_KEY`, `OPENAI_API_KEY`, `CODEX_ACCESS_TOKEN`, `AI_GATEWAY_URL`,
+`AI_GATEWAY_KEY` (see the codex section for what the gateway pair does). A
+variable that is unset on the worker is simply not forwarded.
 
 Per-repo evidence config (`teploy-ship evidence set`) is harness-independent
 by design; the harness is chosen per deployment through the environment, not
@@ -221,6 +224,115 @@ exec. The capability table (`src/harness-capabilities.ts`) declares steering
 supported — the admission gate additionally requires the run's recorded
 harness contract to be 2 or later, so pre-D6 logs keep their refusal.
 
+## codex
+
+OpenAI's Codex CLI, pinned at `@openai/codex@0.163.0`
+(`images/versions.json`). Invocation:
+
+```
+codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox \
+  [--model <SHIP_HARNESS_MODEL>] [--config <gateway provider, when AI_GATEWAY_URL is forwarded>] \
+  - < .teploy-agent/harness-prompt.md
+```
+
+**Why `exec --json` and not `app-server`.** Codex has two programmable
+surfaces. `codex app-server` is a long-lived JSON-RPC server over stdio —
+you spawn it, `initialize`, `thread/start`, `turn/start`, and then read
+notifications (`item/completed`, `thread/tokenUsage/updated`, ...) while
+writing further requests mid-flight. That needs an interactive stdin the
+sandbox exec API does not have: Ship's exec is request/response (output
+arrives when the process ends) and `execStream` is read-only chunked output.
+The app-server shape exists for host applications that own a child process
+with bidirectional pipes — T3 Code's driver
+(`apps/server/src/provider/Drivers/CodexDriver.ts` in the upstream
+reference), not a sandbox daemon. `codex exec --json` is the one-shot
+headless mode built for exactly Ship's shape: one process, JSONL events on
+stdout, a terminal `turn.completed`/`turn.failed`, prompt on stdin via the
+`-` sentinel. One exec, parse at exit — the same contract as claude's
+`-p --output-format stream-json`.
+
+**Codex's own sandbox is bypassed, explicitly.** The single flag
+`--dangerously-bypass-approvals-and-sandbox` sets approval policy `never`
+and sandbox mode `danger-full-access`, and its own help text says it is
+"intended solely for running in environments that are externally sandboxed"
+(`codex-rs/utils/cli/src/shared_options.rs` at the pinned tag) — which a
+Ship run is: the sandbox container IS the isolation boundary (disposable
+filesystem, default-deny egress, no host access), the same reasoning as
+claude's `bypassPermissions` under `IS_SANDBOX=1`. Running codex's nested
+sandbox instead would stack a Landlock sandbox inside an unprivileged
+container — not something Ship can guarantee is even available there — and
+its `workspace-write` mode denies network egress by default, which would cut
+off the model vendor the harness must reach.
+
+**Event contract** (`codex-rs/exec/src/exec_events.rs` at the pinned tag;
+the non-interactive docs at developers.openai.com/codex/noninteractive carry
+the same shapes): `thread.started` (`thread_id`), `turn.started`,
+`item.started`/`item.updated`/`item.completed` with `item.type` in
+`agent_message` (`text`), `command_execution` (`command`,
+`aggregated_output`, `exit_code`), `file_change` (`changes[]` of
+`{path, kind: add|delete|update}`), `mcp_tool_call`, `web_search`,
+`todo_list`, `error`; terminal `turn.completed` (`usage`) or `turn.failed`
+(`error.message`); a bare `error` event is fatal. Ship records the last
+`agent_message` as the summary, counts completed `command_execution` items
+and lists `file_change` paths (a claim by the harness, never evidence — the
+publish gate diffs the tree itself), and reads usage from `turn.completed`:
+`input_tokens` and `output_tokens` include cached input and reasoning output
+respectively (the vendor's own accounting; T3's
+`CodexTurnTokenUsage.ts:164` reads them the same way), so `totalTokens` is
+their sum. **The thread id is durable**: `thread.started`'s `thread_id` is
+recorded on the `harness-run` step, so a log can name the vendor session
+(`codex exec resume <id>` continues it) without re-running anything.
+
+**Cost honesty.** `codex exec` reports tokens and never dollars — there is
+no `total_cost_usd` equivalent anywhere in the exec stream. So every codex
+run is `priced: false` with its tokens recorded: counted in the unpriced
+ledger, not the dollar one (P5-3). Under `CODEX_ACCESS_TOKEN` (the ChatGPT
+subscription path) that is exactly right; under an API key a bill exists but
+Ship has no honest figure for it, and $0 would be the wrong answer.
+
+**Credentials.** `CODEX_API_KEY` is what OpenAI documents for non-interactive
+use (set for the invocation, not the job — a rule Ship's env-file forwarding
+already follows); `OPENAI_API_KEY` is the older spelling; `CODEX_ACCESS_TOKEN`
+carries a ChatGPT access token for subscription-fed runs.
+
+**Routing through teploy-gateway.** When `AI_GATEWAY_URL` is among the
+forwarded variables (it is, by default, when set on the worker), the command
+additionally declares a `teploy-gateway` model provider and selects it:
+
+```
+--config 'model_providers.teploy-gateway.name="teploy-gateway"'
+--config "model_providers.teploy-gateway.base_url='$AI_GATEWAY_URL'"
+--config 'model_providers.teploy-gateway.env_key="AI_GATEWAY_KEY"'
+--config 'model_provider="teploy-gateway"'
+```
+
+The URL expands inside the sandbox after `harness.env` is sourced, so the
+command Ship builds names the variable, not the deployment; codex reads the
+key itself from `AI_GATEWAY_KEY` (`env_key`). One constraint to know before
+relying on it: codex speaks the **Responses** wire API only — `wire_api =
+"chat"` was removed upstream — so the gateway endpoint must be
+Responses-compatible (`/v1/responses`). If your gateway only speaks chat
+completions, point codex at OpenAI directly (`CODEX_API_KEY`) and leave
+`AI_GATEWAY_URL` unset for codex runs (`SHIP_HARNESS_ENV` can exclude it).
+
+**Steering is refused, and why.** Like the other external adapters, a codex
+run reads only its starting prompt; a steer note has no channel into the one
+exec that is the run step, so it is refused at the gate rather than stored
+and ignored. Codex does have a continuation path — `codex exec resume
+<session-id>`, and app-server's `turn/steer` mid-flight — but both need a
+second interaction with a live process, which the sandbox exec API cannot
+express. Follow-ups are the supported path; the recorded `thread_id` means a
+future slice could resume the same vendor session if that ever changes.
+
+**Version guard.** None yet: 0.163.0 is the first pin, minor drift is
+recorded (`pinned: false` in preflight) rather than refused, and no measured
+incompatible major exists. When one does, the adapter takes an opencode-style
+refusal (`refuseVersion`) naming the pin and the receipt that measured the
+break — the hook is already there. The event encoding the tests replay was
+taken from the tagged source, not a live run; see
+`evals/receipts/2026-10-16-codex-exec-json-contract.txt` for what was
+verified and what still needs a live credential.
+
 ## Cost honesty under a subscription (P5-3)
 
 Ship's spend governance prices tokens. A harness fed by a subscription
@@ -229,8 +341,9 @@ an estimate of a bill that does not exist. Reporting that as spend would
 overstate cost; reporting $0 would say the work was free. Neither is true, so:
 
 - Usage carries `priced: false` when the credential is a subscription (claude
-  under `CLAUDE_CODE_OAUTH_TOKEN`) or when the harness reports tokens with no
-  cost (opencode with `cost: 0`). Tokens are still recorded.
+  under `CLAUDE_CODE_OAUTH_TOKEN`), when the harness reports tokens with no
+  cost (opencode with `cost: 0`), or when the harness reports no cost figure
+  at all (codex: tokens only, every run). Tokens are still recorded.
 - An unpriced run is NOT added to the dollar ledger. It is counted, per source
   and per UTC day, in the unpriced-runs ledger, and the Spend page shows
   "unpriced runs: N" as its own line next to the dollars.

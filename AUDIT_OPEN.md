@@ -1,5 +1,24 @@
 # Open audit items
 
+## 2026-10-16 — codex harness adapter: event contract source-verified, live run still owed
+
+The `codex` adapter (src/harness-external.ts, pin @openai/codex@0.163.0)
+parses a JSONL event stream whose encoding its tests replay through a fake
+binary. Per the mock-encodes-semantics rule, that encoding is a claim: it
+was verified against the tagged upstream sources
+(evals/receipts/2026-10-16-codex-exec-json-contract.txt lists every file and
+field), NOT against a live codex run — no OpenAI credential was available.
+Deferred, not closed: the first live canary (one instance, trivial task,
+CODEX_API_KEY) must compare the recorded `harness-run` step against the
+receipt's section 2 and correct `parseCodexExecStream` if the real 0.163.0
+stream differs. Also unverified live: the npm postinstall fetch inside the
+sandbox image build, `codex exec` as root under
+`--dangerously-bypass-approvals-and-sandbox`, and the teploy-gateway route
+(the gateway must expose a Responses-compatible endpoint; codex dropped
+`wire_api = "chat"`). No version-refusal guard exists yet — none is warranted
+until a measured incompatible major exists, same standard S13 set for
+opencode.
+
 ## 2026-10-16 — B6: Slack/Linear intake proven; Linear replay gap closed
 
 Owner Decision 7 (2026-10-16): Slack and Linear are user features for
@@ -44,7 +63,6 @@ existed but only ran for UNSANDBOXED workers, so production never ran it.
   chown. Nothing recorded before it is evidence of agreement.
 - Still open: `install.sh` chowns the volume on a fresh install, but a volume
   teploy creates on a later deploy (as here) is not re-owned; making teploy or
-  the image entrypoint own that step is a teploy-cli question.
   the image entrypoint own that step is a teploy-cli question.
 ## 2026-10-16 — D3 (S03) follow-up continuity: measured, context gap fixed
 
@@ -107,7 +125,6 @@ design (now reported when it moved), not pinned to the recorded sha.
   always reported stale (3 such entries now). CI runs `--check` only; the
   stale report needs a per-evidence "recorded at" field before it can gate.
   Tests are still cited by name only (the script checks the name exists, not
-  that it ran).
   that it ran).
 
 ## 2026-10-16 — ship-backup.sh predates the postgres store — FIXED IN CODE (A0), live rehearsal pending

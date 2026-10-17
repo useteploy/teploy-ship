@@ -47,6 +47,13 @@ import type { HarnessAdapter, HarnessResult, HarnessStatus, HarnessUsage } from 
 export const DEFAULT_FORWARDED_ENV: Record<string, string[]> = {
   "claude-code": ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"],
   opencode: ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "ZHIPU_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY", "OPENCODE_CONFIG_CONTENT"],
+  // CODEX_API_KEY is what OpenAI documents for non-interactive exec; OPENAI_API_KEY
+  // is the older spelling some deployments still carry. CODEX_ACCESS_TOKEN is the
+  // subscription (ChatGPT) path — unpriced under P5-3, like claude's OAuth token.
+  // AI_GATEWAY_URL/AI_GATEWAY_KEY route codex through teploy-gateway when both are
+  // present: the adapter then declares a `teploy-gateway` model provider
+  // (codexGatewayConfigFlags) instead of calling OpenAI directly.
+  codex: ["CODEX_API_KEY", "OPENAI_API_KEY", "CODEX_ACCESS_TOKEN", "AI_GATEWAY_URL", "AI_GATEWAY_KEY"],
 };
 
 const PROMPT_PATH = ".teploy-agent/harness-prompt.md";
@@ -244,6 +251,20 @@ export interface HarnessRunRecord {
   /** Which forwarded env NAMES were present (never values). */
   forwarded: string[];
   stderrTail: string;
+  /**
+   * The vendor session codex reports (`thread.started` → `thread_id`), recorded
+   * so a log can name the program's own continuation handle
+   * (`codex exec resume <id>`) without re-running it. codex only.
+   */
+  threadId?: string;
+  /**
+   * The paths codex says it changed (`file_change` items, `kind path` per
+   * entry, capped). A claim by the harness, not evidence: the publish gate
+   * diffs the tree itself. codex only.
+   */
+  fileChanges?: string[];
+  /** How many commands codex reported executing (`command_execution` items). codex only. */
+  commands?: number;
   /**
    * The vendor session this exec ran (D6/D7): opencode's `ses_…` id, claude's
    * `session_id`. Recorded on the step, so it is durable in the log and a
@@ -512,6 +533,107 @@ export function parseOpencode2Stream(stdout: string): { summary: string; turns: 
 }
 
 /**
+ * Parse codex's `exec --json` JSONL stream (one event per line; the contract
+ * is `codex-rs/exec/src/exec_events.rs` at the pinned tag, see
+ * docs/adapters.md "codex"): `thread.started` names the session, each
+ * `turn.started` is a turn, `item.completed` carries the agent's messages,
+ * commands and file changes, and `turn.completed` carries the turn's usage.
+ * `turn.failed` / `error` are terminal errors.
+ *
+ * Usage nesting follows the vendor's own accounting (and T3's reader,
+ * apps/server/src/provider/CodexTurnTokenUsage.ts:164): cached input and
+ * reasoning output are counted INSIDE input_tokens / output_tokens, so
+ * totalTokens is their sum, not a sum of every field.
+ */
+export function parseCodexExecStream(stdout: string): {
+  status: HarnessStatus;
+  summary: string;
+  turns: number;
+  usage: HarnessUsage;
+  threadId?: string;
+  fileChanges: string[];
+  commands: number;
+  sawCompletion: boolean;
+  error?: string;
+} {
+  let threadId: string | undefined;
+  let turns = 0;
+  let commands = 0;
+  let lastText = "";
+  let sawCompletion = false;
+  let error: string | undefined;
+  const fileChanges: string[] = [];
+  const usage: HarnessUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, priced: false };
+  const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) continue;
+    let event: Record<string, unknown>;
+    try {
+      event = JSON.parse(trimmed) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    switch (event.type) {
+      case "thread.started":
+        if (typeof event.thread_id === "string" && event.thread_id !== "") threadId = event.thread_id;
+        break;
+      case "turn.started":
+        turns += 1;
+        break;
+      case "item.completed":
+      case "item.updated": {
+        const item = (event.item ?? {}) as Record<string, unknown>;
+        if (item.type === "agent_message" && typeof item.text === "string" && item.text.trim() !== "") lastText = item.text.trim();
+        if (event.type === "item.completed" && item.type === "command_execution") commands += 1;
+        if (event.type === "item.completed" && item.type === "file_change") {
+          const changes = Array.isArray(item.changes) ? (item.changes as Record<string, unknown>[]) : [];
+          for (const change of changes.slice(0, 200)) {
+            if (typeof change.path !== "string") continue;
+            fileChanges.push(`${typeof change.kind === "string" && change.kind !== "" ? change.kind : "update"} ${change.path}`);
+          }
+        }
+        break;
+      }
+      case "turn.completed": {
+        sawCompletion = true;
+        const u = (event.usage ?? {}) as Record<string, unknown>;
+        usage.inputTokens = num(u.input_tokens);
+        usage.outputTokens = num(u.output_tokens);
+        usage.cacheReadTokens = num(u.cached_input_tokens);
+        usage.cacheWriteTokens = num(u.cache_write_input_tokens);
+        usage.totalTokens = usage.inputTokens + usage.outputTokens;
+        break;
+      }
+      case "turn.failed": {
+        const e = (event.error ?? {}) as Record<string, unknown>;
+        error = typeof e.message === "string" && e.message !== "" ? e.message : JSON.stringify(event.error ?? "turn failed");
+        break;
+      }
+      case "error":
+        error = typeof event.message === "string" ? event.message : JSON.stringify(event);
+        break;
+      default:
+        break;
+    }
+  }
+  const base = {
+    summary: lastText === "" ? "codex finished without a summary" : lastText.slice(0, 4000),
+    turns,
+    usage,
+    ...(threadId !== undefined ? { threadId } : {}),
+    fileChanges: fileChanges.slice(0, 200),
+    commands,
+    sawCompletion,
+  };
+  if (error !== undefined) return { ...base, status: "error", summary: `codex reported: ${error.slice(0, 800)}`, error };
+  if (!sawCompletion) {
+    return { ...base, status: "error", summary: "codex produced no turn.completed event", error: "no turn.completed" };
+  }
+  return { ...base, status: "finished" };
+}
+
+/**
  * What a harness is doing right now, read off its event stream as it
  * arrives (live.ts). Line-buffered: a chunk may end mid-object. Returns the
  * update to publish when the picture changed, null otherwise, so a busy
@@ -612,6 +734,9 @@ interface ParsedRun {
   turns: number;
   usage: HarnessUsage;
   sessionId?: string;
+  threadId?: string;
+  fileChanges?: string[];
+  commands?: number;
 }
 
 interface ExecOpts {
@@ -619,6 +744,7 @@ interface ExecOpts {
   maxSteps: number;
   maxRunCostUSD: number;
   priced: boolean;
+  forwarded: string[];
 }
 
 /**
@@ -639,6 +765,60 @@ interface LineSpec {
   sessionFor?: (ids: { runId: string; prefix: string }) => string;
   /** Deliver one batch of steer notes by resuming the recorded session. */
   steerResume?: (opts: ExecOpts & { session: string; notePath: string }) => string;
+}
+
+/**
+ * codex's exec --json: `turn.started` counts a turn; item events name the
+ * command being run, the files being changed, or the agent's message
+ * (exec_events.rs — file_change items only ever arrive as `item.completed`).
+ */
+export function codexLiveTracker(): LiveTracker {
+  let turns = 0;
+  return lineBuffered((event) => {
+    if (event.type === "turn.started") {
+      turns += 1;
+      return { phase: "harness", turn: turns };
+    }
+    const item = (event.item ?? {}) as Record<string, unknown>;
+    if ((event.type === "item.started" || event.type === "item.completed") && item.type === "command_execution") {
+      return typeof item.command === "string"
+        ? { phase: "harness", turn: turns, detail: `exec ${clipDetail(item.command, 100)}` }
+        : { phase: "harness", turn: turns, detail: "exec" };
+    }
+    if (event.type === "item.completed" && item.type === "file_change") {
+      const changes = Array.isArray(item.changes) ? (item.changes as Record<string, unknown>[]) : [];
+      const paths = changes.map((c) => (typeof c.path === "string" ? c.path : "")).filter((p) => p !== "");
+      return paths.length > 0 ? { phase: "harness", turn: turns, detail: `edit ${clipDetail(paths.join(", "), 100)}` } : null;
+    }
+    if (event.type === "item.completed" && item.type === "agent_message" && typeof item.text === "string" && item.text.trim() !== "") {
+      return { phase: "harness", turn: turns, detail: clipDetail(item.text, 120) };
+    }
+    return null;
+  });
+}
+
+/**
+ * The `--config` flags that point codex at teploy-gateway: a `teploy-gateway`
+ * model provider whose base_url comes from the (already sourced) AI_GATEWAY_URL
+ * and whose key codex reads itself from AI_GATEWAY_KEY (`env_key`), then
+ * `model_provider` selecting it. Values are TOML on the far side of `-c
+ * key=value` (codex parses the value as TOML with a raw-string fallback —
+ * codex-rs/utils/cli/src/config_override.rs), so literals are quoted and the
+ * URL rides in single quotes inside a shell double-quoted arg so `$AI_GATEWAY_URL`
+ * still expands after harness.env is sourced.
+ *
+ * codex speaks the Responses wire API only (`wire_api = "chat"` was removed
+ * upstream), so the gateway endpoint must be Responses-compatible — see
+ * docs/adapters.md "codex".
+ */
+export function codexGatewayConfigFlags(forwarded: readonly string[]): string {
+  if (!forwarded.includes("AI_GATEWAY_URL")) return "";
+  return (
+    ` --config ${shq('model_providers.teploy-gateway.name="teploy-gateway"')}` +
+    ` --config "model_providers.teploy-gateway.base_url='$AI_GATEWAY_URL'"` +
+    ` --config ${shq('model_providers.teploy-gateway.env_key="AI_GATEWAY_KEY"')}` +
+    ` --config ${shq('model_provider="teploy-gateway"')}`
+  );
 }
 
 interface CommandSpec {
@@ -738,6 +918,36 @@ const opencodeV2Line: LineSpec = {
     `"$(cat ${shq(notePath)})"`,
 };
 
+const codexLine: LineSpec = {
+  // `codex exec --json` is the one-shot headless mode: JSONL on stdout, one
+  // exec, parse at exit — the same shape as claude's `-p --output-format
+  // stream-json`. NOT `codex app-server`: that is a long-lived JSON-RPC
+  // stdio server (initialize → thread/start → turn/start → notifications),
+  // which needs interactive stdin the sandbox exec API does not have —
+  // output is request/response and execStream is read-only. docs/adapters.md
+  // "codex" carries the full argument.
+  //
+  // --dangerously-bypass-approvals-and-sandbox = approval_policy never +
+  // sandbox_mode danger-full-access in one flag, and its own help text says
+  // it is "intended solely for running in environments that are externally
+  // sandboxed" — which a Ship run is: the sandbox container IS the isolation
+  // boundary (default-deny egress, disposable FS), and codex's nested
+  // Landlock sandbox would be a second sandbox inside it, one that also
+  // denies network egress under workspace-write.
+  command: ({ config, forwarded }) =>
+    `codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox` +
+    (config.model !== undefined ? ` --model ${shq(config.model)}` : "") +
+    codexGatewayConfigFlags(forwarded) +
+    ` - < ${shq(PROMPT_PATH)}`,
+  parse: (exec) => {
+    const parsed = parseCodexExecStream(exec.stdout);
+    if (!parsed.sawCompletion && exec.exitCode !== 0) {
+      return { ...parsed, status: "error", summary: `codex exited ${exec.exitCode} before completing a turn: ${tail(exec.stderr, 600).trim() || "(no stderr)"}` };
+    }
+    return parsed;
+  },
+};
+
 const SPECS: Record<string, CommandSpec> = {
   "claude-code": {
     binary: "claude",
@@ -763,9 +973,21 @@ const SPECS: Record<string, CommandSpec> = {
       return major !== undefined && major >= 3 ? opencodeFutureLineRefusal(version, expected) : undefined;
     },
   },
+  codex: {
+    binary: "codex",
+    live: codexLiveTracker,
+    line: () => codexLine,
+    // codex exec reports tokens and never dollars — there is no total_cost_usd
+    // equivalent in the exec event stream — so every codex run is counted in
+    // the unpriced ledger with its tokens recorded (P5-3). Under
+    // CODEX_ACCESS_TOKEN that is exactly right (a subscription quota); under
+    // an API key the bill exists but Ship has no figure for it, and $0 would
+    // be the dishonest answer.
+    priced: () => false,
+  },
 };
 
-export function externalAdapter(id: "claude-code" | "opencode", options: ExternalHarnessOptions = {}): HarnessAdapter {
+export function externalAdapter(id: "claude-code" | "opencode" | "codex", options: ExternalHarnessOptions = {}): HarnessAdapter {
   const spec = SPECS[id]!;
   const env = options.env ?? process.env;
   return {
@@ -812,7 +1034,7 @@ export function externalAdapter(id: "claude-code" | "opencode", options: Externa
           await ws.executor.putFile(ENV_PATH, forwardedEnv.text);
           const command =
             `set -a; . ${shq(ENV_PATH)}; set +a; rm -f ${shq(ENV_PATH)}; ` +
-            commandFor({ config, maxSteps: budget.maxSteps, maxRunCostUSD: budget.maxRunCostUSD, priced, ...(sessionFor !== undefined ? { session: sessionFor } : {}) });
+            commandFor({ config, maxSteps: budget.maxSteps, maxRunCostUSD: budget.maxRunCostUSD, priced, forwarded: forwardedEnv.names, ...(sessionFor !== undefined ? { session: sessionFor } : {}) });
           const execOptions = { timeoutMs: config.timeoutMs, maxOutputBytes: 16 * 1_048_576 };
           // Streamed when the executor can (the sandbox daemon), so the run
           // page shows the harness's turns and tool calls as they happen
@@ -844,6 +1066,9 @@ export function externalAdapter(id: "claude-code" | "opencode", options: Externa
             // with a caller-chosen id, the one we told it to. Recorded so
             // steering resumes exactly what the log says ran.
             ...(sessionId !== undefined ? { sessionId } : {}),
+            ...(parsed.threadId !== undefined ? { threadId: parsed.threadId } : {}),
+            ...(parsed.fileChanges !== undefined ? { fileChanges: parsed.fileChanges } : {}),
+            ...(parsed.commands !== undefined ? { commands: parsed.commands } : {}),
           };
         } catch (error) {
           return {
@@ -961,5 +1186,5 @@ export function externalAdapter(id: "claude-code" | "opencode", options: Externa
 
 /** Every external adapter this worker can carry. Presence of the binary is checked per run, as a recorded step. */
 export function externalAdapters(options: ExternalHarnessOptions = {}): HarnessAdapter[] {
-  return [externalAdapter("claude-code", options), externalAdapter("opencode", options)];
+  return [externalAdapter("claude-code", options), externalAdapter("opencode", options), externalAdapter("codex", options)];
 }

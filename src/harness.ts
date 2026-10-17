@@ -204,6 +204,7 @@ export const HARNESS_VERSIONS: Record<string, string> = {
   // program, which is the point: the recorded steps now mean different things.
   "claude-code": "2",
   opencode: "2",
+  codex: "1",
 };
 
 /** The vendor binary an external adapter drives, at the version Ship bakes. */
@@ -240,6 +241,7 @@ export const HARNESS_PACKAGES: Record<string, HarnessPackage> = {
   // the 2.x CLI is `@opencode/cli`. 2.0.26 is the exact build the measured
   // v2 event contract was taken from (evals/receipts/2026-10-14-opencode-v2-events.txt).
   opencode: { npm: "@opencode/cli", version: "2.0.26", binary: "opencode" },
+  codex: { npm: "@openai/codex", version: "0.163.0", binary: "codex" },
 };
 
 /**

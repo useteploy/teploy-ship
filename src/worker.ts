@@ -861,7 +861,7 @@ export function startWorker(options: WorkerOptions): {
     ...(liveViewEnabled() && options.runtime.config !== undefined ? { liveOutput: options.runtime.config } : {}),
     ...(envNum("SHIP_MAX_OUTPUT_TOKENS") !== undefined ? { maxOutputTokens: envNum("SHIP_MAX_OUTPUT_TOKENS")! } : {}),
     ...(options.codeSearch !== undefined ? { codeSearch: options.codeSearch } : {}),
-    // External harnesses (claude-code, opencode). Always carried; whether the
+    // External harnesses (claude-code, opencode, codex). Always carried; whether the
     // binary is in the sandbox image is a recorded preflight step per run.
     // The steer store rides along so steering-capable lines (D6/D7) can drain
     // operator notes between vendor processes; an absent store drains empty.

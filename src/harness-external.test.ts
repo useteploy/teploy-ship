@@ -14,8 +14,8 @@ import type { DurableAgentOutput, ExecutorProvider } from "./durable.js";
 import { FileRepoMemory } from "./repo-memory.js";
 import { HARNESS_VERSIONS } from "./harness.js";
 import {
-  envFile, externalAdapters, externalHarnessConfig, externalPrompt, opencodeFutureLineRefusal, opencodeSessionId,
-  parseClaudeStream, parseOpencode2Stream, parseOpencodeStream, shq, versionMajor,
+  codexGatewayConfigFlags, envFile, externalAdapters, externalHarnessConfig, externalPrompt, opencodeFutureLineRefusal, opencodeSessionId,
+  parseClaudeStream, parseCodexExecStream, parseOpencode2Stream, parseOpencodeStream, shq, versionMajor,
 } from "./harness-external.js";
 
 const neverModel: ModelAdapter = {
@@ -767,6 +767,230 @@ test("external scan prompt asks for findings without an edited tree", () => {
   assert.match(p, /Nothing will be published/);
   assert.doesNotMatch(p, /EDITED WORKING TREE|what you changed/);
 });
+
+// --- codex -----------------------------------------------------------------
+
+const CODEX_EVENTS = [
+  JSON.stringify({ type: "thread.started", thread_id: "0199a213-81c0-7800-8aa1-bbab2a035a53" }),
+  JSON.stringify({ type: "turn.started" }),
+  "not json at all",
+  JSON.stringify({ type: "item.started", item: { id: "item_0", type: "command_execution", command: "bash -lc ls", status: "in_progress" } }),
+  JSON.stringify({ type: "item.completed", item: { id: "item_0", type: "command_execution", command: "bash -lc ls", aggregated_output: "src\n", exit_code: 0, status: "completed" } }),
+  JSON.stringify({ type: "item.updated", item: { id: "item_1", type: "agent_message", text: "interim" } }),
+  JSON.stringify({ type: "item.completed", item: { id: "item_1", type: "file_change", changes: [{ path: "src/lib.ts", kind: "update" }, { path: "src/new.ts", kind: "add" }], status: "completed" } }),
+  JSON.stringify({ type: "item.completed", item: { id: "item_2", type: "agent_message", text: "Fixed lib.ts and added new.ts." } }),
+  JSON.stringify({ type: "turn.completed", usage: { input_tokens: 24763, cached_input_tokens: 24448, cache_write_input_tokens: 12, output_tokens: 122, reasoning_output_tokens: 10 } }),
+].join("\n");
+
+test("parseCodexExecStream reads thread id, summary, file changes, commands; usage nests the way codex counts", () => {
+  const parsed = parseCodexExecStream(CODEX_EVENTS);
+  assert.equal(parsed.status, "finished");
+  assert.equal(parsed.summary, "Fixed lib.ts and added new.ts.");
+  assert.equal(parsed.threadId, "0199a213-81c0-7800-8aa1-bbab2a035a53");
+  assert.equal(parsed.turns, 1);
+  assert.equal(parsed.commands, 1, "only completed command_execution items count");
+  assert.deepEqual(parsed.fileChanges, ["update src/lib.ts", "add src/new.ts"]);
+  assert.equal(parsed.sawCompletion, true);
+  // cached input and reasoning output are nested INSIDE input/output tokens
+  // (codex-rs Usage; T3's CodexTurnTokenUsage reads them the same way), so
+  // total is their sum — never a sum over every field.
+  assert.equal(parsed.usage.inputTokens, 24763);
+  assert.equal(parsed.usage.outputTokens, 122);
+  assert.equal(parsed.usage.cacheReadTokens, 24448);
+  assert.equal(parsed.usage.cacheWriteTokens, 12);
+  assert.equal(parsed.usage.totalTokens, 24885);
+  assert.equal(parsed.usage.priced, false, "codex reports no dollars: unpriced, tokens recorded");
+  assert.equal(parsed.usage.costUSD, undefined);
+});
+
+test("parseCodexExecStream: turn.failed, stream errors and missing completion are errors; junk lines are skipped", () => {
+  const failed = parseCodexExecStream([JSON.stringify({ type: "thread.started", thread_id: "t1" }), JSON.stringify({ type: "turn.failed", error: { message: "stream error: timeout" } })].join("\n"));
+  assert.equal(failed.status, "error");
+  assert.match(failed.summary, /stream error: timeout/);
+  assert.equal(failed.threadId, "t1");
+
+  const streamError = parseCodexExecStream([JSON.stringify({ type: "error", message: "boom" })].join("\n"));
+  assert.equal(streamError.status, "error");
+  assert.match(streamError.summary, /boom/);
+
+  const none = parseCodexExecStream(["{not json", JSON.stringify({ type: "turn.started" })].join("\n"));
+  assert.equal(none.status, "error");
+  assert.equal(none.sawCompletion, false);
+  assert.match(none.summary, /no turn\.completed/);
+});
+
+test("codex defaults forward the automation credentials and the gateway pair; SHIP_HARNESS_ENV overrides as elsewhere", () => {
+  const d = externalHarnessConfig("codex", {});
+  assert.deepEqual(d.forward, ["CODEX_API_KEY", "OPENAI_API_KEY", "CODEX_ACCESS_TOKEN", "AI_GATEWAY_URL", "AI_GATEWAY_KEY"]);
+  const over = externalHarnessConfig("codex", { SHIP_HARNESS_ENV: "CODEX_API_KEY" });
+  assert.deepEqual(over.forward, ["CODEX_API_KEY"]);
+});
+
+test("codexGatewayConfigFlags declare the teploy-gateway provider only when AI_GATEWAY_URL is forwarded", () => {
+  assert.equal(codexGatewayConfigFlags(["CODEX_API_KEY"]), "");
+  const flags = codexGatewayConfigFlags(["CODEX_API_KEY", "AI_GATEWAY_URL", "AI_GATEWAY_KEY"]);
+  assert.match(flags, /--config 'model_providers\.teploy-gateway\.name="teploy-gateway"'/);
+  // The base_url rides in single quotes inside a double-quoted shell word, so
+  // $AI_GATEWAY_URL expands inside the sandbox after harness.env is sourced —
+  // the URL never appears in the command Ship builds.
+  assert.match(flags, /--config "model_providers\.teploy-gateway\.base_url='\$AI_GATEWAY_URL'"/);
+  assert.match(flags, /--config 'model_providers\.teploy-gateway\.env_key="AI_GATEWAY_KEY"'/);
+  assert.match(flags, /--config 'model_provider="teploy-gateway"'/);
+});
+
+async function workspaceWithFakeCodex(opts: { recordTo: string; stream: string; exitCode?: number }): Promise<{ provider: ExecutorProvider; runs: () => Promise<number> }> {
+  const bin = await mkdtemp(join(tmpdir(), "fake-codex-bin-"));
+  const work = await mkdtemp(join(tmpdir(), "fake-codex-work-"));
+  await fakeBin(
+    bin,
+    "codex",
+    [
+      `if [ "$1" = "--version" ]; then echo "codex-cli 0.163.0 (fake)"; exit 0; fi`,
+      `echo run >> ${shq(join(opts.recordTo, "runs"))}`,
+      `printf '%s\\n' "$@" > ${shq(join(opts.recordTo, "args"))}`,
+      `cat > ${shq(join(opts.recordTo, "prompt"))}`,
+      `env > ${shq(join(opts.recordTo, "env"))}`,
+      `echo edited > edited.txt`,
+      ...(opts.exitCode !== undefined ? [`echo "boom" >&2`, `exit ${opts.exitCode}`] : []),
+      `cat <<'EOF'\n${opts.stream}\nEOF`,
+    ].join("\n"),
+  );
+  const executor = new LocalExecutor({ root: work, env: { PATH: `${bin}:${process.env.PATH ?? ""}` } });
+  return {
+    provider: { isolated: true, async create() { return { handle: work }; }, attach() { return executor; } },
+    runs: async () => (await readFile(join(opts.recordTo, "runs"), "utf8").catch(() => "")).split("\n").filter((l) => l === "run").length,
+  };
+}
+
+test("codex adapter: preflight + one exec, prompt on stdin, thread id and claims recorded, unpriced, undeclared worker secrets never forwarded, replay never re-runs", async () => {
+  const recordTo = await mkdtemp(join(tmpdir(), "fake-codex-rec-"));
+  const { provider, runs } = await workspaceWithFakeCodex({ recordTo, stream: CODEX_EVENTS });
+  const env = { CODEX_API_KEY: "sk-codex-fake", UNRELATED_WORKER_SECRET: "keep-me-out" };
+  const wf = durableAgent({ model: neverModel, executor: provider, workdir: ".", harnesses: externalAdapters({ env }) });
+  const store = new MemoryEventStore();
+  const outcome = await executeRun({
+    workflow: wf,
+    runId: "run-codex",
+    store,
+    input: { task: "Fix the thing", harness: { id: "codex", version: "1" } },
+  });
+  assert.equal(outcome.status, "completed", JSON.stringify(outcome));
+  const out = outcome.output as DurableAgentOutput;
+  assert.equal(out.status, "finished");
+  assert.equal(out.agentSummary, "Fixed lib.ts and added new.ts.");
+  assert.equal(out.usage?.priced, false, "codex reports no dollars: the run is counted, not priced");
+  assert.equal(out.usage?.inputTokens, 24763);
+
+  const steps = (await store.load("run-codex")).filter((e) => e.type === "step-completed").map((e) => e.name);
+  assert.deepEqual(steps, ["sandbox", "harness-preflight", "harness-run"]);
+  const runStep = (await store.load("run-codex")).find((e) => e.type === "step-completed" && e.name === "harness-run");
+  const record = (runStep?.data as { result: { forwarded: string[]; exitCode: number; threadId?: string; fileChanges?: string[]; commands?: number } }).result;
+  assert.deepEqual(record.forwarded, ["CODEX_API_KEY"], "names only, never values");
+  assert.equal(record.exitCode, 0);
+  assert.equal(record.threadId, "0199a213-81c0-7800-8aa1-bbab2a035a53", "the vendor session id is durable: it is on the recorded step");
+  assert.deepEqual(record.fileChanges, ["update src/lib.ts", "add src/new.ts"]);
+  assert.equal(record.commands, 1);
+  assert.ok(!JSON.stringify(runStep).includes("sk-codex-fake"), "the credential must not be in the log");
+
+  // The prompt travelled on stdin (codex exec `-`), and carried the contract.
+  assert.match(await readFile(join(recordTo, "prompt"), "utf8"), /^Fix the thing[\s\S]*do not commit/);
+  const args = await readFile(join(recordTo, "args"), "utf8");
+  assert.match(args, /--json/);
+  assert.match(args, /--dangerously-bypass-approvals-and-sandbox/);
+  assert.match(args, /--skip-git-repo-check/);
+  assert.doesNotMatch(args, /--config/, "no gateway provider without AI_GATEWAY_URL forwarded");
+  const seenEnv = await readFile(join(recordTo, "env"), "utf8");
+  assert.match(seenEnv, /CODEX_API_KEY=sk-codex-fake/);
+  assert.ok(!seenEnv.includes("UNRELATED_WORKER_SECRET"), "a worker secret outside the forward list must not reach the harness");
+  assert.equal(await runs(), 1);
+
+  const again = await executeRun({ workflow: wf, runId: "run-codex", store, input: { task: "Fix the thing" } });
+  assert.equal(again.status, "completed");
+  assert.equal(await runs(), 1, "replay must not re-run the harness");
+});
+
+test("codex adapter: a gateway-routed run declares the teploy-gateway provider and passes the URL through the environment", async () => {
+  const recordTo = await mkdtemp(join(tmpdir(), "fake-codex-gw-"));
+  const { provider } = await workspaceWithFakeCodex({ recordTo, stream: CODEX_EVENTS });
+  const env = { AI_GATEWAY_URL: "http://ship-gateway:8089/v1", AI_GATEWAY_KEY: "gw-key-fake" };
+  const wf = durableAgent({ model: neverModel, executor: provider, workdir: ".", harnesses: externalAdapters({ env }) });
+  const store = new MemoryEventStore();
+  const outcome = await executeRun({ workflow: wf, runId: "run-codex-gw", store, input: { task: "t", harness: { id: "codex", version: "1" } } });
+  assert.equal(outcome.status, "completed", JSON.stringify(outcome));
+  const args = await readFile(join(recordTo, "args"), "utf8");
+  assert.match(args, /model_providers\.teploy-gateway\.name="teploy-gateway"/);
+  // $AI_GATEWAY_URL expands inside the sandbox after harness.env is sourced,
+  // so the binary's argv carries the expanded, TOML-quoted URL — while the
+  // flags Ship built (unit test above) and the recorded step carry names only.
+  assert.match(args, /model_providers\.teploy-gateway\.base_url='http:\/\/ship-gateway:8089\/v1'/);
+  assert.match(args, /model_providers\.teploy-gateway\.env_key="AI_GATEWAY_KEY"/);
+  assert.match(args, /model_provider="teploy-gateway"/);
+  const seenEnv = await readFile(join(recordTo, "env"), "utf8");
+  assert.match(seenEnv, /AI_GATEWAY_URL=http:\/\/ship-gateway:8089\/v1/);
+  assert.match(seenEnv, /AI_GATEWAY_KEY=gw-key-fake/);
+  // The gateway KEY travels only through the sourced env file, never in argv.
+  assert.ok(!args.includes("gw-key-fake"));
+});
+
+test("codex adapter: a non-zero exit before a completed turn is an error carrying the stderr tail", async () => {
+  const recordTo = await mkdtemp(join(tmpdir(), "fake-codex-exit-"));
+  const { provider } = await workspaceWithFakeCodex({ recordTo, stream: CODEX_EVENTS, exitCode: 3 });
+  const wf = durableAgent({ model: neverModel, executor: provider, workdir: ".", harnesses: externalAdapters({ env: {} }) });
+  const store = new MemoryEventStore();
+  const outcome = await executeRun({ workflow: wf, runId: "run-codex-exit", store, input: { task: "t", harness: { id: "codex", version: "1" } } });
+  assert.equal(outcome.status, "completed");
+  const out = outcome.output as DurableAgentOutput;
+  assert.equal(out.status, "error");
+  assert.match(out.summary, /codex exited 3/);
+  assert.match(out.summary, /boom/);
+});
+
+test("codex adapter: a stream with no parsable event is a recorded error, never a thrown step", async () => {
+  const recordTo = await mkdtemp(join(tmpdir(), "fake-codex-junk-"));
+  const { provider } = await workspaceWithFakeCodex({ recordTo, stream: "waiting for model\n{\broken" });
+  const wf = durableAgent({ model: neverModel, executor: provider, workdir: ".", harnesses: externalAdapters({ env: {} }) });
+  const store = new MemoryEventStore();
+  const outcome = await executeRun({ workflow: wf, runId: "run-codex-junk", store, input: { task: "t", harness: { id: "codex", version: "1" } } });
+  assert.equal(outcome.status, "completed");
+  const out = outcome.output as DurableAgentOutput;
+  assert.equal(out.status, "error");
+  assert.match(out.summary, /no turn\.completed/);
+});
+
+test("a missing codex binary names the package and the build command", async () => {
+  const work = await mkdtemp(join(tmpdir(), "fake-codex-nobin-"));
+  const bin = await mkdtemp(join(tmpdir(), "fake-codex-emptybin-"));
+  const executor = new LocalExecutor({ root: work, env: { PATH: bin } });
+  const provider: ExecutorProvider = { async create() { return { handle: work }; }, attach: () => executor };
+  const wf = durableAgent({ model: neverModel, executor: provider, workdir: ".", harnesses: externalAdapters({ env: {} }) });
+  const store = new MemoryEventStore();
+  const outcome = await executeRun({ workflow: wf, runId: "run-codex-nobin", store, input: { task: "t", harness: { id: "codex", version: "1" } } });
+  assert.equal(outcome.status, "completed");
+  const out = outcome.output as DurableAgentOutput;
+  assert.equal(out.status, "error");
+  assert.match(out.summary, /codex is not on PATH in the sandbox image/);
+  assert.match(out.summary, /images\/build\.sh --harness codex/);
+  assert.match(out.summary, /@openai\/codex@/);
+});
+
+test("codexLiveTracker: turns, the running command, edits and the agent's message; torn chunks held", async () => {
+  const { codexLiveTracker } = await import("./harness-external.js");
+  const t = codexLiveTracker();
+  const threadStart = JSON.stringify({ type: "thread.started", thread_id: "t1" });
+  const turnStart = JSON.stringify({ type: "turn.started" });
+  const cmd = JSON.stringify({ type: "item.started", item: { id: "i0", type: "command_execution", command: "bash -lc 'pnpm test'", status: "in_progress" } });
+  const edit = JSON.stringify({ type: "item.completed", item: { id: "i1", type: "file_change", changes: [{ path: "src/lib.ts", kind: "update" }], status: "completed" } });
+  const msg = JSON.stringify({ type: "item.completed", item: { id: "i2", type: "agent_message", text: "Done: fixed lib.ts" } });
+  assert.equal(t.feed(`${threadStart}\n`), null, "thread start is not progress");
+  assert.deepEqual(t.feed(`${turnStart}\n`), { phase: "harness", turn: 1 });
+  assert.deepEqual(t.feed(`${cmd}\n`), { phase: "harness", turn: 1, detail: "exec bash -lc 'pnpm test'" });
+  const half = edit.slice(0, 25);
+  assert.equal(t.feed(half), null, "a torn line is held");
+  assert.deepEqual(t.feed(`${edit.slice(25)}\n`), { phase: "harness", turn: 1, detail: "edit src/lib.ts" });
+  assert.deepEqual(t.feed(`${msg}\n`), { phase: "harness", turn: 1, detail: "Done: fixed lib.ts" });
+  assert.equal(t.feed("garbage\n"), null);
+});
+
 
 test("direct external execution cannot bypass requested plan review", async () => {
   const recordTo = await mkdtemp(join(tmpdir(), "fake-harness-plan-"));
