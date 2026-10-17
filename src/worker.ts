@@ -2,6 +2,7 @@ import { recoverLaunches } from "./launch-journal.js";
 import { intakeJourney } from "./journeys.js";
 import { sweepSchedulesForWorker, sweepScheduleDigests } from "./workflow-schedules.js";
 import { serveWorkspaceRequests } from "./workspace-requests.js";
+import { clearLiveView, liveViewEnabled, serveLiveDiffs } from "./live-view.js";
 import { loadTakeover } from "./takeover.js";
 import { sweepIncidents, sweepIncidentRecovery, type IncidentRecoveryReader } from "./incidents.js";
 import { launchNext, listCoordinations } from "./coordination.js";
@@ -856,6 +857,8 @@ export function startWorker(options: WorkerOptions): {
     projects: options.runtime.projects,
     steer: options.runtime.steer,
     ...((options.runtime as Partial<Pick<NucleusShipRuntime, "live">>).live !== undefined ? { live: options.runtime.live } : {}),
+    // Live view terminal (SHIP_LIVE_VIEW=on only): absent leaves every bash action's exec untouched.
+    ...(liveViewEnabled() && options.runtime.config !== undefined ? { liveOutput: options.runtime.config } : {}),
     ...(envNum("SHIP_MAX_OUTPUT_TOKENS") !== undefined ? { maxOutputTokens: envNum("SHIP_MAX_OUTPUT_TOKENS")! } : {}),
     ...(options.codeSearch !== undefined ? { codeSearch: options.codeSearch } : {}),
     // External harnesses (claude-code, opencode). Always carried; whether the
@@ -999,6 +1002,8 @@ export function startWorker(options: WorkerOptions): {
       // and resume repeatedly, and their side effects are already idempotent
       // (outbox ids dedupe the notifications).
       const terminal = outcome.status === "completed" || outcome.status === "failed" || outcome.status === "cancelled";
+      // Live view rows describe an active run only (live-view.ts).
+      if (terminal && liveViewEnabled()) void clearLiveView(options.runtime.config, runId);
       // One claim shared by every terminal side effect below (settle, notify,
       // observe). Parks resolve true without claiming.
       const terminalPass = !terminal ? Promise.resolve(true) : claimTerminalOutcome(runId);
@@ -1910,6 +1915,11 @@ export function startWorker(options: WorkerOptions): {
       })().catch(e => log(`[worker] coordination sweep: ${e instanceof Error ? e.message : String(e)}`)))
       .then(() => serveWorkspaceRequests(options.runtime, executor, { ...workspacePolicyFromEnv(), ...options.repoPolicy, ...(options.gitToken !== undefined ? { gitToken: options.gitToken } : {}), ...(options.githubToken !== undefined ? { githubToken: options.githubToken } : {}) }).catch(e => log(`[worker] workspace request: ${e instanceof Error ? e.message : String(e)}`)))
       .then(() => prWatchTick().catch(e => log(`[worker] pr watch: ${e instanceof Error ? e.message : String(e)}`)))
+      // D5 live view: refresh the running diff of watched active runs only.
+      // Strictly inert when SHIP_LIVE_VIEW is not `on` (no store read at all).
+      .then(() => liveViewEnabled()
+        ? serveLiveDiffs(options.runtime, executor).then((r) => { for (const e of r.errors) log(`[worker] live diff: ${e}`); }).catch(e => log(`[worker] live diff: ${e instanceof Error ? e.message : String(e)}`))
+        : undefined)
       .then(() => retryNotifications())
       .catch((error) => log(`[worker] intake sweep: ${error instanceof Error ? error.message : String(error)}`))
       .finally(() => {

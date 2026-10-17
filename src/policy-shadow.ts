@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { NETWORK_TIERS } from "./egress.js";
@@ -10,6 +10,8 @@ import type { Governance } from "./governance.js";
 import { explainRefusal, resolvePolicy, validateLayer } from "./policy-inheritance.js";
 import type { EffectivePolicy, PolicyLayer, PolicyLimits, PolicyRequest } from "./policy-inheritance.js";
 import { stateDir } from "./run-store.js";
+import { appendRecordLine, dirWritableNoCreate, permissionLine } from "./record-writes.js";
+import type { DirProbe } from "./record-writes.js";
 import { setShadowObserver, suppressShadow } from "./shadow-hook.js";
 import type { ShadowEvent, ShadowObserver, ShadowPrincipal, ShadowProjectLike } from "./shadow-hook.js";
 
@@ -395,11 +397,11 @@ export function createShadowObserver(options: ShadowObserverOptions): ShadowObse
 
 // ── sink and installation ─────────────────────────────────────────────────
 
+/** Never rejects: a failed write is counted and logged once per file (record-writes.ts). */
 export function fileSink(path: string): ShadowSink {
   return {
     async append(record) {
-      await mkdir(dirname(path), { recursive: true });
-      await appendFile(path, `${JSON.stringify(record)}\n`);
+      await appendRecordLine("policy shadow", path, JSON.stringify(record));
     },
   };
 }
@@ -457,6 +459,8 @@ export interface ShadowSummary {
   notes: string[];
   /** False when the record file does not exist: the shadow never ran (or flag off). Unknown, not zero. */
   fileFound: boolean;
+  /** Set only when the file is missing: whether this process could have written it. */
+  dirProbe?: DirProbe;
 }
 
 export const REPORT_NOTES: readonly string[] = [
@@ -541,7 +545,8 @@ export function summariseShadow(records: readonly ShadowRecord[], malformed = 0)
 export function renderShadowReport(s: ShadowSummary, file: string): string {
   const out: string[] = [];
   out.push(`policy shadow report (${file})`);
-  if (!s.fileFound) out.push(`no record file: the shadow has not recorded anything here (${SHADOW_FLAG} is off, or never ran). This is unknown, not zero disagreements.`);
+  if (!s.fileFound && s.dirProbe?.status === "not-writable") out.push(`no record file: ${permissionLine(s.dirProbe)}`);
+  else if (!s.fileFound) out.push(`no record file: the shadow has not recorded anything here (${SHADOW_FLAG} is off, or never ran). This is unknown, not zero disagreements.`);
   out.push(
     `${s.disagreements} disagreement(s): ${s.byKind["existing-allows-policy-denies"]} existing allows / policy denies, ` +
       `${s.byKind["policy-allows-existing-denies"]} policy allows / existing denies`,
@@ -575,5 +580,7 @@ export async function readShadowSummary(path: string): Promise<ShadowSummary> {
     fileFound = false;
   }
   const { records, malformed } = parseShadowRecords(text);
-  return { ...summariseShadow(records, malformed), fileFound };
+  // A missing file in a directory this process cannot write is a broken shadow, not a quiet one.
+  const dirProbe = fileFound ? undefined : await dirWritableNoCreate(dirname(path));
+  return { ...summariseShadow(records, malformed), fileFound, ...(dirProbe !== undefined ? { dirProbe } : {}) };
 }

@@ -40,7 +40,10 @@
  * replay cannot see the tree). Per-project live counts exist only for runs
  * this process placed. A create that fails on every host is not recorded.
  */
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
+
+import { appendRecordLine, dirWritableNoCreate, permissionLine } from "./record-writes.js";
+import type { DirProbe } from "./record-writes.js";
 import { dirname, join } from "node:path";
 
 import type { SandboxOverrides } from "./durable.js";
@@ -267,11 +270,11 @@ export interface PlacementSink {
   append(record: PlacementRecord): Promise<void>;
 }
 
+/** Never rejects: a failed write is counted and logged once per file (record-writes.ts). */
 export function fileSink(path: string): PlacementSink {
   return {
     async append(record) {
-      await mkdir(dirname(path), { recursive: true });
-      await appendFile(path, `${JSON.stringify(record)}\n`);
+      await appendRecordLine("placement shadow", path, JSON.stringify(record));
     },
   };
 }
@@ -485,6 +488,8 @@ export function placementShadowFromEnv(env: NodeJS.ProcessEnv = process.env, log
 
 export interface PlacementSummary {
   fileFound: boolean;
+  /** Set only when the file is missing: whether this process could have written it. */
+  dirProbe?: DirProbe;
   records: number;
   malformedLines: number;
   byPoint: Record<PlacementPoint, number>;
@@ -565,7 +570,8 @@ export function summarisePlacement(records: readonly PlacementRecord[], malforme
 export function renderPlacementReport(s: PlacementSummary, file: string): string {
   const out: string[] = [];
   out.push(`placement shadow report (${file})`);
-  if (!s.fileFound) out.push(`no record file: the shadow has not recorded anything here (${PLACEMENT_FLAG} is not "shadow", or never ran). This is unknown, not zero disagreements.`);
+  if (!s.fileFound && s.dirProbe?.status === "not-writable") out.push(`no record file: ${permissionLine(s.dirProbe)}`);
+  else if (!s.fileFound) out.push(`no record file: the shadow has not recorded anything here (${PLACEMENT_FLAG} is not "shadow", or never ran). This is unknown, not zero disagreements.`);
   out.push(`${s.records} decision(s): ${s.byPoint.create} create, ${s.byPoint.createFrom} createFrom, ${s.byPoint["host-loss"]} host-loss`);
   out.push(
     `${s.disagreements} disagreement(s): ${s.byKind["chosen-unsuitable"]} chosen host unsuitable, ` +
@@ -595,5 +601,7 @@ export async function readPlacementSummary(path: string): Promise<PlacementSumma
     fileFound = false;
   }
   const { records, malformed } = parsePlacementRecords(text);
-  return { ...summarisePlacement(records, malformed), fileFound };
+  // A missing file in a directory this process cannot write is a broken shadow, not a quiet one.
+  const dirProbe = fileFound ? undefined : await dirWritableNoCreate(dirname(path));
+  return { ...summarisePlacement(records, malformed), fileFound, ...(dirProbe !== undefined ? { dirProbe } : {}) };
 }
