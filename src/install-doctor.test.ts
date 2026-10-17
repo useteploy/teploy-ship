@@ -320,7 +320,7 @@ test("EQUIVALENCE: with no stated kind the report is the pre-X11 shape — no st
   assert.equal(r.checks.find((c) => c.id === "store-engine"), undefined);
   assert.deepEqual(
     r.checks.map((c) => c.id),
-    ["node-version", "state-dir-writable", "state-dir-space", "web-port", "env-web-token", "env-model-credential", "store-url", "store-connectivity", "clock"],
+    ["node-version", "state-dir-writable", "data-dir-writable", "state-dir-space", "web-port", "env-web-token", "env-model-credential", "store-url", "store-connectivity", "clock"],
   );
   assert.equal(byId(r, "store-url").detail, "NUCLEUS_URL shape valid, host db.internal:5432 (shape only, nothing connected)");
   assert.equal(byId(r, "store-connectivity").detail, "store answered");
