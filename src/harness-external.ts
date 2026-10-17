@@ -108,7 +108,12 @@ export interface ExternalHarnessConfig {
 
 export function externalHarnessConfig(id: string, env: NodeJS.ProcessEnv = process.env): ExternalHarnessConfig {
   const timeout = Number(env.SHIP_HARNESS_TIMEOUT_MS);
-  const model = (env.SHIP_HARNESS_MODEL ?? "").trim();
+  // One worker can drive several harnesses whose model names differ in shape
+  // (claude on an Anthropic-compatible endpoint takes "glm-5.3"; opencode wants
+  // "provider/model"). SHIP_HARNESS_MODEL_<ID> (id upper-cased, "-" -> "_")
+  // wins for that harness; SHIP_HARNESS_MODEL stays the shared default.
+  const perHarness = (env[`SHIP_HARNESS_MODEL_${id.toUpperCase().replace(/-/g, "_")}`] ?? "").trim();
+  const model = perHarness !== "" ? perHarness : (env.SHIP_HARNESS_MODEL ?? "").trim();
   const forwardRaw = (env.SHIP_HARNESS_ENV ?? "").trim();
   const forward =
     forwardRaw === ""

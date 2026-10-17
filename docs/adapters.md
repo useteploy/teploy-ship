@@ -123,6 +123,7 @@ version its log did not record.
 | `SHIP_HARNESS` | `native` (default), `claude-code`, `opencode`, `codex`. The worker-wide default; a project record's `harness` field wins for that repo. Read at enqueue on every surface (CLI, dashboard, webhook, sweep); recorded on the run. |
 | `SHIP_HARNESS_ATTEMPTS` | Comma list of harness ids. When it names two or more, every new run tries each in its own workspace and the critic picks one to publish (P5-4). Off by default. |
 | `SHIP_HARNESS_MODEL` | Model id passed to the harness (`--model`). Absent = the harness's own default. |
+| `SHIP_HARNESS_MODEL_<ID>` | Per-harness override (`SHIP_HARNESS_MODEL_OPENCODE`, `_CLAUDE_CODE`, `_CODEX`; `-` becomes `_`), winning over `SHIP_HARNESS_MODEL` for that harness only. Model names differ in shape: claude on an Anthropic-compatible endpoint takes `glm-5.3`; opencode wants `provider/model` (e.g. `zai-coding-plan/glm-5.3`). |
 | `SHIP_HARNESS_ENV` | Comma list of worker env var NAMES forwarded into the harness process. Overrides the per-adapter default below. |
 | `SHIP_HARNESS_TIMEOUT_MS` | Per-exec deadline for each vendor process. Default 1800000. A steered attempt runs at most `1 + STEER_ROUNDS_MAX` execs (main + resume rounds), each bounded by this. |
 | `SHIP_CLAUDE_BARE` | `1` adds `--bare` to claude: API-key auth only, no host context (hooks, CLAUDE.md, MCP). |
