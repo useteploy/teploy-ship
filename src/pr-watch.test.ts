@@ -11,6 +11,7 @@ import type { WorkflowEvent } from "@neutron-build/workflow";
 import { FileIntakeStore } from "./intake.js";
 import {
   PR_WATCH_CURSOR_KEY,
+  PR_WATCH_DISCOVERY_LIMIT,
   PR_WATCH_KEY_PREFIX,
   contextMatches,
   openedPr,
@@ -20,7 +21,7 @@ import {
   type PrWatchDeps,
 } from "./pr-watch.js";
 import type { RunMeta } from "./run-store.js";
-import { MemoryRuntimeConfig } from "./runtime-config.js";
+import { MemoryRuntimeConfig, type RuntimeConfigStore } from "./runtime-config.js";
 
 /**
  * B1 real-path sweep: real HTTP to a loopback fake Forgejo, the real
@@ -106,7 +107,14 @@ async function harness(runs: { runId: string; events: WorkflowEvent[]; updatedAt
   }));
   const deps: PrWatchDeps = {
     config,
-    listMeta: async () => [...metas].sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1)),
+    // Honors limit/offset like the real stores (newest first) so paging is
+    // exercised. (Explicitly typed so this also compiles against a listMeta
+    // without `offset` — where the paging tests must FAIL.)
+    listMeta: async (o?: { limit?: number; offset?: number }) => {
+      const all = [...metas].sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+      const offset = Math.max(0, Math.trunc(o?.offset ?? 0));
+      return o?.limit !== undefined ? all.slice(offset, offset + Math.max(1, Math.trunc(o.limit))) : all.slice(offset);
+    },
     store: { load: async (id) => runs.find((r) => r.runId === id)?.events ?? [] },
     intake,
     policy: { gitToken: "tok", allowlist: `${base}/acme` },
@@ -332,4 +340,98 @@ test("openedPr / prWatchKey / contextMatches", () => {
   assert.ok(!contextMatches("ci/*", "lint"));
   assert.ok(contextMatches("a.b", "a.b"));
   assert.ok(!contextMatches("a.b", "axb"));
+});
+
+test("a transient config read error keeps the watch and its handled history; a corrupt row is still dropped", async () => {
+  reset();
+  prs.set(40, { state: "open", merged: false, head: sha("7"), ref: "ship/r40", mergeable: false, statuses: [] });
+  const h = await harness([{ runId: "r40", events: runEvents(`${base}/acme/app.git`, { openedPr: 40 }) }]);
+  assert.equal((await sweepPrWatch(h.deps)).proposed.length, 1);
+  const task = (await h.intake.list())[0]!;
+  await h.intake.setState(task.taskId, "dismissed");
+  const key = prWatchKey(h.repo, 40);
+  assert.ok((await h.config.get(key)) !== undefined);
+
+  // One sweep where every watch-row read rejects (store hiccup), not corrupt data.
+  let flaky = true;
+  const flakyConfig: RuntimeConfigStore = {
+    get: (k) => (flaky && k.startsWith(PR_WATCH_KEY_PREFIX) ? Promise.reject(new Error("store: connection reset")) : h.config.get(k)),
+    set: (k, v, by) => h.config.set(k, v, by),
+    remove: (k) => h.config.remove(k),
+    list: () => h.config.list(),
+  };
+  h.advance(61);
+  const during = await sweepPrWatch({ ...h.deps, config: flakyConfig });
+  assert.equal(during.checked, 0);
+  assert.deepEqual(during.unwatched, []);
+  assert.deepEqual(during.errors, []);
+  assert.ok((await h.config.get(key)) !== undefined, "a transient read error must not delete the watch");
+
+  // The dismissed head is not re-proposed: `handled` survived the failed read.
+  flaky = false;
+  h.advance(61);
+  const after = await sweepPrWatch(h.deps);
+  assert.equal(after.checked, 1);
+  assert.equal(after.proposed.length, 0);
+  assert.equal((await h.intake.list()).length, 1);
+
+  // A value that IS present but unparseable is still garbage-collected.
+  await h.config.set(key, "{corrupt", "test");
+  h.advance(61);
+  await sweepPrWatch(h.deps);
+  assert.equal((await h.config.list()).some((k) => k.key === key), false, "a corrupt row is dropped");
+  await h.cleanup();
+});
+
+/** Runs for the paging tests: n runs in one interval, each having opened a PR, newest first. */
+function burstRuns(count: number, firstPr: number): { runId: string; events: WorkflowEvent[]; updatedAt: string }[] {
+  const repo = `${base}/acme/app.git`;
+  return Array.from({ length: count }, (_, i) => {
+    const pr = firstPr + i;
+    prs.set(pr, { state: "open", merged: false, head: sha(String(pr).padStart(2, "0")), ref: `ship/p${pr}`, mergeable: true, statuses: [] });
+    return {
+      runId: `p${i}`,
+      events: runEvents(repo, { openedPr: pr }),
+      updatedAt: new Date(Date.parse("2026-10-16T12:00:00Z") - i * 1000).toISOString(),
+    };
+  });
+}
+
+test("discovery pages past the newest 50 runs instead of skipping the rest forever", async () => {
+  reset();
+  // 60 runs updated since the cursor — more than one discovery window.
+  const runs = burstRuns(60, 100);
+  const h = await harness(runs);
+  const first = await sweepPrWatch({ ...h.deps, env: { ...h.deps.env, SHIP_PR_WATCH_MAX_PER_SWEEP: "2" } });
+  assert.equal(first.discovered, 60, "every run past the cursor is examined, not just the newest 50");
+  assert.equal((await h.config.list()).filter((k) => k.key.startsWith(PR_WATCH_KEY_PREFIX)).length, 60);
+  // The cursor advanced to the newest meta only after examining all of them.
+  assert.equal(await h.config.get(PR_WATCH_CURSOR_KEY), runs[0]!.updatedAt);
+  assert.equal((await sweepPrWatch(h.deps)).discovered, 0);
+  await h.cleanup();
+});
+
+test("a backlog deeper than the page bound is resumed next sweep, never marked seen", async () => {
+  reset();
+  // Five more than the page bound (10 windows of 50): the first sweep examines
+  // 500 and runs out of pages. Those five below the bound must not be counted
+  // as seen — the cursor stays put and a resume marker parks the depth reached.
+  const bound = PR_WATCH_DISCOVERY_LIMIT * 10;
+  const runs = burstRuns(bound + 5, 500);
+  const h = await harness(runs);
+  const env = { ...h.deps.env, SHIP_PR_WATCH_MAX_PER_SWEEP: "1" };
+  const first = await sweepPrWatch({ ...h.deps, env });
+  assert.equal(first.discovered, bound);
+  assert.equal(await h.config.get(PR_WATCH_CURSOR_KEY), undefined, "the cursor did not advance past unexamined metas");
+  assert.equal((await h.config.list()).some((k) => k.key === "SHIP_PR_WATCH_DISCOVERY_RESUME"), true, "the sweep parked a resume marker instead");
+
+  // The next sweep continues at that depth and examines the remaining five;
+  // only once the whole backlog is seen may the cursor advance.
+  const second = await sweepPrWatch({ ...h.deps, env });
+  assert.equal(second.discovered, 5, "the remainder is examined on the next sweep");
+  assert.equal(await h.config.get(PR_WATCH_CURSOR_KEY), runs[0]!.updatedAt);
+  assert.equal((await h.config.list()).some((k) => k.key === "SHIP_PR_WATCH_DISCOVERY_RESUME"), false, "the resume marker is spent");
+  assert.equal((await h.config.list()).filter((k) => k.key.startsWith(PR_WATCH_KEY_PREFIX)).length, bound + 5);
+  assert.equal((await sweepPrWatch(h.deps)).discovered, 0);
+  await h.cleanup();
 });

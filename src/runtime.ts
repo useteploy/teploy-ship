@@ -370,7 +370,7 @@ export interface ShipRuntime {
    * fine for a demo, a latency and memory problem for a service that is
    * supposed to run unattended for months.
    */
-  listMeta(options?: { limit?: number }): Promise<RunMeta[]>;
+  listMeta(options?: { limit?: number; offset?: number }): Promise<RunMeta[]>;
   /** Flag a parked run due so a resident worker picks it up (nucleus only). */
   markWake?(runId: string): Promise<void>;
   /**
@@ -697,11 +697,15 @@ export async function nucleusRuntime(
      */
     async listMeta(options) {
       const limit = Math.max(1, Math.trunc(options?.limit ?? DEFAULT_LIST_LIMIT));
-      const docs = await db.document.find(
+      // `offset` pages below the newest window (the PR watch's discovery).
+      // The page is cut in SQL wide enough to cover it, then trimmed here —
+      // same ranked read as before, just a deeper slice of it.
+      const offset = Math.max(0, Math.trunc(options?.offset ?? 0));
+      const docs = (await db.document.find(
         META_COLLECTION,
         {},
-        { newest: { limit, freshenedBy: "ship_runs" } },
-      );
+        { newest: { limit: limit + offset, freshenedBy: "ship_runs" } },
+      )).slice(offset);
       const runIds = docs.map((doc) => (doc as { runId?: string }).runId ?? "");
       const records = await db.document.find("ship_runs", {}, { runIds });
       const byRun = new Map(records.map((r) => [r.runId as string, r]));
