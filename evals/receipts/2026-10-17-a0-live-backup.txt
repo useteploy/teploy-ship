@@ -1,0 +1,18 @@
+2026-10-17 (UTC) A0 live proof — postgres backup, verify, rehearse on production
+
+Script: scripts/ship-backup.sh at github main after #91 + #102 (copied to
+infra-home /root/ship-backup.sh). SHIP_ROOT=/deployments/ship,
+SHIP_BACKUP_DIR=/deployments/ship/backups. Production web+worker 1c460ba, store
+postgres (accessory ship-postgres, pgvector/pgvector:0.8.0-pg17).
+
+backup --label a0-live-proof (online, writers running):
+  store detected: postgres — writer args (ship-worker-1c460ba ship-web-1c460ba)
+  /deployments/ship/backups/a0-live-proof-2026-10-16/ship-pg.dump
+  4773239 bytes, sha256 811269d14078d459f346c39a8e326dc2c629fbcf33f980dfacbc4daacd66ff2a, 45 tables
+verify: sha256 sidecar match + PGDMP header + pg_restore --list (docker exec ship-postgres)
+rehearse: restored into scratch container ship-backup-proof-3931722; table set and
+  every row count matched the manifest (e.g. ship_stream 21264, ship_tasks 58,
+  ship_users 1); scratch container removed. Preflight skipped (no teploy-ship on
+  the host PATH) — the table set and counts are the proof.
+
+Verdict: PASS. Retention is the operator's; the script deleted nothing.
