@@ -1,5 +1,40 @@
 # Open audit items
 
+## 2026-10-17 — PR watch first-enable flood: discovery bounded by PR age
+
+Found live on production 2026-10-17: the FIRST sweep after
+`SHIP_PR_WATCH=on` walked the entire run history (no discovery cursor
+existed yet) and adopted EVERY run that ever opened a `ship/` PR —
+months-old load-test PRs (`Tyler/ship-load-test` #3..#55) plus real ones
+(`tyler/neutron.git` #5, `Tyler/teploy-observe.git` #12/#13) — proposing 24
+conflict-revision tasks into the Inbox at once. Nothing auto-launched
+(intake policies do not cover source `pr-watch`), but the operator's queue
+flooded with stale work. Fixed (branch `fix/pr-watch-age-bound`):
+
+- Discovery adopts only runs whose PR OPENING is within
+  `SHIP_PR_WATCH_MAX_AGE_DAYS` (new env; default 14, clamped 1-90), dated
+  by the recorded `repo-pr` step's own append time when present, else the
+  run meta's `updatedAt` — the tighter bound, so a run touched recently
+  that opened its PR long ago is still skipped.
+- First-enable cutover: when no discovery cursor exists, it is initialised
+  at now minus the max age instead of scanning all history; older metas
+  count as examined by definition. Existing proposals are NOT
+  auto-dismissed — the 24 are the operator's to triage — but the first
+  enable logs one line summarising how many historical PRs were skipped
+  as too old.
+- Pinned by failing-on-main tests in `src/pr-watch.test.ts`: a PR opened
+  60 days ago is not adopted while one 3 days old is; the age is taken
+  from the step's own time, not `updatedAt`; first enable adopts nothing
+  beyond the window and writes the cursor at the floor; the env clamps
+  (90 adopts a 60-day PR, 1 skips a 3-day one); flag-off stays a strict
+  no-op.
+
+Still open: the watches adopted on production by the flood sit in the
+runtime config until their 30-day expiry (or merge/close) removes them —
+harmless (each due watch costs forge reads only, capped per sweep), but
+an operator `teploy` command to prune watch rows by age would be nicer
+than waiting.
+
 ## 2026-10-16 — codex harness adapter: event contract source-verified, live run still owed
 
 The `codex` adapter (src/harness-external.ts, pin @openai/codex@0.163.0)

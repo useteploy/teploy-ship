@@ -18,7 +18,12 @@
  *    nothing, so it is never watched; the forge's head branch must also be
  *    `ship/…` at check time. A backlog deeper than the page bound is paged
  *    through across sweeps via a resume marker — the cursor itself advances
- *    only once everything above it is proven examined (see discover).
+ *    only once everything above it is proven examined (see discover). Two
+ *    bounds keep it off the deep past: a PR opening older than
+ *    SHIP_PR_WATCH_MAX_AGE_DAYS (default 14, clamped 1-90) is never adopted,
+ *    and the FIRST enable initialises the cursor at now minus that window
+ *    instead of walking all history (the 2026-10-17 production flood came
+ *    from exactly that walk adopting months-old load-test PRs).
  *  - Each due watch costs forge reads only (readForgeState + one best-effort
  *    branch-protection read) — never a model call. Watches are capped per
  *    sweep, spaced by SHIP_PR_WATCH_INTERVAL_SEC, and back off exponentially
@@ -68,6 +73,14 @@ export const PR_WATCH_DEFAULT_MAX_PER_SWEEP = 20;
 export const PR_WATCH_MAX_BACKOFF_SEC = 3600;
 /** A watch older than this is dropped even if the PR is still open. */
 export const PR_WATCH_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+/**
+ * Discovery adopts only runs whose PR OPENING is this new (days):
+ * SHIP_PR_WATCH_MAX_AGE_DAYS, clamped to [1, 90]; invalid or below-range
+ * values fall back to the default (same convention as the other knobs).
+ */
+export const PR_WATCH_DEFAULT_MAX_AGE_DAYS = 14;
+export const PR_WATCH_MAX_AGE_DAYS_MIN = 1;
+export const PR_WATCH_MAX_AGE_DAYS_MAX = 90;
 const HANDLED_KEEP = 20;
 
 /** Only the exact value `on` enables the watch. */
@@ -83,6 +96,12 @@ export function prWatchIntervalSec(env: NodeJS.ProcessEnv = process.env): number
 export function prWatchMaxPerSweep(env: NodeJS.ProcessEnv = process.env): number {
   const n = Number(env.SHIP_PR_WATCH_MAX_PER_SWEEP);
   return Number.isFinite(n) && n >= 1 ? Math.min(200, Math.floor(n)) : PR_WATCH_DEFAULT_MAX_PER_SWEEP;
+}
+
+/** How far back (days) discovery may adopt a PR opening. */
+export function prWatchMaxAgeDays(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number(env.SHIP_PR_WATCH_MAX_AGE_DAYS);
+  return Number.isFinite(n) && n >= PR_WATCH_MAX_AGE_DAYS_MIN ? Math.min(PR_WATCH_MAX_AGE_DAYS_MAX, Math.floor(n)) : PR_WATCH_DEFAULT_MAX_AGE_DAYS;
 }
 
 export interface PrWatch {
@@ -137,10 +156,20 @@ export async function sweepPrWatch(deps: PrWatchDeps): Promise<PrWatchResult> {
   if (!prWatchEnabled(env)) return result;
   result.enabled = true;
   const now = deps.now ?? (() => new Date());
+  const maxAgeDays = prWatchMaxAgeDays(env);
+  // Mutated by discover so the first-enable summary survives a discovery
+  // error (the cutover write happens before the walk; see discover).
+  const first = { enable: false, skippedTooOld: 0 };
   try {
-    result.discovered = await discover(deps, now());
+    result.discovered = await discover(deps, now(), maxAgeDays, first);
   } catch (e) {
     result.errors.push(`discovery: ${message(e)}`);
+  }
+  if (first.enable) {
+    deps.log?.(
+      `[worker] pr watch: first enable: discovery starts ${maxAgeDays} day${maxAgeDays === 1 ? "" : "s"} back; ` +
+        `${first.skippedTooOld} historical PR${first.skippedTooOld === 1 ? "" : "s"} skipped as too old`,
+    );
   }
   const keys = (await deps.config.list()).filter((k) => k.key.startsWith(PR_WATCH_KEY_PREFIX)).map((k) => k.key);
   const policy = await withProjects(deps.policy ?? policyFromEnv(env), deps.projects);
@@ -211,6 +240,19 @@ function parseResume(raw: string | undefined): DiscoveryResume | null {
 /**
  * Discovery: watch every PR a recently-updated run OPENED.
  *
+ * Two bounds keep a sweep off the deep past. (1) The age bound: a run is
+ * adopted only if the PR it opened is younger than SHIP_PR_WATCH_MAX_AGE_DAYS
+ * (default 14) — dated by the repo-pr step's own append time when the event
+ * carries one, else the run meta's updatedAt (the tighter meta bound). (2) The
+ * first-enable cutover: with no cursor yet, "everything above the cursor has
+ * been examined" would be a lie unless the whole history were walked, and
+ * walking it adopts every PR a run EVER opened — the 2026-10-17 production
+ * flood (24 conflict proposals from months-old load-test PRs) — so the cursor
+ * is initialised at now minus the max age and older history counts as
+ * examined by definition. A run updated recently that opened its PR long
+ * before the floor still slips past the cursor, which is why bound (1) is
+ * checked per run and not only via the cursor.
+ *
  * Metas are read newest-first in PR_WATCH_DISCOVERY_LIMIT-wide pages past a
  * cursor stamp, at most PR_WATCH_DISCOVERY_MAX_PAGES pages per sweep. The
  * cursor means "every meta above this has been examined", so it may only
@@ -228,9 +270,20 @@ function parseResume(raw: string | undefined): DiscoveryResume | null {
  * then restarts from the top (re-examining metas is harmless: watches dedupe
  * by key, and a run that opened nothing leaves no row to collide with).
  */
-async function discover(deps: PrWatchDeps, now: Date): Promise<number> {
-  const cursor = (await deps.config.get(PR_WATCH_CURSOR_KEY).catch(() => undefined)) ?? "";
+async function discover(deps: PrWatchDeps, now: Date, maxAgeDays: number, first: { enable: boolean; skippedTooOld: number }): Promise<number> {
+  const floorMs = now.getTime() - maxAgeDays * 24 * 60 * 60 * 1000;
+  const floor = new Date(floorMs).toISOString();
+  let cursor = (await deps.config.get(PR_WATCH_CURSOR_KEY).catch(() => undefined)) ?? "";
   const resume = parseResume(await deps.config.get(PR_WATCH_DISCOVERY_RESUME_KEY).catch(() => undefined));
+  // First-enable cutover: no cursor has ever been written, so start it at the
+  // age floor instead of scanning all history. The write happens before the
+  // walk on purpose — a sweep that dies mid-walk must not leave "no cursor"
+  // behind for the next sweep to re-cut (and re-log) from a later now.
+  if (cursor === "" && resume === null) {
+    first.enable = true;
+    cursor = floor;
+    await deps.config.set(PR_WATCH_CURSOR_KEY, cursor, "pr-watch");
+  }
   const base = resume !== null ? Math.floor(resume.offset / PR_WATCH_DISCOVERY_LIMIT) * PR_WATCH_DISCOVERY_LIMIT : 0;
   let page = base / PR_WATCH_DISCOVERY_LIMIT;
   let pages = 0;
@@ -265,6 +318,17 @@ async function discover(deps: PrWatchDeps, now: Date): Promise<number> {
       }
       const opened = openedPr(await deps.store.load(meta.runId));
       if (opened === null) continue;
+      // Age bound, per run: the cursor only bounds meta.updatedAt, but a run
+      // touched now can have opened its PR long before the floor (the live
+      // finding's stale load-test PRs behind a recently-updated run). The
+      // repo-pr step's own append time is the exact opening; updatedAt is the
+      // tightest meta-side bound. An undateable stamp fails open: the watch
+      // itself still expires after 30 days.
+      const openedAt = Date.parse(opened.at ?? meta.updatedAt);
+      if (!Number.isNaN(openedAt) && openedAt < floorMs) {
+        first.skippedTooOld += 1;
+        continue;
+      }
       const key = prWatchKey(opened.repo, opened.pr);
       let watched: boolean;
       try {
@@ -300,15 +364,22 @@ async function discover(deps: PrWatchDeps, now: Date): Promise<number> {
   return added;
 }
 
-/** The PR a run OPENED: a recorded `repo-pr` step on a repo run. Reviews/revisions of existing PRs open none. */
-export function openedPr(events: WorkflowEvent[]): { repo: string; pr: number } | null {
+/**
+ * The PR a run OPENED: a recorded `repo-pr` step on a repo run. Reviews/revisions of existing PRs open none.
+ * `at` is that step's own append time when the event carries one — the exact
+ * moment the PR was opened, which discovery's age bound prefers over any run
+ * meta stamp.
+ */
+export function openedPr(events: WorkflowEvent[]): { repo: string; pr: number; at?: string } | null {
   const input = (events.find((e) => e.type === "run-started")?.data as { input?: { repo?: unknown } } | undefined)?.input;
   if (typeof input?.repo !== "string" || input.repo === "") return null;
   for (const e of events) {
     if (e.type !== "step-completed" || e.name !== "repo-pr") continue;
     const r = (e.data as { result?: { number?: unknown; url?: unknown } } | undefined)?.result;
     const n = Number(r?.number);
-    if (Number.isSafeInteger(n) && n > 0) return { repo: input.repo, pr: n };
+    if (Number.isSafeInteger(n) && n > 0) {
+      return { repo: input.repo, pr: n, ...(typeof e.at === "string" && e.at !== "" ? { at: e.at } : {}) };
+    }
   }
   return null;
 }
