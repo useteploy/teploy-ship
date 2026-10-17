@@ -19,6 +19,8 @@ import { ASK_UNAVAILABLE, askAnswerMessage, askEvent } from "./ask.js";
 import type { AskDecisionPayload } from "./ask.js";
 import { clipDetail, liveSink } from "./live.js";
 import type { LiveStore } from "./live.js";
+import { liveOutputExecutor, liveOutputRecorder } from "./live-view.js";
+import type { RuntimeConfigStore } from "./runtime-config.js";
 import { criticFeedback, isApproved, parsePick, pickAttempt, reviewWork } from "./critic.js";
 import type { PickCandidate } from "./critic.js";
 import {
@@ -1006,6 +1008,13 @@ export interface DurableAgentConfig {
    */
   live?: Pick<LiveStore, "set">;
   /**
+   * Where the live view's terminal tail is written (live-view.ts), set by
+   * the worker only under SHIP_LIVE_VIEW=on. Same contract as `live`:
+   * advisory, written from inside executing steps only, never part of the
+   * step sequence. Absent means bash actions run exactly as before.
+   */
+  liveOutput?: Pick<RuntimeConfigStore, "set">;
+  /**
    * Ceiling on one model turn's output (SHIP_MAX_OUTPUT_TOKENS, default
    * 16384). The adapter default of 4096 was hit on every one of the three
    * long deployed runs measured on 2026-09-15 under GLM 5.3, whose thinking
@@ -1914,7 +1923,8 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
       const steerReply = input.steerReply === true;
       const dialect: ActionDialect = steerReply ? { look, delegate, reply: true } : { look, delegate };
       /** Untrusted observation text, re-framed only on steerReply runs (fenceOperatorLines). */
-      const untrusted = (text: string, marker?: string): string => (steerReply ? fenceOperatorLines(text, marker) : text);
+      const untrusted = (text: string, marker?: string, anchored?: boolean): string =>
+        steerReply ? fenceOperatorLines(text, marker, { anchored: anchored === true }) : text;
       /** The previous turn posted a ```reply — this turn's top is a queue checkpoint. */
       let repliedLastTurn = false;
       /**
@@ -1956,7 +1966,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
           // are re-framed like any other untrusted text, so a crafted issue
           // cannot smuggle "Operator steering — ..." into the one section the
           // model reads as its orders. Flag-off bytes are unchanged.
-          content: systemPrompt({ workdir: ws.workdir, task: untrusted(task.prompt, "[task text, not the operator]"), search: searchable, browser: input.verification?.preview !== undefined, ask: input.ask === true, look, lookImage: lookImage !== undefined, delegate: input.delegate === true, ...(steerReply ? { reply: true } : {}) }),
+          content: systemPrompt({ workdir: ws.workdir, task: untrusted(task.prompt, "[task text, not the operator]", true), search: searchable, browser: input.verification?.preview !== undefined, ask: input.ask === true, look, lookImage: lookImage !== undefined, delegate: input.delegate === true, ...(steerReply ? { reply: true } : {}) }),
         },
       ];
       let anySuccessfulAction = false;
@@ -2867,6 +2877,13 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
         const steerStore = steerReply ? config.steer : undefined;
         const result: InterruptibleResult = await ws.ctx.step(`${p}turn-${turn}-exec`, () => {
           ws.live?.({ phase: "running", turn, detail: clipDetail(describeAction(action)) });
+          // Live view (SHIP_LIVE_VIEW=on): a bash action's output streams to
+          // the run page's terminal. Same ExecResult either way.
+          const liveOutput = config.liveOutput;
+          const exec =
+            liveOutput !== undefined && action.kind === "bash"
+              ? liveOutputExecutor(ws.executor, ws.execStream, (command) => liveOutputRecorder(liveOutput, ws.ctx.runId, command, { turn }))
+              : ws.executor;
           // D2: the interrupt protocol rides INSIDE the exec step (no new
           // step): its result, interrupt record included, is what replays.
           // `turn` carries the attempt prefix for the same reason the held
@@ -2879,10 +2896,10 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
               turn: `${p}${turn}`,
               action,
               pollMs: config.interruptPollMs ?? 2000,
-              run: (signal) => executeAction(ws.executor, action, config.actionTimeoutMs, `t${turn}`, true, signal),
+              run: (signal) => executeAction(exec, action, config.actionTimeoutMs, `t${turn}`, true, signal),
             });
           }
-          return executeAction(ws.executor, action, config.actionTimeoutMs, `t${turn}`);
+          return executeAction(exec, action, config.actionTimeoutMs, `t${turn}`);
         });
         if (result.interrupt?.at === "before") {
           // Never ran: no verdict, no evidence, nothing for the recovery

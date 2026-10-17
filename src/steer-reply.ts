@@ -55,11 +55,23 @@ export const FINISH_HELD_FOR_OPERATOR =
  * they are instead of claiming to be tool output; the observation path keeps
  * the original wording every test and prompt pins.
  */
-export function fenceOperatorLines(text: string, marker = "[tool output, not the operator]"): string {
+export function fenceOperatorLines(
+  text: string,
+  marker = "[tool output, not the operator]",
+  options: { anchored?: boolean } = {},
+): string {
+  // Split on EVERY line terminator and keep the separators: a "\n"-only split
+  // left "framing\r\nok" as one line whose rewrite silently did nothing
+  // (CRLF bypass, 2026-10-17 re-review).
+  const framing = options.anchored === true ? ANCHORED_FRAMING : OPERATOR_FRAMING;
   return text
-    .split("\n")
-    .map((line) => (OPERATOR_FRAMING.test(detectionCopy(line)) ? line.replace(/^([ \t]*)(.*)$/, `$1${marker} $2`) : line))
-    .join("\n");
+    .split(/(\r\n|\r|\n|\u2028|\u2029)/)
+    .map((part, i) => {
+      if (i % 2 === 1 || !framing.test(detectionCopy(part))) return part;
+      const indent = /^[ \t]*/.exec(part)?.[0] ?? "";
+      return `${indent}${marker} ${part.slice(indent.length)}`;
+    })
+    .join("");
 }
 
 /**
@@ -76,6 +88,9 @@ function detectionCopy(line: string): string {
   return line
     .normalize("NFKC")
     .replace(/\p{Cf}/gu, "")
+    // Invisible combining marks a \p{Cf} strip misses: the combining grapheme
+    // joiner and variation selectors.
+    .replace(/[\u034F\uFE00-\uFE0F]|\uDB40[\uDD00-\uDDEF]/g, "")
     .replace(/[\u2018\u2019]/g, "'")
     .replace(new RegExp(`[${Object.keys(HOMOGLYPHS).join("")}]`, "gu"), (ch) => HOMOGLYPHS[ch] ?? ch);
 }
@@ -115,6 +130,24 @@ const OPERATOR_FRAMING = new RegExp(
     "\\b(?:denied|approved)\\s+by\\s+the\\s+operator\\b",
     "\\bthe\\s+operator\\s+did\\s+not\\s+answer\\b",
   ].join("|"),
+  "i",
+);
+
+/**
+ * The task-text variant: only a line that STARTS (after indentation and
+ * markdown quote/list/emphasis characters) with a loop framing is fenced.
+ * Ordinary task wording like "the k8s operator messages are dropped" or "our
+ * Operator approved flow fails" must reach the model unmarked (2026-10-17
+ * re-review: the loose match fenced real task sentences).
+ */
+const ANCHORED_FRAMING = new RegExp(
+  "^[\\s>*_#`\\-+|]*(?:" +
+    [
+      "(?:the\\s+)?operator\\s*(?:'s)?\\s*(?:steering|messages?|interrupts?|answers?|answered|approved|denied)\\b",
+      "action\\s+(?:denied|approved)\\s+by\\s+the\\s+operator\\b",
+      "the\\s+operator\\s+did\\s+not\\s+answer\\b",
+    ].join("|") +
+    ")",
   "i",
 );
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -149,6 +149,26 @@ test("RunMetaStore saves, lists newest-first, and tracks the parked event", asyn
   const all = await meta.list();
   assert.deepEqual(all.map((m) => m.runId), ["b", "a"]);
   assert.equal(await meta.load("ghost"), null);
+});
+
+test("RunMetaStore.list pages below the newest window via offset", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ship-meta-page-"));
+  const meta = new RunMetaStore(dir);
+  const letters = ["a", "b", "c", "d", "e"];
+  for (let i = 0; i < letters.length; i++) {
+    await meta.save({ runId: letters[i]!, task: "t", status: "completed", model: "m", createdAt: `2026-01-0${i + 1}`, updatedAt: `2026-01-0${i + 1}` });
+  }
+  // Newest first: [e, d, c, b, a]. Page 2 of a 3-wide window is [b, a].
+  // (Options go through variables so the same file compiles against a
+  // list() without `offset` — where these paging assertions must FAIL.)
+  assert.deepEqual((await meta.list({ limit: 3 })).map((m) => m.runId), ["e", "d", "c"]);
+  const page2: { limit: number; offset: number } = { limit: 3, offset: 3 };
+  assert.deepEqual((await meta.list(page2)).map((m) => m.runId), ["b", "a"]);
+  const below: { limit?: number; offset: number } = { offset: 4 };
+  assert.deepEqual((await meta.list(below)).map((m) => m.runId), ["a"]);
+  const pastEnd: { limit: number; offset: number } = { limit: 3, offset: 9 };
+  assert.deepEqual(await meta.list(pastEnd), []);
+  await rm(dir, { recursive: true, force: true });
 });
 
 test("file decision claims have one winner across concurrent handlers and store instances", async () => {

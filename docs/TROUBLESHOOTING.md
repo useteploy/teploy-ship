@@ -74,6 +74,16 @@ The three reasons, checked in this order (`src/host-load.ts`):
 Nothing is dropped — due runs wait. The hold re-senses on every pass and
 clears itself when the box recovers; `0` disables a limit.
 
+**`[ship] ERROR: data dir /data is not writable by uid 1000`, or `[ship] WARNING: policy shadow cannot write ...`.**
+The data volume is owned by someone other than the service user (uid 1000,
+`node`). Every file-backed shadow and record written there (policy, placement,
+tool-manifest, budget ledger) records nothing until fixed; Ship keeps running.
+On a teploy deploy: `chown 1000:1000 /deployments/ship/volumes/ship-data` on
+the server, then confirm with `teploy-ship doctor` (`data-dir-writable: PASS`).
+This happened in production for 12 days (2026-10-04 to 10-16, AUDIT_OPEN).
+A shadow report that says "the shadow could not write here (permission)" is
+the same fault.
+
 **A worker refuses to start on the forge's own box.**
 The forge co-location gate (B4): the sandbox egress allowlist permits the
 forge by design, so on the forge's machine that permission is a local hop to

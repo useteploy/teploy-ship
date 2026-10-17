@@ -46,6 +46,7 @@
  */
 import { join } from "node:path";
 
+import { noteWriteFailure } from "./record-writes.js";
 import { fileReservationLedger, type ReservationLedger, type Settlement } from "./budget-reservation.js";
 import { stateDir } from "./run-store.js";
 
@@ -106,9 +107,12 @@ export interface BudgetGate {
 
 const scopeIdOf = (source: string, day: string): string => `budget:${source}:${day}`;
 
-export function createBudgetGate(opts: { mode: "shadow" | "on"; ledger: ReservationLedger; log?: (line: string) => void }): BudgetGate {
+export function createBudgetGate(opts: { mode: "shadow" | "on"; ledger: ReservationLedger; log?: (line: string) => void; ledgerPath?: string }): BudgetGate {
   const { mode, ledger } = opts;
   const log = opts.log ?? ((line: string) => console.error(line));
+  // Count every ledger failure; log loudly once per process (record-writes.ts). The per-run lines below still say what was decided.
+  const ledgerKey = opts.ledgerPath ?? "budget-ledger";
+  const noteLedgerError = (error: unknown): void => noteWriteFailure("budget reservation ledger", ledgerKey, error, log);
   const stats: BudgetGateStats = {
     admissions: 0,
     agreements: 0,
@@ -166,6 +170,7 @@ export function createBudgetGate(opts: { mode: "shadow" | "on"; ledger: Reservat
           } else why = `reserve refused: ${r.reason}`;
         }
       } catch (error) {
+        noteLedgerError(error);
         why = `ledger error: ${error instanceof Error ? error.message : String(error)}`;
       }
       if (ledgerAllows === undefined) {
@@ -207,6 +212,7 @@ export function createBudgetGate(opts: { mode: "shadow" | "on"; ledger: Reservat
           log(`[budget-reservation] ${runId}: unpriced usage — its estimate stays held as unknown spend, not recorded as $0`);
         }
       } catch (error) {
+        noteLedgerError(error);
         log(`[budget-reservation] ${runId}: settle failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     },
@@ -214,6 +220,7 @@ export function createBudgetGate(opts: { mode: "shadow" | "on"; ledger: Reservat
       try {
         await ledger.release(runId);
       } catch (error) {
+        noteLedgerError(error);
         log(`[budget-reservation] ${runId}: release failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     },
@@ -253,7 +260,7 @@ export function resolveBudgetGate(
   if (effective === "on") {
     log("[budget-reservation] mode=on: ledger refusals deny admission. Single-process only; do not run a second worker or CLI enqueue process against this state dir while it is on.");
   }
-  const gate = effective === undefined ? undefined : createBudgetGate({ mode: effective, ledger: fileReservationLedger(path), log });
+  const gate = effective === undefined ? undefined : createBudgetGate({ mode: effective, ledger: fileReservationLedger(path), log, ledgerPath: path });
   memo = { key, gate };
   return gate;
 }

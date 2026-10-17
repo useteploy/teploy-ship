@@ -2,6 +2,7 @@ import { recoverLaunches } from "./launch-journal.js";
 import { intakeJourney } from "./journeys.js";
 import { sweepSchedulesForWorker, sweepScheduleDigests } from "./workflow-schedules.js";
 import { serveWorkspaceRequests } from "./workspace-requests.js";
+import { clearLiveView, liveViewEnabled, serveLiveDiffs } from "./live-view.js";
 import { loadTakeover } from "./takeover.js";
 import { sweepIncidents, sweepIncidentRecovery, type IncidentRecoveryReader } from "./incidents.js";
 import { launchNext, listCoordinations } from "./coordination.js";
@@ -104,6 +105,7 @@ import type { CodeSearch } from "./code-index.js";
 import { costUSD, isPricedModel } from "./pricing.js";
 import { UPGRADE_HOLD_EVENT, replayDrift, upgradeHoldReason } from "./step-fingerprint.js";
 import { makeObserveLogEmitter, selfwatchOnce, WarningGate } from "./selfwatch.js";
+import { prWatchEnabled, prWatchIntervalSec, sweepPrWatch } from "./pr-watch.js";
 
 export type { IntakePolicy } from "./intake.js";
 
@@ -855,6 +857,8 @@ export function startWorker(options: WorkerOptions): {
     projects: options.runtime.projects,
     steer: options.runtime.steer,
     ...((options.runtime as Partial<Pick<NucleusShipRuntime, "live">>).live !== undefined ? { live: options.runtime.live } : {}),
+    // Live view terminal (SHIP_LIVE_VIEW=on only): absent leaves every bash action's exec untouched.
+    ...(liveViewEnabled() && options.runtime.config !== undefined ? { liveOutput: options.runtime.config } : {}),
     ...(envNum("SHIP_MAX_OUTPUT_TOKENS") !== undefined ? { maxOutputTokens: envNum("SHIP_MAX_OUTPUT_TOKENS")! } : {}),
     ...(options.codeSearch !== undefined ? { codeSearch: options.codeSearch } : {}),
     // External harnesses (claude-code, opencode). Always carried; whether the
@@ -998,6 +1002,8 @@ export function startWorker(options: WorkerOptions): {
       // and resume repeatedly, and their side effects are already idempotent
       // (outbox ids dedupe the notifications).
       const terminal = outcome.status === "completed" || outcome.status === "failed" || outcome.status === "cancelled";
+      // Live view rows describe an active run only (live-view.ts).
+      if (terminal && liveViewEnabled()) void clearLiveView(options.runtime.config, runId);
       // One claim shared by every terminal side effect below (settle, notify,
       // observe). Parks resolve true without claiming.
       const terminalPass = !terminal ? Promise.resolve(true) : claimTerminalOutcome(runId);
@@ -1842,6 +1848,26 @@ export function startWorker(options: WorkerOptions): {
   // Akiroo pull between fetch and ack, and a shutdown that returned while one
   // was mid-pass abandoned it.
   let sweepChain: Promise<void> | null = null;
+  // B1 PR watch: forge reads only, at most once per SHIP_PR_WATCH_INTERVAL_SEC
+  // per process (per-PR spacing and error backoff live in each watch record).
+  // Flag off = this returns before touching the store or the forge.
+  let prWatchNextAt = 0;
+  const prWatchTick = async (): Promise<void> => {
+    if (!prWatchEnabled()) return;
+    if (Date.now() < prWatchNextAt) return;
+    prWatchNextAt = Date.now() + prWatchIntervalSec() * 1000;
+    const r = await sweepPrWatch({
+      config: options.runtime.config,
+      listMeta: (o) => options.runtime.listMeta(o),
+      store: options.runtime.store,
+      intake: options.runtime.intake,
+      projects: options.runtime.projects,
+      policy: { ...(options.repoPolicy ?? policyFromEnv()), ...(options.gitToken !== undefined ? { gitToken: options.gitToken } : {}), ...(options.githubToken !== undefined ? { githubToken: options.githubToken } : {}) },
+      log,
+    });
+    for (const p of r.proposed) if (p.created) log(`[worker] pr watch: ${p.reason} on ${p.repo}#${p.pr} proposed ${p.taskId}`);
+    for (const u of r.unwatched) log(`[worker] pr watch: stopped watching ${u.repo}#${u.pr} (${u.why})`);
+  };
   const intakeTimer = setInterval(() => {
     if (sweepChain !== null) return;
     sweepChain = sweep()
@@ -1888,6 +1914,12 @@ export function startWorker(options: WorkerOptions): {
         }
       })().catch(e => log(`[worker] coordination sweep: ${e instanceof Error ? e.message : String(e)}`)))
       .then(() => serveWorkspaceRequests(options.runtime, executor, { ...workspacePolicyFromEnv(), ...options.repoPolicy, ...(options.gitToken !== undefined ? { gitToken: options.gitToken } : {}), ...(options.githubToken !== undefined ? { githubToken: options.githubToken } : {}) }).catch(e => log(`[worker] workspace request: ${e instanceof Error ? e.message : String(e)}`)))
+      .then(() => prWatchTick().catch(e => log(`[worker] pr watch: ${e instanceof Error ? e.message : String(e)}`)))
+      // D5 live view: refresh the running diff of watched active runs only.
+      // Strictly inert when SHIP_LIVE_VIEW is not `on` (no store read at all).
+      .then(() => liveViewEnabled()
+        ? serveLiveDiffs(options.runtime, executor).then((r) => { for (const e of r.errors) log(`[worker] live diff: ${e}`); }).catch(e => log(`[worker] live diff: ${e instanceof Error ? e.message : String(e)}`))
+        : undefined)
       .then(() => retryNotifications())
       .catch((error) => log(`[worker] intake sweep: ${error instanceof Error ? error.message : String(error)}`))
       .finally(() => {
