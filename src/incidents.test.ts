@@ -956,3 +956,46 @@ test("REPLAY: starter-era records (no new fields) walk the sweep unchanged and a
   assert.equal(recoverySweep.checked, 0);
   assert.equal(JSON.stringify(await config.get(`SHIP_INCIDENT_${id}`)), after);
 });
+
+// The live notification outbox body (teploy-observe notify_outbox.go
+// NotificationPayload): no alert_id, a kind, Observe's incident id.
+const OUTBOX_OPENED: IncidentObserveWire = {
+  kind: "incident_opened",
+  incident_id: "oinc-1",
+  rule_id: "rule-413",
+  rule_name: "413s on checkout",
+  metric: "error_rate",
+  value: 12.5,
+  threshold: "1",
+  site_id: "fylun-web",
+  evaluated_at: "2026-10-17T10:00:00Z",
+};
+
+test("outbox intake: incident_opened creates an incident keyed on the rule; incident_repeat re-fires it", async () => {
+  const config = memoryConfig();
+  const opened = await intakeObserveAlert({ config, projects: projects() }, OUTBOX_OPENED, { now, newId });
+  assert.equal(opened.kind, "created");
+  assert.equal(opened.kind === "created" && opened.record.observe?.fingerprint, "rule-413");
+  assert.match(opened.kind === "created" ? opened.record.alertText : "", /fired 2026-10-17T10:00:00Z/);
+  const repeat = await intakeObserveAlert({ config, projects: projects() }, { ...OUTBOX_OPENED, kind: "incident_repeat" }, { now, newId });
+  assert.equal(repeat.kind, "refired");
+  assert.equal((await listIncidents(config)).length, 1);
+});
+
+test("outbox intake NEGATIVE: incident_recovered never counts as a re-fire and never reopens a recovered incident", async () => {
+  const config = memoryConfig();
+  const first = await intakeObserveAlert({ config, projects: projects() }, OUTBOX_OPENED, { now, newId });
+  const id = first.kind === "created" ? first.record.id : "";
+  const open = await intakeObserveAlert({ config, projects: projects() }, { ...OUTBOX_OPENED, kind: "incident_recovered" }, { now, newId });
+  assert.equal(open.kind, "skipped");
+  assert.equal((await listIncidents(config))[0]!.observe?.alertCount, 1, "an open incident is not bumped by a recovery notice");
+
+  const record = (await listIncidents(config)).find((i) => i.id === id)!;
+  await config.set(`SHIP_INCIDENT_${id}`, JSON.stringify({ ...record, status: "recovered" }), "incidents");
+  const after = await intakeObserveAlert({ config, projects: projects() }, { ...OUTBOX_OPENED, kind: "incident_recovered" }, { now, newId });
+  assert.equal(after.kind, "skipped");
+  const listed = await listIncidents(config);
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0]!.status, "recovered", "the recovery notice leaves a recovered incident recovered");
+  assert.equal(listed[0]!.reopens ?? 0, 0);
+});

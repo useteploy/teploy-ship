@@ -5,6 +5,7 @@ import {
   ciFixTaskFromWorkflowRun,
   incidentTaskFromObserveAlert,
   linearTaskFromIssue,
+  observeAlertDedupeKey,
   observeAlertKey,
   parseRepoToken,
   reviewGateSatisfied,
@@ -416,4 +417,33 @@ test("observeAlertKey prefers service, then service_name, then site_id", () => {
   assert.equal(observeAlertKey({ service_name: "b", site_id: "c" }), "b");
   assert.equal(observeAlertKey({ site_id: " c " }), "c");
   assert.equal(observeAlertKey({}), "");
+});
+
+test("observe outbox: the live NotificationPayload (no alert_id) proposes one task keyed on rule + Observe incident", () => {
+  const outbox = {
+    kind: "incident_opened",
+    incident_id: "oinc-7",
+    rule_id: "rule-413",
+    rule_name: "413s on checkout",
+    metric: "error_rate",
+    value: 12.5,
+    threshold: "1",
+    site_id: "fylun-web",
+    evaluated_at: "2026-10-17T10:00:00Z",
+  };
+  const task = incidentTaskFromObserveAlert(outbox);
+  assert.ok(task !== null);
+  assert.equal(task.dedupeKey, "observe:rule:rule-413:oinc-7");
+  assert.match(task.detail ?? "", /Triggered at: 2026-10-17T10:00:00Z/);
+  assert.match(task.detail ?? "", /Observe incident: oinc-7/);
+  // A repeat of the same episode collapses onto the same key.
+  assert.equal(incidentTaskFromObserveAlert({ ...outbox, kind: "incident_repeat" })?.dedupeKey, task.dedupeKey);
+  // A legacy body keeps its alert_id key.
+  assert.equal(observeAlertDedupeKey({ alert_id: "al-1", rule_id: "r", incident_id: "i" }), "observe:al-1");
+});
+
+test("observe outbox NEGATIVE: a recovery notice proposes nothing; rule without incident id has no key", () => {
+  assert.equal(incidentTaskFromObserveAlert({ kind: "incident_recovered", rule_id: "rule-413", incident_id: "oinc-7" }), null);
+  assert.equal(incidentTaskFromObserveAlert({ kind: "incident_opened", rule_id: "rule-413" }), null);
+  assert.equal(observeAlertDedupeKey({ rule_id: "rule-413" }), null);
 });

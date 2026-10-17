@@ -479,6 +479,14 @@ export interface ObserveAlertPayload {
   url?: string;
   sample_stack?: string;
   stack_trace?: string;
+
+  // --- The live notification outbox (notify_outbox.go NotificationPayload). ---
+  /** incident_opened | incident_repeat | incident_recovered. */
+  kind?: string;
+  /** Observe's incident grouping id; stable across repeats of one episode. */
+  incident_id?: string;
+  evaluated_at?: string;
+  message?: string;
 }
 
 /** How much of a sample stack reaches the task detail. */
@@ -513,7 +521,9 @@ function observeIncidentDetail(payload: ObserveAlertPayload, repo: string | unde
   push("Threshold", payload.threshold, 120);
   push("Severity", payload.severity ?? payload.level, 60);
   push("Site", payload.site_id, 200);
-  push("Triggered at", payload.timestamp, 60);
+  push("Triggered at", payload.timestamp ?? payload.evaluated_at, 60);
+  push("Observe incident", payload.incident_id, 200);
+  push("Message", payload.message);
   // The fingerprint is what makes two incidents the same incident; it is worth
   // printing even though nothing in Observe fills it yet.
   push("Error fingerprint", payload.fingerprint ?? payload.group_hash, 200);
@@ -580,17 +590,22 @@ export function incidentTaskFromObserveAlert(
   payload: ObserveAlertPayload,
   options: { repo?: string } = {},
 ): ProposeInput | null {
+  // The live outbox announces recovery as its own notice; a recovery is not
+  // an incident to investigate.
+  if (oneLine(payload.kind, 60) === "incident_recovered") return null;
+  const dedupeKey = observeAlertDedupeKey(payload);
+  // Without a key there is no dedupe, and an alert storm on one rule would
+  // open one task per evaluation tick (every 60s, main.go:463).
+  if (dedupeKey === null) return null;
   const alertId = oneLine(payload.alert_id, 200);
-  // Without an alert id there is no dedupe key, and an alert storm on one rule
-  // would open one task per evaluation tick (every 60s, main.go:463).
-  if (alertId === "") return null;
 
   const rule = oneLine(payload.rule_name, 80);
   const metric = oneLine(payload.metric, 60);
   const value = oneLine(payload.value === undefined ? "" : String(payload.value), 40);
   const threshold = oneLine(payload.threshold === undefined ? "" : String(payload.threshold), 40);
   const measured = metric === "" ? "" : ` (${metric}${value === "" ? "" : ` ${value}`}${threshold === "" ? "" : ` vs ${threshold}`})`;
-  const subject = rule !== "" ? rule : oneLine(payload.title, 80) !== "" ? oneLine(payload.title, 80) : `alert ${alertId}`;
+  const subject =
+    rule !== "" ? rule : oneLine(payload.title, 80) !== "" ? oneLine(payload.title, 80) : `alert ${alertId !== "" ? alertId : oneLine(payload.incident_id, 80)}`;
 
   return {
     source: "observe",
@@ -598,6 +613,25 @@ export function incidentTaskFromObserveAlert(
     ...(options.repo !== undefined && options.repo !== "" ? { repo: options.repo } : {}),
     title: clip(`Incident: ${subject}${measured}`, 140),
     detail: observeIncidentDetail(payload, options.repo === "" ? undefined : options.repo),
-    dedupeKey: `observe:${alertId}`,
+    dedupeKey,
   };
+}
+
+/**
+ * The intake dedupe key for an Observe alert.
+ *
+ * The legacy webhook body (webhooks.go AlertPayload) carries `alert_id`, and
+ * keeps `observe:<alert_id>`. The live notification outbox
+ * (notify_outbox.go NotificationPayload) carries no alert_id; it carries the
+ * rule and Observe's own incident id, which is stable across repeats of one
+ * episode, so `observe:rule:<rule_id>:<incident_id>` opens one task per
+ * outage episode instead of one per cooldown.
+ */
+export function observeAlertDedupeKey(payload: Pick<ObserveAlertPayload, "alert_id" | "rule_id" | "incident_id">): string | null {
+  const alertId = oneLine(payload.alert_id, 200);
+  if (alertId !== "") return `observe:${alertId}`;
+  const ruleId = oneLine(payload.rule_id, 200);
+  const incidentId = oneLine(payload.incident_id, 200);
+  if (ruleId !== "" && incidentId !== "") return `observe:rule:${ruleId}:${incidentId}`;
+  return null;
 }

@@ -57,11 +57,10 @@ export async function action({ request }: { request: Request }): Promise<Respons
   const refused = await verifyObserveSignature(request, body, secret);
   if (refused !== null) return refused;
 
-  // Observe stamps NO delivery id (webhooks.go:134-161 sets only the signature
-  // and the timestamp), so the signature itself is the fallback claim key: it
-  // is a function of the body AND the per-fire timestamp, so it is unique per
-  // delivery and identical across a replay of the same bytes. The
-  // `x-observe-delivery` header is preferred for when Observe grows one.
+  // Observe's notification outbox stamps X-Observe-Delivery with the outbox
+  // row id, reused across retries (notify_outbox.go:774), so a retry collapses
+  // here. The legacy webhook sender stamps none; for it the signature is the
+  // fallback claim key (a function of the body and the per-fire timestamp).
   // Belt and braces regardless — `observe:<alert_id>` dedupes at intake, so a
   // replay that gets past this collapses onto the existing task rather than
   // opening a second incident.
@@ -75,7 +74,7 @@ export async function action({ request }: { request: Request }): Promise<Respons
   // builder: service -> repo is a reverse lookup over the evidence store.
   const repo = await observeRepoFor(payload);
   const input = incidentTaskFromObserveAlert(payload, repo !== undefined ? { repo } : {});
-  if (input === null) return json(200, { ok: true, skipped: "alert carries no alert_id" });
+  if (input === null) return json(200, { ok: true, skipped: "recovery notice, or no alert_id / rule_id+incident_id to dedupe on" });
   return proposeFromWebhook(input);
 }
 
