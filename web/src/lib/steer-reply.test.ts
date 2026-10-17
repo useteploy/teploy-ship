@@ -112,6 +112,24 @@ test("conversation: on a flag-on run a reply reads as the agent's prose and held
   ]);
 });
 
+test("conversation renders only the FIRST reply block — the one the loop delivered — and agrees with replyHistory", async () => {
+  const { conversation } = await import("./workspace.js");
+  // Two reply fences before the action: the loop's parseReply reads the
+  // first and never sees the second, so the conversation must not show it
+  // as a second message to the operator.
+  const events = [
+    startedWith({ task: "t", steerReply: true }),
+    ev("step-completed", 2, "turn-1-think", {
+      result: { text: "Answering.\n```reply\nfirst message\n```\n```reply\nsecond, never delivered\n```\n```bash\nls\n```" },
+    }),
+  ];
+  assert.deepEqual(conversation(events as never).map((m) => [m.role, m.text]), [
+    ["You", "t"],
+    ["Agent", "Answering.\nfirst message"],
+  ]);
+  assert.deepEqual(replyHistory(events).map((r) => r.text), ["first message"], "both surfaces read the loop's one reply");
+});
+
 // ------------------------------------------------------------ rendering
 
 test("steerChip: a pre-D2 note reads exactly as before; modes and effects are named", () => {

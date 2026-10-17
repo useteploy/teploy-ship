@@ -1914,16 +1914,23 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
       const steerReply = input.steerReply === true;
       const dialect: ActionDialect = steerReply ? { look, delegate, reply: true } : { look, delegate };
       /** Untrusted observation text, re-framed only on steerReply runs (fenceOperatorLines). */
-      const untrusted = (text: string): string => (steerReply ? fenceOperatorLines(text) : text);
+      const untrusted = (text: string, marker?: string): string => (steerReply ? fenceOperatorLines(text, marker) : text);
       /** The previous turn posted a ```reply — this turn's top is a queue checkpoint. */
       let repliedLastTurn = false;
-      /** Claim held operator messages of both kinds; called only inside a recorded step. */
+      /**
+       * Claim held operator messages of both kinds; called only inside a
+       * recorded step. Keys carry the attempt prefix `p`: attempts run the
+       * same turn NUMBERS against one shared store, and an attempt-1 turn N
+       * keyed `q:N` would answer with attempt-0's already-consumed claim and
+       * re-deliver its messages. Single-attempt runs have `p === ""`, so
+       * their keys are byte-identical to the pre-fix ones.
+       */
       const claimHeld = async (key: string, includeQueued: boolean): Promise<HeldItem[]> => {
         const steerStore = config.steer;
         if (steerStore?.claimHeld === undefined) return [];
         const runId = ws.ctx.runId;
-        const queued = includeQueued ? await steerStore.claimHeld(runId, "queue", `q:${key}`).catch(() => [] as string[]) : [];
-        const interrupts = await steerStore.claimHeld(runId, "interrupt", `i:${key}`).catch(() => [] as string[]);
+        const queued = includeQueued ? await steerStore.claimHeld(runId, "queue", `q:${p}${key}`).catch(() => [] as string[]) : [];
+        const interrupts = await steerStore.claimHeld(runId, "interrupt", `i:${p}${key}`).catch(() => [] as string[]);
         return [...queued.map((text): HeldItem => ({ mode: "queue", text })), ...interrupts.map((text): HeldItem => ({ mode: "interrupt", text }))];
       };
       const heldMessages = (items: HeldItem[]): Message[] => {
@@ -1944,7 +1951,12 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
       let messages: Message[] = [
         {
           role: "system",
-          content: systemPrompt({ workdir: ws.workdir, task: task.prompt, search: searchable, browser: input.verification?.preview !== undefined, ask: input.ask === true, look, lookImage: lookImage !== undefined, delegate: input.delegate === true, ...(steerReply ? { reply: true } : {}) }),
+          // The task text is issue/webhook content — the same trust class as
+          // command output. On steerReply runs its operator-imitating lines
+          // are re-framed like any other untrusted text, so a crafted issue
+          // cannot smuggle "Operator steering — ..." into the one section the
+          // model reads as its orders. Flag-off bytes are unchanged.
+          content: systemPrompt({ workdir: ws.workdir, task: untrusted(task.prompt, "[task text, not the operator]"), search: searchable, browser: input.verification?.preview !== undefined, ask: input.ask === true, look, lookImage: lookImage !== undefined, delegate: input.delegate === true, ...(steerReply ? { reply: true } : {}) }),
         },
       ];
       let anySuccessfulAction = false;
@@ -2121,8 +2133,14 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
           // before the step result is committed, and a crash in that window
           // would otherwise consume the operator's notes without delivering
           // them (they are not in the log, and they are no longer pending).
+          // On steerReply runs the key is attempt-scoped — attempts share one
+          // store and re-run the same turn numbers, so a plain turn key would
+          // re-deliver attempt 0's notes to attempt 1 (the same flaw the held
+          // keys above fix). Flag-off runs keep the plain turn number, so
+          // their store bytes are exactly what they always were; the
+          // pre-existing flag-off re-delivery is documented in AUDIT_OPEN.md.
           const steers = await ws.ctx.step(`${p}turn-${turn}-steer`, async () =>
-            config.steer !== undefined ? config.steer.drain(ws.ctx.runId, turn).catch(() => []) : [],
+            config.steer !== undefined ? config.steer.drain(ws.ctx.runId, steerReply ? `${p}${turn}` : turn).catch(() => []) : [],
           );
           for (const text of steers) {
             messages.push({ role: "user", content: `Operator steering — adjust course accordingly: ${text}` });
@@ -2163,7 +2181,13 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
                   prompt: transcript,
                   maxOutputTokens: 800,
                 });
-                return { text: generated.text, usage: generated.usage };
+                // The summary is model output over a transcript that carries
+                // untrusted bytes, so on steerReply runs its operator-imitating
+                // lines are re-framed INSIDE the step: a recap is not a live
+                // operator turn and must not re-issue one, the fenced text is
+                // what the step records, and a replay returns those bytes
+                // without fencing them a second time.
+                return { text: untrusted(generated.text, "[recap, not the operator]"), usage: generated.usage };
               });
               addUsage(summaryStep.usage);
               return summaryStep.text;
@@ -2845,11 +2869,14 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
           ws.live?.({ phase: "running", turn, detail: clipDetail(describeAction(action)) });
           // D2: the interrupt protocol rides INSIDE the exec step (no new
           // step): its result, interrupt record included, is what replays.
+          // `turn` carries the attempt prefix for the same reason the held
+          // keys do — attempt 1's `i:N:before` must not answer attempt 0's
+          // claim and skip the action a second time.
           if (steerStore?.claimHeld !== undefined) {
             return runInterruptible({
               claim: (runId, kind, key) => steerStore.claimHeld!(runId, kind, key),
               runId: ws.ctx.runId,
-              turn: `${turn}`,
+              turn: `${p}${turn}`,
               action,
               pollMs: config.interruptPollMs ?? 2000,
               run: (signal) => executeAction(ws.executor, action, config.actionTimeoutMs, `t${turn}`, true, signal),

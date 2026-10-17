@@ -27,6 +27,7 @@
 import { isAskEvent } from "teploy-ship/ask";
 import { parseAction, parseReply } from "../../../dist/actions.js";
 import { taskRootRunId as resolveTaskRoot } from "../../../dist/task-session.js";
+import { replyDialectOf } from "./workspace.js";
 import type { HeldNote, SteerNote } from "teploy-ship/runtime";
 import type { RunMeta } from "teploy-ship/runtime";
 import type { WorkflowEvent } from "@neutron-build/workflow";
@@ -223,11 +224,9 @@ export function replyHistory(events: readonly WorkflowEvent[]): AgentReplyView[]
   const started = events.find((e) => e.type === "run-started");
   const input = record(record(started?.data).input);
   if (input.steerReply !== true) return [];
-  const dialect = {
-    look: input.look === true,
-    delegate: input.delegate === true || input.delegateChild === true,
-    reply: true,
-  };
+  // The same dialect settings conversation() uses (workspace.ts) — both
+  // surfaces render what the loop's own parseReply delivered.
+  const dialect = replyDialectOf(input);
   const out: AgentReplyView[] = [];
   for (const event of events) {
     if (event.type !== "step-completed") continue;

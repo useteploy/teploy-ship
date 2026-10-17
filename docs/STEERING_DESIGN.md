@@ -43,7 +43,10 @@ the negative control in `src/steer-reply.test.ts` pins that three turns of
 work without a reply never see it.
 
 **3. Interrupt** (S11 effect vocabulary). Safe points, each claimed under its
-own key so a crash-and-rerun of the step re-derives the same answer:
+own key so a crash-and-rerun of the step re-derives the same answer. Keys
+carry the attempt prefix on multi-attempt runs (`i:attempt-1-3:during`, say),
+because attempts re-run the same turn numbers against one shared store and a
+bare turn number would answer another attempt's claim:
 
 | Where | When it lands | Effect recorded |
 | --- | --- | --- |
@@ -72,8 +75,14 @@ and replies only from think steps — tool output can produce neither.
 **5. Storage.** Plain notes stay in `ship_steer` / `<run>.jsonl`, untouched.
 Queued messages and interrupts live in their own table, `ship_steer_held`
 (created lazily like `ship_steer`; no migration) / `<run>.held.jsonl`, with
-`claimHeld(run, kind, key)` following drain's stamp-then-read idempotency.
-A run without the flag never reads the held side.
+`claimHeld(run, kind, key)` answering a key that already claimed from those
+rows alone (read-before-stamp, so a row that arrives after a claim stays
+pending for a later key — the same contract in the file and Nucleus stores).
+A run without the flag never reads the held side. The impersonation fence
+(fenceOperatorLines) covers observations, the task text and condense recaps
+on steerReply runs; the drain's turn key and the held keys are attempt-scoped
+(on flag-on runs for the drain — see AUDIT_OPEN.md for the pre-existing
+flag-off behaviour).
 
 ## Replay semantics
 
