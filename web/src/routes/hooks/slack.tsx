@@ -34,7 +34,12 @@ export async function action({ request }: { request: Request }): Promise<Respons
   }
   const signature = request.headers.get("x-slack-signature") ?? "";
   const expected = `v0=${createHmac("sha256", secret).update(`v0:${timestamp}:${body}`).digest("hex")}`;
-  if (signature.length !== expected.length || !timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {
+  const signatureBytes = Buffer.from(signature);
+  const expectedBytes = Buffer.from(expected);
+  // Equal string lengths do not imply equal byte lengths (the header is
+  // attacker-chosen and may carry multi-byte characters), and timingSafeEqual
+  // throws on a length mismatch — an unsigned request must never become a 500.
+  if (signatureBytes.length !== expectedBytes.length || !timingSafeEqual(signatureBytes, expectedBytes)) {
     return json(401, { title: "bad slack signature" });
   }
 

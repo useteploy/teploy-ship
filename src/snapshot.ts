@@ -242,6 +242,15 @@ export async function produceSnapshot(deps: ProduceDeps): Promise<SnapshotOutcom
   const label = deps.label ?? "manual";
   const dataDir = join(deps.shipRoot, NUCLEUS_DATA_REL);
   if (!existsSync(dataDir)) {
+    // A postgres-store install has no nucleus data dir. This producer is the
+    // nucleus tar only; the postgres backup (online pg_dump with row counts,
+    // or a cold pgdata tar) lives in the script.
+    if (existsSync(join(deps.shipRoot, "accessories", "postgres"))) {
+      refuse(
+        `this install uses the postgres store (${join(deps.shipRoot, "accessories", "postgres")}); ` +
+          "`teploy-ship snapshot` tars the nucleus data dir only — use scripts/ship-backup.sh backup (pg_dump + manifest row counts) instead",
+      );
+    }
     refuse(`engine data dir not found: ${dataDir} (set --ship-root or SHIP_ROOT)`);
   }
 

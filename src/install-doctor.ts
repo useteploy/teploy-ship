@@ -21,6 +21,13 @@
  *    read-only `nucleusProbes` when NUCLEUS_URL is set; with no configured
  *    store there is nothing to ask and connectivity honestly stays unknown.
  *    Passing the first must not read as passing the second.
+ *    The store KIND (file | nucleus | postgres — `--store`, SHIP_STORE, or
+ *    config) is resolved by the caller: both shared stores read their URL
+ *    from NUCLEUS_URL, so the URL alone cannot say which dialect the runtime
+ *    will speak. With a stated shared-store kind the `store-engine` check asks
+ *    the engine its identity (`SELECT version()`) and fails a mismatch (a
+ *    postgres-dialect runtime pointed at Nucleus, or the reverse); an engine
+ *    that does not identify itself stays unknown.
  * 3. **Values never leave.** Env checks report presence only, never the value
  *    or its length, and the whole report passes the support RedactionGate
  *    before it is emitted (`renderDoctor`), so even a detail string that
@@ -36,7 +43,8 @@ import { mkdir, rm, statfs, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join } from "node:path";
 
-import { NucleusPgwire } from "./nucleus-pgwire.js";
+import { NucleusPgwire, type PgwireDialect } from "./nucleus-pgwire.js";
+import { chownHint, uidOf } from "./record-writes.js";
 import { RedactionGate } from "./support.js";
 
 export type CheckStatus = "pass" | "fail" | "unknown";
@@ -59,10 +67,18 @@ export interface DoctorReport {
   checks: DoctorCheck[];
 }
 
+export type DoctorStoreKind = "file" | "nucleus" | "postgres";
+
 export interface DoctorProbes {
   nodeVersion: string;
   env: Readonly<Record<string, string | undefined>>;
+  /** The store the runtime will use (flag > SHIP_STORE > config). Unset = not stated. */
+  storeKind?: DoctorStoreKind;
+  /** The resolved store URL (flag > NUCLEUS_URL > config). Unset falls back to env.NUCLEUS_URL. */
+  storeUrl?: string;
   stateDir: string;
+  /** Directories the file-backed shadows/records write into (record-dirs.ts). Absent: the state dir alone. */
+  recordDirs?: string[];
   webPort: number;
   /** Real write+remove of a scratch file in the state dir. Throws on failure. */
   writeProbe?: (dir: string) => Promise<void>;
@@ -72,6 +88,8 @@ export interface DoctorProbes {
   portState?: (port: number) => Promise<"free" | "in-use" | undefined>;
   /** Try to reach the store. Resolves true only when it answered. */
   storeReachable?: (url: string) => Promise<boolean | undefined>;
+  /** The engine's self-reported identity (`SELECT version()`), undefined when it did not say. */
+  storeEngine?: () => Promise<string | undefined>;
   /** This host's clock, ms since epoch. */
   nowMs: number;
   /** An independent clock reading (e.g. the store's), ms since epoch. */
@@ -106,8 +124,36 @@ export async function checkStateWritable(p: DoctorProbes): Promise<DoctorCheck> 
     await p.writeProbe(p.stateDir);
     return check("state-dir-writable", "pass", `wrote and removed a scratch file in ${p.stateDir}`);
   } catch (e) {
-    return check("state-dir-writable", "fail", `cannot write to ${p.stateDir}: ${errMessage(e)}`, "create the directory and give the service user write access (TEPLOY_SHIP_STATE)");
+    return check("state-dir-writable", "fail", `cannot write to ${p.stateDir} as uid ${uidOf()}: ${errMessage(e)}`, `create the directory and give the service user write access (TEPLOY_SHIP_STATE): ${chownHint(p.stateDir)}`);
   }
+}
+
+/**
+ * The data dir as the shadows see it: every directory a file-backed shadow or
+ * record writes into. A root-owned volume made every shadow write fail for 12
+ * days (2026-10-16) while nothing said so. Any probe failure is fail; no probe
+ * is unknown, never pass.
+ */
+export async function checkRecordDirsWritable(p: DoctorProbes): Promise<DoctorCheck> {
+  const dirs = p.recordDirs !== undefined && p.recordDirs.length > 0 ? p.recordDirs : [p.stateDir];
+  if (p.writeProbe === undefined) return check("data-dir-writable", "unknown", "no write probe available", `check by hand that uid ${uidOf()} can write ${dirs.join(", ")}`);
+  const failed: string[] = [];
+  for (const dir of dirs) {
+    try {
+      await p.writeProbe(dir);
+    } catch (e) {
+      failed.push(`${dir} (${errMessage(e)})`);
+    }
+  }
+  if (failed.length > 0) {
+    return check(
+      "data-dir-writable",
+      "fail",
+      `shadows and records cannot write: ${failed.join("; ")} as uid ${uidOf()}; every file-backed shadow there records nothing`,
+      chownHint(dirs.length === 1 ? dirs[0]! : "<each dir above>"),
+    );
+  }
+  return check("data-dir-writable", "pass", `wrote and removed a scratch file in ${dirs.join(", ")}`);
 }
 
 export async function checkStateSpace(p: DoctorProbes): Promise<DoctorCheck> {
@@ -153,10 +199,45 @@ export function checkEnv(env: DoctorProbes["env"]): DoctorCheck[] {
   return out;
 }
 
-/** Parse only. Absent NUCLEUS_URL is a legitimate local-file install. */
-export function checkStoreShape(env: DoctorProbes["env"]): DoctorCheck {
-  const raw = env.NUCLEUS_URL;
-  if (!isSet(raw)) return check("store-url", "pass", "NUCLEUS_URL not set: local file store (shape only, nothing connected)");
+/**
+ * The store doctor checks, resolved the way the runtime resolves it
+ * (`makeRuntime` in cli.ts): kind = --store > SHIP_STORE > config.store,
+ * url = --nucleus-url > NUCLEUS_URL > config.nucleusUrl. Both shared stores
+ * read NUCLEUS_URL, so the kind is the only thing that says which dialect the
+ * runtime will speak; unstated stays unstated (no engine check), never a guess.
+ * Throws on a kind the runtime would also reject.
+ */
+export function resolveDoctorStore(
+  flags: Readonly<Record<string, unknown>>,
+  env: Readonly<Record<string, string | undefined>>,
+  config: { store?: string; nucleusUrl?: string } = {},
+): { kind?: DoctorStoreKind; url?: string } {
+  const kind = (typeof flags.store === "string" ? flags.store : undefined) ?? (isSet(env.SHIP_STORE) ? env.SHIP_STORE : undefined) ?? config.store;
+  if (kind !== undefined && kind !== "file" && kind !== "nucleus" && kind !== "postgres") {
+    throw new Error(`unknown --store: ${kind} (expected file, nucleus, or postgres)`);
+  }
+  const url = (typeof flags["nucleus-url"] === "string" ? flags["nucleus-url"] : undefined) ?? (isSet(env.NUCLEUS_URL) ? env.NUCLEUS_URL : undefined) ?? config.nucleusUrl;
+  return { ...(kind !== undefined ? { kind } : {}), ...(isSet(url) ? { url } : {}) };
+}
+
+/** The URL the store checks look at: the resolved one, else the env's. */
+function storeUrlOf(p: Pick<DoctorProbes, "env" | "storeUrl">): string | undefined {
+  return isSet(p.storeUrl) ? p.storeUrl : p.env.NUCLEUS_URL;
+}
+
+/**
+ * Parse only. Absent NUCLEUS_URL is a legitimate local-file install — unless
+ * a shared store (nucleus or postgres) was stated, which cannot run without one.
+ */
+export function checkStoreShape(env: DoctorProbes["env"], store: { kind?: DoctorStoreKind; url?: string } = {}): DoctorCheck {
+  if (store.kind === "file") return check("store-url", "pass", "store file: local file store selected, no store URL used (shape only, nothing connected)");
+  const raw = isSet(store.url) ? store.url : env.NUCLEUS_URL;
+  if (!isSet(raw)) {
+    if (store.kind !== undefined) {
+      return check("store-url", "fail", `store ${store.kind} selected but no store URL is set`, "set NUCLEUS_URL (both shared stores read it) or pass --nucleus-url");
+    }
+    return check("store-url", "pass", "NUCLEUS_URL not set: local file store (shape only, nothing connected)");
+  }
   let u: URL;
   try {
     u = new URL(raw as string);
@@ -168,11 +249,13 @@ export function checkStoreShape(env: DoctorProbes["env"]): DoctorCheck {
     return check("store-url", "fail", `NUCLEUS_URL scheme "${u.protocol}" is not postgres`, "use postgres://host:port/db");
   }
   if (u.hostname === "") return check("store-url", "fail", "NUCLEUS_URL has no host", "use postgres://host:port/db");
-  return check("store-url", "pass", `NUCLEUS_URL shape valid, host ${u.hostname}${u.port !== "" ? `:${u.port}` : ""} (shape only, nothing connected)`);
+  const prefix = store.kind === undefined ? "" : `store ${store.kind}: `;
+  return check("store-url", "pass", `${prefix}NUCLEUS_URL shape valid, host ${u.hostname}${u.port !== "" ? `:${u.port}` : ""} (shape only, nothing connected)`);
 }
 
 export async function checkStoreConnectivity(p: DoctorProbes): Promise<DoctorCheck> {
-  const url = p.env.NUCLEUS_URL;
+  if (p.storeKind === "file") return check("store-connectivity", "unknown", "store file: nothing to connect to", "not applicable to a local file store; verify with a real run");
+  const url = storeUrlOf(p);
   if (!isSet(url)) return check("store-connectivity", "unknown", "no NUCLEUS_URL: nothing to connect to", "not applicable to a local file store; verify with a real run");
   let ok: boolean | undefined;
   try {
@@ -181,9 +264,47 @@ export async function checkStoreConnectivity(p: DoctorProbes): Promise<DoctorChe
     ok = false;
   }
   if (ok === undefined) return check("store-connectivity", "unknown", "no connect probe was run", "run `teploy-ship preflight` against the live store");
+  const prefix = p.storeKind === undefined ? "" : `store ${p.storeKind}: `;
   return ok
-    ? check("store-connectivity", "pass", "store answered")
-    : check("store-connectivity", "fail", "store did not answer", "check NUCLEUS_URL, the network path and that the store is up");
+    ? check("store-connectivity", "pass", `${prefix}store answered`)
+    : check("store-connectivity", "fail", `${prefix}store did not answer`, "check NUCLEUS_URL, the network path and that the store is up");
+}
+
+/** Which engine a `version()` string names. Nucleus reports "PostgreSQL 16.0 (Nucleus …)". */
+export function engineOf(version: string | undefined): "nucleus" | "postgres" | undefined {
+  if (version === undefined) return undefined;
+  if (/nucleus/i.test(version)) return "nucleus";
+  if (/^\s*PostgreSQL\b/.test(version)) return "postgres";
+  return undefined;
+}
+
+/**
+ * Only for a stated shared-store kind with a URL: does the engine behind the
+ * URL match the dialect the runtime will speak? The two KV/stream surfaces
+ * are not interchangeable (engine built-ins vs plain tables), so a mismatch
+ * is a fail. An engine that does not identify itself is unknown, never pass.
+ */
+export async function checkStoreEngine(p: DoctorProbes): Promise<DoctorCheck | undefined> {
+  if (p.storeKind !== "nucleus" && p.storeKind !== "postgres") return undefined;
+  if (!isSet(storeUrlOf(p))) return undefined;
+  let version: string | undefined;
+  try {
+    version = p.storeEngine === undefined ? undefined : await p.storeEngine();
+  } catch {
+    version = undefined;
+  }
+  const engine = engineOf(version);
+  if (engine === undefined) {
+    return check("store-engine", "unknown", `store ${p.storeKind}: the engine did not identify itself`, "run `SELECT version()` against the store by hand");
+  }
+  return engine === p.storeKind
+    ? check("store-engine", "pass", `store ${p.storeKind}: engine identifies as ${engine}`)
+    : check(
+        "store-engine",
+        "fail",
+        `store ${p.storeKind} selected but the engine identifies as ${engine}`,
+        `run with --store ${engine}, or point NUCLEUS_URL at the ${p.storeKind} store`,
+      );
 }
 
 export async function checkClock(p: DoctorProbes): Promise<DoctorCheck> {
@@ -209,13 +330,16 @@ export async function runDoctor(p: DoctorProbes): Promise<DoctorReport> {
   const checks: DoctorCheck[] = [
     checkNode(p.nodeVersion),
     await checkStateWritable(p),
+    await checkRecordDirsWritable(p),
     await checkStateSpace(p),
     await checkPort(p),
     ...checkEnv(p.env),
-    checkStoreShape(p.env),
+    checkStoreShape(p.env, { ...(p.storeKind !== undefined ? { kind: p.storeKind } : {}), ...(p.storeUrl !== undefined ? { url: p.storeUrl } : {}) }),
     await checkStoreConnectivity(p),
-    await checkClock(p),
   ];
+  const engine = await checkStoreEngine(p);
+  if (engine !== undefined) checks.push(engine);
+  checks.push(await checkClock(p));
   const counts: Record<CheckStatus, number> = { pass: 0, fail: 0, unknown: 0 };
   for (const c of checks) counts[c.status]++;
   const verdict: DoctorVerdict = counts.fail > 0 ? "not-ready" : counts.unknown > 0 ? "incomplete" : "ready";
@@ -240,7 +364,7 @@ export function formatDoctor(report: DoctorReport): string {
 }
 
 /** Real probes. Local filesystem and loopback only; no outbound network. */
-export function defaultProbes(base: Pick<DoctorProbes, "env" | "stateDir" | "webPort" | "nodeVersion">): DoctorProbes {
+export function defaultProbes(base: Pick<DoctorProbes, "env" | "stateDir" | "webPort" | "nodeVersion" | "recordDirs">): DoctorProbes {
   return {
     ...base,
     nowMs: Date.now(),
@@ -276,6 +400,7 @@ export interface StoreQueryClient {
 export interface LiveStoreProbes {
   storeReachable: NonNullable<DoctorProbes["storeReachable"]>;
   referenceMs: () => Promise<number | undefined>;
+  storeEngine: () => Promise<string | undefined>;
 }
 
 /**
@@ -286,13 +411,17 @@ export interface LiveStoreProbes {
  * question). `referenceMs` asks the store its clock (`SELECT now()`); the
  * store's clock is the independent reference the skew check needs, and when
  * the engine does not answer a time query the clock check stays UNKNOWN and
- * says why — never a guessed reference. What is deliberately NOT probed:
+ * says why — never a guessed reference. `storeEngine` asks `SELECT version()`
+ * so a stated store kind can be checked against the engine that answers.
+ * `dialect` matters only for KV/stream surfaces, which no probe touches; it is
+ * passed through so the probe client is the same shape the runtime opens.
+ * What is deliberately NOT probed:
  * anything write-shaped, and store CONSISTENCY, which cannot be established
  * read-only while writers run (that proof is a snapshot rehearsal, not a
  * doctor check).
  */
-export function nucleusProbes(url: string, deps: { connect?: () => StoreQueryClient } = {}): LiveStoreProbes {
-  const connect = deps.connect ?? (() => new NucleusPgwire(url, "doctor"));
+export function nucleusProbes(url: string, deps: { connect?: () => StoreQueryClient; dialect?: PgwireDialect } = {}): LiveStoreProbes {
+  const connect = deps.connect ?? (() => new NucleusPgwire(url, "doctor", { dialect: deps.dialect ?? "nucleus" }));
   return {
     storeReachable: async () => {
       const client = connect();
@@ -317,6 +446,18 @@ export function nucleusProbes(url: string, deps: { connect?: () => StoreQueryCli
           if (Number.isFinite(t)) return t;
         }
         return undefined;
+      } catch {
+        return undefined;
+      } finally {
+        await client.close().catch(() => {});
+      }
+    },
+    storeEngine: async () => {
+      const client = connect();
+      try {
+        const rows = await client.query("SELECT version() AS v");
+        const value = Object.values(rows[0] ?? {})[0];
+        return typeof value === "string" && value.trim() !== "" ? value : undefined;
       } catch {
         return undefined;
       } finally {

@@ -1,7 +1,8 @@
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
+import { appendRecordLine } from "./record-writes.js";
 import { stateDir } from "./run-store.js";
 import { conformanceChecks, effectivePermissions, hasExcess, validateManifest } from "./tool-manifest.js";
 import type { AdminGrant, ConformanceFinding, Effect, ObservedCall, ToolManifest, ValidationResult } from "./tool-manifest.js";
@@ -82,9 +83,9 @@ export function observedFromAction(action: { kind: string; code?: string }): Obs
   return { tool: action.kind, effects, hosts: [], argv: typeof action.code === "string" ? [action.code] : [], secretValues: [] };
 }
 
+/** Never rejects: a failed write is counted and logged once per file (record-writes.ts). */
 async function record(file: string, rec: ShadowRecord): Promise<void> {
-  await mkdir(dirname(file), { recursive: true });
-  await appendFile(file, `${JSON.stringify(rec)}\n`, "utf8");
+  await appendRecordLine("tool-manifest shadow", file, JSON.stringify(rec));
 }
 
 /**

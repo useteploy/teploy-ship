@@ -10,6 +10,7 @@ declare module "@neutron-build/core" {
     | "/api/policies"
     | `/api/runs/${string}/decide`
     | `/api/runs/${string}/findings`
+    | `/api/runs/${string}/live`
     | `/api/runs/${string}/promote`
     | `/api/runs/${string}/rollback-delivery`
     | `/api/runs/${string}/thread`
