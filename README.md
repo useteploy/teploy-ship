@@ -66,6 +66,10 @@ route and the forge co-location gate — and writes nothing and starts nothing
 unless all of them answered. It never fetches credentials over the network; you
 carry them in the bundle, and the reasoning is in `src/join.ts`.
 
+**Taking work from Slack or Linear?** [docs/INTEGRATIONS_SLACK_LINEAR.md](docs/INTEGRATIONS_SLACK_LINEAR.md)
+walks a self-hoster through the Slack app, the Linear webhook and results
+posted back to a channel.
+
 **Integrating another application?** The [independent HTTP client](docs/HTTP_CLIENT.md)
 shows task submission, progress, decisions, cancellation and follow-ups without
 Akiroo or direct store access.

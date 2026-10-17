@@ -1,6 +1,6 @@
 import { hostname } from "node:os";
 
-import { fileRuntime, nucleusRuntime, bootstrapAdmin } from "teploy-ship/runtime";
+import { fileRuntime, nucleusRuntime, bootstrapAdmin, checkRecordDirsAtStartup } from "teploy-ship/runtime";
 import type { ShipRuntime } from "teploy-ship/runtime";
 
 /**
@@ -22,6 +22,8 @@ export function shipRuntime(): Promise<ShipRuntime> {
 }
 
 async function create(): Promise<ShipRuntime> {
+  // A root-owned data volume must be visible in the web log, not discovered after the shadows sat empty (2026-10-16). Never throws.
+  void checkRecordDirsAtStartup();
   const kind = process.env.SHIP_STORE ?? "file";
   if (kind === "file") return fileRuntime();
   if (kind !== "nucleus" && kind !== "postgres") throw new Error(`unknown SHIP_STORE: ${kind} (expected file, nucleus, or postgres)`);

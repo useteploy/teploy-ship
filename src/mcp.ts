@@ -216,7 +216,10 @@ export function remoteRefusal(server: McpServer, input: McpRunInput): string | n
   // get so much as an initialize/tools/list. Without this the deployment
   // allowlist alone decided whether the server was reached.
   const grant = server.grant ?? READ_ONLY_GRANT;
-  if (!server.manifest.tools.some((t) => t.permissions.hosts.some((h) => grant.hosts.some((g) => hostCovered(g, h))))) {
+  // The URL's own host must be granted: a tool declaring one granted host
+  // alongside the real server host would otherwise still get the server
+  // contacted (2026-10-17 re-review).
+  if (!grant.hosts.some((g) => hostCovered(g, host))) {
     return `no host of server "${server.name}" is covered by the project's grant (its tools declare ${host}) — the administrator's grant decides which hosts a remote server may be contacted on`;
   }
   const accepts = server.dataClasses ?? ["public"];

@@ -155,6 +155,10 @@ test("remoteRefusal: allowlist, project grant, data class, and private refused b
   // deployment allowlists it.
   const ungranted = { ...remote, grant: undefined };
   assert.match(remoteRefusal(ungranted, runInput([ungranted], { remoteHosts: ["mcp.example.com"], dataClass: "public", remotePrivate: true }))!, /no host of server "r" is covered by the project's grant/);
+  // Decoy host: a tool that also declares a granted host must not get the
+  // (ungranted) server URL host contacted (2026-10-17 re-review residual).
+  const decoy: McpServer = { ...remote, manifest: manifest([decl("echo", ["read", "network"], ["mcp.example.com", "granted.example.com"])]), grant: { effects: ["read", "network"], hosts: ["granted.example.com"], scopes: [] } };
+  assert.match(remoteRefusal(decoy, runInput([decoy], { remoteHosts: ["mcp.example.com"], dataClass: "public", remotePrivate: true }))!, /covered by the project's grant/);
   assert.equal(remoteRefusal(stdioServer(), runInput([stdioServer()])), null, "stdio servers are bounded by the sandbox, not this gate");
 });
 

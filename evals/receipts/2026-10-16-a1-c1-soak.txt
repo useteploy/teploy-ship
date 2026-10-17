@@ -1,0 +1,38 @@
+2026-10-16 production soaks: A1 (SHIP_THREAD_VIEW=on) and C1 (second sandbox host)
+
+Deploys: 9085591 (A1 + C1 config), then 1c460ba (pool placement-race fix #95).
+Backups before each deploy: online pg_dump -Fc of ship-postgres
+(/root/ship-pg-pre-c1-a1-2026-10-16.dump, /root/ship-pg-pre-1c460ba-2026-10-16.dump,
+sha256 sidecars, 45 tables). The first was restore-rehearsed into a scratch
+pgvector/pgvector:0.8.0-pg17 container: ship_kv 50 rows, ship_stream 21078 rows,
+identical to live.
+
+A1 — thread view (PASS)
+- Secret SHIP_THREAD_VIEW=on (the parser accepts only "on"; "1" leaves it off).
+- Run run-request-81ed1fa7… (investigate journey, ship-preview-proof scratch
+  project). Two steering notes posted mid-run through the run page's steer
+  action (form field "steer"). Thread API /api/runs/<id>/thread returned both
+  notes with state "delivered" at turns 0 and 2; the run's answer ended with the
+  line SOAK-OK as note 2 requested. Cost $0.01-scale.
+- First attempt used the wrong form field ("text"); the route answered sent=1
+  for an empty note. Fixed in #95 (empty notes now refused with a message).
+
+C1 — second sandbox host (PASS after fix)
+- compute-2 (100.85.188.104) provisioned to match compute-1: teploy-sandbox
+  binary sha256 138099ca…, same token, gVisor runsc release-20260817.0, the four
+  ship-sandbox-* images with identical image IDs. Direct probe from the worker:
+  create/exec/destroy ok, kernel 4.19.0-gvisor, git 2.47.3, chromium present,
+  per-exec env forwarded.
+- Defect 1 (provisioning): ufw dropped sandbox -> egress-proxy traffic. Final rule:
+  allow from 172.31.99.0/24 to 172.31.99.1 proto tcp (current daemons start a
+  per-run proxy on an ephemeral port; an interim 7443-only rule failed run-49bacf6e
+  at checkout). docs/TROUBLESHOOTING.md already documented the subnet rule.
+- Defect 2 (code): SandboxPool counted live handles only after the daemon's create
+  resolved, so concurrent creates all chose host 0. On 9085591 two concurrent runs
+  both landed on compute-1. Fixed in #95 (reserve before await).
+- On 1c460ba: run-c63f309b and run-49bacf6e picked up in one tick were placed on
+  compute-2 and compute-1 respectively (placement shadow log).
+
+Also found: /deployments/ship/volumes/ship-data was root:root while web/worker run
+as uid 1000, so every file-backed shadow had recorded nothing since 2026-10-04.
+Hand fix: chown 1000:1000 (2026-10-16). Code fix: PR #94.

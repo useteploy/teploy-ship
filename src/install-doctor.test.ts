@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { MAX_CLOCK_SKEW_MS, defaultProbes, formatDoctor, nucleusProbes, renderDoctor, runDoctor } from "./install-doctor.js";
+import { MAX_CLOCK_SKEW_MS, defaultProbes, engineOf, formatDoctor, nucleusProbes, renderDoctor, resolveDoctorStore, runDoctor } from "./install-doctor.js";
 import type { DoctorProbes, StoreQueryClient } from "./install-doctor.js";
 
 // Fake secrets assembled at runtime so no secret-shaped literal sits in source.
@@ -239,4 +239,148 @@ test("nucleusProbes wired through runDoctor: an answering store with its clock i
   assert.equal(byId(silent, "store-connectivity").status, "fail");
   assert.equal(byId(silent, "clock").status, "unknown");
   assert.equal(silent.verdict, "not-ready");
+});
+
+// ---------------------------------------------------------------------------
+// X11: the postgres store. Both shared stores read NUCLEUS_URL, so the stated
+// store kind (flag > SHIP_STORE > config) is what the engine check answers to.
+// ---------------------------------------------------------------------------
+
+const PG_VERSION = "PostgreSQL 17.6 (Debian 17.6-1.pgdg120+1) on x86_64-pc-linux-gnu, compiled by gcc";
+// The string Nucleus's version() really returns (nucleus src/executor/scalar_fns.rs).
+const NUCLEUS_VERSION = "PostgreSQL 16.0 (Nucleus 1.1.1 — The Definitive Database)";
+
+test("store postgres: an answering PostgreSQL engine is ready, and every store check names the kind", async () => {
+  const r = await runDoctor(allGood({ storeKind: "postgres", storeEngine: async () => PG_VERSION }));
+  assert.equal(r.verdict, "ready");
+  assert.equal(byId(r, "store-engine").status, "pass");
+  for (const id of ["store-url", "store-connectivity", "store-engine"]) assert.match(byId(r, id).detail, /store postgres/, id);
+});
+
+test("NEGATIVE CONTROL: a stated kind that does not match the engine fails, in both directions", async () => {
+  const pgOnNucleus = await runDoctor(allGood({ storeKind: "postgres", storeEngine: async () => NUCLEUS_VERSION }));
+  assert.equal(byId(pgOnNucleus, "store-engine").status, "fail");
+  assert.match(byId(pgOnNucleus, "store-engine").remedy ?? "", /--store nucleus/);
+  assert.equal(pgOnNucleus.verdict, "not-ready");
+
+  const nucleusOnPg = await runDoctor(allGood({ storeKind: "nucleus", storeEngine: async () => PG_VERSION }));
+  assert.equal(byId(nucleusOnPg, "store-engine").status, "fail");
+  assert.equal(nucleusOnPg.verdict, "not-ready");
+
+  const nucleusOnNucleus = await runDoctor(allGood({ storeKind: "nucleus", storeEngine: async () => NUCLEUS_VERSION }));
+  assert.equal(byId(nucleusOnNucleus, "store-engine").status, "pass", "the nucleus path still answers");
+});
+
+test("unknown stays unknown: an engine probe that is absent, throws, or answers nothing is never pass", async () => {
+  const variants: Array<DoctorProbes["storeEngine"]> = [
+    undefined,
+    async () => undefined,
+    async () => "SQLite 3.45",
+    async () => {
+      throw new Error("boom");
+    },
+  ];
+  for (const storeEngine of variants) {
+    const r = await runDoctor(allGood({ storeKind: "postgres", ...(storeEngine !== undefined ? { storeEngine } : {}) }));
+    assert.equal(byId(r, "store-engine").status, "unknown");
+    assert.ok(byId(r, "store-engine").remedy);
+    assert.equal(r.verdict, "incomplete");
+  }
+});
+
+test("store postgres with no store URL fails store-url (a shared store cannot run without one)", async () => {
+  const r = await runDoctor(allGood({ storeKind: "postgres", env: { SHIP_WEB_TOKEN: "t", ANTHROPIC_API_KEY: "k" } }));
+  assert.equal(byId(r, "store-url").status, "fail");
+  assert.match(byId(r, "store-url").remedy ?? "", /NUCLEUS_URL/);
+  assert.equal(byId(r, "store-connectivity").status, "unknown");
+  assert.equal(r.checks.find((c) => c.id === "store-engine"), undefined, "no URL, nothing to identify");
+});
+
+test("the resolved storeUrl is what is probed, not only env.NUCLEUS_URL", async () => {
+  const seen: string[] = [];
+  const r = await runDoctor(
+    allGood({
+      env: { SHIP_WEB_TOKEN: "t", ANTHROPIC_API_KEY: "k" },
+      storeKind: "postgres",
+      storeUrl: "postgres://ship@cfg-db:5432/ship",
+      storeReachable: async (url) => {
+        seen.push(url);
+        return true;
+      },
+      storeEngine: async () => PG_VERSION,
+    }),
+  );
+  assert.deepEqual(seen, ["postgres://ship@cfg-db:5432/ship"]);
+  assert.equal(byId(r, "store-url").status, "pass");
+  assert.equal(r.verdict, "ready");
+});
+
+test("EQUIVALENCE: with no stated kind the report is the pre-X11 shape — no store-engine check", async () => {
+  const r = await runDoctor(allGood({ storeEngine: async () => NUCLEUS_VERSION }));
+  assert.equal(r.checks.find((c) => c.id === "store-engine"), undefined);
+  assert.deepEqual(
+    r.checks.map((c) => c.id),
+    // data-dir-writable arrived with #94 (loud shadow writes) and is always
+    // present; this test pins only that no store-engine check appears.
+    ["node-version", "state-dir-writable", "data-dir-writable", "state-dir-space", "web-port", "env-web-token", "env-model-credential", "store-url", "store-connectivity", "clock"],
+  );
+  assert.equal(byId(r, "store-url").detail, "NUCLEUS_URL shape valid, host db.internal:5432 (shape only, nothing connected)");
+  assert.equal(byId(r, "store-connectivity").detail, "store answered");
+  assert.equal(r.verdict, "ready");
+});
+
+test("store file: a stray NUCLEUS_URL is not probed and connectivity stays unknown", async () => {
+  let probed = false;
+  const r = await runDoctor(
+    allGood({
+      storeKind: "file",
+      storeReachable: async () => {
+        probed = true;
+        return true;
+      },
+    }),
+  );
+  assert.equal(probed, false);
+  assert.equal(byId(r, "store-url").status, "pass");
+  assert.equal(byId(r, "store-connectivity").status, "unknown");
+});
+
+test("engineOf: Nucleus's PostgreSQL-prefixed identity is nucleus; plain PostgreSQL is postgres; anything else unknown", () => {
+  assert.equal(engineOf(NUCLEUS_VERSION), "nucleus");
+  assert.equal(engineOf(PG_VERSION), "postgres");
+  assert.equal(engineOf("CockroachDB CCL v23"), undefined);
+  assert.equal(engineOf(undefined), undefined);
+});
+
+test("nucleusProbes.storeEngine asks version() and degrades to undefined, never a guess", async () => {
+  const sqls: string[] = [];
+  const ok = nucleusProbes("postgres://s/x", {
+    connect: () =>
+      fakeClient({
+        sql: (sql) => {
+          sqls.push(sql);
+          return PG_VERSION;
+        },
+      }),
+    dialect: "postgres",
+  });
+  assert.equal(await ok.storeEngine(), PG_VERSION);
+  assert.match(sqls.join("\n"), /SELECT version\(\)/);
+  const failing = nucleusProbes("postgres://s/x", { connect: () => fakeClient({ error: () => new Error("down") }) });
+  assert.equal(await failing.storeEngine(), undefined);
+  const empty = nucleusProbes("postgres://s/x", { connect: () => fakeClient({}) });
+  assert.equal(await empty.storeEngine(), undefined);
+});
+
+test("resolveDoctorStore: flag > SHIP_STORE > config for the kind, flag > NUCLEUS_URL > config for the url", () => {
+  const cfg = { store: "nucleus", nucleusUrl: "postgres://cfg/x" };
+  assert.deepEqual(resolveDoctorStore({}, {}, {}), {});
+  assert.deepEqual(resolveDoctorStore({}, {}, cfg), { kind: "nucleus", url: "postgres://cfg/x" });
+  assert.deepEqual(resolveDoctorStore({}, { SHIP_STORE: "postgres", NUCLEUS_URL: "postgres://env/x" }, cfg), { kind: "postgres", url: "postgres://env/x" });
+  assert.deepEqual(
+    resolveDoctorStore({ store: "file", "nucleus-url": "postgres://flag/x" }, { SHIP_STORE: "postgres", NUCLEUS_URL: "postgres://env/x" }, cfg),
+    { kind: "file", url: "postgres://flag/x" },
+  );
+  assert.deepEqual(resolveDoctorStore({}, { SHIP_STORE: "  ", NUCLEUS_URL: "" }, {}), {}, "blank env values are unset");
+  assert.throws(() => resolveDoctorStore({ store: "mysql" }, {}, {}), /unknown --store: mysql/);
 });

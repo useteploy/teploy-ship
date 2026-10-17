@@ -3,6 +3,7 @@ import type {RecordInput,RepoMemoryStore,RepoNote} from './repo-memory.js';
 import type {KnowledgeMode,KnowledgeProvenance,RetrievalContext} from './knowledge-provenance.js';
 import {canonicalRepositoryURL} from './repository-reference.js';
 import {repoKeyOf} from './repository-scope.js';
+import {dirKeyOf,noteWriteFailure} from './record-writes.js';
 
 /** Read legacy notes only when their recorded run proves the requested origin.
  * Manual/unattributed notes remain available in Knowledge, never guessed into
@@ -23,7 +24,7 @@ export class ScopedRepoMemory implements RepoMemoryStore {
     const {provenance:hint,...note}=input;
     const stored=await this.inner.record({...note,repo:canonicalRepositoryURL(note.repo)??note.repo});
     // Advisory, like the note itself: a provenance failure never fails a record.
-    await this.provenance?.recordNote(stored,hint).catch(()=>{});
+    await this.provenance?.recordNote(stored,hint).catch((error:unknown)=>noteWriteFailure('knowledge provenance',dirKeyOf(error,'knowledge-provenance-store'),error));
     return stored;
   }
   repos(){return this.inner.repos()}
@@ -40,7 +41,7 @@ export class ScopedRepoMemory implements RepoMemoryStore {
       console.error(JSON.stringify({event:'knowledge-provenance-error',op:'redact',noteId:id,error:String(error)}));
     }
   }
-  recordSummary(input:{id:string;repo:string;runId:string;summary:string;derivedFrom:string[]}){return this.provenance?.recordSummary(input)??Promise.resolve()}
+  recordSummary(input:{id:string;repo:string;runId:string;summary:string;derivedFrom:string[]}){return this.provenance?.recordSummary(input).catch((error:unknown)=>noteWriteFailure('knowledge provenance',dirKeyOf(error,'knowledge-provenance-store'),error))??Promise.resolve()}
   async recent(repo:string,limit:number,options?:{context?:RetrievalContext}):Promise<RepoNote[]> {
     const p=this.provenance;
     if(p===undefined||p.mode==='off'||options?.context===undefined)return this.#gather(repo,limit);

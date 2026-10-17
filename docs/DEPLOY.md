@@ -370,6 +370,10 @@ not just a complaint.
 
 ### Slack and Linear
 
+Step-by-step guide for self-hosters (Slack app manifest, scopes, Linear
+webhook, the public HTTPS requirement, troubleshooting):
+**[INTEGRATIONS_SLACK_LINEAR.md](INTEGRATIONS_SLACK_LINEAR.md)**. Summary:
+
 - **Slack**: create an app with an `app_mention` event subscription
   pointed at `/hooks/slack`, set `SHIP_SLACK_SIGNING_SECRET` (the app's
   signing secret), and invite the bot. `@ship fix the flaky test
@@ -378,6 +382,8 @@ not just a complaint.
 - **Linear**: add a webhook for Issue events at `/hooks/linear` with
   `SHIP_LINEAR_SIGNING_SECRET`. Issues labeled `ship` become tasks;
   put `repo:<clone-url>` in the description to bind a repository.
+  Deliveries whose signed `webhookTimestamp` is over 5 minutes off are
+  refused (replay bound).
 - **Notifications**: set `SHIP_SLACK_WEBHOOK_URL` (an incoming-webhook
   URL) and `SHIP_PUBLIC_URL` — Ship pings the channel when a run parks
   for approval/plan review and when it completes or fails, with a link.
@@ -987,6 +993,12 @@ with the explanation rather than with a worker that exits during startup.
 
 - `teploy deploy` redeploys; secrets persist. Run state lives in
   Nucleus (accessory volume) — containers are disposable.
+- The data volume (`/deployments/ship/volumes/ship-data`, mounted at `/data`)
+  must be owned by uid 1000. `install.sh` does it on a fresh install; a volume
+  teploy creates later is root-owned, and every file-backed shadow then
+  records nothing (2026-10-16 incident). Fix: `chown 1000:1000
+  /deployments/ship/volumes/ship-data`. Web and worker log an ERROR at
+  startup when it is wrong, and `teploy-ship doctor` fails `data-dir-writable`.
 - `teploy accessory upgrade nucleus ghcr.io/neutron-build/nucleus:latest`
   picks up engine updates.
 - CI runs on Forgejo Actions (`.forgejo/workflows/ci.yml`) with a
@@ -1016,6 +1028,10 @@ new deployment actually has to set.
 | `SHIP_MCP_REMOTE_PORTS` | unset | Remote MCP ports beyond the scheme default (comma-separated integers). A remote MCP server whose URL names any other port is refused before a connection is made — the URL's own port is never trusted as permission. Unset = only 443 (https) / 80 (http). Materialised into the run input at enqueue like `SHIP_MCP_REMOTE_HOSTS`, so already-enqueued runs keep the ports they were recorded with. |
 | `SHIP_MCP_REMOTE_PRIVATE` | unset | `allow` lets remote MCP servers that declare `private` in their `dataClasses` receive runs whose project data class is `private` (the default). This is owner Decision 6 (programme E6), pending: leave unset, and private repository data is refused to every remote MCP server — the server is not contacted, not even for `tools/list`. |
 | `SHIP_MCP_SECRET_<NAME>` | unset | The bearer credential for a remote MCP server whose record names `authSecret: "<NAME>"`. Read by the worker inside the call step, sent as `Authorization: Bearer`, scrubbed from output; never enters the run input, the event log, the prompt or the sandbox. |
+| `SHIP_PR_WATCH` | unset | B1 PR watch (S16/S09), **worker only**. Only the exact value `on` enables it; anything else is off, and off is a strict no-op (no store read, no forge call). Watches every PR a run OPENED (a recorded `repo-pr` step; the forge head must be `ship/…`) and polls it with forge API reads only — never a model call — so idle watched PRs cost nothing but a few HTTP reads. A merge conflict (`mergeable=false`) or a failing check on the head SHA proposes exactly ONE revision task on the same PR through the ordinary intake path, so source/project policy, budgets and auto windows decide whether it waits in the Inbox or launches: conflicts use source `pr-watch`, failing checks source `ci` with the CI webhook's own dedupe key (`ci:<owner/repo>#<pr>:<sha>`), so a `workflow_run` delivery and a poll of the same head collapse to one task. Dedupe = PR + head SHA + reason; a dismissed task is not re-proposed for the same head; a new head is eligible again. Conflict wins when both hold. Failing check = `failure`/`error`/`timed_out`/`action_required`; when the base branch's protection is readable and names required contexts, only those count, otherwise every failing check does. Merged, closed or 30-day-old watches are dropped. State is small `SHIP_PR_WATCH_*` rows in the runtime config store — no new table. Forges without webhooks (and external CI that reports commit statuses) are covered by the polling alone. |
+| `SHIP_PR_WATCH_INTERVAL_SEC` | `300` | Seconds between PR-watch sweeps per worker process and between reads of one PR (minimum 30). Forge errors back off exponentially per PR (interval x 2^failures, capped at 3600 s). |
+| `SHIP_PR_WATCH_MAX_PER_SWEEP` | `20` | Cap on PRs read per sweep (1-200), least-recently-checked first, so a large watch list rotates instead of bursting the forge API. |
+| `SHIP_LIVE_VIEW` | unset | Live view on the run page (D5 — S12, S10): while a run is active, a read-only terminal tail of the native loop's bash actions and a running diff of the workspace against the run's base, polled every 2 s from `GET /api/runs/<id>/live`. Accepts only `on`. Set it on **both** web (shows the panel, serves the endpoint) and worker (records output, serves diffs); off on either side, that half is inert — the worker does no extra store read, exec or write and bash actions run through the plain exec exactly as before. Terminal: the bash action's exec streams through the sandbox daemon (same `ExecResult` as the plain exec), and a redacted tail of at most 8,000 characters is written to a `SHIP_LIVE_OUTPUT_<run>` config row at most once a second (plus a trailing flush), so output reaches the page in about 3 s plus store latency; written from inside the executing step only, never recorded, so replays and the step fingerprint are unchanged. External harness output and evidence legs (tests, preview) are not streamed. Diff: computed only while somebody has the page open (a `SHIP_LIVE_WATCH_<run>` heartbeat the endpoint refreshes every 5 s, abandoned after 15 s), at most once per 3 s per run and 5 runs per worker tick, as ONE read-only git command in the sandbox (no optional locks, hooks, fsmonitor, external diff or textconv) that records its own sandbox-clock instant, HEAD, the resolved base (a PR run's checked-out head, otherwise the merge-base with `origin/<base>`) and a sha256 of the exact bytes; untracked files are shown as new files, ignored files (`.env`, dependency trees) are never read; bounded to 9,000 bytes and redacted. Skipped while a takeover holds the workspace. Access is the run page's (any signed-in role); the endpoint has no write surface. Rows are removed when the run settles. |
 | `SHIP_PREVIEW` | unset | Ask every newly-enqueued run to deploy its branch to a preview environment and link the URL on the pull request. Per-run, and only the request — whether a preview can happen is `SHIP_PREVIEW_DIR` below. |
 | `SHIP_PREVIEW_DIR` | unset | **The switch.** A clone **of the repository being fixed**, on the WORKER host, containing the app's `teploy.yml`. Ship fetches the run's branch into a detached `git worktree` beside it and builds THERE — building in the directory itself would deploy whatever commit it happens to sit on and label it as the fix. Your checkout is never moved and the worktree is always removed. Deploy credentials stay on the worker — they are never placed in the agent's sandbox, which executes model-authored commands. Without this a run that asked for a preview records the step as disabled. |
 | `SHIP_PREVIEW_BIN` | `teploy` | Path to the CLI. Needs a CLI with `teploy build`, released in **v0.1.27**; older binaries can only produce an image by deploying to production, which is exactly what a preview must not do. **The container image ships it**, built in the Dockerfile's `teploy-cli` stage from a pinned source commit (`ARG TEPLOY_COMMIT`, a full SHA on the CLI's public main; the stage refuses to finish unless the binary advertises `preview-exposure`). It was a checksum-verified release download until tailnet previews needed a CLI newer than the latest release; it goes back to the release pin once a release carries that commit. Set this only to point at a different binary. |

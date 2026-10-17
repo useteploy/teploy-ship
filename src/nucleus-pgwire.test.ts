@@ -462,6 +462,22 @@ test("listMeta overlays exactly what the unbounded implementation overlaid", asy
   }
 });
 
+test("listMeta offset pages below the newest window without changing the ranking", async () => {
+  const { pool, seen } = shipDocsPool(LIST_META_ROWS);
+  const runtime = await nucleusRuntime("", "test", { db: new NucleusPgwire("", "test", { pool }), log: () => {} });
+
+  // Effective order is m1, m2, m6, m5, m4, m3 — so offset 2, limit 2 is m6, m5.
+  // (Through a variable so this also compiles against a listMeta without
+  // `offset` — where the paging assertion must FAIL.)
+  const deepPage: { limit: number; offset: number } = { limit: 2, offset: 2 };
+  const page = await runtime.listMeta(deepPage);
+  assert.deepEqual(page.map((m) => m.runId), ["m6", "m5"]);
+  // The page is cut from one ranked read wide enough to cover it.
+  const ranked = seen.filter((s) => /ORDER BY GREATEST/.test(s));
+  assert.equal(ranked.length, 1);
+  assert.match(ranked[0]!, /LIMIT 4$/);
+});
+
 test("transaction pins statements and commit to one connection; errors roll back without retry", async () => {
   const statements:string[]=[];
   const releases:boolean[]=[];

@@ -18,6 +18,8 @@ import { ASK_UNAVAILABLE, askAnswerMessage, askEvent } from "./ask.js";
 import type { AskDecisionPayload } from "./ask.js";
 import { clipDetail, liveSink } from "./live.js";
 import type { LiveStore } from "./live.js";
+import { liveOutputExecutor, liveOutputRecorder } from "./live-view.js";
+import type { RuntimeConfigStore } from "./runtime-config.js";
 import { criticFeedback, isApproved, parsePick, pickAttempt, reviewWork } from "./critic.js";
 import type { PickCandidate } from "./critic.js";
 import {
@@ -998,6 +1000,13 @@ export interface DurableAgentConfig {
    * changes no step sequence.
    */
   live?: Pick<LiveStore, "set">;
+  /**
+   * Where the live view's terminal tail is written (live-view.ts), set by
+   * the worker only under SHIP_LIVE_VIEW=on. Same contract as `live`:
+   * advisory, written from inside executing steps only, never part of the
+   * step sequence. Absent means bash actions run exactly as before.
+   */
+  liveOutput?: Pick<RuntimeConfigStore, "set">;
   /**
    * Ceiling on one model turn's output (SHIP_MAX_OUTPUT_TOKENS, default
    * 16384). The adapter default of 4096 was hit on every one of the three
@@ -2811,7 +2820,14 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
 
         const result = await ws.ctx.step(`${p}turn-${turn}-exec`, () => {
           ws.live?.({ phase: "running", turn, detail: clipDetail(describeAction(action)) });
-          return executeAction(ws.executor, action, config.actionTimeoutMs, `t${turn}`);
+          // Live view (SHIP_LIVE_VIEW=on): a bash action's output streams to
+          // the run page's terminal. Same ExecResult either way.
+          const liveOutput = config.liveOutput;
+          const exec =
+            liveOutput !== undefined && action.kind === "bash"
+              ? liveOutputExecutor(ws.executor, ws.execStream, (command) => liveOutputRecorder(liveOutput, ws.ctx.runId, command, { turn }))
+              : ws.executor;
+          return executeAction(exec, action, config.actionTimeoutMs, `t${turn}`);
         });
         if (result.exitCode === 0) anySuccessfulAction = true;
         execsSinceNudge += 1;
