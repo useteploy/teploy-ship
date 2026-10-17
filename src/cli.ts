@@ -86,7 +86,7 @@ import { NucleusCodeIndex } from "./code-index.js";
 import type { CodeSearch } from "./code-index.js";
 import { startWorker } from "./worker.js";
 import { assembleSupportBundle, defaultDocker } from "./support.js";
-import { defaultProbes, formatDoctor, nucleusProbes, renderDoctor, runDoctor } from "./install-doctor.js";
+import { defaultProbes, formatDoctor, nucleusProbes, renderDoctor, resolveDoctorStore, runDoctor } from "./install-doctor.js";
 import {
   DEFAULT_SHIP_ROOT,
   SnapshotRefusal,
@@ -215,9 +215,11 @@ Usage:
       [--port N] [--token <t>]        token also via SHIP_WEB_TOKEN (required)
       [--dev]                         vite dev server instead of the built app
   teploy-ship doctor [--json] [--out f]  check this machine is ready (pass|fail|unknown; unknown is not pass)
-                                       store liveness and clock skew are probed read-only
-                                       when NUCLEUS_URL is set; without a store they
-                                       stay unknown — nothing is guessed
+      [--store file|nucleus|postgres]  store liveness and clock skew are probed read-only
+      [--nucleus-url <url>]            when a store URL is set; without a store they
+                                       stay unknown — nothing is guessed. With a stated
+                                       shared store (flag, SHIP_STORE or config) the
+                                       engine's identity must match it
   teploy-ship snapshot [--label NAME] [--ship-root DIR] [--backup-dir DIR]
                       [--dry-run] [--i-stopped-writers] [--json]
                                        consistent-snapshot producer (same archive shape
@@ -2455,7 +2457,7 @@ async function supportCommand(rest: string[]): Promise<void> {
       docker: defaultDocker(),
       // The doctor report and the latest backup manifest (never the archive)
       // ride along; both degrade to note files inside the bundle.
-      doctorJson: async () => renderDoctor(await runDoctor(doctorProbes())).json,
+      doctorJson: async () => renderDoctor(await runDoctor(doctorProbes(args.flags, config))).json,
       backupReceipt: () => latestBackupReceipt(backupDir),
     });
   } finally {
@@ -2476,9 +2478,20 @@ async function supportCommand(rest: string[]): Promise<void> {
 // doctor — S19 install-readiness checks (all logic in src/install-doctor.ts)
 // ---------------------------------------------------------------------------
 
-/** The doctor probes every command shares: local checks always, live store checks when NUCLEUS_URL is set. */
-function doctorProbes(): ReturnType<typeof defaultProbes> {
+/**
+ * The doctor probes every command shares: local checks always, live store
+ * checks when a store URL resolves (flag > NUCLEUS_URL > config). The store
+ * kind (flag > SHIP_STORE > config) picks the probe dialect and arms the
+ * engine-identity check; resolution lives in install-doctor.ts.
+ */
+function doctorProbes(flags: Record<string, unknown>, config: Config): ReturnType<typeof defaultProbes> {
   const port = Number(process.env.SHIP_WEB_PORT ?? process.env.PORT ?? 7460);
+  let store: ReturnType<typeof resolveDoctorStore>;
+  try {
+    store = resolveDoctorStore(flags, process.env, config);
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
+  }
   const probes = defaultProbes({
     env: process.env,
     stateDir: stateDir(),
@@ -2486,12 +2499,13 @@ function doctorProbes(): ReturnType<typeof defaultProbes> {
     webPort: Number.isInteger(port) ? port : 7460,
     nodeVersion: process.version,
   });
-  const url = process.env.NUCLEUS_URL;
-  if (url !== undefined && url.trim() !== "") {
-    // Read-only liveness + the store's clock as the skew reference. With no
-    // configured store there is nothing to ask: connectivity and skew stay
-    // unknown rather than guessed.
-    Object.assign(probes, nucleusProbes(url));
+  if (store.kind !== undefined) probes.storeKind = store.kind;
+  if (store.url !== undefined && store.kind !== "file") {
+    probes.storeUrl = store.url;
+    // Read-only liveness, the store's clock as the skew reference, and the
+    // engine's identity. With no configured store there is nothing to ask:
+    // connectivity and skew stay unknown rather than guessed.
+    Object.assign(probes, nucleusProbes(store.url, { dialect: store.kind === "postgres" ? "postgres" : "nucleus" }));
   }
   return probes;
 }
@@ -2499,7 +2513,7 @@ function doctorProbes(): ReturnType<typeof defaultProbes> {
 /** Exit 0 only for "ready"; 1 for not-ready or incomplete (unknown is not pass). */
 async function doctorCommand(rest: string[]): Promise<void> {
   const args = parseArgs(rest, COMMAND_FLAGS.doctor);
-  const report = await runDoctor(doctorProbes());
+  const report = await runDoctor(doctorProbes(args.flags, loadConfig()));
   const rendered = renderDoctor(report);
   if (typeof args.flags.out === "string") writeFileSync(args.flags.out, rendered.json);
   process.stdout.write(args.flags.json === true ? rendered.json : formatDoctor(report));
