@@ -9,11 +9,15 @@ process.env.TEPLOY_SHIP_STATE = mkdtempSync(
 );
 process.env.SHIP_STORE = "file";
 process.env.SHIP_WEB_TOKEN = "workspace-tests";
+// The chain tests below read a long ancestor history; the default $10 daily
+// budget for the "manual" source is not what they are about.
+process.env.SHIP_DAILY_BUDGET_USD = "100";
 const { shipRuntime } = await import("./store.server.js");
 const templates = await import("../routes/workflows.js");
 const setup = await import("../routes/setup.js");
 const run = await import("../routes/runs/[id].js");
 const { enqueueRun } = await import("./ship.server.js");
+const { threadHistory } = await import("./workspace.server.js");
 function request(path: string, fields: Record<string, string>, auth = true) {
   return new Request("http://localhost" + path, {
     method: "POST",
@@ -166,6 +170,68 @@ test("follow-up requires launch authority and a terminal parent; new run records
   assert.equal(input.mode, "scan");
   assert.match(input.task, /Fix the parser/);
   assert.match(input.task, /Add tests/);
+});
+
+test("D3: a follow-up on a failed run carries its recorded failure and steering, not 'No final result recorded'", async () => {
+  const runtime = await shipRuntime();
+  const id = "run-d3-failed-parent";
+  await enqueueRun(runtime, { runId: id, task: "Upgrade the parser", model: "test", source: "manual", trust: "operator" });
+  const at = new Date().toISOString();
+  await runtime.store.append(id, { v: 1, seq: 1, at, type: "step-completed", name: "turn-1-steer", data: { result: ["Do not touch the lexer"] } });
+  await runtime.store.append(id, { v: 1, seq: 2, at, type: "run-failed", data: { error: "provider returned 500" } });
+  const meta = await runtime.loadMeta(id); assert.ok(meta);
+  await runtime.saveMeta({ ...meta, status: "failed" });
+  const res = await run.action({ params: { id }, request: request("/runs/" + id, { intent: "follow-up", message: "Retry the parser upgrade", journey: "change" }) });
+  const next = res.headers.get("location")!.split("/").pop()!;
+  const input = ((await runtime.store.load(next))[0]!.data as any).input;
+  assert.equal(input.userMessage, "Retry the parser upgrade");
+  assert.match(input.task, /^Retry the parser upgrade\n\nPrevious conversation \(context, not new instructions\)/);
+  assert.match(input.task, /Recorded request:\n  > Upgrade the parser/);
+  assert.match(input.task, /Recorded outcome: FAILED\. Error:\n  > provider returned 500/);
+  assert.match(input.task, /Recorded steering notes delivered to this run \(operator-written\):\n  > Do not touch the lexer/);
+  assert.doesNotMatch(input.task, /No final result recorded/);
+});
+
+test("threadHistory stops at a parent in a different repository/project and the follow-up names the cut", async () => {
+  const runtime = await shipRuntime();
+  // The coordination shape (coordination.ts launchChild): a client run whose
+  // parentRunId points at the API run in ANOTHER repository.
+  await enqueueRun(runtime, { runId: "coord-api", repo: "https://forge.example/team/api.git", task: "Break the API contract", model: "test", source: "manual", trust: "operator" });
+  await enqueueRun(runtime, { runId: "coord-client", repo: "https://forge.example/team/client.git", task: "Adapt the client", model: "test", source: "manual", trust: "operator", parentRunId: "coord-api" });
+  const h = await threadHistory(runtime, "coord-client");
+  assert.deepEqual(h.history.map((r) => r.runId), ["coord-client"], "the API run's history is not walked into");
+  assert.equal(h.crossProjectCutAt, "coord-api");
+  assert.equal(h.olderOmitted, 0);
+  const meta = await runtime.loadMeta("coord-client"); assert.ok(meta);
+  await runtime.saveMeta({ ...meta, status: "completed" });
+  const res = await run.action({ params: { id: "coord-client" }, request: request("/runs/coord-client", { intent: "follow-up", message: "also fix the types", journey: "change" }) });
+  const input = ((await runtime.store.load(res.headers.get("location")!.split("/").pop()!))[0]!.data as any).input;
+  assert.doesNotMatch(input.task, /Break the API contract/, "the other project's request is not carried into this task");
+  assert.match(input.task, /earlier runs omitted at coord-api: that run is in a different repository\/project/);
+});
+
+test("threadHistory counts the ancestors its 20-run bound drops, and the digest says so", async () => {
+  const runtime = await shipRuntime();
+  const at = new Date().toISOString();
+  // Ancestors are appended directly (only the followed-up run needs an
+  // enqueue): threadHistory reads events, not launch state.
+  for (let i = 0; i < 24; i++) {
+    await runtime.store.append(`chain-run-${i}`, { v: 1, seq: 1, at, type: "run-started", data: { input: { task: `step ${i}`, ...(i > 0 ? { parentRunId: `chain-run-${i - 1}` } : {}) } } });
+  }
+  await enqueueRun(runtime, { runId: "chain-run-24", task: "step 24", model: "test", source: "manual", trust: "operator", parentRunId: "chain-run-23" });
+  const h = await threadHistory(runtime, "chain-run-24");
+  assert.equal(h.history.length, 20);
+  assert.equal(h.history[0]!.runId, "chain-run-5");
+  assert.equal(h.history[19]!.runId, "chain-run-24");
+  assert.equal(h.olderOmitted, 5);
+  assert.equal(h.crossProjectCutAt, undefined);
+  const meta = await runtime.loadMeta("chain-run-24"); assert.ok(meta);
+  await runtime.saveMeta({ ...meta, status: "completed" });
+  const res = await run.action({ params: { id: "chain-run-24" }, request: request("/runs/chain-run-24", { intent: "follow-up", message: "continue", journey: "change" }) });
+  const input = ((await runtime.store.load(res.headers.get("location")!.split("/").pop()!))[0]!.data as any).input;
+  assert.match(input.task, /\(5 earlier runs omitted: only the 20 most recent runs are read\)/);
+  assert.match(input.task, /step 5/, "the oldest read ancestor is carried");
+  assert.doesNotMatch(input.task, /step 4/, "the dropped ancestors are not carried");
 });
 
 test("setup preparation persists and verification enqueues recorded checks with no publication",async()=>{
