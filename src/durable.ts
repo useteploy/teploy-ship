@@ -98,10 +98,14 @@ import { formatSearchHits } from "./code-index.js";
 import { frameUntrusted, screenUntrusted } from "./guard.js";
 import { LOOK_IMAGE_NO_MODEL, LOOK_IMAGE_NO_STORE, LOOK_OPEN_PLAN, LOOK_SEALED, lookImageCap, runLook, runLookImage } from "./look.js";
 import {
+  DELEGATE_CHILD_APPROVAL_REFUSED,
+  DELEGATE_CHILD_ASK_REFUSED,
   DELEGATE_CHILD_REFUSED,
   DELEGATE_POLL_MS,
   DELEGATE_UNAVAILABLE,
   delegateControl,
+  delegateTimeoutTransfer,
+  delegateWaitMs,
   transferObservation,
 } from "./delegate.js";
 import type { DelegateControl, DelegateSpawnOutcome, DelegateTransfer } from "./delegate.js";
@@ -2771,12 +2775,14 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
         }
 
         // Bounded child work (S20/S22, input.delegate). The T3-reference data
-        // plane in one branch: spawn one child (an ordinary run carrying this
-        // run's lineage and gates), PARK until its log holds a terminal event,
-        // and merge its result back as the next observation — a CONTEXT
-        // TRANSFER recorded on the wait step, so a replay reads the recorded
-        // transfer without touching the child (which has its own log and is
-        // never re-run).
+        // plane in one branch: spawn one child (an ordinary READ-ONLY SCAN run
+        // carrying this run's lineage — 2026-10-17 live finding: children
+        // never edit, push or open pull requests, and the parent stays the
+        // only writer), PARK until its log holds a terminal event, and merge
+        // its result back as the next observation — a CONTEXT TRANSFER
+        // recorded on the wait step, so a replay reads the recorded transfer
+        // without touching the child (which has its own log and is never
+        // re-run).
         //
         // The park is the ask machinery's shape over the engine's sleeping
         // run: snapshot before (when the executor supports park snapshots),
@@ -2786,7 +2792,9 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
         // lock for the child to use) or the transfer, then restore. Each poll
         // is a recorded step so replay re-derives the same iteration count;
         // a terminal child log is immutable, so live and replay read the
-        // same transfer by construction.
+        // same transfer by construction. The wait is BOUNDED
+        // (SHIP_DELEGATE_WAIT_MS): a child that never terminates yields an
+        // honest "did not finish" transfer rather than an infinite park.
         //
         // Accounting, deliberately identical to ```search and ```look: a
         // delegation clears no finish gate (waiting is not work), touches no
@@ -2846,6 +2854,18 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
             parkImage = await ws.ctx.step(`${p}turn-${turn}-delegate-snapshot`, () => config.executor.snapshot!(ws.handle));
           }
           ws.live?.({ phase: "delegating", turn, detail: clipDetail(`waiting for child ${spawn.childRunId}`) });
+          // The wait is BOUNDED (2026-10-17 live finding): a child that never
+          // reaches a terminal event — an orphan stuck somewhere, a lost
+          // worker — must not park the parent forever. The bound is decided
+          // INSIDE the wait step, so what replay reads is the RECORDED result
+          // — a live run that gives up records the timeout transfer as that
+          // poll's result, and replay returns it at the same iteration. The
+          // deadline is recomputed per execution (a crash-resumed parent waits
+          // its full bound again — the honest reading of "how long may THIS
+          // attempt wait"), safe for the same reason: only recorded results
+          // drive a replay.
+          const waitMs = delegateWaitMs();
+          const deadline = Date.now() + waitMs;
           let transfer: DelegateTransfer | null = null;
           while (transfer === null) {
             // Errors are caught INSIDE the step so it always records a value
@@ -2854,10 +2874,12 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
             // child whose log cannot be read yet is simply not terminal.
             transfer = await ws.ctx.step(`${p}turn-${turn}-delegate-wait`, async () => {
               try {
-                return (await control.outcome(spawn.childRunId)) ?? null;
+                const outcome = await control.outcome(spawn.childRunId);
+                if (outcome !== null) return outcome;
               } catch {
-                return null;
+                // An unreadable log is not a terminal one.
               }
+              return Date.now() >= deadline ? delegateTimeoutTransfer(spawn.childRunId, waitMs) : null;
             });
             if (transfer === null) await ws.ctx.sleep(DELEGATE_POLL_MS);
           }
@@ -2879,6 +2901,18 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
         // on a pre-feature log, and a worker that predates the action feeds
         // the block back as unknown exactly as before.
         if (action.kind === "ask") {
+          // A delegated child never asks (2026-10-17 live finding): its ask
+          // parks it on a human whose eye is on the parent, and the parent's
+          // delegate-wait must not block behind a question nobody is watching.
+          // Refused BY NAME, before the availability check, so even a
+          // hand-crafted or pre-fix child input (ask: true) gets the reason.
+          // A pure function of the recorded input, so replay refuses
+          // identically and no step is recorded for the park that never
+          // happens.
+          if (input.delegateChild === true) {
+            messages.push({ role: "user", content: DELEGATE_CHILD_ASK_REFUSED });
+            continue;
+          }
           if (input.ask !== true) {
             messages.push({ role: "user", content: ASK_UNAVAILABLE });
             continue;
@@ -2905,6 +2939,15 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
         // decision to park replays identically; only the human decision
         // is external input, delivered via waitForEvent.
         const decision = config.approveAction ? await config.approveAction(action) : "auto";
+        // A delegated child never parks on an approval either (2026-10-17
+        // live finding): the denial is automatic, with the reason recorded
+        // in the transcript. Same replay shape as the classifier itself — a
+        // pure function of the recorded input and the deterministic
+        // decision, no step recorded for a park that never happens.
+        if (decision === "required" && input.delegateChild === true) {
+          messages.push({ role: "user", content: DELEGATE_CHILD_APPROVAL_REFUSED });
+          continue;
+        }
         if (decision === "required") {
           // With snapshot support, persist the workspace BEFORE parking:
           // the park can outlive the container's TTL. The snapshot ref is

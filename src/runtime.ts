@@ -1154,7 +1154,14 @@ export async function enqueueRun(
   // block below spells out at length: the recorded input is what gates step
   // presence, so "off for a scan" has to be a fact in the log, not a decision a
   // worker makes while replaying one.
-  const scan = options.mode === "scan" || (journey !== undefined && journey !== "change");
+  const scan = options.mode === "scan" || (journey !== undefined && journey !== "change") ||
+    // Belt for the 2026-10-17 live finding: a DELEGATION CHILD is read-only,
+    // ALWAYS, whatever its caller said. The spawn (delegateControlFromRuntime)
+    // states `mode: "scan"` itself; this line is the enforcement that makes a
+    // writable child un-enqueueable even if a future caller forgets — the
+    // option is internal to the delegation control, so nobody else can be
+    // relying on the old behaviour.
+    options.delegateChild === true;
   if(options.environmentCheckOnly === true && (!options.repo || options.environmentCheck !== true || !scan))throw new Error("A setup-only check requires a repository and read-only environment verification");
   // Stuck detection (recovery.ts) is ON by default since 2026-09-15. It had
   // been opt-in (`SHIP_RECOVERY=1`) on the product path while the live loop
@@ -1544,8 +1551,13 @@ export async function enqueueRun(
         // Every newly-enqueued run may ask the operator a question (```ask,
         // durable.ts). Materialised like steer so the log says the run was
         // offered the action; a worker that predates it feeds the block back
-        // as unknown, which is the pre-feature behaviour exactly.
-        ask: true,
+        // as unknown, which is the pre-feature behaviour exactly. The one
+        // exception is a DELEGATION CHILD (2026-10-17 live finding): an ask
+        // parks the child on a human whose eye is on the parent, and the
+        // parent's delegate-wait must never block behind that — so the action
+        // is never offered, and the loop's belt refuses a stray block BY NAME
+        // (DELEGATE_CHILD_ASK_REFUSED) for hand-crafted and pre-fix inputs.
+        ...(options.delegateChild === true ? {} : { ask: true }),
         // ```look (S12), from SHIP_LOOK above: default off, so the runs that
         // do not set it enqueue exactly as they did before the action
         // existed.
@@ -1662,17 +1674,24 @@ export async function enqueueRun(
 
 /**
  * The runtime half of the delegate control (delegate.ts holds the pure half).
- * spawn claims a child in the task root's ledger and enqueues an ORDINARY
+ * spawn claims a child in the task root's ledger and enqueues an ORDINARY SCAN
  * run carrying the parent's lineage and gates; outcome projects a child's log
  * into a transfer. Everything here runs INSIDE the parent's recorded
  * `turn-N-delegate-spawn` / `-wait` steps, so every store read it makes is
  * replay-safe by the same contract those steps already carry.
  *
- * GATES: the child copies trust, the declared network tier and the plan flag
- * from the parent's RECORDED input, and its spend settles into the parent's
- * (source, day) bucket because the source is copied too — the cap sees
- * delegation without a second ledger. The repo hint from the fence is
- * verified against the parent's own repo; a workspace run cannot grant one.
+ * GATES: the child copies trust and the declared network tier from the
+ * parent's RECORDED input, and its spend settles into the parent's (source,
+ * day) bucket because the source is copied too — the cap sees delegation
+ * without a second ledger. The repo hint from the fence is verified against
+ * the parent's own repo; a workspace run cannot grant one. Everything the
+ * parent holds that is ABOUT making a change — plan review, the change-class
+ * and merge gates, requireEdit — is NOT copied and would not survive the scan
+ * mode anyway: a child is a READ-ONLY researcher (2026-10-17 live finding,
+ * run-request-1032fa9d…), the parent stays the only writer, and the single
+ * pull request is the parent's. The scan mode is materialised HERE, on the
+ * enqueue: it is part of the child's recorded input, so the child's whole
+ * step sequence is a fact of its own log before any worker touches it.
  */
 export function delegateControlFromRuntime(runtime: ShipRuntime): DelegateControl {
   return {
@@ -1682,7 +1701,7 @@ export function delegateControlFromRuntime(runtime: ShipRuntime): DelegateContro
       // the run's whole life.
       const events = (await runtime.store.load(request.parentRunId)) as Array<{ type: string; data?: unknown }>;
       const started = events.find((e) => e.type === "run-started")?.data as
-        | { taskRootRunId?: unknown; input?: { repo?: unknown; trust?: unknown; plan?: unknown; sandboxNetwork?: unknown } }
+        | { taskRootRunId?: unknown; input?: { repo?: unknown; trust?: unknown; sandboxNetwork?: unknown } }
         | undefined;
       if (started === undefined) return { ok: false, reason: `delegation unavailable: run ${request.parentRunId} has no recorded input` };
       const input = started.input ?? {};
@@ -1751,12 +1770,21 @@ export function delegateControlFromRuntime(runtime: ShipRuntime): DelegateContro
           // the parent, inherits the task root, and shows in the thread view.
           parentRunId: request.parentRunId,
           ...(typeof input.trust === "string" && (input.trust === "operator" || input.trust === "external") ? { trust: input.trust } : {}),
-          ...(input.plan === true ? { plan: true } : {}),
           ...(typeof input.sandboxNetwork === "string" && input.sandboxNetwork !== "" ? { sandboxNetwork: input.sandboxNetwork as NetworkTier } : {}),
           ...(meta?.source !== undefined && meta.source !== "" ? { source: meta.source } : {}),
           ...(meta?.actor !== undefined && meta.actor !== "" && meta.actorKind !== undefined
             ? { actor: { id: meta.actor, kind: meta.actorKind } as Actor }
             : {}),
+          // READ-ONLY, ALWAYS (2026-10-17 live finding): the child is a scan,
+          // whatever journey the parent is on. A scan edits nothing, pushes
+          // nothing and opens no pull request — its publish gate is disabled
+          // and its finish deliverable is the findings/answer write-up the
+          // parent consumes as the context transfer — and the change-shaped
+          // flags (plan, change-class, merge gate, auto-merge) are forced off
+          // by the scan resolution below, so the child can never park at a
+          // human decision the parent's wait would block behind. The parent
+          // remains the only writer and produces the single PR.
+          mode: "scan",
           delegateChild: true,
         });
       } catch (error) {

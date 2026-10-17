@@ -112,17 +112,19 @@ const LOOK_IMAGE_SENTENCE =
  * visible — the turn is spent waiting, the child draws on the same budget —
  * because an agent that delegates every subtask is one that multiplies spend
  * and hides work, which is the failure mode the hard per-root cap exists to
- * bound.
+ * bound. Since the 2026-10-17 live finding it also states the WRITER rule:
+ * children are read-only researchers, the parent is the only writer and
+ * produces the single pull request.
  */
 const DELEGATE_ACTION = `# Delegating work
 
-You may split off ONE self-contained piece of work as a child run. The child is an ordinary run in this repository with the same permissions as yours; it cannot delegate further. Your turn PAUSES until the child finishes, and its final report comes back to you as your next observation.
+You may split off ONE self-contained piece of work as a child run. The child is a READ-ONLY researcher in this repository: it edits nothing, pushes nothing and opens no pull request — it investigates, answers and proposes changes as patch text in its report. It cannot delegate further, and it cannot ask a human anything. YOU remain the only writer: apply any change the child proposes yourself. Your turn PAUSES until the child finishes (or the wait gives up on it), and its final report comes back to you as your next observation.
 
 \`\`\`delegate path=src/foo
-Make the foo parser accept RFC 3339 durations. Add tests for the edge cases.
+Find how the foo parser handles durations and report the exact change needed, with the edge cases a fix must cover.
 \`\`\`
 
-Write the child's task as a complete, standalone brief — it does not see your conversation. Scope it with path= when the work belongs to one area. Delegate only work you do not need to interleave with your own: while the child runs you do nothing. The number of children this task may spawn in total is small and hard-capped; a refused delegation tells you so.
+Write the child's task as a complete, standalone brief — it does not see your conversation. Scope it with path= when the work belongs to one area. Delegate only work you do not need to interleave with your own: while the child runs you do nothing. The number of children this task may spawn in total is small and hard-capped; a refused delegation tells you so. Delegate research and analysis — searching, reading, measuring, proposing — never the edit itself.
 
 `;
 

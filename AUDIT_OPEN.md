@@ -1,5 +1,53 @@
 # Open audit items
 
+## 2026-10-17 — delegated children were writable change runs: read-only children, single parent PR (FIXED IN CODE, re-enable owed)
+
+Found live on production 2026-10-17 (soak A4, run-request-1032fa9d…): a
+change-journey parent delegated two children, and each child — an ordinary
+change run with the parent's gates copied — edited files, opened its OWN
+draft PR (#3, #4 on the scratch repo) and parked at approve-merge, so the
+parent's delegate-wait blocked until a human approved each child's merge;
+then the parent redid both files in a THIRD PR. Delegation was switched off
+in production until fixed. The mechanics otherwise worked (sequential
+children, context transfers, placement across hosts, $0.072 total).
+
+- Code fix (branch `fix/delegate-readonly-children`): delegated children are
+  ALWAYS read-only — `delegateControlFromRuntime` enqueues the child with
+  `mode: "scan"` (and `enqueueRun` forces scan for any `delegateChild` run,
+  enforcement over cooperation), so a child edits nothing, pushes nothing,
+  opens no pull request and can never park at approve-merge; its deliverable
+  is the context transfer (findings/answer/proposed patch text in the
+  summary), and the parent stays the only writer producing the single PR.
+  The `plan` flag is no longer copied (a child that cannot edit owes no plan
+  review); trust, the network tier and the spend source still are.
+- No human-blocking child parks: a child is never offered ```ask (suppressed
+  at enqueue) and a stray block is refused BY NAME in the loop
+  (`DELEGATE_CHILD_ASK_REFUSED`); an approval-required action on a child is
+  denied automatically with the reason recorded
+  (`DELEGATE_CHILD_APPROVAL_REFUSED`). Both are pure functions of the
+  recorded input, so replay refuses identically.
+- The parent's wait is bounded by `SHIP_DELEGATE_WAIT_MS` (new env; default
+  30 min, 0 honoured, ceiling 6 h): a child that never terminates yields an
+  honest `timeout` context transfer ("child did not finish") instead of an
+  infinite park. The bound is decided inside the recorded wait step, so
+  replay reads the recorded result, never a recomputed clock.
+- Pinned by failing-on-main tests in `src/delegate.test.ts` (verified against
+  `github/main`: on main the child enqueues with no `mode` — a writable
+  change run; a child ask parks the run (`waiting`); a never-finishing child
+  leaves the parent `sleeping` forever): a child from a change parent is a
+  scan with none of the parent's change-shaped gates and no ask; a child ask
+  and a child approval never park; the wait timeout records the transfer and
+  replays; flag-off equivalence and the updated gates/prompt tests.
+- Replay safety: the child mode is materialised at enqueue (part of the
+  child's input), the parent's step sequence and step names are unchanged,
+  and flag-off is byte-identical. Accepted exposure: a pre-fix child log that
+  contains an ask or approval park would replay into a NondeterminismError —
+  moot, because the flag is off in production and those soak children are
+  terminal (a terminal log is never re-executed).
+- Still open: re-enable `SHIP_DELEGATE` in production and run one live
+  delegated change to confirm the read-only shape end to end (single PR from
+  the parent, no child PRs, no human-blocking parks).
+
 ## 2026-10-17 — PR watch first-enable flood: discovery bounded by PR age
 
 Found live on production 2026-10-17: the FIRST sweep after
