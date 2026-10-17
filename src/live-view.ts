@@ -24,6 +24,8 @@
  *   execs. The diff is ONE read-only shell invocation that records its own
  *   instant (sandbox clock), HEAD and resolved base alongside the diff, plus
  *   a digest of the exact bytes, so the page can say which tree it shows.
+ *   Sensitive filenames (a hard denylist on top of .gitignore) are listed as
+ *   omitted without content, tracked or untracked.
  *
  * Observers cannot write: the web surface is a GET with no action; the only
  * write an observer causes is the watch heartbeat (a Ship-store row, never
@@ -63,6 +65,36 @@ const ROW_BYTES_LIMIT = 14_000;
 
 const RUN_ID = /^[a-zA-Z0-9_-]{1,100}$/;
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
+
+/**
+ * Hard denylist on top of .gitignore: files whose basename matches one of
+ * these patterns are never shown, tracked or not, listed instead as omitted
+ * without content. `.gitignore` already keeps the repository's own ignored
+ * secrets out (`--exclude-standard`); this catches the ones git does not
+ * know are sensitive — a copied `id_rsa`, a stray `.env.local` in an app
+ * that ignores only `.env`, a renamed `credentials.json`.
+ */
+const SENSITIVE_BASENAME_PATTERNS = [
+  ".env*",
+  "*.pem",
+  "*.key",
+  "id_rsa*",
+  "id_ed25519*",
+  "id_ecdsa*",
+  ".npmrc",
+  ".netrc",
+  ".pypirc",
+  "credentials*",
+  "*.p12",
+  "*.pfx",
+  ".git-credentials",
+];
+/** One `case` arm for the sandbox-side basename check. */
+const SENSITIVE_CASE_ARMS = SENSITIVE_BASENAME_PATTERNS.join("|");
+/** Exclude pathspecs for the tracked diff: the leading double-star matches at any depth, and glob magic keeps single stars off slashes. */
+const SENSITIVE_EXCLUDE_PATHSPECS = SENSITIVE_BASENAME_PATTERNS.map((p) => `':(exclude,glob)**/${p}'`).join(" ");
+/** How an omitted file is named in the diff, without any content. */
+export const SENSITIVE_FILE_NOTICE = "omitted (sensitive filename)";
 
 export function liveViewEnabled(env: { SHIP_LIVE_VIEW?: string } = process.env): boolean {
   return (env.SHIP_LIVE_VIEW ?? "").trim().toLowerCase() === "on";
@@ -112,6 +144,16 @@ function keepTail(text: string, max: number): { text: string; cut: boolean } {
 }
 
 /**
+ * Scrub the full raw output FIRST, then truncate: cutting first would leave
+ * the head of a secret straddling the cut half-visible, in a shape the
+ * redaction patterns no longer match (keepTail's line cut only helps when
+ * the tail has newlines — one long line defeats it).
+ */
+function scrubThenKeepTail(text: string, max: number): { text: string; cut: boolean } {
+  return keepTail(safeForDisplay(text, text.length), max);
+}
+
+/**
  * One command's live output, written to its run's row. Writes are chained so
  * a slow store can never land an older flush over a newer one; every write is
  * advisory (failures swallowed) — a live hint must not fail a turn.
@@ -136,7 +178,7 @@ export function liveOutputRecorder(
   const shownCommand = safeForDisplay(command.split("\n", 1)[0] ?? "", 300);
 
   const write = (record: Partial<LiveOutputRecord>): void => {
-    const tail = keepTail(buffer, LIVE_OUTPUT_LIMIT);
+    const tail = scrubThenKeepTail(buffer, LIVE_OUTPUT_LIMIT);
     const full: LiveOutputRecord = {
       runId,
       command: shownCommand,
@@ -163,7 +205,9 @@ export function liveOutputRecorder(
       if (ended || text === "") return;
       buffer += text;
       if (buffer.length > LIVE_OUTPUT_LIMIT * 2) {
-        buffer = buffer.slice(-LIVE_OUTPUT_LIMIT * 2);
+        // Scrub before the 2x cap drops the head, for the same reason as
+        // every other cut: a straddling secret must not survive as a fragment.
+        buffer = scrubThenKeepTail(buffer, LIVE_OUTPUT_LIMIT * 2).text;
         dropped = true;
       }
       lastChunkAt = iso(now());
@@ -250,7 +294,7 @@ export interface LiveDiffRecord {
   baseLabel?: string;
   /** sha256 of the exact diff bytes the sandbox produced (before redaction), first 16 hex. */
   digest?: string;
-  /** Redacted, bounded diff: tracked changes vs base, then untracked non-ignored files as new files. */
+  /** Redacted, bounded diff: tracked changes vs base, then untracked non-ignored files as new files; sensitive filenames are listed as omitted without content. */
   output?: string;
   truncated?: boolean;
   error?: string;
@@ -270,7 +314,9 @@ const quote = (s: string): string => "'" + s.replace(/'/g, "'\\''") + "'";
  * the index lock the agent's own git needs. Untracked files are read with
  * `git diff --no-index` against /dev/null, which touches no repository state;
  * ignored files (`.env`, dependency trees) are excluded by --exclude-standard,
- * so the diff shows what `git add -A` at publish would commit.
+ * so the diff shows what `git add -A` at publish would commit — EXCEPT the
+ * hard denylist: sensitive basenames (SENSITIVE_BASENAME_PATTERNS) are never
+ * shown, tracked or untracked; each is listed as omitted without content.
  *
  * `base` is either an exact commit (a PR run's recorded head at checkout) or
  * a branch name whose merge-base with HEAD is resolved at the same instant.
@@ -287,9 +333,14 @@ export function liveDiffCommand(base: { sha: string } | { branch: string }, limi
     const ref = quote(`refs/remotes/origin/${base.branch}`);
     resolve = `base=$(${git} merge-base HEAD ${ref} 2>/dev/null || ${git} rev-parse --verify --quiet ${ref})`;
   }
-  const diff = `${git} diff --no-ext-diff --no-textconv --ignore-submodules=all "$base" --`;
-  const untracked = `${git} ls-files -z --others --exclude-standard | xargs -0 -I{} ${git} diff --no-index --no-ext-diff --no-textconv -- /dev/null {}`;
+  const sensitive = `sensitive() { case "\${1##*/}" in ${SENSITIVE_CASE_ARMS}) return 0 ;; *) return 1 ;; esac; }`;
+  // Tracked changes, minus the denylist (exclude pathspecs match at any depth).
+  const sensitiveChanged = `${git} diff --name-only -z --no-ext-diff --no-textconv --ignore-submodules=all "$base" -- | while IFS= read -r -d '' p; do sensitive "$p" && printf '${SENSITIVE_FILE_NOTICE}: %s\\n' "$p"; done`;
+  const diff = `${git} diff --no-ext-diff --no-textconv --ignore-submodules=all "$base" -- ${SENSITIVE_EXCLUDE_PATHSPECS}`;
+  // Untracked, non-ignored files: sensitive basenames are listed, not read.
+  const untracked = `${git} ls-files -z --others --exclude-standard | while IFS= read -r -d '' p; do if sensitive "$p"; then printf '${SENSITIVE_FILE_NOTICE}: %s\\n' "$p"; else ${git} diff --no-index --no-ext-diff --no-textconv -- /dev/null "$p"; fi; done`;
   const script = [
+    sensitive,
     `printf 'at=%s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"`,
     `head=$(${git} rev-parse HEAD 2>/dev/null) || { echo 'error=not a git work tree'; exit 0; }`,
     `printf 'head=%s\\n' "$head"`,
@@ -297,7 +348,10 @@ export function liveDiffCommand(base: { sha: string } | { branch: string }, limi
     `[ -n "$base" ] || { echo 'error=base not resolvable'; exit 0; }`,
     `printf 'base=%s\\n' "$base"`,
     `echo '--- diff'`,
-    `{ ${diff}; ${untracked}; } 2>/dev/null | head -c ${limit + 1}`,
+    // Notices first so they stay visible inside the byte cap; the raw stream
+    // may carry up to 2x the kept limit so the reader can scrub the whole
+    // diff BEFORE truncating (parseLiveDiff).
+    `{ ${sensitiveChanged}; ${diff}; ${untracked}; } 2>/dev/null | head -c ${limit * 2 + 1}`,
     `exit 0`,
   ].join("\n");
   return `bash -c ${quote(script)}`;
@@ -321,12 +375,17 @@ export function parseLiveDiff(stdout: string, limit = LIVE_DIFF_LIMIT): Omit<Liv
   if (marker < 0) return { ...out, error: "The workspace did not answer the diff request." };
   const raw = stdout.slice(marker + "--- diff\n".length);
   const bytes = Buffer.from(raw, "utf8");
-  const truncated = bytes.length > limit;
-  const body = truncated ? bytes.subarray(0, limit).toString("utf8") : raw;
+  // Scrub the FULL raw diff first, then truncate: cutting first would leave
+  // the head of a secret straddling the cut half-visible, in a shape the
+  // redaction patterns no longer match. The command is allowed to emit up to
+  // 2x the kept limit so the scrubber sees the whole first `limit` worth.
+  const scrubbed = safeForDisplay(raw, raw.length);
+  const truncated = bytes.length > limit || scrubbed.length > limit;
+  const body = scrubbed.length > limit ? scrubbed.slice(0, limit) : scrubbed;
   return {
     ...out,
     digest: createHash("sha256").update(bytes.subarray(0, limit)).digest("hex").slice(0, 16),
-    output: safeForDisplay(body, limit + 500),
+    output: body,
     truncated,
   };
 }
@@ -363,6 +422,10 @@ type LiveDiffRuntime = {
  * diff snapshot. Bounded per sweep and per run; abandoned watches and settled
  * runs are cleaned up. Callers invoke it only when the flag is on.
  */
+
+/** Where the per-sweep serving window starts; advances each sweep for cap fairness. */
+let sweepCursor = 0;
+
 export async function serveLiveDiffs(
   runtime: LiveDiffRuntime,
   executor: Pick<ExecutorProvider, "attach">,
@@ -374,9 +437,32 @@ export async function serveLiveDiffs(
   const cap = options.maxPerSweep ?? LIVE_DIFF_MAX_PER_SWEEP;
   const served: string[] = [];
   const errors: string[] = [];
-  const watches = (await runtime.config.list()).filter((e) => e.key.startsWith(LIVE_WATCH_PREFIX) && e.set);
+  const entries = await runtime.config.list();
+
+  // Orphan live rows describe an ACTIVE run only (clearLiveView drops them
+  // when the finisher sees the run settle). A row whose run is terminal or
+  // gone — the finisher crashed, the flag flipped mid-run, or a late
+  // recorder.end / serve write landed after the clear — is deleted here, so
+  // a write-after-clear self-heals on the next sweep.
+  for (const entry of entries) {
+    const prefix = entry.key.startsWith(LIVE_OUTPUT_PREFIX) ? LIVE_OUTPUT_PREFIX : entry.key.startsWith(LIVE_DIFF_PREFIX) ? LIVE_DIFF_PREFIX : null;
+    if (prefix === null || !entry.set) continue;
+    const runId = entry.key.slice(prefix.length);
+    try {
+      if (!RUN_ID.test(runId)) {
+        await runtime.config.remove(entry.key);
+        continue;
+      }
+      const meta = await runtime.loadMeta(runId);
+      if (meta === null || TERMINAL.has(meta.status) || meta.status === "cancelling") await runtime.config.remove(entry.key);
+    } catch {
+      // unreadable now; the next sweep retries
+    }
+  }
+
+  const watches = entries.filter((e) => e.key.startsWith(LIVE_WATCH_PREFIX) && e.set);
+  const candidates: string[] = [];
   for (const entry of watches) {
-    if (served.length >= cap) break;
     const runId = entry.key.slice(LIVE_WATCH_PREFIX.length);
     try {
       if (!RUN_ID.test(runId)) {
@@ -408,12 +494,33 @@ export async function serveLiveDiffs(
           // unreadable prior — recompute
         }
       }
-      served.push(runId);
-      const record = await computeLiveDiff(runtime, executor, runId, now);
-      await runtime.config.set(liveDiffKey(runId), JSON.stringify(fitDiff(record)));
+      candidates.push(runId);
     } catch (e) {
       errors.push(`${runId}: ${e instanceof Error ? e.message : String(e)}`);
     }
+  }
+
+  // Fair cap: with more watchers than the per-sweep budget, always serving
+  // the list's head would starve everyone after it. The start offset
+  // advances by the number served, so every watched run gets its turn.
+  if (candidates.length > 0) {
+    const offset = sweepCursor % candidates.length;
+    const order = [...candidates.slice(offset), ...candidates.slice(0, offset)];
+    for (const runId of order.slice(0, cap)) {
+      try {
+        served.push(runId);
+        const record = await computeLiveDiff(runtime, executor, runId, now);
+        // The run may have settled while the diff was computed; writing now
+        // would resurrect the row clearLiveView just removed. Leave it —
+        // the orphan sweep above drops any that slipped through.
+        const latest = await runtime.loadMeta(runId);
+        if (latest === null || TERMINAL.has(latest.status) || latest.status === "cancelling") continue;
+        await runtime.config.set(liveDiffKey(runId), JSON.stringify(fitDiff(record)));
+      } catch (e) {
+        errors.push(`${runId}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    sweepCursor = (sweepCursor + served.length) % candidates.length;
   }
   return { served, errors };
 }
@@ -433,7 +540,7 @@ async function computeLiveDiff(
   const takeover = await loadTakeover(runtime.config, runId).catch(() => null);
   if (takeover !== null) return { ...record, baseLabel: base.label, error: "A person holds this workspace; the running diff resumes after handback." };
   try {
-    const r = await executor.attach(handle).exec(liveDiffCommand(base.spec), { timeoutMs: 10_000, maxOutputBytes: LIVE_DIFF_LIMIT * 2 });
+    const r = await executor.attach(handle).exec(liveDiffCommand(base.spec), { timeoutMs: 10_000, maxOutputBytes: LIVE_DIFF_LIMIT * 4 });
     if (r.exitCode !== 0) return { ...record, baseLabel: base.label, error: "The workspace is unavailable. The sandbox may have expired." };
     return { ...record, baseLabel: base.label, ...parseLiveDiff(r.stdout) };
   } catch (e) {

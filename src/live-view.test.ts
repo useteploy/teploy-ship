@@ -23,6 +23,7 @@ import {
   liveOutputRecorder,
   liveViewEnabled,
   liveWatchKey,
+  parseLiveDiff,
   readLiveView,
   serveLiveDiffs,
   type LiveDiffRecord,
@@ -30,6 +31,9 @@ import {
 } from "./live-view.js";
 import { MemoryRuntimeConfig } from "./runtime-config.js";
 import { saveTakeover } from "./takeover.js";
+
+/** The fixed UI string an omitted sensitive file is listed with (live-view.ts SENSITIVE_FILE_NOTICE). */
+const SENSITIVE_FILE_NOTICE = "omitted (sensitive filename)";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } }).trim();
@@ -116,6 +120,43 @@ test("redaction negative control: secrets never reach the terminal row or the pa
     assert.ok(!JSON.stringify(view).includes(secret), "reader-side redaction");
   } finally {
     delete process.env.SHIP_LIVE_TEST_TOKEN;
+  }
+});
+
+test("redaction order: a secret straddling the terminal tail cut is scrubbed whole, never left as a fragment", async () => {
+  const secret = "fragtest-secret-value-abcdefghij";
+  process.env.SHIP_LIVE_FRAG_SECRET = secret;
+  try {
+    const config = new MemoryRuntimeConfig();
+    const recorder = liveOutputRecorder(config, "run-frag", "cat dump.log", { flushMs: 0 });
+    // One long single line — keepTail's line-boundary cut cannot help without
+    // a newline, and the secret straddles the 8000-char tail window's cut.
+    const head = "x".repeat(4_205);
+    const tail = "y".repeat(7_978);
+    recorder.chunk(head + secret + tail); // total 12_215: the cut lands 10 chars into the secret
+    await recorder.end({ exitCode: 0, timedOut: false });
+    const stored = (await config.get(liveOutputKey("run-frag")))!;
+    assert.ok(!stored.includes(secret), "no whole secret");
+    assert.ok(!stored.includes(secret.slice(10)), "no fragment of the secret survives the cut");
+  } finally {
+    delete process.env.SHIP_LIVE_FRAG_SECRET;
+  }
+});
+
+test("redaction order: parseLiveDiff scrubs the full raw diff before truncating", () => {
+  const secret = "parselive-secret-value-97531";
+  process.env.SHIP_LIVE_PARSE_SECRET = secret;
+  try {
+    const limit = 200;
+    const body = "x".repeat(190) + secret + "y".repeat(500); // the cut lands 10 chars into the secret
+    const stdout = `at=2026-10-16T00:00:00Z\n--- diff\n${body}`;
+    const parsed = parseLiveDiff(stdout, limit);
+    assert.equal(parsed.truncated, true);
+    assert.ok(!parsed.output!.includes(secret), "no whole secret");
+    assert.ok(!parsed.output!.includes(secret.slice(0, 10)), "no fragment at the cut");
+    assert.ok(parsed.output!.startsWith("x".repeat(50)), "the kept part is still the diff's head");
+  } finally {
+    delete process.env.SHIP_LIVE_PARSE_SECRET;
   }
 });
 
@@ -277,6 +318,53 @@ test("real path: secrets inside changed files are redacted in the stored diff", 
   assert.ok(!stored.includes("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
 });
 
+test("denylist: untracked files with sensitive names are listed as omitted, never shown", async () => {
+  const { root } = await realWorkspace();
+  // `.env.staging`, not `.env.local`: the developer's global gitignore may
+  // already hide common .env names, and --exclude-standard honours it; the
+  // denylist must hold even when git itself would show the file.
+  await writeFile(join(root, ".env.staging"), "UNTRACKED_ENV_MARKER=hunter2-local\n");
+  await writeFile(join(root, "server.pem"), "UNTRACKED_PEM_MARKER_BODY\n");
+  await writeFile(join(root, "id_rsa"), "UNTRACKED_RSA_MARKER_BODY\n");
+  await writeFile(join(root, ".npmrc"), "//registry.npmjs.org/:_authToken=UNTRACKED_NPM_MARKER\n");
+  await writeFile(join(root, "deploy.key"), "UNTRACKED_KEY_MARKER_BODY\n");
+  await writeFile(join(root, "credentials.json"), "UNTRACKED_CREDS_MARKER_BODY\n");
+  await mkdir(join(root, "nested"));
+  await writeFile(join(root, "nested", "client.p12"), "UNTRACKED_P12_MARKER_BODY\n");
+  const config = new MemoryRuntimeConfig();
+  const { provider } = providerFor(root);
+  await watch(config, "run-deny-untracked");
+  await serveLiveDiffs(runtimeFor(config), provider);
+  const stored = (await config.get(liveDiffKey("run-deny-untracked")))!;
+  assert.equal(JSON.parse(stored).error, undefined);
+  for (const name of [".env.staging", "server.pem", "id_rsa", ".npmrc", "deploy.key", "credentials.json", "nested/client.p12"]) {
+    assert.ok(stored.includes(`${SENSITIVE_FILE_NOTICE}: ${name}`), `${name} is listed as omitted`);
+  }
+  for (const marker of ["UNTRACKED_ENV_MARKER", "UNTRACKED_PEM_MARKER_BODY", "UNTRACKED_RSA_MARKER_BODY", "UNTRACKED_NPM_MARKER", "UNTRACKED_KEY_MARKER_BODY", "UNTRACKED_CREDS_MARKER_BODY", "UNTRACKED_P12_MARKER_BODY"]) {
+    assert.ok(!stored.includes(marker), `${marker} content is never shown`);
+  }
+});
+
+test("denylist: tracked files with sensitive names are omitted from the diff too", async () => {
+  const { root } = await realWorkspace();
+  await writeFile(join(root, "secrets.pem"), "TRACKED_PEM_BASE\n");
+  await mkdir(join(root, "vault"));
+  await writeFile(join(root, "vault", "credentials.json"), "TRACKED_CREDS_BASE\n");
+  git(root, "add", "-A");
+  git(root, "commit", "-q", "-m", "secrets at base");
+  await writeFile(join(root, "secrets.pem"), "TRACKED_PEM_MODIFIED\n");
+  await writeFile(join(root, "vault", "credentials.json"), "TRACKED_CREDS_MODIFIED\n");
+  const config = new MemoryRuntimeConfig();
+  const { provider } = providerFor(root);
+  await watch(config, "run-deny-tracked");
+  await serveLiveDiffs(runtimeFor(config), provider);
+  const stored = (await config.get(liveDiffKey("run-deny-tracked")))!;
+  assert.ok(stored.includes(`${SENSITIVE_FILE_NOTICE}: secrets.pem`), "root sensitive tracked file listed");
+  assert.ok(stored.includes(`${SENSITIVE_FILE_NOTICE}: vault/credentials.json`), "nested sensitive tracked file listed");
+  assert.ok(!stored.includes("TRACKED_PEM_MODIFIED"), "tracked sensitive content never shown");
+  assert.ok(!stored.includes("TRACKED_CREDS_MODIFIED"), "nested tracked sensitive content never shown");
+});
+
 test("diff load is bounded: nobody watching, a stale watch, or a settled run costs zero execs", async () => {
   const { root } = await realWorkspace();
   const { provider, execs } = providerFor(root);
@@ -312,6 +400,54 @@ test("diff load is bounded: one refresh per interval per run, and a per-sweep ca
   for (let i = 0; i < 9; i++) await watch(many, `run-${i}`);
   const r = await serveLiveDiffs(runtimeFor(many), provider, { maxPerSweep: 3 });
   assert.equal(r.served.length, 3);
+});
+
+test("fair cap: with more watchers than the per-sweep budget the start rotates so every run is served", async () => {
+  const { root } = await realWorkspace();
+  const { provider } = providerFor(root);
+  const config = new MemoryRuntimeConfig();
+  const seen = new Set<string>();
+  let t = Date.now();
+  for (let sweep = 0; sweep < 6 && seen.size < 9; sweep++) {
+    for (let i = 0; i < 9; i++) await watch(config, `run-${i}`, new Date(t));
+    const r = await serveLiveDiffs(runtimeFor(config), provider, { maxPerSweep: 3, now: () => t });
+    assert.equal(r.served.length, 3);
+    for (const id of r.served) seen.add(id);
+    t += 10_000; // past the per-run interval for everyone served so far
+  }
+  assert.equal(seen.size, 9, "every watched run gets its turn, not only the list's head");
+});
+
+test("orphan sweep: live rows of terminal or missing runs are deleted; a late write after the clear self-heals", async () => {
+  const { root } = await realWorkspace();
+  const { provider, execs } = providerFor(root);
+  const config = new MemoryRuntimeConfig();
+  const output: LiveOutputRecord = { runId: "run-x", command: "c", startedAt: "", lastChunkAt: "", at: "", running: false, output: "o", truncated: false };
+  await config.set(liveOutputKey("run-done"), JSON.stringify({ ...output, runId: "run-done" }));
+  await config.set(liveDiffKey("run-done"), JSON.stringify({ runId: "run-done", at: new Date().toISOString() } satisfies LiveDiffRecord));
+  await config.set(liveOutputKey("run-gone"), JSON.stringify({ ...output, runId: "run-gone" }));
+  await config.set(liveOutputKey("run-keep"), JSON.stringify({ ...output, runId: "run-keep", running: true }));
+  const statuses: Record<string, { status: string } | null> = {
+    "run-done": { status: "completed" },
+    "run-gone": null,
+    "run-keep": { status: "running" },
+  };
+  const runtime = {
+    config,
+    loadMeta: async (id: string) => statuses[id] ?? null,
+    store: { load: async () => events("h1", { branch: "ship/run-live", base: "main" }) },
+  };
+  await serveLiveDiffs(runtime, provider);
+  assert.equal(await config.get(liveOutputKey("run-done")), undefined, "terminal run's output row removed");
+  assert.equal(await config.get(liveDiffKey("run-done")), undefined, "terminal run's diff row removed");
+  assert.equal(await config.get(liveOutputKey("run-gone")), undefined, "missing run's row removed");
+  assert.ok(await config.get(liveOutputKey("run-keep")), "active run's row kept");
+  assert.equal(execs(), 0, "sweeping rows costs no sandbox exec");
+  // A write landing after the clear (late recorder.end or a slow serve
+  // finishing after the run settled) is gone again on the next sweep.
+  await config.set(liveDiffKey("run-done"), JSON.stringify({ runId: "run-done", at: new Date().toISOString() } satisfies LiveDiffRecord));
+  await serveLiveDiffs(runtime, provider);
+  assert.equal(await config.get(liveDiffKey("run-done")), undefined, "write-after-clear self-heals");
 });
 
 test("a held workspace is never execed by the live diff", async () => {
