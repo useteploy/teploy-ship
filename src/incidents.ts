@@ -377,7 +377,20 @@ export interface IncidentObserveWire {
   timestamp?: string;
   /** Not sent by Observe today; CreateRule defaults an omitted operator to "gt" (alerts.go). */
   operator?: string;
+  /**
+   * The live notification outbox body (teploy-observe
+   * internal/platform/notify_outbox.go NotificationPayload): `kind` is
+   * incident_opened | incident_repeat | incident_recovered, and there is no
+   * alert_id. `evaluated_at` stands in for `timestamp`.
+   */
+  kind?: string;
+  incident_id?: string;
+  evaluated_at?: string;
+  message?: string;
 }
+
+/** Observe's own "this incident recovered" notice (notify_outbox.go NotifyIncidentRecovered). */
+export const OBSERVE_RECOVERED_KIND = "incident_recovered";
 
 // ---------------------------------------------------------------- attribution
 
@@ -624,7 +637,8 @@ export function observeAlertProse(payload: IncidentObserveWire): string {
   const service = observeServiceHintOf(payload);
   if (service !== "") parts.push(`on ${service}`);
   if (payload.severity !== undefined && payload.severity.trim() !== "") parts.push(`severity ${payload.severity.trim()}`);
-  if (payload.timestamp !== undefined && payload.timestamp.trim() !== "") parts.push(`fired ${payload.timestamp.trim()}`);
+  const firedAt = (payload.timestamp ?? payload.evaluated_at ?? "").trim();
+  if (firedAt !== "") parts.push(`fired ${firedAt}`);
   if (payload.alert_id !== undefined && payload.alert_id.trim() !== "") parts.push(`alert id ${payload.alert_id.trim()}`);
   if (payload.rule_id !== undefined && payload.rule_id.trim() !== "") parts.push(`rule id ${payload.rule_id.trim()}`);
   return clip(parts.join(", "), OBSERVE_PROSE_MAX);
@@ -657,6 +671,13 @@ export async function intakeObserveAlert(
   payload: IncidentObserveWire,
   options: { now?: () => number; newId?: () => string; rawAlert?: string } = {},
 ): Promise<IntakeObserveResult> {
+  // Observe's recovery notice is not a re-fire. Counting it as one bumped an
+  // open incident and REOPENED a recovered one on the very message that says
+  // the opposite. Recovery here is decided by Ship's own watch against the
+  // service's readings (sweepIncidentRecovery), not by the notifier.
+  if ((payload.kind ?? "").trim() === OBSERVE_RECOVERED_KIND) {
+    return { kind: "skipped", reason: "Observe recovery notice: recovery is judged by the incident's own watch, not the notifier" };
+  }
   const fingerprint = observeFingerprintOf(payload);
   if (fingerprint === null) {
     return { kind: "skipped", reason: "the alert carries no fingerprint, rule id or alert id — nothing to dedupe on" };
