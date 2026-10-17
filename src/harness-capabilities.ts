@@ -72,7 +72,7 @@ const DECLARATIONS: Record<string, HarnessDeclaration> = {
       browser: { status: "partial", reason: "```look a11y observation when input.look (SHIP_LOOK, default off); pixel screenshots on an image look when input.lookImage (SHIP_LOOK_IMAGE_MODEL) — refused without it; the agent-authored browser flow only when verification.preview is configured (durable.ts, ladder-steps.ts)" },
       interruption: {
         status: "partial",
-        reason: "bounded by steps, budget and stuck detection (harness.ts HarnessBudget); mid-turn interruption is not shown by the source",
+        reason: "bounded by steps, budget and stuck detection (harness.ts HarnessBudget); with input.steerReply (SHIP_STEER_REPLY=on) an operator interrupt stops an action before it starts and cancels a running python kernel cell — a running bash command cannot be cancelled (no abort in the executor contract) and runs to completion (steer-reply.ts)",
       },
       approvals: { status: "supported", reason: "parks on approval, snapshots and restores when the executor can (durable.ts:703-717, 2249-2255)" },
       recovery: { status: "supported", reason: "stuck/settled detector via input.recovery (durable.ts:2300-2325)" },
@@ -196,6 +196,14 @@ export const PLAN_REVIEW_REFUSAL = "Plan review requires the native harness.";
 /** Message shown when a steer is refused on a run that cannot consume it. */
 export const STEER_UNSUPPORTED_MESSAGE =
   "This run uses an external harness, which reads only its starting prompt and cannot take mid-run messages. Cancel it and start a follow-up instead.";
+
+/**
+ * A queued message or an interrupt sent to a run whose recorded input never
+ * admitted two-way steering (D2, SHIP_STEER_REPLY=on at enqueue). The run
+ * still takes plain steering; only the new modes are refused.
+ */
+export const STEER_REPLY_UNSUPPORTED_MESSAGE =
+  "This run was started without two-way steering, so it cannot queue a message or be interrupted. Send the message without a mode instead.";
 
 const REFUSALS: Record<HarnessOperation, string> = {
   "plan-review": PLAN_REVIEW_REFUSAL,

@@ -1,4 +1,4 @@
-import { transcriptTurn } from "../../../dist/actions.js";
+import { parseReply, transcriptTurn } from "../../../dist/actions.js";
 import { frameAllowed } from "./csp.js";
 /** Read-only projections of recorded work. Never infer a passing check from agent prose. */
 export interface LogEvent {
@@ -52,13 +52,64 @@ export function safeLink(value: unknown): string | undefined {
     return undefined;
   }
 }
+/**
+ * The reply dialect a run's recorded input admits — the loop's own parse
+ * settings (actions.ts parseReply), read the same way here and in the thread
+ * view so both render exactly what the loop delivered.
+ */
+export function replyDialectOf(input: Record<string, unknown>): { look: boolean; delegate: boolean; reply: true } {
+  return { look: input.look === true, delegate: input.delegate === true || input.delegateChild === true, reply: true };
+}
+
+/** One ```reply fence, body captured. */
+const REPLY_FENCE = /```reply[^\n]*\n([\s\S]*?)```/g;
+
+/**
+ * Inline the ONE reply the loop accepted. parseReply (the loop's own parse,
+ * shared with replyHistory) already decided what that reply is; a second
+ * fence in the same turn was never delivered, so it is dropped rather than
+ * shown as a second message to the operator.
+ */
+function renderReply(stripped: string, reply: string): string {
+  let first = true;
+  return stripped.replace(REPLY_FENCE, (fence) => {
+    if (first) {
+      first = false;
+      return reply;
+    }
+    return "";
+  });
+}
+
 export function conversation(events: LogEvent[]): Message[] {
   const messages: Message[] = [];
+  // D2: on a two-way-steering run (input.steerReply) a ```reply is the
+  // agent talking to the operator, so it is shown as prose, and the held
+  // steps' queued messages / interrupts are the operator's. Absent the
+  // field nothing below changes what a run renders.
+  let steerReply = false;
+  let replyDialect: { look: boolean; delegate: boolean; reply: true } | null = null;
   for (const e of events) {
     const d = record(e.data),
       r = d.result;
+    if (e.type === "run-started") {
+      steerReply = record(d.input).steerReply === true;
+      if (steerReply) replyDialect = replyDialectOf(record(d.input));
+    }
     if (e.type === "run-started" && typeof record(d.input).task === "string")
       messages.push({ role: "You", text: record(d.input).userMessage ?? record(d.input).task, at: e.at });
+    if (
+      steerReply &&
+      e.type === "step-completed" &&
+      /-held$/.test(e.name ?? "") &&
+      Array.isArray(r)
+    )
+      for (const item of r) {
+        const h = record(item);
+        if (typeof h.text !== "string") continue;
+        if (h.mode === "queue") messages.push({ role: "You", text: h.text, at: e.at });
+        else if (h.mode === "interrupt") messages.push({ role: "You", text: h.text === "" ? "(interrupt)" : `(interrupt) ${h.text}`, at: e.at });
+      }
     if (
       e.type === "step-completed" &&
       /-steer$/.test(e.name ?? "") &&
@@ -75,9 +126,21 @@ export function conversation(events: LogEvent[]): Message[] {
       if (typeof raw === "string") {
         // Commands stay in Activity; retain the human-readable progress and questions.
         const consumed = /(?:^|-)plan-think$/.test(e.name ?? "") ? raw : transcriptTurn(raw);
-        const text = consumed
-          .replace(/```(?:bash|python|sh|javascript|edit|create)[^\n]*\n[\s\S]*?```/g, "")
-          .trim();
+        const stripped = consumed
+          .replace(/```(?:bash|python|sh|javascript|edit|create)[^\n]*\n[\s\S]*?```/g, "");
+        // The reply shown is exactly what the loop delivered: parseReply
+        // reads the FIRST reply fence before the action, so a second fence
+        // (never delivered) is dropped rather than rendered as one more
+        // message. A flag-on turn the loop read as having no reply keeps
+        // the old inline shape; a flag-off run keeps the fence as literal
+        // text, exactly as before the feature.
+        const reply = replyDialect !== null ? parseReply(raw, replyDialect) : null;
+        const text = (replyDialect === null
+          ? stripped
+          : reply !== null
+            ? renderReply(stripped, reply)
+            : stripped.replace(REPLY_FENCE, "$1")
+        ).trim();
         if (text)
           messages.push({
             role: "Agent",

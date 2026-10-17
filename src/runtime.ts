@@ -84,6 +84,7 @@ import {
   transferFromEvents,
 } from "./delegate.js";
 import type { DelegateControl, DelegateSpawnOutcome, DelegationEntry, DelegationRecord } from "./delegate.js";
+import { steerReplyEnabled } from "./steer-reply.js";
 import { FileOutbox, NucleusOutbox } from "./outbox.js";
 import { FileDeliveryStore, NucleusDeliveryStore, type DeliveryStore } from "./delivery.js";
 import type { Outbox } from "./outbox.js";
@@ -248,7 +249,7 @@ export {
 export { FileFleetStore, NucleusFleetStore, FilePlacementStore, NucleusPlacementStore } from "./fleet.js";
 export type { RepoMemoryStore, RepoNote } from "./repo-memory.js";
 export { FileRepoMemory, NucleusRepoMemory, loadRepoContext, runNote } from "./repo-memory.js";
-export type { SteerStore, SteerNote } from "./steer.js";
+export type { SteerStore, SteerNote, SteerMode, HeldKind, HeldNote } from "./steer.js";
 export { FileSteerStore, NucleusSteerStore } from "./steer.js";
 export type { LiveStore, LiveState, LivePhase } from "./live.js";
 export { askAnswerMessage, askEvent, isAskEvent, pendingQuestion } from "./ask.js";
@@ -1540,6 +1541,11 @@ export async function enqueueRun(
         // children, whose own inputs never admit delegation.
         ...(delegate === true ? { delegate: true } : {}),
         ...(options.delegateChild === true ? { delegateChild: true } : {}),
+        // Two-way steering (D2), from SHIP_STEER_REPLY=on (only `on`; the
+        // SHIP_THREAD_VIEW grammar): default off, so a run that does not set
+        // it enqueues exactly as before. Materialised for the standing
+        // reason — it admits the turn-N-held / turn-N-finish-held steps.
+        ...(steerReplyEnabled() ? { steerReply: true } : {}),
         // The MCP client (D1), from SHIP_MCP + the project record above:
         // absent on every run that does not admit it, so those inputs stay
         // byte-identical to pre-MCP ones.

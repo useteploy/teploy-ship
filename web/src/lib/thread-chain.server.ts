@@ -25,9 +25,10 @@
  * page mounts nothing, so flag-off output is byte-for-byte what it was.
  */
 import { isAskEvent } from "teploy-ship/ask";
-import { parseAction } from "../../../dist/actions.js";
+import { parseAction, parseReply } from "../../../dist/actions.js";
 import { taskRootRunId as resolveTaskRoot } from "../../../dist/task-session.js";
-import type { SteerNote } from "teploy-ship/runtime";
+import { replyDialectOf } from "./workspace.js";
+import type { HeldNote, SteerNote } from "teploy-ship/runtime";
 import type { RunMeta } from "teploy-ship/runtime";
 import type { WorkflowEvent } from "@neutron-build/workflow";
 
@@ -58,6 +59,31 @@ export interface SteerNoteView {
   state: "delivered" | "pending";
   /** The turn that claimed a delivered note — the drain's own keying. */
   turn?: number;
+  /**
+   * How the operator asked for it to be applied (D2, SHIP_STEER_REPLY):
+   * `steer` at the next turn boundary, `queue` at the agent's next
+   * checkpoint, `interrupt` at the next safe point. ABSENT means `steer`, so
+   * a plain note serialises exactly as it did before D2.
+   */
+  mode?: "queue" | "interrupt";
+  /**
+   * An interrupt's effect on the action it landed on (S11): `not-done` (it
+   * never ran), `done` (ran to its end), `unknown` (cancelled part-way), or
+   * `none` (nothing was running). Absent on non-interrupts and pending ones.
+   */
+  effect?: "not-done" | "done" | "unknown" | "none";
+}
+
+/**
+ * The agent's ```reply into the thread (D2). Read off the recorded think
+ * text with the run's own dialect, so it is exactly what the loop saw — and
+ * ONLY off think steps: command output, files and pages are never parsed
+ * for replies, and nothing here can ever be rendered as an operator note.
+ */
+export interface AgentReplyView {
+  text: string;
+  at: string;
+  turn: number;
 }
 
 export interface AskParkView {
@@ -83,6 +109,11 @@ export interface ThreadRunView {
   summary: string | null;
   steers: SteerNoteView[];
   asks: AskParkView[];
+  /**
+   * Agent replies, oldest first — present only on runs whose input admitted
+   * them (input.steerReply), so a flag-off run's thread is byte-identical.
+   */
+  replies?: AgentReplyView[];
 }
 
 export interface ThreadView {
@@ -101,7 +132,7 @@ export interface ThreadDeps {
   store: { load(runId: string): Promise<WorkflowEvent[]> };
   loadMeta(runId: string): Promise<RunMeta | null>;
   listMeta(options?: { limit?: number }): Promise<RunMeta[]>;
-  steer: { pending(runId: string): Promise<SteerNote[]> };
+  steer: { pending(runId: string): Promise<SteerNote[]>; pendingHeld?(runId: string): Promise<HeldNote[]> };
 }
 
 const record = (v: unknown): Record<string, unknown> =>
@@ -113,6 +144,9 @@ function resultOf(event: WorkflowEvent): unknown {
 }
 
 const STEER_STEP = /^(?:attempt-\d+-)?turn-(\d+)-steer$/;
+const HELD_STEP = /^(?:attempt-\d+-)?turn-(\d+)-(?:finish-)?held$/;
+const EXEC_STEP = /^(?:attempt-\d+-)?turn-(\d+)-exec$/;
+const THINK_STEP = /^(?:attempt-\d+-)?turn-(\d+)-think$/;
 
 /**
  * Delivered steer notes are a step result — `turn-N-steer` records the
@@ -121,19 +155,89 @@ const STEER_STEP = /^(?:attempt-\d+-)?turn-(\d+)-steer$/;
  * pending() is the read. The crash window steer.ts documents (a note stamped
  * for a turn whose step never committed) is visible on replay, not here.
  */
-export function steerHistory(events: readonly WorkflowEvent[], pending: readonly SteerNote[]): SteerNoteView[] {
+export function steerHistory(
+  events: readonly WorkflowEvent[],
+  pending: readonly SteerNote[],
+  pendingHeld: readonly HeldNote[] = [],
+): SteerNoteView[] {
   const out: SteerNoteView[] = [];
   for (const event of events) {
     if (event.type !== "step-completed") continue;
-    const turn = STEER_STEP.exec(event.name ?? "");
-    if (turn === null) continue;
-    const result = resultOf(event);
-    if (!Array.isArray(result)) continue;
-    for (const text of result) {
-      if (typeof text === "string" && text !== "") out.push({ text, at: event.at, state: "delivered", turn: Number(turn[1]) });
+    const steer = STEER_STEP.exec(event.name ?? "");
+    if (steer !== null) {
+      const result = resultOf(event);
+      if (!Array.isArray(result)) continue;
+      for (const text of result) {
+        if (typeof text === "string" && text !== "") out.push({ text, at: event.at, state: "delivered", turn: Number(steer[1]) });
+      }
+      continue;
+    }
+    // D2 held messages: `turn-N-held` / `turn-N-finish-held` record the
+    // queued messages and boundary interrupts a checkpoint released.
+    const held = HELD_STEP.exec(event.name ?? "");
+    if (held !== null) {
+      const result = resultOf(event);
+      if (!Array.isArray(result)) continue;
+      for (const item of result) {
+        const r = record(item);
+        if (typeof r.text !== "string" || (r.mode !== "queue" && r.mode !== "interrupt")) continue;
+        out.push({
+          text: r.text,
+          at: event.at,
+          state: "delivered",
+          turn: Number(held[1]),
+          mode: r.mode,
+          ...(r.mode === "interrupt" ? { effect: "none" as const } : {}),
+        });
+      }
+      continue;
+    }
+    // ...and interrupts that landed on an action, recorded on its exec result.
+    const exec = EXEC_STEP.exec(event.name ?? "");
+    if (exec !== null) {
+      const interrupt = record(record(resultOf(event)).interrupt);
+      const effect = interrupt.effect;
+      if (!Array.isArray(interrupt.notes) || (effect !== "not-done" && effect !== "done" && effect !== "unknown")) continue;
+      for (const text of interrupt.notes) {
+        if (typeof text === "string") out.push({ text, at: event.at, state: "delivered", turn: Number(exec[1]), mode: "interrupt", effect });
+      }
     }
   }
   for (const note of pending) out.push({ text: note.text, at: note.createdAt, state: "pending" });
+  for (const note of pendingHeld) out.push({ text: note.text, at: note.createdAt, state: "pending", mode: note.mode });
+  return out;
+}
+
+/**
+ * Agent replies (D2): every ```reply the loop accepted, parsed from the
+ * `turn-N-think` results with the dialect the run's input recorded. A run
+ * whose input never admitted replies has none, whatever its text contains —
+ * the same answer the loop gave it.
+ */
+/** Did the run's recorded input admit ```reply (input.steerReply)? */
+export function admitsReplies(events: readonly WorkflowEvent[]): boolean {
+  const started = events.find((e) => e.type === "run-started");
+  return record(record(started?.data).input).steerReply === true;
+}
+
+export function replyHistory(events: readonly WorkflowEvent[]): AgentReplyView[] {
+  const started = events.find((e) => e.type === "run-started");
+  const input = record(record(started?.data).input);
+  if (input.steerReply !== true) return [];
+  // The same dialect settings conversation() uses (workspace.ts) — both
+  // surfaces render what the loop's own parseReply delivered.
+  const dialect = replyDialectOf(input);
+  const out: AgentReplyView[] = [];
+  for (const event of events) {
+    if (event.type !== "step-completed") continue;
+    const think = THINK_STEP.exec(event.name ?? "");
+    if (think === null) continue;
+    const result = resultOf(event);
+    const raw = typeof result === "string" ? result : typeof record(result).text === "string" ? (record(result).text as string) : null;
+    if (raw === null) continue;
+    const text = parseReply(raw, dialect);
+    if (text !== null) out.push({ text, at: event.at, turn: Number(think[1]) });
+  }
   return out;
 }
 
@@ -308,6 +412,7 @@ export async function runThread(deps: ThreadDeps, runId: string): Promise<Thread
     // a terminal run has none, and skipping the read keeps the scan bounded.
     const terminal = ["completed", "failed", "cancelled"].includes(meta.status);
     const pending = terminal ? [] : await deps.steer.pending(id).catch(() => []);
+    const pendingHeld = terminal || deps.steer.pendingHeld === undefined ? [] : await deps.steer.pendingHeld(id).catch(() => []);
     runs.push({
       runId: id,
       parentRunId: typeof parent === "string" ? parent : null,
@@ -317,8 +422,9 @@ export async function runThread(deps: ThreadDeps, runId: string): Promise<Thread
       model: meta.model,
       harness: harnessLabel(events),
       summary: summaryOf(events),
-      steers: steerHistory(events, pending),
+      steers: steerHistory(events, pending, pendingHeld),
       asks: askHistory(events),
+      ...(admitsReplies(events) ? { replies: replyHistory(events) } : {}),
     });
   }
   return { run: runId, root, runs, truncated };
