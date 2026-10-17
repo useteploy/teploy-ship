@@ -16,13 +16,18 @@ import { systemPrompt } from "./prompt.js";
 import { durableAgent } from "./durable.js";
 import type { ExecutorProvider } from "./durable.js";
 import {
+  DELEGATE_CHILD_ASK_REFUSED,
   DELEGATE_CHILD_REFUSED,
   DELEGATE_MAX_CEILING,
   DELEGATE_MAX_DEFAULT,
   DELEGATE_UNAVAILABLE,
+  DELEGATE_WAIT_MS_CEILING,
+  DELEGATE_WAIT_MS_DEFAULT,
   childTaskPrompt,
   delegateCapMessage,
   delegateMaxChildren,
+  delegateTimeoutTransfer,
+  delegateWaitMs,
   delegatedChildRunId,
   delegationKey,
   parseDelegationRecord,
@@ -147,6 +152,11 @@ test("the prompt offers delegation only when the run input admits it", () => {
   const on = systemPrompt({ workdir: "/work", task: "t", delegate: true });
   assert.ok(on.includes("# Delegating work"));
   assert.ok(on.includes("hard-capped"));
+  // The writer rule (2026-10-17 live finding): children are read-only
+  // researchers, the parent is the only writer.
+  assert.ok(on.includes("READ-ONLY researcher"));
+  assert.ok(on.includes("only writer"));
+  assert.ok(on.includes("never the edit itself"));
 });
 
 // ---------------------------------------------------------------- pure helpers
@@ -193,14 +203,36 @@ test("the transfer observation names the child, its status, and what to do about
   const cancelled = transferObservation({ childRunId: "run-del-1", status: "cancelled", summary: "stopped" });
   assert.ok(cancelled.includes("CANCELLED"));
   assert.ok(transferObservation({ childRunId: "r", status: "completed", summary: "s", pr: "https://x/1" }).includes("Pull request: https://x/1"));
+  // The wait bound's honest ending: the child never finished, and the parent
+  // is told to stop waiting rather than to read a report that does not exist.
+  const timedOut = transferObservation(delegateTimeoutTransfer("run-del-1", 30 * 60_000));
+  assert.ok(timedOut.startsWith("Delegated run run-del-1 timed out:"));
+  assert.ok(timedOut.includes("did not reach a terminal state"));
+  assert.ok(timedOut.includes("Do not wait for it again"));
 });
 
-test("the child task prompt states lineage and the standalone-brief rule", () => {
+test("delegateWaitMs defaults narrow, honours zero, clamps wide", () => {
+  assert.equal(delegateWaitMs({}), DELEGATE_WAIT_MS_DEFAULT);
+  assert.equal(delegateWaitMs({ SHIP_DELEGATE_WAIT_MS: "" }), DELEGATE_WAIT_MS_DEFAULT);
+  assert.equal(delegateWaitMs({ SHIP_DELEGATE_WAIT_MS: "garbage" }), DELEGATE_WAIT_MS_DEFAULT);
+  assert.equal(delegateWaitMs({ SHIP_DELEGATE_WAIT_MS: "-1" }), DELEGATE_WAIT_MS_DEFAULT);
+  // 0 is the explicit degenerate bound: one poll, then the honest transfer.
+  assert.equal(delegateWaitMs({ SHIP_DELEGATE_WAIT_MS: "0" }), 0);
+  assert.equal(delegateWaitMs({ SHIP_DELEGATE_WAIT_MS: "45000" }), 45000);
+  assert.equal(delegateWaitMs({ SHIP_DELEGATE_WAIT_MS: "999999999" }), DELEGATE_WAIT_MS_CEILING);
+});
+
+test("the child task prompt states lineage, the standalone-brief rule and the read-only role", () => {
   const task = childTaskPrompt({ parentRunId: "run-parent", turn: 3, task: "Do the work.", repo: "https://forge.example/team/repo.git", path: "src/foo" });
   assert.ok(task.includes("[Delegated task, claimed by run run-parent at its turn 3]"));
   assert.ok(task.includes("https://forge.example/team/repo.git"));
   assert.ok(task.includes("scoped to src/foo/"));
   assert.ok(task.endsWith("Do the work."));
+  // Read-only researcher (2026-10-17 live finding): the child edits nothing
+  // and the parent applies any proposed change itself.
+  assert.ok(task.includes("READ-ONLY researcher"));
+  assert.ok(task.includes("cannot edit files, push, or open a pull request"));
+  assert.ok(task.includes("applies any change itself"));
 });
 
 // ---------------------------------------------------------------- the runtime control
@@ -252,7 +284,7 @@ const childInputOf = async (runtime: ShipRuntime, runId: string): Promise<Record
   return ((started?.data as { input?: Record<string, unknown> })?.input ?? {}) as Record<string, unknown>;
 };
 
-test("spawn records lineage, inherits gates and source, and never admits delegation on the child", async () => {
+test("spawn records lineage, inherits gates and source, and enqueues a read-only child", async () => {
   const { runtime, restore } = await fileRuntimeIn({ SHIP_DELEGATE: "on" });
   try {
     await enqueueParent(
@@ -274,9 +306,16 @@ test("spawn records lineage, inherits gates and source, and never admits delegat
     assert.equal(input.delegateChild, true);
     // The one-level rule at enqueue: SHIP_DELEGATE=on does NOT reach the child.
     assert.equal(input.delegate, undefined);
-    // Gates: trust, plan and the declared network tier are copied, never widened.
+    // READ-ONLY, ALWAYS (2026-10-17 live finding): the child is a scan
+    // whatever the parent is — and the parent's plan flag is NOT copied,
+    // because a child that cannot change anything owes no plan review.
+    assert.equal(input.mode, "scan");
+    assert.equal(input.plan, undefined);
+    // A child is unattended: the ask action is never offered (and the loop's
+    // belt refuses a stray block by name — see the loop tests below).
+    assert.equal(input.ask, undefined);
+    // Gates: trust and the declared network tier are copied, never widened.
     assert.equal(input.trust, "external");
-    assert.equal(input.plan, true);
     assert.equal(input.sandboxNetwork, "allowlist");
     assert.equal(input.repo, "https://forge.example/team/repo.git");
     // Spend: the child carries the parent's source, so its settle lands in
@@ -292,6 +331,50 @@ test("spawn records lineage, inherits gates and source, and never admits delegat
     const record = parseDelegationRecord(await runtime.config.get(delegationKey("run-parent")), "run-parent");
     assert.equal(record?.entries.length, 1);
     assert.equal(record?.entries[0]?.childRunId, childId);
+  } finally {
+    restore();
+  }
+});
+
+test("a child enqueued from a change parent is a read-only scan: no edits, no push, no PR, no human parks", async () => {
+  const { runtime, restore } = await fileRuntimeIn({ SHIP_DELEGATE: "on" });
+  try {
+    // A change-journey parent carrying every change-shaped gate its repo has.
+    await enqueueParent(
+      runtime,
+      "run-change",
+      {
+        task: "fix the parser",
+        repo: "https://forge.example/team/repo.git",
+        trust: "external",
+        plan: true,
+        sandboxNetwork: "allowlist",
+        changeClass: true,
+        mergeGate: true,
+        autoMerge: true,
+      },
+      { source: "github", model: "glm-5.3" },
+    );
+    const control = delegateControlFromRuntime(runtime);
+    const spawned = await control.spawn({ parentRunId: "run-change", turn: 1, task: "Where does the parser reject RFC 3339 durations, and what exact change would fix it?" });
+    assert.ok(spawned.ok, spawned.ok ? "" : spawned.reason);
+    const child = await childInputOf(runtime, (spawned as { childRunId: string }).childRunId);
+    // The live finding's whole fix in one assertion set: the child is a SCAN,
+    // so its publish gate is disabled (no push, no pull request — the parent
+    // produces the single PR) and ```edit / ```create are refused in the loop.
+    assert.equal(child.mode, "scan");
+    // None of the parent's change-shaped gates reach the child — no
+    // change-class verdict, no merge gate, no auto-merge — so there is no
+    // human park (approve-merge included) for the parent's wait to block on.
+    assert.equal(child.changeClass, undefined);
+    assert.equal(child.mergeGate, undefined);
+    assert.equal(child.autoMerge, undefined);
+    assert.equal(child.requireEdit, undefined);
+    assert.equal(child.tests, undefined);
+    // Unattended: no ask, no delegation of its own.
+    assert.equal(child.ask, undefined);
+    assert.equal(child.delegate, undefined);
+    assert.equal(child.delegateChild, true);
   } finally {
     restore();
   }
@@ -372,6 +455,10 @@ test("enqueue materialises SHIP_DELEGATE and suppresses it for scans and childre
     const kid = await childInputOf(runtime, "run-kid");
     assert.equal(kid.delegateChild, true);
     assert.equal(kid.delegate, undefined);
+    // The enqueue belt: a delegation CHILD is a scan even when its caller
+    // forgot to say so, and it is never offered the ask.
+    assert.equal(kid.mode, "scan");
+    assert.equal(kid.ask, undefined);
   } finally {
     restore();
   }
@@ -535,4 +622,89 @@ test("the scan belt refuses delegation even on a hand-crafted scan input", async
   assert.equal(fake.spawnCount(), 0);
   const names = (await store.load("run-scan")).filter((e) => e.type === "step-completed").map((e) => e.name);
   assert.ok(!names.some((n) => n?.includes("delegate")), "a scan delegates nothing");
+});
+
+// ------------------------------------------------- read-only children (2026-10-17)
+
+test("a delegated child's ```ask never parks: refused by name, the run continues", async () => {
+  const { model } = reactiveModel([
+    "```ask\nShould I look at the parser or at the caller?\n```",
+    (obs) => (obs === DELEGATE_CHILD_ASK_REFUSED ? "```bash\necho deciding-myself\n```" : "```bash\necho no-refusal\n```"),
+    (obs) => (obs.includes("deciding-myself") ? "```finish\nDecided myself.\n```" : "```bash\necho wrong\n```"),
+    (obs) => (obs.includes("Before finishing") ? "```bash\necho proof\n```" : "```bash\necho unexpected\n```"),
+    "```finish\nDone and proven.\n```",
+  ]);
+  const provider = await localProvider();
+  const fake = fakeControl();
+  const wf = durableAgent({ model, executor: provider, delegate: fake.control });
+  const store = new MemoryEventStore();
+  // A hand-crafted child input carrying ask: true — the exact shape a pre-fix
+  // enqueue produced — so this pins the loop's belt, not just the enqueue.
+  const done = await executeRun({ workflow: wf, runId: "run-kid-ask", store, input: { task: "t", delegateChild: true, ask: true } });
+  assert.equal(done.status, "completed", "a child ask is a refusal, never a park");
+  const events = await store.load("run-kid-ask");
+  assert.ok(!events.some((e) => e.type === "event-waiting"), "a child ask records no event wait");
+  assert.ok(!events.some((e) => e.type === "step-completed" && (e.name === "turn-0-snapshot" || e.name === "turn-0-restore")), "a refused ask snapshots nothing");
+});
+
+test("a delegated child's approval-required action is denied automatically, never parked", async () => {
+  const { model } = reactiveModel([
+    "```bash\necho needs-approval\n```",
+    (obs) => (obs.includes("denied automatically") ? "```bash\necho another-way\n```" : "```bash\necho no-denial\n```"),
+    (obs) => (obs.includes("another-way") ? "```finish\nWent another way.\n```" : "```bash\necho wrong\n```"),
+    (obs) => (obs.includes("Before finishing") ? "```bash\necho proof\n```" : "```bash\necho unexpected\n```"),
+    "```finish\nDone and proven.\n```",
+  ]);
+  const provider = await localProvider();
+  const wf = durableAgent({ model, executor: provider, approveAction: () => "required" });
+  const store = new MemoryEventStore();
+  const done = await executeRun({ workflow: wf, runId: "run-kid-approval", store, input: { task: "t", delegateChild: true } });
+  assert.equal(done.status, "completed", "an approval on a child is an automatic denial, never a park");
+  const events = await store.load("run-kid-approval");
+  assert.ok(!events.some((e) => e.type === "event-waiting"), "no approval wait is recorded");
+});
+
+test("a child that never finishes yields an honest timeout transfer, not an infinite park", async () => {
+  const saved = process.env.SHIP_DELEGATE_WAIT_MS;
+  process.env.SHIP_DELEGATE_WAIT_MS = "0"; // the degenerate bound: one poll, then give up
+  try {
+    const { model, callCount } = reactiveModel([
+      "```delegate\nSlow child.\n```",
+      (obs) => (obs.includes("Delegated run") && obs.includes("timed out:") ? "```bash\necho moving-on\n```" : "```bash\necho no-timeout\n```"),
+      (obs) => (obs.includes("moving-on") ? "```finish\nDid the work myself.\n```" : "```bash\necho wrong\n```"),
+      (obs) => (obs.includes("Before finishing") ? "```bash\necho proof\n```" : "```bash\necho unexpected\n```"),
+      "```finish\nDone and proven.\n```",
+    ]);
+    const provider = await localProvider();
+    // A control whose child never becomes terminal — the orphaned child of
+    // the live finding's worst case.
+    const never: DelegateControl = {
+      async spawn() {
+        return { ok: true, childRunId: "run-del-stuck" };
+      },
+      async outcome() {
+        return null;
+      },
+    };
+    const wf = durableAgent({ model, executor: provider, delegate: never });
+    const store = new MemoryEventStore();
+    const done = await executeRun({ workflow: wf, runId: "run-stuck-parent", store, input: { task: "t", delegate: true } });
+    assert.equal(done.status, "completed", "the parent gives up on the child and finishes its own run");
+    const waits = (await store.load("run-stuck-parent")).filter((e) => e.type === "step-completed" && e.name === "turn-0-delegate-wait");
+    assert.equal(waits.length, 1, "the bound expires on the first poll — no sleep park follows");
+    const result = (waits.at(-1)?.data as { result?: unknown }).result as DelegateTransfer;
+    assert.equal(result.status, "timeout");
+    assert.equal(result.childRunId, "run-del-stuck");
+    assert.ok(typeof result.summary === "string" && result.summary.includes("did not reach a terminal state"));
+    // Replay returns the recorded timeout transfer without re-reading the child.
+    const before = callCount();
+    const again = await executeRun({ workflow: wf, runId: "run-stuck-parent", store });
+    assert.equal(again.status, "completed");
+    assert.equal(callCount(), before, "a replay re-calls no model turn");
+    const replayed = (await store.load("run-stuck-parent")).filter((e) => e.type === "step-completed" && e.name === "turn-0-delegate-wait");
+    assert.deepEqual((replayed.at(-1)?.data as { result?: unknown }).result, result, "the timeout transfer is the recorded result replay reads");
+  } finally {
+    if (saved === undefined) delete process.env.SHIP_DELEGATE_WAIT_MS;
+    else process.env.SHIP_DELEGATE_WAIT_MS = saved;
+  }
 });
