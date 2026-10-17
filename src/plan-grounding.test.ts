@@ -179,6 +179,49 @@ test("prose is not a claim: plain words and URLs in backticks are not extracted;
   assert.equal(refs[0]!.line, 3);
 });
 
+test("prose file names ground: the production plan that used to report nothing (2026-10-17 A5 soak)", async () => {
+  const r = await repo({ "index.html": "<p>old text</p>\n", "test.sh": "echo hi\n" });
+  try {
+    // Verbatim shape of the GLM-5.3 plan: files named in plain prose, no backticks.
+    const plan = "read index.html to find the paragraph, and read test.sh … change only the paragraph text in index.html … check for an existing .ship/flow.mjs";
+    const rep = await groundPlanFromExecutor(r.executor, plan);
+    const names = rep.refs.map((x) => `${x.kind}:${x.name}`);
+    assert.deepEqual(names, ["file:index.html", "file:test.sh", "file:.ship/flow.mjs"]);
+    assert.ok(rep.refs.every((x) => x.origin === "prose"), "prose-derived refs are marked");
+    assert.equal(byName(rep, "index.html").status, "grounded");
+    assert.equal(byName(rep, "index.html").line, 1);
+    assert.equal(byName(rep, "test.sh").status, "grounded");
+    assert.equal(byName(rep, ".ship/flow.mjs").status, "ungrounded");
+    assert.deepEqual(rep.counts, { grounded: 2, ungrounded: 1, proposed: 0, unchecked: 0 });
+  } finally { await r.done(); }
+});
+
+test("prose negative controls: domains, versions, abbreviations and sentence ends are not file refs", () => {
+  const plan = [
+    "visit example.com",
+    "version 1.2.3",
+    "api.z.ai",
+    "e.g.",
+    "i.e.",
+    "done.",
+  ].join("\n");
+  assert.deepEqual(extractRefs(plan), []);
+});
+
+test("prose and backticks: same path both ways dedupes to one ref in source order; backtick rules unchanged", () => {
+  const refs = extractRefs([
+    "First read index.html, then `index.html` again; `not a path` stays prose.",
+    "See docs/notes.md and (docs/gone.md).",
+  ].join("\n"));
+  const names = refs.map((x) => `${x.kind}:${x.name}`);
+  assert.deepEqual(names, ["file:index.html", "file:docs/notes.md", "file:docs/gone.md"]);
+  assert.equal(refs[0]!.origin, "prose"); // first occurrence in source order wins
+  assert.equal(refs[0]!.line, 1);
+  assert.equal(refs[1]!.line, 2);
+  assert.equal(refs[2]!.line, 2);
+  assert.equal(refs[2]!.creates, false);
+});
+
 test("hostile plan text never reaches a shell: a symbol with metacharacters is not extracted or searched", async () => {
   const r = await repo(TREE);
   try {

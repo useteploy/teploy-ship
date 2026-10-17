@@ -1,5 +1,29 @@
 # Open audit items
 
+## 2026-10-17 — plan grounding saw nothing on plain-prose plans (GLM-5.3)
+
+Found live on production 2026-10-17 (A5 soak): with
+`SHIP_PLAN_GROUNDING=on`, a GLM-5.3 plan that named its files in plain
+prose ("read index.html to find the paragraph, and read test.sh … check
+for an existing .ship/flow.mjs") produced a grounding report with
+`refs: []` and every count 0. `extractRefs` read only backtick spans and
+fenced command lines; this model writes file names unquoted, so real
+plans grounded nothing and the advisory said "no files, symbols or
+commands" about a plan full of them. Fixed (branch
+`fix/plan-grounding-prose`): `extractRefs` also scans the prose between
+backtick spans (never inside fences) for bare file-path tokens that pass
+`looksLikePath` with surrounding punctuation stripped — conservatively:
+emails, `1.2.3`-style versions and hostnames are refused (`example.com`,
+`api.z.ai`: a dot-suffix that is not a known FILE_EXT is TLD-like, with
+or without a path), URLs are refused by `looksLikePath` itself, and
+symbols and commands stay backtick/fence-only. Prose-derived refs carry
+an additive `origin: "prose"` field; report shape is otherwise
+unchanged. Pinned by failing-on-main tests in
+`src/plan-grounding.test.ts`: the production plan text yields
+`index.html`, `test.sh`, `.ship/flow.mjs` (grounded / grounded /
+ungrounded against a real git fixture), negative controls (`example.com`,
+`1.2.3`, `api.z.ai`, `e.g.`, `i.e.`, `done.`) extract nothing, and
+backtick behaviour is unchanged (same path both ways dedupes to one ref).
 ## 2026-10-17 — delegated children were writable change runs: read-only children, single parent PR (FIXED IN CODE, re-enable owed)
 
 Found live on production 2026-10-17 (soak A4, run-request-1032fa9d…): a
