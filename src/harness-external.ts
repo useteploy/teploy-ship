@@ -1164,6 +1164,14 @@ export function externalAdapter(
           // --max-budget-usd again, so a steered run could spend several
           // times its ceiling.
           const remainingTurns = budget.maxSteps - turns;
+          // A cost cap bounds a resume only if spend so far is KNOWN. Unknown
+          // (unpriced) spend on a harness that is billed per token (opencode
+          // on a model it cannot price) would otherwise count as $0 and let
+          // every resume run uncapped, so the resume is refused with a reason.
+          // A harness that is unpriced by design (a subscription: claude with
+          // an OAuth token, codex) has no dollar cap to honour and stays
+          // bounded by its turn limit.
+          const spendUnknown = budget.maxRunCostUSD > 0 && usage.priced === false && spec.priced(envFile(externalHarnessConfig(id, env).forward, env).names);
           const spent = usage.priced === false ? 0 : (usage.costUSD ?? 0);
           const remainingCost = budget.maxRunCostUSD - spent;
           const resumed = await ws.ctx.step(`${p}harness-resume-${round}`, async (): Promise<HarnessRunRecord | { delivered: false; reason: string }> => {
@@ -1184,6 +1192,9 @@ export function externalAdapter(
             }
             if (budget.maxSteps > 0 && remainingTurns <= 0) {
               return { delivered: false, reason: `the run has used its ${budget.maxSteps}-turn limit, so there is no budget left to act on the note. The note was not delivered; send a follow-up instead.` };
+            }
+            if (spendUnknown) {
+              return { delivered: false, reason: `the run's spend is unpriced, so its $${budget.maxRunCostUSD.toFixed(2)} cost limit cannot be enforced across a resume. The note was not delivered; send a follow-up instead.` };
             }
             if (budget.maxRunCostUSD > 0 && remainingCost < 0.01) {
               return { delivered: false, reason: `the run has spent its $${budget.maxRunCostUSD.toFixed(2)} cost limit, so there is no budget left to act on the note. The note was not delivered; send a follow-up instead.` };

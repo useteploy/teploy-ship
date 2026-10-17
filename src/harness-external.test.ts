@@ -1269,3 +1269,73 @@ test("selectAdapter matches id AND version across the registered aliases", () =>
   assert.throws(() => selectAdapter(adapters, { id: "opencode", version: "7" }), /refuses to replay under a different program/);
   assert.throws(() => selectAdapter(adapters, { id: "codex", version: "2" }), /refuses to replay under a different program/);
 });
+
+test("unpriced spend under a cost cap refuses the resume on the record (opencode v2); a subscription run stays bounded by turns and still resumes", async () => {
+  const recordTo = await mkdtemp(join(tmpdir(), "oc-v2-unpriced-rec-"));
+  const { provider, runs } = await workspaceWithFakeOpencode({ recordTo, versionLine: "2.0.26", stream: V2_TOOL_STREAM, resumeStream: V2_RESUME_STREAM });
+  const wf = durableAgent({
+    model: neverModel,
+    executor: provider,
+    workdir: ".",
+    harnesses: externalAdapters({ env: {}, steer: scriptedSteer({ "ext-0": ["tighten it"] }) }),
+    maxSteps: 40,
+    maxRunCostUSD: 2,
+  });
+  const store = new MemoryEventStore();
+  const input = { task: "t", steer: true, harness: { id: "opencode", version: HARNESS_VERSIONS.opencode } };
+  const outcome = await executeRun({ workflow: wf, runId: "run-oc-unpriced", store, input });
+  assert.equal(outcome.status, "completed", JSON.stringify(outcome));
+  assert.equal((outcome.output as DurableAgentOutput).usage?.priced, false, "the premise: the main run is unpriced");
+  const events = await store.load("run-oc-unpriced");
+  const refusal = stepResult<{ delivered: false; reason: string }>(events, "harness-resume-0");
+  assert.equal(refusal.delivered, false);
+  assert.match(refusal.reason, /unpriced.*cost limit cannot be enforced/);
+  assert.equal(await runs(), 1, "no resume process started");
+  assert.deepEqual(stepResult<string[]>(events, "harness-steer-undelivered"), ["tighten it"]);
+
+  // Subscription claude (no API key): no dollar flag exists to enforce, the
+  // turn limit is the bound, and the resume proceeds exactly as before.
+  const sub = await workspaceWithScriptedClaude({ recordTo: await mkdtemp(join(tmpdir(), "cc-sub-rec-")), main: claudeResult({ num_turns: 2 }), resumes: [claudeResult({ num_turns: 1, result: "resumed" })] });
+  const subWf = durableAgent({
+    model: neverModel,
+    executor: sub.provider,
+    workdir: ".",
+    harnesses: externalAdapters({ env: {}, steer: scriptedSteer({ "ext-0": ["also x"] }) }),
+    maxSteps: 10,
+    maxRunCostUSD: 2,
+  });
+  const subStore = new MemoryEventStore();
+  await executeRun({ workflow: subWf, runId: "run-cc-sub", store: subStore, input: { task: "t", steer: true, harness: { id: "claude-code", version: HARNESS_VERSIONS["claude-code"] } } });
+  const resumed = stepResult<{ exitCode: number; turns: number }>(await subStore.load("run-cc-sub"), "harness-resume-0");
+  assert.equal(resumed.turns, 1, "the subscription run resumed");
+  assert.match((await sub.args())[1]!, /--max-turns 8 /);
+});
+
+test("external drain keys never collide with D2's held-claim keys or the native steerReply drain keys", async () => {
+  const recordTo = await mkdtemp(join(tmpdir(), "oc-v2-keys-rec-"));
+  const { provider } = await workspaceWithFakeOpencode({ recordTo, versionLine: "2.0.26", stream: V2_TOOL_STREAM, resumeStream: V2_RESUME_STREAM });
+  const seen: string[] = [];
+  const spy = { drain: async (_r: string, turn: string | number) => { seen.push(String(turn)); return turn === "ext-0" ? ["note"] : []; } };
+  const wf = durableAgent({ model: neverModel, executor: provider, workdir: ".", harnesses: externalAdapters({ env: {}, steer: spy }) });
+  await executeRun({ workflow: wf, runId: "run-oc-keys", store: new MemoryEventStore(), input: { task: "t", steer: true, harness: { id: "opencode", version: HARNESS_VERSIONS.opencode } } });
+  assert.deepEqual(seen, ["ext-0", "ext-1", "ext-final"]);
+  for (const prefix of ["", "attempt-0-", "attempt-1-"]) {
+    for (const key of seen.map((k) => `${prefix}${k}`)) {
+      assert.ok(!/^[qi]:/.test(key), `${key} must not look like a held-claim key (q:/i:)`);
+      assert.ok(!/^(?:attempt-\d+-)?\d+$/.test(key), `${key} must not look like a native steerReply drain key (<prefix><turn>)`);
+    }
+  }
+  // And through a real store: external-keyed drains and D2 claims of the same
+  // names' shapes stay independent of one another.
+  const { FileSteerStore } = await import("./steer.js");
+  const store = new FileSteerStore(await mkdtemp(join(tmpdir(), "steer-keys-")));
+  await store.add("r", "plain");
+  await store.add("r", "queued", "queue");
+  await store.add("r", "int", "interrupt");
+  assert.deepEqual(await store.drain("r", "ext-0"), ["plain"]);
+  assert.deepEqual(await store.claimHeld("r", "queue", "q:0"), ["queued"]);
+  assert.deepEqual(await store.claimHeld("r", "interrupt", "i:0"), ["int"]);
+  assert.deepEqual(await store.drain("r", "ext-0"), ["plain"], "idempotent replay of the external key");
+  assert.deepEqual(await store.drain("r", 0), [], "native turn key 0 does not re-claim what ext-0 took");
+  assert.deepEqual(await store.claimHeld("r", "queue", "q:0"), ["queued"], "idempotent replay of the held key");
+});

@@ -1095,3 +1095,81 @@ locks; run `node scripts/refresh-framework-locks.mjs` after the core/CLI/create
 release becomes available, then install/test/build before integrating this branch.
 No production rollout or browser acceptance is claimed. See
 [FRAMEWORK_UPGRADE.md](docs/FRAMEWORK_UPGRADE.md) for validation and rollback.
+
+## 2026-10-16 — D2 two-way steering (`SHIP_STEER_REPLY`, default off)
+
+Built behind the flag (default off, pending review and a soak): agent
+```reply into the thread, steer/queue modes, operator interrupt at safe
+points, thread-view rendering. Design and replay semantics in
+[STEERING_DESIGN.md](docs/STEERING_DESIGN.md).
+
+### 2026-10-16 — PR review fixes
+
+Security review of the branch, fixed here:
+
+- **Held-store keys now carry the attempt.** `claimHeld`'s `q:`/`i:` keys and
+  the drain's turn key were keyed by turn number alone, so on a multi-attempt
+  run attempt 1's turn N answered attempt 0's claim of the same number and
+  re-delivered its queued messages, interrupts and drained notes (and a
+  re-claimed `i:N:before` skipped attempt 1's action outright). Every key now
+  carries `stepPrefix`; single-attempt runs have an empty prefix, so their
+  store bytes are unchanged.
+- **The plain drain has the same flaw on flag-off runs, and it is
+  deliberately NOT fixed there.** `drain(runId, turn)` is keyed by turn
+  number, so attempt 1's turn-N drain answers attempt 0's recorded claim and
+  re-delivers its notes on ANY multi-attempt run, steerReply or not. The fix
+  applies the attempt-scoped key only when `input.steerReply` is set:
+  changing the key for flag-off runs would change live store bytes under
+  in-flight runs whose logs say nothing about it, which is the class of
+  change the upgrade fence exists to prevent. Until a flag-day can carry it,
+  flag-off multi-attempt runs re-deliver drained notes to later attempts
+  (advisory duplication — the notes were real operator instructions; nothing
+  is lost or forged). Revisit when a materialised input field can admit the
+  new keying (the shape `drain(runId, turn: number | string)` already
+  accepts).
+- **`NucleusSteerStore.claimHeld` is idempotent per key.** The old
+  stamp-then-read swept rows that arrived after a claim into a rerun with
+  the same key (a superset), consuming them without delivering them. It now
+  answers a key that already claimed from those rows alone, the file store's
+  contract.
+- **The operator-impersonation fence is hardened** (fenceOperatorLines):
+  NFKC, zero-width/format-character stripping, Cyrillic/Greek homoglyph
+  folding and the typographic apostrophe are folded in a detection copy; the
+  framing match runs anywhere in a line (markdown prefixes, quoting, mid-line
+  no longer shield it) and covers every framing the loop itself emits —
+  drain, queued, interrupt, ask answers ("Operator's answer", "did not
+  answer"), plan approvals ("The operator approved …", edited and plain) and
+  denials ("Action denied by the operator").
+- **The task text and condense recaps are fenced the same way** on steerReply
+  runs (markers "[task text, not the operator]" / "[recap, not the
+  operator]"; the recap fence is applied inside the recorded step so replay
+  returns the recorded bytes rather than fencing twice).
+- **The conversation view renders only the first reply block per turn**,
+  through the loop's own `parseReply` (shared with `replyHistory` via a
+  common dialect builder) — a second ```reply fence was never delivered and
+  must not read as a second message.
+
+Considered and rejected for now: a per-run nonce on genuine operator turns
+(materialised at enqueue, so the prompt could say only nonce-bearing
+operator text is authentic). The framings the nonce would have to mark span
+paths the flag does not gate — ```ask answers, plan approvals and denials
+are written by the live loop and the external-harness runs too, and a nonce
+that appears on only some of them teaches the model less than the current
+"only user turns the system writes" rule. It fits cleanly only if every
+operator-adjacent surface adopts it at once; revisit with the live soak.
+
+Open, deliberately not in the slice:
+
+- **A running bash command cannot be interrupted.** The executor contract
+  (`@neutron-build/agents` `ExecOptions`) has no abort, and what the sandbox
+  daemon does when an exec stream is dropped is unverified. So an interrupt
+  that lands during bash lets the command finish and records effect `done`.
+  The fix belongs upstream (an exec abort plus a daemon-side kill of the
+  process group), followed by a Ship change that passes the signal through
+  `runAction`'s bash branch. Only python kernel cells are cancelled mid-flight
+  today.
+- The kernel cancel issues a second exec while the first (the blocked waiter)
+  is still running. Proven on `LocalExecutor`, not yet against the live
+  sandbox daemon.
+- No live soak yet. The flag earns its own one-run flip (web + worker, both
+  enqueue) on the 2026-10-16 pattern.

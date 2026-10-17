@@ -76,6 +76,18 @@ Two recorded steps, both of which always record a value:
    earlier external log carries, and a replay walks the recorded rounds
    without starting a vendor process.
 
+   Two caveats. (1) A run recorded under the `opencode@1` alias that has not
+   yet reached its preflight step (queued, or the worker restarted before it)
+   executes on the v2 line when the worker's binary is 2.x: the alias fixes
+   what a REPLAY reads, not what a first execution runs. Replay of recorded
+   steps is unaffected. (2) Unpriced spend is not treated as zero: when a run
+   has a dollar cap and its spend so far is unpriced (opencode on a model it
+   cannot price), a steering resume is refused on the record rather than run
+   uncapped. Subscription runs (claude with an OAuth token, codex) have no
+   dollar flag and stay bounded by their turn limit. External runs take plain
+   steering only; queued messages and interrupts (D2) are refused for them,
+   since the adapter never claims held notes.
+
 The recorded step is the exit — one step, one result — but the run is not a
 blank while it executes: on a sandbox executor the exec is streamed
 (`execStream`, durable.ts, over the daemon's SSE), the harness's event stream

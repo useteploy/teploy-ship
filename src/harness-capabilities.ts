@@ -75,7 +75,7 @@ const DECLARATIONS: Record<string, HarnessDeclaration> = {
       browser: { status: "partial", reason: "```look a11y observation when input.look (SHIP_LOOK, default off); pixel screenshots on an image look when input.lookImage (SHIP_LOOK_IMAGE_MODEL) — refused without it; the agent-authored browser flow only when verification.preview is configured (durable.ts, ladder-steps.ts)" },
       interruption: {
         status: "partial",
-        reason: "bounded by steps, budget and stuck detection (harness.ts HarnessBudget); mid-turn interruption is not shown by the source",
+        reason: "bounded by steps, budget and stuck detection (harness.ts HarnessBudget); with input.steerReply (SHIP_STEER_REPLY=on) an operator interrupt stops an action before it starts and cancels a running python kernel cell — a running bash command cannot be cancelled (no abort in the executor contract) and runs to completion (steer-reply.ts)",
       },
       approvals: { status: "supported", reason: "parks on approval, snapshots and restores when the executor can (durable.ts:703-717, 2249-2255)" },
       recovery: { status: "supported", reason: "stuck/settled detector via input.recovery (durable.ts:2300-2325)" },
@@ -208,6 +208,18 @@ export const PLAN_REVIEW_REFUSAL = "Plan review requires the native harness.";
 export const STEER_UNSUPPORTED_MESSAGE =
   "This run's harness cannot take mid-run messages: it is on the 1.x external contract, which reads only its starting prompt (the 2.x contracts steer by session resume). Cancel it and start a follow-up instead.";
 
+/**
+ * A queued message or an interrupt sent to a run whose recorded input never
+ * admitted two-way steering (D2, SHIP_STEER_REPLY=on at enqueue). The run
+ * still takes plain steering; only the new modes are refused.
+ */
+export const STEER_REPLY_UNSUPPORTED_MESSAGE =
+  "This run was started without two-way steering, so it cannot queue a message or be interrupted. Send the message without a mode instead.";
+
+/** Queue and interrupt on an external-harness run: the adapter drains plain notes only and never claims held notes, so they would sit unread. */
+export const STEER_REPLY_EXTERNAL_MESSAGE =
+  "This run's agent is an external harness, which takes plain steering messages only. Queued messages and interrupts are native-harness features; send the message without a mode instead.";
+
 const REFUSALS: Record<HarnessOperation, string> = {
   "plan-review": PLAN_REVIEW_REFUSAL,
   steer: STEER_UNSUPPORTED_MESSAGE,
@@ -293,6 +305,8 @@ export function conformanceCheck(
 interface RecordedHarness {
   /** The enqueue-time steer flag (input.steer): what admits the steer steps. */
   steer?: boolean | undefined;
+  /** D2 two-way steering flag (input.steerReply). */
+  steerReply?: boolean | undefined;
   harness?: { id?: unknown; version?: unknown } | undefined;
   harnessAttempts?: readonly { id?: unknown; version?: unknown }[] | undefined;
 }
@@ -357,11 +371,28 @@ export function steerRefusal(input: RecordedHarness | undefined, loopExited = fa
   return undefined;
 }
 
-/** True once an external adapter's steer loop has finished (single-harness runs; attempts each carry their own window). */
+/**
+ * Why a queued message or an interrupt must be refused for this run, or
+ * undefined when it may be held. Needs the D2 enqueue flag AND an all-native
+ * run: the external adapter never claims held notes.
+ */
+export function steerReplyRefusal(input: RecordedHarness | undefined): string | undefined {
+  if (recordedHarnessIds(input).some((id) => id !== "native")) return STEER_REPLY_EXTERNAL_MESSAGE;
+  if (input?.steerReply !== true) return STEER_REPLY_UNSUPPORTED_MESSAGE;
+  return undefined;
+}
+
+/**
+ * True once an external adapter's steer loop has finished. A single-harness
+ * run is done at its `harness-steer-undelivered` step; a multi-attempt run is
+ * done once the FINAL attempt recorded its own closing step (earlier attempts'
+ * windows ending says nothing about the attempt still running).
+ */
 export function steerLoopExited(
   input: RecordedHarness | undefined,
   events: readonly { type: string; name?: string | undefined }[],
 ): boolean {
-  if ((input?.harnessAttempts?.length ?? 0) >= 2) return false;
-  return events.some((e) => e.type === "step-completed" && e.name === "harness-steer-undelivered");
+  const attempts = input?.harnessAttempts?.length ?? 0;
+  const closing = attempts >= 2 ? `attempt-${attempts - 1}-harness-steer-undelivered` : "harness-steer-undelivered";
+  return events.some((e) => e.type === "step-completed" && e.name === closing);
 }

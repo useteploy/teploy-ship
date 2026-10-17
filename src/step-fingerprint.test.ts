@@ -299,6 +299,21 @@ const GATE_CASES: Array<{ what: string; input: RecordedInput; admits: string[]; 
     denies: ["step:*turn-*-fingerprint"],
   },
   {
+    // D2: two-way steering's held-message steps are admitted by steerReply
+    // alone — plain steering (every run since steer existed) does not admit
+    // them, so no in-flight run's fingerprint moves.
+    what: "a two-way-steering run (SHIP_STEER_REPLY=on at enqueue)",
+    input: { task: "t", steer: true, steerReply: true },
+    admits: ["step:*turn-*-steer", "step:*turn-*-held", "step:*turn-*-finish-held"],
+    denies: [],
+  },
+  {
+    what: "a plainly steered run (the default since steer existed)",
+    input: { task: "t", steer: true, ask: true },
+    admits: ["step:*turn-*-steer"],
+    denies: ["step:*turn-*-held", "step:*turn-*-finish-held"],
+  },
+  {
     what: "settle alone, which turns the recovery tracker on (durable.ts recoveryOn)",
     input: { task: "t", settle: true },
     admits: ["step:*turn-*-fingerprint"],
@@ -403,6 +418,24 @@ test("the boundary park (C1) moves only the fingerprints of runs that carry merg
     stepFingerprint(preChange),
     "and the pre-change run's fingerprint is exactly the table without the merge-gate rows",
   );
+});
+
+test("two-way steering (D2) moves only the fingerprints of runs that carry steerReply", () => {
+  // The default-off equivalence for the upgrade fence: every input a worker
+  // enqueues without SHIP_STEER_REPLY=on fingerprints exactly as the table
+  // without the D2 rows does — i.e. exactly as it did before this change.
+  const held = (s: WorkflowStep): boolean => s.key === "step:*turn-*-held" || s.key === "step:*turn-*-finish-held";
+  assert.equal(WORKFLOW_STEPS.filter(held).length, 2, "both D2 steps are declared");
+  const beforeTable = WORKFLOW_STEPS.filter((s) => !held(s));
+  for (const input of [
+    { task: "t" },
+    { task: "t", steer: true, ask: true },
+    { task: "t", repo: "r", steer: true, ask: true, look: true, delegate: true, requireEdit: true },
+  ] as RecordedInput[]) {
+    assert.equal(fingerprintOf(beforeTable, input), stepFingerprint(input), `flag-off input ${JSON.stringify(input)} is untouched`);
+  }
+  const on: RecordedInput = { task: "t", steer: true, ask: true, steerReply: true };
+  assert.notEqual(stepFingerprint(on), fingerprintOf(beforeTable, on), "a flag-on run sees the new steps");
 });
 
 test("renaming a step moves the fingerprint", () => {
@@ -605,4 +638,24 @@ test('setup-only checks admit only the setup prefix and cannot replay as a paid 
   assert.deepEqual(admittedSteps(deterministic),['step:sandbox','step:repo-setup','step:environment-check']);
   assert.deepEqual(admittedSteps({...deterministic,preparation:{command:'npm ci',timeoutMs:1000}}),['step:sandbox','step:repo-setup','step:environment-prepare','step:environment-check']);
   assert.equal(stepFingerprint({...input,environmentCheckOnly:false}),old,'legacy check fingerprints do not change');
+});
+
+test("merged D2 + external steering: native fingerprints equal main's, v1 external runs match main exactly", () => {
+  // Values captured from github/main (dfaaf32, #97) for the same inputs.
+  const onMain: Array<[RecordedInput, string]> = [
+    [{ task: "t" }, "s1:702c0f81bfcc3ef7"],
+    [{ task: "t", steer: true }, "s1:6f7be2c88ca5b22b"],
+    [{ task: "t", steer: true, steerReply: true }, "s1:590a4066d2397e86"],
+    [{ task: "t", steerReply: true }, "s1:cd763deaeb048788"],
+    [{ task: "t", steer: true, ask: true, steerReply: true }, "s1:c33ded6920d04370"],
+    [{ task: "t", steer: true, harness: { id: "claude-code", version: "1" } } as RecordedInput, "s1:253c069123f238db"],
+    [{ task: "t", steer: true, harness: { id: "opencode", version: "1" } } as RecordedInput, "s1:253c069123f238db"],
+    [{ task: "t", harness: { id: "opencode", version: "1" } } as RecordedInput, "s1:51cfcd32feed06a8"],
+    [{ task: "t", steer: true, harness: { id: "native", version: "1" } } as RecordedInput, "s1:6f7be2c88ca5b22b"],
+  ];
+  for (const [input, want] of onMain) assert.equal(stepFingerprint(input), want, JSON.stringify(input));
+  const native = admittedSteps({ task: "t", steer: true, steerReply: true });
+  for (const key of ["step:*turn-*-held", "step:*turn-*-finish-held", "step:*turn-*-steer"]) assert.ok(native.includes(key), key);
+  const external = admittedSteps({ task: "t", steer: true, harness: { id: "opencode", version: "2" } } as RecordedInput);
+  for (const key of ["step:*harness-steer-*", "step:*harness-resume-*", "step:*harness-steer-undelivered"]) assert.ok(external.includes(key), key);
 });

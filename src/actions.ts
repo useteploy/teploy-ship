@@ -407,8 +407,46 @@ function actionLangsBase(dialect?: ActionDialect): ReadonlySet<string> {
 export interface ActionDialect {
   look?: boolean;
   delegate?: boolean;
+  /**
+   * Two-way steering (D2, input.steerReply): a ```reply block is the agent's
+   * message to the operator. NOT an action — parseAction never returns it,
+   * so the turn's real action (if any) still runs; read it with parseReply.
+   */
+  reply?: boolean;
   /** ```mcp (D1): parsed only where the run input carries `mcp`. */
   mcp?: boolean;
+}
+
+/** Longest reply kept; a reply is a message to a person, not a report. */
+export const REPLY_MAX = 4000;
+
+/**
+ * The agent's ```reply to the operator in this turn, or null.
+ *
+ * Only a reply that comes BEFORE the turn's first action block counts: the
+ * transcript is cut at the end of that block (transcriptTurn) and everything
+ * after it is discarded unread, a reply included — the same rule as any
+ * text the model writes after acting. Pure over the recorded think text, so
+ * the reply needs no step of its own: live, replay and the thread view all
+ * read the same bytes off the same `turn-N-think` result.
+ *
+ * Without the dialect this always returns null and a ```reply block is an
+ * unknown-language fence that parseAction skips — a reply-only turn on a
+ * flag-off run parses as `none`, exactly as before the feature existed.
+ */
+export function parseReply(text: string, dialect?: ActionDialect): string | null {
+  if (dialect?.reply !== true) return null;
+  const langs = actionLangs(dialect);
+  for (const match of text.matchAll(FENCE)) {
+    const lang = (match[1]!.trim().split(/\s+/)[0] ?? "").toLowerCase();
+    if (lang === "reply") {
+      const body = match[2]!.trim();
+      if (body === "") return null;
+      return body.length > REPLY_MAX ? `${body.slice(0, REPLY_MAX)}\n…(reply clamped)` : body;
+    }
+    if (langs.has(lang)) return null;
+  }
+  return null;
 }
 
 export function parseAction(text: string, dialect?: ActionDialect): Action {

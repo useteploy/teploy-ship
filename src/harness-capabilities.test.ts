@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { HARNESS_VERSIONS } from "./harness.js";
-import { harnessSupports, recordedHarnessIds } from "./harness-capabilities.js";
+import { STEER_REPLY_EXTERNAL_MESSAGE, STEER_REPLY_UNSUPPORTED_MESSAGE, harnessSupports, recordedHarnessIds, steerLoopExited, steerReplyRefusal } from "./harness-capabilities.js";
 
 test("S13/D6/D7: steering is supported by every current contract and refused for the 1-contract external logs", () => {
   // Native: always (no version to check).
@@ -47,4 +47,25 @@ test("S13: every harness in the run must support steering, single and multi-atte
     "one 1-contract attempt is enough to refuse: its notes would be dropped",
   );
   assert.deepEqual(recordedHarnessIds({ harness: { id: "native", version: "1" }, harnessAttempts: [{ id: "opencode", version: "2" }] }), ["native", "opencode"]);
+});
+
+test("steerLoopExited: a multi-attempt run is open until the FINAL attempt's closing step, then exited", () => {
+  const cc = { id: "claude-code", version: HARNESS_VERSIONS["claude-code"] };
+  const two = { steer: true, harnessAttempts: [cc, cc] };
+  const done = (name: string) => ({ type: "step-completed", name });
+  assert.equal(steerLoopExited(two, []), false);
+  assert.equal(steerLoopExited(two, [done("attempt-0-harness-steer-undelivered")]), false, "attempt 0 closing says nothing about attempt 1");
+  assert.equal(steerLoopExited(two, [done("attempt-0-harness-steer-undelivered"), done("attempt-1-harness-steer-undelivered")]), true);
+  const three = { steer: true, harnessAttempts: [cc, cc, cc] };
+  assert.equal(steerLoopExited(three, [done("attempt-1-harness-steer-undelivered")]), false);
+  assert.equal(steerLoopExited(three, [done("attempt-2-harness-steer-undelivered")]), true);
+  assert.equal(steerLoopExited({ steer: true, harness: cc }, [done("harness-steer-undelivered")]), true, "single harness unchanged");
+});
+
+test("steerReplyRefusal: queue/interrupt need the D2 flag and an all-native run", () => {
+  const cc = { id: "claude-code", version: HARNESS_VERSIONS["claude-code"] };
+  assert.equal(steerReplyRefusal({ steer: true, steerReply: true }), undefined);
+  assert.equal(steerReplyRefusal({ steer: true }), STEER_REPLY_UNSUPPORTED_MESSAGE);
+  assert.equal(steerReplyRefusal({ steer: true, steerReply: true, harness: cc }), STEER_REPLY_EXTERNAL_MESSAGE);
+  assert.equal(steerReplyRefusal({ steer: true, steerReply: true, harnessAttempts: [{ id: "native", version: "1" }, cc] }), STEER_REPLY_EXTERNAL_MESSAGE);
 });

@@ -21,7 +21,7 @@ import { costUSD, isPricedModel, pendingQuestion, verificationFactsFromEvents } 
 import { typicalDuration } from "./expect.js";
 import type { Typical } from "./expect.js";
 import { isAskEvent } from "teploy-ship/ask";
-import { steerLoopExited, steerRefusal } from "teploy-ship/harness-capabilities";
+import { steerLoopExited, steerRefusal, steerReplyRefusal } from "teploy-ship/harness-capabilities";
 import type { RunMeta, ScanFinding } from "teploy-ship/runtime";
 import { shipRuntime } from "./store.server.js";
 import { currentUser } from "./session.server.js";
@@ -133,6 +133,14 @@ export interface RunData {
   steerable: boolean;
   /** Steer notes sent but not yet consumed by a turn. */
   steerPending: string[];
+  /**
+   * D2 two-way steering (input.steerReply): the composer offers steer/queue
+   * and an interrupt. Present only on runs whose input admits it, so a
+   * flag-off page payload carries no new key.
+   */
+  steerReply?: true;
+  /** Queued messages and interrupts not yet claimed by a checkpoint (steerReply runs only). */
+  heldPending?: Array<{ mode: "queue" | "interrupt"; text: string }>;
   /** Every step-completed event, ordered — the log's index (see timeline.ts). */
   steps: RecordedStep[];
   /** ?decision=stale|taken — read server-side so the banner survives hydration. */
@@ -236,8 +244,10 @@ export async function runData({ params, request }: { params: { id: string }; req
     // Offered when the run's harness can read a steering note: the native
     // loop drains notes each turn, and the contract-2 external adapters
     // deliver them into the recorded vendor session by resume (D6/D7).
-    const startedInput = (started?.data as { input?: { steer?: boolean; harness?: { id?: unknown; version?: unknown }; harnessAttempts?: { id?: unknown; version?: unknown }[] } } | undefined)?.input;
+    const startedInput = (started?.data as { input?: { steer?: boolean; steerReply?: boolean; harness?: { id?: unknown; version?: unknown }; harnessAttempts?: { id?: unknown; version?: unknown }[] } } | undefined)?.input;
     const steerable = startedInput?.steer === true && steerRefusal(startedInput, steerLoopExited(startedInput, events)) === undefined;
+    const steerReply = steerable && steerReplyRefusal(startedInput) === undefined;
+    const heldPending = steerReply ? await runtime.steer.pendingHeld(runId).catch(() => []) : [];
     const plan = planFrom(events);
     const planGrounding = planGroundingView(events);
     const scanned = findingsFrom(events);
@@ -405,6 +415,7 @@ export async function runData({ params, request }: { params: { id: string }; req
       isScan: (started?.data as { input?: { mode?: string } } | undefined)?.input?.mode === "scan",
       steerable,
       steerPending: steerNotes.map((n) => n.text),
+      ...(steerReply ? { steerReply: true as const, heldPending: heldPending.map((n) => ({ mode: n.mode, text: n.text })) } : {}),
       steps: recordedSteps(events),
       decision: query.get("decision"),
       cancelFailed: query.get("cancel") === "failed",

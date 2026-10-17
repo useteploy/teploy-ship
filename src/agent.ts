@@ -624,8 +624,9 @@ export async function executeAction(
   timeoutMs?: number,
   scriptSuffix?: string,
   useKernel = true,
+  signal?: AbortSignal,
 ): Promise<ExecResult> {
-  const result = await runAction(executor, action, timeoutMs, scriptSuffix, useKernel);
+  const result = await runAction(executor, action, timeoutMs, scriptSuffix, useKernel, signal);
   // S24 shadow: report the call AFTER it ran; a no-op unless SHIP_TOOL_MANIFEST is set.
   void observeToolCall(action);
   return result;
@@ -637,6 +638,7 @@ async function runAction(
   timeoutMs?: number,
   scriptSuffix?: string,
   useKernel = true,
+  signal?: AbortSignal,
 ): Promise<ExecResult> {
   const opts = timeoutMs !== undefined ? { timeoutMs } : {};
   const suffix = scriptSuffix ?? String(Date.now());
@@ -649,7 +651,10 @@ async function runAction(
       if (useKernel) {
         await installKernel(executor);
         if (await ensureKernel(executor)) {
-          return runCell(executor, suffix, action.code, timeoutMs);
+          // Only a kernel cell can be interrupted mid-flight (the cancel
+          // marker raises KeyboardInterrupt in it); a bash command or a
+          // per-file python3 cannot — the executor contract has no abort.
+          return runCell(executor, suffix, action.code, timeoutMs, signal);
         }
       }
       const scriptPath = `.teploy-agent/step-${suffix}.py`;

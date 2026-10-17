@@ -268,3 +268,17 @@ test("negative control: a run whose parent chain leaves the family is not a memb
   const thread = await runThread(d, "root");
   assert.deepEqual(thread!.runs.map((r) => r.runId), ["root"]);
 });
+
+test("steerHistory shows notes drained by an external harness-steer-N step as delivered (attempt prefixes too)", () => {
+  const events = [
+    ev("step-completed", 3, "harness-steer-0", { result: ["use the smaller change"] }),
+    ev("step-completed", 4, "harness-steer-1", { result: [] }),
+    ev("step-completed", 5, "attempt-1-harness-steer-0", { result: ["and add a test"] }),
+    ev("step-completed", 6, "harness-steer-undelivered", { result: ["too late"] }),
+  ];
+  assert.deepEqual(steerHistory(events, []), [
+    { text: "use the smaller change", at: at(3), state: "delivered" },
+    { text: "and add a test", at: at(5), state: "delivered" },
+    { text: "too late", at: at(6), state: "undelivered" },
+  ]);
+});
