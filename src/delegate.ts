@@ -17,10 +17,12 @@ import { scrub } from "./redact.js";
  * without a cycle (runtime.ts imports this for the registration below).
  *
  * WHAT THIS MODULE IS NOT. A scheduler, a second budget ledger, or a
- * coordinator. Children are ordinary runs: they ride the existing admission,
- * the existing worker, the existing parks, and their spend settles through
- * the source they inherit. The cap is the one thing delegation adds, and it
- * is counted from a durable record, never from memory.
+ * coordinator. Children are ordinary SCAN runs (read-only by construction,
+ * 2026-10-17): they ride the existing admission, the existing worker and the
+ * existing scan gates — no edits, no push, no pull request, and no park on a
+ * human decision the parent would then block behind — and their spend settles
+ * through the source they inherit. The cap and the wait bound are the two
+ * things delegation adds, both counted from durable records, never memory.
  *
  * THE PARK (see docs/COORDINATOR_DESIGN.md). The parent snapshots, sleeps in
  * a recorded wait step until the child's log holds a terminal event, and
@@ -51,6 +53,32 @@ export function delegateMaxChildren(env: NodeJS.ProcessEnv = process.env): numbe
 
 /** How long the parent's wait step sleeps between child-state polls. */
 export const DELEGATE_POLL_MS = 30_000;
+
+/**
+ * How long a parent's delegate-wait may poll before it gives up on the child
+ * (SHIP_DELEGATE_WAIT_MS, 2026-10-17 live finding): a child that never reaches
+ * a terminal event — an orphan parked somewhere, a lost worker — must not park
+ * the parent forever. 30 minutes by default: a read-only child is a scan, and
+ * a scan that runs longer than that is stuck, not thorough.
+ */
+export const DELEGATE_WAIT_MS_DEFAULT = 30 * 60_000;
+/** The ceiling for SHIP_DELEGATE_WAIT_MS — the same footgun rule as the cap. */
+export const DELEGATE_WAIT_MS_CEILING = 6 * 60 * 60_000;
+
+/**
+ * The wait bound, from SHIP_DELEGATE_WAIT_MS. Unset or garbage is the default;
+ * 0 is honoured (a single poll, then the honest "did not finish" transfer — the
+ * degenerate-but-explicit setting tests use); anything above the ceiling is
+ * clamped to it. Read where the wait loop builds its deadline, which is only
+ * consulted LIVE inside a wait step — replay reads the recorded result.
+ */
+export function delegateWaitMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = (env.SHIP_DELEGATE_WAIT_MS ?? "").trim();
+  if (raw === "") return DELEGATE_WAIT_MS_DEFAULT;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0) return DELEGATE_WAIT_MS_DEFAULT;
+  return Math.min(n, DELEGATE_WAIT_MS_CEILING);
+}
 
 /** Config key holding one task root's delegation ledger. */
 export const delegationKey = (taskRootRunId: string): string => `SHIP_DELEGATION_${taskRootRunId}`;
@@ -120,14 +148,17 @@ export function parseDelegationRecord(raw: string | undefined, taskRootRunId: st
  * knows where it came from and who to report to), the standalone-brief rule
  * is stated because the child genuinely cannot see the parent's conversation,
  * and the report expectation is stated because the parent's next turn reads
- * exactly that summary as its transfer.
+ * exactly that summary as its transfer. The child is a READ-ONLY researcher
+ * (2026-10-17 live finding): it edits nothing, pushes nothing, opens no pull
+ * request and answers no human gate — the parent is the only writer and
+ * applies any proposed change itself, so the report is where the work lands.
  */
 export function childTaskPrompt(input: { parentRunId: string; turn: number; task: string; repo?: string; path?: string }): string {
   const scope = [input.repo !== undefined ? `repository ${input.repo}` : "this run's repository", input.path !== undefined ? `scoped to ${input.path}/` : undefined]
     .filter((s) => s !== undefined)
     .join(", ");
   return [
-    `[Delegated task, claimed by run ${input.parentRunId} at its turn ${input.turn}] This is a self-contained piece of a larger task. Work in the ${scope}. The delegating run cannot see your conversation — your finish message is the ENTIRE report it receives, so end it with a short summary of what you changed, what you verified, and anything you could not finish.`,
+    `[Delegated task, claimed by run ${input.parentRunId} at its turn ${input.turn}] This is a self-contained piece of a larger task. Work in the ${scope}. You are a READ-ONLY researcher: this run cannot edit files, push, or open a pull request, and it cannot ask a human anything — the delegating run cannot see your conversation and applies any change itself. Your finish message is the ENTIRE report it receives, so end it with a short summary of what you found (answers, findings, and any proposed change as exact patch text or precise instructions), what you verified, and anything you could not finish.`,
     "",
     input.task,
   ].join("\n");
@@ -136,8 +167,12 @@ export function childTaskPrompt(input: { parentRunId: string; turn: number; task
 /** A child's terminal result, read off its own log — the CONTEXT TRANSFER. */
 export interface DelegateTransfer {
   childRunId: string;
-  status: "completed" | "failed" | "cancelled";
-  /** The child's own final account (run-completed output.summary / the failure line), clamped. */
+  status: "completed" | "failed" | "cancelled" | "timeout";
+  /**
+   * The child's own final account (run-completed output.summary / the failure
+   * line), clamped. For a `timeout` transfer it is OUR honest statement that
+   * the child never finished — there is no child account to quote.
+   */
   summary: string;
   /** The pull request the child opened, when it opened one. */
   pr?: string;
@@ -174,20 +209,36 @@ export function transferFromEvents(childRunId: string, events: readonly EventLik
 }
 
 /**
+ * The honest transfer when the wait bound expires: the child did not finish,
+ * and the parent must not pretend otherwise. Recorded as the wait step's
+ * result by the loop (inside the step, so replay reads it verbatim).
+ */
+export function delegateTimeoutTransfer(childRunId: string, waitMs: number): DelegateTransfer {
+  const minutes = Math.max(1, Math.round(waitMs / 60_000));
+  return {
+    childRunId,
+    status: "timeout",
+    summary: `the child run did not reach a terminal state within the delegation wait bound (~${minutes} minute${minutes === 1 ? "" : "s"}) and may still be running; it delivered no report`,
+  };
+}
+
+/**
  * The observation the parent's next turn consumes — the merge-back half of
  * the T3 shape. Scrubbed like any command output (the summary is model text
  * that reaches the transcript, the log and the PR body), and worded so the
  * model can tell a completed child's report from a failed one at a glance.
  */
 export function transferObservation(transfer: DelegateTransfer): string {
-  const head = `Delegated run ${transfer.childRunId} ${transfer.status}:`;
+  const head = `Delegated run ${transfer.childRunId} ${transfer.status === "timeout" ? "timed out" : transfer.status}:`;
   const pr = transfer.pr !== undefined ? `\nPull request: ${transfer.pr}` : "";
   const advice =
     transfer.status === "completed"
       ? ""
       : transfer.status === "failed"
         ? "\nThe child FAILED — read its summary, decide whether to redo the work yourself or delegate a corrected task, and continue."
-        : "\nThe child was CANCELLED before finishing; the work it was asked for was not done.";
+        : transfer.status === "cancelled"
+          ? "\nThe child was CANCELLED before finishing; the work it was asked for was not done."
+          : "\nThe child did not finish within the wait bound and may still be running. Do not wait for it again — do the work yourself, or delegate a smaller task if the cap still allows one.";
   return `${head}\n${scrub(transfer.summary)}${pr}${advice}`;
 }
 
@@ -248,6 +299,26 @@ export function delegateCapMessage(max: number): string {
 /** The child's one-level refusal, when a ```delegate block comes from a child (input.delegateChild). */
 export const DELEGATE_CHILD_REFUSED =
   "Delegation refused: this run is itself a delegated child, and children cannot delegate further in this version. Do the work yourself.";
+
+/**
+ * A ```ask block from a delegated child, refused BY NAME (2026-10-17 live
+ * finding): a child's ask parks it on a human, the operator's eye is on the
+ * parent, and the parent's delegate-wait must never hang on a decision
+ * nobody is watching. Records no step — a pure function of the recorded
+ * input, so replay refuses identically.
+ */
+export const DELEGATE_CHILD_ASK_REFUSED =
+  "Asking is not available on a delegated child run: no human is watching its questions, and the parent waiting on you must not depend on one. Decide for yourself, prefer the reversible option, and state what you assumed in your finish message — the parent reads that report.";
+
+/**
+ * An approval-required action on a delegated child, denied automatically with
+ * the reason recorded (same finding, same reasoning as the ask refusal above):
+ * a child is a read-only researcher, an approval park is a human decision, and
+ * the parent cannot wait on one. The denial is the approval flow's own denied
+ * shape — the child is told what happened and chooses another approach.
+ */
+export const DELEGATE_CHILD_APPROVAL_REFUSED =
+  "Action denied automatically: this is a delegated child run, and no human is watching its approvals — the parent waiting on you must not depend on one. Choose a different approach; you are a read-only researcher, and the parent applies any change.";
 
 /** A ```delegate block the input never admitted, or a worker with no delegation wiring. */
 export const DELEGATE_UNAVAILABLE =

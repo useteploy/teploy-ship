@@ -1,0 +1,39 @@
+2026-10-17 production soaks: A4 (delegation), A5-A7 (advisory + read-only flags)
+
+Production c434faf. Backups: pre-a4-delegate (pg_dump via scripts/ship-backup.sh).
+
+A4 — SHIP_DELEGATE=1, SHIP_DELEGATE_MAX=2, SHIP_MAX_RUN_COST_USD=1.00 (web+worker)
+- run-request-1032fa9d… (change journey, scratch repo) delegated two children in turn:
+  run-del-cfbf83cf… (placed on compute-2 while the parent's container stayed on
+  compute-1) and run-del-44773a41…. Context transfers returned; thread view lists the
+  parent with both children. Host memory stayed ample (compute-1 5.8 GB, compute-2
+  7.1 GB available). Costs: parent $0.0349, children $0.0141 + $0.0228 = $0.0718 total,
+  each under the per-run cap.
+- DEFECT: write-capable children are ordinary change runs — each opened its own draft
+  PR (#3, #4) and parked at approve-merge, so the parent's delegate-wait blocked until a
+  human approved; the parent then redid both files in a third PR. Children merged by the
+  operator to finish the soak; parent PR denied.
+- Outcome: SHIP_DELEGATE removed from production (cost cap kept). Fix in progress:
+  read-only children, single parent PR, no human-blocking child parks.
+
+A5 — SHIP_PLAN_GROUNDING=on, SHIP_FINDING_CONTINUITY=on, SHIP_TEST_INTEGRITY_SURFACING=shadow
+A6 — SHIP_SCHEDULE_OVERLAP=on; A7 — SHIP_MISSION_VIEW=on, SHIP_STACK_DETECT=on, SHIP_HARNESS_RECORD=on
+- Startup: no errors or warnings.
+- Replay: run-request-d348b7b6… parked at plan-approval BEFORE the flip; after the flip
+  its plan was approved and it resumed, published and reached approve-merge with no
+  step-fingerprint hold. PASS. (Merge denied, scratch.)
+- Plan grounding: run-request-37573967… carried an advisory grounding report on its
+  plan-think result (revision c1ab62d) — but refs [] and all counts 0: the extractor reads
+  only backtick spans, and the GLM plan named index.html / test.sh in prose. Wiring PASS,
+  precision DEFECT; fix in progress (bare file paths in prose).
+- Finding continuity: two reviews of PR #7 (run-request-c4320383…, run-request-018abb48…);
+  the second recorded continuity against the first (same revision e307778): still-open 1,
+  new 2, superseded 1. PASS.
+- Test-integrity surfacing stays shadow until its log is reviewed.
+
+A4 re-soak after #111 (read-only children) — production b8a58bb, SHIP_DELEGATE=1 again
+- run-request-9e443d34… (change journey): two children run-del-dfc91cf9… and
+  run-del-b666b6c5…, both recorded mode=scan, no repo-pr step (no PR), completed with no
+  human decision; the parent wrote DELEGATE-SUMMARY.md and opened ONE PR (#8), then
+  parked at approve-merge (denied, scratch). Children cost $0.0058 + $0.0127. PASS.
+- SHIP_DELEGATE stays on (cap SHIP_MAX_RUN_COST_USD=1.00, SHIP_DELEGATE_WAIT_MS default 30 min).

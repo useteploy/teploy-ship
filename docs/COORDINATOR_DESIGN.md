@@ -11,12 +11,13 @@ it is — a coordinator satisfying its contract is later work, not this).
 
 ## What exists and is reused rather than rebuilt
 
-- **Ordinary runs.** A child is an ordinary durable run: its own log, its own
-  parks, its own publish gate. It carries `parentRunId` (conversation lineage,
-  `task-session.ts`) and therefore the parent's `taskRootRunId`, so it appears
-  in the thread-chain API for free (`web/src/lib/thread-chain.server.ts`
-  admits any run whose recorded `taskRootRunId` is the chain's anchor —
-  verified, no web change made).
+- **Ordinary runs.** A child is an ordinary durable run — since the 2026-10-17
+  live finding, an ordinary **SCAN** run, read-only by construction (below).
+  It carries `parentRunId` (conversation lineage, `task-session.ts`) and
+  therefore the parent's `taskRootRunId`, so it appears in the thread-chain
+  API for free (`web/src/lib/thread-chain.server.ts` admits any run whose
+  recorded `taskRootRunId` is the chain's anchor — verified, no web change
+  made).
 - **The ask/approval park machinery** (`durable.ts`): snapshot before the
   park, sleep-poll while children run, restore after. The engine buffers
   sleeps the same way it buffers delivered events, and the worker's drive loop
@@ -54,17 +55,60 @@ Make the foo parser accept RFC 3339 durations. Add tests.
   grant one at all); `path=` is prepended to the child's task text as a scope
   hint. The model cannot pick a target the parent does not already own.
 
+## Children are READ-ONLY (2026-10-17 live finding)
+
+Production soak A4 (run-request-1032fa9d…): a change-journey parent delegated
+two children, and each child — an ordinary change run with the parent's gates
+copied — edited files, opened its OWN draft PR (#3, #4) and parked at
+approve-merge, so the parent's delegate-wait blocked until a human approved
+each child's merge; then the parent redid both files in a THIRD PR. Delegation
+was switched off in production until this was fixed. The v1 semantics that
+fix it:
+
+- **A delegated child is ALWAYS a scan**, materialised at enqueue
+  (`mode: "scan"` rides the child's recorded input; `enqueueRun` additionally
+  forces scan for any `delegateChild` run — enforcement, never cooperation).
+  A scan edits nothing (```edit/```create refused in the loop), pushes
+  nothing, opens no pull request (its publish gate is disabled), and owes no
+  plan review, change-class verdict or merge decision. The child's
+  deliverable is the CONTEXT TRANSFER itself — findings, answers and proposed
+  changes as patch text in its summary. **The parent stays the only writer
+  and produces the single PR.**
+- **A child never parks on a human decision.** The ask action is not offered
+  (enqueue suppresses `ask` for children) and a stray ```ask block is refused
+  BY NAME (`DELEGATE_CHILD_ASK_REFUSED`) in the loop; an approval-required
+  action is denied automatically with the reason recorded
+  (`DELEGATE_CHILD_APPROVAL_REFUSED`). Pure functions of the recorded input,
+  so replay refuses identically.
+- **The parent's wait is bounded** (`SHIP_DELEGATE_WAIT_MS`, default 30
+  minutes): a child that never reaches a terminal event yields an honest
+  "child did not finish" transfer (status `timeout`) instead of an infinite
+  park. The bound is decided INSIDE the wait step, so the recorded result —
+  never a recomputed clock — is what replay reads.
+
+Replay safety: the child mode is materialised at ENQUEUE (it is part of the
+child's input), the parent's step sequence and step names are unchanged (the
+wait step's result gains the `timeout` variant on the same name, which
+fingerprints do not hash), and flag-off stays byte-identical. The one
+accepted exposure: a PRE-FIX child log that actually contains an ask or
+approval park would now replay into a NondeterminismError — but the flag is
+off in production precisely because those children (the soak's) misbehaved,
+they are all terminal, and a terminal log is never re-executed.
+
 ## Gates: a child is never more privileged than its parent
 
 The spawn reads the parent's RECORDED input and copies: `trust` (an external
-parent spawns external children), the declared network tier
+parent spawns external children) and the declared network tier
 (`sandboxNetwork`; the external-task downgrade in `sandboxOverridesOf` applies
-to the child exactly as it did to the parent), and the `plan` flag (a parent
-that owed plan review spawns children that owe it too — each run earns its own
-approval; approval state itself is never inherited). The child additionally
-carries `delegateChild: true`, which (a) suppresses the delegate flag at
-enqueue even under `SHIP_DELEGATE=1`, and (b) makes the loop REFUSE a
-```delegate block from a child with a clear message — one level only, v1.
+to the child exactly as it did to the parent), plus the spend `source` so the
+cap sees delegation without a second ledger. Nothing change-shaped is copied —
+the `plan` flag is not (a child that cannot edit owes no plan review), and the
+scan mode forces off change-class, the merge gate, auto-merge, requireEdit and
+the suite ladder at the child's own enqueue. The child additionally carries
+`delegateChild: true`, which (a) suppresses the delegate flag at enqueue even
+under `SHIP_DELEGATE=1`, (b) makes the loop REFUSE a ```delegate block from a
+child with a clear message — one level only, v1 — and (c) suppresses `ask`,
+per the read-only rule above.
 
 ## Bounds
 
@@ -74,6 +118,10 @@ enqueue even under `SHIP_DELEGATE=1`, and (b) makes the loop REFUSE a
   child run id, task). Same-process claims serialise under `withFileLock`;
   cross-process, the deterministic child id plus the launch journal is the
   boundary, exactly coordination.ts's honesty note.
+- `SHIP_DELEGATE_WAIT_MS` (default 30 minutes, ceiling 6 hours): how long the
+  parent's wait may poll before recording the honest "child did not finish"
+  transfer. 0 is honoured — one poll, then give up. Unset or garbage is the
+  default; anything above the ceiling clamps to it.
 - Idempotency: an entry keyed (parentRunId, turn) makes a re-run delegate step
   (crash before the step recorded) REPUBLISH its own child rather than spawn a
   second — the step re-derives the same entry and the same derived run id.
@@ -96,10 +144,16 @@ Inside the native loop, after the ```look branch:
    any pass reads a transfer.
 4. The wait step's final recorded result IS the CONTEXT TRANSFER —
    `{ childRunId, status, summary, pr? }`, the child's own run-completed
-   output read off its log. The parent's next turn receives it as an
-   observation ("Delegated run <id> finished (completed): …"), scrubbed and
-   truncated like any command output. Replay returns the recorded transfer
-   without touching the child — the child has its own log and is never re-run.
+   output read off its log. A child that never terminates yields the honest
+   `timeout` transfer (status `timeout`, our own statement that the child did
+   not finish — decided inside the step, so replay returns the recorded
+   transfer at the same poll). The parent's next turn receives it as an
+   observation ("Delegated run <id> finished (completed): …" / "… timed out:
+   …"), scrubbed and truncated like any command output. Replay returns the
+   recorded transfer without touching the child — the child has its own log
+   and is never re-run. (A scan child never opens a PR, so `pr` stays absent
+   on children spawned after 2026-10-17; the field survives for pre-fix
+   logs.)
 5. `turn-N-delegate-restore`: the ask park's restore half.
 
 `livenessProbeTarget`'s name regexes grow the optional `-delegate` segment so

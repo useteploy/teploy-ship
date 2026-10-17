@@ -202,7 +202,14 @@ test("default off: prompt bytes, parser, steps and fingerprint are the pre-MCP o
   // fingerprint of { task, look } under main's WORKFLOW_STEPS table. If
   // either fails, flag-off output has drifted from main — the constant is
   // not something to re-pin to make the test pass.
-  const goldenPromptSha256 = "7485de343f4a327d84a1941583fd1ab0c5b49d563aaf95ccc09405909532a2de";
+  //
+  // One deliberate re-pin: fix/delegate-readonly-children (2026-10-17)
+  // rewrote the DELEGATE-ON section of the prompt (read-only children,
+  // parent is the only writer). These opts turn delegate on, so the golden
+  // moved with that intentional change; the MCP-off half of the claim is
+  // unchanged — the prompt still contains no MCP bytes — and delegate.test.ts
+  // pins the new delegate wording itself.
+  const goldenPromptSha256 = "9092e20561720af4e5c5c59f3932dacdba77ca2acbda1dd2d4c736fe8756a750";
   const goldenNoMcpFingerprint = "s1:075d716632c232b7";
   assert.equal(createHash("sha256").update(systemPrompt(opts)).digest("hex"), goldenPromptSha256, "flag-off system prompt is byte-identical to main's");
   assert.equal(stepFingerprint({ task: "t", look: true }), goldenNoMcpFingerprint, "a no-mcp input's step fingerprint is main's");
