@@ -967,8 +967,8 @@ export interface DurableAgentConfig {
    */
   codeSearch?: CodeSearch;
   /**
-   * External harness adapters this worker can execute (claude-code, opencode —
-   * see harness-external.ts). The native loop is always available and is not
+   * External harness adapters this worker can execute (claude-code, opencode,
+   * codex — see harness-external.ts). The native loop is always available and is not
    * listed here. Selection is by the run INPUT, never by this list.
    */
   harnesses?: HarnessAdapter[];

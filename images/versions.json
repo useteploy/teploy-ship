@@ -61,6 +61,11 @@
       "npm": "opencode-ai",
       "version": "1.18.23",
       "binary": "opencode"
+    },
+    "codex": {
+      "npm": "@openai/codex",
+      "version": "0.163.0",
+      "binary": "codex"
     }
   }
 }

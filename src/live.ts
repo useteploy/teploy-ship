@@ -29,7 +29,7 @@ export type LivePhase =
   | "thinking"
   /** An action is executing in the workspace. */
   | "running"
-  /** An external harness (claude-code, opencode) holds the workspace. */
+  /** An external harness (claude-code, opencode, codex) holds the workspace. */
   | "harness"
   /** Ship's own evidence legs: the suite, the build, the preview. */
   | "verifying"

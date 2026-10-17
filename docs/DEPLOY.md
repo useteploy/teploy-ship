@@ -154,6 +154,10 @@ teploy secret set SHIP_WEBHOOK_SECRET=<webhook HMAC>
 teploy secret set SHIP_GIT_TOKEN=<forgejo/gitea deploy token>
 teploy secret set SHIP_GITHUB_TOKEN=<github token>        # only for github.com repos
 teploy secret set AI_GATEWAY_KEY=<key from teploy-gateway>  # or ANTHROPIC_API_KEY directly
+teploy secret set CODEX_API_KEY=<openai api key>            # only for SHIP_HARNESS=codex runs (docs/adapters.md, "codex")
+# codex can also ride the gateway instead of OpenAI directly: forward the pair
+# AI_GATEWAY_URL + AI_GATEWAY_KEY (already set above) and codex routes through
+# teploy-gateway — the gateway endpoint must be Responses-compatible (/v1/responses).
 
 # optional: provision the first named admin at web boot (see "Accounts" below)
 teploy secret set SHIP_BOOTSTRAP_ADMIN_USER=<username>
@@ -867,7 +871,7 @@ day. Do not pin it back; a test enforces this.
 ### Harnesses: declare, then bake
 
 A harness is the program that edits the tree — `native` (Ship's own loop, which
-needs nothing installed), `claude-code`, or `opencode`.
+needs nothing installed), `claude-code`, `opencode`, or `codex`.
 
 Declaring one and installing one are separate acts, deliberately:
 

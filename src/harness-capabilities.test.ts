@@ -6,6 +6,7 @@ test("S13: only the native harness takes steering notes", () => {
   assert.equal(harnessSupports({ harness: { id: "native" } }, "steer"), true);
   assert.equal(harnessSupports({ harness: { id: "claude-code" } }, "steer"), false);
   assert.equal(harnessSupports({ harness: { id: "opencode" } }, "steer"), false);
+  assert.equal(harnessSupports({ harness: { id: "codex" } }, "steer"), false);
 });
 
 test("S13: a run recorded before pluggable harnesses is native", () => {

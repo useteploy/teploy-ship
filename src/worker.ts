@@ -857,7 +857,7 @@ export function startWorker(options: WorkerOptions): {
     ...((options.runtime as Partial<Pick<NucleusShipRuntime, "live">>).live !== undefined ? { live: options.runtime.live } : {}),
     ...(envNum("SHIP_MAX_OUTPUT_TOKENS") !== undefined ? { maxOutputTokens: envNum("SHIP_MAX_OUTPUT_TOKENS")! } : {}),
     ...(options.codeSearch !== undefined ? { codeSearch: options.codeSearch } : {}),
-    // External harnesses (claude-code, opencode). Always carried; whether the
+    // External harnesses (claude-code, opencode, codex). Always carried; whether the
     // binary is in the sandbox image is a recorded preflight step per run.
     harnesses: externalAdapters(),
     // Where this worker may deploy previews (SHIP_PREVIEW_DIR and friends).
