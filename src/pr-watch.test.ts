@@ -17,6 +17,7 @@ import {
   openedPr,
   prWatchEnabled,
   prWatchKey,
+  prWatchMaxAgeDays,
   sweepPrWatch,
   type PrWatchDeps,
 } from "./pr-watch.js";
@@ -81,12 +82,17 @@ after(() => new Promise<void>((r) => server.close(() => r())));
 
 const sha = (c: string) => c.repeat(40);
 
-function runEvents(repo: string, opts: { openedPr?: number; inputPr?: number }): WorkflowEvent[] {
+function runEvents(repo: string, opts: { openedPr?: number; inputPr?: number; openedAt?: string }): WorkflowEvent[] {
   const events: WorkflowEvent[] = [
     { type: "run-started", data: { input: { repo, ...(opts.inputPr !== undefined ? { pr: opts.inputPr } : {}) } } } as unknown as WorkflowEvent,
   ];
   if (opts.openedPr !== undefined) {
-    events.push({ type: "step-completed", name: "repo-pr", data: { result: { url: `${repo}/pulls/${opts.openedPr}`, number: opts.openedPr } } } as unknown as WorkflowEvent);
+    events.push({
+      type: "step-completed",
+      name: "repo-pr",
+      ...(opts.openedAt !== undefined ? { at: opts.openedAt } : {}),
+      data: { result: { url: `${repo}/pulls/${opts.openedPr}`, number: opts.openedPr } },
+    } as unknown as WorkflowEvent);
   }
   return events;
 }
@@ -145,6 +151,18 @@ test("flag parser: only `on` enables", () => {
   assert.equal(prWatchEnabled({ SHIP_PR_WATCH: "1" }), false);
   assert.equal(prWatchEnabled({ SHIP_PR_WATCH: "true" }), false);
   assert.equal(prWatchEnabled({ SHIP_PR_WATCH: "on" }), true);
+});
+
+test("max-age parser: default 14, clamped to [1, 90]", () => {
+  assert.equal(prWatchMaxAgeDays({}), 14);
+  assert.equal(prWatchMaxAgeDays({ SHIP_PR_WATCH_MAX_AGE_DAYS: "14" }), 14);
+  assert.equal(prWatchMaxAgeDays({ SHIP_PR_WATCH_MAX_AGE_DAYS: "1" }), 1);
+  assert.equal(prWatchMaxAgeDays({ SHIP_PR_WATCH_MAX_AGE_DAYS: "90" }), 90);
+  assert.equal(prWatchMaxAgeDays({ SHIP_PR_WATCH_MAX_AGE_DAYS: "365" }), 90, "above the cap clamps down to 90");
+  assert.equal(prWatchMaxAgeDays({ SHIP_PR_WATCH_MAX_AGE_DAYS: "2.9" }), 2);
+  assert.equal(prWatchMaxAgeDays({ SHIP_PR_WATCH_MAX_AGE_DAYS: "0" }), 14, "below the minimum falls back to the default");
+  assert.equal(prWatchMaxAgeDays({ SHIP_PR_WATCH_MAX_AGE_DAYS: "-5" }), 14);
+  assert.equal(prWatchMaxAgeDays({ SHIP_PR_WATCH_MAX_AGE_DAYS: "abc" }), 14);
 });
 
 test("flag off: no store reads, no forge calls, nothing proposed", async () => {
@@ -303,6 +321,105 @@ test("negative control: a run that reviewed someone else's PR is never watched; 
   await h.cleanup();
 });
 
+/** The harness clock, so tests can date runs relative to it. */
+const CLOCK = "2026-10-16T12:00:00Z";
+const daysAgo = (n: number): string => new Date(Date.parse(CLOCK) - n * 24 * 60 * 60 * 1000).toISOString();
+
+test("discovery is bounded by PR age: a PR opened 60 days ago is not adopted, one 3 days ago is", async () => {
+  reset();
+  prs.set(50, { state: "open", merged: false, head: sha("9"), ref: "ship/age60", mergeable: true, statuses: [] });
+  prs.set(51, { state: "open", merged: false, head: sha("8"), ref: "ship/age3", mergeable: true, statuses: [] });
+  const h = await harness([
+    { runId: "age60", events: runEvents(`${base}/acme/app.git`, { openedPr: 50, openedAt: daysAgo(60) }), updatedAt: daysAgo(60) },
+    { runId: "age3", events: runEvents(`${base}/acme/app.git`, { openedPr: 51, openedAt: daysAgo(3) }), updatedAt: daysAgo(3) },
+  ]);
+  const r = await sweepPrWatch(h.deps);
+  assert.equal(r.discovered, 1, "only the PR inside the age window is adopted");
+  assert.ok((await h.config.get(prWatchKey(h.repo, 51))) !== undefined);
+  assert.equal(await h.config.get(prWatchKey(h.repo, 50)), undefined, "a 60-day-old PR is never watched");
+  assert.equal(requests.some((u) => u.includes("/pulls/50")), false, "the stale PR is not even read from the forge");
+  await h.cleanup();
+});
+
+test("the age bound uses the repo-pr step's own time, not the run meta's updatedAt", async () => {
+  reset();
+  // A long-lived run touched NOW but whose repo-pr step recorded 60 days ago:
+  // updatedAt alone would adopt it; the step's append time must not.
+  prs.set(52, { state: "open", merged: false, head: sha("6"), ref: "ship/touched", mergeable: true, statuses: [] });
+  const h = await harness([
+    { runId: "touched", events: runEvents(`${base}/acme/app.git`, { openedPr: 52, openedAt: daysAgo(60) }), updatedAt: daysAgo(0) },
+  ]);
+  const lines: string[] = [];
+  const r = await sweepPrWatch({ ...h.deps, log: (l) => lines.push(l) });
+  assert.equal(r.discovered, 0);
+  assert.equal(await h.config.get(prWatchKey(h.repo, 52)), undefined);
+  assert.equal(requests.some((u) => u.includes("/pulls/52")), false);
+  assert.equal(lines.some((l) => l.includes("first enable")), true);
+  assert.equal(lines.some((l) => l.includes("1 historical PR skipped as too old")), true, "the first-enable log counts it as skipped");
+  await h.cleanup();
+});
+
+test("first enable with no cursor does not adopt beyond the window; the cursor starts at the age floor; existing proposals stay", async () => {
+  reset();
+  const h = await harness([
+    { runId: "d20", events: runEvents(`${base}/acme/app.git`, { openedPr: 61, openedAt: daysAgo(20) }), updatedAt: daysAgo(20) },
+    { runId: "d40", events: runEvents(`${base}/acme/app.git`, { openedPr: 62, openedAt: daysAgo(40) }), updatedAt: daysAgo(40) },
+    { runId: "d60", events: runEvents(`${base}/acme/app.git`, { openedPr: 63, openedAt: daysAgo(60) }), updatedAt: daysAgo(60) },
+  ]);
+  // A proposal that already sits in the Inbox (from the flood) is NOT auto-dismissed.
+  await h.intake.propose({ source: "pr-watch", kind: "conflict", repo: h.repo, pr: 63, title: "stale flood task", dedupeKey: "pr-watch:acme/app#63:deadbeef:conflict" });
+  const lines: string[] = [];
+  const r = await sweepPrWatch({ ...h.deps, log: (l) => lines.push(l) });
+  assert.equal(r.discovered, 0);
+  assert.equal((await h.config.list()).filter((k) => k.key.startsWith(PR_WATCH_KEY_PREFIX)).length, 0);
+  assert.deepEqual(requests, [], "history beyond the window is not scanned or read");
+  assert.equal(await h.config.get(PR_WATCH_CURSOR_KEY), daysAgo(14), "the cursor is initialised at now minus the max age, not walked through history");
+  assert.equal((await h.config.list()).some((k) => k.key === "SHIP_PR_WATCH_DISCOVERY_RESUME"), false);
+  assert.equal((await h.intake.list()).length, 1);
+  assert.equal((await h.intake.list())[0]!.state, "proposed", "the existing proposal was not touched");
+  assert.equal(lines.filter((l) => l.includes("first enable")).length, 1, "one first-enable summary line");
+  // Not the first enable any more: no repeat line, still nothing adopted.
+  lines.length = 0;
+  const again = await sweepPrWatch({ ...h.deps, log: (l) => lines.push(l) });
+  assert.equal(again.discovered, 0);
+  assert.equal(lines.filter((l) => l.includes("first enable")).length, 0);
+  await h.cleanup();
+});
+
+test("first enable still adopts history inside the window and advances the cursor to it", async () => {
+  reset();
+  prs.set(64, { state: "open", merged: false, head: sha("5"), ref: "ship/infresh", mergeable: true, statuses: [] });
+  const h = await harness([
+    { runId: "infresh", events: runEvents(`${base}/acme/app.git`, { openedPr: 64, openedAt: daysAgo(3) }), updatedAt: daysAgo(3) },
+    { runId: "inold", events: runEvents(`${base}/acme/app.git`, { openedPr: 65, openedAt: daysAgo(40) }), updatedAt: daysAgo(40) },
+  ]);
+  const r = await sweepPrWatch(h.deps);
+  assert.equal(r.discovered, 1);
+  assert.equal(r.checked, 1);
+  assert.equal(await h.config.get(PR_WATCH_CURSOR_KEY), daysAgo(3), "the cursor advances to the newest examined meta, not the floor");
+  await h.cleanup();
+});
+
+test("SHIP_PR_WATCH_MAX_AGE_DAYS widens to 90 and narrows to 1 (clamped)", async () => {
+  reset();
+  prs.set(66, { state: "open", merged: false, head: sha("4"), ref: "ship/w60", mergeable: true, statuses: [] });
+  prs.set(67, { state: "open", merged: false, head: sha("3"), ref: "ship/w3", mergeable: true, statuses: [] });
+  const runs = [
+    { runId: "w60", events: runEvents(`${base}/acme/app.git`, { openedPr: 66, openedAt: daysAgo(60) }), updatedAt: daysAgo(60) },
+    { runId: "w3", events: runEvents(`${base}/acme/app.git`, { openedPr: 67, openedAt: daysAgo(3) }), updatedAt: daysAgo(3) },
+  ];
+  const wide = await harness(runs.map((r) => ({ ...r })));
+  const r90 = await sweepPrWatch({ ...wide.deps, env: { ...wide.deps.env, SHIP_PR_WATCH_MAX_AGE_DAYS: "90" } });
+  assert.equal(r90.discovered, 2, "a 60-day-old PR is inside a 90-day window");
+  await wide.cleanup();
+
+  reset();
+  const narrow = await harness(runs.map((r) => ({ ...r })));
+  const r1 = await sweepPrWatch({ ...narrow.deps, env: { ...narrow.deps.env, SHIP_PR_WATCH_MAX_AGE_DAYS: "1" } });
+  assert.equal(r1.discovered, 0, "a 3-day-old PR is beyond a 1-day window");
+  await narrow.cleanup();
+});
+
 test("forge errors back off exponentially and cap per sweep holds", async () => {
   reset();
   const repo = `${base}/acme/app.git`;
@@ -335,6 +452,7 @@ test("forge errors back off exponentially and cap per sweep holds", async () => 
 test("openedPr / prWatchKey / contextMatches", () => {
   assert.equal(openedPr(runEvents("https://x/a/b.git", { inputPr: 3 })), null);
   assert.deepEqual(openedPr(runEvents("https://x/a/b.git", { openedPr: 4 })), { repo: "https://x/a/b.git", pr: 4 });
+  assert.deepEqual(openedPr(runEvents("https://x/a/b.git", { openedPr: 4, openedAt: "2026-10-01T00:00:00Z" })), { repo: "https://x/a/b.git", pr: 4, at: "2026-10-01T00:00:00Z" });
   assert.equal(prWatchKey("https://X/a/b.git", 1), prWatchKey("https://x/a/b", 1));
   assert.ok(contextMatches("ci/*", "ci/test"));
   assert.ok(!contextMatches("ci/*", "lint"));
@@ -422,7 +540,10 @@ test("a backlog deeper than the page bound is resumed next sweep, never marked s
   const env = { ...h.deps.env, SHIP_PR_WATCH_MAX_PER_SWEEP: "1" };
   const first = await sweepPrWatch({ ...h.deps, env });
   assert.equal(first.discovered, bound);
-  assert.equal(await h.config.get(PR_WATCH_CURSOR_KEY), undefined, "the cursor did not advance past unexamined metas");
+  // The first sweep is also a FIRST ENABLE, so the cursor exists — written at
+  // the age floor by the cutover. What it must NOT be is anywhere above the
+  // unexamined tail: the floor sits below every meta in this history.
+  assert.equal(await h.config.get(PR_WATCH_CURSOR_KEY), new Date(Date.parse("2026-10-16T12:00:00Z") - 14 * 24 * 60 * 60 * 1000).toISOString(), "the cursor did not advance past unexamined metas");
   assert.equal((await h.config.list()).some((k) => k.key === "SHIP_PR_WATCH_DISCOVERY_RESUME"), true, "the sweep parked a resume marker instead");
 
   // The next sweep continues at that depth and examines the remaining five;
