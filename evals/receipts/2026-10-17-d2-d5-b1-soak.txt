@@ -1,0 +1,25 @@
+2026-10-17 production soaks: D2 (SHIP_STEER_REPLY), D5 (SHIP_LIVE_VIEW), B1 (SHIP_PR_WATCH)
+
+Production web+worker dfaaf32; flags set as teploy secrets and redeployed. The
+first attempt (run-request-c4395934…) failed at turn-0-think with
+"[1308] Usage limit reached for 5 hour": the z.ai coding plan is shared by
+production and the GLM workhorse lanes. Re-run after the quota reset.
+
+D2 + D5 — run-request-f9d887ec… (investigate, ship-preview-proof), PASS
+- Steer (mode=steer) asking for a reply block "REPLY-TEST": delivered turn 1;
+  thread API `replies` = [{"text":"REPLY-TEST","turn":1}].
+- Queued note (mode=queue) "add a final line QUEUED-OK": held, then delivered at
+  turn 2 (the checkpoint after the reply); the answer's last line is QUEUED-OK.
+- Live view: /api/runs/<id>/live returned the running command (pwd/ls, ./test.sh,
+  cat Dockerfile with turn numbers) and a diff refreshed about every 5 s while
+  polled; after completion output/diff were null (rows cleaned up).
+- Cost $0.0249; completed.
+
+B1 — PASS with one defect
+- The worker sweep ran with forge reads only: unwatched merged/closed PRs, backed
+  off on deleted repos (HTTP 404, retry 1200 s).
+- Defect: first enable adopted every historical Ship PR and proposed 24
+  conflict-revision tasks at once (old ship-load-test PRs; also tyler/neutron #5,
+  Tyler/teploy-observe #12/#13). None launched: SHIP_INTAKE_POLICIES is
+  {"forgejo":"auto"} and PR watch proposes under sources pr-watch/ci. Fix in
+  progress: bound discovery by PR age (SHIP_PR_WATCH_MAX_AGE_DAYS).
