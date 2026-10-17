@@ -19,7 +19,7 @@ import { PLAN_EVENT, MERGE_EVENT } from "teploy-ship/plan";
 // the park's event name without reaching runtime.ts.
 import { isAskEvent } from "teploy-ship/ask";
 import { UPGRADE_HOLD_EVENT } from "teploy-ship/fence";
-import { harnessSupports, STEER_REPLY_UNSUPPORTED_MESSAGE, STEER_UNSUPPORTED_MESSAGE } from "teploy-ship/harness-capabilities";
+import { steerLoopExited, steerRefusal, steerReplyRefusal } from "teploy-ship/harness-capabilities";
 
 
 import { shipRuntime } from "../../lib/store.server.js";
@@ -226,11 +226,16 @@ export async function action({
     const text = String(form.get("steer") ?? "").trim();
     if (text.length > 12000) return redirectTo(`/runs/${runId}?messageError=Message+must+be+under+12000+characters`);
     // Refuse rather than store a note no executor will ever read.
-    const steerInput = ((await runtime.store.load(runId)).find(e => e.type === "run-started")?.data as { input?: { steerReply?: boolean; harness?: { id?: unknown }; harnessAttempts?: { id?: unknown }[] } } | undefined)?.input;
-    if (!harnessSupports(steerInput, "steer")) return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(STEER_UNSUPPORTED_MESSAGE)}`);
+    const steerEvents = await runtime.store.load(runId);
+    const steerInput = (steerEvents.find(e => e.type === "run-started")?.data as { input?: { steer?: boolean; steerReply?: boolean; harness?: { id?: unknown; version?: unknown }; harnessAttempts?: { id?: unknown; version?: unknown }[] } } | undefined)?.input;
+    const steerRefused = steerRefusal(steerInput, steerLoopExited(steerInput, steerEvents));
+    if (steerRefused !== undefined) return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(steerRefused)}`);
     const mode = intent === "interrupt" ? "interrupt" : String(form.get("mode") ?? "steer");
     if (mode !== "steer" && mode !== "queue" && mode !== "interrupt") return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent("Unknown message mode.")}`);
-    if (mode !== "steer" && steerInput?.steerReply !== true) return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(STEER_REPLY_UNSUPPORTED_MESSAGE)}`);
+    if (mode !== "steer") {
+      const modeRefused = steerReplyRefusal(steerInput);
+      if (modeRefused !== undefined) return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(modeRefused)}`);
+    }
     if (mode === "interrupt") await runtime.steer.add(runId, text, "interrupt");
     // An empty note is not "sent": say so instead of confirming a no-op.
     else if (text === "") return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent("Write a message before sending.")}`);

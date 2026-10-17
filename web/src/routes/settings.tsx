@@ -22,7 +22,7 @@ export const config = { mode: "app" };
 // Mirrors HARNESS_PACKAGES (src/harness.ts), which mirrors images/versions.json
 // under a test. Named here rather than imported because this route is SSR'd
 // from source and the value is display copy, not behaviour.
-const BAKED_HARNESSES = "claude-code 2.1.246, opencode 1.18.23, codex 0.163.0 — images/build.sh --harness <id>";
+const BAKED_HARNESSES = "claude-code 2.1.246, opencode 2.0.26, codex 0.163.0 — images/build.sh --harness <id>";
 
 interface Row {
   label: string;

@@ -53,6 +53,14 @@ export interface ProbeOptions {
    * through (a table that wrongly claims support) overrides it.
    */
   admitSteer?: (harnessId: string) => boolean;
+  /**
+   * The `--version` line the fake binary prints. Default: the pinned version
+   * ("2.0.26 (probe)" for opencode — the line the current adapter measures).
+   * A probe of a 1.x binary passes "1.18.23 (probe)".
+   */
+  versionLine?: string;
+  /** The event stream the fake binary prints. Default: the minimal valid one for the id. */
+  stream?: string;
 }
 
 /** One scripted ModelAdapter for the native loop that records everything it was shown. */
@@ -93,7 +101,7 @@ export interface FakeExternalRig {
   edited(): Promise<boolean>;
 }
 
-const CLAUDE_STREAM = JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, result: "done", usage: { input_tokens: 1, output_tokens: 1 } });
+const CLAUDE_STREAM = JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, result: "done", session_id: "probe-claude-session-1", usage: { input_tokens: 1, output_tokens: 1 } });
 const OPENCODE_STREAM = [
   JSON.stringify({ type: "text", part: { type: "text", text: "done" } }),
   JSON.stringify({ type: "step_finish", part: { tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } }, cost: 0 } }),
@@ -115,19 +123,20 @@ const CODEX_STREAM = [
  */
 export async function fakeExternalHarness(
   id: "claude-code" | "opencode" | "codex",
-  opts: { extraScript?: string[]; exitCode?: number } = {},
+  opts: { extraScript?: string[]; exitCode?: number; versionLine?: string; stream?: string } = {},
 ): Promise<FakeExternalRig> {
   const bin = await mkdtemp(join(tmpdir(), "probe-bin-"));
   const root = await mkdtemp(join(tmpdir(), "probe-work-"));
   const rec = await mkdtemp(join(tmpdir(), "probe-rec-"));
   const binary = HARNESS_PACKAGES[id]!.binary;
-  const stream = id === "claude-code" ? CLAUDE_STREAM : id === "opencode" ? OPENCODE_STREAM : CODEX_STREAM;
+  const stream = opts.stream ?? (id === "claude-code" ? CLAUDE_STREAM : id === "opencode" ? OPENCODE_STREAM : CODEX_STREAM);
+  const versionLine = opts.versionLine ?? `${HARNESS_PACKAGES[id]!.version} (probe)`;
   await mkdir(bin, { recursive: true });
   const script = [
     "#!/bin/sh",
-    `if [ "$1" = "--version" ]; then echo "${HARNESS_PACKAGES[id]!.version} (probe)"; exit 0; fi`,
+    `if [ "$1" = "--version" ]; then echo ${shq(versionLine)}; exit 0; fi`,
     `echo run >> ${shq(join(rec, "runs"))}`,
-    `printf '%s\\n' "$@" > ${shq(join(rec, "args"))}`,
+    `printf '%s\\n' "$@" >> ${shq(join(rec, "args"))}`,
     // claude and opencode get their prompt as an argument; codex reads it from
     // stdin (`codex exec -`). Record both so "what the harness received" is
     // the whole input, whichever side of the boundary it arrived on.
@@ -176,7 +185,13 @@ async function nativeRig(plan: string, steer?: { drain: () => Promise<string[]> 
 export async function probeOperation(id: ProbedId, operation: HarnessOperation, options: ProbeOptions = {}): Promise<ObservedBehaviour> {
   const harness = { id, version: HARNESS_VERSIONS[id]! };
   const external = id !== "native";
-  const rig = external ? await fakeExternalHarness(id) : undefined;
+  const rig =
+    external
+      ? await fakeExternalHarness(id, {
+          ...(options.versionLine !== undefined ? { versionLine: options.versionLine } : {}),
+          ...(options.stream !== undefined ? { stream: options.stream } : {}),
+        })
+      : undefined;
   const note = "probe-steer-note: prefer the smaller change";
   const store = { added: 0 };
   let started = false;
@@ -187,7 +202,13 @@ export async function probeOperation(id: ProbedId, operation: HarnessOperation, 
   if (operation === "plan-review") input.plan = true;
   else if (operation === "investigate") input.mode = "scan";
   else if (operation === "steer") {
-    const admit = (options.admitSteer ?? ((hid: string) => harnessSupports({ harness: { id: hid } }, "steer")))(id);
+    // The same gate the run page's steer route calls, fed the same ref shape
+    // a current enqueue records (id + contract version): steering is a
+    // contract-2 capability, and probing the 1-contract refusal needs the
+    // version a 1-contract log would carry.
+    const admit = (
+      options.admitSteer ?? ((hid: string) => harnessSupports({ harness: { id: hid, version: HARNESS_VERSIONS[hid] ?? "" } }, "steer"))
+    )(id);
     if (!admit) {
       // Refused at the gate, before any note is stored and before anything runs.
       return { operation, accepted: false, sideEffects: store.added > 0, refusalMessage: STEER_UNSUPPORTED_MESSAGE };
@@ -205,9 +226,10 @@ export async function probeOperation(id: ProbedId, operation: HarnessOperation, 
         model: scriptedNativeModel("").model,
         executor: rig!.provider,
         workdir: ".",
-        harnesses: externalAdapters({ env: {} }),
+        // The steer store rides with the adapters the way worker.ts wires it,
+        // so the probe exercises the real delivery path (session resume).
+        harnesses: externalAdapters({ env: {}, steer }),
         maxSteps: 6,
-        ...(steer !== undefined ? { steer } : {}),
       })
     : native!.wf;
   const { outcome, out } = await drive(wf, input);

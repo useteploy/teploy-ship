@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { harnessRef } from "./harness.js";
+import { HARNESS_VERSIONS, harnessRef } from "./harness.js";
 import { clearTestDetectCache, probeRepoTree, resolveTestTarget } from "./test-detect.js";
 
 const FORGEJO = "http://forge.example:3000/tyler/thing";
@@ -175,11 +175,11 @@ test("enqueue wiring: harness precedence and the testCommand that lands in the r
   // A repo that declares its harness beats the worker's env.
   assert.deepEqual(
     await wire({ tests: false }, { harness: "opencode" }, null, { SHIP_HARNESS: "claude-code" }),
-    { harness: { id: "opencode", version: "1" } },
+    { harness: { id: "opencode", version: HARNESS_VERSIONS.opencode! } },
   );
   // No declaration: the worker's env, then native.
   assert.deepEqual(await wire({ tests: false }, null, null, { SHIP_HARNESS: "claude-code" }), {
-    harness: { id: "claude-code", version: "1" },
+    harness: { id: "claude-code", version: HARNESS_VERSIONS["claude-code"]! },
   });
   assert.deepEqual(await wire({ tests: false }, null, null, {}), { harness: { id: "native", version: "1" } });
   // An explicit per-run choice beats both.

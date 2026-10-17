@@ -869,6 +869,13 @@ harness binaries by exact npm version. That file is the single source of truth
 drift, and `build.sh` refuses to build if a Dockerfile's `ARG` default has
 wandered off.
 
+**The opencode pin is the 2.x line (D6)**: `@opencode/cli@2.0.26` — the 1.x
+`opencode-ai` package ends at 1.19.3 and 2.x moved to a scoped package. An
+image that still bakes the old `opencode-ai@1.18.23` keeps working (the
+adapter drives both contracts and picks by the binary's reported version);
+rebuild when you want v2's session-resume steering, which the 1.x line cannot
+do.
+
 **Go is pinned to 1.25, not 1.24.** Three repos need 1.25, and on a 1.24
 sandbox every Go pull request arrived marked `tests: failed` on 2026-08-26 — a
 base-image mismatch that reviewers read as the agent's fault, and it cost a
@@ -896,6 +903,13 @@ old runs unreplayable.
 A run whose declared harness is missing from its image records a
 `harness-preflight` step that says so, names the build command, and ends the
 run without spending anything.
+
+**Steering an external harness (D6/D7)** needs nothing extra at deploy time:
+the run records the vendor session id (`opencode --session`, claude's
+`session_id`), and operator notes are delivered by resuming it — one more
+exec per batch, recorded like every other step. The steer box on the run
+page appears for it as soon as the run's harness contract is 2 or later; see
+docs/adapters.md for the exact semantics and the 1.x refusal.
 
 <a id="test-detect"></a>
 ### Detecting the test command

@@ -7,11 +7,18 @@ import { test } from "node:test";
 import type { ModelAdapter } from "@neutron-build/ai";
 import { LocalExecutor } from "@neutron-build/agents";
 import { MemoryEventStore, executeRun } from "@neutron-build/workflow";
+import type { WorkflowEvent } from "@neutron-build/workflow";
 
 import { durableAgent } from "./durable.js";
 import type { DurableAgentOutput, ExecutorProvider } from "./durable.js";
 import { FileRepoMemory } from "./repo-memory.js";
-import { envFile, externalAdapters, externalHarnessConfig, externalPrompt, codexGatewayConfigFlags, opencodeV2Refusal, parseClaudeStream, parseCodexExecStream, parseOpencodeStream, shq, versionMajor } from "./harness-external.js";
+import { HARNESS_VERSIONS, selectAdapter } from "./harness.js";
+import { STEER_CLOSED_MESSAGE, steerLoopExited, steerRefusal } from "./harness-capabilities.js";
+import { admittedSteps } from "./step-fingerprint.js";
+import {
+  codexGatewayConfigFlags, envFile, STEER_ROUNDS_MAX, externalAdapters, externalHarnessConfig, externalPrompt, opencodeFutureLineRefusal, opencodeSessionId,
+  parseClaudeStream, parseCodexExecStream, parseOpencode2Stream, parseOpencodeStream, shq, versionMajor,
+} from "./harness-external.js";
 
 const neverModel: ModelAdapter = {
   provider: "never",
@@ -24,19 +31,22 @@ const neverModel: ModelAdapter = {
   },
 };
 
+const REF = `evals/receipts/2026-10-14-opencode-v2-events.txt`;
+
 const CLAUDE_RESULT = {
   type: "result",
   subtype: "success",
   is_error: false,
   num_turns: 3,
   result: "Appended the fix and ran the tests.",
+  session_id: "6f47a1d0-8d2c-4b0a-9d3f-2a1b4c5d6e7f",
   total_cost_usd: 0.0123,
   usage: { input_tokens: 10, output_tokens: 20, cache_creation_input_tokens: 100, cache_read_input_tokens: 1000 },
 };
 
-test("parseClaudeStream reads the result event; cost is recorded only under a priced credential", () => {
+test("parseClaudeStream reads the result event and its session id; cost is recorded only under a priced credential", () => {
   const stream = [
-    JSON.stringify({ type: "system", subtype: "init" }),
+    JSON.stringify({ type: "system", subtype: "init", session_id: "6f47a1d0-8d2c-4b0a-9d3f-2a1b4c5d6e7f" }),
     JSON.stringify({ type: "assistant", message: {} }),
     "not json",
     JSON.stringify({ type: "assistant", message: {} }),
@@ -49,11 +59,14 @@ test("parseClaudeStream reads the result event; cost is recorded only under a pr
   assert.equal(priced.usage.costUSD, 0.0123);
   assert.equal(priced.usage.totalTokens, 1130);
   assert.equal(priced.usage.cacheReadTokens, 1000);
+  // D7: the session id is the durable handle --resume steering needs.
+  assert.equal(priced.sessionId, "6f47a1d0-8d2c-4b0a-9d3f-2a1b4c5d6e7f");
 
   const subscription = parseClaudeStream(stream, false);
   assert.equal(subscription.usage.priced, false);
   assert.equal(subscription.usage.costUSD, undefined, "a subscription estimate must not become spend");
   assert.equal(subscription.usage.inputTokens, 10, "tokens are still recorded");
+  assert.equal(subscription.sessionId, "6f47a1d0-8d2c-4b0a-9d3f-2a1b4c5d6e7f");
 
   assert.equal(parseClaudeStream(JSON.stringify({ ...CLAUDE_RESULT, subtype: "error_max_turns" }), true).status, "max-steps");
   assert.equal(parseClaudeStream(JSON.stringify({ ...CLAUDE_RESULT, subtype: "error_max_budget_usd" }), true).status, "budget-exhausted");
@@ -63,6 +76,11 @@ test("parseClaudeStream reads the result event; cost is recorded only under a pr
   const none = parseClaudeStream(JSON.stringify({ type: "assistant" }), true);
   assert.equal(none.status, "error");
   assert.equal(none.sawResult, false);
+  assert.equal(none.sessionId, undefined, "no events, no session");
+  // A crashed run printed its init but no result: the session id survives,
+  // because the first event that names one is the fallback.
+  const crashed = parseClaudeStream(`${JSON.stringify({ type: "system", subtype: "init", session_id: "early-session" })}\n`, true);
+  assert.equal(crashed.sessionId, "early-session");
 });
 
 test("parseOpencodeStream sums step_finish tokens and prices the run only when opencode reports cost", () => {
@@ -84,6 +102,79 @@ test("parseOpencodeStream sums step_finish tokens and prices the run only when o
 
   const errored = parseOpencodeStream([step(0), JSON.stringify({ type: "error", error: { message: "no provider" } })].join("\n"));
   assert.equal(errored.error, "no provider");
+});
+
+/**
+ * The v2 event contract, VERBATIM from the measured 2.0.26 streams in
+ * evals/receipts/2026-10-14-opencode-v2-events.txt (§2 pure reply, §3 resume,
+ * §4 tool run, §2 auth error). Timestamps trimmed for width; shapes kept.
+ */
+const V2_PURE_STREAM = [
+  `{"type":"step_start","timestamp":1792036067715,"sessionID":"ses_ec253b380ffe4G3XXxX9u4Zt9n","part":{"id":"prt_13dac5983001Guo0Azxo9jI56y","sessionID":"ses_ec253b380ffe4G3XXxX9u4Zt9n","messageID":"msg_13dac4cae00196O13d6CYO3mz0","type":"step-start"}}`,
+  `{"type":"text","timestamp":1792036067734,"sessionID":"ses_ec253b380ffe4G3XXxX9u4Zt9n","part":{"id":"prt_13dac4cae00196O13d6CYO3mz0_text-0","sessionID":"ses_ec253b380ffe4G3XXxX9u4Zt9n","messageID":"msg_13dac4cae00196O13d6CYO3mz0","type":"text","text":"CONTRACT-OK","time":{"start":1792036064434,"end":1792036067734}}}`,
+].join("\n");
+
+const V2_TOOL_STREAM = [
+  `{"type":"step_start","timestamp":1792036130000,"sessionID":"ses_toolrun0000000000000000001","part":{"id":"prt_t1","sessionID":"ses_toolrun0000000000000000001","messageID":"msg_13dad4482001MqdthUwB3Tb2q","type":"step-start"}}`,
+  `{"type":"tool_use","timestamp":1792036130100,"sessionID":"ses_toolrun0000000000000000001","part":{"partID":"prt_t2","messageID":"msg_13dad4482001MqdthUwB3Tb2q","type":"tool","id":"call_2e39ea5f07f14a06b848ca3f","tool":"shell","state":{"status":"completed","input":{"command":"ls -a"},"output":"...listing...","title":"shell","metadata":{},"time":{"start":1792036130000,"end":1792036130050}}}}`,
+  `{"type":"step_finish","timestamp":1792036130200,"sessionID":"ses_toolrun0000000000000000001","part":{"id":"prt_t3","messageID":"msg_13dad4482001MqdthUwB3Tb2q","type":"step-finish","reason":"tool-calls","cost":0,"tokens":{"input":4861,"output":13,"reasoning":51,"cache":{"read":3584,"write":0}}}}`,
+  `{"type":"step_start","timestamp":1792036130300,"sessionID":"ses_toolrun0000000000000000001","part":{"id":"prt_t4","sessionID":"ses_toolrun0000000000000000001","messageID":"msg_13dac4fe400113Qo8X3uBrsGD9","type":"step-start"}}`,
+  `{"type":"text","timestamp":1792036130400,"sessionID":"ses_toolrun0000000000000000001","part":{"id":"prt_t5","sessionID":"ses_toolrun0000000000000000001","messageID":"msg_13dac4fe400113Qo8X3uBrsGD9","type":"text","text":"12","time":{"start":1792036130300,"end":1792036130400}}}`,
+].join("\n");
+
+const V2_RESUME_STREAM = [
+  `{"type":"step_start","timestamp":1792036114146,"sessionID":"ses_shipproof_v2contract","part":{"id":"prt_r1","sessionID":"ses_shipproof_v2contract","messageID":"msg_13dadfa56001Tnla33rCwbpIj9","type":"step-start"}}`,
+  `{"type":"text","timestamp":1792036114161,"sessionID":"ses_shipproof_v2contract","part":{"id":"prt_r2","sessionID":"ses_shipproof_v2contract","messageID":"msg_13dadfa56001Tnla33rCwbpIj9","type":"text","text":"You asked me to remember the codeword ZULU-7 and to reply with exactly \\"NOTED\\".","time":{"start":1792036108892,"end":1792036114161}}}`,
+].join("\n");
+
+const V2_ERROR_STREAM = [
+  `{"type":"step_start","timestamp":1792036034116,"sessionID":"ses_ec2542a35ffeOd4SukP1pZcV3y","part":{"id":"prt_e1","sessionID":"ses_ec2542a35ffeOd4SukP1pZcV3y","messageID":"msg_e1","type":"step-start"}}`,
+  `{"type":"error","timestamp":1792036034649,"sessionID":"ses_ec2542a35ffeOd4SukP1pZcV3y","error":{"type":"provider.auth","message":"Provider request failed with HTTP 401","status":401,"response":{"body":"IDE token expired: unauthorized: token expired\\n"}}}`,
+].join("\n");
+
+test("parseOpencode2Stream reads the measured 2.0.26 contract: messageID turns, step_finish usage where it exists, the session id", () => {
+  // A PURE reply: one message, no step_finish at all — the measured v1-parser
+  // degradation was turns 0 / usage all-zero; turns now count the message.
+  const pure = parseOpencode2Stream(V2_PURE_STREAM);
+  assert.equal(pure.summary, "CONTRACT-OK");
+  assert.equal(pure.turns, 1);
+  assert.deepEqual(
+    { ...pure.usage },
+    { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, priced: false },
+    "a pure reply carries no usage anywhere in the stream (receipt §2) — recorded as such, never invented",
+  );
+  assert.equal(pure.sessionId, "ses_ec253b380ffe4G3XXxX9u4Zt9n");
+
+  // The tool run from receipt §4: two messages, usage only on the tool step.
+  const tool = parseOpencode2Stream(V2_TOOL_STREAM);
+  assert.equal(tool.summary, "12");
+  assert.equal(tool.turns, 2, "turns count step_start messageIDs, not step_finish (the terminal text step emits none)");
+  assert.equal(tool.usage.inputTokens, 4861);
+  assert.equal(tool.usage.outputTokens, 64, "output + reasoning, as on 1.x");
+  assert.equal(tool.usage.cacheReadTokens, 3584);
+  assert.equal(tool.usage.totalTokens, 8509);
+  assert.equal(tool.usage.priced, false, "cost 0 with the subscription provider: counted, not priced");
+  assert.equal(tool.sessionId, "ses_toolrun0000000000000000001");
+
+  // A cost the stream DID report, on a run whose terminal text step has no
+  // step_finish (receipt §4: it never does): the figure is a lower bound, so
+  // the run is unpriced rather than priced-but-short.
+  const priced = parseOpencode2Stream(V2_TOOL_STREAM.replace('"cost":0,', '"cost":0.0123,'));
+  assert.equal(priced.usage.priced, false, "two model steps, one step_finish: usage is incomplete, not priced");
+  assert.equal(priced.usage.costUSD, undefined);
+  assert.equal(priced.usage.inputTokens, 4861, "the tokens it does carry are kept");
+
+  // Resume stream (receipt §3 Run B): context is the vendor's problem; Ship
+  // records what came back.
+  const resumed = parseOpencode2Stream(V2_RESUME_STREAM);
+  assert.equal(resumed.turns, 1);
+  assert.match(resumed.summary, /ZULU-7/);
+  assert.equal(resumed.sessionId, "ses_shipproof_v2contract");
+
+  // In-stream error (receipt §2): same role as 1.x, richer fields.
+  const errored = parseOpencode2Stream(V2_ERROR_STREAM);
+  assert.equal(errored.error, "Provider request failed with HTTP 401");
+  assert.equal(errored.sessionId, "ses_ec2542a35ffeOd4SukP1pZcV3y", "the session is known even from a failed run");
 });
 
 test("envFile forwards only named, present, well-formed variables and quotes for sh", () => {
@@ -115,6 +206,14 @@ test("externalPrompt states the tree-is-the-deliverable contract", () => {
   assert.match(p, /do not commit, push/);
 });
 
+test("opencodeSessionId is deterministic, ses-prefixed, and scoped per attempt", () => {
+  assert.match(opencodeSessionId("run-abc", ""), /^ses_ship_run-abc$/);
+  assert.equal(opencodeSessionId("run-abc", "attempt-1-"), "ses_ship_run-abc_attempt-1-");
+  assert.equal(opencodeSessionId("run-abc", ""), opencodeSessionId("run-abc", ""), "a replay rebuilds the same id");
+  // Receipt §3: arbitrary ids are rejected — the ses prefix is required.
+  assert.ok(opencodeSessionId("x", "").startsWith("ses"));
+});
+
 /**
  * A fake `claude` on PATH: records the prompt and the environment it saw,
  * edits the tree, and prints a recorded stream-json. The adapter must then
@@ -137,7 +236,7 @@ async function workspaceWithFakeClaude(opts: { recordTo: string; stream: string 
       `if [ "$1" = "--version" ]; then echo "9.9.9 (fake)"; exit 0; fi`,
       `echo run >> ${shq(join(opts.recordTo, "runs"))}`,
       `printf '%s' "$2" > ${shq(join(opts.recordTo, "prompt"))}`,
-      `printf '%s\\n' "$*" > ${shq(join(opts.recordTo, "args"))}`,
+      `printf '%s\\n' "$*" >> ${shq(join(opts.recordTo, "args"))}`,
       `printf 'OAUTH=%s KEY=%s SANDBOX=%s\\n' "$CLAUDE_CODE_OAUTH_TOKEN" "$ANTHROPIC_API_KEY" "$IS_SANDBOX" > ${shq(join(opts.recordTo, "env"))}`,
       `echo edited > edited.txt`,
       `cat <<'EOF'\n${opts.stream}\nEOF`,
@@ -150,9 +249,13 @@ async function workspaceWithFakeClaude(opts: { recordTo: string; stream: string 
   };
 }
 
+const stepsOf = (events: readonly WorkflowEvent[]): string[] => events.filter((e) => e.type === "step-completed").map((e) => e.name as string);
+const stepResult = <T>(events: readonly WorkflowEvent[], name: string): T =>
+  (events.find((e) => e.type === "step-completed" && e.name === name)?.data as { result: T }).result;
+
 test("claude-code adapter: preflight + one recorded run, prompt and credentials delivered, subscription run unpriced, replay never re-runs the binary", async () => {
   const recordTo = await mkdtemp(join(tmpdir(), "fake-harness-rec-"));
-  const stream = [JSON.stringify({ type: "system", subtype: "init" }), JSON.stringify({ type: "assistant" }), JSON.stringify(CLAUDE_RESULT)].join("\n");
+  const stream = [JSON.stringify({ type: "system", subtype: "init", session_id: CLAUDE_RESULT.session_id }), JSON.stringify({ type: "assistant" }), JSON.stringify(CLAUDE_RESULT)].join("\n");
   const { provider, runs } = await workspaceWithFakeClaude({ recordTo, stream });
   const env = { CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat-fake", SHIP_HARNESS_MODEL: "sonnet" };
   const wf = durableAgent({ model: neverModel, executor: provider, workdir: ".", harnesses: externalAdapters({ env }), maxSteps: 7 });
@@ -161,7 +264,7 @@ test("claude-code adapter: preflight + one recorded run, prompt and credentials 
     workflow: wf,
     runId: "run-claude",
     store,
-    input: { task: "Fix the thing", harness: { id: "claude-code", version: "1" } },
+    input: { task: "Fix the thing", harness: { id: "claude-code", version: HARNESS_VERSIONS["claude-code"] } },
   });
   assert.equal(outcome.status, "completed", JSON.stringify(outcome));
   const out = outcome.output as DurableAgentOutput;
@@ -172,12 +275,15 @@ test("claude-code adapter: preflight + one recorded run, prompt and credentials 
   assert.equal(out.usage?.costUSD, undefined);
   assert.equal(out.usage?.inputTokens, 10);
 
-  const steps = (await store.load("run-claude")).filter((e) => e.type === "step-completed").map((e) => e.name);
-  assert.deepEqual(steps, ["sandbox", "harness-preflight", "harness-run"]);
-  const runStep = (await store.load("run-claude")).find((e) => e.type === "step-completed" && e.name === "harness-run");
-  const record = (runStep?.data as { result: { forwarded: string[]; exitCode: number } }).result;
+  const events = await store.load("run-claude");
+  // No steer flag in the input: the exact two-step sequence every earlier
+  // external log carries — the D6/D7 steps are gated on it.
+  assert.deepEqual(stepsOf(events), ["sandbox", "harness-preflight", "harness-run"]);
+  const record = stepResult<{ forwarded: string[]; exitCode: number; sessionId?: string }>(events, "harness-run");
   assert.deepEqual(record.forwarded, ["CLAUDE_CODE_OAUTH_TOKEN"], "names only, never values");
   assert.equal(record.exitCode, 0);
+  assert.equal(record.sessionId, CLAUDE_RESULT.session_id, "the session id is durable in the log (D7)");
+  const runStep = events.find((e) => e.type === "step-completed" && e.name === "harness-run");
   assert.ok(!JSON.stringify(runStep).includes("sk-ant-oat-fake"), "the credential must not be in the log");
 
   assert.match(await readFile(join(recordTo, "prompt"), "utf8"), /^Fix the thing[\s\S]*do not commit/);
@@ -188,6 +294,7 @@ test("claude-code adapter: preflight + one recorded run, prompt and credentials 
   assert.match(args, /--max-turns 7/);
   assert.match(args, /--model sonnet/);
   assert.doesNotMatch(args, /--max-budget-usd/, "no dollar budget on an unpriced run");
+  assert.doesNotMatch(args, /--resume/, "no resume without steering");
   assert.equal(await runs(), 1);
 
   // Replay: same outcome, the binary is not run again.
@@ -207,7 +314,12 @@ test("claude-code adapter: an API-key run is priced, carries claude's cost, and 
     maxRunCostUSD: 2,
   });
   const store = new MemoryEventStore();
-  const outcome = await executeRun({ workflow: wf, runId: "run-claude-api", store, input: { task: "t", harness: { id: "claude-code", version: "1" } } });
+  const outcome = await executeRun({
+    workflow: wf,
+    runId: "run-claude-api",
+    store,
+    input: { task: "t", harness: { id: "claude-code", version: HARNESS_VERSIONS["claude-code"] } },
+  });
   const out = outcome.output as DurableAgentOutput;
   assert.equal(out.status, "finished");
   assert.equal(out.usage?.priced, true);
@@ -222,7 +334,12 @@ test("a missing binary is a recorded error result, not a thrown step", async () 
   const provider: ExecutorProvider = { async create() { return { handle: work }; }, attach: () => executor };
   const wf = durableAgent({ model: neverModel, executor: provider, workdir: ".", harnesses: externalAdapters({ env: {} }) });
   const store = new MemoryEventStore();
-  const outcome = await executeRun({ workflow: wf, runId: "run-nobin", store, input: { task: "t", harness: { id: "opencode", version: "1" } } });
+  const outcome = await executeRun({
+    workflow: wf,
+    runId: "run-nobin",
+    store,
+    input: { task: "t", harness: { id: "opencode", version: HARNESS_VERSIONS.opencode } },
+  });
   assert.equal(outcome.status, "completed");
   const out = outcome.output as DurableAgentOutput;
   assert.equal(out.status, "error");
@@ -230,9 +347,8 @@ test("a missing binary is a recorded error result, not a thrown step", async () 
   // The message has to carry the FIX, not just the fact: harnesses are baked,
   // and an operator who has just met that word needs the command.
   assert.match(out.summary, /images\/build\.sh --harness opencode/);
-  assert.match(out.summary, /opencode-ai@/);
-  const steps = (await store.load("run-nobin")).filter((e) => e.type === "step-completed").map((e) => e.name);
-  assert.deepEqual(steps, ["sandbox", "harness-preflight"]);
+  assert.match(out.summary, /@opencode\/cli@/);
+  assert.deepEqual(stepsOf(await store.load("run-nobin")), ["sandbox", "harness-preflight"]);
 });
 
 test("versionMajor reads the major out of a --version line, or nothing", () => {
@@ -244,23 +360,23 @@ test("versionMajor reads the major out of a --version line, or nothing", () => {
   assert.equal(versionMajor(""), undefined);
 });
 
-test("opencodeV2Refusal names the resolved version, the pin, and the tracked adoption receipt", () => {
-  const message = opencodeV2Refusal("opencode 2.0.26", "1.18.23");
-  assert.match(message, /2\.0\.26/);
-  assert.match(message, /opencode-ai@1\.18\.23/);
-  assert.match(message, /images\/versions\.json/);
-  assert.match(message, /--pure/);
-  assert.match(message, /evals\/receipts\/2026-10-14-opencode-v2-events\.txt/);
-  // No pin known (no images/versions.json entry): still refuses, still points
-  // at the receipt — the guard must not depend on the pin being present.
-  const unpinned = opencodeV2Refusal("opencode 2.0.26");
-  assert.match(unpinned, /2\.0\.26/);
-  assert.match(unpinned, /2026-10-14-opencode-v2-events\.txt/);
+test("the version guard now refuses only an opencode PAST the measured 2.x line", () => {
+  const message = opencodeFutureLineRefusal("opencode 3.1.0", "2.0.26");
+  assert.match(message, /3\.1\.0/);
+  assert.match(message, /@opencode\/cli@2\.0\.26/);
+  assert.match(message, new RegExp(REF.replace(/\//g, "\\/")));
+  const unpinned = opencodeFutureLineRefusal("opencode 3.1.0");
+  assert.match(unpinned, /3\.1\.0/);
   assert.doesNotMatch(unpinned, /versions\.json/);
 });
 
 /** A fake `opencode` whose --version line the caller picks; records whether its run path ever executed. */
-async function workspaceWithFakeOpencode(opts: { recordTo: string; versionLine: string; stream: string }): Promise<ExecutorProvider> {
+async function workspaceWithFakeOpencode(opts: {
+  recordTo: string;
+  versionLine: string;
+  stream: string;
+  resumeStream?: string;
+}): Promise<{ provider: ExecutorProvider; runs: () => Promise<number>; args: () => Promise<string> }> {
   const bin = await mkdtemp(join(tmpdir(), "fake-oc-bin-"));
   await fakeBin(
     bin,
@@ -268,71 +384,283 @@ async function workspaceWithFakeOpencode(opts: { recordTo: string; versionLine: 
     [
       `if [ "$1" = "--version" ]; then printf '%s\\n' ${shq(opts.versionLine)}; exit 0; fi`,
       `echo run >> ${shq(join(opts.recordTo, "runs"))}`,
-      `echo edited > edited.txt`,
-      `cat <<'EOF'\n${opts.stream}\nEOF`,
+      `printf '%s\\n' "$*" >> ${shq(join(opts.recordTo, "args"))}`,
+      // The resume exec reads a different prompt file; print the other stream for it.
+      `if [ -f .teploy-agent/harness-steer.md ]; then printf '%s\\n' ${shq(opts.resumeStream ?? opts.stream)}; else printf '%s\\n' ${shq(opts.stream)}; fi`,
     ].join("\n"),
   );
   const work = await mkdtemp(join(tmpdir(), "fake-oc-work-"));
   const executor = new LocalExecutor({ root: work, env: { PATH: `${bin}:${process.env.PATH ?? ""}` } });
-  return { isolated: true, async create() { return { handle: work }; }, attach: () => executor };
+  return {
+    provider: { isolated: true, async create() { return { handle: work }; }, attach: () => executor },
+    runs: async () => (await readFile(join(opts.recordTo, "runs"), "utf8").catch(() => "")).split("\n").filter((l) => l === "run").length,
+    args: () => readFile(join(opts.recordTo, "args"), "utf8").catch(() => ""),
+  };
 }
 
-const OPENCODE_OK_STREAM = [
+const OPENCODE_V1_OK_STREAM = [
   JSON.stringify({ type: "step_start", part: {} }),
   JSON.stringify({ type: "text", part: { type: "text", text: "Done: fixed lib.ts" } }),
   JSON.stringify({ type: "step_finish", part: { type: "step-finish", tokens: { input: 5, output: 1, reasoning: 0, cache: { read: 0, write: 0 } }, cost: 0 } }),
 ].join("\n");
 
-test("opencode adapter refuses a >= 2.0.0 binary at preflight: recorded error with the named pin and receipt, nothing runs, replay agrees", async () => {
-  const recordTo = await mkdtemp(join(tmpdir(), "oc-v2-rec-"));
+test("opencode adapter refuses an opencode PAST 2.x at preflight: recorded error, nothing runs, replay agrees", async () => {
+  const recordTo = await mkdtemp(join(tmpdir(), "oc-future-rec-"));
   const runs = async () => (await readFile(join(recordTo, "runs"), "utf8").catch(() => "")).split("\n").filter((l) => l === "run").length;
-  const provider = await workspaceWithFakeOpencode({ recordTo, versionLine: "opencode 2.0.26", stream: OPENCODE_OK_STREAM });
+  const provider = (await workspaceWithFakeOpencode({ recordTo, versionLine: "opencode 3.1.0", stream: OPENCODE_V1_OK_STREAM })).provider;
   const wf = durableAgent({ model: neverModel, executor: provider, workdir: ".", harnesses: externalAdapters({ env: {} }) });
   const store = new MemoryEventStore();
-  const input = { task: "t", harness: { id: "opencode", version: "1" } };
-  const outcome = await executeRun({ workflow: wf, runId: "run-oc-v2", store, input });
+  const input = { task: "t", harness: { id: "opencode", version: HARNESS_VERSIONS.opencode } };
+  const outcome = await executeRun({ workflow: wf, runId: "run-oc-future", store, input });
   assert.equal(outcome.status, "completed", JSON.stringify(outcome));
   const out = outcome.output as DurableAgentOutput;
   assert.equal(out.status, "error");
-  assert.match(out.summary, /2\.0\.26/);
-  assert.match(out.summary, /opencode-ai@1\.18\.23/);
-  assert.match(out.summary, /evals\/receipts\/2026-10-14-opencode-v2-events\.txt/);
+  assert.match(out.summary, /3\.1\.0/);
   assert.match(out.summary, /Nothing ran\./);
-  const steps = (await store.load("run-oc-v2")).filter((e) => e.type === "step-completed").map((e) => e.name);
-  assert.deepEqual(steps, ["sandbox", "harness-preflight"], "no harness-run step: the refusal stops the attempt where the missing-binary one does");
-  // The refusal is on the recorded preflight value, so the version the guard
-  // saw is in the log even without the summary.
-  const preStep = (await store.load("run-oc-v2")).find((e) => e.type === "step-completed" && e.name === "harness-preflight");
-  const pre = preStep?.data as { result: { found: boolean; version: string; expected: string; pinned: boolean; refused: string } };
-  assert.equal(pre.result.found, true);
-  assert.equal(pre.result.version, "opencode 2.0.26");
-  assert.equal(pre.result.pinned, false);
-  assert.match(pre.result.refused, /2\.0\.26/);
+  assert.deepEqual(stepsOf(await store.load("run-oc-future")), ["sandbox", "harness-preflight"], "no harness-run step: the refusal stops the attempt where the missing-binary one does");
+  const pre = stepResult<{ found: boolean; version: string; refused: string }>((await store.load("run-oc-future")), "harness-preflight");
+  assert.equal(pre.found, true);
+  assert.match(pre.refused, /3\.1\.0/);
   assert.equal(await runs(), 0, "the binary's run path must never execute");
-  const replay = await executeRun({ workflow: wf, runId: "run-oc-v2", store, input });
+  const replay = await executeRun({ workflow: wf, runId: "run-oc-future", store, input });
   assert.equal((replay.output as DurableAgentOutput).status, "error");
   assert.equal(await runs(), 0, "replay must not re-run the harness");
 });
 
-test("opencode adapter runs a 1.x binary and an unparseable-version binary exactly as before the guard", async () => {
+test("opencode adapter still drives a 1.x binary through the v1 invocation, and an unparseable version behaves as before", async () => {
   for (const [runId, versionLine, label] of [
     ["run-oc-pass-v1", "1.18.23", "v1.x version string passes"],
     ["run-oc-pass-noversion", "opencode (source build)", "missing version info behaves as today"],
   ] as const) {
     const recordTo = await mkdtemp(join(tmpdir(), "oc-v1-rec-"));
-    const runs = async () => (await readFile(join(recordTo, "runs"), "utf8").catch(() => "")).split("\n").filter((l) => l === "run").length;
-    const provider = await workspaceWithFakeOpencode({ recordTo, versionLine, stream: OPENCODE_OK_STREAM });
+    const { provider, runs, args } = await workspaceWithFakeOpencode({ recordTo, versionLine, stream: OPENCODE_V1_OK_STREAM });
     const wf = durableAgent({ model: neverModel, executor: provider, workdir: ".", harnesses: externalAdapters({ env: {} }) });
     const store = new MemoryEventStore();
-    const outcome = await executeRun({ workflow: wf, runId, store, input: { task: "t", harness: { id: "opencode", version: "1" } } });
+    const outcome = await executeRun({
+      workflow: wf,
+      runId,
+      store,
+      input: { task: "t", harness: { id: "opencode", version: HARNESS_VERSIONS.opencode } },
+    });
     assert.equal(outcome.status, "completed", JSON.stringify(outcome));
     const out = outcome.output as DurableAgentOutput;
     assert.equal(out.status, "finished", label);
     assert.equal(out.agentSummary, "Done: fixed lib.ts");
     assert.equal(await runs(), 1, `${label}: the binary ran`);
-    const steps = (await store.load(runId)).filter((e) => e.type === "step-completed").map((e) => e.name);
-    assert.deepEqual(steps, ["sandbox", "harness-preflight", "harness-run"], label);
+    assert.match(await args(), /--pure --dir \./, `${label}: the v1 invocation, unchanged`);
+    const events = await store.load(runId);
+    assert.deepEqual(stepsOf(events), ["sandbox", "harness-preflight", "harness-run"], label);
+    assert.equal(stepResult<{ sessionId?: string }>(events, "harness-run").sessionId, undefined, `${label}: the 1.x line records no session`);
   }
+});
+
+test("opencode v2 (D6): the 2.x binary runs the v2 invocation with a caller-chosen session, the session id is recorded, replay never re-runs it", async () => {
+  const recordTo = await mkdtemp(join(tmpdir(), "oc-v2-rec-"));
+  const { provider, runs, args } = await workspaceWithFakeOpencode({ recordTo, versionLine: "2.0.26", stream: V2_TOOL_STREAM });
+  const wf = durableAgent({ model: neverModel, executor: provider, workdir: ".", harnesses: externalAdapters({ env: {} }) });
+  const store = new MemoryEventStore();
+  const input = { task: "t", harness: { id: "opencode", version: HARNESS_VERSIONS.opencode } };
+  const outcome = await executeRun({ workflow: wf, runId: "run-oc-v2", store, input });
+  assert.equal(outcome.status, "completed", JSON.stringify(outcome));
+  const out = outcome.output as DurableAgentOutput;
+  assert.equal(out.status, "finished");
+  assert.equal(out.agentSummary, "12");
+  assert.equal(out.turns, 2, "the v2 parser counts step_start messageIDs");
+  assert.equal(out.usage?.inputTokens, 4861);
+  assert.equal(out.usage?.priced, false, "cost 0: counted, not priced");
+
+  const events = await store.load("run-oc-v2");
+  const record = stepResult<{ sessionId?: string; exitCode: number }>(events, "harness-run");
+  // The recorded session is the one the stream reported — which for a
+  // caller-chosen id is the id Ship passed.
+  assert.equal(record.sessionId, "ses_toolrun0000000000000000001");
+  const invocation = await args();
+  assert.match(invocation, /--session ses_[a-z0-9_-]+/);
+  assert.equal(opencodeSessionId("run-oc-v2", ""), "ses_ship_run-oc-v2");
+  assert.doesNotMatch(invocation, /--pure|--dir/, "v2 removed both flags; the invocation must not pass them");
+
+  // Replay: the recorded steps return, the binary is not run again.
+  const replay = await executeRun({ workflow: wf, runId: "run-oc-v2", store, input });
+  assert.equal((replay.output as DurableAgentOutput).status, "finished");
+  assert.equal(await runs(), 1, "v1-path replay: the vendor process never re-runs");
+  assert.deepEqual(stepsOf(await store.load("run-oc-v2")), ["sandbox", "harness-preflight", "harness-run"], "no steer flag: no steer steps");
+});
+
+/** A steer store scripted per round — the drain the worker wires, faked. */
+function scriptedSteer(rounds: Record<string, string[]>): { drain: (runId: string, turn: string | number) => Promise<string[]> } {
+  return { drain: async (_runId, turn) => rounds[String(turn)] ?? [] };
+}
+
+test("opencode v2 steering (D6): a pending note is drained at the process boundary and delivered by resuming the recorded session; replay never re-runs the vendor", async () => {
+  const recordTo = await mkdtemp(join(tmpdir(), "oc-v2-steer-rec-"));
+  const { provider, runs, args } = await workspaceWithFakeOpencode({
+    recordTo,
+    versionLine: "2.0.26",
+    stream: V2_TOOL_STREAM,
+    resumeStream: V2_RESUME_STREAM,
+  });
+  const wf = durableAgent({
+    model: neverModel,
+    executor: provider,
+    workdir: ".",
+    harnesses: externalAdapters({ env: {}, steer: scriptedSteer({ "ext-0": ["prefer the smaller change"] }) }),
+  });
+  const store = new MemoryEventStore();
+  const input = { task: "t", steer: true, harness: { id: "opencode", version: HARNESS_VERSIONS.opencode } };
+  const outcome = await executeRun({ workflow: wf, runId: "run-oc-steer", store, input });
+  assert.equal(outcome.status, "completed", JSON.stringify(outcome));
+  const out = outcome.output as DurableAgentOutput;
+  // The final account is the RESUME's (the work ended there); turns and usage
+  // accumulate across both execs.
+  assert.equal(out.status, "finished");
+  assert.match(out.agentSummary!, /ZULU-7/);
+  assert.equal(out.turns, 2 + 1);
+  assert.equal(out.usage?.inputTokens, 4861 + 0, "usage sums across the execs of the session");
+
+  const events = await store.load("run-oc-steer");
+  assert.deepEqual(stepsOf(events), ["sandbox", "harness-preflight", "harness-run", "harness-steer-0", "harness-resume-0", "harness-steer-1", "harness-steer-undelivered"]);
+  assert.deepEqual(stepResult<string[]>(events, "harness-steer-0"), ["prefer the smaller change"], "the drained notes are the recorded step value");
+  assert.deepEqual(stepResult<string[]>(events, "harness-steer-1"), [], "the terminating drain is recorded too, so replay breaks at the same round");
+  const resume = stepResult<{ exitCode: number; sessionId?: string; turns: number }>(events, "harness-resume-0");
+  assert.equal(resume.sessionId, "ses_shipproof_v2contract", "the resume record carries the session it resumed");
+  const invocation = await args();
+  // The fake records "$*" after the shell expanded the quotes, so flags and
+  // the note text appear unquoted.
+  assert.match(invocation, /--session ses_[a-z0-9_-]+ .*Operator steering — adjust course accordingly: prefer the smaller change/);
+  assert.equal(await runs(), 2, "main run + one resume");
+
+  // Replay: the recorded steer/resume steps return; no vendor process runs.
+  const replay = await executeRun({ workflow: wf, runId: "run-oc-steer", store, input });
+  assert.equal((replay.output as DurableAgentOutput).agentSummary, out.agentSummary);
+  assert.equal(await runs(), 2, "replay must not re-run the harness or resume it");
+  assert.deepEqual(stepsOf(await store.load("run-oc-steer")), ["sandbox", "harness-preflight", "harness-run", "harness-steer-0", "harness-resume-0", "harness-steer-1", "harness-steer-undelivered"]);
+});
+
+test("claude-code steering (D7): the note resumes the recorded claude session with --resume", async () => {
+  const recordTo = await mkdtemp(join(tmpdir(), "cc-steer-rec-"));
+  const stream = [JSON.stringify({ type: "system", subtype: "init", session_id: CLAUDE_RESULT.session_id }), JSON.stringify(CLAUDE_RESULT)].join("\n");
+  const { provider, runs } = await workspaceWithFakeClaude({ recordTo, stream });
+  const wf = durableAgent({
+    model: neverModel,
+    executor: provider,
+    workdir: ".",
+    harnesses: externalAdapters({ env: {}, steer: scriptedSteer({ "ext-0": ["also add a test"] }) }),
+  });
+  const store = new MemoryEventStore();
+  const input = { task: "t", steer: true, harness: { id: "claude-code", version: HARNESS_VERSIONS["claude-code"] } };
+  const outcome = await executeRun({ workflow: wf, runId: "run-cc-steer", store, input });
+  assert.equal(outcome.status, "completed", JSON.stringify(outcome));
+  const out = outcome.output as DurableAgentOutput;
+  assert.equal(out.status, "finished");
+  assert.equal(out.turns, 3 + 3, "turns accumulate across the main run and the resume");
+
+  const events = await store.load("run-cc-steer");
+  assert.deepEqual(stepsOf(events), ["sandbox", "harness-preflight", "harness-run", "harness-steer-0", "harness-resume-0", "harness-steer-1", "harness-steer-undelivered"]);
+  const invocation = await readFile(join(recordTo, "args"), "utf8");
+  assert.match(invocation, new RegExp(`--resume ${CLAUDE_RESULT.session_id}`));
+  assert.match(invocation, /Operator steering — adjust course accordingly: also add a test/);
+  assert.match(invocation, /--permission-mode bypassPermissions/);
+  assert.equal(await runs(), 2);
+});
+
+test("negative control: a note accepted for an opencode run on a 1.x binary is refused on the record, never silently dropped", async () => {
+  const recordTo = await mkdtemp(join(tmpdir(), "oc-v1-steer-rec-"));
+  const { provider, runs } = await workspaceWithFakeOpencode({ recordTo, versionLine: "1.18.23", stream: OPENCODE_V1_OK_STREAM });
+  const wf = durableAgent({
+    model: neverModel,
+    executor: provider,
+    workdir: ".",
+    harnesses: externalAdapters({ env: {}, steer: scriptedSteer({ "ext-0": ["note that cannot land"] }) }),
+  });
+  const store = new MemoryEventStore();
+  const outcome = await executeRun({
+    workflow: wf,
+    runId: "run-oc-v1-steer",
+    store,
+    input: { task: "t", steer: true, harness: { id: "opencode", version: HARNESS_VERSIONS.opencode } },
+  });
+  assert.equal(outcome.status, "completed", JSON.stringify(outcome));
+  const events = await store.load("run-oc-v1-steer");
+  assert.deepEqual(stepsOf(events), ["sandbox", "harness-preflight", "harness-run", "harness-steer-0", "harness-resume-0", "harness-steer-undelivered"]);
+  const refusal = stepResult<{ delivered: false; reason: string }>(events, "harness-resume-0");
+  assert.equal(refusal.delivered, false);
+  assert.match(refusal.reason, /no session to resume/);
+  assert.equal(await runs(), 1, "no second process: there is nothing to resume");
+});
+
+test("steering is bounded: a drain that always has notes runs 1 + STEER_ROUNDS_MAX execs in total, and the note it never read is recorded as undelivered", async () => {
+  const recordTo = await mkdtemp(join(tmpdir(), "oc-v2-bound-rec-"));
+  const { provider, runs } = await workspaceWithFakeOpencode({
+    recordTo,
+    versionLine: "2.0.26",
+    stream: V2_PURE_STREAM,
+    resumeStream: V2_PURE_STREAM,
+  });
+  const wf = durableAgent({
+    model: neverModel,
+    executor: provider,
+    workdir: ".",
+    harnesses: externalAdapters({ env: {}, steer: { drain: async () => ["keep going"] } }),
+  });
+  const store = new MemoryEventStore();
+  const outcome = await executeRun({
+    workflow: wf,
+    runId: "run-oc-bound",
+    store,
+    input: { task: "t", steer: true, harness: { id: "opencode", version: HARNESS_VERSIONS.opencode } },
+  });
+  assert.equal(outcome.status, "completed", JSON.stringify(outcome));
+  const events = await store.load("run-oc-bound");
+  const names = stepsOf(events);
+  const resumes = names.filter((n) => /^harness-resume-\d+$/.test(n));
+  const drains = names.filter((n) => /^harness-steer-\d+$/.test(n));
+  assert.equal(resumes.length, STEER_ROUNDS_MAX, "STEER_ROUNDS_MAX resumes");
+  assert.equal(drains.length, STEER_ROUNDS_MAX);
+  assert.equal(await runs(), 1 + STEER_ROUNDS_MAX, "1 main + STEER_ROUNDS_MAX resumes, as documented");
+  // The drain the loop never got to read from is not lost: the closing step
+  // takes it into the undelivered record, visible in the run's output.
+  assert.deepEqual(stepResult<string[]>(events, "harness-steer-undelivered"), ["keep going"]);
+  assert.match((outcome.output as DurableAgentOutput).agentSummary!, /NOT delivered to the agent \(1\): keep going/);
+});
+
+test("a run recorded under version 1 still runs and replays under the v1 alias; an unknown version is still refused", async () => {
+  for (const [id, versionLine, stream] of [
+    ["opencode", "1.18.23", OPENCODE_V1_OK_STREAM],
+    ["claude-code", "9.9.9", JSON.stringify(CLAUDE_RESULT)],
+  ] as const) {
+    const recordTo = await mkdtemp(join(tmpdir(), "xver-rec-"));
+    const rig = id === "opencode" ? await workspaceWithFakeOpencode({ recordTo, versionLine, stream }) : await workspaceWithFakeClaude({ recordTo, stream });
+    const drained: string[] = [];
+    const wf = durableAgent({
+      model: neverModel,
+      executor: rig.provider,
+      workdir: ".",
+      harnesses: externalAdapters({ env: {}, steer: { drain: async (_r, key) => (drained.push(String(key)), ["a note"]) } }),
+    });
+    const store = new MemoryEventStore();
+    // The ref a pre-D6/D7 enqueue recorded — with the steer flag every new run carries.
+    const input = { task: "t", steer: true, harness: { id, version: "1" } };
+    const outcome = await executeRun({ workflow: wf, runId: `run-${id}-v1`, store, input });
+    assert.equal(outcome.status, "completed", JSON.stringify(outcome));
+    assert.equal((outcome.output as DurableAgentOutput).status, "finished");
+    assert.deepEqual(stepsOf(await store.load(`run-${id}-v1`)), ["sandbox", "harness-preflight", "harness-run"], "contract 1 records no steer steps");
+    assert.deepEqual(drained, [], "the alias never drains notes it cannot deliver");
+    assert.equal(await rig.runs(), 1);
+    const replay = await executeRun({ workflow: wf, runId: `run-${id}-v1`, store, input });
+    assert.equal(replay.status, "completed");
+    assert.equal(await rig.runs(), 1, "replay never re-runs the vendor");
+
+    const unknown = await executeRun({ workflow: wf, runId: `run-${id}-v3`, store: new MemoryEventStore(), input: { task: "t", harness: { id, version: "3" } } });
+    assert.equal(unknown.status, "failed");
+    assert.match(unknown.error?.detail ?? "", /refuses to replay under a different program/);
+  }
+});
+
+test("the step-fingerprint table admits the steer steps only for contracts that record them", () => {
+  const steps = (version: string) => admittedSteps({ task: "t", steer: true, harness: { id: "claude-code", version } });
+  const steerSteps = (keys: string[]) => keys.filter((k) => /harness-(steer|resume)/.test(k));
+  assert.deepEqual(steerSteps(steps("1")), [], "a version-1 external run records no steer steps, so its fingerprint stays what it was");
+  assert.equal(steerSteps(steps("2")).length, 3);
 });
 
 test("opencode adapter on a repo run: the tree it leaves goes through Ship's publish gate", async () => {
@@ -374,7 +702,12 @@ test("opencode adapter on a repo run: the tree it leaves goes through Ship's pub
       workflow: wf,
       runId: "run-oc-repo",
       store,
-      input: { task: "append b", repo: `file://${bareDir}/owner/repo.git`, trust: "operator", harness: { id: "opencode", version: "1" } },
+      input: {
+        task: "append b",
+        repo: `file://${bareDir}/owner/repo.git`,
+        trust: "operator",
+        harness: { id: "opencode", version: HARNESS_VERSIONS.opencode },
+      },
     });
     assert.equal(outcome.status, "completed", JSON.stringify(outcome));
     const out = outcome.output as DurableAgentOutput;
@@ -382,8 +715,9 @@ test("opencode adapter on a repo run: the tree it leaves goes through Ship's pub
     assert.equal(out.agentSummary, "Fixed lib.ts");
     assert.equal(out.pr, "file:///owner/repo/pulls/3");
     assert.equal(out.usage?.priced, false);
-    const steps = (await store.load("run-oc-repo")).filter((e) => e.type === "step-completed").map((e) => e.name);
-    assert.deepEqual(steps, ["sandbox", "repo-setup", "repo-context", "harness-preflight", "harness-run", "repo-push", "repo-pr", "repo-memory"]);
+    assert.deepEqual(stepsOf(await store.load("run-oc-repo")), [
+      "sandbox", "repo-setup", "repo-context", "harness-preflight", "harness-run", "repo-push", "repo-pr", "repo-memory",
+    ]);
     assert.ok(calls.some((c) => c.startsWith("POST ") && c.endsWith("/pulls")), "the PR was opened by Ship, not the harness");
     // The pushed commit is the harness's tree, made by Ship.
     const log = await seeder.exec(`git --git-dir=${bareDir}/owner/repo.git log --all --oneline`);
@@ -393,7 +727,7 @@ test("opencode adapter on a repo run: the tree it leaves goes through Ship's pub
   }
 });
 
-test("claudeLiveTracker: turns and the last tool call, across torn chunks; only changes are reported", async () => {
+test("live trackers: v1 tool events and v2 tool_use/messageID turns, across torn chunks; only changes are reported", async () => {
   const { claudeLiveTracker, opencodeLiveTracker } = await import("./harness-external.js");
   const t = claudeLiveTracker();
   const line1 = JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "Looking at the parser." }] } });
@@ -404,9 +738,21 @@ test("claudeLiveTracker: turns and the last tool call, across torn chunks; only 
   assert.deepEqual(t.feed(`${line1.slice(20)}\n${line2}\n`), { phase: "harness", turn: 2, detail: "Edit src/parser.ts" });
   assert.equal(t.feed("garbage not json\n"), null);
 
-  const o = opencodeLiveTracker();
-  assert.deepEqual(o.feed(`${JSON.stringify({ type: "tool", part: { tool: "bash", state: { input: { command: "pnpm test" } } } })}\n`), { phase: "harness", turn: 0, detail: "bash pnpm test" });
-  assert.deepEqual(o.feed(`${JSON.stringify({ type: "step_finish", part: { tokens: {} } })}\n`), { phase: "harness", turn: 1 });
+  // v1 opencode: unchanged — step_finish ticks the turn, `tool` gives detail.
+  const v1 = opencodeLiveTracker();
+  assert.deepEqual(v1.feed(`${JSON.stringify({ type: "tool", part: { tool: "bash", state: { input: { command: "pnpm test" } } } })}\n`), { phase: "harness", turn: 0, detail: "bash pnpm test" });
+  assert.deepEqual(v1.feed(`${JSON.stringify({ type: "step_finish", part: { tokens: {} } })}\n`), { phase: "harness", turn: 1 });
+
+  // v2 opencode, the receipt's measured tool stream: the turn ticks at each
+  // NEW step_start messageID (the terminal text step emits no step_finish),
+  // tool_use carries the detail the v1 tracker was blind to.
+  const v2 = opencodeLiveTracker();
+  const updates = V2_TOOL_STREAM.split("\n").map((line) => v2.feed(`${line}\n`));
+  assert.deepEqual(updates[0], { phase: "harness", turn: 1 });
+  assert.deepEqual(updates[1], { phase: "harness", turn: 1, detail: "shell ls -a" });
+  assert.equal(updates[2], null, "step_finish does not double-tick a message it already ticked");
+  assert.deepEqual(updates[3], { phase: "harness", turn: 2 });
+  assert.deepEqual(updates[4], { phase: "harness", turn: 2, detail: "12" });
 });
 
 test("claude-code adapter streams through execStream when the workspace has one, and the live store sees the harness's turns", async () => {
@@ -438,7 +784,12 @@ test("claude-code adapter streams through execStream when the workspace has one,
   const env = { CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat-fake" };
   const wf = durableAgent({ model: neverModel, executor: streaming, workdir: ".", harnesses: externalAdapters({ env }), maxSteps: 7, live });
   const store = new MemoryEventStore();
-  const outcome = await executeRun({ workflow: wf, runId: "run-claude-stream", store, input: { task: "Fix the thing", harness: { id: "claude-code", version: "1" } } });
+  const outcome = await executeRun({
+    workflow: wf,
+    runId: "run-claude-stream",
+    store,
+    input: { task: "Fix the thing", harness: { id: "claude-code", version: HARNESS_VERSIONS["claude-code"] } },
+  });
   assert.equal(outcome.status, "completed", JSON.stringify(outcome));
   assert.equal((outcome.output as DurableAgentOutput).status, "finished");
   assert.ok(chunks.length > 1, "the exec was streamed in pieces");
@@ -683,7 +1034,7 @@ test("direct external execution cannot bypass requested plan review", async () =
   const { provider, runs } = await workspaceWithFakeClaude({ recordTo, stream: JSON.stringify(CLAUDE_RESULT) });
   const wf = durableAgent({ model: neverModel, executor: provider, workdir: ".", harnesses: externalAdapters({ env: {} }) });
   const store = new MemoryEventStore();
-  const input = { task: "Fix it", plan: true, harness: { id: "claude-code", version: "1" } };
+  const input = { task: "Fix it", plan: true, harness: { id: "claude-code", version: HARNESS_VERSIONS["claude-code"] } };
   const outcome = await executeRun({ workflow: wf, runId: "run-direct-plan", store, input });
   assert.equal((outcome.output as DurableAgentOutput).status, "error");
   assert.match((outcome.output as DurableAgentOutput).summary, /Plan review requires the native harness/);
@@ -691,4 +1042,300 @@ test("direct external execution cannot bypass requested plan review", async () =
   const replay = await executeRun({ workflow: wf, runId: "run-direct-plan", store, input });
   assert.equal((replay.output as DurableAgentOutput).status, "error");
   assert.equal(await runs(), 0);
+});
+
+// --- steering follow-ups (review of D6/D7) ---------------------------------
+
+/** A fake `claude` whose main and resume execs print different streams; the resume can fail. */
+async function workspaceWithScriptedClaude(opts: {
+  recordTo: string;
+  main: string;
+  resumes: string[];
+  resumeExit?: number;
+}): Promise<{ provider: ExecutorProvider; runs: () => Promise<number>; args: () => Promise<string[]> }> {
+  const bin = await mkdtemp(join(tmpdir(), "fake-cc-script-bin-"));
+  const work = await mkdtemp(join(tmpdir(), "fake-cc-script-work-"));
+  const resumeCases = opts.resumes
+    .map((stream, i) => `  ${i}) cat <<'EOF'\n${stream}\nEOF\n;;`)
+    .join("\n");
+  await fakeBin(
+    bin,
+    "claude",
+    [
+      `if [ "$1" = "--version" ]; then echo "9.9.9 (fake)"; exit 0; fi`,
+      `echo run >> ${shq(join(opts.recordTo, "runs"))}`,
+      `echo "$*" | tr '\\n' ' ' >> ${shq(join(opts.recordTo, "args"))}; echo >> ${shq(join(opts.recordTo, "args"))}`,
+      `case "$*" in *--resume*)`,
+      `  n=$(cat ${shq(join(opts.recordTo, "resume-count"))} 2>/dev/null || echo 0)`,
+      `  echo $((n+1)) > ${shq(join(opts.recordTo, "resume-count"))}`,
+      `  case $n in`,
+      resumeCases,
+      `  esac`,
+      ...(opts.resumeExit !== undefined ? [`  exit ${opts.resumeExit}`] : []),
+      `  exit 0;;`,
+      `esac`,
+      `cat <<'EOF'\n${opts.main}\nEOF`,
+    ].join("\n"),
+  );
+  const executor = new LocalExecutor({ root: work, env: { PATH: `${bin}:${process.env.PATH ?? ""}` } });
+  return {
+    provider: { isolated: true, async create() { return { handle: work }; }, attach() { return executor; } },
+    runs: async () => (await readFile(join(opts.recordTo, "runs"), "utf8").catch(() => "")).split("\n").filter((l) => l === "run").length,
+    args: async () => (await readFile(join(opts.recordTo, "args"), "utf8").catch(() => "")).split("\n").filter((l) => l !== ""),
+  };
+}
+
+const claudeResult = (over: Record<string, unknown>) => JSON.stringify({ ...CLAUDE_RESULT, ...over });
+
+test("steered resumes get only the REMAINING turn and dollar budget, never the full caps again", async () => {
+  const recordTo = await mkdtemp(join(tmpdir(), "cc-budget-rec-"));
+  const { provider, args } = await workspaceWithScriptedClaude({
+    recordTo,
+    main: claudeResult({ num_turns: 3, total_cost_usd: 0.5 }),
+    resumes: [claudeResult({ num_turns: 2, total_cost_usd: 0.25, result: "resumed once" }), claudeResult({ num_turns: 1, total_cost_usd: 0.1, result: "resumed twice" })],
+  });
+  const wf = durableAgent({
+    model: neverModel,
+    executor: provider,
+    workdir: ".",
+    harnesses: externalAdapters({ env: { ANTHROPIC_API_KEY: "sk-ant-api-fake" }, steer: scriptedSteer({ "ext-0": ["one"], "ext-1": ["two"] }) }),
+    maxSteps: 10,
+    maxRunCostUSD: 2,
+  });
+  const store = new MemoryEventStore();
+  const outcome = await executeRun({
+    workflow: wf,
+    runId: "run-cc-budget",
+    store,
+    input: { task: "t", steer: true, harness: { id: "claude-code", version: HARNESS_VERSIONS["claude-code"] } },
+  });
+  assert.equal(outcome.status, "completed", JSON.stringify(outcome));
+  const [main, first, second] = await args();
+  assert.match(main!, /--max-turns 10 /);
+  assert.match(main!, /--max-budget-usd 2\.00/);
+  assert.match(first!, /--max-turns 7 /, "10 - 3 turns already spent");
+  assert.match(first!, /--max-budget-usd 1\.50/, "2.00 - 0.50 already spent");
+  assert.match(second!, /--max-turns 5 /, "10 - 3 - 2");
+  assert.match(second!, /--max-budget-usd 1\.25/, "2.00 - 0.50 - 0.25");
+});
+
+test("a steer with no turn or dollar budget left is refused on the record and no resume process starts", async () => {
+  for (const [name, config, main] of [
+    ["turns", { maxSteps: 3, maxRunCostUSD: 5 }, claudeResult({ num_turns: 3, total_cost_usd: 0.1 })],
+    ["dollars", { maxSteps: 40, maxRunCostUSD: 1 }, claudeResult({ num_turns: 1, total_cost_usd: 1.2 })],
+  ] as const) {
+    const recordTo = await mkdtemp(join(tmpdir(), "cc-nobudget-rec-"));
+    const { provider, runs } = await workspaceWithScriptedClaude({ recordTo, main, resumes: [] });
+    const wf = durableAgent({
+      model: neverModel,
+      executor: provider,
+      workdir: ".",
+      harnesses: externalAdapters({ env: { ANTHROPIC_API_KEY: "sk-ant-api-fake" }, steer: scriptedSteer({ "ext-0": ["more please"] }) }),
+      ...config,
+    });
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: wf,
+      runId: `run-cc-nobudget-${name}`,
+      store,
+      input: { task: "t", steer: true, harness: { id: "claude-code", version: HARNESS_VERSIONS["claude-code"] } },
+    });
+    assert.equal(outcome.status, "completed", JSON.stringify(outcome));
+    const events = await store.load(`run-cc-nobudget-${name}`);
+    const refusal = stepResult<{ delivered: false; reason: string }>(events, "harness-resume-0");
+    assert.equal(refusal.delivered, false, name);
+    assert.match(refusal.reason, /no budget left/, name);
+    assert.equal(await runs(), 1, `${name}: nothing ran`);
+    assert.deepEqual(stepResult<string[]>(events, "harness-steer-undelivered"), ["more please"], name);
+  }
+});
+
+test("notes that arrive after the last drain are recorded as undelivered, and the run page refuses further steering once the loop has exited", async () => {
+  const recordTo = await mkdtemp(join(tmpdir(), "cc-late-rec-"));
+  const { provider } = await workspaceWithScriptedClaude({ recordTo, main: claudeResult({}), resumes: [] });
+  const wf = durableAgent({
+    model: neverModel,
+    executor: provider,
+    workdir: ".",
+    harnesses: externalAdapters({ env: {}, steer: scriptedSteer({ "ext-final": ["too late"] }) }),
+  });
+  const store = new MemoryEventStore();
+  const input = { task: "t", steer: true, harness: { id: "claude-code", version: HARNESS_VERSIONS["claude-code"] } };
+  const outcome = await executeRun({ workflow: wf, runId: "run-cc-late", store, input });
+  const events = await store.load("run-cc-late");
+  assert.deepEqual(stepResult<string[]>(events, "harness-steer-undelivered"), ["too late"]);
+  assert.match((outcome.output as DurableAgentOutput).agentSummary!, /NOT delivered to the agent \(1\): too late/);
+  assert.equal(steerLoopExited(input, events), true);
+  assert.equal(steerLoopExited(input, events.filter((e) => e.name !== "harness-steer-undelivered")), false);
+  assert.equal(steerRefusal(input, true), STEER_CLOSED_MESSAGE);
+  assert.equal(steerRefusal(input, false), undefined);
+});
+
+test("a failed resume does not flip a finished attempt, and a good resume's summary is appended to the original, not substituted", async () => {
+  // Failure: the main run finished; the resume dies. The attempt keeps `finished`.
+  const failRec = await mkdtemp(join(tmpdir(), "cc-failresume-rec-"));
+  const failing = await workspaceWithScriptedClaude({
+    recordTo: failRec,
+    main: claudeResult({ result: "ORIGINAL-SUMMARY" }),
+    resumes: [JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true, num_turns: 1, result: "boom", session_id: CLAUDE_RESULT.session_id })],
+    resumeExit: 1,
+  });
+  const run = async (rig: typeof failing, runId: string) => {
+    const wf = durableAgent({
+      model: neverModel,
+      executor: rig.provider,
+      workdir: ".",
+      harnesses: externalAdapters({ env: {}, steer: scriptedSteer({ "ext-0": ["steer me"] }) }),
+    });
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: wf,
+      runId,
+      store,
+      input: { task: "t", steer: true, harness: { id: "claude-code", version: HARNESS_VERSIONS["claude-code"] } },
+    });
+    return { out: outcome.output as DurableAgentOutput, events: await store.load(runId) };
+  };
+  const failed = await run(failing, "run-cc-failresume");
+  assert.equal(failed.out.status, "finished", "a resume failure must not downgrade the main run's outcome");
+  assert.match(failed.out.agentSummary!, /ORIGINAL-SUMMARY/);
+  assert.match(failed.out.agentSummary!, /Steering not delivered/);
+  assert.deepEqual(stepResult<string[]>(failed.events, "harness-steer-undelivered"), ["steer me"], "the consumed note is accounted as undelivered");
+
+  // Success: both summaries survive.
+  const okRec = await mkdtemp(join(tmpdir(), "cc-okresume-rec-"));
+  const ok = await run(
+    await workspaceWithScriptedClaude({ recordTo: okRec, main: claudeResult({ result: "ORIGINAL-SUMMARY" }), resumes: [claudeResult({ result: "RESUME-SUMMARY" })] }),
+    "run-cc-okresume",
+  );
+  assert.equal(ok.out.status, "finished");
+  assert.match(ok.out.agentSummary!, /ORIGINAL-SUMMARY/);
+  assert.match(ok.out.agentSummary!, /RESUME-SUMMARY/);
+});
+
+test("each steer round resumes the latest session id the previous exec reported, not the first", async () => {
+  const recordTo = await mkdtemp(join(tmpdir(), "cc-session-rec-"));
+  const { provider, args } = await workspaceWithScriptedClaude({
+    recordTo,
+    main: claudeResult({ session_id: "sess-A" }),
+    resumes: [claudeResult({ session_id: "sess-B" }), claudeResult({ session_id: "sess-C" })],
+  });
+  const wf = durableAgent({
+    model: neverModel,
+    executor: provider,
+    workdir: ".",
+    harnesses: externalAdapters({ env: {}, steer: scriptedSteer({ "ext-0": ["one"], "ext-1": ["two"] }) }),
+  });
+  const outcome = await executeRun({
+    workflow: wf,
+    runId: "run-cc-session",
+    store: new MemoryEventStore(),
+    input: { task: "t", steer: true, harness: { id: "claude-code", version: HARNESS_VERSIONS["claude-code"] } },
+  });
+  assert.equal(outcome.status, "completed", JSON.stringify(outcome));
+  const [, first, second] = await args();
+  assert.match(first!, /--resume sess-A/);
+  assert.match(second!, /--resume sess-B/, "the second round continues the session the first resume reported");
+});
+
+test("a plan-review refusal starts nothing and the steer loop does not run", async () => {
+  const recordTo = await mkdtemp(join(tmpdir(), "cc-planrefuse-rec-"));
+  const { provider, runs } = await workspaceWithScriptedClaude({ recordTo, main: claudeResult({}), resumes: [] });
+  const drained: string[] = [];
+  const wf = durableAgent({
+    model: neverModel,
+    executor: provider,
+    workdir: ".",
+    harnesses: externalAdapters({ env: {}, steer: { drain: async (_r, key) => (drained.push(String(key)), ["a note"]) } }),
+  });
+  const store = new MemoryEventStore();
+  await executeRun({
+    workflow: wf,
+    runId: "run-cc-planrefuse",
+    store,
+    input: { task: "t", plan: true, steer: true, harness: { id: "claude-code", version: HARNESS_VERSIONS["claude-code"] } },
+  });
+  const names = stepsOf(await store.load("run-cc-planrefuse"));
+  assert.ok(!names.some((n) => /^harness-(steer|resume)-\d+$/.test(n)), names.join(","));
+  assert.equal(await runs(), 0);
+  assert.ok(!drained.some((k) => k.startsWith("ext-") && k !== "ext-final"), "no per-round drain ran: " + drained.join(","));
+});
+
+test("selectAdapter matches id AND version across the registered aliases", () => {
+  const adapters = externalAdapters({ env: {} });
+  assert.equal(selectAdapter(adapters, { id: "claude-code", version: "1" }).version, "1");
+  assert.equal(selectAdapter(adapters, { id: "claude-code", version: HARNESS_VERSIONS["claude-code"]! }).version, HARNESS_VERSIONS["claude-code"]);
+  assert.equal(selectAdapter(adapters, { id: "opencode", version: "1" }).version, "1");
+  assert.throws(() => selectAdapter(adapters, { id: "opencode", version: "7" }), /refuses to replay under a different program/);
+  assert.throws(() => selectAdapter(adapters, { id: "codex", version: "2" }), /refuses to replay under a different program/);
+});
+
+test("unpriced spend under a cost cap refuses the resume on the record (opencode v2); a subscription run stays bounded by turns and still resumes", async () => {
+  const recordTo = await mkdtemp(join(tmpdir(), "oc-v2-unpriced-rec-"));
+  const { provider, runs } = await workspaceWithFakeOpencode({ recordTo, versionLine: "2.0.26", stream: V2_TOOL_STREAM, resumeStream: V2_RESUME_STREAM });
+  const wf = durableAgent({
+    model: neverModel,
+    executor: provider,
+    workdir: ".",
+    harnesses: externalAdapters({ env: {}, steer: scriptedSteer({ "ext-0": ["tighten it"] }) }),
+    maxSteps: 40,
+    maxRunCostUSD: 2,
+  });
+  const store = new MemoryEventStore();
+  const input = { task: "t", steer: true, harness: { id: "opencode", version: HARNESS_VERSIONS.opencode } };
+  const outcome = await executeRun({ workflow: wf, runId: "run-oc-unpriced", store, input });
+  assert.equal(outcome.status, "completed", JSON.stringify(outcome));
+  assert.equal((outcome.output as DurableAgentOutput).usage?.priced, false, "the premise: the main run is unpriced");
+  const events = await store.load("run-oc-unpriced");
+  const refusal = stepResult<{ delivered: false; reason: string }>(events, "harness-resume-0");
+  assert.equal(refusal.delivered, false);
+  assert.match(refusal.reason, /unpriced.*cost limit cannot be enforced/);
+  assert.equal(await runs(), 1, "no resume process started");
+  assert.deepEqual(stepResult<string[]>(events, "harness-steer-undelivered"), ["tighten it"]);
+
+  // Subscription claude (no API key): no dollar flag exists to enforce, the
+  // turn limit is the bound, and the resume proceeds exactly as before.
+  const sub = await workspaceWithScriptedClaude({ recordTo: await mkdtemp(join(tmpdir(), "cc-sub-rec-")), main: claudeResult({ num_turns: 2 }), resumes: [claudeResult({ num_turns: 1, result: "resumed" })] });
+  const subWf = durableAgent({
+    model: neverModel,
+    executor: sub.provider,
+    workdir: ".",
+    harnesses: externalAdapters({ env: {}, steer: scriptedSteer({ "ext-0": ["also x"] }) }),
+    maxSteps: 10,
+    maxRunCostUSD: 2,
+  });
+  const subStore = new MemoryEventStore();
+  await executeRun({ workflow: subWf, runId: "run-cc-sub", store: subStore, input: { task: "t", steer: true, harness: { id: "claude-code", version: HARNESS_VERSIONS["claude-code"] } } });
+  const resumed = stepResult<{ exitCode: number; turns: number }>(await subStore.load("run-cc-sub"), "harness-resume-0");
+  assert.equal(resumed.turns, 1, "the subscription run resumed");
+  assert.match((await sub.args())[1]!, /--max-turns 8 /);
+});
+
+test("external drain keys never collide with D2's held-claim keys or the native steerReply drain keys", async () => {
+  const recordTo = await mkdtemp(join(tmpdir(), "oc-v2-keys-rec-"));
+  const { provider } = await workspaceWithFakeOpencode({ recordTo, versionLine: "2.0.26", stream: V2_TOOL_STREAM, resumeStream: V2_RESUME_STREAM });
+  const seen: string[] = [];
+  const spy = { drain: async (_r: string, turn: string | number) => { seen.push(String(turn)); return turn === "ext-0" ? ["note"] : []; } };
+  const wf = durableAgent({ model: neverModel, executor: provider, workdir: ".", harnesses: externalAdapters({ env: {}, steer: spy }) });
+  await executeRun({ workflow: wf, runId: "run-oc-keys", store: new MemoryEventStore(), input: { task: "t", steer: true, harness: { id: "opencode", version: HARNESS_VERSIONS.opencode } } });
+  assert.deepEqual(seen, ["ext-0", "ext-1", "ext-final"]);
+  for (const prefix of ["", "attempt-0-", "attempt-1-"]) {
+    for (const key of seen.map((k) => `${prefix}${k}`)) {
+      assert.ok(!/^[qi]:/.test(key), `${key} must not look like a held-claim key (q:/i:)`);
+      assert.ok(!/^(?:attempt-\d+-)?\d+$/.test(key), `${key} must not look like a native steerReply drain key (<prefix><turn>)`);
+    }
+  }
+  // And through a real store: external-keyed drains and D2 claims of the same
+  // names' shapes stay independent of one another.
+  const { FileSteerStore } = await import("./steer.js");
+  const store = new FileSteerStore(await mkdtemp(join(tmpdir(), "steer-keys-")));
+  await store.add("r", "plain");
+  await store.add("r", "queued", "queue");
+  await store.add("r", "int", "interrupt");
+  assert.deepEqual(await store.drain("r", "ext-0"), ["plain"]);
+  assert.deepEqual(await store.claimHeld("r", "queue", "q:0"), ["queued"]);
+  assert.deepEqual(await store.claimHeld("r", "interrupt", "i:0"), ["int"]);
+  assert.deepEqual(await store.drain("r", "ext-0"), ["plain"], "idempotent replay of the external key");
+  assert.deepEqual(await store.drain("r", 0), [], "native turn key 0 does not re-claim what ext-0 took");
+  assert.deepEqual(await store.claimHeld("r", "queue", "q:0"), ["queued"], "idempotent replay of the held key");
 });

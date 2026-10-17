@@ -7,7 +7,7 @@
 export interface SteerNoteLike {
   text: string;
   at: string;
-  state: "delivered" | "pending";
+  state: "delivered" | "pending" | "undelivered";
   turn?: number;
   mode?: "queue" | "interrupt";
   effect?: "not-done" | "done" | "unknown" | "none";
@@ -102,7 +102,7 @@ export function ThreadHistory({ run }: { run: ThreadRunLike }) {
  */
 export function steerChip(note: SteerNoteLike): string {
   const mode = note.mode ?? "steer";
-  if (mode === "steer") return note.state === "pending" ? "queued" : `delivered turn ${note.turn}`;
+  if (mode === "steer") return note.state === "pending" ? "queued" : note.state === "undelivered" ? "not delivered" : note.turn === undefined ? "delivered" : `delivered turn ${note.turn}`;
   const label = mode === "queue" ? "queued for checkpoint" : "interrupt";
   if (note.state === "pending") return `${label} · waiting`;
   const effect = note.effect === "not-done" ? " · not done" : note.effect === "done" ? " · ran to completion" : note.effect === "unknown" ? " · effect unknown" : note.effect === "none" ? " · nothing running" : "";

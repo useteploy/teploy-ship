@@ -1070,7 +1070,7 @@ async function executePass(
     steer: runtime.steer,
     live: runtime.live,
     ...(envNum("SHIP_MAX_OUTPUT_TOKENS") !== undefined ? { maxOutputTokens: envNum("SHIP_MAX_OUTPUT_TOKENS")! } : {}),
-    harnesses: externalAdapters(),
+    harnesses: externalAdapters({ steer: runtime.steer }),
     ...((): { codeSearch?: CodeSearch } => {
       const codeSearch = resolveCodeSearch(runtime);
       return codeSearch !== undefined ? { codeSearch } : {};

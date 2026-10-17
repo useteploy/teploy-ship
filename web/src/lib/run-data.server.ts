@@ -21,7 +21,7 @@ import { costUSD, isPricedModel, pendingQuestion, verificationFactsFromEvents } 
 import { typicalDuration } from "./expect.js";
 import type { Typical } from "./expect.js";
 import { isAskEvent } from "teploy-ship/ask";
-import { harnessSupports } from "teploy-ship/harness-capabilities";
+import { steerLoopExited, steerRefusal, steerReplyRefusal } from "teploy-ship/harness-capabilities";
 import type { RunMeta, ScanFinding } from "teploy-ship/runtime";
 import { shipRuntime } from "./store.server.js";
 import { currentUser } from "./session.server.js";
@@ -241,11 +241,12 @@ export async function runData({ params, request }: { params: { id: string }; req
     const outcome = runOutcome(events);
     const cost = costUSD(meta?.model ?? "", outcome.usage);
     const started = events.find((e) => e.type === "run-started");
-    // Offered only when the run's harness can read a steering note: the native
-    // loop does, external adapters read nothing but their starting prompt.
-    const startedInput = (started?.data as { input?: { steer?: boolean; steerReply?: boolean; harness?: { id?: unknown }; harnessAttempts?: { id?: unknown }[] } } | undefined)?.input;
-    const steerable = startedInput?.steer === true && harnessSupports(startedInput, "steer");
-    const steerReply = steerable && startedInput?.steerReply === true;
+    // Offered when the run's harness can read a steering note: the native
+    // loop drains notes each turn, and the contract-2 external adapters
+    // deliver them into the recorded vendor session by resume (D6/D7).
+    const startedInput = (started?.data as { input?: { steer?: boolean; steerReply?: boolean; harness?: { id?: unknown; version?: unknown }; harnessAttempts?: { id?: unknown; version?: unknown }[] } } | undefined)?.input;
+    const steerable = startedInput?.steer === true && steerRefusal(startedInput, steerLoopExited(startedInput, events)) === undefined;
+    const steerReply = steerable && steerReplyRefusal(startedInput) === undefined;
     const heldPending = steerReply ? await runtime.steer.pendingHeld(runId).catch(() => []) : [];
     const plan = planFrom(events);
     const planGrounding = planGroundingView(events);

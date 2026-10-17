@@ -639,3 +639,23 @@ test('setup-only checks admit only the setup prefix and cannot replay as a paid 
   assert.deepEqual(admittedSteps({...deterministic,preparation:{command:'npm ci',timeoutMs:1000}}),['step:sandbox','step:repo-setup','step:environment-prepare','step:environment-check']);
   assert.equal(stepFingerprint({...input,environmentCheckOnly:false}),old,'legacy check fingerprints do not change');
 });
+
+test("merged D2 + external steering: native fingerprints equal main's, v1 external runs match main exactly", () => {
+  // Values captured from github/main (dfaaf32, #97) for the same inputs.
+  const onMain: Array<[RecordedInput, string]> = [
+    [{ task: "t" }, "s1:702c0f81bfcc3ef7"],
+    [{ task: "t", steer: true }, "s1:6f7be2c88ca5b22b"],
+    [{ task: "t", steer: true, steerReply: true }, "s1:590a4066d2397e86"],
+    [{ task: "t", steerReply: true }, "s1:cd763deaeb048788"],
+    [{ task: "t", steer: true, ask: true, steerReply: true }, "s1:c33ded6920d04370"],
+    [{ task: "t", steer: true, harness: { id: "claude-code", version: "1" } } as RecordedInput, "s1:253c069123f238db"],
+    [{ task: "t", steer: true, harness: { id: "opencode", version: "1" } } as RecordedInput, "s1:253c069123f238db"],
+    [{ task: "t", harness: { id: "opencode", version: "1" } } as RecordedInput, "s1:51cfcd32feed06a8"],
+    [{ task: "t", steer: true, harness: { id: "native", version: "1" } } as RecordedInput, "s1:6f7be2c88ca5b22b"],
+  ];
+  for (const [input, want] of onMain) assert.equal(stepFingerprint(input), want, JSON.stringify(input));
+  const native = admittedSteps({ task: "t", steer: true, steerReply: true });
+  for (const key of ["step:*turn-*-held", "step:*turn-*-finish-held", "step:*turn-*-steer"]) assert.ok(native.includes(key), key);
+  const external = admittedSteps({ task: "t", steer: true, harness: { id: "opencode", version: "2" } } as RecordedInput);
+  for (const key of ["step:*harness-steer-*", "step:*harness-resume-*", "step:*harness-steer-undelivered"]) assert.ok(external.includes(key), key);
+});

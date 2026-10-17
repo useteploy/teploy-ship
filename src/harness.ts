@@ -198,9 +198,27 @@ export interface HarnessAdapter {
  */
 export const HARNESS_VERSIONS: Record<string, string> = {
   [NATIVE_HARNESS_ID]: "1",
-  "claude-code": "1",
-  opencode: "1",
+  // 2 = the session-resume contracts (D6/D7): the run step records the vendor
+  // session id and steer notes are delivered into it as resume execs. Bumped
+  // from 1 deliberately — selectAdapter refuses a 1-contract log under this
+  // program, which is the point: the recorded steps now mean different things.
+  "claude-code": "2",
+  opencode: "2",
   codex: "1",
+};
+
+/**
+ * Older contract versions this worker still replays, per harness id. The
+ * version a run records is materialised at enqueue, so a deploy that bumps
+ * HARNESS_VERSIONS strands every queued or in-flight run recorded under the
+ * old one unless the old contract stays selectable. The alias is the SAME
+ * adapter with the steer loop off (externalAdapters registers it): the steer
+ * steps are input-gated, so v2-with-steering-off is step-identical to v1, and
+ * a v1 log replays and continues exactly as it recorded.
+ */
+export const HARNESS_ALIAS_VERSIONS: Record<string, readonly string[]> = {
+  "claude-code": ["1"],
+  opencode: ["1"],
 };
 
 /** The vendor binary an external adapter drives, at the version Ship bakes. */
@@ -233,7 +251,10 @@ export interface HarnessPackage {
  */
 export const HARNESS_PACKAGES: Record<string, HarnessPackage> = {
   "claude-code": { npm: "@anthropic-ai/claude-code", version: "2.1.246", binary: "claude" },
-  opencode: { npm: "opencode-ai", version: "1.18.23", binary: "opencode" },
+  // v2 moved to a scoped package: the 1.x `opencode-ai` line ends at 1.19.3,
+  // the 2.x CLI is `@opencode/cli`. 2.0.26 is the exact build the measured
+  // v2 event contract was taken from (evals/receipts/2026-10-14-opencode-v2-events.txt).
+  opencode: { npm: "@opencode/cli", version: "2.0.26", binary: "opencode" },
   codex: { npm: "@openai/codex", version: "0.163.0", binary: "codex" },
 };
 
@@ -308,15 +329,16 @@ export function attemptsCount(raw: string | undefined): number {
  */
 export function selectAdapter(adapters: readonly HarnessAdapter[], ref: HarnessRef | undefined): HarnessAdapter {
   const want = ref ?? { id: NATIVE_HARNESS_ID, version: HARNESS_VERSIONS[NATIVE_HARNESS_ID]! };
-  const adapter = adapters.find((a) => a.id === want.id);
-  if (adapter === undefined) {
+  const ofId = adapters.filter((a) => a.id === want.id);
+  if (ofId.length === 0) {
     throw new Error(
-      `this run was enqueued for harness "${want.id}" but the executing worker has no such adapter (available: ${adapters.map((a) => a.id).join(", ")})`,
+      `this run was enqueued for harness "${want.id}" but the executing worker has no such adapter (available: ${[...new Set(adapters.map((a) => a.id))].join(", ")})`,
     );
   }
-  if (adapter.version !== want.version) {
+  const adapter = ofId.find((a) => a.version === want.version);
+  if (adapter === undefined) {
     throw new Error(
-      `this run was recorded under harness ${want.id}@${want.version}; the executing worker carries ${adapter.id}@${adapter.version} and refuses to replay under a different program`,
+      `this run was recorded under harness ${want.id}@${want.version}; the executing worker carries ${ofId.map((a) => `${a.id}@${a.version}`).join(", ")} and refuses to replay under a different program`,
     );
   }
   return adapter;

@@ -8,7 +8,7 @@ Each claim states what it covers, what kind of evidence stands behind it, and wh
 | --- | --- | --- | --- |
 | [model.default-id](#modeldefault-id) | supported | no | The default model id is zai/glm-5.3, with precedence --model, then SHIP_MODEL, then config file, then default. |
 | [model.default-quality](#modeldefault-quality) | provisional | no | glm-5.3 resolved 35 of 50 seeded SWE-bench Lite instances. |
-| [harness.native-steering](#harnessnative-steering) | supported | no | Steering notes are offered and accepted only for runs whose harness can consume them, which is the native harness only. |
+| [harness.native-steering](#harnessnative-steering) | supported | no | Steering notes are offered and accepted only for runs whose harness can consume them: the native loop drains them at every turn, and the contract-2 external adapters (opencode 2.x --session, claude-code --resume) deliver them into the recorded vendor session; 1-contract external runs are refused. |
 | [harness.external-refuse-plan-review](#harnessexternal-refuse-plan-review) | supported | no | External harnesses refuse plan review: a run that requires plan review fails with an explicit error and starts no external agent. |
 | [delivery.stale-executing](#deliverystale-executing) | supported | no | A delivery stuck in executing past the stale window is recognised as stale only by state and age, and stale rollback reconciliation reads the target before deciding. |
 | [git.credential-scrub-same-shell](#gitcredential-scrub-same-shell) | supported | no | Authenticated clone and warm fetch scrub the remote in the same shell invocation as the credential, whatever the credentialed step returns. |
@@ -70,24 +70,28 @@ Re-checked 2026-10-16 (X7) against origin/main 477529a: the writeup still pins n
 
 **Status:** supported  **Owner:** teploy-ship
 
-Steering notes are offered and accepted only for runs whose harness can consume them, which is the native harness only.
+Steering notes are offered and accepted only for runs whose harness can consume them: the native loop drains them at every turn, and the contract-2 external adapters (opencode 2.x --session, claude-code --resume) deliver them into the recorded vendor session; 1-contract external runs are refused.
 
 **Scope / configuration:** The capability table in src/harness-capabilities.ts, as consulted by the run page and the steering route.
 
 | class | path | test | revision |
 | --- | --- | --- | --- |
 | implementation | `src/harness-capabilities.ts` |  | not recorded |
-| automated | `src/harness-capabilities.test.ts` | S13: only the native harness takes steering notes | 477529a602c0 |
-| automated | `src/harness-capabilities.test.ts` | S13: a multi-harness run supports a capability only if every attempt does | 477529a602c0 |
-| automated | `web/src/lib/steer-refusal.test.ts` | steering a run on an external harness is refused and nothing is stored | 477529a602c0 |
-| automated | `web/src/lib/steer-refusal.test.ts` | steering a native run is accepted and queued (negative control for the refusal) | 477529a602c0 |
-| automated | `web/src/lib/steer-refusal.test.ts` | the run page does not offer a steer box for an external-harness run | 477529a602c0 |
+| implementation | `src/harness-external.ts` |  | not recorded |
+| automated | `src/harness-capabilities.test.ts` | S13/D6/D7: steering is supported by every current contract and refused for the 1-contract external logs | 0d67082482c0 |
+| automated | `src/harness-capabilities.test.ts` | S13: every harness in the run must support steering, single and multi-attempt | 0d67082482c0 |
+| automated | `src/harness-external.test.ts` | opencode v2 steering (D6): a pending note is drained at the process boundary and delivered by resuming the recorded session; replay never re-runs the vendor | 0d67082482c0 |
+| automated | `src/harness-external.test.ts` | claude-code steering (D7): the note resumes the recorded claude session with --resume | 0d67082482c0 |
+| automated | `src/harness-external.test.ts` | negative control: a note accepted for an opencode run on a 1.x binary is refused on the record, never silently dropped | 0d67082482c0 |
+| automated | `web/src/lib/steer-refusal.test.ts` | steering a run on a current external harness is accepted and queued (D6/D7) | 0d67082482c0 |
+| automated | `web/src/lib/steer-refusal.test.ts` | steering a native run is accepted and queued (the unchanged case) | 0d67082482c0 |
+| automated | `web/src/lib/steer-refusal.test.ts` | the run page offers a steer box for a current external-harness run | 0d67082482c0 |
 
 **Limitations:**
-- No live steering of a real native run is recorded.
-- External harnesses (claude-code, opencode) cannot be steered; that is a gap, not a feature.
+- No live steering of a real native run or a real vendor session is recorded: delivery is proven against fake vendor binaries over the real adapter path, and the opencode event contract is the measured 2.0.26 receipt (evals/receipts/2026-10-14-opencode-v2-events.txt).
+- An opencode run on a 1.x binary accepts a note at the gate (the input cannot know the binary) and refuses it at delivery with a recorded reason — the conformance probe flags exactly this shape.
 
-Re-checked 2026-10-16 (X7) against origin/main 477529a: the route refusal now has automated tests (web/src/lib/steer-refusal.test.ts, with a native negative control), which removes the limitation that kept this provisional. Upgraded to supported on automated evidence; still not verified live.
+Updated 2026-10-16 (D6/D7, harness contracts bumped to 2): external steering is session resume at vendor-process boundaries; the gate is version-aware so pre-D6/D7 logs keep their refusal. Revision fields point at the slice's own commit.
 
 ## harness.external-refuse-plan-review
 

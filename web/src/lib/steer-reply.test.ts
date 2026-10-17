@@ -16,7 +16,7 @@ delete process.env.SHIP_STEER_REPLY;
 const { shipRuntime } = await import("./store.server.js");
 const run = await import("../routes/runs/[id].js");
 const { enqueueRun } = await import("./ship.server.js");
-const { STEER_REPLY_UNSUPPORTED_MESSAGE } = await import("teploy-ship/harness-capabilities");
+const { STEER_REPLY_EXTERNAL_MESSAGE, STEER_REPLY_UNSUPPORTED_MESSAGE } = await import("teploy-ship/harness-capabilities");
 const { replyHistory, runThread, steerHistory } = await import("./thread-chain.server.js");
 const { SteerComposer, ThreadHistory, steerChip } = await import("../views/steer-thread.js");
 
@@ -244,4 +244,23 @@ test("flag on: mode=queue is held, interrupt is held (an empty one too), no mode
   const page = await loaderOf("run-on");
   assert.equal(page.steerReply, true);
   assert.deepEqual(page.heldPending, [{ mode: "queue", text: "after your next reply" }, { mode: "interrupt", text: "" }]);
+});
+
+test("external harness: queue and interrupt are refused with a clear message, nothing is held; a plain note still lands and no composer modes are offered", async () => {
+  const runtime = await shipRuntime();
+  process.env.SHIP_STEER_REPLY = "on";
+  try {
+    await enqueueRun(runtime, { runId: "run-ext", repo: "https://github.com/team/repo", task: "Fix it", model: "test", source: "manual", trust: "operator", harness: "claude-code" });
+  } finally {
+    delete process.env.SHIP_STEER_REPLY;
+  }
+  for (const fields of [{ intent: "steer", steer: "later", mode: "queue" }, { intent: "interrupt", steer: "stop" }] as Array<Record<string, string>>) {
+    const res = await run.action({ params: { id: "run-ext" }, request: post("run-ext", fields) } as never);
+    assert.ok((res.headers.get("location") ?? "").includes("messageError=" + encodeURIComponent(STEER_REPLY_EXTERNAL_MESSAGE)), JSON.stringify(fields));
+  }
+  assert.deepEqual(await runtime.steer.pendingHeld("run-ext"), []);
+  const res = await run.action({ params: { id: "run-ext" }, request: post("run-ext", { intent: "steer", steer: "plain" }) } as never);
+  assert.match(res.headers.get("location") ?? "", /sent=1/);
+  const page = await loaderOf("run-ext");
+  assert.equal("steerReply" in page, false);
 });

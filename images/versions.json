@@ -50,7 +50,14 @@
       "The vendor coding agents an external harness adapter drives",
       "(src/harness-external.ts). `id` matches HARNESS_VERSIONS in",
       "src/harness.ts and the `harness` field of a project record.",
-      "Versions are the ones verified working on deploy-test 2026-08-26."
+      "claude-code is the one verified on deploy-test 2026-08-24. opencode",
+      "moved to v2 (D6): the 1.x opencode-ai line ends at 1.19.3, the 2.x",
+      "CLI is @opencode/cli, and the pin is the exact 2.0.26 build the",
+      "measured v2 event contract was taken from",
+      "(evals/receipts/2026-10-14-opencode-v2-events.txt; 2.0.32 was the",
+      "line's latest when this pin was set). The adapter drives both the 1.x",
+      "and 2.x contracts and refuses anything past 2.x, so an image that",
+      "still bakes 1.18.23 keeps working until it is rebuilt."
     ],
     "claude-code": {
       "npm": "@anthropic-ai/claude-code",
@@ -58,8 +65,8 @@
       "binary": "claude"
     },
     "opencode": {
-      "npm": "opencode-ai",
-      "version": "1.18.23",
+      "npm": "@opencode/cli",
+      "version": "2.0.26",
       "binary": "opencode"
     },
     "codex": {

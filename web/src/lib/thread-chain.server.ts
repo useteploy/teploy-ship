@@ -56,7 +56,7 @@ export interface SteerNoteView {
   text: string;
   /** When the note was sent (pending) or claimed by a turn (delivered). */
   at: string;
-  state: "delivered" | "pending";
+  state: "delivered" | "pending" | "undelivered";
   /** The turn that claimed a delivered note — the drain's own keying. */
   turn?: number;
   /**
@@ -144,6 +144,10 @@ function resultOf(event: WorkflowEvent): unknown {
 }
 
 const STEER_STEP = /^(?:attempt-\d+-)?turn-(\d+)-steer$/;
+/** Notes an external harness drained for its round-N resume (harness-external.ts). */
+const EXTERNAL_STEER_STEP = /^(?:attempt-\d+-)?harness-steer-(\d+)$/;
+/** An external harness's closing record: notes it accepted and never delivered (harness-external.ts). */
+const STEER_UNDELIVERED_STEP = /^(?:attempt-\d+-)?harness-steer-undelivered$/;
 const HELD_STEP = /^(?:attempt-\d+-)?turn-(\d+)-(?:finish-)?held$/;
 const EXEC_STEP = /^(?:attempt-\d+-)?turn-(\d+)-exec$/;
 const THINK_STEP = /^(?:attempt-\d+-)?turn-(\d+)-think$/;
@@ -163,6 +167,20 @@ export function steerHistory(
   const out: SteerNoteView[] = [];
   for (const event of events) {
     if (event.type !== "step-completed") continue;
+    if (STEER_UNDELIVERED_STEP.test(event.name ?? "")) {
+      const lost = resultOf(event);
+      if (Array.isArray(lost)) for (const text of lost) if (typeof text === "string" && text !== "") out.push({ text, at: event.at, state: "undelivered" });
+      continue;
+    }
+    const ext = EXTERNAL_STEER_STEP.exec(event.name ?? "");
+    if (ext !== null) {
+      const result = resultOf(event);
+      if (!Array.isArray(result)) continue;
+      for (const text of result) {
+        if (typeof text === "string" && text !== "") out.push({ text, at: event.at, state: "delivered" });
+      }
+      continue;
+    }
     const steer = STEER_STEP.exec(event.name ?? "");
     if (steer !== null) {
       const result = resultOf(event);
