@@ -1,0 +1,18 @@
+EV0 deploy receipt, 2026-10-17
+
+Change: PR #115 (df6619d), both Observe receivers matched to Observe's live
+notification outbox (NotificationPayload: kind, incident_id, rule_id, no alert_id).
+Deployed: ship web+worker 9e7d79f, image sha256:e67122e459e46a9f305884dc25063c2f1be2e0ae0498bfc41a13d187b34bc79f.
+Backup before deploy: /root/ship-pg-pre-9e7d79f-2026-10-17.dump
+  sha256 6471edfa0140c145cf13309639f53a9d816e3ea68c8be4d968f17f96adae0f54
+
+Checks after deploy:
+- POST /api/incidents/intake unsigned -> 401 "bad observe signature" (intake live, secret set).
+- POST /hooks/observe -> 503 (SHIP_OBSERVE_SIGNING_SECRET not set on production; the
+  inbox receiver is off here, as before).
+- Behaviour verified by unit tests (src/incidents.test.ts, src/intake-sources.test.ts):
+  incident_opened creates one incident / one task keyed observe:rule:<rule>:<incident>;
+  incident_repeat re-fires; incident_recovered proposes nothing, never bumps an open
+  incident and never reopens a recovered one.
+Not done: a live signed delivery from Observe (needs an Observe webhook row pointed
+at Ship's public URL; Observe's netsafe client refuses tailnet addresses).
