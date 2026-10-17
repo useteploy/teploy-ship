@@ -55,7 +55,7 @@ export interface SteerNoteView {
   text: string;
   /** When the note was sent (pending) or claimed by a turn (delivered). */
   at: string;
-  state: "delivered" | "pending";
+  state: "delivered" | "pending" | "undelivered";
   /** The turn that claimed a delivered note — the drain's own keying. */
   turn?: number;
 }
@@ -113,6 +113,8 @@ function resultOf(event: WorkflowEvent): unknown {
 }
 
 const STEER_STEP = /^(?:attempt-\d+-)?turn-(\d+)-steer$/;
+/** An external harness's closing record: notes it accepted and never delivered (harness-external.ts). */
+const STEER_UNDELIVERED_STEP = /^(?:attempt-\d+-)?harness-steer-undelivered$/;
 
 /**
  * Delivered steer notes are a step result — `turn-N-steer` records the
@@ -125,6 +127,11 @@ export function steerHistory(events: readonly WorkflowEvent[], pending: readonly
   const out: SteerNoteView[] = [];
   for (const event of events) {
     if (event.type !== "step-completed") continue;
+    if (STEER_UNDELIVERED_STEP.test(event.name ?? "")) {
+      const lost = resultOf(event);
+      if (Array.isArray(lost)) for (const text of lost) if (typeof text === "string" && text !== "") out.push({ text, at: event.at, state: "undelivered" });
+      continue;
+    }
     const turn = STEER_STEP.exec(event.name ?? "");
     if (turn === null) continue;
     const result = resultOf(event);

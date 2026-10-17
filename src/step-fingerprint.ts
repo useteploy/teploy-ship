@@ -428,6 +428,16 @@ const externalHarness = (i: RecordedInput): boolean =>
   (i.harnessAttempts ?? []).some((h) => h.id !== NATIVE_HARNESS_ID);
 
 /**
+ * An external harness at a contract that steers (D6/D7): version "1" adapters
+ * never record the steer steps, even on an input that carries `steer`, so a
+ * run enqueued under them keeps the exact pre-steering sequence.
+ */
+const steersExternally = (i: RecordedInput): boolean =>
+  i.steer === true &&
+  ((i.harness !== undefined && i.harness.id !== NATIVE_HARNESS_ID && i.harness.version !== "1") ||
+    (i.harnessAttempts ?? []).some((h) => h.id !== NATIVE_HARNESS_ID && h.version !== "1"));
+
+/**
  * Every deterministic operation the workflow can record, in the order the
  * compiled modules declare them, with the input field that admits each.
  *
@@ -568,8 +578,10 @@ export const WORKFLOW_STEPS: readonly WorkflowStep[] = [
   // loop's turn-steer step) and the resume exec — admitted by the same
   // input flag the native steer steps use, so a run enqueued without it
   // keeps the exact two-step external sequence every earlier log carries.
-  { key: "step:*harness-steer-*", admits: (i) => i.steer === true && externalHarness(i) },
-  { key: "step:*harness-resume-*", admits: (i) => i.steer === true && externalHarness(i) },
+  { key: "step:*harness-steer-*", admits: steersExternally },
+  { key: "step:*harness-resume-*", admits: steersExternally },
+  // The closing record: notes the loop accepted but never delivered.
+  { key: "step:*harness-steer-undelivered", admits: steersExternally },
   // The ladder's own steps (ladder-steps.js, third module above), in that
   // file's source order. Each is admitted by the rung it records, all off
   // `verification` — a field no pre-ladder log carries, so those runs'

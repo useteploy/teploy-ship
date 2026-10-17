@@ -46,6 +46,11 @@ test("steerHistory pairs drained turn steps with pending notes and keeps their s
   ]);
 });
 
+test("steerHistory surfaces the notes an external harness accepted and never delivered", () => {
+  const events = [ev("step-completed", 9, "attempt-1-harness-steer-undelivered", { result: ["too late"] }), ev("step-completed", 10, "harness-steer-undelivered", { result: [] })];
+  assert.deepEqual(steerHistory(events, []), [{ text: "too late", at: at(9), state: "undelivered" }]);
+});
+
 test("askHistory reads each question from its think step and pairs the delivered answer", () => {
   const events = [
     ev("step-completed", 1, "turn-2-think", { result: "Let me check.\n```ask\nShould I drop the table?\n```" }),

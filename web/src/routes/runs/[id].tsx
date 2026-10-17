@@ -19,7 +19,7 @@ import { PLAN_EVENT, MERGE_EVENT } from "teploy-ship/plan";
 // the park's event name without reaching runtime.ts.
 import { isAskEvent } from "teploy-ship/ask";
 import { UPGRADE_HOLD_EVENT } from "teploy-ship/fence";
-import { harnessSupports, STEER_UNSUPPORTED_MESSAGE } from "teploy-ship/harness-capabilities";
+import { steerLoopExited, steerRefusal } from "teploy-ship/harness-capabilities";
 
 
 import { shipRuntime } from "../../lib/store.server.js";
@@ -220,8 +220,10 @@ export async function action({
     const text = String(form.get("steer") ?? "").trim();
     if (text.length > 12000) return redirectTo(`/runs/${runId}?messageError=Message+must+be+under+12000+characters`);
     // Refuse rather than store a note no executor will ever read.
-    const steerInput = ((await runtime.store.load(runId)).find(e => e.type === "run-started")?.data as { input?: { harness?: { id?: unknown }; harnessAttempts?: { id?: unknown }[] } } | undefined)?.input;
-    if (!harnessSupports(steerInput, "steer")) return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(STEER_UNSUPPORTED_MESSAGE)}`);
+    const steerEvents = await runtime.store.load(runId);
+    const steerInput = (steerEvents.find(e => e.type === "run-started")?.data as { input?: { steer?: boolean; harness?: { id?: unknown; version?: unknown }; harnessAttempts?: { id?: unknown; version?: unknown }[] } } | undefined)?.input;
+    const steerRefused = steerRefusal(steerInput, steerLoopExited(steerInput, steerEvents));
+    if (steerRefused !== undefined) return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(steerRefused)}`);
     // An empty note is not "sent": say so instead of confirming a no-op.
     if (text === "") return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent("Write a message before sending.")}`);
     await runtime.steer.add(runId, text);
@@ -1526,7 +1528,7 @@ function ThreadHistory({ run }: { run: ThreadRunView }) {
         {run.steers.map((s, i) => (
           <li key={`steer-${i}`} style={i === 0 ? "padding:8px 0" : "padding:8px 0;border-top:1px solid var(--line)"}>
             <div class="row-actions" style="gap:8px;align-items:baseline;flex-wrap:wrap">
-              <span class="chip">{s.state === "pending" ? "queued" : `delivered turn ${s.turn}`}</span>
+              <span class="chip">{s.state === "pending" ? "queued" : s.state === "undelivered" ? "not delivered" : `delivered turn ${s.turn}`}</span>
               <span class="meta">{utcStamp(s.at)}</span>
             </div>
             <pre style="white-space:pre-wrap;margin:4px 0 0">{s.text}</pre>

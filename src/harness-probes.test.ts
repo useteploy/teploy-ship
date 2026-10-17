@@ -7,7 +7,7 @@ import { MemoryEventStore, executeRun } from "@neutron-build/workflow";
 import { durableAgent } from "./durable.js";
 import type { DurableAgentOutput } from "./durable.js";
 import { HARNESS_PACKAGES, HARNESS_VERSIONS } from "./harness.js";
-import { declarationFor } from "./harness-capabilities.js";
+import { STEER_UNSUPPORTED_MESSAGE, declarationFor } from "./harness-capabilities.js";
 import type { HarnessDeclaration } from "./harness-capabilities.js";
 import { externalAdapters } from "./harness-external.js";
 import { PROBED_OPERATIONS, credentialResidue, fakeExternalHarness, probeHarness, probeOperation } from "./harness-probes.js";
@@ -40,9 +40,14 @@ test("S13 probes: observations are what the adapters really did, not what the ta
     // Steer (D6/D7): the note is accepted and DELIVERED — the fake binary is
     // invoked a second time resuming the recorded session with the note text.
     const steer = await probeOperation(id, "steer");
-    assert.equal(steer.accepted, true, id);
-    assert.equal(steer.sideEffects, true, id);
-    assert.equal(steer.honoured, true, `${id}: the note text must reach the harness`);
+    if (id === "codex") {
+      // codex declares steering refused (no session-resume wiring): refused at the gate, nothing stored.
+      assert.deepEqual(steer, { operation: "steer", accepted: false, sideEffects: false, refusalMessage: STEER_UNSUPPORTED_MESSAGE });
+    } else {
+      assert.equal(steer.accepted, true, id);
+      assert.equal(steer.sideEffects, true, id);
+      assert.equal(steer.honoured, true, `${id}: the note text must reach the harness`);
+    }
     // Scan: the vendor agent really got the read-only framing.
     assert.deepEqual(await probeOperation(id, "investigate"), { operation: "investigate", accepted: true, sideEffects: true, honoured: true });
   }

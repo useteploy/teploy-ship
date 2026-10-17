@@ -1,6 +1,6 @@
 import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 
-import { HARNESS_PACKAGES, HARNESS_VERSIONS } from "./harness.js";
+import { HARNESS_ALIAS_VERSIONS, HARNESS_PACKAGES, HARNESS_VERSIONS } from "./harness.js";
 import { PLAN_REVIEW_REFUSAL, refusalFor } from "./harness-capabilities.js";
 import type { SteerStore } from "./steer.js";
 import { clipDetail } from "./live.js";
@@ -61,8 +61,9 @@ const ENV_PATH = ".teploy-agent/harness.env";
 const STEER_PATH = ".teploy-agent/harness-steer.md";
 
 /**
- * How many batches of steer notes one attempt will deliver. Each batch is one
- * vendor process (up to SHIP_HARNESS_TIMEOUT_MS), so the bound is spend, not
+ * How many batches of steer notes one attempt will deliver: a steered attempt
+ * runs at most `1 + STEER_ROUNDS_MAX` vendor processes (the main run plus this
+ * many resumes). Each batch is one vendor process (up to SHIP_HARNESS_TIMEOUT_MS), so the bound is spend, not
  * correctness: the loop also stops on its own when no notes are pending or a
  * resume timed out. Recorded steps make the count replay-stable.
  */
@@ -523,7 +524,15 @@ export function parseOpencode2Stream(stdout: string): { summary: string; turns: 
   // Same cost-honesty rule as the 1.x parser: opencode reports cost 0 for
   // models it cannot price and for subscription providers alike, and tokens
   // with no dollars is exactly the unpriced shape (P5-3).
-  if (cost > 0) {
+  //
+  // v2 adds a second way to be unpriced: step_finish is emitted only after
+  // tool-calling steps, so the terminal text step carries no usage at all
+  // (receipt §4). When the stream names more model steps than it finished,
+  // the tokens AND the dollars are a lower bound, and summing them as if
+  // complete would report a confident, wrong figure — so the run is
+  // unpriced (tokens kept, no dollars), never priced-but-short.
+  const incomplete = messages.size > 0 && stepFinishes < messages.size;
+  if (cost > 0 && !incomplete) {
     usage.priced = true;
     usage.costUSD = cost;
   } else {
@@ -987,12 +996,20 @@ const SPECS: Record<string, CommandSpec> = {
   },
 };
 
-export function externalAdapter(id: "claude-code" | "opencode" | "codex", options: ExternalHarnessOptions = {}): HarnessAdapter {
+export function externalAdapter(
+  id: "claude-code" | "opencode" | "codex",
+  options: ExternalHarnessOptions = {},
+  version: string = HARNESS_VERSIONS[id]!,
+): HarnessAdapter {
   const spec = SPECS[id]!;
   const env = options.env ?? process.env;
+  // Contract 1 never recorded the steer steps. An alias registered under "1"
+  // (HARNESS_ALIAS_VERSIONS) is this same adapter with the loop off, so a
+  // log recorded before the steer contract replays step-for-step.
+  const steerLoop = version !== "1";
   return {
     id,
-    version: HARNESS_VERSIONS[id]!,
+    version,
     isolated: true,
     async run(task, ws, budget, onEvent): Promise<HarnessResult> {
       const p = ws.stepPrefix;
@@ -1113,18 +1130,27 @@ export function externalAdapter(id: "claude-code" | "opencode" | "codex", option
       });
       // D6/D7 — steering by session resume, at process boundaries. Gated on
       // the input flag set at enqueue (the same gate the step fingerprint
-      // admits these steps by) and bounded by STEER_ROUNDS_MAX. The loop's
-      // control flow reads recorded facts alone — the drain's turn-claimed
-      // notes, the recorded session id, the line the recorded preflight
-      // resolved, the recorded timeout flag — so a replay walks exactly the
-      // rounds the log carries and never starts a vendor process. A line
-      // that cannot be resumed still drains: the note is consumed into a
-      // recorded delivery refusal rather than left pending forever.
-      let final = record;
+      // admits these steps by) and on the contract (version "1" never records
+      // them), and bounded by STEER_ROUNDS_MAX. The loop's control flow reads
+      // recorded facts alone — the drain's turn-claimed notes, the recorded
+      // session id, the line the recorded preflight resolved, the recorded
+      // timeout flag, recorded spend — so a replay walks exactly the rounds
+      // the log carries and never starts a vendor process. A note that cannot
+      // be delivered is consumed into a recorded refusal rather than left
+      // pending forever, and the final step records whatever the loop never
+      // read.
+      let status = record.status;
+      let summary = record.summary;
       let turns = record.turns;
       let usage = record.usage;
-      if (task.input.steer === true && !record.timedOut) {
-        for (let round = 0; round <= STEER_ROUNDS_MAX; round++) {
+      if (steerLoop && task.input.steer === true) {
+        const undelivered: string[] = [];
+        let session = record.sessionId;
+        // A plan-review refusal / could-not-run record (exitCode -1) started
+        // nothing, and a timed-out main run has no session worth resuming:
+        // neither steers. The final drain below still runs.
+        let steerable = record.exitCode !== -1 && !record.timedOut;
+        for (let round = 0; steerable && round < STEER_ROUNDS_MAX; round++) {
           const notes = await ws.ctx.step(`${p}harness-steer-${round}`, async () => {
             // Keyed by attempt prefix + round so the drain is idempotent and
             // no two attempts of one run claim each other's notes (the same
@@ -1133,8 +1159,14 @@ export function externalAdapter(id: "claude-code" | "opencode" | "codex", option
             return await options.steer.drain(ws.ctx.runId, `${p}ext-${round}`).catch(() => []);
           });
           if (notes.length === 0) break;
+          // What is left of the run's caps. Each resume is a fresh vendor
+          // process that would otherwise get the FULL --max-turns and
+          // --max-budget-usd again, so a steered run could spend several
+          // times its ceiling.
+          const remainingTurns = budget.maxSteps - turns;
+          const spent = usage.priced === false ? 0 : (usage.costUSD ?? 0);
+          const remainingCost = budget.maxRunCostUSD - spent;
           const resumed = await ws.ctx.step(`${p}harness-resume-${round}`, async (): Promise<HarnessRunRecord | { delivered: false; reason: string }> => {
-            const session = record.sessionId;
             if (line.steerResume === undefined || session === undefined) {
               // A note the gate accepted but this run cannot deliver — a 2.x
               // contract on a 1.x binary (no --session, no recorded id).
@@ -1150,35 +1182,72 @@ export function externalAdapter(id: "claude-code" | "opencode" | "codex", option
                     `. The note was not delivered; send a follow-up instead.`,
               };
             }
+            if (budget.maxSteps > 0 && remainingTurns <= 0) {
+              return { delivered: false, reason: `the run has used its ${budget.maxSteps}-turn limit, so there is no budget left to act on the note. The note was not delivered; send a follow-up instead.` };
+            }
+            if (budget.maxRunCostUSD > 0 && remainingCost < 0.01) {
+              return { delivered: false, reason: `the run has spent its $${budget.maxRunCostUSD.toFixed(2)} cost limit, so there is no budget left to act on the note. The note was not delivered; send a follow-up instead.` };
+            }
+            const resumeSession = session;
             return await execRecord(
-              (opts) => line.steerResume!({ ...opts, session, notePath: STEER_PATH }),
+              (opts) =>
+                line.steerResume!({
+                  ...opts,
+                  maxSteps: budget.maxSteps > 0 ? remainingTurns : opts.maxSteps,
+                  maxRunCostUSD: budget.maxRunCostUSD > 0 ? remainingCost : opts.maxRunCostUSD,
+                  session: resumeSession,
+                  notePath: STEER_PATH,
+                }),
               async () => {
                 await ws.executor.putFile(STEER_PATH, notes.map((note) => `Operator steering — adjust course accordingly: ${note}`).join("\n\n"));
               },
               `steering note → ${spec.binary}`,
             );
           });
-          if ("delivered" in resumed) break;
-          final = resumed;
+          if ("delivered" in resumed) {
+            undelivered.push(...notes);
+            summary += `\n\nSteering not delivered: ${resumed.reason}`;
+            break;
+          }
           // exitCode -1 is the "could not be run" record: its zero-usage
           // `priced: false` means "no data", not "unpriced", and must not
-          // flip the run's accounting. The failure still surfaces — it is
-          // the final status the attempt reports.
+          // flip the run's accounting.
           if (resumed.exitCode >= 0) {
             turns += resumed.turns;
             usage = addUsage(usage, resumed.usage);
           }
-          if (resumed.timedOut) break;
+          if (resumed.status === "finished" && !resumed.timedOut) {
+            // The resume completed: its work stands. Its account is appended,
+            // never substituted — the main run's summary is part of the result.
+            status = "finished";
+            summary += `\n\nAfter steering: ${resumed.summary}`;
+            if (resumed.sessionId !== undefined) session = resumed.sessionId;
+          } else {
+            // A failed delivery is a refusal on the record, not a verdict on
+            // the work the main run already did: the attempt keeps its
+            // status, and the notes it consumed are accounted as undelivered.
+            undelivered.push(...notes);
+            summary += `\n\nSteering not delivered: the resume ${resumed.timedOut ? "timed out" : `ended with ${resumed.status}`} (${resumed.summary.slice(0, 300)})`;
+            break;
+          }
         }
+        // Notes accepted after the last drain (during the final resume, or
+        // while the publish gate ran) would otherwise be accepted, answered
+        // "sent" and never read. Drain them into an explicit record.
+        const leftovers = await ws.ctx.step(`${p}harness-steer-undelivered`, async () => {
+          const late = options.steer === undefined ? [] : await options.steer.drain(ws.ctx.runId, `${p}ext-final`).catch(() => []);
+          return [...undelivered, ...late];
+        });
+        if (leftovers.length > 0) summary += `\n\nSteering notes that were NOT delivered to the agent (${leftovers.length}): ${leftovers.join(" | ").slice(0, 1500)}`;
       }
       for (let turn = 0; turn < turns; turn++) onEvent({ kind: "turn", turn });
-      onEvent({ kind: "completed", status: final.status });
+      onEvent({ kind: "completed", status });
       return {
-        status: final.status,
-        summary: final.summary,
+        status,
+        summary,
         turns,
         usage,
-        incomplete: final.status !== "finished",
+        incomplete: status !== "finished",
       };
     },
   };
@@ -1186,5 +1255,9 @@ export function externalAdapter(id: "claude-code" | "opencode" | "codex", option
 
 /** Every external adapter this worker can carry. Presence of the binary is checked per run, as a recorded step. */
 export function externalAdapters(options: ExternalHarnessOptions = {}): HarnessAdapter[] {
-  return [externalAdapter("claude-code", options), externalAdapter("opencode", options), externalAdapter("codex", options)];
+  const adapters = [externalAdapter("claude-code", options), externalAdapter("opencode", options), externalAdapter("codex", options)];
+  for (const [id, versions] of Object.entries(HARNESS_ALIAS_VERSIONS)) {
+    for (const version of versions) adapters.push(externalAdapter(id as "claude-code" | "opencode", options, version));
+  }
+  return adapters;
 }

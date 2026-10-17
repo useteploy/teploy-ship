@@ -291,6 +291,8 @@ export function conformanceCheck(
 }
 
 interface RecordedHarness {
+  /** The enqueue-time steer flag (input.steer): what admits the steer steps. */
+  steer?: boolean | undefined;
   harness?: { id?: unknown; version?: unknown } | undefined;
   harnessAttempts?: readonly { id?: unknown; version?: unknown }[] | undefined;
 }
@@ -331,4 +333,35 @@ export function harnessSupports(input: RecordedHarness | undefined, capability: 
     if (ref.id === "native") return capabilityOf(ref.id, "steering").status === "supported";
     return ref.version !== "" && ref.version !== "1" && capabilityOf(ref.id, "steering").status === "supported";
   });
+}
+
+/** Shown when an external-harness run was enqueued without the steer flag: the adapter records no steer steps, so no note would ever be read. */
+export const STEER_NOT_ENABLED_MESSAGE =
+  "This run was started without mid-run steering enabled, so its harness would never read a message. Cancel it and start a follow-up instead.";
+
+/** Shown once an external harness has stopped reading steering: a note accepted now would be stored, acknowledged and never delivered. */
+export const STEER_CLOSED_MESSAGE =
+  "This run's agent has stopped taking mid-run messages (its steering window closed). Start a follow-up instead.";
+
+/**
+ * Why the steer route must refuse a note for this run, or undefined when it
+ * may be queued. `loopExited` is true once the external adapter recorded its
+ * final steer step (`harness-steer-undelivered`): nothing drains after that.
+ * Native runs drain on every turn, so the closed-window arm is external-only.
+ */
+export function steerRefusal(input: RecordedHarness | undefined, loopExited = false): string | undefined {
+  if (!harnessSupports(input, "steer")) return STEER_UNSUPPORTED_MESSAGE;
+  const external = recordedHarnessIds(input).some((id) => id !== "native");
+  if (external && input?.steer !== true) return STEER_NOT_ENABLED_MESSAGE;
+  if (external && loopExited) return STEER_CLOSED_MESSAGE;
+  return undefined;
+}
+
+/** True once an external adapter's steer loop has finished (single-harness runs; attempts each carry their own window). */
+export function steerLoopExited(
+  input: RecordedHarness | undefined,
+  events: readonly { type: string; name?: string | undefined }[],
+): boolean {
+  if ((input?.harnessAttempts?.length ?? 0) >= 2) return false;
+  return events.some((e) => e.type === "step-completed" && e.name === "harness-steer-undelivered");
 }

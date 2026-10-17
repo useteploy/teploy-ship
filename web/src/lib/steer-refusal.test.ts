@@ -17,6 +17,7 @@ process.env.SHIP_STORE = "file";
 process.env.SHIP_WEB_TOKEN = "steer-tests";
 const { shipRuntime } = await import("./store.server.js");
 const run = await import("../routes/runs/[id].js");
+const { STEER_CLOSED_MESSAGE, STEER_NOT_ENABLED_MESSAGE, STEER_UNSUPPORTED_MESSAGE } = await import("teploy-ship/harness-capabilities");
 const { enqueueRun } = await import("./ship.server.js");
 
 function steer(id: string, text: string): Request {
@@ -66,4 +67,61 @@ test("the run page offers a steer box for a current external-harness run", async
   const native = await run.loader({ params: { id: "run-steer-offer-native" }, request: steer("run-steer-offer-native", "") });
   assert.equal(external.steerable, true, "an external contract-2 run steers by session resume");
   assert.equal(native.steerable, true);
+});
+
+// A run recorded under the 1-contract external adapter (enqueued before the
+// steer contract) cannot be hand-built through enqueueRun, which always
+// records the current version — so the recorded run-started input is
+// rewritten at the store read, which is the one place the route sees it.
+async function asRecorded(runId: string, patch: (input: Record<string, unknown>) => Record<string, unknown>): Promise<void> {
+  const runtime = await shipRuntime();
+  const original = runtime.store.load.bind(runtime.store);
+  runtime.store.load = async (id: string) => {
+    const events = await original(id);
+    if (id !== runId) return events;
+    return events.map((e) =>
+      e.type === "run-started"
+        ? { ...e, data: { ...(e.data as Record<string, unknown>), input: patch(((e.data as { input: Record<string, unknown> }).input)) } }
+        : e,
+    );
+  };
+}
+
+test("steering a run recorded under the 1-contract external adapter is refused and nothing is stored", async () => {
+  const runtime = await shipRuntime();
+  await start("run-steer-v1", "claude-code");
+  await asRecorded("run-steer-v1", (input) => ({ ...input, harness: { id: "claude-code", version: "1" } }));
+  const res = await run.action({ params: { id: "run-steer-v1" }, request: steer("run-steer-v1", "also do X") });
+  const location = res.headers.get("location") ?? "";
+  assert.ok(location.includes("messageError=" + encodeURIComponent(STEER_UNSUPPORTED_MESSAGE)), location);
+  assert.doesNotMatch(location, /sent=1/);
+  assert.deepEqual(await runtime.steer.pending("run-steer-v1"), []);
+});
+
+test("steering an external run enqueued without input.steer is refused: its adapter records no steer steps", async () => {
+  const runtime = await shipRuntime();
+  await start("run-steer-noflag", "claude-code");
+  await asRecorded("run-steer-noflag", (input) => {
+    const { steer: _drop, ...rest } = input;
+    return rest;
+  });
+  const res = await run.action({ params: { id: "run-steer-noflag" }, request: steer("run-steer-noflag", "also do X") });
+  const location = res.headers.get("location") ?? "";
+  assert.ok(location.includes("messageError=" + encodeURIComponent(STEER_NOT_ENABLED_MESSAGE)), location);
+  assert.deepEqual(await runtime.steer.pending("run-steer-noflag"), []);
+});
+
+test("steering an external run whose steer loop already exited is refused instead of answering sent", async () => {
+  const runtime = await shipRuntime();
+  await start("run-steer-closed", "opencode");
+  const original = runtime.store.load.bind(runtime.store);
+  runtime.store.load = async (id: string) => {
+    const events = await original(id);
+    if (id !== "run-steer-closed") return events;
+    return [...events, { type: "step-completed", name: "harness-steer-undelivered", at: new Date().toISOString(), data: { result: [] } } as never];
+  };
+  const res = await run.action({ params: { id: "run-steer-closed" }, request: steer("run-steer-closed", "also do X") });
+  const location = res.headers.get("location") ?? "";
+  assert.ok(location.includes("messageError=" + encodeURIComponent(STEER_CLOSED_MESSAGE)), location);
+  assert.deepEqual(await runtime.steer.pending("run-steer-closed"), []);
 });

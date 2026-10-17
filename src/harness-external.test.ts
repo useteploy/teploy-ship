@@ -12,9 +12,11 @@ import type { WorkflowEvent } from "@neutron-build/workflow";
 import { durableAgent } from "./durable.js";
 import type { DurableAgentOutput, ExecutorProvider } from "./durable.js";
 import { FileRepoMemory } from "./repo-memory.js";
-import { HARNESS_VERSIONS } from "./harness.js";
+import { HARNESS_VERSIONS, selectAdapter } from "./harness.js";
+import { STEER_CLOSED_MESSAGE, steerLoopExited, steerRefusal } from "./harness-capabilities.js";
+import { admittedSteps } from "./step-fingerprint.js";
 import {
-  codexGatewayConfigFlags, envFile, externalAdapters, externalHarnessConfig, externalPrompt, opencodeFutureLineRefusal, opencodeSessionId,
+  codexGatewayConfigFlags, envFile, STEER_ROUNDS_MAX, externalAdapters, externalHarnessConfig, externalPrompt, opencodeFutureLineRefusal, opencodeSessionId,
   parseClaudeStream, parseCodexExecStream, parseOpencode2Stream, parseOpencodeStream, shq, versionMajor,
 } from "./harness-external.js";
 
@@ -153,6 +155,14 @@ test("parseOpencode2Stream reads the measured 2.0.26 contract: messageID turns, 
   assert.equal(tool.usage.totalTokens, 8509);
   assert.equal(tool.usage.priced, false, "cost 0 with the subscription provider: counted, not priced");
   assert.equal(tool.sessionId, "ses_toolrun0000000000000000001");
+
+  // A cost the stream DID report, on a run whose terminal text step has no
+  // step_finish (receipt §4: it never does): the figure is a lower bound, so
+  // the run is unpriced rather than priced-but-short.
+  const priced = parseOpencode2Stream(V2_TOOL_STREAM.replace('"cost":0,', '"cost":0.0123,'));
+  assert.equal(priced.usage.priced, false, "two model steps, one step_finish: usage is incomplete, not priced");
+  assert.equal(priced.usage.costUSD, undefined);
+  assert.equal(priced.usage.inputTokens, 4861, "the tokens it does carry are kept");
 
   // Resume stream (receipt §3 Run B): context is the vendor's problem; Ship
   // records what came back.
@@ -508,7 +518,7 @@ test("opencode v2 steering (D6): a pending note is drained at the process bounda
   assert.equal(out.usage?.inputTokens, 4861 + 0, "usage sums across the execs of the session");
 
   const events = await store.load("run-oc-steer");
-  assert.deepEqual(stepsOf(events), ["sandbox", "harness-preflight", "harness-run", "harness-steer-0", "harness-resume-0", "harness-steer-1"]);
+  assert.deepEqual(stepsOf(events), ["sandbox", "harness-preflight", "harness-run", "harness-steer-0", "harness-resume-0", "harness-steer-1", "harness-steer-undelivered"]);
   assert.deepEqual(stepResult<string[]>(events, "harness-steer-0"), ["prefer the smaller change"], "the drained notes are the recorded step value");
   assert.deepEqual(stepResult<string[]>(events, "harness-steer-1"), [], "the terminating drain is recorded too, so replay breaks at the same round");
   const resume = stepResult<{ exitCode: number; sessionId?: string; turns: number }>(events, "harness-resume-0");
@@ -523,7 +533,7 @@ test("opencode v2 steering (D6): a pending note is drained at the process bounda
   const replay = await executeRun({ workflow: wf, runId: "run-oc-steer", store, input });
   assert.equal((replay.output as DurableAgentOutput).agentSummary, out.agentSummary);
   assert.equal(await runs(), 2, "replay must not re-run the harness or resume it");
-  assert.deepEqual(stepsOf(await store.load("run-oc-steer")), ["sandbox", "harness-preflight", "harness-run", "harness-steer-0", "harness-resume-0", "harness-steer-1"]);
+  assert.deepEqual(stepsOf(await store.load("run-oc-steer")), ["sandbox", "harness-preflight", "harness-run", "harness-steer-0", "harness-resume-0", "harness-steer-1", "harness-steer-undelivered"]);
 });
 
 test("claude-code steering (D7): the note resumes the recorded claude session with --resume", async () => {
@@ -545,7 +555,7 @@ test("claude-code steering (D7): the note resumes the recorded claude session wi
   assert.equal(out.turns, 3 + 3, "turns accumulate across the main run and the resume");
 
   const events = await store.load("run-cc-steer");
-  assert.deepEqual(stepsOf(events), ["sandbox", "harness-preflight", "harness-run", "harness-steer-0", "harness-resume-0", "harness-steer-1"]);
+  assert.deepEqual(stepsOf(events), ["sandbox", "harness-preflight", "harness-run", "harness-steer-0", "harness-resume-0", "harness-steer-1", "harness-steer-undelivered"]);
   const invocation = await readFile(join(recordTo, "args"), "utf8");
   assert.match(invocation, new RegExp(`--resume ${CLAUDE_RESULT.session_id}`));
   assert.match(invocation, /Operator steering — adjust course accordingly: also add a test/);
@@ -571,14 +581,14 @@ test("negative control: a note accepted for an opencode run on a 1.x binary is r
   });
   assert.equal(outcome.status, "completed", JSON.stringify(outcome));
   const events = await store.load("run-oc-v1-steer");
-  assert.deepEqual(stepsOf(events), ["sandbox", "harness-preflight", "harness-run", "harness-steer-0", "harness-resume-0"]);
+  assert.deepEqual(stepsOf(events), ["sandbox", "harness-preflight", "harness-run", "harness-steer-0", "harness-resume-0", "harness-steer-undelivered"]);
   const refusal = stepResult<{ delivered: false; reason: string }>(events, "harness-resume-0");
   assert.equal(refusal.delivered, false);
   assert.match(refusal.reason, /no session to resume/);
   assert.equal(await runs(), 1, "no second process: there is nothing to resume");
 });
 
-test("steering is bounded: a drain that always has notes delivers at most 1 + STEER_ROUNDS_MAX resumes and then stops", async () => {
+test("steering is bounded: a drain that always has notes runs 1 + STEER_ROUNDS_MAX execs in total, and the note it never read is recorded as undelivered", async () => {
   const recordTo = await mkdtemp(join(tmpdir(), "oc-v2-bound-rec-"));
   const { provider, runs } = await workspaceWithFakeOpencode({
     recordTo,
@@ -604,26 +614,53 @@ test("steering is bounded: a drain that always has notes delivers at most 1 + ST
   const names = stepsOf(events);
   const resumes = names.filter((n) => /^harness-resume-\d+$/.test(n));
   const drains = names.filter((n) => /^harness-steer-\d+$/.test(n));
-  assert.equal(resumes.length, 4, "1 main + 4 resumes");
-  assert.equal(drains.length, 4);
-  assert.equal(await runs(), 5);
+  assert.equal(resumes.length, STEER_ROUNDS_MAX, "STEER_ROUNDS_MAX resumes");
+  assert.equal(drains.length, STEER_ROUNDS_MAX);
+  assert.equal(await runs(), 1 + STEER_ROUNDS_MAX, "1 main + STEER_ROUNDS_MAX resumes, as documented");
+  // The drain the loop never got to read from is not lost: the closing step
+  // takes it into the undelivered record, visible in the run's output.
+  assert.deepEqual(stepResult<string[]>(events, "harness-steer-undelivered"), ["keep going"]);
+  assert.match((outcome.output as DurableAgentOutput).agentSummary!, /NOT delivered to the agent \(1\): keep going/);
 });
 
-test("cross-version replay is refused: a 1-contract opencode log does not execute under the 2-contract adapter", async () => {
-  const recordTo = await mkdtemp(join(tmpdir(), "oc-xver-rec-"));
-  const provider = (await workspaceWithFakeOpencode({ recordTo, versionLine: "1.18.23", stream: OPENCODE_V1_OK_STREAM })).provider;
-  const wf = durableAgent({ model: neverModel, executor: provider, workdir: ".", harnesses: externalAdapters({ env: {} }) });
-  const store = new MemoryEventStore();
-  const outcome = await executeRun({
-    workflow: wf,
-    runId: "run-oc-xver",
-    store,
-    // The ref a pre-D6 enqueue recorded.
-    input: { task: "t", harness: { id: "opencode", version: "1" } },
-  });
-  assert.equal(outcome.status, "failed");
-  assert.match(outcome.error?.detail ?? "", /refuses to replay under a different program/);
-  assert.equal((await readFile(join(recordTo, "runs"), "utf8").catch(() => "")).trim(), "", "nothing ran");
+test("a run recorded under version 1 still runs and replays under the v1 alias; an unknown version is still refused", async () => {
+  for (const [id, versionLine, stream] of [
+    ["opencode", "1.18.23", OPENCODE_V1_OK_STREAM],
+    ["claude-code", "9.9.9", JSON.stringify(CLAUDE_RESULT)],
+  ] as const) {
+    const recordTo = await mkdtemp(join(tmpdir(), "xver-rec-"));
+    const rig = id === "opencode" ? await workspaceWithFakeOpencode({ recordTo, versionLine, stream }) : await workspaceWithFakeClaude({ recordTo, stream });
+    const drained: string[] = [];
+    const wf = durableAgent({
+      model: neverModel,
+      executor: rig.provider,
+      workdir: ".",
+      harnesses: externalAdapters({ env: {}, steer: { drain: async (_r, key) => (drained.push(String(key)), ["a note"]) } }),
+    });
+    const store = new MemoryEventStore();
+    // The ref a pre-D6/D7 enqueue recorded — with the steer flag every new run carries.
+    const input = { task: "t", steer: true, harness: { id, version: "1" } };
+    const outcome = await executeRun({ workflow: wf, runId: `run-${id}-v1`, store, input });
+    assert.equal(outcome.status, "completed", JSON.stringify(outcome));
+    assert.equal((outcome.output as DurableAgentOutput).status, "finished");
+    assert.deepEqual(stepsOf(await store.load(`run-${id}-v1`)), ["sandbox", "harness-preflight", "harness-run"], "contract 1 records no steer steps");
+    assert.deepEqual(drained, [], "the alias never drains notes it cannot deliver");
+    assert.equal(await rig.runs(), 1);
+    const replay = await executeRun({ workflow: wf, runId: `run-${id}-v1`, store, input });
+    assert.equal(replay.status, "completed");
+    assert.equal(await rig.runs(), 1, "replay never re-runs the vendor");
+
+    const unknown = await executeRun({ workflow: wf, runId: `run-${id}-v3`, store: new MemoryEventStore(), input: { task: "t", harness: { id, version: "3" } } });
+    assert.equal(unknown.status, "failed");
+    assert.match(unknown.error?.detail ?? "", /refuses to replay under a different program/);
+  }
+});
+
+test("the step-fingerprint table admits the steer steps only for contracts that record them", () => {
+  const steps = (version: string) => admittedSteps({ task: "t", steer: true, harness: { id: "claude-code", version } });
+  const steerSteps = (keys: string[]) => keys.filter((k) => /harness-(steer|resume)/.test(k));
+  assert.deepEqual(steerSteps(steps("1")), [], "a version-1 external run records no steer steps, so its fingerprint stays what it was");
+  assert.equal(steerSteps(steps("2")).length, 3);
 });
 
 test("opencode adapter on a repo run: the tree it leaves goes through Ship's publish gate", async () => {
@@ -1005,4 +1042,230 @@ test("direct external execution cannot bypass requested plan review", async () =
   const replay = await executeRun({ workflow: wf, runId: "run-direct-plan", store, input });
   assert.equal((replay.output as DurableAgentOutput).status, "error");
   assert.equal(await runs(), 0);
+});
+
+// --- steering follow-ups (review of D6/D7) ---------------------------------
+
+/** A fake `claude` whose main and resume execs print different streams; the resume can fail. */
+async function workspaceWithScriptedClaude(opts: {
+  recordTo: string;
+  main: string;
+  resumes: string[];
+  resumeExit?: number;
+}): Promise<{ provider: ExecutorProvider; runs: () => Promise<number>; args: () => Promise<string[]> }> {
+  const bin = await mkdtemp(join(tmpdir(), "fake-cc-script-bin-"));
+  const work = await mkdtemp(join(tmpdir(), "fake-cc-script-work-"));
+  const resumeCases = opts.resumes
+    .map((stream, i) => `  ${i}) cat <<'EOF'\n${stream}\nEOF\n;;`)
+    .join("\n");
+  await fakeBin(
+    bin,
+    "claude",
+    [
+      `if [ "$1" = "--version" ]; then echo "9.9.9 (fake)"; exit 0; fi`,
+      `echo run >> ${shq(join(opts.recordTo, "runs"))}`,
+      `echo "$*" | tr '\\n' ' ' >> ${shq(join(opts.recordTo, "args"))}; echo >> ${shq(join(opts.recordTo, "args"))}`,
+      `case "$*" in *--resume*)`,
+      `  n=$(cat ${shq(join(opts.recordTo, "resume-count"))} 2>/dev/null || echo 0)`,
+      `  echo $((n+1)) > ${shq(join(opts.recordTo, "resume-count"))}`,
+      `  case $n in`,
+      resumeCases,
+      `  esac`,
+      ...(opts.resumeExit !== undefined ? [`  exit ${opts.resumeExit}`] : []),
+      `  exit 0;;`,
+      `esac`,
+      `cat <<'EOF'\n${opts.main}\nEOF`,
+    ].join("\n"),
+  );
+  const executor = new LocalExecutor({ root: work, env: { PATH: `${bin}:${process.env.PATH ?? ""}` } });
+  return {
+    provider: { isolated: true, async create() { return { handle: work }; }, attach() { return executor; } },
+    runs: async () => (await readFile(join(opts.recordTo, "runs"), "utf8").catch(() => "")).split("\n").filter((l) => l === "run").length,
+    args: async () => (await readFile(join(opts.recordTo, "args"), "utf8").catch(() => "")).split("\n").filter((l) => l !== ""),
+  };
+}
+
+const claudeResult = (over: Record<string, unknown>) => JSON.stringify({ ...CLAUDE_RESULT, ...over });
+
+test("steered resumes get only the REMAINING turn and dollar budget, never the full caps again", async () => {
+  const recordTo = await mkdtemp(join(tmpdir(), "cc-budget-rec-"));
+  const { provider, args } = await workspaceWithScriptedClaude({
+    recordTo,
+    main: claudeResult({ num_turns: 3, total_cost_usd: 0.5 }),
+    resumes: [claudeResult({ num_turns: 2, total_cost_usd: 0.25, result: "resumed once" }), claudeResult({ num_turns: 1, total_cost_usd: 0.1, result: "resumed twice" })],
+  });
+  const wf = durableAgent({
+    model: neverModel,
+    executor: provider,
+    workdir: ".",
+    harnesses: externalAdapters({ env: { ANTHROPIC_API_KEY: "sk-ant-api-fake" }, steer: scriptedSteer({ "ext-0": ["one"], "ext-1": ["two"] }) }),
+    maxSteps: 10,
+    maxRunCostUSD: 2,
+  });
+  const store = new MemoryEventStore();
+  const outcome = await executeRun({
+    workflow: wf,
+    runId: "run-cc-budget",
+    store,
+    input: { task: "t", steer: true, harness: { id: "claude-code", version: HARNESS_VERSIONS["claude-code"] } },
+  });
+  assert.equal(outcome.status, "completed", JSON.stringify(outcome));
+  const [main, first, second] = await args();
+  assert.match(main!, /--max-turns 10 /);
+  assert.match(main!, /--max-budget-usd 2\.00/);
+  assert.match(first!, /--max-turns 7 /, "10 - 3 turns already spent");
+  assert.match(first!, /--max-budget-usd 1\.50/, "2.00 - 0.50 already spent");
+  assert.match(second!, /--max-turns 5 /, "10 - 3 - 2");
+  assert.match(second!, /--max-budget-usd 1\.25/, "2.00 - 0.50 - 0.25");
+});
+
+test("a steer with no turn or dollar budget left is refused on the record and no resume process starts", async () => {
+  for (const [name, config, main] of [
+    ["turns", { maxSteps: 3, maxRunCostUSD: 5 }, claudeResult({ num_turns: 3, total_cost_usd: 0.1 })],
+    ["dollars", { maxSteps: 40, maxRunCostUSD: 1 }, claudeResult({ num_turns: 1, total_cost_usd: 1.2 })],
+  ] as const) {
+    const recordTo = await mkdtemp(join(tmpdir(), "cc-nobudget-rec-"));
+    const { provider, runs } = await workspaceWithScriptedClaude({ recordTo, main, resumes: [] });
+    const wf = durableAgent({
+      model: neverModel,
+      executor: provider,
+      workdir: ".",
+      harnesses: externalAdapters({ env: { ANTHROPIC_API_KEY: "sk-ant-api-fake" }, steer: scriptedSteer({ "ext-0": ["more please"] }) }),
+      ...config,
+    });
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: wf,
+      runId: `run-cc-nobudget-${name}`,
+      store,
+      input: { task: "t", steer: true, harness: { id: "claude-code", version: HARNESS_VERSIONS["claude-code"] } },
+    });
+    assert.equal(outcome.status, "completed", JSON.stringify(outcome));
+    const events = await store.load(`run-cc-nobudget-${name}`);
+    const refusal = stepResult<{ delivered: false; reason: string }>(events, "harness-resume-0");
+    assert.equal(refusal.delivered, false, name);
+    assert.match(refusal.reason, /no budget left/, name);
+    assert.equal(await runs(), 1, `${name}: nothing ran`);
+    assert.deepEqual(stepResult<string[]>(events, "harness-steer-undelivered"), ["more please"], name);
+  }
+});
+
+test("notes that arrive after the last drain are recorded as undelivered, and the run page refuses further steering once the loop has exited", async () => {
+  const recordTo = await mkdtemp(join(tmpdir(), "cc-late-rec-"));
+  const { provider } = await workspaceWithScriptedClaude({ recordTo, main: claudeResult({}), resumes: [] });
+  const wf = durableAgent({
+    model: neverModel,
+    executor: provider,
+    workdir: ".",
+    harnesses: externalAdapters({ env: {}, steer: scriptedSteer({ "ext-final": ["too late"] }) }),
+  });
+  const store = new MemoryEventStore();
+  const input = { task: "t", steer: true, harness: { id: "claude-code", version: HARNESS_VERSIONS["claude-code"] } };
+  const outcome = await executeRun({ workflow: wf, runId: "run-cc-late", store, input });
+  const events = await store.load("run-cc-late");
+  assert.deepEqual(stepResult<string[]>(events, "harness-steer-undelivered"), ["too late"]);
+  assert.match((outcome.output as DurableAgentOutput).agentSummary!, /NOT delivered to the agent \(1\): too late/);
+  assert.equal(steerLoopExited(input, events), true);
+  assert.equal(steerLoopExited(input, events.filter((e) => e.name !== "harness-steer-undelivered")), false);
+  assert.equal(steerRefusal(input, true), STEER_CLOSED_MESSAGE);
+  assert.equal(steerRefusal(input, false), undefined);
+});
+
+test("a failed resume does not flip a finished attempt, and a good resume's summary is appended to the original, not substituted", async () => {
+  // Failure: the main run finished; the resume dies. The attempt keeps `finished`.
+  const failRec = await mkdtemp(join(tmpdir(), "cc-failresume-rec-"));
+  const failing = await workspaceWithScriptedClaude({
+    recordTo: failRec,
+    main: claudeResult({ result: "ORIGINAL-SUMMARY" }),
+    resumes: [JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true, num_turns: 1, result: "boom", session_id: CLAUDE_RESULT.session_id })],
+    resumeExit: 1,
+  });
+  const run = async (rig: typeof failing, runId: string) => {
+    const wf = durableAgent({
+      model: neverModel,
+      executor: rig.provider,
+      workdir: ".",
+      harnesses: externalAdapters({ env: {}, steer: scriptedSteer({ "ext-0": ["steer me"] }) }),
+    });
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: wf,
+      runId,
+      store,
+      input: { task: "t", steer: true, harness: { id: "claude-code", version: HARNESS_VERSIONS["claude-code"] } },
+    });
+    return { out: outcome.output as DurableAgentOutput, events: await store.load(runId) };
+  };
+  const failed = await run(failing, "run-cc-failresume");
+  assert.equal(failed.out.status, "finished", "a resume failure must not downgrade the main run's outcome");
+  assert.match(failed.out.agentSummary!, /ORIGINAL-SUMMARY/);
+  assert.match(failed.out.agentSummary!, /Steering not delivered/);
+  assert.deepEqual(stepResult<string[]>(failed.events, "harness-steer-undelivered"), ["steer me"], "the consumed note is accounted as undelivered");
+
+  // Success: both summaries survive.
+  const okRec = await mkdtemp(join(tmpdir(), "cc-okresume-rec-"));
+  const ok = await run(
+    await workspaceWithScriptedClaude({ recordTo: okRec, main: claudeResult({ result: "ORIGINAL-SUMMARY" }), resumes: [claudeResult({ result: "RESUME-SUMMARY" })] }),
+    "run-cc-okresume",
+  );
+  assert.equal(ok.out.status, "finished");
+  assert.match(ok.out.agentSummary!, /ORIGINAL-SUMMARY/);
+  assert.match(ok.out.agentSummary!, /RESUME-SUMMARY/);
+});
+
+test("each steer round resumes the latest session id the previous exec reported, not the first", async () => {
+  const recordTo = await mkdtemp(join(tmpdir(), "cc-session-rec-"));
+  const { provider, args } = await workspaceWithScriptedClaude({
+    recordTo,
+    main: claudeResult({ session_id: "sess-A" }),
+    resumes: [claudeResult({ session_id: "sess-B" }), claudeResult({ session_id: "sess-C" })],
+  });
+  const wf = durableAgent({
+    model: neverModel,
+    executor: provider,
+    workdir: ".",
+    harnesses: externalAdapters({ env: {}, steer: scriptedSteer({ "ext-0": ["one"], "ext-1": ["two"] }) }),
+  });
+  const outcome = await executeRun({
+    workflow: wf,
+    runId: "run-cc-session",
+    store: new MemoryEventStore(),
+    input: { task: "t", steer: true, harness: { id: "claude-code", version: HARNESS_VERSIONS["claude-code"] } },
+  });
+  assert.equal(outcome.status, "completed", JSON.stringify(outcome));
+  const [, first, second] = await args();
+  assert.match(first!, /--resume sess-A/);
+  assert.match(second!, /--resume sess-B/, "the second round continues the session the first resume reported");
+});
+
+test("a plan-review refusal starts nothing and the steer loop does not run", async () => {
+  const recordTo = await mkdtemp(join(tmpdir(), "cc-planrefuse-rec-"));
+  const { provider, runs } = await workspaceWithScriptedClaude({ recordTo, main: claudeResult({}), resumes: [] });
+  const drained: string[] = [];
+  const wf = durableAgent({
+    model: neverModel,
+    executor: provider,
+    workdir: ".",
+    harnesses: externalAdapters({ env: {}, steer: { drain: async (_r, key) => (drained.push(String(key)), ["a note"]) } }),
+  });
+  const store = new MemoryEventStore();
+  await executeRun({
+    workflow: wf,
+    runId: "run-cc-planrefuse",
+    store,
+    input: { task: "t", plan: true, steer: true, harness: { id: "claude-code", version: HARNESS_VERSIONS["claude-code"] } },
+  });
+  const names = stepsOf(await store.load("run-cc-planrefuse"));
+  assert.ok(!names.some((n) => /^harness-(steer|resume)-\d+$/.test(n)), names.join(","));
+  assert.equal(await runs(), 0);
+  assert.ok(!drained.some((k) => k.startsWith("ext-") && k !== "ext-final"), "no per-round drain ran: " + drained.join(","));
+});
+
+test("selectAdapter matches id AND version across the registered aliases", () => {
+  const adapters = externalAdapters({ env: {} });
+  assert.equal(selectAdapter(adapters, { id: "claude-code", version: "1" }).version, "1");
+  assert.equal(selectAdapter(adapters, { id: "claude-code", version: HARNESS_VERSIONS["claude-code"]! }).version, HARNESS_VERSIONS["claude-code"]);
+  assert.equal(selectAdapter(adapters, { id: "opencode", version: "1" }).version, "1");
+  assert.throws(() => selectAdapter(adapters, { id: "opencode", version: "7" }), /refuses to replay under a different program/);
+  assert.throws(() => selectAdapter(adapters, { id: "codex", version: "2" }), /refuses to replay under a different program/);
 });

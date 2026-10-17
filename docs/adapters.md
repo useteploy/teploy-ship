@@ -55,8 +55,23 @@ Two recorded steps, both of which always record a value:
    "turn boundary" for an external harness is therefore a process exit: the
    sandbox exec API is request/response, so notes that arrive while the
    vendor runs are delivered by the next process. Bounded
-   (`STEER_ROUNDS_MAX`); the loop stops on its own when no notes are pending
-   or a resume timed out. The steps are input-gated in the step fingerprint,
+   (`STEER_ROUNDS_MAX`: a steered attempt runs `1 + STEER_ROUNDS_MAX` execs at
+   most — the main run plus that many resumes); the loop stops on its own
+   when no notes are pending or a resume failed or timed out. Each resume is
+   given only the REMAINING `--max-turns` / `--max-budget-usd` (the cap minus
+   what the recorded steps already spent); with none left the note is
+   refused on the record and no process starts. The attempt keeps the main
+   run's status unless a resume completed successfully, a resume's summary
+   is appended to (never substituted for) the original, and each round
+   resumes the latest session id the previous exec reported. A closing
+   `harness-steer-undelivered` step drains whatever the loop never read
+   (notes that arrived during the last allowed resume or while the publish
+   gate ran) and the notes whose delivery was refused or failed; they are
+   recorded as "not delivered" in the run output and the thread, and the
+   run page refuses new notes once that step has run. A run whose adapter
+   contract is 1 records none of these steps (see `HARNESS_ALIAS_VERSIONS`:
+   runs recorded under `claude-code@1` / `opencode@1` replay under an alias
+   of the same adapter with the steer loop off). The steps are input-gated in the step fingerprint,
    so a run enqueued without `steer` keeps the exact two-step sequence every
    earlier external log carries, and a replay walks the recorded rounds
    without starting a vendor process.
@@ -223,6 +238,24 @@ a vendor process runs are delivered by the next `opencode run --session <id>`
 exec. The capability table (`src/harness-capabilities.ts`) declares steering
 supported — the admission gate additionally requires the run's recorded
 harness contract to be 2 or later, so pre-D6 logs keep their refusal.
+
+**Not yet proven in the image.** The opencode v2 invocation (flags, the
+`@opencode/cli` package, `--session` resume across execs) is measured against
+a real 2.0.26 binary on a workstation, not inside the sandbox image: it still
+needs one real image build (`images/build.sh --harness opencode`) and one real
+steered run on deploy-test before it is called proven. Until then treat v2 as
+declared, not verified.
+
+**Notes and the critic.** A note drained by an attempt that the critic then
+rejects never reaches the published result: the attempt's tree and summary
+are what is dropped, and so is the steering delivered into it. The note is
+still on that attempt's record (and in the thread), but a rejected attempt's
+work is not what ships.
+
+**Pricing.** opencode v2 emits `step_finish` only on tool steps, so the
+final text step carries no usage. A stream that names more model steps than
+it finished is recorded unpriced (tokens kept as a lower bound, no dollars),
+never priced-but-short.
 
 ## codex
 
