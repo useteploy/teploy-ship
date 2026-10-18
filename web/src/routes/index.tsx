@@ -159,6 +159,11 @@ export async function action({ request }: { request: Request }): Promise<Respons
         trust: task.source === "manual" ? "operator" : "external",
         ...(task.repo !== undefined ? { repo: task.repo } : {}),
         ...(task.pr !== undefined ? { pr: task.pr } : {}),
+        // DS1: the same stack facts the worker's auto-launch carries
+        // (worker.ts). Without them a manually launched stack-rebase task ran
+        // as a plain PR follow-up against the merged base's deleted branch
+        // (found live 2026-10-18).
+        ...(task.stack !== undefined ? { stackRebase: task.stack } : {}),
       });
     } catch (error) {
       // It may have been accepted before the response failed. Retain the
