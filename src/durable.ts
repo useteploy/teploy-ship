@@ -41,6 +41,7 @@ import {
   readPullRequestBody,
   reviewPrompt,
   checkoutRepo,
+  checkoutRepoAtSha,
   setupRepo,
   setupRepoForPr,
   resolvePr,
@@ -76,6 +77,7 @@ import { refusalMessage, warningMessage } from "./publish-policy.js";
 import type { RepoCheckout, RepoRef } from "./git.js";
 import { assertRepoAllowed, credentialFor, policyFromEnv } from "./repo-policy.js";
 import type { RepoPolicyConfig, RepoTrust } from "./repo-policy.js";
+import type { ForkSourceRecord } from "./fork.js";
 import type { KnownSecret } from "./redact.js";
 import { condenseIfNeeded, defaultCondenseConfig } from "./memory.js";
 import type { CondenseConfig } from "./memory.js";
@@ -172,6 +174,18 @@ export interface DurableAgentInput {
   repositoryScopeVersion?: 2;
   /** Review follow-up: work PR #pr's existing head branch and reply there. */
   pr?: number;
+  /**
+   * DF1 (SHIP_FORK): this run is a fork of `forkOf.runId` — a new task that
+   * carries the source's recorded history as text and starts a NEW branch
+   * from the source's recorded pushed commit (`sha`; absent = the source
+   * pushed nothing and the fork starts from the default branch). Lineage,
+   * never a parent: a fork is its own task root, so parentRunId stays unset
+   * (task-session.ts). Materialised at enqueue only when a surface forked a
+   * settled run; the repo-setup step reads it to decide where to stand. Admits
+   * NO step, so runs without it replay byte-identically and a fork shares the
+   * fingerprint of the equivalent non-fork run. See fork.ts.
+   */
+  forkOf?: ForkSourceRecord;
   /**
    * Where the task came from (L7), materialised at enqueue. Read by the
    * worker's notification builder, never by the workflow: it gates no step,
@@ -1226,6 +1240,42 @@ function pruneLookImageHistory(messages: Message[]): void {
 }
 
 /**
+ * DF1 (SHIP_FORK): a fork's repo-setup — the source run's recorded pushed
+ * commit on a new ship/<runId> branch (git.ts checkoutRepoAtSha). The lineage
+ * and the sha are facts of the fork's own recorded input, so a replay re-reads
+ * them from the log, never from the source's. A fork of a run that pushed
+ * nothing never reaches this helper: it takes the ordinary default-branch
+ * checkout, which is what its Recorded line says it did.
+ */
+async function forkCheckout(
+  executor: AgentExecutor,
+  runId: string,
+  fork: ForkSourceRecord & { sha: string },
+  ref: RepoRef,
+  token: string,
+  repoPolicy: RepoPolicyConfig,
+  warm: boolean,
+): Promise<RepoCheckout> {
+  // A fork-PR source's branch lives in another repository, which the
+  // allowlist has to cover too — resolve its credential the same way the
+  // PR path does for the branch it names.
+  const headToken =
+    fork.headRepo !== undefined
+      ? credentialFor(assertRepoAllowed(fork.headRepo, { trust: "external", config: repoPolicy }), repoPolicy)
+      : "";
+  return checkoutRepoAtSha(executor, {
+    ref,
+    token,
+    runId,
+    sha: fork.sha,
+    ...(fork.branch !== undefined ? { branch: fork.branch } : {}),
+    ...(fork.headRepo !== undefined ? { headRepo: fork.headRepo } : {}),
+    ...(headToken !== "" ? { headToken } : {}),
+    warm,
+  });
+}
+
+/**
  * The CodeAct agent as a durable workflow. Every model call and every
  * execution is a recorded step, so a crashed run replays completed turns
  * from the log and continues without re-calling the model or re-running
@@ -1395,7 +1445,16 @@ export function durableAgent(
             // holds a clone; a cold clone otherwise. Both end in the same
             // checkout, so the step's OUTPUT — the only thing a replay reads —
             // does not depend on which path ran.
-            if (input.pr === undefined) return checkoutRepo(executor, { ref, token, runId: ctx.runId, warm: input.warm === true });
+            if (input.pr === undefined) {
+              // DF1 (SHIP_FORK): a fork stands on the source's recorded pushed
+              // commit on its own new branch; a fork of a run that pushed
+              // nothing takes the ordinary default-branch checkout below.
+              const fork = input.forkOf;
+              if (fork !== undefined && fork.sha !== undefined) {
+                return forkCheckout(executor, ctx.runId, { ...fork, sha: fork.sha }, ref, token, repoPolicy, input.warm === true);
+              }
+              return checkoutRepo(executor, { ref, token, runId: ctx.runId, warm: input.warm === true });
+            }
             // A fork PR's head branch lives in another repository, which the
             // allowlist has to cover too — resolve its credential the same way.
             const resolved = await resolvePr(ref, token, input.pr);
@@ -1795,6 +1854,12 @@ export function durableAgent(
             // checkoutRepo, not setupRepo: every attempt boots its own warm
             // volume (the daemon copies the template per run), and a cold
             // clone into one that already holds the repo fails outright.
+            // A fork (DF1) checks out the recorded pushed commit here too —
+            // the primary path's rule, in this attempt's own sandbox.
+            const fork = input.forkOf;
+            if (fork !== undefined && fork.sha !== undefined) {
+              return forkCheckout(attemptExecutor, ctx.runId, { ...fork, sha: fork.sha }, ref, credentialFor(ref, repoPolicy), repoPolicy, input.warm === true);
+            }
             return checkoutRepo(attemptExecutor, { ref, token: credentialFor(ref, repoPolicy), runId: ctx.runId, warm: input.warm === true });
           });
           if (input.preparation !== undefined) {

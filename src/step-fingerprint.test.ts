@@ -438,6 +438,22 @@ test("two-way steering (D2) moves only the fingerprints of runs that carry steer
   assert.notEqual(stepFingerprint(on), fingerprintOf(beforeTable, on), "a flag-on run sees the new steps");
 });
 
+test("fork lineage (DF1) moves no fingerprint at all: the field admits no step", () => {
+  // forkOf changes WHERE repo-setup stands, never WHICH steps exist, so a
+  // run without it (every log written before forks) replays byte-identically
+  // and a fork shares the fingerprint of the equivalent non-fork run.
+  for (const input of [
+    { task: "t" },
+    { task: "t", repo: "r", tests: true },
+    { task: "t", repo: "r", pr: 7 },
+    { task: "t", repo: "r", mode: "scan" },
+    { task: "t", repo: "r", changeClass: true, mergeGate: true, tests: true },
+  ] as RecordedInput[]) {
+    const forked = { ...input, forkOf: { runId: "run-src", sha: "a".repeat(40), branch: "ship/run-src" } } as RecordedInput;
+    assert.equal(stepFingerprint(forked), stepFingerprint(input), `forkOf admits no step for ${JSON.stringify(input)}`);
+  }
+});
+
 test("renaming a step moves the fingerprint", () => {
   const after: WorkflowStep[] = [{ key: "step:one", admits: () => true }, { key: "step:deux", admits: () => true }];
   assert.notEqual(fingerprintOf(after, OLD), fingerprintOf(base, OLD));

@@ -114,6 +114,12 @@ export interface ThreadRunView {
    * them (input.steerReply), so a flag-off run's thread is byte-identical.
    */
   replies?: AgentReplyView[];
+  /**
+   * DF1 (SHIP_FORK): the run this one was forked from, present only on runs
+   * whose input recorded one — absent on every earlier run, so the view
+   * serialises exactly as it did before forks existed.
+   */
+  forkOf?: { runId: string; sha?: string };
 }
 
 export interface ThreadView {
@@ -319,6 +325,19 @@ export function harnessLabel(events: readonly WorkflowEvent[]): string {
   return "native";
 }
 
+/**
+ * A run's recorded fork lineage (DF1), shape-checked off its input like every
+ * other field this module reads out of a log. Undefined on a non-fork.
+ */
+export function forkOfInput(events: readonly WorkflowEvent[]): ThreadRunView["forkOf"] {
+  const started = events.find((e) => e.type === "run-started");
+  const fork = record(record(record(started?.data).input).forkOf);
+  const runId = fork.runId;
+  if (typeof runId !== "string" || runId === "") return undefined;
+  const sha = fork.sha;
+  return { runId, ...(typeof sha === "string" && sha !== "" ? { sha } : {}) };
+}
+
 /** The run-completed summary, bounded like threadHistory bounds it. */
 function summaryOf(events: readonly WorkflowEvent[]): string | null {
   for (let i = events.length - 1; i >= 0; i--) {
@@ -393,9 +412,12 @@ export async function runThread(deps: ThreadDeps, runId: string): Promise<Thread
     const started = startedOf(events);
     if (started === undefined) continue;
     const parent = started.data?.input?.parentRunId;
-    // A member either names the anchor (runs since taskRootRunId existed)
-    // or hangs off a member by parentRunId (legacy chains).
-    if (started.data?.taskRootRunId === root || (typeof parent === "string" && members.has(parent))) {
+    const forked = forkOfInput(events);
+    // A member either names the anchor (runs since taskRootRunId existed),
+    // hangs off a member by parentRunId (legacy chains), or — a fork (DF1) —
+    // records forkOf lineage to one. A fork is a new task root, so the anchor
+    // test cannot catch it, but it belongs in the thread it came from.
+    if (started.data?.taskRootRunId === root || (typeof parent === "string" && members.has(parent)) || (forked !== undefined && members.has(forked.runId))) {
       members.add(candidate.runId);
     }
   }
@@ -426,6 +448,7 @@ export async function runThread(deps: ThreadDeps, runId: string): Promise<Thread
       updatedAt: events[events.length - 1]?.at ?? "",
     }) as RunMeta;
     const parent = started?.data?.input?.parentRunId;
+    const forkOf = forkOfInput(events);
     // Pending notes are only readable for a run that could still drain them;
     // a terminal run has none, and skipping the read keeps the scan bounded.
     const terminal = ["completed", "failed", "cancelled"].includes(meta.status);
@@ -443,6 +466,7 @@ export async function runThread(deps: ThreadDeps, runId: string): Promise<Thread
       steers: steerHistory(events, pending, pendingHeld),
       asks: askHistory(events),
       ...(admitsReplies(events) ? { replies: replyHistory(events) } : {}),
+      ...(forkOf !== undefined ? { forkOf } : {}),
     });
   }
   return { run: runId, root, runs, truncated };
