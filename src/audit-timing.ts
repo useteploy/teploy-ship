@@ -14,7 +14,8 @@
  *    the raw values are reported and no median/p90 is offered, because a median
  *    of five runs reads like a measurement and is not one.
  *  - Runs whose telemetry is partial or missing are counted explicitly.
- *  - toFirstStepMs is an upper bound on queue wait (no claim-time event exists).
+ *  - toFirstStepMs is an upper bound on queue wait unless the worker's claim
+ *    time (run meta) was handed in and fell inside the run's window.
  */
 import type { WorkflowEvent } from "@neutron-build/workflow";
 
@@ -24,13 +25,17 @@ import type { RunTiming } from "./run-timing.js";
 /** Below this many established values per status, report raw values only. */
 export const MIN_N_FOR_PERCENTILES = 20;
 
-/** The per-run timing object attached to a JSON audit row. */
-export function auditTiming(events: readonly WorkflowEvent[]): RunTiming {
-  return runTiming(events);
+/**
+ * The per-run timing object attached to a JSON audit row. `claimedAt` is the
+ * worker claim timestamp from run meta (D4-a) — passed by the JSON export, so
+ * the admission phase can split queue wait from the first step's own cost.
+ */
+export function auditTiming(events: readonly WorkflowEvent[], claimedAt?: string): RunTiming {
+  return runTiming(events, claimedAt === undefined ? undefined : { claimedAt });
 }
 
-export type TimingMetric = "toFirstStepMs" | "elapsedMs" | "waitingOnPeopleMs" | "activeMs";
-const METRICS: TimingMetric[] = ["toFirstStepMs", "elapsedMs", "waitingOnPeopleMs", "activeMs"];
+export type TimingMetric = "toFirstStepMs" | "elapsedMs" | "waitingOnPeopleMs" | "activeMs" | "ttftMs" | "ttfeMs";
+const METRICS: TimingMetric[] = ["toFirstStepMs", "elapsedMs", "waitingOnPeopleMs", "activeMs", "ttftMs", "ttfeMs"];
 
 export interface MetricSummary {
   /** Runs with an established value for this metric. */

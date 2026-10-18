@@ -42,7 +42,7 @@ import {
 } from "./delivery.js";
 import { deployAdapterFlagOn, teployDeliveryAdapterFactory } from "./teploy-adapter.js";
 import { intakeActor } from "./actor.js";
-import type { NucleusShipRuntime } from "./runtime.js";
+import type { NucleusShipRuntime, ShipRuntime } from "./runtime.js";
 import type { RunMeta } from "./run-store.js";
 import type { NucleusPgwire } from "./nucleus-pgwire.js";
 import type { IntakeStore, IntakePolicy, IntakeTask } from "./intake.js";
@@ -684,6 +684,36 @@ export async function launchDueBounded(deps: {
   return launched;
 }
 
+/**
+ * Stamp the moment this worker first took the run (D4-a / S28): the
+ * queue-wait half of run-timing.ts's admission split. Written to run META,
+ * never the event log, so replay is untouched and this write cannot change
+ * what a replaying worker observes.
+ *
+ * Write-once, and never for a run that is already terminal: the FIRST pickup
+ * is the boundary queue wait means, and a resume (after a park) or a replay
+ * of a finished run must not overwrite or fabricate it — a claim stamped at
+ * resume time would fold the human wait into "queue". Fire-and-forget like
+ * the placement write beside it: telemetry that races a status flip loses at
+ * worst its own value, and the derivation reports that as null with a reason
+ * rather than as a wrong number.
+ */
+export async function recordClaim(
+  runtime: Pick<ShipRuntime, "loadMeta" | "saveMeta">,
+  runId: string,
+  log: (line: string) => void,
+): Promise<void> {
+  try {
+    const meta = await runtime.loadMeta(runId);
+    if (meta === null) return;
+    if (meta.claimedAt !== undefined) return;
+    if (meta.status === "completed" || meta.status === "failed" || meta.status === "cancelled") return;
+    await runtime.saveMeta({ ...meta, claimedAt: new Date().toISOString() });
+  } catch (error) {
+    log(`[worker] ${runId}: claim timestamp not recorded: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 /** What `releaseUpgradeHolds` needs, as data, so a test can drive it without a store. */
 export interface UpgradeHoldDeps {
   listMeta: () => Promise<RunMeta[]>;
@@ -980,6 +1010,9 @@ export function startWorker(options: WorkerOptions): {
     log(`[worker] picked up ${runId}`);
     // Record where this run is executing so the dashboard can show placement.
     void options.runtime.placement.set(runId, host).catch(() => {});
+    // D4-a: when this worker first took the run, for the queue-wait split.
+    // Meta, not the log — see recordClaim for why it is write-once.
+    void recordClaim(options.runtime, runId, log);
   };
   const handleComplete = (runId: string, outcome: { status: string; eventName?: string }): void => {
       inflight.delete(runId);

@@ -105,6 +105,15 @@ export interface RunMeta {
   /** Host of the worker that most recently executed this run (fleet placement). */
   ranOn?: string;
   /**
+   * When a worker FIRST took this run (D4-a / S28): written to meta, never to
+   * the event log, so replay is unaffected and a replaying worker writes
+   * nothing (recordClaim in worker.ts is write-once and skips terminal runs).
+   * This is the queue-wait half of run-timing.ts's admission split; absent on
+   * runs enqueued before the field existed, which derives as null with a
+   * reason there, never as 0.
+   */
+  claimedAt?: string;
+  /**
    * Stable id of whoever asked for this run (see actor.ts). Absent on runs
    * enqueued before attribution existed, and on any surface that genuinely
    * cannot name a person — `actorKind` says which.
@@ -141,6 +150,7 @@ export const RUN_META_FIELDS = [
   "model",
   "source",
   "ranOn",
+  "claimedAt",
   "actor",
   "actorKind",
   "createdAt",
