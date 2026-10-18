@@ -1,6 +1,6 @@
 import { slackTaskFromMention } from "../../lib/ship.server.js";
 
-import { BodyTooLarge, claimDelivery, json, parseJson, proposeFromWebhook, readCappedBody } from "../../lib/webhook.server.js";
+import { BodyTooLarge, claimDelivery, json, parseJson, proposeFromWebhook, readCappedBody, shadowBuiltin } from "../../lib/webhook.server.js";
 
 export const config = { mode: "app" };
 
@@ -60,6 +60,7 @@ export async function action({ request }: { request: Request }): Promise<Respons
   }
 
   const input = slackTaskFromMention(payload.event);
+  await shadowBuiltin("slack", payload.event, input);
   if (input === null) return json(200, { ok: true, skipped: "empty mention" });
   // Slack's five-minute window bounds replay but does not prevent it; the
   // message's channel+ts is a stable per-delivery identity.

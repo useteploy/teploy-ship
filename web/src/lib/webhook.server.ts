@@ -1,5 +1,10 @@
 import { RepoNotAllowedError, proposeExternal } from "teploy-ship/runtime";
 import type { ProposeInput } from "teploy-ship/runtime";
+import {
+  builtinShadowEnabled,
+  shadowBuiltinIntake,
+  type BuiltinSourceId,
+} from "teploy-ship/runtime";
 
 import { incidentTaskFromObserveAlert, observeAlertKey, repoForObserveService } from "teploy-ship";
 
@@ -129,6 +134,37 @@ export async function proposeFromWebhook(input: ProposeInput): Promise<Response>
     }
     throw error;
   }
+}
+
+/**
+ * E7 EV3 — the built-in shadow, hung off every receiver that proposes through
+ * proposeFromWebhook. Call it with the payload the builder was handed and the
+ * input the builder produced (null when it skipped); the shadow re-evaluates
+ * the equivalent default rule, logs any diff, counts matches, and never
+ * proposes or writes anything but its counter. The flag gate comes FIRST so
+ * SHIP_EVENT_RULES=off (the default) never even constructs the runtime.
+ */
+export async function shadowBuiltin(
+  source: BuiltinSourceId,
+  payload: unknown,
+  input: ProposeInput | null,
+  context: { repo?: string } = {},
+): Promise<void> {
+  if (!builtinShadowEnabled()) return;
+  let runtime: Awaited<ReturnType<typeof shipRuntime>>;
+  try {
+    runtime = await shipRuntime();
+  } catch (error) {
+    console.log(`[event-rules shadow] error source=${source}: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+  await shadowBuiltinIntake(
+    {
+      config: runtime.config,
+      policyOf: async (taskSource) => (await runtime.policies.list()).find((p) => p.source === taskSource)?.policy,
+    },
+    { source, payload, builtin: input, ...(context.repo !== undefined ? { repo: context.repo } : {}) },
+  );
 }
 
 

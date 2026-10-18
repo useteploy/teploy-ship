@@ -1,6 +1,6 @@
 import { linearTaskFromIssue } from "../../lib/ship.server.js";
 
-import { BodyTooLarge, claimDelivery, firstHeader, json, parseJson, proposeFromWebhook, readCappedBody } from "../../lib/webhook.server.js";
+import { BodyTooLarge, claimDelivery, firstHeader, json, parseJson, proposeFromWebhook, readCappedBody, shadowBuiltin } from "../../lib/webhook.server.js";
 
 export const config = { mode: "app" };
 
@@ -50,6 +50,7 @@ export async function action({ request }: { request: Request }): Promise<Respons
   const age = (Date.now() - payload.webhookTimestamp) / 1000;
   if (Math.abs(age) > 300) return json(401, { title: "stale linear webhookTimestamp" });
   const input = linearTaskFromIssue(payload);
+  await shadowBuiltin("linear", payload, input);
   if (input === null) return json(200, { ok: true, skipped: "not a ship-labeled issue event" });
   // Dedupe on the hash of the signed bytes IN ADDITION to the delivery
   // header: the header is unsigned, so a captured body under a fresh delivery

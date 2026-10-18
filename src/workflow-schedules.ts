@@ -9,6 +9,8 @@ import type { WorkflowEvent } from "@neutron-build/workflow";
 // cost reconstruction the settle path owns; one definition beats two.
 import { readOutcome } from "./worker.js";
 import { costUSD } from "./pricing.js";
+import { shadowBuiltinIntake } from "./event-builtin.js";
+import type { ProposeInput } from "./intake.js";
 import {
   planSlots,
   specProblem,
@@ -150,7 +152,7 @@ export function makeScheduleIsRunning(
  * identical by construction.
  */
 export async function sweepSchedulesForWorker(
-  runtime: Pick<ShipRuntime, "config" | "intake" | "projects" | "listMeta" | "store">,
+  runtime: Pick<ShipRuntime, "config" | "intake" | "projects" | "listMeta" | "store" | "policies">,
   log: (line: string) => void,
   env: NodeJS.ProcessEnv = process.env,
   now?: number,
@@ -165,7 +167,7 @@ export async function sweepSchedulesForWorker(
  * one, no catch-up storm after downtime.
  */
 export async function sweepWorkflowSchedules(
-  runtime: Pick<ShipRuntime, "config" | "intake" | "projects">,
+  runtime: Pick<ShipRuntime, "config" | "intake" | "projects" | "policies">,
   now = Date.now(),
   opts: SweepOptions = {},
 ): Promise<void> {
@@ -182,7 +184,7 @@ export async function sweepWorkflowSchedules(
     const lastFired = s.debounceMinutes !== undefined ? await runtime.config.get(firedKey) : undefined;
     const plan = planSlots(s, last, now, running, lastFired);
     for (const slot of plan.fire) {
-      await runtime.intake.propose({
+      const input: ProposeInput = {
         source: "workflow",
         kind: s.journey ? `request-${s.journey}` :
           s.mode === "scan"
@@ -195,7 +197,22 @@ export async function sweepWorkflowSchedules(
         detail: s.task,
         dedupeKey: `workflow:${s.id}:${slot.id}`,
         requestedBy: s.by,
-      });
+      };
+      // EV3: in shadow mode the same slot is also evaluated through the
+      // built-in rule set and the result compared with `input` above. The
+      // shadow cannot propose and writes nothing but its counter; with the
+      // flag off this returns before touching a store.
+      await shadowBuiltinIntake(
+        {
+          config: runtime.config,
+          ...(runtime.policies !== undefined
+            ? { policyOf: async (source) => (await runtime.policies.list()).find((p) => p.source === source)?.policy }
+            : {}),
+          ...(opts.log !== undefined ? { log: opts.log } : {}),
+        },
+        { source: "schedule", payload: { schedule: s, slot, repo: project.url }, builtin: input },
+      );
+      await runtime.intake.propose(input);
     }
     if (s.debounceMinutes !== undefined && plan.fire.length > 0) {
       await runtime.config.set(firedKey, plan.fire[plan.fire.length - 1].id);
