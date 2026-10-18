@@ -96,6 +96,7 @@ import {
 import type { HeldItem, InterruptibleResult } from "./steer-reply.js";
 import { formatSearchHits } from "./code-index.js";
 import { frameUntrusted, screenUntrusted } from "./guard.js";
+import type { DelegateTarget, RecordedDelegateTarget } from "./delegate-targets.js";
 import { LOOK_IMAGE_NO_MODEL, LOOK_IMAGE_NO_STORE, LOOK_OPEN_PLAN, LOOK_SEALED, lookImageCap, runLook, runLookImage } from "./look.js";
 import {
   DELEGATE_CHILD_APPROVAL_REFUSED,
@@ -269,6 +270,20 @@ export interface DurableAgentInput {
    * prices on it. Admits no step; the fingerprint does not read it.
    */
   model?: string;
+  /**
+   * The delegate targets this run was OFFERED (DT2): deployment
+   * SHIP_DELEGATE_TARGETS ∩ the project's delegateTargets, materialised at
+   * enqueue only when `delegate` is on and the set is non-empty. The prompt
+   * lists them; the spawn admits only an id that is here AND still allowed.
+   * Admits no step.
+   */
+  delegateTargets?: DelegateTarget[];
+  /**
+   * On a targeted CHILD (DT2): the target it was spawned on and the policy
+   * decision that admitted it (version, file digest, destination). A record,
+   * read by nothing that gates a step.
+   */
+  delegateTarget?: RecordedDelegateTarget;
   /**
    * The MCP client (D1, SHIP_MCP; docs/MCP_DESIGN.md): the project's declared
    * servers plus the deployment facts the gates read (data class, remote host
@@ -2023,7 +2038,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
           // are re-framed like any other untrusted text, so a crafted issue
           // cannot smuggle "Operator steering — ..." into the one section the
           // model reads as its orders. Flag-off bytes are unchanged.
-          content: systemPrompt({ workdir: ws.workdir, task: untrusted(task.prompt, "[task text, not the operator]", true), search: searchable, browser: input.verification?.preview !== undefined, ask: input.ask === true, look, lookImage: lookImage !== undefined, delegate: input.delegate === true, ...(steerReply ? { reply: true } : {}), ...(mcpOffer !== undefined ? { mcp: renderMcpSection(mcpOffer) } : {}) }),
+          content: systemPrompt({ workdir: ws.workdir, task: untrusted(task.prompt, "[task text, not the operator]", true), search: searchable, browser: input.verification?.preview !== undefined, ask: input.ask === true, look, lookImage: lookImage !== undefined, delegate: input.delegate === true, ...(input.delegate === true && input.delegateTargets !== undefined && input.delegateTargets.length > 0 ? { delegateTargets: input.delegateTargets } : {}), ...(steerReply ? { reply: true } : {}), ...(mcpOffer !== undefined ? { mcp: renderMcpSection(mcpOffer) } : {}) }),
         },
       ];
       let anySuccessfulAction = false;
@@ -2860,6 +2875,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
                 task: action.task,
                 ...(action.repo !== undefined ? { repoHint: action.repo } : {}),
                 ...(action.path !== undefined ? { pathHint: action.path } : {}),
+                ...(action.target !== undefined ? { target: action.target } : {}),
               });
             } catch (error) {
               return { ok: false, reason: `delegation failed: ${error instanceof Error ? error.message : String(error)}` };

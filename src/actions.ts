@@ -35,7 +35,7 @@ export type Action =
   | { kind: "create"; file: string; content: string }
   | { kind: "search"; query: string } // semantic code retrieval (repo runs with an index)
   | { kind: "look"; url?: string; ref?: string; find?: string; depth?: number; image?: boolean } // browser perception (S12): the run's page as an a11y-tree text with refs; image=on adds a PNG screenshot (gated slice)
-  | { kind: "delegate"; task: string; repo?: string; path?: string } // bounded child work (S20/S22): spawn one child run, park, merge its result back as an observation
+  | { kind: "delegate"; task: string; repo?: string; path?: string; target?: string } // bounded child work (S20/S22): spawn one child run, park, merge its result back as an observation
   | { kind: "mcp"; tool: string; args: Record<string, unknown> } // a declared MCP tool (D1, input.mcp): mcp.<server>.<tool> + JSON arguments
   | { kind: "finish"; message: string }
   | { kind: "ask"; question: string } // a question for the operator; the run parks on the answer (durable, input.ask)
@@ -232,7 +232,9 @@ export function parseLookArgs(arg: string): Action {
  * `repo=` must name the parent's own repository (the loop enforces that —
  * the parser only checks the shape), `path=` narrows where the child works.
  */
-const DELEGATE_PARAM = /(?:^|\s)(repo|path)=/g;
+const DELEGATE_PARAM = /(?:^|\s)(repo|path|target)=/g;
+/** A delegate target id (delegate-targets.ts): what `target=` may name. Lives here so the parser stays dependency-free. */
+export const DELEGATE_TARGET_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
 /** The task prompt carried in the body is clamped here, before it reaches a run. */
 export const DELEGATE_TASK_MAX = 8000;
@@ -241,13 +243,15 @@ export const DELEGATE_HELP =
   "```delegate spawns ONE child run with a task and waits for its result:\n" +
   "```delegate path=src/foo\nMake the foo parser accept RFC 3339 durations. Add tests.\n```\n" +
   "Use it to split off self-contained work you do not need to interleave with your own. " +
-  "The child is an ordinary run with the same permissions as this one; it cannot delegate further.";
+  "The child is an ordinary run with the same permissions as this one; it cannot delegate further. " +
+  "target=<id> runs the child on one of the targets this run was offered; leave it off to use this run's own model.";
 
 /**
  * Parse a ```delegate fence. The body is the child's task (required); the
- * fence argument carries the optional `repo=` / `path=` hints. Deliberately
- * no other parameters in v1 — budget, model and gates are inherited, not
- * chosen by the model.
+ * fence argument carries the optional `repo=` / `path=` hints and `target=`
+ * (DT2), which names an allowlisted target id — never a free-form model.
+ * Budget and gates are inherited, not chosen by the model; whether the target
+ * is allowed is the spawn's decision (delegate-targets.ts), not the parser's.
  */
 export function parseDelegateArgs(arg: string, code: string): Action {
   const params = new Map<string, string>();
@@ -269,6 +273,11 @@ export function parseDelegateArgs(arg: string, code: string): Action {
     const bad = validateActionPath(path);
     if (bad !== null) return { kind: "invalid", message: `cannot scope delegation to ${path}: ${bad}` };
   }
+  const target = params.get("target");
+  if (target === "") return { kind: "invalid", message: "```delegate target= is empty — name one of the targets this run was offered, or leave it off to use this run's own model.\n\n" + DELEGATE_HELP };
+  if (target !== undefined && !DELEGATE_TARGET_ID.test(target)) {
+    return { kind: "invalid", message: `\`\`\`delegate target= must be a target id (lowercase letters, digits, . _ -), got: ${target}\n\n` + DELEGATE_HELP };
+  }
   const task = code.trim();
   if (task === "") {
     return { kind: "invalid", message: "```delegate block needs the child's task in its body, e.g.\n```delegate path=src/foo\nMake the foo parser accept RFC 3339 durations. Add tests.\n```" };
@@ -278,6 +287,7 @@ export function parseDelegateArgs(arg: string, code: string): Action {
     task: task.length > DELEGATE_TASK_MAX ? `${task.slice(0, DELEGATE_TASK_MAX)}\n…(task clamped at ${DELEGATE_TASK_MAX} chars)` : task,
     ...(repo !== undefined ? { repo } : {}),
     ...(path !== undefined ? { path } : {}),
+    ...(target !== undefined ? { target } : {}),
   };
 }
 

@@ -250,6 +250,8 @@ export interface DelegateSpawnRequest {
   /** Scope hint from the fence; the control verifies it names the parent's own repo. */
   repoHint?: string;
   pathHint?: string;
+  /** A delegate target id from the fence (DT2); the control gates it (delegate-targets.ts). Absent = inherit. */
+  target?: string;
 }
 
 /** The spawn's answer. A refusal is a RESULT (an observation for the model), never a thrown error. */

@@ -126,6 +126,26 @@ per the read-only rule above.
   (crash before the step recorded) REPUBLISH its own child rather than spawn a
   second — the step re-derives the same entry and the same derived run id.
 
+## Delegate targets (DT2)
+
+A parent may name WHERE its child runs: ```delegate target=<id>. The id is an
+entry in an allowlist — `SHIP_DELEGATE_TARGETS` (deployment: id -> harness +
+model) intersected with the project's optional `delegateTargets` — never a
+free-form model string. The intersection is materialised into the parent's
+input at enqueue (`delegateTargets`, offered in the prompt), and the spawn
+re-checks it against today's lists, so an operator can only narrow a running
+task. A target is a new destination for the task's data, so the spawn runs the
+routing policy's data-class gate (`checkCandidate` in model-routing.ts, i.e.
+`whyNot`: destination and retention first) whatever `SHIP_MODEL_ROUTING` is:
+picking a child's model is a selection, not a mid-run switch, so it needs no
+tool-call journal and no `fallbackOn` trigger. Fail closed, every refusal named
+(`delegate-targets.ts` lists them): no policy file loaded refuses every target;
+an external harness must run the model the deployment configures for it and
+call its provider at the policy entry's destination host. The admitted child
+records `delegateTarget` (the decision) and `model` (DT1: the native loop
+resolves the adapter per run and prices on it), and a `selection` segment is
+appended to `ship_model_segments`. Without `target=` nothing changes.
+
 ## The park and the data plane
 
 Inside the native loop, after the ```look branch:
