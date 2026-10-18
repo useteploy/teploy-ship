@@ -126,6 +126,8 @@ import {
 import type { DelegateControl, DelegateSpawnOutcome, DelegateTransfer } from "./delegate.js";
 import { callMcpTool, listMcpTools, mcpObservation, offerTools, prepareMcpCall, renderMcpSection } from "./mcp.js";
 import type { McpHttpDeps, McpOffer, McpRunInput } from "./mcp.js";
+import { renderSkillsSection, skillObservation } from "./skills.js";
+import type { SkillRunInput } from "./skills.js";
 import { recordToolFindings } from "./tool-manifest-shadow.js";
 import { networkForTrust, parseNetworkTier, wireNetwork } from "./egress.js";
 import type { NetworkTier } from "./egress.js";
@@ -336,6 +338,18 @@ export interface DurableAgentInput {
    * action does not parse and the prompt does not mention it.
    */
   mcp?: McpRunInput;
+  /**
+   * Skills (Q4-a/Q4-b, SHIP_SKILLS): the registry versions this project
+   * pinned, materialised at enqueue as {name, version, digest, description,
+   * body} — a SNAPSHOT, so editing the registry never changes a run that is
+   * in flight or replaying. Present only when the flag was on AND the
+   * project pinned at least one skill; absent is byte-identical to a
+   * pre-skills run: the ```skill action does not parse, the prompt carries
+   * no index, and no step exists — the body returns inside the existing
+   * turn as a pure function of this field, so no WORKFLOW_STEPS gate admits
+   * anything and the fingerprint does not move.
+   */
+  skills?: SkillRunInput[];
   /**
    * Codebase indexing: repo runs refresh the Nucleus code index after
    * clone (a recorded step) and the agent gets the ```search action.
@@ -2273,7 +2287,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
       }
       // One dialect for both optional surfaces; flag-off runs get exactly
       // { look, delegate }, as before either feature existed.
-      const dialect: ActionDialect = { look, delegate, ...(steerReply ? { reply: true } : {}), ...(mcpInput !== undefined ? { mcp: true } : {}) };
+      const dialect: ActionDialect = { look, delegate, ...(steerReply ? { reply: true } : {}), ...(mcpInput !== undefined ? { mcp: true } : {}), ...(input.skills !== undefined ? { skill: true } : {}) };
       let messages: Message[] = [
         {
           role: "system",
@@ -2282,7 +2296,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
           // are re-framed like any other untrusted text, so a crafted issue
           // cannot smuggle "Operator steering — ..." into the one section the
           // model reads as its orders. Flag-off bytes are unchanged.
-          content: systemPrompt({ workdir: ws.workdir, task: untrusted(task.prompt, "[task text, not the operator]", true), search: searchable, browser: input.verification?.preview !== undefined, ask: input.ask === true, look, lookImage: lookImage !== undefined, delegate: input.delegate === true, ...(input.delegate === true && input.delegateTargets !== undefined && input.delegateTargets.length > 0 ? { delegateTargets: input.delegateTargets } : {}), ...(steerReply ? { reply: true } : {}), ...(mcpOffer !== undefined ? { mcp: renderMcpSection(mcpOffer) } : {}) }),
+          content: systemPrompt({ workdir: ws.workdir, task: untrusted(task.prompt, "[task text, not the operator]", true), search: searchable, browser: input.verification?.preview !== undefined, ask: input.ask === true, look, lookImage: lookImage !== undefined, delegate: input.delegate === true, ...(input.delegate === true && input.delegateTargets !== undefined && input.delegateTargets.length > 0 ? { delegateTargets: input.delegateTargets } : {}), ...(steerReply ? { reply: true } : {}), ...(mcpOffer !== undefined ? { mcp: renderMcpSection(mcpOffer) } : {}), ...(input.skills !== undefined ? { skills: renderSkillsSection(input.skills) } : {}) }),
         },
       ];
       let anySuccessfulAction = false;
@@ -3029,6 +3043,26 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
           // defanged. Framed AFTER truncation so the pair can never be cut
           // apart by an oversized snapshot.
           messages.push({ role: "user", content: frameUntrusted(truncate(untrusted(formatObservation(result)), maxObs)) });
+          continue;
+        }
+
+        // A skill load (Q4-b, input.skills). Read-only like ```search, and
+        // alone among the gated actions it records NO step: the observation
+        // is a pure function of the recorded input (skillObservation reads
+        // input.skills and the action, nothing else), so replay re-derives
+        // it without I/O and the step sequence is identical to a run
+        // without skills — which is why no WORKFLOW_STEPS gate admits one
+        // and the fingerprint does not move. Accounting like the other
+        // read-only actions: clears no finish gate, touches no last-command
+        // verdict, not fed to recovery. The body arrives framed as
+        // untrusted data inside the observation (skills.ts), and nothing
+        // about a skill can widen an action, an egress entry or a
+        // credential: those surfaces never read this field.
+        if (action.kind === "skill") {
+          // The loop's `untrusted` wrapper (fenceOperatorLines) applies on
+          // steerReply runs so a skill body imitating an operator message is
+          // re-framed exactly like a command output that tries the same.
+          messages.push({ role: "user", content: untrusted(skillObservation(action.name, input.skills, maxObs), "[skill text, not the operator]") });
           continue;
         }
 

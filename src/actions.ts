@@ -37,6 +37,7 @@ export type Action =
   | { kind: "look"; url?: string; ref?: string; find?: string; depth?: number; image?: boolean } // browser perception (S12): the run's page as an a11y-tree text with refs; image=on adds a PNG screenshot (gated slice)
   | { kind: "delegate"; task: string; repo?: string; path?: string; target?: string } // bounded child work (S20/S22): spawn one child run, park, merge its result back as an observation
   | { kind: "mcp"; tool: string; args: Record<string, unknown> } // a declared MCP tool (D1, input.mcp): mcp.<server>.<tool> + JSON arguments
+  | { kind: "skill"; name: string } // load an enabled skill's full text (Q4-b, input.skills): read-only, the body returns framed as untrusted data
   | { kind: "finish"; message: string; needsInput?: true } // needsInput: ```finish needs-input — honoured only on a delegated child (DT4)
   | { kind: "ask"; question: string } // a question for the operator; the run parks on the answer (durable, input.ask)
   | { kind: "invalid"; message: string } // recognized but malformed — feed the error back
@@ -391,9 +392,12 @@ const LOOK_ACTION_LANGS: ReadonlySet<string> = new Set([...ACTION_LANGS, "look"]
 const DELEGATE_ACTION_LANGS: ReadonlySet<string> = new Set([...LOOK_ACTION_LANGS, "delegate"]);
 
 function actionLangs(dialect?: ActionDialect): ReadonlySet<string> {
-  // `mcp` (D1) widens whichever set applies; absent, the sets are exactly the
-  // pre-MCP ones, so flag-off transcripts trim identically.
-  if (dialect?.mcp === true) return new Set([...actionLangsBase(dialect), "mcp"]);
+  // `mcp` (D1) and `skill` (Q4-b) widen whichever set applies; absent, the
+  // sets are exactly the pre-MCP ones, so flag-off transcripts trim
+  // identically.
+  if (dialect?.mcp === true || dialect?.skill === true) {
+    return new Set([...actionLangsBase(dialect), ...(dialect.mcp === true ? ["mcp"] : []), ...(dialect.skill === true ? ["skill"] : [])]);
+  }
   return actionLangsBase(dialect);
 }
 
@@ -425,6 +429,8 @@ export interface ActionDialect {
   reply?: boolean;
   /** ```mcp (D1): parsed only where the run input carries `mcp`. */
   mcp?: boolean;
+  /** ```skill (Q4-b): parsed only where the run input carries `skills`. */
+  skill?: boolean;
 }
 
 /** Longest reply kept; a reply is a message to a person, not a report. */
@@ -510,6 +516,22 @@ function parseFencedAction(text: string, dialect?: ActionDialect): { index: numb
     }
     if (lang === "mcp" && dialect?.mcp === true) {
       return { index, action: parseMcpBlock(arg, code) };
+    }
+    if (lang === "skill" && dialect?.skill === true) {
+      // The name on the fence, the ```create shape. Whether a skill with
+      // that name is OFFERED is the loop's decision (a lookup in
+      // input.skills, pure of the parser), never the parser's.
+      const name = arg.trim();
+      if (name === "" || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name)) {
+        return {
+          index,
+          action: {
+            kind: "invalid",
+            message: "```skill needs the skill's name on the fence, exactly as the index lists it, e.g.\n```skill deploy-checklist\n```",
+          },
+        };
+      }
+      return { index, action: { kind: "skill", name } };
     }
     if (PYTHON_LANGS.has(lang)) {
       if (code.trim() === "") return { index, action: { kind: "invalid", message: "The Python action is empty. Put the code on a new line after ```python and close the block on its own line." } };
@@ -604,6 +626,8 @@ export function describeAction(action: Action): string {
       return `delegate: ${firstLine(action.task)}`;
     case "mcp":
       return `mcp: ${action.tool}`;
+    case "skill":
+      return `skill: ${action.name}`;
     case "ask":
       return `ask: ${firstLine(action.question)}`;
     case "invalid":
