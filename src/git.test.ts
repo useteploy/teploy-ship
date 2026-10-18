@@ -30,6 +30,7 @@ import {
   checkoutRepo,
   hasClone,
   reuseRepo,
+  reuseRepoForPr,
   setupRepo,
   SHIP_COMMENT_MARKER,
   truncateMiddle,
@@ -945,4 +946,26 @@ test("S01: a real git clone in env mode sends the credential as a header and nev
   assert.ok(commands.every((c) => !c.includes(token)), "the token is in no command line");
   const config = await inner.exec("cat .git/config 2>/dev/null || true");
   assert.ok(!config.stdout.includes(token), "the token is in no config file");
+});
+
+test("D4-c: reuseRepoForPr brings a snapshot-restored PR workspace to the CURRENT head, keeping ignored files", async () => {
+  const { bare, ref, work, seed } = await warmFixture("git-pr-reuse");
+  // The PR head branch, pushed after the cold clone above was made.
+  await seed.exec(`git checkout -q -b feature/pr-7 && echo pr >> f.txt && git commit -qam pr && git push -q ${bare}/repo.git feature/pr-7`);
+  // The snapshot's workspace: standing on the PR head as the parent turn
+  // left it, with the dependency tree the snapshot was worth taking.
+  await work.exec("git fetch -q origin feature/pr-7 && git checkout -q feature/pr-7");
+  // The branch has moved on the remote SINCE the snapshot was taken...
+  await seed.exec(`echo more >> f.txt && git commit -qam more && git push -q ${bare}/repo.git feature/pr-7`);
+  // ...and the previous turn left its own edits and scratch behind.
+  await work.exec("echo stale >> f.txt && mkdir -p .teploy-agent && echo x > .teploy-agent/state.json");
+
+  const checkout = await reuseRepoForPr(work, { ref, token: "", checkout: { branch: "feature/pr-7", base: "main" } });
+  assert.equal(checkout.branch, "feature/pr-7", "still the PR's head branch, not a fresh ship/ branch");
+  assert.match((await work.exec("cat f.txt")).stdout, /more/, "reset to the remote's CURRENT tip, not the snapshot's");
+  assert.equal((await work.exec("git status --porcelain")).stdout.trim(), "", "the previous turn's tree is gone");
+  assert.equal((await work.exec("test -d .teploy-agent")).exitCode, 1, "harness scratch does not cross turns");
+  assert.equal((await work.exec("cat node_modules/left-pad/index.js")).stdout.trim(), "dep", "the ignored dependency tree survives");
+  assert.match(checkout.headSha ?? "", /^[a-f0-9]{40}$/, "the resolved head is recorded on the step's output");
+  assert.equal((await work.exec("git remote get-url origin")).stdout.trim(), ref.cloneUrl, "the remote is credential-free afterwards");
 });

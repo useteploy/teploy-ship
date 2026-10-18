@@ -178,6 +178,18 @@ export class SandboxPool implements ExecutorProvider {
         this.#track(poolHandle(index, created.handle), index, overrides);
         return { handle: poolHandle(index, created.handle) };
       };
+      // D4-c: deleting a thread snapshot routes by the ref's tag like the
+      // restore does. All-or-nothing for the same reason snapshot is; absent
+      // just means the cap's eviction logs a leak instead of deleting, never
+      // that a run changes shape.
+      if (this.#hosts.every((h) => h.provider.deleteSnapshot !== undefined)) {
+        this.deleteSnapshot = async (image: string): Promise<void> => {
+          const { index, handle: inner } = parsePoolHandle(image);
+          const host = this.#hosts[index];
+          if (host === undefined) throw new Error(`this snapshot is on host #${index}, which is no longer configured`);
+          await host.provider.deleteSnapshot!(inner);
+        };
+      }
     }
 
     // Leases (Package C) route by the handle's tag like everything else.
@@ -390,6 +402,8 @@ export class SandboxPool implements ExecutorProvider {
    */
   snapshot?: (handle: string) => Promise<string>;
   createFrom?: (image: string, overrides?: SandboxOverrides) => Promise<{ handle: string }>;
+  /** Delete a snapshot image (D4-c), host-aware like the restore. */
+  deleteSnapshot?: (image: string) => Promise<void>;
   /** Lease operations (Package C), present when every host can lease. */
   lease?: import("./durable.js").ExecutorProvider["lease"];
 

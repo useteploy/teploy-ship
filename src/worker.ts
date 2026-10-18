@@ -29,6 +29,7 @@ import type { ExecutorProvider, RunUsage, SandboxOverrides } from "./durable.js"
 import { enqueueRun, proposeExternal } from "./runtime.js";
 import { changeClassRequired, sweepBulletin } from "./bulletin.js";
 import { parseSandboxUrls } from "./sandbox-pool.js";
+import { sweepThreadWarm, threadWarmStore, warmThreadEnabled } from "./thread-warm.js";
 import { attributionsFrom } from "./attributed-spend.js";
 import {
   deliveryFromEvents,
@@ -902,6 +903,7 @@ export function startWorker(options: WorkerOptions): {
     ...(src.createFrom !== undefined
       ? { createFrom: (image: string, o?: SandboxOverrides) => src.createFrom!(image, hostSizedOverrides(o)) }
       : {}),
+    ...(src.deleteSnapshot !== undefined ? { deleteSnapshot: (image: string) => src.deleteSnapshot!(image) } : {}),
     ...(src.destroy !== undefined ? { destroy: (handle: string) => src.destroy!(handle) } : {}),
     ...(src.warmInfo !== undefined ? { warmInfo: (handle: string) => src.warmInfo!(handle) } : {}),
     ...(src.warmCommit !== undefined ? { warmCommit: (handle: string) => src.warmCommit!(handle) } : {}),
@@ -914,6 +916,19 @@ export function startWorker(options: WorkerOptions): {
     // first live proof showed (run-da2d9b19, 2026-09-15).
     ...(src.execStream !== undefined ? { execStream: (handle, command, o, onChunk) => src.execStream!(handle, command, o, onChunk) } : {}),
   };
+  // The thread-warm record store (D4-c, thread-warm.ts): shared by the
+  // durable config (what the `thread-snapshot` step writes and caps) and the
+  // sweeper timer below (what expires). Built once, before both, so the cap
+  // and the sweep always see the same rows.
+  const threadWarmSweepStore = warmThreadEnabled()
+    ? threadWarmStore(options.runtime.config, {
+        discard: (image) =>
+          executor.deleteSnapshot !== undefined
+            ? executor.deleteSnapshot(image)
+            : Promise.reject(new Error("this worker's provider cannot delete snapshots")),
+        log,
+      })
+    : undefined;
   const wf = durableAgent({
     ...(maxSteps !== undefined ? { maxSteps } : {}),
     model: options.model,
@@ -965,6 +980,11 @@ export function startWorker(options: WorkerOptions): {
       marked: async (runId) => parseSupersededMark(await options.runtime.config.get(previewSupersededKey(runId))),
       mark: (runId, mark) => options.runtime.config.set(previewSupersededKey(runId), JSON.stringify(mark), "preview-supersede"),
     },
+    // The thread-warm record store (D4-c, thread-warm.ts): what the
+    // `thread-snapshot` step writes and the sweeper below expires. Wired only
+    // under the flag pair — an off deployment gets no store, and the step
+    // records itself skipped on workers that have nothing behind them.
+    ...(threadWarmSweepStore !== undefined ? { threadWarm: threadWarmSweepStore } : {}),
     // Where this worker reads service health (OBSERVE_URL + OBSERVE_READ_TOKEN
     // + OBSERVE_SERVICE). Absent unless all three are set.
     ...(telemetryTargetFromEnv() !== undefined ? { telemetry: telemetryTargetFromEnv()! } : {}),
@@ -1659,6 +1679,14 @@ export function startWorker(options: WorkerOptions): {
   driveTimer.unref?.();
   void drive().catch(() => {});
 
+  // D4-c: the thread-warm sweeper. Expired snapshots and cap overflow are a
+  // DISK budget on the sandbox hosts (Decision 16), so it is the worker's
+  // own cadence, minute-grain like the reaper, and every failure is logged
+  // and retried next pass — a sweeper that threw would take nothing down
+  // with it but would also never clean anything.
+  const threadWarmTimer = threadWarmSweepStore !== undefined ? setInterval(() => { void sweepThreadWarm(threadWarmSweepStore, { log }).catch(() => {}); }, 60_000) : undefined;
+  threadWarmTimer?.unref?.();
+
   // The policy store is dashboard-authoritative; seed it from the env defaults
   // once (first run) so an operator who never opens the UI keeps the same
   // behavior, then let store edits win on every subsequent sweep.
@@ -2308,6 +2336,7 @@ export function startWorker(options: WorkerOptions): {
       clearInterval(reapTimer);
       clearInterval(deliveryTimer);
       if (selfwatchTimer !== undefined) clearInterval(selfwatchTimer);
+      if (threadWarmTimer !== undefined) clearInterval(threadWarmTimer);
       clearInterval(driveTimer);
       // The wait the rewritten shutdown dropped: a sweep that was mid-pass
       // when the timers cleared. The chain never rejects (every leg catches),
