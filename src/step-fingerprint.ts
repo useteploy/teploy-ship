@@ -542,6 +542,12 @@ export const WORKFLOW_STEPS: readonly WorkflowStep[] = [
     admits: (i) => i.recovery !== false && (i.recovery !== undefined || i.settle === true),
   },
   { key: "step:*turn-*-hold-recheck", admits: (i) => i.requireEdit === true },
+  // EV6 (SHIP_INCIDENT_FIX): the reproducing-test gate on an authorised
+  // remediation — first leg of the publish path, before the build/suite legs
+  // and the classifier. Admitted by input.requireReproTest alone: no
+  // pre-flag log carries the field, so those runs' fingerprints are
+  // untouched and their replays expect no repro-test step.
+  { key: "step:repro-test", admits: (i) => i.requireReproTest === true && repoRun(i) },
   { key: "step:change-class", admits: (i) => i.changeClass === true },
   { key: "wait:CHANGE_EVENT", admits: (i) => i.changeClass === true },
   { key: "step:change-rejected", admits: (i) => i.changeClass === true },

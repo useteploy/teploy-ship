@@ -364,6 +364,16 @@ function Remediation({ incident }: { incident: IncidentRecord }) {
         <span class="meta"> — authorized by {rem.authorizedBy} {when(rem.authorizedAt)}</span>
       </p>
       {outcome !== undefined && outcome.reason !== "" && <p class="meta" style="margin:4px 0 0">Outcome: {outcome.reason}.</p>}
+      {outcome?.repro !== undefined && (
+        <p class="meta" style="margin:4px 0 0">
+          Repro test: {outcome.repro.verdict}
+          {outcome.repro.testFiles.length > 0 ? ` (${outcome.repro.testFiles.join(", ")})` : ""}
+          {outcome.repro.baseExit !== undefined || outcome.repro.headExit !== undefined
+            ? ` — base exit ${outcome.repro.baseExit ?? "?"}, head exit ${outcome.repro.headExit ?? "?"}`
+            : ""}
+          .
+        </p>
+      )}
       <p class="meta" style="margin:4px 0 0">The incident tracks this run; if it merges, the delivery machinery owns what ships next.</p>
     </div>
   );

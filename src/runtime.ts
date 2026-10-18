@@ -946,6 +946,16 @@ export interface EnqueueReport {
   testCommandSource?: "project" | "detected";
 }
 
+/**
+ * EV6 (SHIP_INCIDENT_FIX): appended to a repro-gated remediation's task at
+ * enqueue and frozen into the recorded input. The gate holds the pull
+ * request unless the change carries a reproducing test, so the agent has to
+ * know that is the deliverable — without this the gate would hold nearly
+ * every remediation and teach an operator to ignore it.
+ */
+const REPRO_REMEDIATION_TASK_NOTE =
+  "\n\nThis remediation is gated on a reproducing test: include a test that FAILS on the revision you started from and PASSES with your change. Ship runs this check itself (the repro-test gate), and the pull request is held at the merge boundary until it passes.";
+
 export async function enqueueRun(
   runtime: ShipRuntime,
   options: {
@@ -1040,6 +1050,23 @@ export async function enqueueRun(
      * never set then. See DurableAgentInput.mergeGate in durable.ts.
      */
     mergeGate?: boolean;
+    /**
+     * EV6 (SHIP_INCIDENT_FIX): this enqueue is an AUTHORISED incident
+     * remediation (incidents.ts authorizeRemediation — explicit human
+     * approval only in v1, per Decision 13), gated on a reproducing test.
+     * The option is present on every remediation enqueue; THIS module reads
+     * the flag, because incidents.ts must not touch env (its header). Under
+     * SHIP_INCIDENT_FIX=on the run's recorded input carries
+     * `requireReproTest` and the repro-test step gates its publish; with the
+     * flag off the option is dropped and the run enqueues byte-identically
+     * to pre-EV6 — no field, no step.
+     *
+     * Implies the change-class and merge gates (the outcome holds at the
+     * merge boundary, and a run without one has nowhere to hold), so an
+     * explicit changeClass/mergeGate false alongside it is refused rather
+     * than silently overridden.
+     */
+    requireReproTest?: boolean;
     /**
      * Merge a `trivial` change without a human (L5). Absent falls back to the
      * repo's project record; there is no env default, because "which repos may
@@ -1393,6 +1420,22 @@ export async function enqueueRun(
   // comment above), off for scans, and SHIP_MERGE_GATE=0 restores the old
   // mid-run routing without disturbing anything else about the run.
   const mergeGate = scan ? undefined : (options.mergeGate ?? (changeClass === true && !envFlagOff("SHIP_MERGE_GATE") ? true : undefined));
+  // EV6 (SHIP_INCIDENT_FIX): the reproducing-test gate on an authorised
+  // remediation, materialised HERE like every step-adding flag — it admits
+  // the `repro-test` step (repro-test.ts), so a run whose log predates the
+  // flag must not find a step it does not contain. The option comes from
+  // authorizeRemediation's enqueue (incidents.ts); only "on" counts, the
+  // same strict spelling EV5's worker-side read uses, so a bare "1" cannot
+  // turn a gate that holds remediations on by accident.
+  const requireReproTest =
+    !scan && options.requireReproTest === true && (process.env.SHIP_INCIDENT_FIX ?? "").trim().toLowerCase() === "on"
+      ? true
+      : undefined;
+  if (requireReproTest === true && (options.changeClass === false || options.mergeGate === false)) {
+    throw new Error(
+      "A remediation gated on a reproducing test parks at the merge boundary; it cannot be enqueued with the change-class or merge gate disabled",
+    );
+  }
   // AUTO-MERGE (L5 / D5). Per repo, off unless the project record says on, and
   // additionally requires the change-class gate: `trivial` is the entire
   // authority for merging without a human (see change-class.ts), and with the
@@ -1517,11 +1560,15 @@ export async function enqueueRun(
     scan ? project?.sandboxEgressAllow : withPreviewEgress(project?.sandboxEgressAllow, project?.verification),
     [harness, ...attempts],
   );
+  // EV6: the gate only passes when the agent writes the reproducing test, so
+  // the task must SAY so — appended here, frozen into the recorded input's
+  // task text, which is what a replay reads.
+  const reproTask = requireReproTest === true ? `${baseTask}${REPRO_REMEDIATION_TASK_NOTE}` : baseTask;
   // Hoisted out of the append below so the upgrade fence can fingerprint the
   // exact object the log will carry, rather than a reconstruction of it.
   const input = {
         restoreValidation: 1 as const,
-        task: journey ? `${baseTask}\n\n${journeyInstruction(journey)}` : baseTask,
+        task: journey ? `${reproTask}\n\n${journeyInstruction(journey)}` : reproTask,
         ...(journey ? { journey, userMessage: options.userMessage ?? options.task } : {}),
         ...(options.environmentCheckOnly === true ? { environmentCheckOnly: true } : {}),
         ...(options.environmentCheck === true ? { environmentCheck: true, ...projectReadinessRecord(project, options.environmentInputsDigest, stackDetectEnabled()) } : {}),
@@ -1567,8 +1614,12 @@ export async function enqueueRun(
         ...(testsFeedback === true ? { testsFeedback: true } : {}),
         ...(fixRetries !== undefined ? { fixRetries } : {}),
         ...(criticAdvisory === true ? { criticAdvisory: true } : {}),
-        ...(changeClass === true ? { changeClass: true } : {}),
-        ...(mergeGate === true ? { mergeGate: true } : {}),
+        ...(changeClass === true || requireReproTest === true ? { changeClass: true } : {}),
+        // EV6: a repro-gated remediation always carries the boundary park
+        // (the `||` above and below), whatever the deployment's gate
+        // defaults — the outcome has to hold somewhere.
+        ...(mergeGate === true || requireReproTest === true ? { mergeGate: true } : {}),
+        ...(requireReproTest === true ? { requireReproTest: true } : {}),
         ...(autoMerge === true ? { autoMerge: true } : {}),
         ...(rollback === true ? { rollback: true } : {}),
         ...(autoDeploy === true ? { autoDeploy: true } : {}),
