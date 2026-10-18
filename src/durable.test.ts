@@ -12,7 +12,8 @@ import { MemoryEventStore, cancelRun, deliverEvent, executeRun } from "@neutron-
 
 import type { ArtifactStore } from "./artifacts.js";
 import { CHANGE_EVENT, MERGE_EVENT, PLAN_EVENT, approvalEvent, askEvent, durableAgent, livenessProbeTarget } from "./durable.js";
-import { threadWarmStore } from "./thread-warm.js";
+import { threadWarmStore, sweepThreadWarm, sandboxOverridesDigest, WARM_THREAD_DEFAULT_TTL_SEC } from "./thread-warm.js";
+import { parsePoolHandle } from "./sandbox-pool.js";
 import { MemoryRuntimeConfig } from "./runtime-config.js";
 import { runTiming } from "./run-timing.js";
 import type { CommandRunner, PreviewTarget } from "./deploy.js";
@@ -5996,6 +5997,287 @@ test("D4-c replay: a warm follow-up replays from its log after the image was del
   const replay = await executeRun({ workflow: wf, runId: "run-replay", store });
   assert.equal(replay.status, "completed", "a completed run replays from its log; live host state is irrelevant to it");
   assert.equal(rig.createFromCalls.length, calls, "replay never re-asked the daemon");
+});
+
+// --- D4-c2: merge-parked runs get thread warmth from the park's own image ---
+
+/** A serious-change script: 501 added lines in one new file, neither a
+ * deletion nor a migration — the shape C1 routes to the boundary park. */
+const SERIOUS_SCRIPT = [
+  "```bash\n(yes x | head -501) > big.txt\n```",
+  "```finish\nadded the big file\n```",
+  "```bash\nwc -l big.txt\n```",
+  "```finish\nadded the big file\n```",
+];
+
+/**
+ * A merge park with a snapshot-capable daemon: threadWarmProvider's rig (the
+ * fixed daemon's snapshot semantics — volume bytes in, `.git` and all) plus
+ * the forge stub the boundary gate talks to. The park's snapshot/restore pair
+ * is what kills the original sandbox before the run ends, which is the live
+ * 2026-10-18 finding this slice fixes.
+ */
+async function mergeWarmFixture(name: string): Promise<{
+  repo: string;
+  rig: Awaited<ReturnType<typeof threadWarmProvider>>;
+  seedRoot: (store: MemoryEventStore) => Promise<void>;
+  restore: () => void;
+}> {
+  const fixture = await threadFixture(name);
+  const rig = await threadWarmProvider();
+  const orig = globalThis.fetch;
+  (globalThis as unknown as { fetch: unknown }).fetch = (url: unknown) => {
+    const href = String(url);
+    if (href.endsWith("/merge")) {
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ sha: "merged1234" }), text: () => Promise.resolve("") });
+    }
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({ number: 1, html_url: "http://example/owner/repo/pulls/1", body: "", title: "", state: "open", merged: false }),
+      text: () => Promise.resolve(""),
+    });
+  };
+  return { repo: fixture.repo, rig, seedRoot: fixture.seedRoot, restore: () => { globalThis.fetch = orig; } };
+}
+
+test("D4-c2: a run that parks at approve-merge, is approved and merges, ends thread-warm on the park's own image", async () => {
+  const fixture = await mergeWarmFixture("d4c2-park");
+  // The warmth must REUSE the park image, not re-image a workspace: count
+  // every snapshot the daemon is asked for across both passes.
+  const snapCalls: string[] = [];
+  const realSnapshot = fixture.rig.provider.snapshot!;
+  fixture.rig.provider.snapshot = async (handle: string) => {
+    snapCalls.push(handle);
+    return await realSnapshot(handle);
+  };
+  try {
+    const store = new MemoryEventStore();
+    await fixture.seedRoot(store);
+    const cfg = new MemoryRuntimeConfig();
+    const wf = durableAgent({
+      model: reactiveModel(SERIOUS_SCRIPT).model,
+      executor: fixture.rig.provider,
+      workdir: ".",
+      threadWarm: threadWarmStore(cfg),
+      loadEvents: (runId) => store.load(runId),
+    });
+    const input = {
+      task: "add the big file",
+      repo: fixture.repo,
+      changeClass: true,
+      mergeGate: true,
+      warmParks: true,
+      warmThread: true,
+      parentRunId: "run-root",
+    };
+    const parked = await executeRun({ workflow: wf, runId: "run-d4c2-park", store, input });
+    assert.equal(parked.status, "waiting", "the run parks at the merge boundary");
+    assert.equal(parked.eventName, MERGE_EVENT);
+    let events = await store.load("run-d4c2-park");
+    const parkImage = stepResult(events, "merge-snapshot");
+    assert.ok(typeof parkImage === "string" && fixture.rig.images.has(parkImage), "the park took an image");
+    assert.equal(stepResult(events, "merge-hygiene")?.clean, true, "and recorded its hygiene verdict against the workspace it imaged");
+
+    await deliverEvent(store, "run-d4c2-park", MERGE_EVENT, { approved: true });
+    const resumed = await executeRun({ workflow: wf, runId: "run-d4c2-park", store, input });
+    assert.equal(resumed.status, "completed", "the approved run merges — with its original sandbox long gone");
+    events = await store.load("run-d4c2-park");
+    assert.equal(stepResult(events, "merge-decision")?.kind, "merged");
+
+    const snap = stepResult(events, "thread-snapshot");
+    assert.equal(snap?.via, "merge-park", "the warmth came from the park, not a live workspace");
+    assert.equal(snap?.image, parkImage, "it is the park's own image");
+    const push = stepResult(events, "repo-push");
+    const rebase = stepResult(events, "merge-rebase");
+    assert.equal(rebase?.kind, "up-to-date", "the bare had not moved");
+    assert.equal(rebase?.sha, push?.sha, "so the PR head is still the pushed sha");
+    assert.equal(snap?.head, push?.sha, "the recorded head is the PR head");
+    assert.equal(snapCalls.length, 1, "the daemon imaged the workspace exactly once — for the park");
+
+    const record = await threadWarmStore(cfg).get("run-root");
+    assert.equal(record?.image, parkImage, "the record is keyed on the thread root");
+    assert.equal(record?.head, push?.sha);
+
+    // A follow-up can boot from that image: it holds the repository and the
+    // change the pull request carried.
+    const boot = await fixture.rig.provider.createFrom!(record!.image);
+    const ws = new LocalExecutor({ root: fixture.rig.workspaces.get(boot.handle)! });
+    assert.equal((await ws.exec("test -d .git && test $(wc -l < big.txt) -eq 501 && printf yes")).stdout, "yes");
+    // The park cleaned up after itself: original and restored containers both
+    // disposed — the warmth is the image, not a kept-open box.
+    assert.ok(fixture.rig.destroyed.length >= 2, "no live container is held for the warmth");
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("D4-c2: a rebase under the park records the REBASED head, which is where the PR branch landed", async () => {
+  const fixture = await mergeWarmFixture("d4c2-rebase");
+  // The base moves under the park, as in the C1 rebase test: main gains a
+  // change to another file, so the approval rebases instead of standing pat.
+  const mover = await mkdtemp(join(tmpdir(), "d4c2-rebase-mover-"));
+  const moverExec = new LocalExecutor({ root: mover });
+  await moverExec.exec(`git clone -q ${fixture.repo.replace("file://", "")} . && git config user.email t@t && git config user.name t`);
+  try {
+    const store = new MemoryEventStore();
+    await fixture.seedRoot(store);
+    const cfg = new MemoryRuntimeConfig();
+    const wf = durableAgent({
+      model: reactiveModel(SERIOUS_SCRIPT).model,
+      executor: fixture.rig.provider,
+      workdir: ".",
+      threadWarm: threadWarmStore(cfg),
+      loadEvents: (runId) => store.load(runId),
+    });
+    const input = {
+      task: "add the big file",
+      repo: fixture.repo,
+      changeClass: true,
+      mergeGate: true,
+      tests: true,
+      testCommand: "true",
+      warmParks: true,
+      warmThread: true,
+      parentRunId: "run-root",
+    };
+    const parked = await executeRun({ workflow: wf, runId: "run-d4c2-rebase", store, input });
+    assert.equal(parked.eventName, MERGE_EVENT);
+    await moverExec.exec("echo moved > other.txt && git add -A && git commit -qm 'move main' && git push -q origin main");
+    await deliverEvent(store, "run-d4c2-rebase", MERGE_EVENT, { approved: true });
+    const resumed = await executeRun({ workflow: wf, runId: "run-d4c2-rebase", store, input });
+    assert.equal(resumed.status, "completed");
+    const events = await store.load("run-d4c2-rebase");
+    assert.equal(stepResult(events, "merge-decision")?.kind, "merged");
+    const rebase = stepResult(events, "merge-rebase");
+    assert.equal(rebase?.kind, "rebased", "the base moved, so the branch was rebased and force-pushed");
+    const push = stepResult(events, "repo-push");
+    assert.notEqual(rebase?.sha, push?.sha, "the rebase really did move the head");
+    const snap = stepResult(events, "thread-snapshot");
+    assert.equal(snap?.via, "merge-park");
+    assert.equal(snap?.head, rebase?.sha, "the recorded head is where the PR branch landed, not where it started");
+    const record = await threadWarmStore(cfg).get("run-root");
+    assert.equal(record?.head, rebase?.sha);
+    assert.equal(record?.image, stepResult(events, "merge-snapshot"), "still the park image — the rebased bytes are fetched by the follow-up, not re-imaged here");
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("D4-c2: the park image is not deleted while a warm record points at it, and the sweeper owns its deletion", async () => {
+  const fixture = await threadFixture("d4c2-sweep");
+  const rig = await threadWarmProvider();
+  // The image a merge park leaves and the thread-snapshot step records —
+  // made here directly, because what is under test is the ownership rule,
+  // not the run that made the record (the test above covers that).
+  const boot = await rig.provider.create!();
+  const image = await rig.provider.snapshot!(boot.handle);
+  const cfg = new MemoryRuntimeConfig();
+  await threadWarmStore(cfg).record({
+    taskRootRunId: "run-root",
+    repo: fixture.repo,
+    image,
+    hostIndex: parsePoolHandle(image).index,
+    head: "a".repeat(40),
+    overridesDigest: sandboxOverridesDigest(undefined),
+    createdAt: new Date().toISOString(),
+  });
+  const discarded: string[] = [];
+  const discard = (i: string): Promise<void> => {
+    discarded.push(i);
+    return Promise.resolve();
+  };
+  const owner = threadWarmStore(cfg, { discard });
+  assert.ok(rig.images.has(image), "the image survives the run that recorded it");
+  assert.equal(await sweepThreadWarm(owner, { now: () => new Date(), discard }), 0, "a sweep before expiry deletes nothing");
+  assert.deepEqual(discarded, [], "the referenced image was never discarded");
+  assert.equal(
+    await sweepThreadWarm(owner, {
+      now: () => new Date(Date.now() + (WARM_THREAD_DEFAULT_TTL_SEC + 60) * 1000),
+      discard,
+    }),
+    1,
+    "past the TTL the sweeper claims it",
+  );
+  assert.deepEqual(discarded, [image], "exactly the referenced image, once");
+  assert.equal(await owner.get("run-root"), null, "record and image went together");
+});
+
+test("D4-c2 negative: credential material in the workspace at park time refuses the park image as warmth", async () => {
+  const fixture = await mergeWarmFixture("d4c2-cred");
+  try {
+    const store = new MemoryEventStore();
+    await fixture.seedRoot(store);
+    const cfg = new MemoryRuntimeConfig();
+    const wf = durableAgent({
+      model: reactiveModel([
+        "```bash\n(yes x | head -501) > big.txt && mkdir -p .teploy-agent && printf 'ANTHROPIC_API_KEY=sk-ant-x\\n' > .teploy-agent/harness.env\n```",
+        ...SERIOUS_SCRIPT.slice(1),
+      ]).model,
+      executor: fixture.rig.provider,
+      workdir: ".",
+      threadWarm: threadWarmStore(cfg),
+      loadEvents: (runId) => store.load(runId),
+    });
+    const input = {
+      task: "add the big file",
+      repo: fixture.repo,
+      changeClass: true,
+      mergeGate: true,
+      warmParks: true,
+      warmThread: true,
+      parentRunId: "run-root",
+    };
+    const parked = await executeRun({ workflow: wf, runId: "run-d4c2-cred", store, input });
+    assert.equal(parked.status, "waiting");
+    assert.equal(stepResult(await store.load("run-d4c2-cred"), "merge-hygiene")?.clean, false, "the verdict was recorded at image time");
+    await deliverEvent(store, "run-d4c2-cred", MERGE_EVENT, { approved: true });
+    const resumed = await executeRun({ workflow: wf, runId: "run-d4c2-cred", store, input });
+    assert.equal(resumed.status, "completed", "the refusal costs nothing: the run still merges");
+    const events = await store.load("run-d4c2-cred");
+    assert.match(String(stepResult(events, "merge-hygiene")?.reason), /credential-shaped/, "the verdict names the file");
+    assert.match(String(stepResult(events, "thread-snapshot")?.skipped), /credential-shaped/, "the warmth skip repeats it");
+    assert.equal(await threadWarmStore(cfg).get("run-root"), null, "no record points at the dirty image");
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("D4-c2 negative: a warm store that fails mid-record skips and never fails the merged run", async () => {
+  const fixture = await mergeWarmFixture("d4c2-down");
+  try {
+    const store = new MemoryEventStore();
+    await fixture.seedRoot(store);
+    const cfg = new MemoryRuntimeConfig();
+    const wf = durableAgent({
+      model: reactiveModel(SERIOUS_SCRIPT).model,
+      executor: fixture.rig.provider,
+      workdir: ".",
+      threadWarm: { ...threadWarmStore(cfg), record: async () => { throw new Error("thread-warm store down"); } },
+      loadEvents: (runId) => store.load(runId),
+    });
+    const input = {
+      task: "add the big file",
+      repo: fixture.repo,
+      changeClass: true,
+      mergeGate: true,
+      warmParks: true,
+      warmThread: true,
+      parentRunId: "run-root",
+    };
+    const parked = await executeRun({ workflow: wf, runId: "run-d4c2-down", store, input });
+    assert.equal(parked.status, "waiting");
+    await deliverEvent(store, "run-d4c2-down", MERGE_EVENT, { approved: true });
+    const resumed = await executeRun({ workflow: wf, runId: "run-d4c2-down", store, input });
+    assert.equal(resumed.status, "completed", "the record failing is a skipped optimisation, not a failed run");
+    const events = await store.load("run-d4c2-down");
+    assert.equal(stepResult(events, "merge-decision")?.kind, "merged", "the merge itself was never at risk");
+    assert.match(String(stepResult(events, "thread-snapshot")?.skipped), /store down/, "the skip names why");
+    assert.equal(await threadWarmStore(cfg).get("run-root"), null, "and nothing half-recorded");
+  } finally {
+    fixture.restore();
+  }
 });
 
 // ------------------------------------------------------------- DS1 stack ----
