@@ -407,6 +407,53 @@ const taskRequirementsTable: Migration = {
   },
 };
 
+/**
+ * 009 — ship_docs gained `claimed_at`: when a worker first took the run
+ * (D4-a / S28). Run META, never an event, so the durable log and replay are
+ * untouched; the derivation in run-timing.ts uses it to split queue wait from
+ * the first step's own cost and treats its absence as null-with-a-reason.
+ *
+ * Same shape and same reason as 001/004: column() THROWS on an unmapped key,
+ * so on an existing deployment the first claim write would have failed the
+ * whole saveMeta — taking run execution with it. A missing claim time is a
+ * gap in a latency export; a missing column is a total outage of the worker.
+ */
+const docsClaimedAt: Migration = {
+  id: "009-ship-docs-claimed-at",
+  description: "add claimed_at to ship_docs (rename-aside + copy)",
+  async needed(db) {
+    if (!(await tableExists(db, "ship_docs"))) return false; // fresh install: the DDL already has it
+    return !(await hasColumns(db, "ship_docs", ["claimed_at"]));
+  },
+  async run(db) {
+    const aside = "ship_docs_009";
+    const cols =
+      "collection, run_id, workflow, status, wake_at, event_name, task, model, workspace, source, ran_on, actor, actor_kind, created_at, updated_at";
+    await db.query(`ALTER TABLE ship_docs RENAME TO ${aside}`);
+    await db.query(
+      `CREATE TABLE ship_docs (
+        collection TEXT,
+        run_id TEXT,
+        workflow TEXT,
+        status TEXT,
+        wake_at TEXT,
+        event_name TEXT,
+        task TEXT,
+        model TEXT,
+        workspace TEXT,
+        source TEXT,
+        ran_on TEXT,
+        claimed_at TEXT,
+        actor TEXT,
+        actor_kind TEXT,
+        created_at TEXT,
+        updated_at TEXT
+      )`,
+    );
+    await db.query(`INSERT INTO ship_docs (${cols}) SELECT ${cols} FROM ${aside}`);
+  },
+};
+
 export const MIGRATIONS: Migration[] = [
   docsSourceColumn,
   steerConsumedTurn,
@@ -416,6 +463,7 @@ export const MIGRATIONS: Migration[] = [
   runtimeConfigTable,
   connectRequestsTable,
   taskRequirementsTable,
+  docsClaimedAt,
 ];
 
 /**

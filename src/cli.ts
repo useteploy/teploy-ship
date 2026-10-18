@@ -1924,7 +1924,9 @@ async function auditCommand(rest: string[]): Promise<void> {
     for (const meta of metas) {
       const events = await runtime.store.load(meta.runId);
       rows.push(auditRow(meta, events));
-      if (format === "json") timings.set(meta.runId, auditTiming(events));
+      // claimedAt is run meta (worker claim, D4-a) — the one input timing
+      // cannot get from the log itself. CSV reads none of this.
+      if (format === "json") timings.set(meta.runId, auditTiming(events, meta.claimedAt));
     }
     const windowed = withinWindow(rows, since, until);
     const jsonRows = windowed.map((r) => ({ ...r, timing: timings.get(r.runId) }));
