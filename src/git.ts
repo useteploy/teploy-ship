@@ -142,8 +142,10 @@ export function authenticatedUrl(ref: RepoRef, token: string): string {
  * ENVIRONMENT as an origin-scoped `http.extraHeader` (git >= 2.31
  * GIT_CONFIG_COUNT). Nothing token-bearing appears in argv or in any config
  * file. Off by default: it needs the executor to forward per-exec `env` (the
- * SDK contract has it; the Sandbox daemon's behaviour is unproven from here)
- * and a recent git in the sandbox image. If either is missing the failure is
+ * sandbox daemon accepts it on exec and passes it via a private --env-file;
+ * the SDK's sandbox executor sends it only with
+ * patches/@neutron-build__agents.patch applied) and a recent git in the
+ * sandbox image. If either is missing the failure is
  * an authentication error from the forge, not a silent downgrade.
  * Select with SHIP_GIT_CREDENTIAL=env.
  */

@@ -76,6 +76,7 @@ import { refusalMessage, warningMessage } from "./publish-policy.js";
 import type { RepoCheckout, RepoRef } from "./git.js";
 import { assertRepoAllowed, credentialFor, policyFromEnv } from "./repo-policy.js";
 import type { RepoPolicyConfig, RepoTrust } from "./repo-policy.js";
+import type { KnownSecret } from "./redact.js";
 import { condenseIfNeeded, defaultCondenseConfig } from "./memory.js";
 import type { CondenseConfig } from "./memory.js";
 import { RecoveryTracker, defaultRecoveryConfig } from "./recovery.js";
@@ -846,7 +847,7 @@ export interface ExecutorProvider {
    * (the sandbox daemon's exec is SSE). Same result as `attach(h).exec`;
    * the chunks feed the live hint. Absent means output arrives at exit.
    */
-  execStream?: (handle: string, command: string, options: { timeoutMs?: number; maxOutputBytes?: number }, onChunk: (stream: "stdout" | "stderr", chunk: string) => void) => Promise<ExecResult>;
+  execStream?: (handle: string, command: string, options: { timeoutMs?: number; maxOutputBytes?: number; env?: Record<string, string> }, onChunk: (stream: "stdout" | "stderr", chunk: string) => void) => Promise<ExecResult>;
   /**
    * The warm repo cache (SB-A), present only on a provider that can talk
    * to a daemon holding one. `warmInfo` reports the run volume's current
@@ -1568,7 +1569,8 @@ export function durableAgent(
       // The loop used to hold handle/executor as `let` locals and reassign them
       // on a snapshot restore; the workspace carries them now so the publish
       // gate reads whichever container the attempt ended in.
-      const primary: HarnessWorkspace = { ctx, handle, executor, workdir, checkout, scopeKey, stepPrefix: "", ...liveWiring(config, ctx.runId, handle, "") };
+      const secrets = checkoutSecrets(input.repo, checkout, repoPolicy);
+      const primary: HarnessWorkspace = { ctx, handle, executor, workdir, checkout, scopeKey, stepPrefix: "", secrets, ...liveWiring(config, ctx.runId, handle, "") };
 
       /**
        * Collect a scan's findings out of the agent's own finish message, as a
@@ -1746,7 +1748,7 @@ export function durableAgent(
             const prepared = await ctx.step(`${p}environment-prepare`, () => prepareEnvironment(attemptExecutor, input.preparation!));
             if (prepared.kind !== "passed") throw new Error("Environment preparation failed for this attempt");
           }
-          ws = { ctx, handle: attemptHandle, executor: attemptExecutor, workdir, checkout: attemptCheckout, scopeKey, stepPrefix: p, ...liveWiring(config, ctx.runId, attemptHandle, p) };
+          ws = { ctx, handle: attemptHandle, executor: attemptExecutor, workdir, checkout: attemptCheckout, scopeKey, stepPrefix: p, secrets, ...liveWiring(config, ctx.runId, attemptHandle, p) };
         }
         const result = await attemptAdapter.run(harnessTask, ws, budget, () => {});
         const diff = await ctx.step(`${p}diff`, async () => {
@@ -4423,6 +4425,27 @@ function parkCanSnapshot(
 }
 
 /**
+ * The forge credentials a run's checkout used, for the external adapters'
+ * exact-value scrub (`HarnessWorkspace.secrets`). Recomputed from config and
+ * never recorded; a URL or policy that no longer resolves yields nothing
+ * rather than failing a replay. `token:` is listed too because its base64 is
+ * what the env-mode extraheader carries (gitCredential).
+ */
+function checkoutSecrets(repo: string | undefined, checkout: RepoCheckout | null, repoPolicy: RepoPolicyConfig): KnownSecret[] {
+  const out: KnownSecret[] = [];
+  for (const url of [repo, checkout?.headRepo]) {
+    if (url === undefined) continue;
+    try {
+      const token = credentialFor(parseRepoUrl(url), repoPolicy);
+      if (token !== "") out.push({ name: "git-token", value: token }, { name: "git-token", value: `${token}:` });
+    } catch {
+      // not resolvable now: nothing to add
+    }
+  }
+  return out;
+}
+
+/**
  * The workspace's live hint and streamed exec, bound to one handle. Rebuilt
  * whenever the handle changes (a restore after a park), because a stream
  * bound to the superseded container would talk to nothing.
@@ -4703,7 +4726,7 @@ export async function streamSandboxExec(
   base: { baseURL: string; token: string; fetch?: typeof globalThis.fetch },
   handle: string,
   command: string,
-  opts: { timeoutMs?: number; maxOutputBytes?: number; lease?: { owner: string; generation: number } },
+  opts: { timeoutMs?: number; maxOutputBytes?: number; env?: Record<string, string>; lease?: { owner: string; generation: number } },
   onChunk: (stream: "stdout" | "stderr", chunk: string) => void,
 ): Promise<ExecResult> {
   const fetchImpl = base.fetch ?? globalThis.fetch;
@@ -4714,6 +4737,10 @@ export async function streamSandboxExec(
     body: JSON.stringify({
       cmd: command,
       timeoutSec,
+      // The command's own env (credentials for this one process). The
+      // daemon writes it to a private --env-file for `docker exec`, so the
+      // values reach neither the host's process list nor the workspace.
+      ...(opts.env !== undefined ? { env: opts.env } : {}),
       // The lease credential: ignored by a daemon with no lease on this run,
       // required by one that holds it (Package C). Absent is the agent path.
       ...(opts.lease !== undefined ? { owner: opts.lease.owner, generation: opts.lease.generation } : {}),
