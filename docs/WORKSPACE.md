@@ -54,6 +54,12 @@ follow-up composer outside the scrolling history.
    launch, then checks again at checkout; a closed or merged PR requires the
    default-branch choice. This starts a fresh sandbox, with bounded conversation
    context and the PR branch’s code, not a resumed terminal or browser session.
+7b. On the same settled runs, **Fork run** starts a new task instead of a
+   follow-up (behind `SHIP_FORK=on`). The fork carries the same recorded
+   history, starts a new branch at the run’s last pushed commit — or the
+   default branch when it pushed nothing, which its task says — and opens a
+   pull request of its own. The forked run’s pull request and branch are
+   untouched. Forking takes the same authority as a follow-up.
 8. While a PR task page is open, Ship requests worker refreshes at most every
    30 seconds (60 seconds after errors). **Refresh from forge** also reads the PR’s current head, reviews, commit statuses
    and GitHub check runs through the worker. The timestamp is explicit. A changed

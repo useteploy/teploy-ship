@@ -17,7 +17,7 @@ import { publicOrigin } from "./oidc.server.js";
 import { previewFrameBase } from "./preview-frame.server.js";
 import { parseSupersededMark, previewSupersededKey } from "../../../dist/preview-supersede.js";
 import { unknownEscalation } from "../../../dist/delivery.js";
-import { costUSD, isPricedModel, pendingQuestion, verificationFactsFromEvents } from "./ship.server.js";
+import { costUSD, isPricedModel, pendingQuestion, verificationFactsFromEvents, forkEnabled, isForkableSourceStatus } from "./ship.server.js";
 import { typicalDuration } from "./expect.js";
 import type { Typical } from "./expect.js";
 import { isAskEvent } from "teploy-ship/ask";
@@ -65,8 +65,16 @@ export interface RunData {
   previewPanel: PreviewPanel;
   parentRunId?: string;
   taskRootRunId?: string;
+  /**
+   * DF1 (SHIP_FORK): the run this one was forked from, with the recorded
+   * pushed commit it started at. Absent on every non-fork run — the key is
+   * additive, so flag-off payloads render exactly as before.
+   */
+  forkedFrom?: { runId: string; sha?: string };
   canSteer: boolean;
   canLaunch: boolean;
+  /** DF1 (SHIP_FORK): the Fork action may be offered (flag on, forkable source, launch authority). */
+  canFork: boolean;
   planSupported: boolean;
   requirePlanReview: boolean;
   hasPr: boolean;
@@ -353,6 +361,18 @@ export async function runData({ params, request }: { params: { id: string }; req
     } catch (error) {
       taskStateError = error instanceof Error ? error.message : "task history could not be read";
     }
+    // DF1 (SHIP_FORK): lineage off the recorded input, never re-derived —
+    // shape-checked like every other field read out of a log.
+    const forkRaw = (started?.data as { input?: { forkOf?: { runId?: unknown; sha?: unknown } } } | undefined)?.input?.forkOf;
+    const forkedFrom =
+      typeof forkRaw?.runId === "string" && forkRaw.runId !== ""
+        ? { runId: forkRaw.runId, ...(typeof forkRaw.sha === "string" && forkRaw.sha !== "" ? { sha: forkRaw.sha } : {}) }
+        : undefined;
+    // The fork action stands where the follow-up does and asks for the same
+    // authority (approve: editor or above) — forking commissions a new run.
+    // Flag off, an in-flight source or a missing grant each hide the button
+    // AND are refused again by the route and the enqueue behind it.
+    const launchAuthority = projectError === null && await may('approve', await currentUser(request));
     const data: RunData = {
       userMessage: (started?.data as any)?.input?.userMessage,
       journey: (started?.data as any)?.input?.journey,
@@ -369,10 +389,12 @@ export async function runData({ params, request }: { params: { id: string }; req
       hasPr: facts.pr !== undefined || typeof (started?.data as any)?.input?.pr === "number",
       parentRunId: typeof (started?.data as any)?.input?.parentRunId === 'string' ? (started?.data as any).input.parentRunId : undefined,
       taskRootRunId: typeof (started?.data as any)?.taskRootRunId === 'string' ? (started?.data as any).taskRootRunId : undefined,
+      forkedFrom,
       canSteer: await may('steer', await currentUser(request)),
       planSupported,
       requirePlanReview: currentProject?.requirePlanReview === true,
-      canLaunch: projectError === null && await may('approve', await currentUser(request)),
+      canLaunch: launchAuthority,
+      canFork: meta !== null && forkEnabled() && isForkableSourceStatus(meta.status, meta.eventName) && launchAuthority,
       messageError: query.get('messageError') ?? projectError,
       ...(deliveryRecord !== null
         ? {

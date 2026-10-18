@@ -12,6 +12,7 @@ test('independent client preserves refusals, decisions and cancellation state ov
     if (req.headers.authorization !== 'Bearer test-only') { res.writeHead(401); res.end('unauthorized'); return; }
     if (responseMode === 'foreign') { res.writeHead(303, { location: 'http://example.invalid/runs/run-foreign' }); res.end(); return; }
     if (responseMode === 'denied') { res.writeHead(303, { location: '/runs/run-one?denied=steer' }); res.end(); return; }
+    if (responseMode === 'fork-refused') { res.writeHead(303, { location: '/runs/run-one?messageError=' + encodeURIComponent('fork refused (FORK_SOURCE_NOT_SETTLED): run run-one is running') }); res.end(); return; }
     if (req.url.endsWith('/decide')) {
       const decision = JSON.parse(body);
       res.writeHead(decision.event_name === 'current' ? 200 : 409, { 'content-type': 'application/json' });
@@ -35,6 +36,17 @@ test('independent client preserves refusals, decisions and cancellation state ov
     await assert.rejects(ship.decide('run-one', { eventName: 'old', approved: true }), e => e instanceof ShipHTTPError && e.status === 409);
     assert.equal(requests.length, before + 1, 'does not retry a stale decision');
     assert.equal((await ship.cancel('run-one')).meta.status, 'cancelling');
+    // DF1: the fork call posts the fork intent like a follow-up, and a refusal
+    // the route sends back as a messageError surfaces as the client's error.
+    assert.equal(await ship.fork('run-one', { message: 'fork it', requestId: 'persisted-id' }), 'run-one');
+    const forkBody = new URLSearchParams(requests.at(-1).body);
+    assert.equal(forkBody.get('intent'), 'fork');
+    assert.equal(forkBody.get('message'), 'fork it');
+    assert.equal(forkBody.get('requestId'), 'persisted-id');
+    assert.throws(() => ship.fork('run-one', { message: '' }), /message and stable requestId are required/);
+    responseMode = 'fork-refused';
+    await assert.rejects(ship.fork('run-one', { message: 'again', requestId: 'persisted-id' }), /FORK_SOURCE_NOT_SETTLED/);
+    responseMode = 'normal';
     await assert.rejects(new ShipClient(origin, 'wrong').workspace('run-one'), e => e.status === 401);
     responseMode = 'foreign';
     await assert.rejects(ship.create(request), /unexpected redirect/);

@@ -43,6 +43,11 @@ not terminal. Continue polling until the executor settles. `followUp(id, ... )`
 starts linked work; pass a persisted requestId and choose `target: 'pr'` only when
 you intend to continue an existing PR. Include the reviewed eventName when the
 current review requires it. Follow-ups retain normal policy and verification.
+`fork(id, ...)` (behind `SHIP_FORK=on`) starts a NEW task from a settled run:
+the same recorded history, a new branch from that run's pushed commit, and a
+pull request of its own — the source run's PR is untouched. An in-flight
+source, or a deployment with the flag off, is refused with the reason in the
+error.
 
 The create/follow-up form endpoints return redirects; this client parses those
 without following them or forwarding a bearer token elsewhere. Persist requestId
