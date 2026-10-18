@@ -457,6 +457,8 @@ export interface IntakeSweepDeps {
  * releasable; the daily launch count is NOT (it is a one-way counter), so it is
  * taken last, immediately before the launch that consumes it.
  */
+const identityLogged = new Set<string>();
+
 export async function sweepIntake(deps: IntakeSweepDeps): Promise<void> {
   const today = utcDay(deps.now());
 
@@ -484,7 +486,12 @@ export async function sweepIntake(deps: IntakeSweepDeps): Promise<void> {
     let project: Project | undefined;
     try { project = projectOf(task); }
     catch (error) {
-      deps.log(`[worker] intake: project identity unresolved; task ${task.taskId} stays proposed`);
+      // Logged once per task per process: the sweep repeats every few seconds
+      // and the task stays proposed until an operator binds the project.
+      if (!identityLogged.has(task.taskId)) {
+        identityLogged.add(task.taskId);
+        deps.log(`[worker] intake: project identity unresolved for ${task.repo ?? "(no repo)"}; task ${task.taskId} stays proposed: ${error instanceof Error ? error.message : String(error)}`);
+      }
       continue;
     }
     if ((project?.sourcePolicy ?? deps.policies[task.source]) !== "auto") continue;
