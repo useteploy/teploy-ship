@@ -1,0 +1,26 @@
+D4-c / D4-c2 warm threads and DF1 fork: live soak, 2026-10-17/18
+
+Scratch project: private Forgejo Tyler/ship-credential-proof (test command `test -f PROOF.md`).
+
+DF1 fork (production 1f5d9b0, SHIP_FORK=on)
+- source run-request-87b9aa83... pushed f31afbd on ship/run-request-87b9aa83... (its merge was then blocked).
+- fork run-request-526b2ac7... opened its own branch; git: the fork branch's history is
+  d06687a (fork change) <- f31afbd (source head) <- 27743c3; merge-base --is-ancestor source fork: YES.
+  The source branch was not touched. PASS.
+
+D4-c first soak: LIVE DEFECT found and fixed
+- With SHIP_WARM_THREAD on, a run that parked at approve-merge and merged was marked failed:
+  thread-snapshot threw "run not found" (the merge park had already reaped the original sandbox).
+  Flag removed and redeployed within minutes; hotfix #129 (the step skips, never fails a run);
+  D4-c2 #133 takes the thread snapshot from the merge park's own image.
+
+D4-c + D4-c2 re-soak (production a047bc4, SHIP_WARM_THREAD=on, SHIP_WARM_PARKS=1)
+Backup /root/ship-pg-pre-a047bc4-2026-10-18.dump sha256 40ce82d1438f9a7ad8556a94bbf927e6032cb72f3a7b943069455cf05c7047bf
+- run A run-request-c74699d5...: change, parked approve-merge, approved, merged, COMPLETED.
+  merge-hygiene {"clean":true}; thread-snapshot recorded the park image
+  0@teploy-sbx-snap:01m56mfj3jezbmgebeycm0qj2f, head db8fe63, via merge-park.
+- follow-up B run-request-b50e762e...: sandbox {"boot":"thread-warm"}; repo-setup via thread-warm
+  (fetch instead of clone); reached approve-merge (scratch, not merged). PASS.
+- Timing: on this one-file repo cold and warm setup are both ~1.6 s (sandbox to repo-setup), so the
+  scratch repo cannot show the gain; the model's first turn dominates time to first token here
+  (B turn-0-think 82 s). The latency comparison belongs on a G1 repo with real dependencies (D4-a fields).
