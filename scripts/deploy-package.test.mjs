@@ -101,9 +101,9 @@ test("production lockfiles describe the deployed manifests and Docker installs t
 // which does not. Every patch the suites run against must also be applied in
 // the Dockerfile, or production runs code nobody tested.
 test("every pnpm patch is applied in the image after npm ci", () => {
-  const workspace = readFileSync(join(root, "pnpm-workspace.yaml"), "utf8");
-  const patches = [...workspace.matchAll(/^\s+'?([^':\s]+)'?:\s*(patches\/\S+\.patch)\s*$/gm)];
-  assert.ok(patches.length > 0, "no patchedDependencies found — the matcher is broken, not the workspace");
+  const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  const patches = Object.entries(pkg.pnpm?.patchedDependencies ?? {}).map(([name, path]) => [undefined, name, path]);
+  assert.ok(patches.length > 0, "no pnpm.patchedDependencies in package.json");
   const dockerfile = readFileSync(join(root, "Dockerfile"), "utf8");
   const shipInstall = dockerfile.indexOf("npm ci --omit=dev");
   for (const [, name, path] of patches) {
