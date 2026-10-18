@@ -24,6 +24,7 @@ import { resolvePreviewTarget, destroyPreview, type PreviewOutcome } from "./dep
 import { compareHealth, effectiveTelemetryTarget, readServiceHealth, telemetryAppliesTo, telemetryRegression } from "./observe.js";
 import { runTests, testTargetFromInput, type TestOutcome } from "./tests.js";
 import { detectEgressRefusal } from "./egress.js";
+import type { ArtifactBinding } from "./artifacts.js";
 import {
   ladderRungs,
   type FlowOutcome,
@@ -44,20 +45,43 @@ import {
  * rung; the evidence is the capture, the attachment is its delivery.
  */
 export interface AssetSink {
-  upload(name: string, bytes: Uint8Array, dataClass?: string): Promise<string>;
+  upload(name: string, bytes: Uint8Array, dataClass?: string, binding?: ArtifactBinding): Promise<string>;
+  /**
+   * A browser recording: stored in Ship's artifact store under its binding
+   * and linked, never attached (the recording data class). Throws when it
+   * could not be stored; returns no `url` when there is no public address to
+   * link from (the run page still shows it by artifact id).
+   */
+  record(name: string, bytes: Uint8Array, binding: ArtifactBinding): Promise<{ artifact: string; expiresAt: string; url?: string }>;
 }
+
+/** What a pull request says about a recording it does not link. */
+export const RECORDING_NOT_LINKED = "recorded, not linked";
+export const RECORDING_ON_RUN_PAGE = "recording on the run page";
 
 /** The most screenshots one step attaches; a flow that writes more keeps the first N by name. */
 export const MAX_SHOTS = 8;
 /** The largest PNG a step attaches. Forgejo's default per-file cap is far above this; the pull request is not. */
 const MAX_SHOT_BYTES = 4 * 1024 * 1024;
 
-async function attach(sink: AssetSink | undefined, name: string, bytes: Uint8Array): Promise<string | undefined> {
+async function attach(sink: AssetSink | undefined, name: string, bytes: Uint8Array, binding?: ArtifactBinding): Promise<string | undefined> {
   if (sink === undefined || bytes.byteLength > MAX_SHOT_BYTES) return undefined;
   try {
-    return await sink.upload(name, bytes);
+    return await sink.upload(name, bytes, undefined, binding);
   } catch {
     return undefined;
+  }
+}
+
+/** The recording half of a FlowShot: where it is stored and linked, or why it is not. */
+async function keepRecording(sink: AssetSink, name: string, bytes: Uint8Array, binding: ArtifactBinding): Promise<Pick<FlowShot, "asset" | "artifact" | "expiresAt" | "revision" | "unlinked">> {
+  const revision = binding.revision !== undefined ? { revision: binding.revision } : {};
+  try {
+    const kept = await sink.record(name, bytes, binding);
+    return { artifact: kept.artifact, expiresAt: kept.expiresAt, ...revision,
+      ...(kept.url !== undefined ? { asset: kept.url } : { unlinked: RECORDING_ON_RUN_PAGE }) };
+  } catch {
+    return { ...revision, unlinked: RECORDING_NOT_LINKED };
   }
 }
 
@@ -292,7 +316,9 @@ export async function visualIfDeclared(
       if (typeof m === "string") return { kind: "failed", reason: m };
       const pixels = comparePngs(p.png, m.png);
       const side = async (url: string, s: { png: Uint8Array; sha256: string }, name: string): Promise<Screenshot> => {
-        const asset = await attach(sink, `ship-${ctx.runId}-visual-${name}.png`, s.png);
+        // Main's picture is not of the preview revision; only the preview side carries it.
+        const revision = name === "preview" && preview.revision !== undefined ? { revision: preview.revision } : {};
+        const asset = await attach(sink, `ship-${ctx.runId}-visual-${name}.png`, s.png, { runId: ctx.runId, ...revision });
         return { url, sha256: s.sha256, bytes: s.png.byteLength, ...(asset !== undefined ? { asset } : {}) };
       };
       return {
@@ -355,6 +381,9 @@ export async function flowIfPresent(
     if (probe.exitCode === 4) return { kind: "skipped", reason: "the sandbox image has no node to run the flow with" };
     if (probe.exitCode !== 0 || probe.stdout.trim() === "") return { kind: "skipped", reason: "the sandbox image has no playwright (npm root -g)/playwright" };
     const playwright = probe.stdout.trim();
+    // Everything this step keeps is evidence of the PREVIEW's revision — not
+    // of whatever the run's head is by the time a reviewer reads it.
+    const binding = { runId: ctx.runId, ...(preview.revision !== undefined ? { revision: preview.revision } : {}) };
     const started = Date.now();
     const shots: FlowShot[] = [];
     try {
@@ -374,7 +403,7 @@ export async function flowIfPresent(
         }
         if (png.byteLength === 0) continue;
         const name = file.slice(file.lastIndexOf("/") + 1);
-        const asset = await attach(sink, `ship-${ctx.runId}-flow-${name}`, png);
+        const asset = await attach(sink, `ship-${ctx.runId}-flow-${name}`, png, binding);
         shots.push({ name, sha256: createHash("sha256").update(png).digest("hex"), bytes: png.byteLength, ...(asset !== undefined ? { asset } : {}) });
       }
       // Optional browser recordings. Bound count and bytes before transferring
@@ -386,8 +415,8 @@ export async function flowIfPresent(
           const bytes = await executor.getFile(file);
           if (!bytes.byteLength || bytes.byteLength > MAX_SHOT_BYTES) continue;
           const name = file.slice(file.lastIndexOf("/") + 1);
-          const asset = await attach(sink, `ship-${ctx.runId}-flow-${name}`, bytes);
-          videos.push({ name, sha256: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.byteLength, ...(asset ? { asset } : {}) });
+          const kept = sink !== undefined ? await keepRecording(sink, `ship-${ctx.runId}-flow-${name}`, bytes, binding) : {};
+          videos.push({ name, sha256: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.byteLength, ...kept });
         } catch { /* The flow result still reports its test outcome. */ }
       }
       if (r.timedOut) return { kind: "errored", script: FLOW_SCRIPT, reason: `timed out after ${Math.round(durationMs / 1000)}s` };

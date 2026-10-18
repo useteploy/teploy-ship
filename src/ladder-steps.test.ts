@@ -10,7 +10,12 @@ import type { WorkflowContext, WorkflowEvent } from "@neutron-build/workflow";
 
 import type { DurableAgentConfig, DurableAgentInput } from "./durable.js";
 import type { CommandRunner, PreviewTarget } from "./deploy.js";
-import { buildIfDeclared, comparePngs, flowIfPresent, mainUrlOf, observeIfDeclared, recordLadder, resolveMainUrl, smokeIfDeclared, visualIfDeclared } from "./ladder-steps.js";
+import { buildIfDeclared, comparePngs, flowIfPresent, mainUrlOf, observeIfDeclared, recordLadder, resolveMainUrl, smokeIfDeclared, visualIfDeclared, RECORDING_NOT_LINKED, RECORDING_ON_RUN_PAGE } from "./ladder-steps.js";
+import { FileArtifacts, RECORDING_DATA_CLASS, type ArtifactStore } from "./artifacts.js";
+import { assetSink } from "./durable.js";
+import { parseRepoUrl } from "./git.js";
+import { proofLinks } from "./ladder.js";
+import { verificationSection } from "./verification.js";
 import { PNG } from "pngjs";
 import type { ServiceHealth } from "./observe.js";
 
@@ -335,7 +340,10 @@ writeFileSync(out + "/walkthrough.webm", "video");
 console.log("drove the page");
 EOF`);
     const uploads: string[] = [];
-    const sink = { upload: async (name: string, bytes: Uint8Array) => { uploads.push(`${name}:${bytes.byteLength}`); return `http://f/${name}`; } };
+    const sink = {
+      upload: async (name: string, bytes: Uint8Array) => { uploads.push(`${name}:${bytes.byteLength}`); return `http://f/${name}`; },
+      record: async (name: string, bytes: Uint8Array) => { uploads.push(`rec:${name}:${bytes.byteLength}`); return { artifact: "a".repeat(64), expiresAt: "2026-10-24T00:00:00.000Z", url: `http://f/${name}` }; },
+    };
     const outcome = await flowIfPresent(ctx, exec, WITH_PREVIEW, PREVIEW, sink);
     assert.equal(outcome?.kind, "passed");
     if (outcome?.kind === "passed") {
@@ -345,7 +353,7 @@ EOF`);
       assert.equal(outcome.videos?.[0]?.asset, "http://f/ship-run-ladder-test-flow-walkthrough.webm");
       assert.equal(outcome.script, ".ship/flow.mjs");
     }
-    assert.deepEqual(uploads, ["ship-run-ladder-test-flow-01-before.png:1", "ship-run-ladder-test-flow-02-after.png:1", "ship-run-ladder-test-flow-walkthrough.webm:5"]);
+    assert.deepEqual(uploads, ["ship-run-ladder-test-flow-01-before.png:1", "ship-run-ladder-test-flow-02-after.png:1", "rec:ship-run-ladder-test-flow-walkthrough.webm:5"]);
     const left = await exec.exec("ls -d .ship/flow-out .ship/node_modules 2>/dev/null | wc -l");
     assert.equal(left.stdout.trim(), "0", "output and the link are removed; the script stays");
     assert.equal((await exec.exec("test -f .ship/flow.mjs")).exitCode, 0);
@@ -377,7 +385,7 @@ test("flow: an upload that fails leaves the shot recorded without an attachment"
   const fake = await fakePlaywrightOnPath();
   try {
     await exec.exec(`mkdir -p .ship && printf 'import { writeFileSync } from "node:fs";\nwriteFileSync(process.argv[3] + "/01.png", "x");\n' > .ship/flow.mjs`);
-    const outcome = await flowIfPresent(ctx, exec, WITH_PREVIEW, PREVIEW, { upload: async () => { throw new Error("413"); } });
+    const outcome = await flowIfPresent(ctx, exec, WITH_PREVIEW, PREVIEW, { upload: async () => { throw new Error("413"); }, record: async () => { throw new Error("413"); } });
     assert.equal(outcome?.kind, "passed");
     if (outcome?.kind === "passed") assert.deepEqual(outcome.shots.map((s) => [s.name, s.asset]), [["01.png", undefined]]);
   } finally {
@@ -547,4 +555,145 @@ test("recordLadder: one step, the rung list, absent when nothing was declared", 
   );
   assert.equal(await recordLadder(ctx, BASE_INPUT, {}), undefined);
   assert.equal(steps.length, 1);
+});
+
+// --- Q3a: recordings bound to the run and the preview revision, linked never attached ---
+
+const REV_A = "a".repeat(40);
+const REV_B = "b".repeat(40);
+const PREVIEW_AT_A = { ...PREVIEW, revision: REV_A } as const;
+const FLOW_WITH_RECORDING = `mkdir -p .ship && cat > .ship/flow.mjs <<'EOF2'
+import { writeFileSync } from "node:fs";
+const out = process.argv[3];
+writeFileSync(out + "/01.png", Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1]));
+writeFileSync(out + "/walk.webm", Buffer.from([26, 69, 223, 163, 1, 2, 3]));
+EOF2`;
+
+/** A forge fetch that remembers every request; any call at all is an attachment attempt. */
+function forgeSpy(): { fetchImpl: typeof fetch; calls: string[] } {
+  const calls: string[] = [];
+  const fetchImpl = (async (url: string | URL | Request) => {
+    calls.push(String(url));
+    return new Response(JSON.stringify({ browser_download_url: "http://forge.example:3000/attachments/x" }), { status: 201 });
+  }) as typeof fetch;
+  return { fetchImpl, calls };
+}
+
+async function withPublicUrl<T>(value: string | undefined, fn: () => Promise<T>): Promise<T> {
+  const before = process.env.SHIP_PUBLIC_URL;
+  if (value === undefined) delete process.env.SHIP_PUBLIC_URL;
+  else process.env.SHIP_PUBLIC_URL = value;
+  try {
+    return await fn();
+  } finally {
+    if (before === undefined) delete process.env.SHIP_PUBLIC_URL;
+    else process.env.SHIP_PUBLIC_URL = before;
+  }
+}
+
+const FORGEJO = parseRepoUrl("http://forge.example:3000/Tyler/app");
+
+test("Q3a: a flow WebM on a Forgejo run is stored bound to the run and the PREVIEW revision, linked with expiry and sha256, never attached", async () => {
+  const { ctx, steps } = fakeCtx();
+  const { exec } = await localExecutor();
+  const fake = await fakePlaywrightOnPath();
+  const store = new FileArtifacts(await mkdtemp(join(tmpdir(), "q3a-store-")));
+  const forge = forgeSpy();
+  try {
+    await exec.exec(FLOW_WITH_RECORDING);
+    const outcome = await withPublicUrl("https://ship.example/", () =>
+      flowIfPresent(ctx, exec, WITH_PREVIEW, PREVIEW_AT_A, assetSink(FORGEJO, "tok", 7, store, forge.fetchImpl)));
+    assert.equal(outcome?.kind, "passed");
+    if (outcome?.kind !== "passed") return;
+    const video = outcome.videos?.[0];
+    assert.ok(video?.artifact !== undefined && video.expiresAt !== undefined);
+    assert.equal(video.asset, `https://ship.example/api/artifacts/${video.artifact}`);
+    assert.equal(video.revision, REV_A);
+    const stored = await store.get(video.artifact);
+    assert.equal(stored?.runId, "run-ladder-test");
+    assert.equal(stored?.revision, REV_A, "the preview's revision, not the run's later head");
+    assert.equal(stored?.dataClass, RECORDING_DATA_CLASS);
+    assert.equal(stored?.mime, "video/webm");
+    const shot = outcome.shots[0];
+    assert.match(shot?.asset ?? "", /^https:\/\/ship\.example\/api\/artifacts\/[a-f0-9]{64}$/);
+    const storedShot = await store.get(shot!.asset!.slice(-64));
+    assert.equal(storedShot?.runId, "run-ladder-test", "screenshots carry the binding too");
+    assert.deepEqual(forge.calls, [], "no issues/<pr>/assets call");
+    assert.deepEqual(steps.map((st) => st.name), ["flow"], "no new step: the store write and link happen inside the recorded flow step");
+
+    // The run's pushed head (B) moved past the previewed revision (A): the
+    // body labels the recording with A and nothing labels it "of B".
+    const body = verificationSection({ preview: PREVIEW_AT_A, proof: proofLinks({ flow: outcome }) }, "run-ladder-test")!;
+    assert.ok(body.includes(`[Watch walk.webm (expires ${video.expiresAt.slice(0, 10)}, Ship sign-in required)](https://ship.example/api/artifacts/${video.artifact})`), body);
+    assert.ok(body.includes(`sha256 \`${video.sha256}\``));
+    assert.ok(body.includes(`of preview revision \`${REV_A.slice(0, 12)}\``));
+    assert.ok(!body.includes(REV_B.slice(0, 12)));
+  } finally {
+    fake.restore();
+  }
+});
+
+test("Q3a negative: with the store throwing, nothing is attached to the forge and the body says recorded, not linked", async () => {
+  const { ctx } = fakeCtx();
+  const { exec } = await localExecutor();
+  const fake = await fakePlaywrightOnPath();
+  const forge = forgeSpy();
+  const broken: ArtifactStore = {
+    put: async () => { throw new Error("store down"); },
+    putTemporary: async () => { throw new Error("store down"); },
+    get: async () => null,
+  };
+  try {
+    await exec.exec(FLOW_WITH_RECORDING);
+    const outcome = await withPublicUrl("https://ship.example", () =>
+      flowIfPresent(ctx, exec, WITH_PREVIEW, PREVIEW_AT_A, assetSink(FORGEJO, "tok", 7, broken, forge.fetchImpl)));
+    assert.equal(outcome?.kind, "passed");
+    if (outcome?.kind !== "passed") return;
+    assert.deepEqual(forge.calls, [], "uploadPrAsset is never reached: no forge fallback for media");
+    assert.equal(outcome.shots[0]?.asset, undefined);
+    assert.equal(outcome.videos?.[0]?.asset, undefined);
+    assert.equal(outcome.videos?.[0]?.unlinked, RECORDING_NOT_LINKED);
+    const body = verificationSection({ proof: proofLinks({ flow: outcome }) }, "run-ladder-test")!;
+    assert.ok(body.includes(`walk.webm: recorded, not linked (of preview revision \`${REV_A.slice(0, 12)}\`, sha256 \``), body);
+    assert.ok(!body.includes("/api/artifacts/") && !body.includes("forge.example"));
+  } finally {
+    fake.restore();
+  }
+});
+
+test("Q3a negative: with SHIP_PUBLIC_URL unset there is no link at all, not a relative one", async () => {
+  const { ctx } = fakeCtx();
+  const { exec } = await localExecutor();
+  const fake = await fakePlaywrightOnPath();
+  const store = new FileArtifacts(await mkdtemp(join(tmpdir(), "q3a-store-")));
+  const forge = forgeSpy();
+  try {
+    await exec.exec(FLOW_WITH_RECORDING);
+    const outcome = await withPublicUrl(undefined, () =>
+      flowIfPresent(ctx, exec, WITH_PREVIEW, PREVIEW_AT_A, assetSink(FORGEJO, "tok", 7, store, forge.fetchImpl)));
+    assert.equal(outcome?.kind, "passed");
+    if (outcome?.kind !== "passed") return;
+    const video = outcome.videos?.[0];
+    assert.equal(video?.asset, undefined);
+    assert.equal(video?.unlinked, RECORDING_ON_RUN_PAGE);
+    assert.equal((await store.get(video!.artifact!))?.runId, "run-ladder-test", "still kept for the run page");
+    assert.equal(outcome.shots[0]?.asset, undefined, "a screenshot gets no relative link either");
+    assert.deepEqual(forge.calls, []);
+    const body = verificationSection({ proof: proofLinks({ flow: outcome }) }, "run-ladder-test")!;
+    assert.ok(body.includes("walk.webm: recording on the run page ("), body);
+    assert.ok(!body.includes("/api/artifacts/") && !body.includes("]("), "no link of any kind");
+  } finally {
+    fake.restore();
+  }
+});
+
+test("Q3a: assetSink never sends WebM bytes to the forge, even untagged and without a store", async () => {
+  const forge = forgeSpy();
+  const sink = assetSink(FORGEJO, "tok", 7, undefined, forge.fetchImpl)!;
+  await assert.rejects(() => sink.upload("clip.png", new Uint8Array([26, 69, 223, 163, 9])), /recordings are never attached/);
+  await assert.rejects(() => sink.record("clip.webm", new Uint8Array([26, 69, 223, 163, 9]), { runId: "run-1" }), /no artifact store/);
+  assert.deepEqual(forge.calls, []);
+  // Without a store an untagged screenshot keeps the operator's forge path.
+  assert.match(await sink.upload("shot.png", new Uint8Array([137, 80, 78, 71])), /attachments/);
+  assert.equal(forge.calls.length, 1);
 });

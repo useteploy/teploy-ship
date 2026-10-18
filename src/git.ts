@@ -1,6 +1,6 @@
 import type { AgentExecutor } from "@neutron-build/agents";
 
-import { LOOK_IMAGE_DATA_CLASS } from "./artifacts.js";
+import { isWebm, LOOK_IMAGE_DATA_CLASS, RECORDING_DATA_CLASS } from "./artifacts.js";
 import { frameUntrusted } from "./guard.js";
 import { forgeFetch } from "./forge-egress.js";
 import { publishLimitsFromEnv, screenPublication } from "./publish-policy.js";
@@ -831,6 +831,11 @@ export async function commentOnPr(
  * refuses that class for every repo, which is stricter than the rule's
  * minimum and simple to reason about: no repo-level "mirrors publicly" flag
  * exists yet, and when one is added this guard can narrow to it.
+ *
+ * The same holds for browser recordings (the recording data class, or any
+ * WebM bytes whatever their tag): they are linked through Ship's
+ * access-checked artifact route, where they expire and can be revoked. An
+ * attachment can be neither.
  */
 export async function uploadPrAsset(options: {
   ref: RepoRef;
@@ -848,8 +853,11 @@ export async function uploadPrAsset(options: {
   if (options.dataClass === LOOK_IMAGE_DATA_CLASS) {
     throw new Error("look screenshots are never attached to pull requests (public-mirror rule, docs/PERCEPTION_INPUT_S12_S13_2026-10-14.md D4)");
   }
+  if (options.dataClass === RECORDING_DATA_CLASS || isWebm(bytes) || name.toLowerCase().endsWith(".webm")) {
+    throw new Error("browser recordings are never attached to pull requests; they are linked through the artifact route");
+  }
   const form = new FormData();
-  form.append("attachment", new Blob([Buffer.from(bytes)], { type: name.endsWith(".webm") ? "video/webm" : "image/png" }), name);
+  form.append("attachment", new Blob([Buffer.from(bytes)], { type: "image/png" }), name);
   const response = await fetchImpl(`${ref.base}/api/v1/repos/${ref.owner}/${ref.repo}/issues/${pr}/assets?name=${encodeURIComponent(name)}`, {
     method: "POST",
     headers: { authorization: `token ${token}` },
