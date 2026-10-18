@@ -315,6 +315,40 @@ test("enqueueRun bakes look image mode into the run INPUT — SHIP_LOOK_IMAGE_MO
   assert.equal("lookImage" in lookOff, false, "image mode cannot precede the action itself");
 });
 
+test("enqueueRun bakes the look recording flag into the run INPUT — SHIP_LOOK_RECORD admits it, unset never does (Q3b)", async () => {
+  // Same inputOf seam: input.lookRecord admits the look-record step, so a
+  // replay must know from its log alone whether the session was recorded —
+  // and a run that does not set the flag enqueues byte-identically to a
+  // pre-Q3b one.
+  const dir = await mkdtemp(join(tmpdir(), "ship-enqueue-"));
+  const store = new FileEventStore(dir);
+  const runtime = { kind: "file" as const, store, saveMeta: async () => {} };
+  let n = 0;
+  const inputOf = async (env: Record<string, string>): Promise<Record<string, unknown>> => {
+    const runId = `r-look-record-${n++}`;
+    const saved = { ...process.env };
+    Object.assign(process.env, env);
+    try {
+      await enqueueRun(runtime as unknown as Parameters<typeof enqueueRun>[0], { runId, task: "t", model: "m" });
+    } finally {
+      for (const key of Object.keys(env)) delete process.env[key];
+      Object.assign(process.env, saved);
+    }
+    const started = (await store.load(runId)).find((e) => e.type === "run-started");
+    return (started?.data as { input: Record<string, unknown> }).input;
+  };
+
+  const on = await inputOf({ SHIP_LOOK: "1", SHIP_LOOK_RECORD: "1" });
+  assert.equal(on.lookRecord, true, "the flag rides the input when set");
+
+  const off = await inputOf({ SHIP_LOOK: "1" });
+  assert.equal("lookRecord" in off, false, "unset: absent, so the input is byte-identical to a pre-Q3b run's");
+
+  const lookAway = await inputOf({ SHIP_LOOK_RECORD: "1" });
+  assert.equal("lookRecord" in lookAway, false, "recording cannot precede the action itself");
+  assert.equal("look" in lookAway, false);
+});
+
 // SEAM: --settle must actually reach the durable run input.
 //
 // Deleting the one spread that joins the flag to the input left 319/319 green

@@ -119,6 +119,8 @@ export const EXACT_SCRUB_MIN_LENGTH = 8;
 interface ExactForm {
   needle: string;
   label: string;
+  /** The secret's own name, for reports that must name what matched, never the value. */
+  name: string;
 }
 
 /**
@@ -127,14 +129,14 @@ interface ExactForm {
  * first, so a value that contains another is replaced whole.
  */
 function exactForms(secrets: readonly KnownSecret[]): ExactForm[] {
-  const forms = new Map<string, string>();
+  const forms = new Map<string, ExactForm>();
   for (const { name, value } of secrets) {
     if (value.length < EXACT_SCRUB_MIN_LENGTH) continue;
-    if (!forms.has(value)) forms.set(value, `[redacted ${name}]`);
+    if (!forms.has(value)) forms.set(value, { needle: value, label: `[redacted ${name}]`, name });
     const encoded = Buffer.from(value, "utf8").toString("base64");
-    if (!forms.has(encoded)) forms.set(encoded, `[redacted ${name} base64]`);
+    if (!forms.has(encoded)) forms.set(encoded, { needle: encoded, label: `[redacted ${name} base64]`, name });
   }
-  return [...forms].map(([needle, label]) => ({ needle, label })).sort((a, b) => b.needle.length - a.needle.length);
+  return [...forms.values()].sort((a, b) => b.needle.length - a.needle.length);
 }
 
 function replaceForms(text: string, forms: readonly ExactForm[]): string {
@@ -169,6 +171,28 @@ export function scrubExact(text: string, secrets: readonly KnownSecret[]): strin
   const forms = exactForms(secrets);
   if (forms.length === 0 || text === "") return text;
   return replaceTrailingPrefix(replaceForms(text, forms), forms);
+}
+
+/**
+ * The NAME of the first configured secret whose value (or its base64 form)
+ * appears verbatim in the text — for withholding decisions (Q3c: a browser
+ * recording whose captured page text carries a secret is never stored) that
+ * must name their reason without ever naming the value. The same
+ * exact-forms and minimum-length rules as scrubExact apply: a value shorter
+ * than EXACT_SCRUB_MIN_LENGTH is not a secret this pass can see.
+ */
+export function firstSecretIn(text: string, secrets: readonly KnownSecret[]): string | undefined {
+  if (text === "") return undefined;
+  return exactForms(secrets).find(({ needle }) => text.includes(needle))?.name;
+}
+
+/**
+ * The sentence a withheld recording records (Q3c): WHICH secret by its name,
+ * never the value, and what happened to the bytes. Shared by both recording
+ * sources — the look session's screencast and the flow rung's WebM.
+ */
+export function withheldRecordingReason(name: string): string {
+  return `a configured secret value (${name}) appeared in the page text captured during the session, so the recording was withheld — nothing was stored, and the captured bytes were deleted`;
 }
 
 /**

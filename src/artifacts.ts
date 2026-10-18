@@ -30,11 +30,19 @@ export interface Artifact {
    * carries the preview's revision, never the run's later head.
    */
   revision?: string;
+  /**
+   * The working tree the bytes were captured against, when there is one: a
+   * look-session recording (Q3b) runs on the unpushed tree, so its honest
+   * binding is `git write-tree` over that tree at capture time — never a
+   * revision, which it cannot claim. Full sha1/sha256 hex.
+   */
+  treeDigest?: string;
 }
 /** Who an artifact belongs to (see Artifact.runId / Artifact.revision). */
 export interface ArtifactBinding {
   runId: string;
   revision?: string;
+  treeDigest?: string;
 }
 export interface ArtifactStore {
   put(name: string, bytes: Uint8Array, dataClass?: string, binding?: ArtifactBinding): Promise<string>;
@@ -54,12 +62,18 @@ export const RECORDING_DATA_CLASS = "recording";
 export function isWebm(bytes: Uint8Array): boolean {
   return bytes.length >= 4 && bytes[0] === 26 && bytes[1] === 69 && bytes[2] === 223 && bytes[3] === 163;
 }
-function bindingFields(binding: ArtifactBinding | undefined): Pick<Artifact, "runId" | "revision"> {
+function bindingFields(binding: ArtifactBinding | undefined): Pick<Artifact, "runId" | "revision" | "treeDigest"> {
   if (binding === undefined) return {};
   if (!/^[A-Za-z0-9._:-]{1,128}$/.test(binding.runId)) throw new Error("Artifact binding needs a valid run id");
   if (binding.revision !== undefined && !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(binding.revision))
     throw new Error("Artifact binding needs a full commit revision");
-  return { runId: binding.runId, ...(binding.revision !== undefined ? { revision: binding.revision } : {}) };
+  if (binding.treeDigest !== undefined && !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(binding.treeDigest))
+    throw new Error("Artifact binding needs a full tree digest");
+  return {
+    runId: binding.runId,
+    ...(binding.revision !== undefined ? { revision: binding.revision } : {}),
+    ...(binding.treeDigest !== undefined ? { treeDigest: binding.treeDigest } : {}),
+  };
 }
 function artifact(name: string, bytes: Uint8Array, dataClass?: string, binding?: ArtifactBinding): Artifact {
   if (bytes.length > 4 * 1024 * 1024 || !bytes.length)
