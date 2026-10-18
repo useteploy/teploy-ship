@@ -140,7 +140,7 @@ export default function Skills({ data, actionData }: { data: SkillsData; actionD
       </p>
       <form method="post" class="card" style="display:grid;gap:8px">
         <input type="hidden" name="intent" value="import" />
-        <textarea name="text" aria-label="SKILL.md text" rows="10" required placeholder={"---\nname: deploy-checklist\ndescription: What to verify before a deploy\n---\nRun the suite, then..."} style={`${field};font-family:var(--mono,monospace)`} />
+        <textarea name="text" aria-label="SKILL.md text" rows={10} required placeholder={"---\nname: deploy-checklist\ndescription: What to verify before a deploy\n---\nRun the suite, then..."} style={`${field};font-family:var(--mono,monospace)`} />
         <div class="row-actions" style="gap:10px;align-items:center;flex-wrap:wrap">
           <label class="meta">Source
             <select name="sourceKind" aria-label="Source kind" style={field}>
