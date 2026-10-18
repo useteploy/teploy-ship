@@ -892,7 +892,7 @@ DT2 and EV6 before merge (credentials, authority and access boundaries).
 
 #### E7.4 Owner decisions added (continuing E6)
 
-Defaults are applied unless the owner overrules; only 11 blocks work.
+Decided 2026-10-17; the reasoning and the user-facing settings are in `docs/DECISIONS_OPEN_2026-10-04.md`. Decisions 5, 6, 8 and 10 (E6) were decided the same day.
 
 11. **Subscription credentials on a server (H7).** Whether Ship may run a
     user's personal subscription login (Gemini, Grok, Pi, Antigravity) on a
