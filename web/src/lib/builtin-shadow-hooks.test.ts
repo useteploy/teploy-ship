@@ -93,7 +93,7 @@ test("slack route in shadow mode: task lands, counter records the match", async 
   assert.equal(res.status, 201);
   const created = (await res.json()) as { taskId: string };
   const task = (await runtime.intake.list()).find((t) => t.taskId === created.taskId);
-  assert.ok(task !== null);
+  assert.ok(task !== undefined);
   assert.equal(task.dedupeKey, "slack:C0ENG:1760700000.000100");
   const c = await counters();
   assert.equal(c?.sources.slack?.matched, 1);
