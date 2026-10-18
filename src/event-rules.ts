@@ -124,6 +124,30 @@ export interface EventRule {
 }
 
 /**
+ * The vendors EV4 ships payload mappers for. Each one verifies and maps its
+ * own webhook shape in src/event-adapters/<vendor>.ts; the map is pure, the
+ * secret stays in deployment config, and the auth class below is what
+ * Decision 12 keys off (shared-secret vendors can never carry an auto rule).
+ */
+export const EVENT_VENDORS = ["sentry", "datadog", "pagerduty", "jira", "gitlab"] as const;
+export type EventVendor = (typeof EVENT_VENDORS)[number];
+
+/**
+ * The auth class each vendor's verification actually provides. Sentry,
+ * PagerDuty and Jira always sign; Datadog has no HMAC at all (shared secret
+ * in a custom header); GitLab is either, depending on whether the webhook
+ * was configured with a signing token (Standard Webhooks, hmac) or a plain
+ * secret token (X-Gitlab-Token, shared-secret).
+ */
+export const VENDOR_AUTH: Record<EventVendor, readonly ("hmac" | "shared-secret")[]> = {
+  sentry: ["hmac"],
+  pagerduty: ["hmac"],
+  jira: ["hmac"],
+  datadog: ["shared-secret"],
+  gitlab: ["hmac", "shared-secret"],
+};
+
+/**
  * A registered event source. No secret in here on purpose: the secret is
  * deployment config (`SHIP_EVENT_SECRET_<ID>`), the same place every other
  * Ship webhook secret lives, so no ring buffer, snapshot or config listing
@@ -134,6 +158,16 @@ export interface EventSourceRecord {
   /** hmac = real signature over ts.body. shared-secret = bearer token only (no real signature). */
   auth: "hmac" | "shared-secret";
   enabled: boolean;
+  /**
+   * EV4: when set, the source speaks a vendor webhook (verification and
+   * payload mapping from src/event-adapters/<vendor>.ts) instead of the S24
+   * envelope. Unset = the generic signed envelope of EV2.
+   */
+  vendor?: EventVendor;
+  /** Shared-secret vendors: the header the sender puts the token in (default x-teploy-token). */
+  tokenHeader?: string;
+  /** Jira (and GitLab issues): the label that maps an issue to ticket.labelled. */
+  label?: string;
   /** hmac freshness window seconds (default 300). */
   replayWindowSeconds?: number;
   /** shared-secret soft freshness for the body timestamp (default 86400). */
@@ -182,9 +216,10 @@ export interface EventSubjectRecord {
 
 // ------------------------------------------------------------------ clamps
 
-const TITLE_MAX = 140;
-const DETAIL_MAX = 4_000;
-const SUBST_MAX = 300;
+/** Shared clamp budgets: adapters (EV4) clamp vendor text to the same limits. */
+export const EVENT_TITLE_MAX = 140;
+export const EVENT_DETAIL_MAX = 4_000;
+export const EVENT_SUBST_MAX = 300;
 
 /** Collapse whitespace and mark the cut, so a template cannot smuggle a blob. */
 export function oneLine(value: string, max: number): string {
@@ -316,6 +351,23 @@ export function validateEventSource(source: unknown): { ok: true } | { ok: false
   if (typeof s.id !== "string" || !SOURCE_ID_RE.test(s.id)) return problem("id must match [a-z0-9-]{1,40}");
   if (s.auth !== "hmac" && s.auth !== "shared-secret") return problem('auth must be "hmac" or "shared-secret"');
   if (typeof s.enabled !== "boolean") return problem("enabled must be a boolean");
+  if (s.vendor !== undefined && !EVENT_VENDORS.includes(s.vendor as EventVendor)) {
+    return problem(`vendor must be one of ${EVENT_VENDORS.join(", ")}`);
+  }
+  if (s.vendor !== undefined && !VENDOR_AUTH[s.vendor].includes(s.auth)) {
+    return problem(`vendor ${s.vendor} cannot use auth "${s.auth}": it provides ${VENDOR_AUTH[s.vendor].join(" or ")}`);
+  }
+  if (s.tokenHeader !== undefined) {
+    if (typeof s.tokenHeader !== "string" || !/^[A-Za-z0-9-]{1,64}$/.test(s.tokenHeader)) {
+      return problem("tokenHeader must be a plain header name ([A-Za-z0-9-], max 64)");
+    }
+  }
+  if (s.label !== undefined && (typeof s.label !== "string" || s.label.length < 1 || s.label.length > 100)) {
+    return problem("label must be 1-100 characters");
+  }
+  if (s.vendor === "jira" && (s.label === undefined || s.label === "")) {
+    return problem('jira sources need label: the label whose presence maps an issue to ticket.labelled');
+  }
   if (s.replayWindowSeconds !== undefined && (!Number.isInteger(s.replayWindowSeconds) || s.replayWindowSeconds < 60 || s.replayWindowSeconds > 3_600)) {
     return problem("replayWindowSeconds must be an integer between 60 and 3600");
   }
@@ -376,7 +428,7 @@ export function conditionsMatch(event: ShipEvent, when: Condition[] | undefined)
 
 export function eventAttr(event: ShipEvent, attr: string): string {
   const value = attrValue(event, attr);
-  return value === undefined ? "" : oneLine(String(value), SUBST_MAX);
+  return value === undefined ? "" : oneLine(String(value), EVENT_SUBST_MAX);
 }
 
 /**
@@ -389,12 +441,12 @@ export function renderEventTemplate(template: string, rule: Pick<EventRule, "id"
     if (token === "rule.id") return rule.id;
     if (token === "source") return event.source;
     if (token === "type") return event.type;
-    if (token === "subject") return oneLine(event.subject, SUBST_MAX);
-    if (token === "eventId") return oneLine(event.eventId, SUBST_MAX);
+    if (token === "subject") return oneLine(event.subject, EVENT_SUBST_MAX);
+    if (token === "eventId") return oneLine(event.eventId, EVENT_SUBST_MAX);
     // title/detail were clamped and redacted by the adapter; detail keeps
     // its full budget so a template cannot silently halve the report.
-    if (token === "title") return oneLine(event.title, TITLE_MAX);
-    if (token === "detail") return event.detail.slice(0, DETAIL_MAX);
+    if (token === "title") return oneLine(event.title, EVENT_TITLE_MAX);
+    if (token === "detail") return event.detail.slice(0, EVENT_DETAIL_MAX);
     if (token.startsWith("attr.")) return eventAttr(event, token.slice(5));
     return "";
   });
@@ -462,7 +514,7 @@ export function shipEventFromEnvelope(
     for (const [key, value] of Object.entries(d.attrs as Record<string, unknown>).slice(0, 40)) {
       const v = scalar(value);
       if (v === undefined) continue;
-      attrs[oneLine(key, 60)] = typeof v === "string" ? safeForDisplay(v, SUBST_MAX) : v;
+      attrs[oneLine(key, 60)] = typeof v === "string" ? safeForDisplay(v, EVENT_SUBST_MAX) : v;
     }
   }
   let seq: number | undefined;
@@ -485,8 +537,8 @@ export function shipEventFromEnvelope(
       occurredAt: new Date(Date.parse(envelope.occurredAt)).toISOString(),
       ...(seq !== undefined ? { seq } : {}),
       ...(repoHint !== undefined ? { repoHint } : {}),
-      title: safeForDisplay(oneLine(d.title, TITLE_MAX + 60), TITLE_MAX),
-      detail: safeForDisplay(typeof d.detail === "string" ? d.detail.replace(/\s+/g, " ").trim() : "", DETAIL_MAX),
+      title: safeForDisplay(oneLine(d.title, EVENT_TITLE_MAX + 60), EVENT_TITLE_MAX),
+      detail: safeForDisplay(typeof d.detail === "string" ? d.detail.replace(/\s+/g, " ").trim() : "", EVENT_DETAIL_MAX),
       attrs,
     },
   };
@@ -584,7 +636,7 @@ export function decideEvent(
 
   const base = renderEventTemplate(rule.dedupeKey, rule, event);
   const dedupeKey = episodeDedupeKey(base, rule, episode);
-  const title = oneLine(renderEventTemplate(rule.task.titleTemplate, rule, event), TITLE_MAX);
+  const title = oneLine(renderEventTemplate(rule.task.titleTemplate, rule, event), EVENT_TITLE_MAX);
   const repo = rule.task.repoFrom === "fixed" ? rule.task.repo : resolvedRepo;
   const input: ProposeInput = {
     // The "events:" prefix is the policy namespace: an operator turns a
@@ -596,7 +648,7 @@ export function decideEvent(
     title,
     // Detail keeps its newlines (every substituted value was clamped and
     // redacted individually); only the total is bounded here.
-    detail: clipText(renderEventTemplate(rule.task.detailTemplate, rule, event), DETAIL_MAX),
+    detail: clipText(renderEventTemplate(rule.task.detailTemplate, rule, event), EVENT_DETAIL_MAX),
     dedupeKey,
   };
   return {

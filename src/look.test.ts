@@ -185,6 +185,10 @@ test("the session script is the receipt's verified launch: decomposed proxy, hea
   assert.match(source, /server: `\$\{u\.protocol\}\/\/\$\{u\.host\}`/);
   assert.match(source, /username: decodeURIComponent\(u\.username\)/);
   assert.match(source, /password: decodeURIComponent\(u\.password\)/);
+  // Loopback bypasses the proxy (the agent's own dev server), and Playwright's
+  // forced <-loopback> rule is disabled so the bypass actually applies.
+  assert.match(source, /bypass: "localhost,127\.0\.0\.1,\[::1\]"/);
+  assert.match(source, /PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK = "1"/);
   assert.match(source, /--disable-background-networking/);
   assert.match(source, /--headless=new/);
   assert.match(source, /--remote-debugging-port=9222/);
@@ -403,6 +407,15 @@ test("flag off: the session the driver spawns is LOOK_SESSION verbatim; flag on:
   const script = on.files.get(".teploy-agent/look-session.mjs")!;
   assert.ok(script.startsWith(LOOK_SESSION), "the launch contract is unchanged — the recorder is appended, never spliced in");
   assert.match(script, /Page\.startScreencast/);
+  // A static page never repaints after the screencast starts: one still per
+  // load guarantees at least one frame (live finding 2026-10-18).
+  assert.match(script, /Page\.captureScreenshot/);
+  assert.match(script, /page\.on\("load"/);
+  // A launched Browser lists no default context, so the recorder must watch
+  // through its own CDP connection (probed in the sandbox image 2026-10-18:
+  // launched view 0 pages, CDP view 1).
+  assert.match(script, /const recView = await chromium\.connectOverCDP\("http:\/\/127\.0\.0\.1:9222"\)/);
+  assert.doesNotMatch(script.slice(LOOK_SESSION.length), /browser\.contexts\(\)/);
   assert.match(script, /format: "jpeg", quality: 60, maxWidth: 960, maxHeight: 600, everyNthFrame: 2/, "the design's capture parameters, verbatim");
   assert.match(script, /rec: cap reached/, "the frame/byte caps stop loudly");
   assert.ok(script.includes(`"${LOOK_REC_DIR}"`), "frames and the captured page text land under the rec dir");

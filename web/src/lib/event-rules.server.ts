@@ -11,12 +11,14 @@ import {
   eventRulesMode,
   eventSourceSecret,
   parseEventEnvelope,
+  ruleSeesEvent,
   shipEventFromEnvelope,
   decideEvent,
   type EventRule,
   type ShipEvent,
   type EventSourceRecord,
 } from "../../../dist/event-rules.js";
+import { eventVendorAdapter, vendorSignatureCoversTimestamp } from "../../../dist/event-adapters/index.js";
 import {
   getEventRule,
   getEventSource,
@@ -25,6 +27,7 @@ import {
   listSeenEvents,
   processEvent,
   readSubject,
+  recordSeenEvent,
   saveEventRule,
   saveEventSource,
 } from "../../../dist/event-subjects.js";
@@ -52,6 +55,11 @@ import { shipRuntime } from "./store.server.js";
  * Sources without a real signature (shared-secret) are accepted as
  * first-class senders but can never carry an auto rule: that refusal is
  * validateEventRule's, enforced at save (Decision 12, 2026-10-17).
+ *
+ * EV4 adds the vendor leg: a source whose record declares a vendor (Sentry,
+ * Datadog, PagerDuty v3, Jira, GitLab) is verified and mapped by that
+ * vendor's adapter (src/event-adapters/) instead of the envelope parser,
+ * behind the same flag, claim and processEvent.
  */
 
 /** The minimum a shared-secret token must be, before it is a secret at all. */
@@ -140,6 +148,14 @@ export async function handleEventIntake(request: Request, sourceId: string, d: E
     throw error;
   }
 
+  // EV4: a source that declares a vendor speaks that vendor's webhook, not
+  // the S24 envelope. Same discipline, different wire format: verify with
+  // the per-source secret, map to typed events, claim the vendor's delivery
+  // id, then the same processEvent the envelope path feeds.
+  if (source.vendor !== undefined) {
+    return handleVendorEventIntake(request, source, body, { runtime, env, now, log, mode });
+  }
+
   let envelope: EventEnvelope;
   if (source.auth === "hmac") {
     const verified = verifyEvent(
@@ -203,6 +219,93 @@ export async function handleEventIntake(request: Request, sourceId: string, d: E
     throw error;
   }
   return json(200, { ok: true, mode, outcomes: result.outcomes });
+}
+
+// ---------------------------------------------------------------- vendors
+
+interface VendorIntakeContext {
+  runtime: EventRulesRuntime;
+  env: NodeJS.ProcessEnv;
+  now: () => number;
+  log: (line: string) => void;
+  mode: "shadow" | "on";
+}
+
+/**
+ * The EV4 vendor leg of `/hooks/events/:source`. Layer order matches the
+ * envelope leg exactly: verify (401) -> map (400; a body without the
+ * vendor's own event/delivery id is refused, never deduped on body bytes)
+ * -> durable delivery claim -> soft freshness for schemes whose signature
+ * covers no timestamp -> processEvent through the same propose path. A
+ * delivery whose payload maps to no event (an unhandled resource or type)
+ * is still claimed and answered 200: the sender did nothing wrong.
+ */
+async function handleVendorEventIntake(request: Request, source: EventSourceRecord, body: string, ctx: VendorIntakeContext): Promise<Response> {
+  const { runtime, env, now, log, mode } = ctx;
+  const vendor = source.vendor;
+  if (vendor === undefined) return json(500, { title: "vendor intake on a vendor-less source" });
+  const secret = eventSourceSecret(source.id, env);
+  if (secret === undefined) {
+    return json(503, { title: `event source ${source.id} disabled: its secret is not set (SHIP_EVENT_SECRET_${source.id.toUpperCase().replace(/-/g, "_")})` });
+  }
+  const adapter = eventVendorAdapter(vendor);
+  const opts = {
+    secret,
+    nowMs: now(),
+    auth: source.auth,
+    ...(source.replayWindowSeconds !== undefined ? { replayWindowSeconds: source.replayWindowSeconds } : {}),
+    ...(source.tokenHeader !== undefined ? { tokenHeader: source.tokenHeader } : {}),
+    ...(source.label !== undefined ? { label: source.label } : {}),
+  };
+  const verified = adapter.verify(request.headers, body, opts);
+  if (!verified.ok) {
+    // Authentication failures are 401 with nothing stored; a malformed
+    // signature header is still a failure to authenticate the delivery.
+    return json(verified.status, { title: `bad ${vendor} delivery: ${verified.reason}` });
+  }
+  const mapped = adapter.map(source.id, request.headers, body, opts);
+  if (!mapped.ok) return json(mapped.status, { title: mapped.problem });
+
+  // Layer 1 of dedupe: the durable claim on the vendor delivery id, falling
+  // back to the mapped event's own id (stable across vendor retries).
+  const deliveryId = mapped.deliveryId ?? mapped.events[0]?.eventId ?? null;
+  if (deliveryId !== null && !(await runtime.deliveries.claim(`events:${source.id}`, deliveryId))) {
+    return json(200, { ok: true, skipped: "duplicate delivery" });
+  }
+
+  // Soft freshness for schemes whose signature covers no timestamp; the
+  // GitLab signing token is the one that binds the clock into the MAC and
+  // was rejected above if outside the window.
+  const soft = !vendorSignatureCoversTimestamp(vendor, source.auth);
+  const outcomes: unknown[] = [];
+  const skipped: Array<{ eventId: string; reason: string }> = [];
+  for (const event of mapped.events) {
+    if (soft && now() - Date.parse(event.occurredAt) > (source.maxAgeSeconds ?? 86_400) * 1000) {
+      // Recorded, not acted on: the ring keeps it for a dry run.
+      await recordSeenEvent(runtime.config, source.id, {
+        receivedAt: new Date(now()).toISOString(),
+        deliveryId,
+        eventId: event.eventId,
+        type: event.type,
+        subject: event.subject,
+        occurredAt: event.occurredAt,
+        title: event.title,
+        outcomes: [{ ruleId: "-", outcome: "expired" }],
+      });
+      skipped.push({ eventId: event.eventId, reason: "expired" });
+      continue;
+    }
+    try {
+      const result = await processEvent(makeProcessEventDeps(runtime, log), { sourceId: source.id, event, deliveryId, mode, nowMs: now() });
+      outcomes.push(...result.outcomes);
+    } catch (error) {
+      if (error instanceof RepoNotAllowedError) {
+        return json(403, { title: "repository not allowed", detail: error.message });
+      }
+      throw error;
+    }
+  }
+  return json(200, { ok: true, mode, vendor, outcomes, ...(skipped.length > 0 ? { skipped } : {}) });
 }
 
 // ------------------------------------------------------------- operator API
@@ -282,15 +385,30 @@ export async function handleEventRuleDryRun(ruleId: string, request: Request, d:
   const rule = await getEventRule(runtime.config, ruleId);
   if (rule === null) return json(404, { title: "unknown event rule" });
 
-  let payload: { payload?: string; recorded?: string };
+  let payload: { payload?: string; recorded?: string; headers?: Record<string, string> };
   try {
-    payload = JSON.parse(await request.text()) as { payload?: string; recorded?: string };
+    payload = JSON.parse(await request.text()) as { payload?: string; recorded?: string; headers?: Record<string, string> };
   } catch {
     return json(400, { title: "malformed JSON body" });
   }
 
+  // A vendor source dry-runs the vendor's own payload shape (verification is
+  // skipped: nothing is stored and no rule fires, so the secret is not
+  // needed; headers may be supplied for the ids that travel as headers).
+  const source = await getEventSource(runtime.config, rule.match.source);
+
   let event: ShipEvent | null = null;
-  if (typeof payload.payload === "string") {
+  if (typeof payload.payload === "string" && source?.vendor !== undefined) {
+    const adapter = eventVendorAdapter(source.vendor);
+    const mapped = adapter.map(
+      source.id,
+      new Headers(payload.headers ?? {}),
+      payload.payload,
+      { secret: "", nowMs: now(), auth: source.auth, ...(source.tokenHeader !== undefined ? { tokenHeader: source.tokenHeader } : {}), ...(source.label !== undefined ? { label: source.label } : {}) },
+    );
+    if (!mapped.ok) return json(400, { title: mapped.problem });
+    event = mapped.events.find((e) => ruleSeesEvent(rule, e)) ?? mapped.events[0] ?? null;
+  } else if (typeof payload.payload === "string") {
     const parsed = parseEventEnvelope(payload.payload);
     if (!parsed.ok) return json(400, { title: `malformed event body: ${parsed.reason}` });
     const mapped = shipEventFromEnvelope(rule.match.source, parsed.envelope);

@@ -1,0 +1,69 @@
+{
+  "issue": {
+    "id": "99291",
+    "self": "https://your-domain.atlassian.net/rest/api/2/issue/99291",
+    "key": "JRA-20002",
+    "fields": {
+      "summary": "I feel the need for speed",
+      "created": "2009-12-16T23:46:10.612-0600",
+      "description": "Make the issue nav load 10x faster",
+      "labels": ["UI", "ship"],
+      "priority": {
+        "self": "https://your-domain.atlassian.net/rest/api/2/priority/3",
+        "iconUrl": "https://your-domain.atlassian.net/images/icons/priorities/minor.svg",
+        "name": "Minor",
+        "id": "3"
+      },
+      "project": {
+        "self": "https://your-domain.atlassian.net/rest/api/2/project/EXA",
+        "id": "10000",
+        "key": "EXA",
+        "name": "Example",
+        "projectTypeKey": "software"
+      },
+      "issuetype": {
+        "self": "https://your-domain.atlassian.net/rest/api/2/issuetype/3",
+        "id": "3",
+        "name": "Task",
+        "subtask": false
+      },
+      "status": {
+        "self": "https://your-domain.atlassian.net/rest/api/2/status/10000",
+        "id": "10000",
+        "name": "In Progress"
+      }
+    }
+  },
+  "user": {
+    "self": "https://your-domain.atlassian.net/rest/api/2/user?accountId=99:27935d01-92a7-4687-8272-a9b8d3b2ae2e",
+    "accountId": "99:27935d01-92a7-4687-8272-a9b8d3b2ae2e",
+    "accountType": "atlassian",
+    "displayName": "Bryan Rollins [Atlassian]",
+    "active": "true",
+    "timeZone": "Europe/Warsaw"
+  },
+  "changelog": {
+    "items": [
+      {
+        "toString": "ship",
+        "to": null,
+        "fromString": null,
+        "from": null,
+        "fieldtype": "jira",
+        "field": "labels"
+      },
+      {
+        "toString": "In Progress",
+        "to": "3",
+        "fromString": "To Do",
+        "from": "10000",
+        "fieldtype": "jira",
+        "field": "status"
+      }
+    ],
+    "id": 10124
+  },
+  "timestamp": 1606480536302,
+  "webhookEvent": "jira:issue_updated",
+  "issue_event_type_name": "issue_generic"
+}

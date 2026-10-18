@@ -1,0 +1,106 @@
+ACP initialize receipt — Cursor agent CLI (`cursor-agent`) at 2026.10.16-e3cb207
+Date: 2026-10-18 (local). Worktree /tmp/lane-h0 @ evals/h0-acp-contracts
+(base github/main f3e0ced). Slice E7 H0 (programme E7.2 W3). Probe:
+node scripts/acp-initialize-probe.mjs -- cursor-agent acp (no credentials
+sent; child HOME pointed at a throwaway directory). Not logged in; no model
+call made. T3 reference: packages/provider-cursor (in-process @cursor/sdk
+1.0.35 — the CLI is the new surface).
+
+================================================================================
+1. INSTALL (how, version, size)
+================================================================================
+- NOT npm. The ACP registry entry "cursor" (version 2026.10.16) is a binary
+  distribution; there is no @cursor/agent or cursor-agent package on the
+  public npm registry (404 checked 2026-10-18; the `cursor-agent` npm name
+  belongs to an unrelated third-party package).
+- Binary URL (darwin/arm64 pin):
+  https://downloads.cursor.com/lab/2026.10.16-e3cb207/darwin/arm64/agent-cli-package.tar.gz
+  (linux x64/arm64 and windows equivalents exist in the same entry).
+- Downloaded and extracted locally to /tmp/h0-agents/cursor (never
+  installed): tarball 177,839,943 bytes (~170 MB), unpacked dist-package
+  595 MB, ~110 bundled JS chunks plus the launcher.
+- The registry entry carries NO sha256 for any platform (T3 treats binary
+  sha256 as optional; H9's build-time rule will require it). Locally
+  computed for the darwin/arm64 tarball:
+  sha256 5f04d196a84ddb5c20a4a466bdd74e3695bfb447e3c4a1e6071364b2b9497dd0
+- `cursor-agent --version` -> 2026.10.16-e3cb207.
+
+================================================================================
+2. ACP SUPPORT AND LAUNCH FLAG
+================================================================================
+- Speaks ACP: YES. Subcommand `cursor-agent acp` — help text: "Start the
+  Cursor Agent as an ACP (Agent Client Protocol) server". This settles the
+  design note's open question ("whether the pinned cursor-agent speaks ACP
+  is uncertain"): at 2026.10.16 it does, first-class.
+- The CLI also keeps the one-shot headless path the design note named as
+  fallback: `-p/--print` with `--output-format text|json|stream-json`
+  (and --stream-partial-output for text deltas), i.e. a claude-code-style
+  stream-json LineSpec remains available without ACP.
+- Other useful flags from --help: --mode plan|ask (read-only phases),
+  --sandbox enabled|disabled, --force/--yolo (auto-approve — a Ship profile
+  must never pass these), --endpoint (default https://api2.cursor.sh, env
+  CURSOR_API_ENDPOINT), --api-key (env CURSOR_API_KEY), --resume [chatId],
+  --continue, --list-models, -w/--worktree, --plugin-dir.
+
+================================================================================
+3. INITIALIZE EXCHANGE (verbatim, captured 2026-10-18)
+================================================================================
+Request: as in the gemini receipt (protocolVersion 2 offered, fs/terminal
+client capabilities off).
+Response (one stdout line, answered in 393 ms; no auth required):
+  {"jsonrpc":"2.0","id":1,"result":{
+    "protocolVersion":1,
+    "agentCapabilities":{
+      "loadSession":true,
+      "mcpCapabilities":{"http":true,"sse":true},
+      "promptCapabilities":{"audio":false,"embeddedContext":false,"image":true},
+      "sessionCapabilities":{"list":{}}},
+    "authMethods":[
+      {"id":"cursor_login","name":"Cursor Login",
+       "description":"Authenticate using existing Cursor login credentials. Run 'agent login' first if not logged in."}]}}
+Notes:
+- Client offered protocolVersion 2; agent answered 1.
+- No top-level agentInfo.
+- sessionCapabilities advertises list only (no resume); loadSession:true is
+  present, which is the H5 steering primitive.
+- Only one auth method advertised: cursor_login. The K-class CURSOR_API_KEY
+  path is a CLI-level flag, not an advertised ACP method.
+
+================================================================================
+4. AUTH
+================================================================================
+- initialize requires no credentials (observed).
+- K-class: --api-key / CURSOR_API_KEY (from --help). T3's browser-login flow
+  mints exactly such an API key per install (provider-cursor auth.ts), which
+  is the cleanest subscription story of the five agents.
+- F/T-class: `cursor-agent login` (NO_OPEN_BROWSER=1 supported) stores the
+  session; state lives under ~/.cursor/ (string-literal evidence in the
+  bundled chunks: .cursor/cli.json, .cursor/mcp.json, .cursor/projects,
+  .cursor/agents, plus an "auth.json" literal and cursor_authorization_params
+  in index.js — exact credential filename inside ~/.cursor/ not pinned down
+  beyond that). Not logged in; nothing created.
+
+================================================================================
+5. EGRESS HOSTS (bundled JS chunks; not wire-measured)
+================================================================================
+- api2.cursor.sh      default agent endpoint (--endpoint / CURSOR_API_ENDPOINT)
+- api3.cursor.sh      secondary API host (uncertain role)
+- repo42.cursor.sh    telemetry/reporting (uncertain)
+- cursor.com, www.cursor.com     login/docs/update endpoints
+- downloads.cursor.com           self-update distribution
+- cursor.blob.core.windows.net   asset blob storage (uncertain)
+- staging.cursor.sh / dev-staging.cursor.sh   test builds; must never be
+  reachable from a sandbox profile
+
+================================================================================
+6. UNCERTAIN / NOT VERIFIED
+================================================================================
+- Whether `cursor-agent acp` honours CURSOR_API_KEY for headless runs
+  (initialize advertises only cursor_login; a full authenticated round was
+  not run).
+- Which egress hosts fire in a headless ACP run (empty-allowlist sandbox
+  measurement pending).
+- Exact credential file path inside ~/.cursor/ (auth.json literal found;
+  layout not enumerated without logging in).
+- Linux packaging of the 595 MB dist-package for the sandbox image (the
+  registry ships linux x64/arm64 archives; not unpacked here).

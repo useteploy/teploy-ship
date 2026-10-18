@@ -81,6 +81,8 @@ export { priorRunContext } from "../../../dist/prior-run-context.js";
 // DF1 (SHIP_FORK): the flag and the forkable-status rule, server-only like
 // everything else here (the page payload carries the computed booleans).
 export { forkEnabled, isForkableSourceStatus } from "../../../dist/fork.js";
+// DS1 (SHIP_STACKED_PRS): the flag, same posture as the fork's.
+export { stackedPrsEnabled } from "../../../dist/stacked-pr.js";
 
 export { projectReference, ProjectIdentityError } from "../../../dist/projects.js";
 

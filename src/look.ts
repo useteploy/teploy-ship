@@ -173,7 +173,9 @@ export function renderLook(action: { find?: string | null; ref?: string | null }
  * usable). Chromium on Linux reads the proxy env vars but STRIPS the URL
  * userinfo, so the per-run credential must arrive as an explicit
  * proxy:{server,username,password} — an env-only launch dies at the daemon's
- * 407 with a silent empty response (receipt §4, measured live). The open tier
+ * 407 with a silent empty response (receipt §4, measured live). Loopback
+ * bypasses the proxy so `look` can see a dev server the agent started in its
+ * own container; nothing beyond the container's loopback is reachable that way. The open tier
  * injects no proxy env, and `proxy` stays undefined there on purpose.
  *
  * Exported only so the test suite can pin the launch contract — the receipt's
@@ -190,7 +192,14 @@ if (raw) {
     server: \`\${u.protocol}//\${u.host}\`,    // NO userinfo
     username: decodeURIComponent(u.username),// "run"
     password: decodeURIComponent(u.password),// per-run credential
+    // The agent's own dev server runs on this container's loopback; the
+    // egress proxy refuses every local address, so loopback must not go
+    // through it (found live 2026-10-18: look could not see :8000).
+    bypass: "localhost,127.0.0.1,[::1]",
   };
+  // Playwright otherwise appends <-loopback>, forcing loopback THROUGH the
+  // proxy and overriding the bypass above.
+  process.env.PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK = "1";
 }
 const browser = await chromium.launch({
   executablePath: process.env.CHROMIUM_BIN ?? "/usr/bin/chromium",
@@ -250,10 +259,9 @@ async function watch(page) {
   watched.add(page);
   try {
     const cdp = await page.context().newCDPSession(page);
-    cdp.on("Page.screencastFrame", async (frame) => {
-      try { await cdp.send("Page.screencastFrameAck", { sessionId: frame.sessionId }); } catch {}
+    const keep = async (data) => {
       if (capped) { try { await cdp.send("Page.stopScreencast"); } catch {} return; }
-      const jpg = Buffer.from(frame.data, "base64");
+      const jpg = Buffer.from(data, "base64");
       if (frames >= MAX_FRAMES || bytes + jpg.length > MAX_BYTES) {
         stopCapture(frames >= MAX_FRAMES ? "frame" : "byte");
         try { await cdp.send("Page.stopScreencast"); } catch {}
@@ -262,12 +270,33 @@ async function watch(page) {
       fs.writeFileSync(REC + "/f" + String(frameSeq++).padStart(5, "0") + ".jpg", jpg);
       frames += 1; bytes += jpg.length;
       await captureText(page);
+    };
+    // A static page paints once, often before the screencast starts, and then
+    // never repaints, so the screencast alone records nothing (found live
+    // 2026-10-18). One still per load gives every page at least one frame.
+    const still = async () => {
+      try {
+        const shot = await cdp.send("Page.captureScreenshot", { format: "jpeg", quality: 60 });
+        await keep(shot.data);
+      } catch { /* a page mid-navigation has nothing to show yet */ }
+    };
+    cdp.on("Page.screencastFrame", async (frame) => {
+      try { await cdp.send("Page.screencastFrameAck", { sessionId: frame.sessionId }); } catch {}
+      await keep(frame.data);
     });
+    page.on("load", () => void still());
     await cdp.send("Page.startScreencast", { format: "jpeg", quality: 60, maxWidth: 960, maxHeight: 600, everyNthFrame: 2 });
+    await still();
     await captureText(page);
   } catch { /* a closing page is not a failure of the session */ }
 }
-for (const context of browser.contexts()) for (const page of context.pages()) await watch(page);
+// The driver opens its pages in the browser's DEFAULT context over its own
+// CDP connection, and a launched Browser does not list that context in
+// contexts() — so the recorder watched nothing (found live 2026-10-18). It
+// connects over CDP the same way the driver does and watches those pages.
+const recView = await chromium.connectOverCDP("http://127.0.0.1:${LOOK_CDP_PORT}");
+const recPages = () => recView.contexts().flatMap((context) => context.pages());
+for (const page of recPages()) await watch(page);
 // New pages and tabs join on the next tick; the same tick is the finaliser's
 // stop signal, so capture ends when the recording is assembled.
 setInterval(() => {
@@ -275,7 +304,7 @@ setInterval(() => {
     if (!capped) { capped = "finalised"; try { fs.unlinkSync(REC + "/stop"); } catch {} }
     return;
   }
-  for (const context of browser.contexts()) for (const page of context.pages()) void watch(page);
+  for (const page of recPages()) void watch(page);
 }, 1000);
 `;
 

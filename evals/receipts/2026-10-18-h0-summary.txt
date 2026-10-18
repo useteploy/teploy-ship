@@ -1,0 +1,109 @@
+H0 summary — ACP contracts at pinned versions + D6 adapter cost (opens D8)
+Date: 2026-10-18 (local). Worktree /tmp/lane-h0 @ evals/h0-acp-contracts
+(base github/main f3e0ced). Slice E7 H0 (programme E7.2 W3; design note
+"Harness breadth" sections 2-4 and 6). Driver committed at
+scripts/acp-initialize-probe.mjs (plain node, no deps, no secrets; its only
+I/O is spawning the probed CLI and stdio). Agents were installed into
+throwaway /tmp/h0-agents/<name> trees with npm --prefix (never global) or,
+for cursor, a downloaded tarball; none of that is committed. Every probe ran
+with HOME pointed at an empty throwaway directory; no agent was logged in
+and no credentials existed in the environment. Per-agent receipts:
+2026-10-18-acp-gemini.txt, -grok.txt, -cursor.txt, -pi.txt, -qwen-code.txt.
+
+================================================================================
+1. TABLE (all facts observed at the pinned binary unless marked)
+================================================================================
+
+Agent    Pin / install                      ACP? flag / transport      initialize (no creds)          auth methods advertised           auth file (F/T)                  egress (source; not wire-measured)
+Gemini   @google/gemini-cli@0.64.0          yes — `--acp`              1 (offered 2), 832 ms          oauth-personal, gemini-api-key,  ~/.gemini/oauth_creds.json       generativelanguage.googleapis.com;
+         npm, 94 MB unpacked                (--experimental-acp is     loadSession:true; no           vertex-ai, gateway               (+ google_accounts.json,         cloudcode-pa + oauth2 + accounts.google.com;
+         (95 MB tree)                        deprecated alias)          sessionCapabilities           (env key = K-class)              gemini-credentials.json)         Vertex: monitoring/cloudresourcemanager/
+                                                                                                                                                  iamcredentials/storage.googleapis.com
+Grok     @xai-official/grok@1.0.63          yes — `grok agent stdio`   1 (offered 2), 592 ms          grok.com ONLY (even with         ~/.grok/auth.json (+ .lock;       api.x.ai/v1; cli-chat-proxy.grok.com;
+         npm stub 18 KB -> grok-native      asking mode via            loadSession:true;              XAI_API_KEY set); K-class is     GROK_HOME overrides)             accounts.x.ai; auth.x.ai; console.x.ai;
+         168 MB (215 MB tree,               --permission-mode default  sessionCapabilities            xai.api_key chosen client-side                                    computer-hub/code.grok.com; OTLP env-gated
+         grok.br 47 MB decompressed                                                                    at authenticate (T3), NOT
+         offline at install)                                                                           advertised
+Cursor   binary 2026.10.16-e3cb207          YES — `cursor-agent acp`   1 (offered 2), 393 ms          cursor_login only; K-class       ~/.cursor/ (auth.json literal     api2.cursor.sh (default endpoint);
+         (registry binary, NOT npm;        (also -p --output-format   loadSession:true;              CURSOR_API_KEY is a CLI flag,    in chunks; exact path not         api3/repo42.cursor.sh; cursor.com;
+         tarball 170 MB, unpacked           stream-json one-shot       sessionCapabilities list       not an ACP method                pinned)                          downloads.cursor.com;
+         595 MB; registry entry             fallback)                  only (no resume)                                                                                 cursor.blob.core.windows.net
+         has NO sha256)
+Pi       @earendil-works/pi-coding-         no — own LF JSON RPC       no initialize exists;          provider keys (multi-provider    ~/.pi/agent/auth.json (+          per-provider (opencode-shaped table);
+         agent@1.3.0, npm, 23 MB            `pi --mode rpc`; commands  get_state/get_available_models K-class)                        oauth.json, sessions/)          none found in-package beyond
+         (25 MB tree); T3 min 0.80.5        new_session/prompt/abort/  answered auth-free; sessionId    (no ACP authMethods              PI_CODING_AGENT_DIR overrides     providers; update via npm
+                                            steer                      present even with --no-session  concept)
+Qwen     @qwen-code/qwen-code@0.25.2        yes — `--acp`              1 (offered 2), 1369 ms         openai (OPENAI_API_KEY env,     ~/.qwen/.env (OAuth filename      dashscope/coding(-intl).dashscope.
+Code     npm, 140 MB (generic registry      (registry also passes      loadSession:true;              _meta type "terminal") — a      not pinned)                      aliyuncs.com; token-plan.*.maas.
+         agent, Apache-2.0, npx pin)        --experimental-skills)     sessionCapabilities            generic-agent caution: an                                              aliyuncs.com; qwen-code-assets.oss-
+                                                                    list+resume                    env-key method carrying _meta                                      cn-hangzhou.aliyuncs.com; qwen.ai
+                                                                                                   T3 would refuse as non-agent
+
+Cross-cutting observations:
+- All four ACP agents answered protocolVersion 1 to a client offering 2.
+  T3's pinned schema generation is 2 (PROTOCOL_VERSION = 2); real agents at
+  these pins negotiate down. ship-acp must accept 1 in the initialize
+  result and record it in preflight.
+- initialize needed no credentials on every agent probed (incl. the binary
+  cursor distribution). Auth is a post-initialize concern (authenticate /
+  auth_required), matching T3's runtime.
+- No agent advertised resume-capable sessionCapabilities AND an env-key
+  method at the same time: cursor has list-only; grok has list+resume+close
+  but only the subscription method advertised; qwen has list+resume.
+  Steering (H5) keys off loadSession:true, which all four ACP agents set.
+- The ACP registry (v1.0.0, 42 agents, cdn.agentclientprotocol.com,
+  fetched 2026-10-18) already pins gemini, grok-build, cursor and qwen-code;
+  its cursor binary entry has no sha256 (H9's mandatory-sha256 rule for
+  binaries is stricter than the registry, and this is the concrete case).
+
+================================================================================
+2. D6 ADAPTER COST (recorded; opens the D8 gate)
+================================================================================
+D6 = the opencode v2 adapter, the most recent bespoke adapter. Source: git
+history of src/harness-external.ts around PR #101 in this repo.
+
+- Measured contract first: evals/receipts/2026-10-14-opencode-v2-events.txt
+  (PROOF C, event contract of opencode 2.0.26 vs 1.x, recorded 2026-10-14).
+- Adapter landed: commit 0d67082 "feat(harness): OpenCode v2 adapter +
+  session-resume steering for opencode and claude-code (D6/D7)", merged as
+  PR #101 (627a370) on 2026-10-16 — receipt-to-merge gap of two days.
+- Commit size: 19 files, +1151 / -279 total. The adapter core,
+  src/harness-external.ts: +437 / -91. The largest other hunks are the
+  parser tests (src/harness-external.test.ts ~447 changed lines) and
+  capability/conformance updates (harness-capabilities.ts 69,
+  harness-probes.ts 40).
+- Parser today: parseOpencode2Stream is 63 lines of code plus a 21-line
+  measured-contract comment (src/harness-external.ts:649-732); the whole
+  bespoke-adapter file is 1479 lines for three vendors (claude, opencode
+  1+2, codex) — consistent with the design note's "about 1,400 lines".
+- What that cost bought per vendor: invocation selection, preflight,
+  JSONL event parser, live tracker, usage/pricing honesty, steering
+  resume, and the replay pin. The ACP thesis (D8) is that initialize +
+  session/update + request_permission replace the per-vendor parser and
+  permission guesswork for the new agents, at the price of one driver.
+- Codex comparison from the same file: commit efdd56c (codex exec --json
+  adapter, PR #100) — the codex parser is similarly sized; both adapters
+  needed a receipt before code, which is the process cost ACP profiles
+  would not pay per agent (only the generic conformance suite, once).
+
+================================================================================
+3. UNCERTAIN (consolidated; each is in the per-agent receipt)
+================================================================================
+- Egress sets are string-literal evidence from the pinned artifacts, not
+  wire measurements. The programme's empty-allowlist sandbox measurement is
+  the follow-up; this lane had no sandbox.
+- Grok: ~/.grok layout beyond auth.json/auth.json.lock; which hosts a
+  headless run touches.
+- Cursor: whether `cursor-agent acp` honours CURSOR_API_KEY headless;
+  exact credential filename inside ~/.cursor/; Linux image packaging of the
+  595 MB dist-package.
+- Pi: RPC command drift between T3's 0.80.x-era protocol and 1.3.0 (only
+  get_state/get_available_models exercised); provider host table.
+- Qwen: what the advertised OPENAI_API_KEY method targets at this pin;
+  OAuth filename under ~/.qwen/.
+- Antigravity was deliberately not probed (design note: separate image,
+  owner Decision 20 pending). Its initialize shape for H3 tests comes from
+  the T3 fixture antigravity-initialize.json — note that fixture is a
+  protocolVersion 2 response (with sessionCapabilities list/resume and an
+  auth.logout capability), a shape none of the four probed real agents
+  produced (all answered 1).

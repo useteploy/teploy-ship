@@ -17,7 +17,7 @@ import { publicOrigin } from "./oidc.server.js";
 import { previewFrameBase } from "./preview-frame.server.js";
 import { parseSupersededMark, previewSupersededKey } from "../../../dist/preview-supersede.js";
 import { unknownEscalation } from "../../../dist/delivery.js";
-import { costUSD, isPricedModel, pendingQuestion, verificationFactsFromEvents, forkEnabled, isForkableSourceStatus } from "./ship.server.js";
+import { costUSD, isPricedModel, pendingQuestion, verificationFactsFromEvents, forkEnabled, isForkableSourceStatus, stackedPrsEnabled } from "./ship.server.js";
 import { typicalDuration } from "./expect.js";
 import type { Typical } from "./expect.js";
 import { isAskEvent } from "teploy-ship/ask";
@@ -75,6 +75,14 @@ export interface RunData {
   canLaunch: boolean;
   /** DF1 (SHIP_FORK): the Fork action may be offered (flag on, forkable source, launch authority). */
   canFork: boolean;
+  /**
+   * DS1 (SHIP_STACKED_PRS): the Stack action may be offered — flag on, launch
+   * authority, and this run OPENED a pull request (`repo-pr` step) that is not
+   * itself stacked and is not known to have closed. The live forge read is
+   * best-effort: an unknown state still offers and the enqueue behind the
+   * action re-refuses every unstackable run by name.
+   */
+  canStack: boolean;
   planSupported: boolean;
   requirePlanReview: boolean;
   hasPr: boolean;
@@ -291,6 +299,7 @@ export async function runData({ params, request }: { params: { id: string }; req
     }
     const { history } = await threadHistory(runtime, runId);
     const forgeRaw = await runtime.config.get("SHIP_FORGE_STATE_" + runId);
+    const forge: WorkspaceReply | null = forgeRaw ? (JSON.parse(forgeRaw) as WorkspaceReply) : null;
     // The reverse link a newer revision left when it removed this run's
     // preview (preview-supersede.ts). Advisory: unreadable means "not marked".
     const superseded = parseSupersededMark(await runtime.config.get(previewSupersededKey(runId)).catch(() => undefined));
@@ -373,10 +382,22 @@ export async function runData({ params, request }: { params: { id: string }; req
     // Flag off, an in-flight source or a missing grant each hide the button
     // AND are refused again by the route and the enqueue behind it.
     const launchAuthority = projectError === null && await may('approve', await currentUser(request));
+    // DS1: the stack action stands here too, on the runs a stack may ride —
+    // one that OPENED a pull request of its own (the recorded `repo-pr` step;
+    // a follow-up that only revised someone else's PR never did) and is not
+    // itself a stack (one level deep). The forge state, when a read exists,
+    // hides the button on a closed or merged PR; an unknown state still
+    // offers and the enqueue re-refuses by name, the same belt-and-offer
+    // posture the fork takes over settledness.
+    const stackBaseInput = (started?.data as { input?: { stack?: unknown } } | undefined)?.input?.stack;
+    const stackPrOpen = forge?.forge === undefined || forge.forge.state === "open";
+    const canStack =
+      meta !== null && stackedPrsEnabled() && facts.pr !== undefined && stackBaseInput === undefined &&
+      stackPrOpen && launchAuthority;
     const data: RunData = {
       userMessage: (started?.data as any)?.input?.userMessage,
       journey: (started?.data as any)?.input?.journey,
-      forge: forgeRaw ? JSON.parse(forgeRaw) : null,
+      forge,
       workspace: await workspaceInspection(runtime, runId),
       recovery: workspaceRecovery(events),
       ancestors: history.slice(0,-1).map(h => ({ runId: h.runId, task: h.task, messages: conversation(h.events).slice(-20) })),
@@ -395,6 +416,7 @@ export async function runData({ params, request }: { params: { id: string }; req
       requirePlanReview: currentProject?.requirePlanReview === true,
       canLaunch: launchAuthority,
       canFork: meta !== null && forkEnabled() && isForkableSourceStatus(meta.status, meta.eventName) && launchAuthority,
+      canStack,
       messageError: query.get('messageError') ?? projectError,
       ...(deliveryRecord !== null
         ? {

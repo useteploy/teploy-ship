@@ -843,6 +843,33 @@ thing off — set it if a repo's cached tree is ever suspected of poisoning runs
 and drop that repo's template with
 `curl -X DELETE -H "authorization: Bearer $TOKEN" $SHIP_SANDBOX_URL/v1/warmcache/<slug>`.
 
+<a id="snapshot-gc"></a>
+#### Snapshot housekeeping (park images)
+
+Every park takes a snapshot image (`teploy-sbx-snap:*`) and the restore that
+ends the park never deleted it: merge-park and delegate-park images
+accumulated by the hundred on long-lived hosts. The worker now sweeps them
+(`src/snapshot-gc.ts`), once a minute like the warm-thread sweeper: an image
+is deleted only when the run that took it is terminal (completed, failed or
+cancelled — a run parked at a decision KEEPS its image, that is what it
+restores from) and no live warm-thread record points at it (a merge-park
+image that became its thread's warmth survives until that record expires).
+Deletion failures are logged as `[snapshot-gc]` lines and retried the next
+pass; they never affect a run.
+
+Notes for operators:
+
+- The sweeper is active only when every host in `SHIP_SANDBOX_URL` supports
+  explicit snapshot deletion (the same all-or-nothing rule as taking them).
+- Each pass examines the newest 200 runs only. Images of runs older than
+  that — including the backlog from before this sweeper existed — are not
+  reached: clean those once by hand on each sandbox host
+  (`docker images 'teploy-sbx-snap:*'` then `docker rmi` what no live
+  thread-warm record names).
+- Watching a host: `docker images 'teploy-sbx-snap:*' | wc -l` should fall
+  to roughly (live warm records + parked runs' images) after the first
+  passes.
+
 <a id="sandbox-images"></a>
 ### Sandbox images
 
