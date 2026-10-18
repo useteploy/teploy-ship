@@ -144,6 +144,30 @@ test("the driver's containment policy admits the workspace and nothing else", as
   assert.equal(decide("edit", [{ path: "notes.md" }]).decision, "allow");
   assert.equal(decide("edit", [{ path: "../notes.md" }]).decision, "deny");
 
+  // Path-like rawInput fields are gated with the same workspace check: a
+  // move whose destination appears ONLY in rawInput cannot walk outside.
+  assert.equal(
+    driver.acpPermissionDecision({ workspaceRoot: root, cwd: work, kind: "move", locations: [{ path: join(work, "a.txt") }], rawInput: { destination: "/etc/ship-acp-must-not-exist" } }).decision,
+    "deny",
+  );
+  assert.equal(
+    driver.acpPermissionDecision({ workspaceRoot: root, cwd: work, kind: "move", locations: [{ path: join(work, "a.txt") }], rawInput: { destination: join(work, "b.txt") } }).decision,
+    "allow",
+  );
+  // A read whose only path-like field is in rawInput is gated too.
+  assert.equal(driver.acpPermissionDecision({ workspaceRoot: root, cwd: work, kind: "read", locations: [], rawInput: { target: "/etc/passwd" } }).decision, "deny");
+  assert.equal(driver.acpPermissionDecision({ workspaceRoot: root, cwd: work, kind: "read", locations: [], rawInput: {} }).decision, "allow");
+  // rawInput cannot SUBSTITUTE for locations on a mutation: an edit whose
+  // target the driver cannot see as a location is denied, not guessed at.
+  assert.equal(driver.acpPermissionDecision({ workspaceRoot: root, cwd: work, kind: "edit", locations: [], rawInput: { filePath: join(work, "x") } }).decision, "deny");
+  assert.match(
+    driver.acpPermissionDecision({ workspaceRoot: root, cwd: work, kind: "move", locations: [{ path: join(work, "a") }], rawInput: { destination: "/etc/pwned" } }).reason ?? "",
+    /rawInput destination "\S+" is outside the workspace/,
+  );
+  // execute/fetch rawInput is not path-gated — the container and the egress
+  // allowlist are those boundaries.
+  assert.equal(driver.acpPermissionDecision({ workspaceRoot: root, cwd: work, kind: "execute", locations: [], rawInput: { command: "cat /etc/passwd" } }).decision, "allow");
+
   // Kinds: the sandbox boundary and the egress allowlist decide elsewhere.
   assert.equal(decide("execute", []).decision, "allow");
   assert.equal(decide("fetch", [{ path: "https://example.test" }]).decision, "allow");
@@ -212,7 +236,7 @@ test("negative control: every outside-workspace write is denied and nothing outs
   const { record } = await driveGemini(rig);
   assert.equal(record.status, "finished");
   assert.equal(record.permissions?.allowed, 1, "exactly the in-workspace write");
-  assert.equal(record.permissions?.denied, 6, "etc, dotdot, symlink, broken symlink, no-locations, unknown kind");
+  assert.equal(record.permissions?.denied, 7, "etc, dotdot, symlink, broken symlink, no-locations, unknown kind, rawInput destination");
   const denials = record.permissions?.denials ?? [];
   assert.ok(denials.some((d) => d.startsWith("edit /etc/ship-acp-must-not-exist:") && /outside the workspace/.test(d)), denials.join("; "));
   assert.ok(denials.some((d) => /outside-dotdot:/.test(d) && /outside the workspace/.test(d)), denials.join("; "));
@@ -220,13 +244,15 @@ test("negative control: every outside-workspace write is denied and nothing outs
   assert.ok(denials.some((d) => /broken-link\//.test(d) && /does not canonicalize/.test(d)), denials.join("; "));
   assert.ok(denials.some((d) => /no locations is denied/.test(d)), denials.join("; "));
   assert.ok(denials.some((d) => /teleport/.test(d) && /unknown or ungated tool kind/.test(d)), denials.join("; "));
+  assert.ok(denials.some((d) => /move denied: rawInput destination/.test(d)), `the move whose destination appears only in rawInput is denied: ${denials.join("; ")}`);
   // The peer's own transcript: every denial was answered reject_once.
   const log = (await readFile(rig.log, "utf8")).trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
   const answered = log.filter((e) => e.event === "permission");
-  assert.equal(answered.filter((e) => e.optionId === "reject").length, 6);
+  assert.equal(answered.filter((e) => e.optionId === "reject").length, 7);
   assert.equal(answered.filter((e) => e.optionId === "allow").length, 1);
   // Nothing outside the workspace exists: /etc untouched, no sibling escapes.
   assert.equal(await readFile("/etc/ship-acp-must-not-exist", "utf8").catch(() => "absent"), "absent");
+  assert.equal(await readFile("/etc/ship-acp-must-not-exist-rawinput", "utf8").catch(() => "absent"), "absent", "the rawInput destination was never written");
   assert.equal(await readFile(join(rig.work, "..", "outside-dotdot"), "utf8").catch(() => "absent"), "absent");
   assert.equal(await readFile("/outside-symlink", "utf8").catch(() => "absent"), "absent");
   // The one allowed write went to the (fresh, not-yet-existing) nested path.

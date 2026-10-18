@@ -16,11 +16,14 @@
 //   prompt response {stopReason}    ->  usage + stop events
 //
 // Permission policy (fail-closed; see docs/adapters.md "ACP harnesses"):
-//   read/search/think  allow when every location canonicalises inside the
-//                      workspace; a request with no locations targets nothing
-//                      and is allowed
-//   edit/delete/move   allow only when EVERY location canonicalises, through
-//                      realpath, inside the workspace; no locations -> deny
+//   read/search/think  allow when every location — and every path-like
+//                      rawInput field (destination, newPath, path, filePath,
+//                      target) — canonicalises inside the workspace; a
+//                      request naming nothing targets nothing and is allowed
+//   edit/delete/move   allow only when EVERY location and path-like rawInput
+//                      field canonicalises, through realpath, inside the
+//                      workspace; no locations -> deny (rawInput cannot
+//                      substitute for them)
 //   execute            allow — the sandbox container is the boundary, the same
 //                      authority decision every external harness makes
 //   fetch              allow — the sandbox egress allowlist decides
@@ -210,6 +213,25 @@ export function resolveAcpPermissionPath(path, cwd) {
   return `${cwd}${cwd.endsWith(sep) ? "" : sep}${trimmed}`;
 }
 
+/**
+ * Path-like fields a tool puts in rawInput when the structured locations do
+ * not carry them. A move is the case that matters: the request names its
+ * SOURCE as a location and its destination ONLY in rawInput — a policy that
+ * reads locations alone would let that destination walk anywhere.
+ */
+export const ACP_RAW_INPUT_PATH_FIELDS = ["destination", "newPath", "path", "filePath", "target"];
+
+/** The path-like rawInput values of a permission request, each with the field it came from. */
+export function acpRawInputPathCandidates(rawInput) {
+  if (rawInput === null || typeof rawInput !== "object" || Array.isArray(rawInput)) return [];
+  const out = [];
+  for (const field of ACP_RAW_INPUT_PATH_FIELDS) {
+    const value = rawInput[field];
+    if (typeof value === "string" && value.trim() !== "") out.push({ path: value, origin: `rawInput ${field}` });
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // The permission policy
 // ---------------------------------------------------------------------------
@@ -225,18 +247,27 @@ export const ACP_UNGATED_KINDS = new Set(["execute", "fetch"]);
 
 /**
  * The fail-closed disposition for one permission request, given the canonical
- * workspace root, the tool kind and the location paths as the agent wrote
- * them. Returns allow/deny with a reason the run records verbatim.
+ * workspace root, the tool kind, the location paths as the agent wrote them
+ * and the request's rawInput. Path-like rawInput fields (destination,
+ * newPath, path, filePath, target — acpRawInputPathCandidates) are gated with
+ * the same workspace check as locations, so a tool that names its target only
+ * in rawInput cannot walk outside either. Returns allow/deny with a reason
+ * the run records verbatim.
  */
-export function acpPermissionDecision({ workspaceRoot, cwd, kind, locations }) {
+export function acpPermissionDecision({ workspaceRoot, cwd, kind, locations, rawInput }) {
   const paths = Array.isArray(locations) ? locations.map((l) => (typeof l === "string" ? l : l?.path)) : [];
+  const rawCandidates = acpRawInputPathCandidates(rawInput);
+  const candidates = [
+    ...paths.map((path) => ({ path, origin: "location" })),
+    ...rawCandidates.map(({ path, origin }) => ({ path, origin })),
+  ];
   const kindText = typeof kind === "string" && kind !== "" ? kind : "other";
-  const contained = (path) => {
+  const contained = (path, origin) => {
     const resolvedPath = resolveAcpPermissionPath(path, cwd);
-    if (resolvedPath === undefined) return `unusable location "${path}"`;
+    if (resolvedPath === undefined) return `${origin} "${path}" is unusable`;
     const canonical = acpCanonicalPathForContainment(resolvedPath);
-    if (canonical === undefined) return `"${path}" does not canonicalize (broken symlink or unresolvable)`;
-    if (!acpPathIsWithinRoot(canonical, workspaceRoot)) return `"${path}" is outside the workspace`;
+    if (canonical === undefined) return `${origin} "${path}" does not canonicalize (broken symlink or unresolvable)`;
+    if (!acpPathIsWithinRoot(canonical, workspaceRoot)) return `${origin} "${path}" is outside the workspace`;
     return null;
   };
   if (ACP_UNGATED_KINDS.has(kindText)) {
@@ -246,17 +277,20 @@ export function acpPermissionDecision({ workspaceRoot, cwd, kind, locations }) {
     };
   }
   if (ACP_READ_KINDS.has(kindText)) {
-    if (paths.length === 0) return { decision: "allow", reason: "read with no locations: nothing outside the workspace is named" };
-    for (const path of paths) {
-      const denial = contained(path);
+    if (candidates.length === 0) return { decision: "allow", reason: "read with no locations: nothing outside the workspace is named" };
+    for (const candidate of candidates) {
+      const denial = contained(candidate.path, candidate.origin);
       if (denial !== null) return { decision: "deny", reason: `read denied: ${denial}` };
     }
     return { decision: "allow", reason: "read inside the workspace" };
   }
   if (ACP_MUTATION_KINDS.has(kindText)) {
+    // No locations is denied even when rawInput names paths: the driver
+    // cannot know the tool honours rawInput over locations, and an edit the
+    // driver cannot see the target of is not an edit it can allow.
     if (paths.length === 0) return { decision: "deny", reason: `${kindText} with no locations is denied` };
-    for (const path of paths) {
-      const denial = contained(path);
+    for (const candidate of candidates) {
+      const denial = contained(candidate.path, candidate.origin);
       if (denial !== null) return { decision: "deny", reason: `${kindText} denied: ${denial}` };
     }
     return { decision: "allow", reason: `${kindText} inside the workspace (symlink-safe)` };
@@ -469,7 +503,7 @@ async function main() {
     if (message.method === "session/request_permission") {
       const toolCall = message.params?.toolCall ?? {};
       const locations = Array.isArray(toolCall.locations) ? toolCall.locations : [];
-      const verdict = acpPermissionDecision({ workspaceRoot, cwd: workspaceRoot, kind: toolCall.kind, locations });
+      const verdict = acpPermissionDecision({ workspaceRoot, cwd: workspaceRoot, kind: toolCall.kind, locations, rawInput: toolCall.rawInput });
       // allow with no allow_once option becomes a DENY: never allow_always.
       let decision = verdict.decision;
       let optionId = acpPermissionOptionId(message.params?.options, decision);

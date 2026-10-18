@@ -86,7 +86,7 @@ function acpDeclaration(id: string): HarnessDeclaration {
       tools: {
         status: "partial",
         reason:
-          "vendor tools inside the sandbox, not Ship's tool layer; permission requests are answered by the ship-acp driver's fail-closed policy (workspace reads and writes only, symlink-safe, never allow-always) and every decision is recorded — claims made inside the sandbox, with the container as the boundary",
+          "vendor tools inside the sandbox, not Ship's tool layer; file-tool requests are workspace-gated — the ship-acp driver answers every permission request fail-closed (locations and path-like rawInput fields alike, symlink-safe, never allow-always) and records each decision; shell execution is unrestricted inside the sandbox container, where gVisor and the egress allowlist are the boundary",
       },
       browser: { status: "refused", reason: "no browser wiring in the adapter (harness-acp.ts)" },
       interruption: {

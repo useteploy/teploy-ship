@@ -489,16 +489,26 @@ harness exists to run would silently stop existing.
 **Permission requests are answered, not bypassed.** This is the material
 difference from the bespoke adapters (which run vendor bypass flags). The
 driver answers every `session/request_permission` from a fail-closed policy
-ported from T3 Code's clientPolicy:
+ported from T3 Code's clientPolicy. File-tool requests are workspace-gated;
+shell execution is unrestricted inside the sandbox container — gVisor and
+the egress allowlist are the boundary, the same authority decision every
+external harness makes:
 
 | request | decision |
 |---|---|
-| read / search / think, every location canonicalises inside the workspace | **allow** (allow_once); no locations = allow (nothing outside is named) |
-| edit / delete / move, every location inside the workspace after a symlink-safe realpath walk (missing files resolve through their deepest existing ancestor) | **allow** (allow_once) |
-| edit / delete / move with no locations, an unresolvable path, a broken symlink, or any location outside | **deny** (reject_once) |
-| execute | **allow** — the sandbox container is the boundary, as with every external harness |
+| read / search / think, every location — and every path-like rawInput field (`destination`, `newPath`, `path`, `filePath`, `target`) — canonicalises inside the workspace | **allow** (allow_once); no locations and no path-like rawInput = allow (nothing outside is named) |
+| edit / delete / move, every location and path-like rawInput field inside the workspace after a symlink-safe realpath walk (missing files resolve through their deepest existing ancestor) | **allow** (allow_once) |
+| edit / delete / move with no locations, an unresolvable path, a broken symlink, or any location/rawInput path outside | **deny** (reject_once) |
+| execute | **allow** — shell execution is unrestricted inside the sandbox container; gVisor and the egress allowlist are the boundary |
 | fetch | **allow** — the egress allowlist decides |
 | anything else | **deny** |
+
+rawInput is gated because tools do not always fill the structured locations:
+a move names its source as a location and its destination only in
+`rawInput.destination`, and a policy that read locations alone would let
+that destination walk anywhere. rawInput cannot substitute for locations on
+a mutation, though — an edit whose target the driver cannot see as a
+location is denied, not guessed at.
 
 **allow_always is never selected** — it can outlive the session (Grok saves
 it for the whole project). An allow that only exists as an allow_always

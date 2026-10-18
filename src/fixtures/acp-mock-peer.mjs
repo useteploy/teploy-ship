@@ -19,7 +19,8 @@
 //                               write (permission requested), final message
 //   ACP_MOCK_JOURNEY=matrix     the negative-control matrix: permission
 //                               requests for outside/dotdot/symlink/broken/
-//                               no-locations/unknown-kind/in-workspace
+//                               no-locations/unknown-kind/rawinput-destination/
+//                               in-workspace
 //   ACP_MOCK_ALLOW_ALWAYS_ONLY  offer ONLY allow_always + reject_once: the
 //                               driver must deny, never select allow_always
 //   ACP_MOCK_ECHO               echo env and the base64 of GEMINI_API_KEY in
@@ -73,7 +74,7 @@ const update = (entry) => write({ jsonrpc: "2.0", method: "session/update", para
 
 let cwd = process.cwd();
 
-const askWrite = (title, kind, path, allowAlwaysOnly) =>
+const askPermission = (title, kind, locations, rawInput, allowAlwaysOnly) =>
   request("session/request_permission", {
     sessionId: SESSION_ID,
     title,
@@ -82,10 +83,13 @@ const askWrite = (title, kind, path, allowAlwaysOnly) =>
       title,
       kind,
       status: "pending",
-      ...(path === undefined ? {} : { locations: [{ path }] }),
+      ...(locations === undefined ? {} : { locations }),
+      ...(rawInput === undefined ? {} : { rawInput }),
     },
     options: OPTIONS(allowAlwaysOnly),
   });
+
+const askWrite = (title, kind, path, allowAlwaysOnly) => askPermission(title, kind, path === undefined ? undefined : [{ path }], undefined, allowAlwaysOnly);
 
 /** Ask, record what the driver chose, and write only on an explicit allow_once. */
 const permittedWrite = async (title, path, allowAlwaysOnly) => {
@@ -132,6 +136,12 @@ const runPrompt = async (promptText) => {
     const unknown = await askWrite("teleport", "teleport", join(cwd, "teleported.txt"), allowAlwaysOnly);
     log({ event: "permission", title: "teleport", path: join(cwd, "teleported.txt"), optionId: unknown?.outcome?.outcome === "selected" ? unknown.outcome.optionId : null });
     update({ sessionUpdate: "tool_call", toolCallId: "tool-teleport", title: "teleport", kind: "teleport", status: "failed", locations: [{ path: join(cwd, "teleported.txt") }] });
+    // A move whose destination appears ONLY in rawInput (the source is a
+    // proper in-workspace location): a policy that reads locations alone
+    // would allow it and the move would land outside the workspace.
+    const rawMove = await askPermission("move via rawinput", "move", [{ path: join(cwd, "moved-src.txt") }], { destination: "/etc/ship-acp-must-not-exist-rawinput" }, allowAlwaysOnly);
+    log({ event: "permission", title: "move via rawinput", path: "/etc/ship-acp-must-not-exist-rawinput", optionId: rawMove?.outcome?.outcome === "selected" ? rawMove.outcome.optionId : null });
+    update({ sessionUpdate: "tool_call", toolCallId: "tool-move-via-rawinput", title: "move via rawinput", kind: "move", status: "failed", locations: [{ path: join(cwd, "moved-src.txt") }] });
     await permittedWrite("inside workspace", join(cwd, "made", "up", "dir", "inside.txt"), allowAlwaysOnly);
     update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Matrix complete." } });
     return { stopReason: "end_turn" };
