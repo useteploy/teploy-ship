@@ -1910,6 +1910,7 @@ export function durableAgent(
         // snapshot is an optimisation for a run that has already delivered.
         if (input.warmThread === true && (input.parentRunId !== undefined || input.pr !== undefined || pr !== null)) {
           await ctx.step("thread-snapshot", async () => {
+           try {
             if (config.executor.snapshot === undefined || config.executor.createFrom === undefined) {
               return { skipped: "this worker's provider cannot snapshot" };
             }
@@ -1953,6 +1954,13 @@ export function durableAgent(
               createdAt: new Date().toISOString(),
             });
             return { image, head, ...(evicted.length > 0 ? { evicted: evicted.length } : {}) };
+           } catch (error) {
+            // Found live 2026-10-18: a run that parked at approve-merge had its
+            // original sandbox snapshotted and destroyed by the merge park, so
+            // the exec above threw "run not found" and failed a run that had
+            // already merged. The snapshot is an optimisation; it skips.
+            return { skipped: `no snapshot: ${error instanceof Error ? error.message : String(error)}` };
+           }
           });
         }
         await dispose(config, primary.handle);
