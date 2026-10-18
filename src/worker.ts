@@ -18,6 +18,7 @@ import { durableAgent } from "./durable.js";
 import { repoLockKey } from "./repository-scope.js";
 import { resolveApprovalPolicy } from "./approval.js";
 import { externalAdapters } from "./harness-external.js";
+import { harnessCredentialResolver } from "./harness-credentials.js";
 import { isAskEvent, pendingQuestion } from "./ask.js";
 import { hostRunner, previewTargetFromEnv, sweepStalePreviewCheckouts } from "./deploy.js";
 import type { CommandRunner } from "./deploy.js";
@@ -965,7 +966,9 @@ export function startWorker(options: WorkerOptions): {
     // binary is in the sandbox image is a recorded preflight step per run.
     // The steer store rides along so steering-capable lines (D6/D7) can drain
     // operator notes between vendor processes; an absent store drains empty.
-    harnesses: externalAdapters({ steer: options.runtime.steer }),
+    // The credential resolver (H2) unseals what a run's input REFERENCES at
+    // exec time — inert on inputs that carry no references.
+    harnesses: externalAdapters({ steer: options.runtime.steer, credentials: harnessCredentialResolver(options.runtime.harnessCredentials) }),
     // Where this worker may deploy previews (SHIP_PREVIEW_DIR and friends).
     // Absent on a worker that has no app checkout to run the CLI in; a run
     // that asked for a preview then records the step as disabled rather than

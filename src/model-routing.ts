@@ -157,6 +157,27 @@ function destinationAllowed(c: Candidate, task: RouteTask): boolean {
   );
 }
 
+/**
+ * The data-protection gates every candidate must clear, in the order they are
+ * reported: destination and retention first, so they are the stated reason
+ * even when other reasons also apply. Shared by `whyNot` (a whole candidate)
+ * and `checkDestinationHost` (one host, H2's harness gate), so the two can
+ * never drift into judging "permitted destination" differently.
+ */
+function dataGate(c: Candidate, task: RouteTask): { code: "destination-not-allowed" | "retention-exceeds"; why: string } | undefined {
+  if (!destinationAllowed(c, task)) {
+    return {
+      code: "destination-not-allowed",
+      why: `${c.dataDestination.host} (${c.dataDestination.class}) is not a permitted destination for ${task.dataClass} data`,
+    };
+  }
+  const maxRet = task.maxRetention ?? DEFAULT_MAX_RETENTION[task.dataClass];
+  if (RETENTION_RANK[c.retention] > RETENTION_RANK[maxRet]) {
+    return { code: "retention-exceeds", why: `retention ${c.retention} exceeds ${maxRet}` };
+  }
+  return undefined;
+}
+
 function reserve(model: string, task: RouteTask, env: NodeJS.ProcessEnv): { usd: number; basis: Segment["pricing"] } {
   const usd = costUSD(model, { inputTokens: task.contextTokens, outputTokens: task.maxOutputTokens }, env);
   const free = isLocalModel(model, env) || isQuotaModel(model, env);
@@ -167,18 +188,10 @@ function reserve(model: string, task: RouteTask, env: NodeJS.ProcessEnv): { usd:
 /** First reason this candidate cannot take the task, or undefined if it can. */
 function whyNot(c: Candidate, task: RouteTask, env: NodeJS.ProcessEnv): Skipped | undefined {
   const skip = (code: SkipCode, why: string): Skipped => ({ candidate: c.model, code, why });
-  // Destination and retention first: they are the data-protection gates and
-  // must be the reported reason even when other reasons also apply.
-  if (!destinationAllowed(c, task)) {
-    return skip(
-      "destination-not-allowed",
-      `${c.dataDestination.host} (${c.dataDestination.class}) is not a permitted destination for ${task.dataClass} data`,
-    );
-  }
-  const maxRet = task.maxRetention ?? DEFAULT_MAX_RETENTION[task.dataClass];
-  if (RETENTION_RANK[c.retention] > RETENTION_RANK[maxRet]) {
-    return skip("retention-exceeds", `retention ${c.retention} exceeds ${maxRet}`);
-  }
+  // Destination and retention first (dataGate): they are the data-protection
+  // gates and must be the reported reason even when other reasons also apply.
+  const data = dataGate(c, task);
+  if (data !== undefined) return { candidate: c.model, ...data };
   const grantedTools = new Set(task.authority?.tools ?? []);
   const grantedConns = new Set(task.authority?.connections ?? []);
   const extraTools = (c.requestedAuthority?.tools ?? []).filter((t) => !grantedTools.has(t));
@@ -325,6 +338,41 @@ export function checkCandidate(
     skipped: [],
   });
   return { ok: true, candidate, segment };
+}
+
+export type DestinationHostCheck =
+  | { ok: true }
+  | { ok: false; code: "destination-not-in-policy" | "destination-not-allowed" | "retention-exceeds"; why: string };
+
+/**
+ * Judge ONE provider HOST against the task, wherever the policy declares it
+ * (H2: an external harness's data destination, derived from its forwarded
+ * credentials — there is no model id to name, so `checkCandidate` cannot ask
+ * the question). Every entry that declares the host, in every role, must
+ * clear the data gates — two entries that disagree about where data goes or
+ * how long it is kept are answered by the stricter one, exactly as
+ * `checkCandidate` treats one model listed twice. A host no entry declares is
+ * refused: an undeclared destination is not an allowed one. The capability,
+ * context, authority and budget gates do not apply — they judge a MODEL a
+ * task would run on, and here the model is the harness's own choice; the
+ * question is only where the data travels. Same purity as `checkCandidate`.
+ */
+export function checkDestinationHost(policy: RoutingPolicy, host: string, task: RouteTask): DestinationHostCheck {
+  const errors = validatePolicy(policy);
+  if (errors.length > 0) return { ok: false, code: "destination-not-in-policy", why: `invalid policy: ${errors.join("; ")}` };
+  const wanted = host.trim().toLowerCase();
+  const entries: Candidate[] = [];
+  for (const candidates of Object.values(policy.roles)) {
+    for (const candidate of candidates) if (candidate.dataDestination.host.trim().toLowerCase() === wanted) entries.push(candidate);
+  }
+  if (entries.length === 0) {
+    return { ok: false, code: "destination-not-in-policy", why: `${wanted} is not a declared data destination in policy ${policy.version}` };
+  }
+  for (const candidate of entries) {
+    const gate = dataGate(candidate, task);
+    if (gate !== undefined) return { ok: false, code: gate.code, why: gate.why };
+  }
+  return { ok: true };
 }
 
 export interface CurrentAttempt {

@@ -135,6 +135,7 @@ version its log did not record.
 | `SHIP_HARNESS_ENV` | Comma list of worker env var NAMES forwarded into the harness process. Overrides the per-adapter default below. |
 | `SHIP_HARNESS_TIMEOUT_MS` | Per-exec deadline for each vendor process. Default 1800000. A steered attempt runs at most `1 + STEER_ROUNDS_MAX` execs (main + resume rounds), each bounded by this. |
 | `SHIP_CLAUDE_BARE` | `1` adds `--bare` to claude: API-key auth only, no host context (hooks, CLAUDE.md, MCP). |
+| `SHIP_HARNESS_CRED` | `on` enables the sealed per-project credential store and the enqueue gates (see the sealed-credentials section below). Only the exact spelling `on` counts; anything else, including unset, is off, and off is byte-identical to the pre-H2 behaviour. |
 
 Default forwarded variables: claude-code `CLAUDE_CODE_OAUTH_TOKEN`,
 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`; opencode
@@ -209,6 +210,54 @@ fingerprint moves — the upgrade fence treats it as data, not behaviour.
 derives as the `harness-egress` line — pass with the host list, or UNKNOWN
 with the remedy when an external harness is configured but nothing can be
 derived from the forwarded credentials.
+
+## Sealed harness credentials (H2, `SHIP_HARNESS_CRED=on`)
+
+The deployment environment is one way a harness gets its API key — and until
+H2 the only one: every project on a worker shared every key the worker held.
+The sealed credential store is the other way: an operator with the `policies`
+grant stores a key against ONE project and ONE harness profile on the
+project's page (Project settings → Harness credentials), it is sealed at rest
+with the same `SHIP_CONFIG_KEY` material as the runtime config's sealed keys,
+and only presence is ever shown — which name, when, who, which version. The
+value is never rendered, never returned by an API, never recorded: the run
+input carries a reference (project, profile, env name, version) and the
+worker unseals it into the same exec-env delivery H1 built, where the
+exact-value scrub covers it like any forwarded secret. A stored value wins
+over the deployment environment for its name. Storing is refused while
+`SHIP_CONFIG_KEY` is unset — a plaintext key in the state store is strictly
+worse than the env var it replaces.
+
+The flag also turns on two enqueue gates, both fail-closed and both refused
+by name before any run exists:
+
+- **Presence.** A profile that authenticates with a credential (the
+  credential-shaped names on its forward list — e.g. claude-code:
+  `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`)
+  finds none of them in the deployment environment or the store → the
+  enqueue is refused (`harness-credential-missing`).
+- **Data destination.** Every provider host the harness will dial — derived
+  exactly as the egress section describes, from the env overlaid with the
+  store's unsealed values, so a base URL in the store routes the check where
+  the run dials — must be declared in the routing policy
+  (`SHIP_MODEL_ROUTING_POLICY`) and permitted for the deployment's data class
+  (`SHIP_MODEL_ROUTING_DESTINATIONS`, `SHIP_MODEL_ROUTING_DATA_CLASS`;
+  `checkDestinationHost` applies the same destination/retention gates
+  delegate targets answer to). A credential whose host cannot be derived — a
+  subscription token — is refused (`credential-destination-unknown`): per
+  Decision 11 API keys are the default path, and subscription logins are a
+  later, explicitly opted-in slice (H7).
+
+The production ensemble this must not break is pinned by test: claude-code or
+opencode rerouted to `api.z.ai` under a policy whose `api.z.ai` entry retains
+nothing, with `SHIP_MODEL_ROUTING_DESTINATIONS=api.z.ai`, enqueues unchanged.
+Flag off — the default — runs neither gate, records no reference, and
+enqueues byte-identically to a pre-H2 build.
+
+A reference the executing worker cannot resolve (the binding was cleared, a
+worker with no store, a rotated `SHIP_CONFIG_KEY`) stops the attempt with a
+recorded, named refusal on the `harness-run` step; the vendor binary is not
+started.
 
 ## claude-code
 

@@ -2,6 +2,8 @@ import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 
 import { HARNESS_ALIAS_VERSIONS, HARNESS_PACKAGES, HARNESS_VERSIONS } from "./harness.js";
 import { PLAN_REVIEW_REFUSAL, refusalFor } from "./harness-capabilities.js";
+import type { HarnessCredentialRef, HarnessCredentialResolution } from "./harness-credentials.js";
+import { resolveCredentialOverlay } from "./harness-credentials.js";
 import type { SteerStore } from "./steer.js";
 import { clipDetail } from "./live.js";
 import type { LiveUpdate } from "./live.js";
@@ -95,6 +97,13 @@ export interface ExternalHarnessOptions {
    * of the input alone.
    */
   steer?: Pick<SteerStore, "drain">;
+  /**
+   * H2 (SHIP_HARNESS_CRED): the sealed store a run's recorded credential
+   * references are unsealed from, at exec time (harness-credentials.ts).
+   * Absent on a runtime with no store; a run whose input names references
+   * then fails with a recorded refusal rather than running unauthenticated.
+   */
+  credentials?: HarnessCredentialResolution;
 }
 
 export interface ExternalHarnessConfig {
@@ -1223,6 +1232,17 @@ export function externalAdapter(
       // the invocation, the parser, and whether the session can be resumed.
       const line = spec.line(versionMajor(pre.version));
       const sessionFor = line.sessionFor?.({ runId: ws.ctx.runId, prefix: p });
+      // H2 (SHIP_HARNESS_CRED): unseal the run's recorded credential
+      // references into the env this attempt's execs deliver. Store values WIN
+      // over the worker's own env of the same name — the enqueue gate judged
+      // the destination with exactly this precedence — and a reference that
+      // cannot be resolved stops the exec with a recorded, named refusal: the
+      // run was admitted on that credential, and proceeding without it would
+      // be a silently unauthenticated vendor call.
+      const credentials = await resolveCredentialOverlay(task.input.harnessCredentials, options.credentials);
+      const credentialFailure = credentials.failure;
+      const runEnv: NodeJS.ProcessEnv =
+        credentialFailure === undefined && Object.keys(credentials.overlay).length > 0 ? { ...env, ...credentials.overlay } : env;
       /**
        * One vendor exec: the command with its credentials in the exec's own
        * env, the output scrubbed of them, the parsed record. `startDetail` is
@@ -1234,8 +1254,20 @@ export function externalAdapter(
         writeFiles: () => Promise<void>,
         startDetail?: string,
       ): Promise<HarnessRunRecord> => {
-        const config = externalHarnessConfig(id, env);
-        const forwarded = forwardEnv(config.forward, env);
+        if (credentialFailure !== undefined) {
+          return {
+            exitCode: -1,
+            timedOut: false,
+            status: "error",
+            summary: credentialFailure,
+            turns: 0,
+            usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, priced: false },
+            forwarded: [],
+            stderrTail: "",
+          };
+        }
+        const config = externalHarnessConfig(id, runEnv);
+        const forwarded = forwardEnv(config.forward, runEnv);
         const priced = spec.priced(forwarded.names);
         // The vendor process and every tool it spawns inherit the forwarded
         // credentials, so an agent that prints `env` prints them. Every value
@@ -1308,7 +1340,7 @@ export function externalAdapter(
         }
       };
       const record = await ws.ctx.step(`${p}harness-run`, async (): Promise<HarnessRunRecord> => {
-        const config = externalHarnessConfig(id, env);
+        const config = externalHarnessConfig(id, runEnv);
         // Admission covers the UI/queue; direct CLI workflow execution also
         // must not silently skip an operator's requested plan gate. Kept as a
         // recorded `error` RESULT, not a thrown step — the contract every
@@ -1321,7 +1353,7 @@ export function externalAdapter(
             summary: `${refusalFor(id, "plan-review") ?? PLAN_REVIEW_REFUSAL} No external agent was started.`,
             turns: 0,
             usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, priced: false },
-            forwarded: forwardEnv(config.forward, env).names,
+            forwarded: forwardEnv(config.forward, runEnv).names,
             stderrTail: "",
           };
         }
@@ -1376,7 +1408,7 @@ export function externalAdapter(
           // A harness that is unpriced by design (a subscription: claude with
           // an OAuth token, codex) has no dollar cap to honour and stays
           // bounded by its turn limit.
-          const spendUnknown = budget.maxRunCostUSD > 0 && usage.priced === false && spec.priced(forwardEnv(externalHarnessConfig(id, env).forward, env).names);
+          const spendUnknown = budget.maxRunCostUSD > 0 && usage.priced === false && spec.priced(forwardEnv(externalHarnessConfig(id, runEnv).forward, runEnv).names);
           const spent = usage.priced === false ? 0 : (usage.costUSD ?? 0);
           const remainingCost = budget.maxRunCostUSD - spent;
           const resumed = await ws.ctx.step(`${p}harness-resume-${round}`, async (): Promise<HarnessRunRecord | { delivered: false; reason: string }> => {

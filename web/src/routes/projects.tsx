@@ -21,6 +21,8 @@ import {
 import { shipRuntime, effectiveAuthority } from "../lib/store.server.js";
 import { currentUser } from "../lib/session.server.js";
 import { may } from "../lib/authority.server.js";
+import { allProfileCredentialNames, harnessCredEnabled, sealingStatus } from "../lib/ship.server.js";
+import type { HarnessCredentialPresence } from "teploy-ship/runtime";
 import { redirect } from "../lib/http.server.js";
 import { SubNav } from "../lib/subnav.js";
 import { PROJECT_VIEWS } from "../views/project-views.js";
@@ -53,6 +55,10 @@ const AUTHORITIES = ["", "legacy", "propose", "send", "auto_trivial", "auto_norm
 // normalizeProject refuses an id this list does not contain, so a drift here
 // surfaces as a rejected save rather than a broken run.
 const HARNESSES = ["", "native", "claude-code", "opencode", "codex"] as const;
+// The profiles a sealed harness credential can be stored for (H2): external
+// harness ids only — the native loop takes its credentials from the worker's
+// own config, never from the per-project store.
+const CRED_PROFILES = HARNESSES.filter((h) => h !== "" && h !== "native");
 
 interface ProjectsData {
   view: "repos";
@@ -88,6 +94,13 @@ interface ProjectsData {
   denied: string | null;
   error: string | null;
   store: string;
+  /**
+   * H2 (SHIP_HARNESS_CRED): the selected project's sealed-credential panel —
+   * presence metadata only, never a value. Null when the flag is off or no
+   * project is selected, so the page payload of a flag-off deployment is
+   * exactly what it was before this existed.
+   */
+  credentials: { sealed: boolean; sealingDetail: string; presence: HarnessCredentialPresence[]; envNames: string[] } | null;
 }
 
 function viewOf(request: Request): string {
@@ -116,6 +129,15 @@ export async function loader({ request }: { request: Request }): Promise<Project
   let selected:Project|null=null, identityError:string|null=null;
   try {selected=repo!==""?await runtime.projects.forRepo(repo):null;}
   catch(error){if(!(error instanceof ProjectIdentityError))throw error;identityError=error.message;}
+  // H2: presence for the selected project, under the flag only. A store that
+  // cannot be read shows an empty panel rather than failing the page — the
+  // credential gate at enqueue is where unreadability refuses, loudly.
+  let credentials: ProjectsData["credentials"] = null;
+  if (harnessCredEnabled() && selected !== null) {
+    const sealing = sealingStatus();
+    const presence = (await runtime.harnessCredentials?.presence(selected.repo).catch(() => [] as HarnessCredentialPresence[])) ?? [];
+    credentials = { sealed: sealing.sealed, sealingDetail: sealing.detail, presence, envNames: allProfileCredentialNames() };
+  }
   return {
     view: "repos",
     projects,
@@ -160,6 +182,7 @@ export async function loader({ request }: { request: Request }): Promise<Project
     error: identityError ?? url.searchParams.get("error"),
     historyNotice: unscoped.length || attributed.some(e=>e.kind==="repo"&&!e.key.includes("://")) ? "Some older results or costs cannot be matched to a specific repository. Affected comparisons and promotion suggestions are unavailable; the original history remains in Activity and Spend." : null,
     store: runtime.kind,
+    credentials,
   };
 }
 
@@ -191,6 +214,41 @@ export async function action({ request }: { request: Request }): Promise<Respons
   if (intent === "remove") {
     try {await runtime.projects.remove(target);}catch(error){return redirect(`/projects?error=${encodeURIComponent(error instanceof Error?error.message:"Could not remove project")}`);}
     return redirect("/projects");
+  }
+
+  // H2 (SHIP_HARNESS_CRED): store or clear one sealed harness credential for
+  // this project. The `policies` gate above already refused everyone else, the
+  // same grant that owns every other project setting — a credential spends
+  // money and names a data destination, which is exactly what this authority
+  // exists for. The VALUE is read here and goes nowhere else: not into the
+  // redirect, not into the error path, never back into the page.
+  if (intent === "credential-set" || intent === "credential-clear") {
+    if (!harnessCredEnabled()) {
+      return redirect(`/projects?error=${encodeURIComponent("harness credentials are off: set SHIP_HARNESS_CRED=on to use the sealed store")}`);
+    }
+    const store = runtime.harnessCredentials;
+    if (store === undefined) {
+      return redirect(`/projects?error=${encodeURIComponent("this runtime carries no harness credential store")}`);
+    }
+    let credProject: Project | null;
+    try {credProject = await runtime.projects.forRepo(target);}
+    catch(error){return redirect(`/projects?error=${encodeURIComponent(error instanceof Error?error.message:"Could not resolve project")}`);}
+    if (credProject === null) return redirect(`/projects?error=${encodeURIComponent("no such project")}`);
+    const profile = str("credProfile") ?? "";
+    const envName = str("credEnvName") ?? "";
+    try {
+      if (intent === "credential-clear") {
+        await store.clear({ project: credProject.repo, profile, envName });
+      } else {
+        const value = String(form.get("credValue") ?? "");
+        await store.set({ project: credProject.repo, profile, envName, value, actor: me?.user ?? "unknown" });
+      }
+    } catch (error) {
+      // The store's messages carry the fix (sealing off, unknown profile, a
+      // malformed env name) and never the value.
+      return redirect(`/projects?repo=${encodeURIComponent(credProject.url ?? credProject.repo)}&error=${encodeURIComponent(error instanceof Error?error.message:"Could not store the credential")}`);
+    }
+    return redirect(`/projects?repo=${encodeURIComponent(credProject.url ?? credProject.repo)}`);
   }
 
   // L8 D4: the ratchet's promote — a human click on the Projects page that
@@ -379,6 +437,72 @@ function ManagedPanel({ p, drift }: { p: Project; drift: ManagedDrift[] }) {
 }
 
 const INPUT = "background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 8px";
+
+/**
+ * H2: the sealed-credential panel. Shows PRESENCE only — which profile, which
+ * env name, when, who — because that is all any surface ever gets; the value
+ * is sealed in the store and delivered no further than a run's exec env. The
+ * form posts once and the value never comes back: no echo field, no error
+ * path that carries it, and Clear needs only the profile and name.
+ */
+function CredentialsPanel({ p, data }: { p: Project; data: ProjectsData }) {
+  const cred = data.credentials;
+  if (cred === null) return null;
+  return (
+    <section class="card">
+      <h2 class="section">Harness credentials</h2>
+      <p class="meta">
+        API keys this project's external-harness runs authenticate with, stored sealed (SHIP_HARNESS_CRED). A stored value
+        wins over the deployment environment for its name, is delivered to the agent through the exec environment only, and is
+        scrubbed from everything the run records. Values are never displayed — not here, not on any page, not through any API.
+      </p>
+      {!cred.sealed && (
+        <p class="card attn" style="margin:12px 0;color:var(--red)">
+          Not stored — {cred.sealingDetail}
+        </p>
+      )}
+      {cred.presence.length === 0 ? (
+        <p class="meta" style="color:var(--dim)">No credentials stored for this project. Its harness runs use the deployment environment.</p>
+      ) : (
+        <div class="table-wrap"><table class="runs">
+          <thead><tr><th>harness</th><th>env name</th><th>set</th><th>by</th><th>version</th></tr></thead>
+          <tbody>
+            {cred.presence.map((c) => (
+              <tr key={`${c.profile}:${c.envName}`}>
+                <td class="meta">{c.profile}</td>
+                <td class="meta"><code>{c.envName}</code></td>
+                <td class="meta">{c.setAt.slice(0, 19).replace("T", " ")}</td>
+                <td class="meta">{c.setBy ?? "—"}</td>
+                <td class="meta">{c.version}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table></div>
+      )}
+      <datalist id="ship-cred-env">
+        {cred.envNames.map((n) => (
+          <option key={n} value={n} />
+        ))}
+      </datalist>
+      {data.canEdit ? (
+        <form method="post" class="row-actions" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px">
+          <input type="hidden" name="repo" value={p.url ?? p.repo} />
+          <select name="credProfile" style={INPUT}>
+            {CRED_PROFILES.map((h) => (
+              <option key={h} value={h}>{h}</option>
+            ))}
+          </select>
+          <input name="credEnvName" list="ship-cred-env" placeholder="ANTHROPIC_API_KEY" style={INPUT} />
+          <input type="password" name="credValue" autocomplete="off" placeholder="value — sealed, never displayed" style={INPUT} />
+          <button class="primary sm" type="submit" name="intent" value="credential-set">Store</button>
+          <button class="sm" type="submit" name="intent" value="credential-clear">Clear</button>
+        </form>
+      ) : (
+        <p class="meta" style="color:var(--dim)">Storing or clearing a credential needs the policies grant. An admin can grant it on <a href="/policies">Policies</a>.</p>
+      )}
+    </section>
+  );
+}
 
 function Field({ label, name, value, placeholder, type, list, width }: { label: string; name: string; value?: string; placeholder?: string; type?: string; list?: string; width?: string }) {
   return (
@@ -578,6 +702,7 @@ export default function Projects({ data }: { data: ProjectsData | SourcesData | 
             <tr><td>Plan approval</td><td>{p.requirePlanReview ? "Required before code changes (native harness)" : "Optional per task; planning and verification still expected"}</td><td>{p.requirePlanReview ? "Project requirement" : "Task choice"}</td></tr>
             <tr><td>Team requests</td><td>Always require approval to start</td><td>Request policy</td></tr>
           </tbody></table></div><p class="meta">Deployment defaults shown here are the dashboard's configuration. Verify readiness through a real worker run. Changes apply to future tasks; existing tasks retain their recorded setup.</p></section>
+          <CredentialsPanel p={p} data={data} />
           {data.canEdit && <details class="disclosure"><summary>Edit project configuration</summary><div class="card"><ProjectForm p={p} data={data} /></div><p class="meta">Choose “worker default” or clear an optional override to inherit it again. Save to apply the change to new tasks.</p></details>}
           <h2 class="section">Webhook</h2>
           <p class="meta">

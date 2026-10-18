@@ -68,6 +68,11 @@ export {
   suggestAuthority,
   summarizeRepoStats,
   utcDay,
+  // H2 (SHIP_HARNESS_CRED): the flag and the credential-name suggestions for
+  // the Projects page's sealed-credential panel. The store itself is reached
+  // through shipRuntime() (store.server.ts), never imported here.
+  harnessCredEnabled,
+  allProfileCredentialNames,
 } from "teploy-ship/runtime";
 export { cancelRun, deliverEvent } from "@neutron-build/workflow";
 

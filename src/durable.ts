@@ -147,6 +147,7 @@ import { compareWithPrior, findingContinuityEnabled, loadPriorReview, revisionDi
 import type { ParsedFindings, ScanFinding } from "./findings.js";
 import { costUSD } from "./pricing.js";
 import { HARNESS_VERSIONS, NATIVE_HARNESS_ID, selectAdapter } from "./harness.js";
+import type { HarnessCredentialRef } from "./harness-credentials.js";
 import type { HarnessAdapter, HarnessBudget, HarnessRef, HarnessResult, HarnessTask, HarnessUsage, HarnessWorkspace, StreamExec } from "./harness.js";
 import { attemptOutcomeLine, rankAttempts } from "./attempt-rank.js";
 import type { AttemptOutcome } from "./attempt-rank.js";
@@ -809,6 +810,18 @@ export interface DurableAgentInput {
    * default — the measurements argue for diverse harnesses, not more loops.
    */
   harnessAttempts?: HarnessRef[];
+  /**
+   * H2 (SHIP_HARNESS_CRED): references to the sealed per-project harness
+   * credentials this run delivers, materialised at ENQUEUE — project, profile,
+   * env name, version, NEVER a value. The worker unseals each reference at
+   * exec time and hands the value to the harness through the exec env (H1
+   * forwardEnv), whose exact-value scrub covers it like any forwarded secret.
+   * Admits no step of its own, so a run without it (every log written before
+   * the flag, and every run on a flag-off deployment) replays byte-identically.
+   * A reference the executing worker cannot resolve is a recorded refusal on
+   * the harness-run step, not a silently unauthenticated run.
+   */
+  harnessCredentials?: HarnessCredentialRef[];
   /**
    * How many independent attempts this run makes of the same task (P6-1),
    * materialised at ENQUEUE from `SHIP_ATTEMPTS` (default 3, max 5) on repo
