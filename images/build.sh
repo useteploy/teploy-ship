@@ -113,11 +113,16 @@ build() {
   if [ "${stack}" = node ]; then set -- "$@" --build-arg "PNPM_VERSION=${pnpm_version}"; fi
   if [ "${stack}" = node ] || [ "${stack}" = go ]; then set -- "$@" --build-arg "PLAYWRIGHT_VERSION=${playwright_version}"; fi
   if [ "${stack}" = rust ]; then set -- "$@" --build-arg "RUST_BASE=${rust_base}"; fi
+  # The build context is the images/ directory, not the stack's own subdir:
+  # every image COPYies images/acp-driver/ship-acp.mjs (the in-sandbox ACP
+  # driver, E7 H3) beside its Dockerfile, and a context cannot reach above
+  # itself. -f keeps each stack's own Dockerfile.
   set -- "$@" \
     --build-arg "HARNESS_SPECS=${specs}" \
     --build-arg "HARNESS_BINARIES=${binaries}" \
     --build-arg "HARNESS_LABEL=${label}" \
-    "${here}/sandbox-${stack}"
+    -f "${here}/sandbox-${stack}/Dockerfile" \
+    "${here}"
   docker build "$@"
   echo "built ${image}"
 }

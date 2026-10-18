@@ -215,6 +215,14 @@ export const HARNESS_VERSIONS: Record<string, string> = {
   "claude-code": "2",
   opencode: "2",
   codex: "1",
+  // The ACP harnesses (E7 H3, src/harness-acp.ts): one generic adapter, one
+  // contract for every profile. Enqueue is gated on SHIP_ACP_HARNESS
+  // (assertAcpHarnessAdmitted at enqueue); the worker registers the adapters
+  // unconditionally so on-flag runs stay replayable after the flag flips off.
+  gemini: "1",
+  grok: "1",
+  cursor: "1",
+  qwen: "1",
 };
 
 /**
@@ -266,6 +274,12 @@ export const HARNESS_PACKAGES: Record<string, HarnessPackage> = {
   // v2 event contract was taken from (evals/receipts/2026-10-14-opencode-v2-events.txt).
   opencode: { npm: "@opencode/cli", version: "2.0.26", binary: "opencode" },
   codex: { npm: "@openai/codex", version: "0.163.0", binary: "codex" },
+  // The ACP agents (E7 H3), pinned at the versions the H0 receipts measured
+  // (evals/receipts/2026-10-18-acp-*.txt). cursor is deliberately absent: it
+  // is a registry binary, not npm, and ships when H9 bakes registry agents.
+  gemini: { npm: "@google/gemini-cli", version: "0.64.0", binary: "gemini" },
+  grok: { npm: "@xai-official/grok", version: "1.0.63", binary: "grok" },
+  qwen: { npm: "@qwen-code/qwen-code", version: "0.25.2", binary: "qwen" },
 };
 
 /**

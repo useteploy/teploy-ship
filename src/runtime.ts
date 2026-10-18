@@ -44,6 +44,7 @@ import { FileRepoStatsStore, NucleusRepoStatsStore } from "./repo-stats.js";
 import type { RepoStatsStore } from "./repo-stats.js";
 import { attemptsCount, harnessAttempts, harnessRef } from "./harness.js";
 import { PLAN_REVIEW_REFUSAL, refusalFor } from "./harness-capabilities.js";
+import { assertAcpHarnessAdmitted, withAcpProviderEgress } from "./harness-acp.js";
 import { harnessIdentity, harnessRecordEnabled } from "./harness-identity.js";
 import { withProviderEgress } from "./harness-external.js";
 import type { HarnessRef } from "./harness.js";
@@ -1586,6 +1587,11 @@ export async function enqueueRun(
   // cost for an answer the critic picks between on the strength of a DIFF,
   // which a scan does not have.
   const attempts = options.repo !== undefined && !scan ? harnessAttempts(process.env.SHIP_HARNESS_ATTEMPTS) : [];
+  // E7 H3 (SHIP_ACP_HARNESS): the ACP harness ids are admitted at enqueue
+  // only when the flag is on and the profile's credential is present. Same
+  // before-append rule as the plan-review refusal — a refusal after
+  // `store.append` would leave a ghost run no surface can explain.
+  assertAcpHarnessAdmitted([harness, ...attempts]);
   // A project requirement is a floor, never a heuristic based on prompt size.
   // Resolve only for new runs; accepted launches and parked histories retain
   // the recorded checkpoint so changing policy cannot change their replay.
@@ -1653,9 +1659,13 @@ export async function enqueueRun(
   // say which hosts the container was actually allowed. Native (and an
   // external run with nothing derivable) records exactly what it did before
   // this existed — byte-identical inputs, and no step is admitted by the
-  // field, so fingerprints do not move.
-  const sandboxEgressAllow = withProviderEgress(
-    scan ? project?.sandboxEgressAllow : withPreviewEgress(project?.sandboxEgressAllow, project?.verification),
+  // field, so fingerprints do not move. The ACP profiles' hosts ride the same
+  // merge (harness-acp.ts withAcpProviderEgress), derived per profile.
+  const sandboxEgressAllow = withAcpProviderEgress(
+    withProviderEgress(
+      scan ? project?.sandboxEgressAllow : withPreviewEgress(project?.sandboxEgressAllow, project?.verification),
+      [harness, ...attempts],
+    ),
     [harness, ...attempts],
   );
   // EV6: the gate only passes when the agent writes the reproducing test, so

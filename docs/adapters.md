@@ -9,6 +9,8 @@ SHIP_HARNESS=native        # default — Ship's own CodeAct loop (src/durable.ts
 SHIP_HARNESS=claude-code   # `claude -p`, headless, in the sandbox
 SHIP_HARNESS=opencode      # `opencode run`, headless, in the sandbox
 SHIP_HARNESS=codex         # `codex exec --json`, one-shot, in the sandbox
+SHIP_HARNESS=gemini        # ACP agents (E7 H3) — gemini, grok, cursor, qwen —
+                           # one generic adapter, gated on SHIP_ACP_HARNESS=on
 ```
 
 What stays Ship's whichever harness runs: intake and policies, approvals,
@@ -141,7 +143,9 @@ Default forwarded variables: claude-code `CLAUDE_CODE_OAUTH_TOKEN`,
 `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `ZHIPU_API_KEY`
 (z.ai, per models.dev), `GOOGLE_GENERATIVE_AI_API_KEY`, `OPENCODE_CONFIG_CONTENT`; codex
 `CODEX_API_KEY`, `OPENAI_API_KEY`, `CODEX_ACCESS_TOKEN`, `AI_GATEWAY_URL`,
-`AI_GATEWAY_KEY` (see the codex section for what the gateway pair does). A
+`AI_GATEWAY_KEY` (see the codex section for what the gateway pair does); the
+ACP profiles gemini `GEMINI_API_KEY`, `GOOGLE_API_KEY`; grok `XAI_API_KEY`;
+cursor `CURSOR_API_KEY`; qwen `OPENAI_API_KEY` (see the ACP section). A
 variable that is unset on the worker is simply not forwarded.
 
 Per-repo evidence config (`teploy-ship evidence set`) is harness-independent
@@ -448,6 +452,80 @@ break — the hook is already there. The event encoding the tests replay was
 taken from the tagged source, not a live run; see
 `evals/receipts/2026-10-16-codex-exec-json-contract.txt` for what was
 verified and what still needs a live credential.
+
+## ACP harnesses (E7 H3)
+
+`SHIP_ACP_HARNESS=on` admits four more ids — `gemini`, `grok`, `cursor`,
+`qwen` — all driven by ONE adapter (`src/harness-acp.ts`) over the Agent
+Client Protocol. The flag gates **enqueue** only: a worker whose flag is off
+still carries the adapters, so runs recorded under an on-flag worker replay
+everywhere. Off by default.
+
+The protocol constraint that shapes everything here: Ship's exec has no
+stdin, and ACP is bidirectional JSON-RPC over stdio. So the whole session —
+initialize, `session/new`, the prompt, streaming updates, permission
+requests, cancellation — runs inside ONE exec via an in-sandbox driver,
+`ship-acp` (baked into every image at `/usr/local/bin/ship-acp`, source at
+`images/acp-driver/ship-acp.mjs`). The driver spawns the agent, answers
+permission requests itself, and prints Ship's own JSONL on stdout; the
+adapter parses that into the same run record shape the bespoke adapters
+produce. What a bespoke adapter re-derives per vendor — session ids,
+permission handling, event shapes — the protocol standardises, so each agent
+is a thin profile:
+
+| id | binary + args | credential | provider egress derived | baked pin |
+|---|---|---|---|---|
+| gemini | `gemini --acp` | `GEMINI_API_KEY` (Vertex: `GOOGLE_API_KEY`, hosts on the project record) | `generativelanguage.googleapis.com:443` | `@google/gemini-cli@0.64.0` |
+| grok | `grok --permission-mode default agent stdio` | `XAI_API_KEY` | `api.x.ai:443` | `@xai-official/grok@1.0.63` |
+| cursor | `cursor-agent acp` | `CURSOR_API_KEY` | `api2.cursor.sh:443` | registry binary — H9 |
+| qwen | `qwen --acp` | `OPENAI_API_KEY` | `dashscope`/`coding(-intl).dashscope.aliyuncs.com:443` | `@qwen-code/qwen-code@0.25.2` |
+
+gemini is wired end to end; the others are declared behind the same flag and
+stop at preflight on images that lack their binary. grok launches in its
+**asking** mode (`--permission-mode default`) — never `--always-approve`: an
+agent started in always-approve never asks, and the permission gate this
+harness exists to run would silently stop existing.
+
+**Permission requests are answered, not bypassed.** This is the material
+difference from the bespoke adapters (which run vendor bypass flags). The
+driver answers every `session/request_permission` from a fail-closed policy
+ported from T3 Code's clientPolicy:
+
+| request | decision |
+|---|---|
+| read / search / think, every location canonicalises inside the workspace | **allow** (allow_once); no locations = allow (nothing outside is named) |
+| edit / delete / move, every location inside the workspace after a symlink-safe realpath walk (missing files resolve through their deepest existing ancestor) | **allow** (allow_once) |
+| edit / delete / move with no locations, an unresolvable path, a broken symlink, or any location outside | **deny** (reject_once) |
+| execute | **allow** — the sandbox container is the boundary, as with every external harness |
+| fetch | **allow** — the egress allowlist decides |
+| anything else | **deny** |
+
+**allow_always is never selected** — it can outlive the session (Grok saves
+it for the whole project). An allow that only exists as an allow_always
+option becomes a deny. Every decision is a recorded `permission` claim on
+the run step, with the reason; like all harness output, claims are not
+evidence — the publish gate diffs the tree itself.
+
+**Capability record.** The `initialize` result — protocol version negotiated
+(every H0-measured agent negotiated 1, which is all the driver speaks),
+advertised auth methods, `loadSession` — is recorded on the `harness-run`
+step as `capabilities`, and the enqueue-time identity record carries the
+profile facts. Steering derives from that recorded fact in H5; until then
+steering notes for ACP runs are refused at the gate.
+
+**Credentials** ride exec env and are scrubbed on both sides of the boundary
+(H1): the driver scrubs the values (and base64 forms) from everything it
+prints inside the sandbox; the adapter scrubs them again before parse,
+record and live view. A profile with no credential set is refused at
+enqueue, before any run exists. Enqueue also derives the profile's provider
+hosts onto the run's egress allowlist exactly as the bespoke adapters do.
+
+**Not yet:** steering (H5, `session/load` at process boundaries plus the
+interrupt control file), the read-only plan phase (H8), cursor's registry
+binary and qwen's declared-journey verification (H9), Pi (RPC, not ACP; H6).
+The agent runs as the exec user today: the images define no unprivileged
+user yet, and H9's images are where `spec.agentUser` gets a real user to
+drop to.
 
 ## Cost honesty under a subscription (P5-3)
 

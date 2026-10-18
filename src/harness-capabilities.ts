@@ -63,6 +63,46 @@ export interface HarnessDeclaration {
 const EXTERNAL_BYPASS =
   "permissions are bypassed inside the sandbox (harness-external.ts:406 claude --permission-mode bypassPermissions; :450 opencode run --auto)";
 
+/**
+ * The ACP harnesses' declaration (E7 H3, src/harness-acp.ts). One shape for
+ * every profile: the permission gate is the driver's fail-closed policy, not
+ * a vendor bypass flag — the material difference from the bespoke adapters.
+ */
+function acpDeclaration(id: string): HarnessDeclaration {
+  return {
+    id,
+    accounting: "unknown",
+    capabilities: {
+      investigation: { status: "supported", reason: "scan prompt framing (harness-external.ts externalPrompt)" },
+      planning: { status: "refused", reason: "plan review requires the native harness (H8 tracks the ACP read-only plan phase)" },
+      // Deliberately refused until H5 lands session/load steering: the H3
+      // adapter runs exactly one prompt per exec, so a note accepted now
+      // would be stored, answered "sent" and never read — the exact bug
+      // this table exists to prevent.
+      steering: {
+        status: "refused",
+        reason: "the ACP adapter runs one prompt per exec; steering by session/load lands with H5 (SHIP_ACP_CONTROL)",
+      },
+      tools: {
+        status: "partial",
+        reason:
+          "vendor tools inside the sandbox, not Ship's tool layer; permission requests are answered by the ship-acp driver's fail-closed policy (workspace reads and writes only, symlink-safe, never allow-always) and every decision is recorded — claims made inside the sandbox, with the container as the boundary",
+      },
+      browser: { status: "refused", reason: "no browser wiring in the adapter (harness-acp.ts)" },
+      interruption: {
+        status: "partial",
+        reason: "the exec timeout and the driver's tool-call budget (session/cancel past maxSteps); an operator interrupt needs H5's control file",
+      },
+      approvals: { status: "refused", reason: "no park: the driver answers permission requests inside the sandbox and records the decision (H8's plan phase turns ask into a park)" },
+      recovery: { status: "refused", reason: "no stuck detection or settle for external runs" },
+      accounting: {
+        status: "partial",
+        reason: "tokens recorded from the agent's reported usage; no ACP agent reports dollars, so every run is counted, not priced (P5-3)",
+      },
+    },
+  };
+}
+
 const DECLARATIONS: Record<string, HarnessDeclaration> = {
   native: {
     id: "native",
@@ -159,6 +199,10 @@ const DECLARATIONS: Record<string, HarnessDeclaration> = {
       },
     },
   },
+  gemini: acpDeclaration("gemini"),
+  grok: acpDeclaration("grok"),
+  cursor: acpDeclaration("cursor"),
+  qwen: acpDeclaration("qwen"),
 };
 
 /** The declaration for a harness id, or undefined for an unknown one. */

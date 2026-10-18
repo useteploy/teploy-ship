@@ -48,6 +48,7 @@ import { chownHint, uidOf } from "./record-writes.js";
 import { RedactionGate } from "./support.js";
 import { NATIVE_HARNESS_ID, harnessAttempts, harnessRef } from "./harness.js";
 import { providerEgressAllow } from "./harness-external.js";
+import { acpProviderEgressAllow } from "./harness-acp.js";
 
 export type CheckStatus = "pass" | "fail" | "unknown";
 
@@ -231,7 +232,9 @@ export function checkHarnessEgress(env: DoctorProbes["env"]): DoctorCheck | unde
   }
   const external = [...new Set(refs.filter((r) => r.id !== NATIVE_HARNESS_ID).map((r) => r.id))];
   if (external.length === 0) return undefined;
-  const derived = providerEgressAllow(refs, env);
+  // Bespoke adapters derive from base-URL/key variables (harness-external),
+  // the ACP profiles from their per-profile host lists (harness-acp).
+  const derived = [...providerEgressAllow(refs, env), ...acpProviderEgressAllow(refs, env)];
   if (derived.length > 0) {
     return check("harness-egress", "pass", `harness ${external.join(", ")}: provider egress derived at enqueue and added to each run's allowlist: ${derived.join(", ")}`);
   }
