@@ -454,7 +454,7 @@ export async function setupStackedRepo(
     await git(executor, "git clean -fd");
     // Harness scratch is EXCLUDED from clean, and a previous run's kernel
     // state in this run's workspace is a correctness problem (reuseRepo).
-    await git(executor, "git rm -rf .teploy-agent");
+    await git(executor, "rm -rf .teploy-agent");
   }
   const cred = gitCredential(ref, token);
   const work = `ship/${runId}`;
