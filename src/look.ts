@@ -290,7 +290,13 @@ async function watch(page) {
     await captureText(page);
   } catch { /* a closing page is not a failure of the session */ }
 }
-for (const context of browser.contexts()) for (const page of context.pages()) await watch(page);
+// The driver opens its pages in the browser's DEFAULT context over its own
+// CDP connection, and a launched Browser does not list that context in
+// contexts() — so the recorder watched nothing (found live 2026-10-18). It
+// connects over CDP the same way the driver does and watches those pages.
+const recView = await chromium.connectOverCDP("http://127.0.0.1:${LOOK_CDP_PORT}");
+const recPages = () => recView.contexts().flatMap((context) => context.pages());
+for (const page of recPages()) await watch(page);
 // New pages and tabs join on the next tick; the same tick is the finaliser's
 // stop signal, so capture ends when the recording is assembled.
 setInterval(() => {
@@ -298,7 +304,7 @@ setInterval(() => {
     if (!capped) { capped = "finalised"; try { fs.unlinkSync(REC + "/stop"); } catch {} }
     return;
   }
-  for (const context of browser.contexts()) for (const page of context.pages()) void watch(page);
+  for (const page of recPages()) void watch(page);
 }, 1000);
 `;
 
