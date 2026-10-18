@@ -232,6 +232,14 @@ export interface RepoCheckout {
   headRepo?: string;
   /** Exact head commit at resolve time — what the review feedback was about. */
   headSha?: string;
+  /**
+   * Which path produced this checkout, when it is not the plain clone.
+   * "thread-warm" (D4-c) says the workspace came from the thread's snapshot
+   * and repo-setup fetched instead of cloning — recorded on the step's
+   * output so the timeline can show which boot a follow-up took. Absent on
+   * every cold checkout, whose outputs stay byte-identical to before.
+   */
+  via?: "thread-warm";
 }
 
 /**
@@ -859,6 +867,53 @@ export async function setupRepoForPr(
     sourceCred.env,
   );
   return checkout;
+}
+
+/**
+ * Bring a snapshot-restored PR workspace up to the PR head (D4-c) — the
+ * fetch-and-checkout half of a warm-thread follow-up, where `setupRepoForPr`
+ * above is the clone.
+ *
+ * The workspace already holds the head branch checked out (the snapshot
+ * carried the parent's tree), so the fetch goes into a REMOTE-tracking ref
+ * and `checkout -B` resets the branch onto it: fetching into the checked-out
+ * branch is refused by git, and resetting onto the fetched tip is what makes
+ * this honest about a branch that moved since the snapshot. The end state
+ * matches `setupRepoForPr`'s: on the PR head, tree clean, remote
+ * credential-free. Kept-but-ignored files (the dependency tree the snapshot
+ * was worth taking for) survive, exactly as in `reuseRepo`.
+ */
+export async function reuseRepoForPr(
+  executor: AgentExecutor,
+  options: { ref: RepoRef; token: string; checkout: RepoCheckout; headToken?: string },
+): Promise<RepoCheckout> {
+  const { ref, token, checkout } = options;
+  // The fetch happens under the credential and the remote is scrubbed back
+  // to the credential-free URL in the SAME shell whatever happened — the
+  // one-window rule cloneCredentialFree and reuseRepo already follow. The
+  // source is the fork for a fork PR, same as the cold path.
+  const source = checkout.headRepo !== undefined ? parseRepoUrl(checkout.headRepo) : ref;
+  const sourceToken = checkout.headRepo !== undefined ? (options.headToken ?? "") : token;
+  const sourceCred = gitCredential(source, sourceToken);
+  await git(
+    executor,
+    `git remote set-url origin ${sourceCred.url} && ` +
+      `{ git fetch --depth 50 --prune origin +refs/heads/${checkout.branch}:refs/remotes/origin/${checkout.branch} 2>&1; }; rc=$?; ` +
+      `git remote set-url origin ${ref.cloneUrl} >/dev/null 2>&1; exit $rc`,
+    300_000,
+    sourceCred.env,
+  );
+  // Drop the previous turn's tree before resetting: an unmergeable local
+  // change would fail the reset, and nothing here is worth keeping except
+  // what git ignores. Harness scratch goes too — a previous run's kernel
+  // state in this run's workspace is a correctness problem, not warmth.
+  await git(executor, "git reset --hard");
+  await git(executor, "git clean -fd");
+  await git(executor, "rm -rf .teploy-agent");
+  await git(executor, `git checkout -B ${checkout.branch} refs/remotes/origin/${checkout.branch}`);
+  await git(executor, 'git config user.name "Teploy Ship" && git config user.email "ship@teploy.dev"');
+  await git(executor, excludeCommand());
+  return { ...checkout, headSha: await git(executor, "git rev-parse HEAD") };
 }
 
 /** Marker every Ship-authored PR comment carries — also the self-trigger guard. */

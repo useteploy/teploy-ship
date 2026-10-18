@@ -460,6 +460,13 @@ export const WORKFLOW_STEPS: readonly WorkflowStep[] = [
   // Only reachable when the harness threw AND the tree was publishable, both
   // facts about the run rather than the input; gated on the input it needs.
   { key: "step:publish-on-failure", admits: repoRun },
+  // The end-of-turn thread snapshot (D4-c), admitted by `warmThread` alone
+  // (SHIP_WARM_THREAD + SHIP_WARM_PARKS at enqueue) — no pre-feature log
+  // carries the field, so those fingerprints hold. The step's own decision
+  // to skip (not a thread run, credential material present, no store) is a
+  // recorded outcome, not an absent step, which is why the gate is the input
+  // flag rather than anything the run did.
+  { key: "step:thread-snapshot", admits: (i) => i.warmThread === true },
   // P6-1: the cost ceiling refusing a further attempt. Admitted by the same
   // inputs that launch more than one, so a single-attempt run's fingerprint is
   // untouched.

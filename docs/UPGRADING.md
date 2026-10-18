@@ -496,3 +496,20 @@ Runs enqueued with the flag off record `warm: true` without `warmParks` and
 park the legacy way. There is no automatic downgrade path from a run
 enqueued with `warmParks` back to the legacy park; upgrade the daemon before
 setting the flag, per fleet, in that order.
+
+## Warm threads: a snapshot per conversation (D4-c)
+
+`SHIP_WARM_THREAD=1` (with `SHIP_WARM_PARKS=1`, the same daemon coupling
+above) snapshots a thread's workspace at the end of a run that belongs to a
+PR thread, and boots the thread's follow-ups from that image — a fetch and
+checkout instead of a full clone and install. `SHIP_WARM_THREAD_TTL_SEC`
+(default 7200) bounds how long a record stays usable; at most 5 snapshots
+per project per host are kept, oldest first (Decision 16 — both are a disk
+budget on the sandbox hosts, swept by the worker).
+
+Every failure is a cold run, never a failed one: an expired record, a repo
+or sandbox-shape mismatch, a removed host or a deleted image each fall back
+to the cold path and say why. The snapshot refuses to fire when the
+workspace holds credential material (a `.teploy-agent/` credential file or a
+token-bearing git config), and plan approval is never inherited through
+warmth: every follow-up decides its own plan park at enqueue.

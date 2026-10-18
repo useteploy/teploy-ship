@@ -10,7 +10,7 @@ import type { ImagePart, Message, ModelAdapter, UserContentPart } from "@neutron
 import { SandboxExecutor } from "@neutron-build/agents";
 import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 import { isSuspension, workflow } from "@neutron-build/workflow";
-import type { WorkflowContext, WorkflowDefinition } from "@neutron-build/workflow";
+import type { WorkflowContext, WorkflowDefinition, WorkflowEvent } from "@neutron-build/workflow";
 
 import { DEFAULT_MAX_OUTPUT_TOKENS, executeAction, workspaceFingerprint } from "./agent.js";
 import { FINISH_NUDGE_CLEAN_TREE, FINISH_NUDGE_FAILED, FINISH_NUDGE_NO_EVIDENCE, FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, describeAction, parseAction, parseReply, transcriptTurn } from "./actions.js";
@@ -44,6 +44,8 @@ import {
   checkoutRepoAtSha,
   setupRepo,
   setupRepoForPr,
+  reuseRepoForPr,
+  hasClone,
   resolvePr,
   updatePullRequestBody,
   uploadPrAsset,
@@ -69,6 +71,15 @@ import { compareAroundNow, effectiveTelemetryTarget, telemetryAppliesTo, telemet
 import { spliceVerification, verificationSection, type Evidence } from "./verification.js";
 import { surfacedTestIntegrity } from "./test-integrity-surface.js";
 import { shortHash, warmClient, warmSlugOf, type WarmState } from "./warm.js";
+import {
+  sandboxOverridesDigest,
+  workspaceCredentialReason,
+  type ThreadWarmRef,
+  type ThreadWarmStore,
+} from "./thread-warm.js";
+import { taskRootRunId } from "./task-session.js";
+import { parsePoolHandle } from "./sandbox-pool.js";
+import { canonicalRepositoryURL } from "./repository-reference.js";
 import { resourceClassOf, type ResourceClass } from "./resource-class.js";
 import { mergeFact, verificationSummary, type VerificationFacts } from "./verification-summary.js";
 import { preExisting, runTests, testComment, testTargetFromInput, testsFailedNudge, type TestOutcome, type TestTarget } from "./tests.js";
@@ -173,6 +184,14 @@ export interface DurableAgentInput {
   repo?: string;
   /** v2 records the full origin for memory/index scope; absent preserves parked runs. */
   repositoryScopeVersion?: 2;
+  /**
+   * Conversation lineage (D3): the run this one follows up, materialised at
+   * enqueue (runtime.ts) and read by the surfaces that walk a thread. Also
+   * the thread-warm half of D4-c: a run with a parent is by definition a
+   * follow-up, so it is one of the conditions the `thread-snapshot` step
+   * tests, and the anchor its record is keyed by is resolved through it.
+   */
+  parentRunId?: string;
   /** Review follow-up: work PR #pr's existing head branch and reply there. */
   pr?: number;
   /**
@@ -358,6 +377,32 @@ export interface DurableAgentInput {
    * exactly the population that must keep the keep-container path.
    */
   warmParks?: boolean;
+  /**
+   * Warm threads (D4-c): this run may snapshot its workspace at the END of
+   * the run for the thread's next turn (the `thread-snapshot` step). Only
+   * this field, written at enqueue under SHIP_WARM_THREAD + SHIP_WARM_PARKS,
+   * admits that step — the snapshot is live host state, so nothing about it
+   * may decide step presence from the worker side (the warm.ts REPLAY rule).
+   *
+   * The step's body decides whether the run actually snapshots: only a run
+   * that belongs to a thread (a follow-up itself, or one that worked an
+   * existing PR, or one that published one) has anything to be followed up
+   * on, and a workspace holding credential material is refused outright.
+   * Absent on every run enqueued before the feature or with it off, so
+   * those inputs and fingerprints are byte-identical.
+   */
+  warmThread?: boolean;
+  /**
+   * The follow-up half of D4-c: the thread's snapshot, materialised at
+   * ENQUEUE (thread-warm.ts) when a valid record exists — same repo, same
+   * sandbox shape, unexpired. Boots the `sandbox` step from the image via
+   * `createFrom` on the same host, and `repo-setup` fetches instead of
+   * cloning. Any failure of either half falls back to the cold path inside
+   * the same steps, so the run completes whatever the host says. Admits no
+   * step of its own, and carries no authority: the parent's plan approval
+   * is not in the image and not in this field.
+   */
+  threadWarm?: ThreadWarmRef;
   /**
    * Post-finish critic pass: before a finish that survives the verify
    * nudge is honored, an independent reviewer (Team/TeamPolicy over a
@@ -901,6 +946,13 @@ export interface ExecutorProvider {
   snapshot?: (handle: string) => Promise<string>;
   createFrom?: (image: string, overrides?: SandboxOverrides) => Promise<{ handle: string }>;
   /**
+   * Delete a snapshot image (D4-c; the daemon's `DELETE /v1/snapshots`).
+   * Optional like snapshot/createFrom because the thread-warm cap and TTL
+   * need it, while parks do not: absent means eviction leaves the image on
+   * the host and logs it rather than pretending.
+   */
+  deleteSnapshot?: (image: string) => Promise<void>;
+  /**
    * Release a workspace. Optional, and deliberately best-effort: the provider
    * had no way to say "done with this" at all, so every run's container sat
    * allocated until the daemon's TTL reaper noticed — and a snapshot-restore
@@ -1040,6 +1092,14 @@ export interface DurableAgentConfig {
    * sequence stays a function of the input.
    */
   previewLineage?: PreviewLineage;
+  /**
+   * The thread-warm record store (D4-c, thread-warm.ts): where the
+   * `thread-snapshot` step writes what a follow-up boots from, and where the
+   * per-project-per-host cap is enforced. Worker wiring like previewLineage —
+   * the store is deployment state, not a fact of the run. Absent = the step
+   * records itself skipped, so a replay's step sequence still matches.
+   */
+  threadWarm?: ThreadWarmStore;
   /**
    * Where this worker reads telemetry, if it may at all. Worker wiring for the
    * same reason as `preview`: it carries a credential (an Observe share token)
@@ -1385,7 +1445,29 @@ export function durableAgent(
       // per execution (a store read, not a step — it decides nothing about
       // the step sequence) so a project added while the worker runs counts.
       const repoPolicy = await withProjects(basePolicy, config.projects);
-      const handle = await ctx.step("sandbox", async () => (await config.executor.create(sandboxOverrides)).handle);
+      // D4-c: a follow-up whose input carries the thread's snapshot boots
+      // from it — on the SAME host, because an image ref lives on one daemon
+      // (the pool routes createFrom by the ref's tag). The step's output
+      // records which boot ran, so a cold fallback is visible on the timeline
+      // instead of reading as a feature that never fired. A string output is
+      // what every pre-thread-warm log carries; livenessProbeTarget reads
+      // both shapes.
+      const sandboxStep = await ctx.step("sandbox", async () => {
+        if (input.threadWarm === undefined || config.executor.createFrom === undefined) {
+          return (await config.executor.create(sandboxOverrides)).handle;
+        }
+        try {
+          const restored = await config.executor.createFrom(input.threadWarm.image, sandboxOverrides);
+          return { handle: restored.handle, boot: "thread-warm" as const };
+        } catch (error) {
+          // Host gone, image evicted, daemon refusing: the record was live
+          // state when it was read and stale now. The cold path is the
+          // fallback the whole feature degrades to, never a failed run.
+          const reason = error instanceof Error ? error.message : String(error);
+          return { handle: (await config.executor.create(sandboxOverrides)).handle, boot: "cold" as const, coldWhy: reason };
+        }
+      });
+      const handle = typeof sandboxStep === "string" ? sandboxStep : sandboxStep.handle;
       const executor = config.executor.attach(handle);
 
       // C5: is the container this run recorded still ALIVE?
@@ -1459,16 +1541,24 @@ export function durableAgent(
             // Warm reuse (SB-A) when this run booted a warm volume that already
             // holds a clone; a cold clone otherwise. Both end in the same
             // checkout, so the step's OUTPUT — the only thing a replay reads —
-            // does not depend on which path ran.
+            // does not depend on which path ran. A thread-warm boot (D4-c)
+            // counts as holding a clone too: the snapshot carried the volume's
+            // bytes, `.git` included, whatever the warm cache said. The `via`
+            // marker is recorded only when the restored clone was REALLY
+            // there, so a cold fallback inside a threadWarm run never claims
+            // the fetch path.
             if (input.pr === undefined) {
               // DF1 (SHIP_FORK): a fork stands on the source's recorded pushed
               // commit on its own new branch; a fork of a run that pushed
-              // nothing takes the ordinary default-branch checkout below.
+              // nothing takes the ordinary default-branch checkout below. A
+              // fork is a new task root, so it never carries threadWarm.
               const fork = input.forkOf;
               if (fork !== undefined && fork.sha !== undefined) {
                 return forkCheckout(executor, ctx.runId, { ...fork, sha: fork.sha }, ref, token, repoPolicy, input.warm === true);
               }
-              return checkoutRepo(executor, { ref, token, runId: ctx.runId, warm: input.warm === true });
+              const restored = input.threadWarm !== undefined && (await hasClone(executor));
+              const co = await checkoutRepo(executor, { ref, token, runId: ctx.runId, warm: restored || input.warm === true });
+              return restored ? { ...co, via: "thread-warm" as const } : co;
             }
             // A fork PR's head branch lives in another repository, which the
             // allowlist has to cover too — resolve its credential the same way.
@@ -1477,6 +1567,20 @@ export function durableAgent(
               resolved.headRepo !== undefined
                 ? credentialFor(assertRepoAllowed(resolved.headRepo, { trust: "external", config: repoPolicy }), repoPolicy)
                 : "";
+            // D4-c: a snapshot-booted workspace already holds the PR head's
+            // tree, so a fetch plus checkout replaces the clone. Any failure
+            // (or an integrity check that says the tree is not what the
+            // record claimed) falls through to the cold path below — same
+            // step, same RepoCheckout shape, same run.
+            if (input.threadWarm !== undefined && (await hasClone(executor))) {
+              try {
+                const reused = await reuseRepoForPr(executor, { ref, token, checkout: resolved, ...(headToken !== "" ? { headToken } : {}) });
+                await assertRestoredRepository(executor, repoUrl, true);
+                return { ...reused, via: "thread-warm" as const };
+              } catch {
+                // cold below
+              }
+            }
             return setupRepoForPr(executor, { ref, token, pr: input.pr, requireOpen: input.requireOpenPr === true, ...(headToken !== "" ? { headToken } : {}) });
           });
         }
@@ -1810,6 +1914,70 @@ export function durableAgent(
                 primary.handle,
                 facts,
               );
+        // D4-c: THREAD SNAPSHOT — the run's warmth, handed to its follow-ups.
+        //
+        // Only a run that belongs to a thread has anything to be followed up
+        // on: one that is itself a follow-up, works an existing PR, or just
+        // published one. The condition reads the recorded input and the
+        // publish result the recorded steps re-derive, so a replay takes the
+        // same branch its log took. Everything inside refuses by SKIPPING
+        // (the refusal is the step's recorded output), never by throwing: a
+        // snapshot is an optimisation for a run that has already delivered.
+        if (input.warmThread === true && (input.parentRunId !== undefined || input.pr !== undefined || pr !== null)) {
+          await ctx.step("thread-snapshot", async () => {
+           try {
+            if (config.executor.snapshot === undefined || config.executor.createFrom === undefined) {
+              return { skipped: "this worker's provider cannot snapshot" };
+            }
+            if (config.threadWarm === undefined) {
+              return { skipped: "this worker has no thread-warm store configured" };
+            }
+            // The hygiene gate: a snapshot outlives its container, so nothing
+            // that was supposed to die with the container may be in it.
+            const credential = await workspaceCredentialReason(primary.executor);
+            if (credential !== null) {
+              return { skipped: `no snapshot: ${credential}` };
+            }
+            let head = "";
+            try {
+              head = (await primary.executor.exec("git rev-parse --verify HEAD", { timeoutMs: 15_000 })).stdout.trim();
+            } catch {
+              // A workspace with no commit still snapshots; the follow-up's
+              // repo-setup sees no .git and clones cold.
+            }
+            // The record keys on the thread root: taskRootRunId is recorded
+            // on this run's own run-started (runtime.ts), and the walk below
+            // covers a hand-executed run whose log lacks the anchor. Resolved
+            // BEFORE the snapshot so a worker that cannot load history skips
+            // without stranding an image nothing points at.
+            let taskRoot = ctx.runId;
+            if (input.parentRunId !== undefined) {
+              if (config.loadEvents === undefined) return { skipped: "this worker cannot resolve the thread root" };
+              taskRoot = await taskRootRunId(
+                { load: async (id) => [...((await config.loadEvents!(id)) ?? [])] as WorkflowEvent[] },
+                input.parentRunId,
+              );
+            }
+            const image = await config.executor.snapshot(primary.handle);
+            const evicted = await config.threadWarm.record({
+              taskRootRunId: taskRoot,
+              repo: canonicalRepositoryURL(input.repo ?? "") ?? "",
+              image,
+              hostIndex: parsePoolHandle(image).index,
+              head,
+              overridesDigest: sandboxOverridesDigest(sandboxOverridesOf(input)),
+              createdAt: new Date().toISOString(),
+            });
+            return { image, head, ...(evicted.length > 0 ? { evicted: evicted.length } : {}) };
+           } catch (error) {
+            // Found live 2026-10-18: a run that parked at approve-merge had its
+            // original sandbox snapshotted and destroyed by the merge park, so
+            // the exec above threw "run not found" and failed a run that had
+            // already merged. The snapshot is an optimisation; it skips.
+            return { skipped: `no snapshot: ${error instanceof Error ? error.message : String(error)}` };
+           }
+          });
+        }
         await dispose(config, primary.handle);
         return {
           status: result.status,
@@ -4826,6 +4994,26 @@ export function sandboxProvider(options: {
     },
     async snapshot(handle: string) {
       return SandboxExecutor.attach(handle, base).snapshot();
+    },
+    async deleteSnapshot(image: string) {
+      // The daemon's explicit-delete route (README "Snapshots"): only
+      // teploy-sbx-snap refs are deletable there, which is exactly the shape
+      // this provider's own snapshot returns.
+      const doFetch = base.fetch ?? globalThis.fetch;
+      const response = await doFetch(`${base.baseURL.replace(/\/+$/, "")}/v1/snapshots?image=${encodeURIComponent(image)}`, {
+        method: "DELETE",
+        headers: { authorization: `Bearer ${base.token}` },
+      });
+      if (!response.ok) {
+        let detail = `Sandbox snapshot delete failed with status ${response.status}.`;
+        try {
+          const problem = (await response.json()) as { detail?: unknown };
+          if (typeof problem.detail === "string") detail = problem.detail;
+        } catch {
+          // non-JSON body
+        }
+        throw new Error(detail);
+      }
     },
     async createFrom(image: string, overrides?: SandboxOverrides) {
       // No warm volume on a restore: the snapshot IS the workspace, and a
