@@ -7,7 +7,7 @@ import type { IntakeTask } from "./intake.js";
 import type { RunUsage } from "./durable.js";
 import type { RunMeta } from "./run-store.js";
 import type { SpendStore } from "./spend.js";
-import { usageFromEvents, intakeOrigin, notificationContext, terminalContext, verificationContext } from "./worker.js";
+import { usageFromEvents, intakeOrigin, notificationContext, terminalContext, verificationContext, incidentEvidenceDeps, incidentEvidenceEnabled } from "./worker.js";
 import type { WorkflowEvent } from "@neutron-build/workflow";
 import { issueBodyFor } from "./akiroo.js";
 import { LocalAdmission } from "./admission.js";
@@ -739,6 +739,84 @@ test("contract 2: a pre-ladder run still reports its verification, derived from 
 
   // And a run with nothing recorded carries no block: absent is a fact too.
   assert.deepEqual(verificationContext([wev("run-started", { input: { task: "t" } }), wev("run-failed", { error: "x" })]), {});
+});
+
+// ------------------------------------------------- EV5 diagnosis evidence
+
+test("incidentEvidenceDeps: flag off means no readers — the diagnosis task stays byte-identical to pre-EV5", () => {
+  const records = { list: async () => [{ repo: "tyler/web", updatedAt: "2026-07-06T00:00:00Z", mergedSha: "abc1234", state: "confirmed" }] };
+  assert.equal(incidentEvidenceDeps({ deliveryRecords: records }, { SHIP_INCIDENT_EVIDENCE: "off", OBSERVE_URL: "https://observe.example.com", OBSERVE_READ_TOKEN: "tok" }), undefined);
+  assert.equal(incidentEvidenceDeps({ deliveryRecords: records }, { OBSERVE_URL: "https://observe.example.com", OBSERVE_READ_TOKEN: "tok" }), undefined);
+  assert.equal(incidentEvidenceEnabled({ SHIP_INCIDENT_EVIDENCE: "on" }), true);
+  assert.equal(incidentEvidenceEnabled({ SHIP_INCIDENT_EVIDENCE: "ON" }), true);
+  assert.equal(incidentEvidenceEnabled({ SHIP_INCIDENT_EVIDENCE: "shadow" }), false);
+});
+
+test("incidentEvidenceDeps: no credential and no delivery store means no evidence at all, not an all-unknowns block", () => {
+  assert.equal(incidentEvidenceDeps({}, { SHIP_INCIDENT_EVIDENCE: "on" }), undefined);
+  // One-sided wiring is fine: the missing half becomes an honest unknown.
+  const onlyRecords = incidentEvidenceDeps(
+    { deliveryRecords: { list: async () => [] } },
+    { SHIP_INCIDENT_EVIDENCE: "on" },
+  );
+  assert.notEqual(onlyRecords, undefined);
+  assert.equal(onlyRecords?.readHealth, undefined);
+  assert.notEqual(onlyRecords?.recentDeliveries, undefined);
+});
+
+test("incidentEvidenceDeps: the health reader is the recovery sweep's own reader, and deliveries map to the evidence shape", async () => {
+  const env = {
+    SHIP_INCIDENT_EVIDENCE: "on",
+    OBSERVE_URL: "https://observe.example.com",
+    OBSERVE_READ_TOKEN: "share-token",
+    SHIP_INCIDENT_RECOVERY_POLL_SECONDS: "120",
+  };
+  const records = {
+    list: async () => [
+      { repo: "tyler/web", updatedAt: "2026-07-06T11:00:00Z", mergedSha: "abc1234", state: "confirmed" },
+      { repo: "tyler/web", updatedAt: "2026-07-06T10:00:00Z", state: "proposed" },
+    ],
+  };
+  const deps = incidentEvidenceDeps({ deliveryRecords: records }, env);
+  assert.notEqual(deps, undefined);
+
+  // Delivery mapping: updatedAt -> at, mergedSha -> revision (absent stays
+  // absent), state passes through for incidents.ts to classify.
+  const deliveries = await deps!.recentDeliveries!("tyler/web");
+  assert.deepEqual(deliveries, [
+    { repo: "tyler/web", at: "2026-07-06T11:00:00Z", revision: "abc1234", state: "confirmed" },
+    { repo: "tyler/web", at: "2026-07-06T10:00:00Z", state: "proposed" },
+  ]);
+
+  // The health reader is the same share-token read the recovery sweep uses,
+  // and the request count rides through as samples for the evidence model.
+  const was = globalThis.fetch;
+  let sawUrl = "";
+  globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+    sawUrl = String(url);
+    void init;
+    return new Response(
+      JSON.stringify([{ service_name: "fylun-web", request_count: 240, error_count: 30, error_rate: undefined }]),
+      { status: 200 },
+    );
+  }) as typeof fetch;
+  try {
+    const read = await deps!.readHealth!("fylun-web", "error_rate");
+    assert.match(sawUrl, /\/api\/v1\/traces\/services\?from=/);
+    assert.equal(read.kind, "ok");
+    assert.deepEqual(read.kind === "ok" ? read.health : null, {
+      service: "fylun-web",
+      requests: 240,
+      errors: 30,
+      errorRate: 0.125,
+      p50: 0,
+      p95: 0,
+      p99: 0,
+      apdex: 0,
+    });
+  } finally {
+    globalThis.fetch = was;
+  }
 });
 
 // ------------------------------------------------- worker claim stamp (D4-a)
