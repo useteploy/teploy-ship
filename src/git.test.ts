@@ -122,6 +122,35 @@ test("setupRepo + commitAndPush against a local bare remote", async () => {
   assert.match(author.stdout, /Teploy Ship <ship@teploy\.dev>/);
 });
 
+test("the ACP vendor-state excludes never touch the global list: a run committing .gemini/settings.json ships it", async () => {
+  // Repos legitimately commit .gemini/settings.json (and .qwen/, .grok/ peer
+  // state); hiding those directories from `git add -A` for EVERY run would
+  // silently drop such deliverables — including a native run's. The vendor
+  // excludes are the ACP adapter's belt (harness-acp.ts), not the checkout's.
+  const bare = await mkdtemp(join(tmpdir(), "ship-git-bare-"));
+  const seed = await mkdtemp(join(tmpdir(), "ship-git-seed-"));
+  const seeder = new LocalExecutor({ root: seed });
+  await seeder.exec(`git init -q -b main . && git config user.email t@t && git config user.name t && echo hello > readme.md && git add -A && git commit -qm seed && git clone -q --bare . ${bare}/repo.git`);
+  const ref = { kind: "forgejo" as const, base: "file://", owner: "local", repo: "repo", cloneUrl: `${bare}/repo.git` };
+  const work = await mkdtemp(join(tmpdir(), "ship-git-work-"));
+  const executor = new LocalExecutor({ root: work });
+  const checkout = await setupRepo(executor, { ref, token: "", runId: "run-vendor" });
+  // The workspace exclude file carries none of the vendor dirs.
+  const excludeFile = await executor.exec("cat .git/info/exclude");
+  for (const dir of [".gemini/", ".qwen/", ".grok/"]) {
+    assert.ok(!excludeFile.stdout.includes(dir), `${dir} is not excluded for an ordinary checkout`);
+  }
+  // The run's deliverable IS a settings file the repo wants to commit.
+  await executor.exec("mkdir -p .gemini && echo '{\"model\":\"gemini-2.5-pro\"}' > .gemini/settings.json");
+  const pushed = await commitAndPush(executor, { ref, token: "", checkout, message: "chore: pin the repo gemini settings\n\nrun-vendor" });
+  assert.equal(pushed.kind, "pushed", "an untracked .gemini/settings.json is a deliverable, not scratch");
+  const snapshot = await publishedDiff(executor, checkout.base);
+  assert.match(snapshot ?? "", /diff --git a\/\.gemini\/settings\.json b\/\.gemini\/settings\.json/, "the settings file reached the commit");
+  const check = new LocalExecutor({ root: bare });
+  const show = await check.exec(`cd repo.git && git show ${checkout.branch}:.gemini/settings.json`);
+  assert.match(show.stdout, /gemini-2\.5-pro/);
+});
+
 test("openPullRequest hits the right endpoint per host kind", async () => {
   const calls: Array<{ url: string; init: RequestInit }> = [];
   const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {

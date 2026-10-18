@@ -47,6 +47,7 @@ import { attemptsCount, harnessAttempts, harnessRef, NATIVE_HARNESS_ID } from ".
 import { admitHarnessCredentials, harnessCredEnabled } from "./harness-credentials.js";
 import type { HarnessCredentialStore } from "./harness-credentials.js";
 import { PLAN_REVIEW_REFUSAL, refusalFor } from "./harness-capabilities.js";
+import { assertAcpHarnessAdmitted, withAcpProviderEgress } from "./harness-acp.js";
 import { harnessIdentity, harnessRecordEnabled } from "./harness-identity.js";
 import { withProviderEgress } from "./harness-external.js";
 import type { HarnessRef } from "./harness.js";
@@ -1616,6 +1617,11 @@ export async function enqueueRun(
   // cost for an answer the critic picks between on the strength of a DIFF,
   // which a scan does not have.
   const attempts = options.repo !== undefined && !scan ? harnessAttempts(process.env.SHIP_HARNESS_ATTEMPTS) : [];
+  // E7 H3 (SHIP_ACP_HARNESS): the ACP harness ids are admitted at enqueue
+  // only when the flag is on and the profile's credential is present. Same
+  // before-append rule as the plan-review refusal — a refusal after
+  // `store.append` would leave a ghost run no surface can explain.
+  assertAcpHarnessAdmitted([harness, ...attempts]);
   // A project requirement is a floor, never a heuristic based on prompt size.
   // Resolve only for new runs; accepted launches and parked histories retain
   // the recorded checkpoint so changing policy cannot change their replay.
@@ -1711,21 +1717,25 @@ export async function enqueueRun(
   // say which hosts the container was actually allowed. Native (and an
   // external run with nothing derivable) records exactly what it did before
   // this existed — byte-identical inputs, and no step is admitted by the
-  // field, so fingerprints do not move. Under SHIP_HARNESS_CRED the env is
-  // first overlaid with the store's unsealed values, so a credential or base
-  // URL held in the store derives the same host the exec will really dial.
+  // field, so fingerprints do not move. The ACP profiles' hosts ride the same
+  // merge (harness-acp.ts withAcpProviderEgress), derived per profile.
   // Under SHIP_HARNESS_CRED the env each profile's derivation runs over is
-  // that profile's OWN overlay (S1): bindings are sealed per profile, and a
-  // codex-stored OPENAI_API_KEY must not be merged into opencode's derivation
-  // by env name. Flag off derives from the plain env exactly as before.
+  // that profile's OWN overlay (S1): bindings are sealed per profile, so a
+  // credential or base URL held in the store derives the same host the exec
+  // will really dial, and a codex-stored OPENAI_API_KEY is never merged into
+  // opencode's derivation by env name. Flag off derives from the plain env
+  // exactly as before.
   const credOverlayEnvFor = (id: string): NodeJS.ProcessEnv => {
     const overlay = harnessCred?.ok === true ? harnessCred.overlays[id] : undefined;
     return overlay !== undefined && Object.keys(overlay).length > 0 ? { ...process.env, ...overlay } : process.env;
   };
-  const sandboxEgressAllow = withProviderEgress(
-    scan ? project?.sandboxEgressAllow : withPreviewEgress(project?.sandboxEgressAllow, project?.verification),
+  const sandboxEgressAllow = withAcpProviderEgress(
+    withProviderEgress(
+      scan ? project?.sandboxEgressAllow : withPreviewEgress(project?.sandboxEgressAllow, project?.verification),
+      [harness, ...attempts],
+      (ref) => credOverlayEnvFor(ref.id),
+    ),
     [harness, ...attempts],
-    (ref) => credOverlayEnvFor(ref.id),
   );
   // EV6: the gate only passes when the agent writes the reproducing test, so
   // the task must SAY so — appended here, frozen into the recorded input's

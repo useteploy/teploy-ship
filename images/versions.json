@@ -73,6 +73,35 @@
       "npm": "@openai/codex",
       "version": "0.163.0",
       "binary": "codex"
+    },
+    "gemini": {
+      "npm": "@google/gemini-cli",
+      "version": "0.64.0",
+      "binary": "gemini",
+      "acpOptIn": true
+    },
+    "grok": {
+      "npm": "@xai-official/grok",
+      "version": "1.0.63",
+      "binary": "grok",
+      "acpOptIn": true
+    },
+    "qwen": {
+      "npm": "@qwen-code/qwen-code",
+      "version": "0.25.2",
+      "binary": "qwen",
+      "acpOptIn": true
     }
-  }
+  },
+  "$comment_acp": [
+    "The ACP harness pins (E7 H3) are the exact versions the H0 receipts",
+    "measured (evals/receipts/2026-10-18-acp-*.txt): every one negotiated ACP",
+    "protocolVersion 1. cursor is NOT here on purpose: it is a registry",
+    "binary, not npm, and its pin lands with H9's build-time registry support.",
+    "acpOptIn marks the ACP vendor agents: images/build.sh bakes them only",
+    "with --acp, so a flag-off deployment does not ship three extra agent",
+    "CLIs it cannot enqueue. images/acp-driver/ship-acp.mjs (the in-sandbox",
+    "ACP driver) is baked into every image regardless of which harnesses",
+    "are declared."
+  ]
 }

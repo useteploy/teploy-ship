@@ -6,7 +6,10 @@ import type { WorkflowEvent } from "@neutron-build/workflow";
 import { isCursorEvent } from "@neutron-build/workflow";
 
 import { NATIVE_HARNESS_ID } from "./harness.js";
+import { ACP_HARNESS_IDS } from "./harness-acp.js";
 import type { DurableAgentInput } from "./durable.js";
+
+const ACP_IDS: ReadonlySet<string> = new Set(ACP_HARNESS_IDS);
 
 /**
  * The upgrade fence: can THIS build replay a run that ANOTHER build enqueued?
@@ -338,7 +341,7 @@ export function extractStepSequence(source: string): string[] {
  * steps must be added here, and step-fingerprint.test.ts fails if one exists
  * and is missing — the list cannot quietly fall behind the code.
  */
-export const WORKFLOW_STEP_MODULES = ["durable.js", "harness-external.js", "ladder-steps.js"] as const;
+export const WORKFLOW_STEP_MODULES = ["durable.js", "harness-external.js", "harness-acp.js", "ladder-steps.js"] as const;
 
 let cachedSequence: Promise<string[]> | null = null;
 
@@ -426,6 +429,16 @@ const multiAttempt = (i: RecordedInput): boolean => (i.harnessAttempts?.length ?
 const externalHarness = (i: RecordedInput): boolean =>
   (i.harness !== undefined && i.harness.id !== NATIVE_HARNESS_ID) ||
   (i.harnessAttempts ?? []).some((h) => h.id !== NATIVE_HARNESS_ID);
+
+/**
+ * An ACP harness run (E7 H3): the same step names the external adapters use,
+ * recorded by harness-acp.js's adapter. Gated on the ACP ids ALONE so no
+ * pre-ACP input admits these entries — an existing claude-code or opencode
+ * run's fingerprint cannot move, and an ACP run (only enqueueable under
+ * SHIP_ACP_HARNESS, which no earlier log carries) gets its own.
+ */
+const acpHarness = (i: RecordedInput): boolean =>
+  (i.harness !== undefined && ACP_IDS.has(i.harness.id)) || (i.harnessAttempts ?? []).some((h) => ACP_IDS.has(h.id));
 
 /**
  * An external harness at a contract that steers (D6/D7): version "1" adapters
@@ -618,6 +631,12 @@ export const WORKFLOW_STEPS: readonly WorkflowStep[] = [
   { key: "step:*harness-resume-*", admits: steersExternally },
   // The closing record: notes the loop accepted but never delivered.
   { key: "step:*harness-steer-undelivered", admits: steersExternally },
+  // The ACP adapter (E7 H3, harness-acp.js, third module above): the same
+  // preflight/run pair the external adapters record, gated on the ACP ids
+  // alone so no pre-existing input admits it and every in-flight run's
+  // fingerprint holds. ACP steering is H5; no steer steps exist here yet.
+  { key: "step:*harness-preflight", admits: acpHarness },
+  { key: "step:*harness-run", admits: acpHarness },
   // The ladder's own steps (ladder-steps.js, third module above), in that
   // file's source order. Each is admitted by the rung it records, all off
   // `verification` — a field no pre-ladder log carries, so those runs'

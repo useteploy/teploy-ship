@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { HARNESS_PACKAGES } from "./harness.js";
 import type { HarnessRef } from "./harness.js";
+import { ACP_PROFILES, ACP_PROTOCOL_VERSION } from "./harness-acp.js";
 import { externalHarnessConfig } from "./harness-external.js";
 
 /**
@@ -47,6 +48,13 @@ export interface HarnessIdentity {
   configuration: { timeoutMs: number | null; claudeBare: boolean | null; forwardedEnvNames: string[]; digest: string };
   /** Other harnesses a multi-attempt run may execute under. */
   attempts?: { id: string; adapterVersion: string }[];
+  /**
+   * E7 H3: the enqueue-time ACP profile facts. The agent's own initialize
+   * result (protocol negotiated, advertised auth methods, loadSession) is a
+   * per-RUN fact the in-sandbox driver learns, so it is recorded on the
+   * `harness-run` step as `capabilities` (harness-acp.ts), next to this.
+   */
+  acp?: { profile: string; protocolOffered: number; authMethodId: string | null };
 }
 
 function digest(value: unknown): string {
@@ -75,5 +83,8 @@ export function harnessIdentity(opts: {
     expectedRevision: external ? { npm: pkg.npm, version: pkg.version } : null,
     configuration: { ...fields, digest: digest({ id: opts.harness.id, model: config?.model ?? null, ...fields }) },
     ...((opts.attempts?.length ?? 0) >= 2 ? { attempts: opts.attempts!.map((a) => ({ id: a.id, adapterVersion: a.version })) } : {}),
+    ...(ACP_PROFILES[opts.harness.id] !== undefined
+      ? { acp: { profile: opts.harness.id, protocolOffered: ACP_PROTOCOL_VERSION, authMethodId: ACP_PROFILES[opts.harness.id]!.authMethodId ?? null } }
+      : {}),
   };
 }

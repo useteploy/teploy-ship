@@ -1,0 +1,23 @@
+DS1 stacked PRs: live soak, 2026-10-18
+
+Production 122cb4d, SHIP_STACKED_PRS=on, scratch repo Tyler/ship-credential-proof (private Forgejo).
+
+Defects found on the way, both fixed before the pass:
+1. Warm stacked checkout ran `git rm -rf .teploy-agent`, which fails when the scratch dir is untracked or
+   absent; the stacked run failed at repo-setup -> #151 (plain rm, as the other warm paths).
+2. Launching pr-watch's stack-rebase proposal from the dashboard dropped the stack facts (the worker's
+   auto-launch carried them), so the run went in as a plain PR follow-up against the merged base's deleted
+   branch and failed at push -> #154.
+
+Passing cycle:
+- base run-request-1d8826ca...: STACK-BASE-<ts>.md, PR #14, parked approve-merge.
+- stack action (run page / http client stack()) -> run-request-74162594...: PR #15 opened against
+  ship/run-request-1d8826ca..., parked approve-merge.
+- base approved and squash-merged (main 86f6a58).
+- pr-watch: "stack-rebase on ...#15 proposed task-v2-3f47d86b...-1" (one proposal; dedupe by stacked head +
+  base merge sha).
+- launched from the dashboard -> run-31e423eb...: repo-setup on the stacked branch; stack-rebase
+  {"kind":"rebased","sha":"c71d3bc","base":"main"}; tests passed; repo-push pushed c71d3bc whose diff is
+  only STACK-TOP-<ts>.md.
+- git: origin/main is an ancestor of the stacked branch; diff main..stacked = 1 file (the top's own).
+- Forgejo: PR #15 base retargeted to main. PASS.

@@ -51,14 +51,17 @@ const POLICIES = ["", "ignore", "propose", "auto"] as const;
 const AUTHORITIES = ["", "legacy", "propose", "send", "auto_trivial", "auto_normal"] as const;
 // Mirrors HARNESS_VERSIONS (src/harness.ts) the way NETWORKS/POLICIES mirror
 // their unions: this route is SSR'd from source and importing a value out of
-// the runtime package for a four-entry list is not worth the coupling.
+// the runtime package for a list this small is not worth the coupling.
 // normalizeProject refuses an id this list does not contain, so a drift here
-// surfaces as a rejected save rather than a broken run.
-const HARNESSES = ["", "native", "claude-code", "opencode", "codex"] as const;
-// The profiles a sealed harness credential can be stored for (H2): external
-// harness ids only — the native loop takes its credentials from the worker's
-// own config, never from the per-project store.
-const CRED_PROFILES = HARNESSES.filter((h) => h !== "" && h !== "native");
+// surfaces as a rejected save rather than a broken run. The ACP ids
+// (gemini/grok/cursor/qwen) are only enqueueable where SHIP_ACP_HARNESS=on
+// (harness-acp.ts); offering them everywhere is honest — a pick on an
+// off-flag worker refuses at enqueue with the reason named.
+const HARNESSES = ["", "native", "claude-code", "opencode", "codex", "gemini", "grok", "cursor", "qwen"] as const;
+// The profiles a sealed harness credential can be stored for (H2): the
+// external CLI harnesses only — the native loop takes its credentials from
+// the worker's own config, and the ACP profiles are not H2 profiles.
+const CRED_PROFILES = ["claude-code", "opencode", "codex"] as const;
 
 interface ProjectsData {
   view: "repos";

@@ -168,8 +168,14 @@ test("a run enqueued for a harness the worker lacks fails before a sandbox is al
  */
 test("HARNESS_PACKAGES matches images/versions.json and covers every external adapter", async () => {
   const raw = await readFile(new URL("../images/versions.json", import.meta.url), "utf8");
-  const versions = JSON.parse(raw) as { harnesses: Record<string, { npm: string; version: string; binary: string }> };
-  const declared = Object.fromEntries(Object.entries(versions.harnesses).filter(([k]) => !k.startsWith("$")));
+  const versions = JSON.parse(raw) as { harnesses: Record<string, { npm: string; version: string; binary: string; acpOptIn?: boolean }> };
+  // acpOptIn is a build-sh fact (which agents are opt-in bakes), not an
+  // adapter fact — compare the fields HARNESS_PACKAGES carries.
+  const declared = Object.fromEntries(
+    Object.entries(versions.harnesses)
+      .filter(([k]) => !k.startsWith("$"))
+      .map(([k, v]) => [k, { npm: v.npm, version: v.version, binary: v.binary }]),
+  );
 
   assert.deepEqual(HARNESS_PACKAGES, declared);
 

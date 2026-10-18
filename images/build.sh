@@ -5,7 +5,8 @@
 # a run's container is created there, and an image that only exists on your
 # laptop is an image Ship cannot boot. `install.sh` does this for you.
 #
-#   images/build.sh                       # go + node, every harness baked, :dev
+#   images/build.sh                       # go + node, the always-on harnesses (claude-code, opencode, codex), :dev
+#   images/build.sh --acp                 # ...plus the ACP agents (gemini, grok, qwen; opt-in, ~300MB more)
 #   images/build.sh go                    # just the Go image
 #   images/build.sh rust                  # the Rust image (never the default; per project)
 #   images/build.sh --harness none node   # a plain pnpm sandbox, native runs only
@@ -42,14 +43,16 @@ fi
 stacks=()
 tag="dev"
 harness_arg=""
+acp=0
 no_alias=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --tag) tag="${2:?--tag needs a value}"; shift 2 ;;
     --harness) harness_arg="${2:?--harness needs a value}"; shift 2 ;;
+    --acp) acp=1; shift ;;
     --no-alias) no_alias=1; shift ;;
-    -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     go|node|rust) stacks+=("$1"); shift ;;
     all) stacks+=(go node rust); shift ;;
     *) die "unknown argument: $1" ;;
@@ -66,11 +69,21 @@ rust_base="$(json 'd["bases"]["rust"]')"
 pnpm_version="$(json 'd["pnpm"]')"
 playwright_version="$(json "d['playwright']")"
 
-# Which harnesses to bake. Default: every one versions.json knows about, which
-# is also every one src/harness.ts has an adapter for.
+# Which harnesses to bake. Default: the always-on adapters only. The ACP
+# vendor agents (gemini, grok, qwen — acpOptIn in versions.json) are OPT-IN
+# via --acp: they are three ~100MB CLIs a flag-off deployment never launches
+# (SHIP_ACP_HARNESS gates their enqueue), and every image still bakes the
+# ship-acp driver itself, so an --acp image differs from a plain one only in
+# which agent binaries are on PATH. An explicit --harness id is honoured
+# whatever the default is.
 all_ids="$(json '" ".join(k for k in d["harnesses"] if not k.startswith("$"))')"
+core_ids="$(json '" ".join(k for k, v in d["harnesses"].items() if not k.startswith("$") and not v.get("acpOptIn"))')"
+acp_ids="$(json '" ".join(k for k, v in d["harnesses"].items() if not k.startswith("$") and v.get("acpOptIn"))')"
 case "${harness_arg}" in
-  "")   ids="${all_ids}" ;;
+  "")
+    ids="${core_ids}"
+    if [ "${acp}" -eq 1 ]; then ids="${core_ids}${acp_ids:+ }${acp_ids}"; fi
+    ;;
   none) ids="" ;;
   *)    ids="$(printf '%s' "${harness_arg}" | tr ',' ' ')" ;;
 esac
@@ -113,11 +126,16 @@ build() {
   if [ "${stack}" = node ]; then set -- "$@" --build-arg "PNPM_VERSION=${pnpm_version}"; fi
   if [ "${stack}" = node ] || [ "${stack}" = go ]; then set -- "$@" --build-arg "PLAYWRIGHT_VERSION=${playwright_version}"; fi
   if [ "${stack}" = rust ]; then set -- "$@" --build-arg "RUST_BASE=${rust_base}"; fi
+  # The build context is the images/ directory, not the stack's own subdir:
+  # every image COPYies images/acp-driver/ship-acp.mjs (the in-sandbox ACP
+  # driver, E7 H3) beside its Dockerfile, and a context cannot reach above
+  # itself. -f keeps each stack's own Dockerfile.
   set -- "$@" \
     --build-arg "HARNESS_SPECS=${specs}" \
     --build-arg "HARNESS_BINARIES=${binaries}" \
     --build-arg "HARNESS_LABEL=${label}" \
-    "${here}/sandbox-${stack}"
+    -f "${here}/sandbox-${stack}/Dockerfile" \
+    "${here}"
   docker build "$@"
   echo "built ${image}"
 }

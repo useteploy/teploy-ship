@@ -59,6 +59,18 @@ export const DEFAULT_FORWARDED_ENV: Record<string, string[]> = {
   // present: the adapter then declares a `teploy-gateway` model provider
   // (codexGatewayConfigFlags) instead of calling OpenAI directly.
   codex: ["CODEX_API_KEY", "OPENAI_API_KEY", "CODEX_ACCESS_TOKEN", "AI_GATEWAY_URL", "AI_GATEWAY_KEY"],
+  // The ACP profiles (E7 H3, src/harness-acp.ts ACP_PROFILES) carry the same
+  // names per profile; a test there asserts the two tables agree. K-class
+  // env keys only — the OAuth/subscription paths of these agents are H7.
+  gemini: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+  grok: ["XAI_API_KEY"],
+  cursor: ["CURSOR_API_KEY"],
+  // qwen's OWN worker-side pair (Dashscope key + base URL), never
+  // OPENAI_API_KEY/OPENAI_BASE_URL, which the worker carries for
+  // codex/opencode: harness-acp.ts renames them into the exec as the
+  // OPENAI_* names qwen-code actually reads, so the operator's OpenAI
+  // values never reach a qwen run.
+  qwen: ["DASHSCOPE_API_KEY", "QWEN_BASE_URL"],
 };
 
 const PROMPT_PATH = ".teploy-agent/harness-prompt.md";
@@ -215,7 +227,7 @@ const PROVIDER_EGRESS: Record<string, ProviderEgressSpec> = {
 };
 
 /** One base-URL value as a daemon egress entry: `host:443`, or `host:port` when the URL names one. */
-function egressEntryForBaseURL(raw: string): string | undefined {
+export function egressEntryForBaseURL(raw: string): string | undefined {
   let url: URL;
   try {
     url = new URL(raw);
@@ -582,15 +594,38 @@ export function providerEgressAllow(refs: readonly { id: string }[], env: NodeJS
 }
 
 /**
+ * Merge a derived egress list into a run's explicit one, the merge discipline
+ * `withProviderEgress` and `withAcpProviderEgress` (harness-acp.ts) share:
+ * explicit entries always survive, derived entries skip when the explicit
+ * list already carries their bare host, and when both together would fail
+ * validation or pass the daemon's entry bound the derived ones are dropped
+ * rather than refusing the enqueue. Nothing derived returns `explicit`
+ * unchanged.
+ */
+export function mergeDerivedEgress(explicit: string[] | undefined, derived: readonly string[]): string[] | undefined {
+  if (derived.length === 0) return explicit;
+  const bare = new Set((explicit ?? []).map((entry) => entry.split(":")[0]!.trim().toLowerCase()).filter((host) => host !== ""));
+  const add = derived.filter((entry) => !bare.has(entry.split(":")[0]!.toLowerCase()));
+  if (add.length === 0) return explicit;
+  let merged: string[] | undefined;
+  try {
+    merged = normalizeEgressAllow([...(explicit ?? []), ...add]);
+  } catch {
+    return explicit;
+  }
+  return merged !== undefined && merged.length <= MAX_EGRESS_ALLOW_ENTRIES ? merged : explicit;
+}
+
+/**
  * A run's explicit (project + preview) egress allowlist with the harness's
- * derived provider hosts appended — `withPreviewEgress`'s merge discipline,
- * for the same reason: explicit entries always survive, and when both
- * together would fail validation or pass the daemon's entry bound the derived
- * ones are dropped rather than refusing the enqueue. A derived `host:443` is
- * also skipped when the explicit list already carries the bare host: a
- * portless entry admits 80 and 443 (egress.ts), so the narrower copy beside
- * it is noise. Nothing derived returns `explicit` unchanged — byte-identical,
- * which is the fence that keeps native runs' inputs exactly as they were.
+ * derived provider hosts appended — the merge discipline above, for the same
+ * reason: explicit entries always survive, and when both together would fail
+ * validation or pass the daemon's entry bound the derived ones are dropped
+ * rather than refusing the enqueue. A derived `host:443` is also skipped when
+ * the explicit list already carries the bare host: a portless entry admits 80
+ * and 443 (egress.ts), so the narrower copy beside it is noise. Nothing
+ * derived returns `explicit` unchanged — byte-identical, which is the fence
+ * that keeps native runs' inputs exactly as they were.
  */
 export function withProviderEgress(
   explicit: string[] | undefined,
@@ -604,18 +639,7 @@ export function withProviderEgress(
    */
   envOf: (ref: { id: string }) => NodeJS.ProcessEnv = () => process.env,
 ): string[] | undefined {
-  const derived = unionPerRef(refs, envOf);
-  if (derived.length === 0) return explicit;
-  const bare = new Set((explicit ?? []).map((entry) => entry.split(":")[0]!.trim().toLowerCase()).filter((host) => host !== ""));
-  const add = derived.filter((entry) => !bare.has(entry.split(":")[0]!.toLowerCase()));
-  if (add.length === 0) return explicit;
-  let merged: string[] | undefined;
-  try {
-    merged = normalizeEgressAllow([...(explicit ?? []), ...add]);
-  } catch {
-    return explicit;
-  }
-  return merged !== undefined && merged.length <= MAX_EGRESS_ALLOW_ENTRIES ? merged : explicit;
+  return mergeDerivedEgress(explicit, unionPerRef(refs, envOf));
 }
 
 /**
@@ -731,7 +755,8 @@ export function opencodeFutureLineRefusal(version: string, expected?: string): s
   );
 }
 
-async function preflight(
+/** Preflight an external or ACP harness's binary: present, versioned, and comparable to the baked pin. */
+export async function preflight(
   executor: AgentExecutor,
   id: string,
   binary: string,
@@ -1182,7 +1207,8 @@ export interface LiveTracker {
   feed(chunk: string): LiveUpdate | null;
 }
 
-function lineBuffered(onLine: (event: Record<string, unknown>) => LiveUpdate | null): LiveTracker {
+/** Line-buffered tracker plumbing, shared by every external-harness tracker (and the ACP one). */
+export function lineBuffered(onLine: (event: Record<string, unknown>) => LiveUpdate | null): LiveTracker {
   let buffer = "";
   return {
     feed(chunk) {
