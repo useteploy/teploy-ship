@@ -1,4 +1,4 @@
-import { handleEventIntake } from "../../../lib/event-rules.server.js";
+import { handleEventIntake } from "../../lib/event-rules.server.js";
 
 export const config = { mode: "app" };
 

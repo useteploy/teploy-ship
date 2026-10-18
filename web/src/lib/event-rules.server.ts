@@ -155,6 +155,9 @@ export async function handleEventIntake(request: Request, sourceId: string, d: E
       const refused = verified.reason === "malformed-body" || verified.reason === "malformed-envelope" || verified.reason === "unsupported-major";
       return json(refused ? 400 : 401, { title: `bad event delivery: ${verified.reason}` });
     }
+    // No seen-store is passed to verifyEvent, so it never reports a
+    // duplicate here; delivery dedupe is the claim below.
+    if (verified.duplicate) return json(200, { ok: true, skipped: "duplicate delivery" });
     envelope = verified.event;
   } else {
     const token = firstHeader(request, "x-teploy-token") ?? "";
