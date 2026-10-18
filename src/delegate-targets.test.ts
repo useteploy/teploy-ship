@@ -13,7 +13,7 @@ import { parseAction } from "./actions.js";
 import { delegationKey, parseDelegationRecord } from "./delegate.js";
 import type { DelegateControl, DelegateSpawnRequest } from "./delegate.js";
 import { effectiveDelegateTargets, normalizeDelegateTargetIds, parseDelegateTargets } from "./delegate-targets.js";
-import { durableAgent } from "./durable.js";
+import { durableAgent, effectiveRunCap } from "./durable.js";
 import type { ExecutorProvider } from "./durable.js";
 import { checkCandidate } from "./model-routing.js";
 import type { Candidate, RouteTask, RoutingPolicy } from "./model-routing.js";
@@ -483,4 +483,132 @@ test("the loop hands the fence's target to the spawn, and a refusal reaches the 
   assert.equal(outcome.status, "completed");
   assert.equal(requests.length, 1);
   assert.equal(requests[0]!.target, "far");
+});
+
+// ---------------------------------------------------------------- DT3: the child's cost cap
+
+test("effectiveRunCap narrows and never widens", () => {
+  assert.equal(effectiveRunCap(5, 2), 2);
+  assert.equal(effectiveRunCap(5, 10), 5, "an input cap above config never widens");
+  assert.equal(effectiveRunCap(5, undefined), 5);
+  for (const junk of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) assert.equal(effectiveRunCap(5, junk), 5, String(junk));
+  assert.equal(effectiveRunCap(0, 3), 3, "no configured ceiling: the recorded cap is still a bound");
+  assert.equal(effectiveRunCap(0, undefined), 0);
+});
+
+async function appendParentSteps(runtime: ShipRuntime, runId: string, usages: Array<Record<string, number>>): Promise<void> {
+  let seq = (await runtime.store.load(runId)).length;
+  for (const [i, usage] of usages.entries()) {
+    await runtime.store.append(runId, { v: 1, seq: seq++, type: "step-completed", at: new Date().toISOString(), name: `turn-${i}-think`, data: { result: { text: "x", usage } } } as WorkflowEvent);
+  }
+}
+
+const PRICING = JSON.stringify({ "parent-model": { inputPer1M: 1, outputPer1M: 1 }, "zai/glm-5.3": { inputPer1M: 10, outputPer1M: 10 } });
+
+test("a child's cap is min(per-run cap, parent remaining), recorded on its input", async () => {
+  const { runtime, control, restore } = await setup({ SHIP_MAX_RUN_COST_USD: "1", SHIP_MODEL_PRICING: PRICING });
+  try {
+    await parentWithOffer(runtime);
+    await appendParentSteps(runtime, "run-parent", [{ inputTokens: 300_000, outputTokens: 0, totalTokens: 300_000 }, { inputTokens: 100_000, outputTokens: 0, totalTokens: 100_000 }]);
+    const spawned = await control.spawn({ parentRunId: "run-parent", turn: 2, task: "t" });
+    assert.ok(spawned.ok, spawned.ok ? "" : spawned.reason);
+    const input = await inputOf(runtime, (spawned as { childRunId: string }).childRunId);
+    assert.equal(input.maxRunCostUSD, 0.6, "the parent spent $0.40 of $1.00");
+  } finally {
+    restore();
+  }
+  // A fresh parent: the child gets the full per-run cap, never more.
+  const fresh = await setup({ SHIP_MAX_RUN_COST_USD: "1", SHIP_MODEL_PRICING: PRICING });
+  try {
+    await parentWithOffer(fresh.runtime);
+    const spawned = await fresh.control.spawn({ parentRunId: "run-parent", turn: 0, task: "t" });
+    assert.ok(spawned.ok);
+    assert.equal((await inputOf(fresh.runtime, (spawned as { childRunId: string }).childRunId)).maxRunCostUSD, 1);
+  } finally {
+    fresh.restore();
+  }
+  // No per-run cap configured: nothing to share, nothing recorded.
+  const uncapped = await setup({ SHIP_MODEL_PRICING: PRICING });
+  try {
+    await parentWithOffer(uncapped.runtime);
+    const spawned = await uncapped.control.spawn({ parentRunId: "run-parent", turn: 0, task: "t" });
+    assert.ok(spawned.ok);
+    assert.ok(!("maxRunCostUSD" in (await inputOf(uncapped.runtime, (spawned as { childRunId: string }).childRunId))));
+  } finally {
+    uncapped.restore();
+  }
+});
+
+test("NEG: a parent with nothing left gets budget-insufficient, and nothing is spawned", async () => {
+  const { runtime, control, sink, restore } = await setup({ SHIP_MAX_RUN_COST_USD: "1", SHIP_MODEL_PRICING: PRICING });
+  try {
+    await parentWithOffer(runtime);
+    await appendParentSteps(runtime, "run-parent", [{ inputTokens: 1_200_000, outputTokens: 0, totalTokens: 1_200_000 }]);
+    for (const target of [undefined, "glm"]) {
+      const reason = refusal(await control.spawn({ parentRunId: "run-parent", turn: 1, task: "t", ...(target !== undefined ? { target } : {}) }));
+      assert.match(reason, /^delegation refused \(budget-insufficient\): this run has spent ~\$1\.20 of its \$1\.00 per-run cost ceiling/);
+    }
+    await assertNothingSpawned(runtime, sink);
+  } finally {
+    restore();
+  }
+});
+
+test("NEG: a target the child's share cannot afford is refused by the policy's budget check", async () => {
+  const { runtime, control, sink, restore } = await setup({ SHIP_MAX_RUN_COST_USD: "1", SHIP_MODEL_PRICING: PRICING });
+  try {
+    await parentWithOffer(runtime);
+    // $0.999 spent: the child's share is $0.001, and the policy reserves
+    // 40k tokens on zai/glm-5.3 at $10/1M = $0.40 for the target.
+    await appendParentSteps(runtime, "run-parent", [{ inputTokens: 999_000, outputTokens: 0, totalTokens: 999_000 }]);
+    assert.match(refusal(await control.spawn({ parentRunId: "run-parent", turn: 1, task: "t", target: "glm" })), /^delegation refused \(budget-insufficient\): target glm \(zai\/glm-5\.3\): needs \$0\.4000/);
+    await assertNothingSpawned(runtime, sink);
+  } finally {
+    restore();
+  }
+});
+
+test("the loop runs under the narrowed cap: a recorded cap above config never widens, one below narrows", async () => {
+  const root = await mkdtemp(join(tmpdir(), "dt3-loop-"));
+  const executor = new LocalExecutor({ root });
+  const provider: ExecutorProvider = { async create() { return { handle: `local:${root}` }; }, attach() { return executor; } };
+  const big = (turns: string[]): ModelAdapter => {
+    let i = 0;
+    return {
+      provider: "scripted",
+      modelId: "unknown-vendor/pricey",
+      async doGenerate(): Promise<AdapterGenerateResult> {
+        const text = turns[i++] ?? "```finish\nout of script\n```";
+        return { content: [{ type: "text", text }], finishReason: "stop", usage: { inputTokens: 1_000_000, outputTokens: 0, totalTokens: 1_000_000 }, raw: null };
+      },
+      async *doStream() {
+        throw new Error("unused");
+      },
+    };
+  };
+  const SCRIPT = ["```bash\necho hi\n```", "```finish\ndone\n```", "```bash\necho proof\n```", "```finish\ndone, proven\n```"];
+  const statusOf = (o: unknown): string | undefined => (o as { output?: { status?: string } }).output?.status;
+  // Config caps at one cent; the input's $1000 does not lift it.
+  const widened = await executeRun({
+    workflow: durableAgent({ model: big(SCRIPT), modelId: "unknown-vendor/pricey", executor: provider, maxRunCostUSD: 0.01 }),
+    runId: "run-dt3-wide",
+    store: new MemoryEventStore(),
+    input: { task: "t", maxRunCostUSD: 1000 },
+  });
+  assert.equal(statusOf(widened), "budget-exhausted");
+  // Config allows $1000; the input's one cent binds.
+  const narrowed = await executeRun({
+    workflow: durableAgent({ model: big(SCRIPT), modelId: "unknown-vendor/pricey", executor: provider, maxRunCostUSD: 1000 }),
+    runId: "run-dt3-narrow",
+    store: new MemoryEventStore(),
+    input: { task: "t", maxRunCostUSD: 0.01 },
+  });
+  assert.equal(statusOf(narrowed), "budget-exhausted");
+  const free = await executeRun({
+    workflow: durableAgent({ model: big(SCRIPT), modelId: "unknown-vendor/pricey", executor: provider, maxRunCostUSD: 1000 }),
+    runId: "run-dt3-free",
+    store: new MemoryEventStore(),
+    input: { task: "t" },
+  });
+  assert.equal(statusOf(free), "finished");
 });

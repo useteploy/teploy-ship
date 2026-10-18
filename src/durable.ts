@@ -285,6 +285,14 @@ export interface DurableAgentInput {
    */
   delegateTarget?: RecordedDelegateTarget;
   /**
+   * A per-run cost cap the INPUT carries (DT3): a delegated child's
+   * min(per-run cap, what its parent had left), computed inside the parent's
+   * recorded spawn step. It can only NARROW the worker's
+   * SHIP_MAX_RUN_COST_USD (`effectiveRunCap`): a value above it, or a junk
+   * value, changes nothing. Admits no step.
+   */
+  maxRunCostUSD?: number;
+  /**
    * The MCP client (D1, SHIP_MCP; docs/MCP_DESIGN.md): the project's declared
    * servers plus the deployment facts the gates read (data class, remote host
    * allowlist, SHIP_TOOL_MANIFEST mode, the Decision 6 switch), materialised
@@ -1590,7 +1598,9 @@ export function durableAgent(
             : fixPrompt({ task: input.task, branch: checkout.branch, base: checkout.base, context: repoContext })
           : input.task;
 
-      const budget: HarnessBudget = { maxSteps, maxRunCostUSD: config.maxRunCostUSD ?? 0 };
+      // The per-run ceiling, narrowed (never widened) by a cap the run input
+      // recorded (DT3: a delegated child's share of its parent's remainder).
+      const budget: HarnessBudget = { maxSteps, maxRunCostUSD: effectiveRunCap(config.maxRunCostUSD ?? 0, input.maxRunCostUSD) };
       const harnessTask: HarnessTask = {
         prompt: task,
         // So the finish gate can tell a suite this run broke from one it
@@ -3219,13 +3229,18 @@ function summaryFields(
 }
 
 /**
- * Publish whatever the tree holds after the run threw.
- *
- * Separate from publishIfRepoRun so the failure path can be read on its own,
- * and so its swallow-everything posture is explicit rather than smuggled into
- * the happy path. Returns the pull request URL, or null when there was nothing
- * to publish or the rescue itself failed.
+ * The per-run cost ceiling a run executes under (DT3): the worker's configured
+ * one (0 = off), narrowed by a cap the run input recorded. Narrow only — a
+ * recorded cap above the configured one, or a non-positive or non-finite one,
+ * leaves the configured ceiling exactly as it was; with no configured ceiling
+ * a recorded cap is the only bound, which is still narrower than none.
  */
+export function effectiveRunCap(configured: number, recorded: number | undefined): number {
+  const base = Number.isFinite(configured) && configured > 0 ? configured : 0;
+  if (recorded === undefined || !Number.isFinite(recorded) || recorded <= 0) return base;
+  return base > 0 ? Math.min(base, recorded) : recorded;
+}
+
 /**
  * The config a run executes under (DT1): `config` itself when the input names
  * no model — the object identity, so a run without `input.model` takes exactly
@@ -3242,6 +3257,14 @@ export function runModelConfig(config: DurableAgentConfig, input: Pick<DurableAg
   return { ...config, model: config.modelFor(input.model), modelId: input.model };
 }
 
+/**
+ * Publish whatever the tree holds after the run threw.
+ *
+ * Separate from publishIfRepoRun so the failure path can be read on its own,
+ * and so its swallow-everything posture is explicit rather than smuggled into
+ * the happy path. Returns the pull request URL, or null when there was nothing
+ * to publish or the rescue itself failed.
+ */
 async function rescuePublish(
   ctx: WorkflowContext,
   ws: HarnessWorkspace,

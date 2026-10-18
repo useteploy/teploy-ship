@@ -122,6 +122,14 @@ per the read-only rule above.
   parent's wait may poll before recording the honest "child did not finish"
   transfer. 0 is honoured — one poll, then give up. Unset or garbage is the
   default; anything above the ceiling clamps to it.
+- Child cost cap (DT3): with `SHIP_MAX_RUN_COST_USD` set, each child records
+  `maxRunCostUSD` = min(per-run cap, parent cap minus the parent's spend so
+  far, priced from its recorded steps inside the spawn step). The child's loop
+  takes min(its worker's cap, that) — narrow only. A parent with nothing left
+  is refused (`budget-insufficient`); a target the share cannot afford is
+  refused by the policy's own budget check. Serial children of a parked parent
+  bound a tree at about parentCap + N x childCap; parallel children or depth 2
+  still need the reservation ledger (C8).
 - Idempotency: an entry keyed (parentRunId, turn) makes a re-run delegate step
   (crash before the step recorded) REPUBLISH its own child rather than spawn a
   second — the step re-derives the same entry and the same derived run id.

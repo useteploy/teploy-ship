@@ -100,9 +100,10 @@ import { migrate } from "./migrations.js";
 import { stepFingerprint } from "./step-fingerprint.js";
 import { warmCacheEnabled, warmSlugOf } from "./warm.js";
 import { assertRepoAllowed, policyFromEnv } from "./repo-policy.js";
-import { withProjects } from "./durable.js";
+import { effectiveRunCap, withProjects } from "./durable.js";
+import { costUSD } from "./pricing.js";
 import type { RepoTrust } from "./repo-policy.js";
-import type { RecoveryTuning } from "./durable.js";
+import type { RecoveryTuning, RunUsage } from "./durable.js";
 import type { ProposeInput as IntakeProposeInput, IntakeTask as IntakeTaskType } from "./intake.js";
 import { FileEventStore, RunMetaStore } from "./run-store.js";
 import { askEnv, readDeploymentAsks } from "./deployment-asks.js";
@@ -1136,9 +1137,16 @@ export async function enqueueRun(
      * control; recorded verbatim, gates no step.
      */
     delegateTarget?: RecordedDelegateTarget;
+    /**
+     * A per-run cost cap carried in the INPUT (DT3): a delegated child's
+     * min(per-run cap, parent remaining). Narrow only at execution
+     * (durable.ts effectiveRunCap). Internal to the delegation control.
+     */
+    maxRunCostUSD?: number;
   },
 ): Promise<EnqueueReport | undefined> {
   const journey = options.journey === undefined ? undefined : parseJourney(options.journey);
+  if (options.maxRunCostUSD !== undefined && !(Number.isFinite(options.maxRunCostUSD) && options.maxRunCostUSD > 0)) throw new Error("maxRunCostUSD must be a positive number");
   if (options.runModel !== undefined && (options.runModel.trim() === "" || options.runModel !== options.runModel.trim())) throw new Error("runModel must name a model");
   const requestHash = options.requestIdentity ?? launchRequestHash(options);
   if (!/^[a-f0-9]{64}$/.test(requestHash)) throw new Error("Invalid request identity");
@@ -1603,6 +1611,7 @@ export async function enqueueRun(
         ...(options.delegateChild === true ? { delegateChild: true } : {}),
         ...(delegateTargets !== undefined ? { delegateTargets } : {}),
         ...(options.delegateTarget !== undefined ? { delegateTarget: options.delegateTarget } : {}),
+        ...(options.maxRunCostUSD !== undefined ? { maxRunCostUSD: options.maxRunCostUSD } : {}),
         // The run's own model (DT1), absent unless the caller named one.
         ...(options.runModel !== undefined ? { model: options.runModel } : {}),
         // Two-way steering (D2), from SHIP_STEER_REPLY=on (only `on`; the
@@ -1728,6 +1737,54 @@ export async function enqueueRun(
  * enqueue: it is part of the child's recorded input, so the child's whole
  * step sequence is a fact of its own log before any worker touches it.
  */
+/**
+ * A delegated child's cost cap (DT3): min(per-run cap, the parent's
+ * remaining), where the parent's cap is the per-run cap narrowed by any cap
+ * its own input recorded and its spend is priced from its recorded steps on
+ * its model. `cap` undefined = no ceiling configured, nothing to share. The
+ * cap is floored to a millionth of a dollar, the narrowing direction.
+ */
+export function childCostShare(args: {
+  perRunCap: number;
+  parentRecordedCap: number | undefined;
+  parentModel: string;
+  events: ReadonlyArray<{ type: string; data?: unknown }>;
+  env?: NodeJS.ProcessEnv;
+}): { ok: true; cap?: number } | { ok: false; reason: string } {
+  const perRun = Number.isFinite(args.perRunCap) && args.perRunCap > 0 ? args.perRunCap : 0;
+  const parentCap = effectiveRunCap(perRun, args.parentRecordedCap);
+  if (parentCap <= 0) return { ok: true };
+  const usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+  let harnessCost = 0;
+  for (const event of args.events) {
+    if (event.type !== "step-completed") continue;
+    const u = (event.data as { result?: { usage?: Partial<RunUsage> } } | undefined)?.result?.usage;
+    if (u === undefined || u === null || typeof u !== "object") continue;
+    // A leg that priced itself (an external harness) is counted at its own
+    // figure; everything else is tokens on the parent's model.
+    if (typeof u.costUSD === "number" && Number.isFinite(u.costUSD) && u.costUSD >= 0) {
+      harnessCost += u.costUSD;
+      continue;
+    }
+    usage.inputTokens += u.inputTokens ?? 0;
+    usage.outputTokens += u.outputTokens ?? 0;
+    usage.totalTokens += u.totalTokens ?? 0;
+    usage.cacheReadTokens += u.cacheReadTokens ?? 0;
+    usage.cacheWriteTokens += u.cacheWriteTokens ?? 0;
+  }
+  const spent = harnessCost + costUSD(args.parentModel, usage, args.env);
+  const remaining = parentCap - spent;
+  if (!(remaining > 0)) {
+    return {
+      ok: false,
+      reason: `delegation refused (budget-insufficient): this run has spent ~$${spent.toFixed(2)} of its $${parentCap.toFixed(2)} per-run cost ceiling, so a child would have nothing to run on. Do the remaining work yourself.`,
+    };
+  }
+  const cap = Math.floor(Math.min(perRun > 0 ? perRun : remaining, remaining) * 1e6) / 1e6;
+  if (!(cap > 0)) return { ok: false, reason: `delegation refused (budget-insufficient): this run has under $0.000001 of its per-run cost ceiling left. Do the remaining work yourself.` };
+  return { ok: true, cap };
+}
+
 /** The targets a new run is offered (DT2): SHIP_DELEGATE_TARGETS ∩ the project's list, or undefined for none. */
 function offeredDelegateTargets(projectIds: readonly string[] | undefined, env: NodeJS.ProcessEnv = process.env): DelegateTarget[] | undefined {
   const parsed = parseDelegateTargets(env.SHIP_DELEGATE_TARGETS);
@@ -1765,7 +1822,7 @@ export function delegateControlFromRuntime(runtime: ShipRuntime, deps: DelegateC
       // the run's whole life.
       const events = (await runtime.store.load(request.parentRunId)) as Array<{ type: string; data?: unknown }>;
       const started = events.find((e) => e.type === "run-started")?.data as
-        | { taskRootRunId?: unknown; input?: { repo?: unknown; trust?: unknown; sandboxNetwork?: unknown; delegateTargets?: unknown } }
+        | { taskRootRunId?: unknown; input?: { repo?: unknown; trust?: unknown; sandboxNetwork?: unknown; delegateTargets?: unknown; maxRunCostUSD?: unknown } }
         | undefined;
       if (started === undefined) return { ok: false, reason: `delegation unavailable: run ${request.parentRunId} has no recorded input` };
       const input = started.input ?? {};
@@ -1786,6 +1843,22 @@ export function delegateControlFromRuntime(runtime: ShipRuntime, deps: DelegateC
           return { ok: false, reason: "delegation refused: repo= must name this run's own repository (a delegation cannot target another repository)" };
         }
       }
+      // The child's cost cap (DT3): min(per-run cap, what the parent has
+      // left), read off the parent's own recorded steps inside this recorded
+      // spawn step, so a replay reads the recorded outcome. Narrow only: the
+      // child's loop takes min(its worker's cap, this). With no per-run cap
+      // configured there is nothing to share and nothing is recorded. A
+      // parent with nothing left gets a refusal, never a child that would
+      // stop on its first turn.
+      const share = childCostShare({
+        perRunCap: Number(env.SHIP_MAX_RUN_COST_USD),
+        parentRecordedCap: typeof input.maxRunCostUSD === "number" ? input.maxRunCostUSD : undefined,
+        parentModel: model,
+        events,
+        env,
+      });
+      if (!share.ok) return { ok: false, reason: share.reason };
+      const childCap = share.cap;
       // A NAMED target (DT2) is a new destination for this task's data, so it
       // is gated here, before the ledger claim: allowlisted for this run and
       // project, a harness that can run a read-only child, and admitted by the
@@ -1801,6 +1874,7 @@ export function delegateControlFromRuntime(runtime: ShipRuntime, deps: DelegateC
           offered: recordedOffer(input.delegateTargets),
           projectIds: project?.delegateTargets,
           env,
+          ...(childCap !== undefined ? { reservedBudgetUSD: childCap } : {}),
         });
         if (!gate.ok) return { ok: false, reason: gate.reason };
         target = gate.target;
@@ -1875,6 +1949,7 @@ export function delegateControlFromRuntime(runtime: ShipRuntime, deps: DelegateC
           // and prices the child on it; for an external harness the gate
           // proved it is the model that harness is configured with.
           ...(target !== undefined ? { harness: target.harness, runModel: target.model, delegateTarget: target } : {}),
+          ...(childCap !== undefined ? { maxRunCostUSD: childCap } : {}),
         });
       } catch (error) {
         // The enqueue refused (budget, allowlist): give the claim back so the
