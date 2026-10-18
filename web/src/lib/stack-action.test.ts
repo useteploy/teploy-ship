@@ -129,3 +129,10 @@ test("the stack takes follow-up authority: a viewer is denied by name", async ()
   assert.match(location, /denied=approve/);
   assert.equal(await stackRunCount(), 1, "nothing enqueued");
 });
+
+test("a manually launched stack-rebase intake task carries its stack facts like the worker's auto-launch (live 2026-10-18)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../routes/index.tsx", import.meta.url), "utf8");
+  const launch = src.slice(src.indexOf('intent === "launch-task" || intent === "retry-task" || intent === "dismiss-task") {'));
+  assert.match(launch.slice(0, launch.indexOf("} catch (error)")), /task\.stack !== undefined \? \{ stackRebase: task\.stack \}/);
+});

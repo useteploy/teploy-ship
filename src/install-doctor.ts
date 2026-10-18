@@ -49,6 +49,9 @@ import { RedactionGate } from "./support.js";
 import { NATIVE_HARNESS_ID, harnessAttempts, harnessRef } from "./harness.js";
 import { providerEgressAllow } from "./harness-external.js";
 import { acpProviderEgressAllow } from "./harness-acp.js";
+import { eventRulesMode } from "./event-rules.js";
+import { BUILTIN_SHADOW_COUNTER_KEY, parseBuiltinShadowCounters, readBuiltinShadowCounters, type BuiltinShadowCounters } from "./event-builtin.js";
+import { FileRuntimeConfig } from "./runtime-config.js";
 
 export type CheckStatus = "pass" | "fail" | "unknown";
 
@@ -97,6 +100,11 @@ export interface DoctorProbes {
   nowMs: number;
   /** An independent clock reading (e.g. the store's), ms since epoch. */
   referenceMs?: () => Promise<number | undefined>;
+  /**
+   * E7 EV3: the built-in shadow's match/diff counters, or null when none are
+   * recorded. Absent → the check reports the flag state without counts.
+   */
+  shadowCounters?: () => Promise<BuiltinShadowCounters | null>;
 }
 
 export const MIN_NODE_MAJOR = 20;
@@ -373,6 +381,40 @@ export async function checkClock(p: DoctorProbes): Promise<DoctorCheck> {
     : check("clock", "fail", `skew ${Math.round(skew / 1000)}s exceeds ${MAX_CLOCK_SKEW_MS / 1000}s`, "enable NTP; leases, schedules and tokens depend on agreeing clocks");
 }
 
+/**
+ * E7 EV3 — the built-in shadow's health check. A diff counts as a failure
+ * (the design note's rule), so one recorded diff fails the check while the
+ * built-in path keeps running exactly as before: the check is the alarm, not
+ * the enforcement. Off with no history is a pass, not an unknown — the
+ * shadow is a soak, not an install requirement.
+ */
+export function checkEventRulesShadow(env: DoctorProbes["env"], counters: BuiltinShadowCounters | null | undefined): DoctorCheck {
+  const mode = eventRulesMode(env);
+  const id = "event-rules-shadow";
+  const summary =
+    counters === null || counters === undefined
+      ? undefined
+      : `${counters.deliveries} built-in delivery(s) shadow-evaluated since ${counters.since}: ${counters.matched} matched, ${counters.diffed} diffed`;
+  if (mode === "off") {
+    return check(id, "pass", `SHIP_EVENT_RULES is off${summary === undefined ? " — the built-in shadow is not running" : `; ${summary} recorded from a previous soak`}`);
+  }
+  if (mode === "on") {
+    return check(id, "pass", `SHIP_EVENT_RULES is on — the built-in flip slice owns this state${summary === undefined ? "" : `; ${summary}`}`);
+  }
+  if (summary === undefined) {
+    return check(id, "pass", "shadow on; no built-in traffic evaluated yet (no counters recorded)");
+  }
+  if (counters!.diffed > 0) {
+    return check(
+      id,
+      "fail",
+      `${summary} — the built-in path stayed authoritative; inspect the [event-rules shadow] diff lines in the web and worker logs`,
+      "resolve every diff (or acknowledge it) before flipping SHIP_EVENT_RULES=on for the built-ins",
+    );
+  }
+  return check(id, "pass", summary);
+}
+
 export async function runDoctor(p: DoctorProbes): Promise<DoctorReport> {
   const checks: DoctorCheck[] = [
     checkNode(p.nodeVersion),
@@ -389,6 +431,15 @@ export async function runDoctor(p: DoctorProbes): Promise<DoctorReport> {
   const harnessEgress = checkHarnessEgress(p.env);
   if (harnessEgress !== undefined) checks.push(harnessEgress);
   checks.push(await checkClock(p));
+  let shadowCounters: BuiltinShadowCounters | null | undefined;
+  if (p.shadowCounters !== undefined) {
+    try {
+      shadowCounters = await p.shadowCounters();
+    } catch {
+      shadowCounters = undefined;
+    }
+  }
+  checks.push(checkEventRulesShadow(p.env, shadowCounters));
   const counts: Record<CheckStatus, number> = { pass: 0, fail: 0, unknown: 0 };
   for (const c of checks) counts[c.status]++;
   const verdict: DoctorVerdict = counts.fail > 0 ? "not-ready" : counts.unknown > 0 ? "incomplete" : "ready";
@@ -514,4 +565,48 @@ export function nucleusProbes(url: string, deps: { connect?: () => StoreQueryCli
       }
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// E7 EV3 — reading the built-in shadow's counters, wherever this install
+// keeps its runtime config KV
+// ---------------------------------------------------------------------------
+
+/**
+ * The shadow counters as the doctor can read them: the file runtime config
+ * when the store is file-backed (or unstated), otherwise a read-only SELECT
+ * against the shared store's ship_runtime_config table. Read-only, and any
+ * failure reads as "none recorded" rather than an error — the table is only
+ * created by the first counter WRITE, so a fresh shared-store install without
+ * shadow traffic legitimately has neither the table nor the row, and a store
+ * that cannot be reached here is reported by the connectivity check, not
+ * manufactured into a shadow verdict.
+ */
+export async function readShadowCountersForDoctor(
+  kind: DoctorStoreKind | undefined,
+  url: string | undefined,
+  stateDirPath: string,
+): Promise<BuiltinShadowCounters | null> {
+  if (kind === undefined || kind === "file") {
+    return readBuiltinShadowCounters(new FileRuntimeConfig(stateDirPath));
+  }
+  if (url === undefined) return null;
+  const client = new NucleusPgwire(url, "doctor", { dialect: kind === "postgres" ? "postgres" : "nucleus" });
+  try {
+    const rows = await client.query(`SELECT config_value AS v FROM ship_runtime_config WHERE config_key = '${BUILTIN_SHADOW_COUNTER_KEY}'`);
+    const value = Object.values(rows[0] ?? {})[0];
+    return typeof value === "string" ? parseBuiltinShadowCounters(safeJsonParse(value)) : null;
+  } catch {
+    return null;
+  } finally {
+    await client.close().catch(() => {});
+  }
+}
+
+function safeJsonParse(value: string): unknown {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return null;
+  }
 }
