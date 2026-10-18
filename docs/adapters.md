@@ -137,6 +137,7 @@ version its log did not record.
 | `SHIP_HARNESS_ENV` | Comma list of worker env var NAMES forwarded into the harness process. Overrides the per-adapter default below. |
 | `SHIP_HARNESS_TIMEOUT_MS` | Per-exec deadline for each vendor process. Default 1800000. A steered attempt runs at most `1 + STEER_ROUNDS_MAX` execs (main + resume rounds), each bounded by this. |
 | `SHIP_CLAUDE_BARE` | `1` adds `--bare` to claude: API-key auth only, no host context (hooks, CLAUDE.md, MCP). |
+| `SHIP_HARNESS_CRED` | `on` enables the sealed per-project credential store and the enqueue gates (see the sealed-credentials section below). Only the exact spelling `on` counts; anything else, including unset, is off, and off is byte-identical to the pre-H2 behaviour. |
 
 Default forwarded variables: claude-code `CLAUDE_CODE_OAUTH_TOKEN`,
 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`; opencode
@@ -199,13 +200,21 @@ derivation's call. Those deployments put the host on the project record
 derives nothing — and still suppresses the vendor default it replaces,
 because the harness will dial the configured URL, not `api.*`.
 
+Under `SHIP_HARNESS_CRED=on` one more source is derived, for opencode only:
+the provider `baseURL`s an `OPENCODE_CONFIG_CONTENT` blob declares (its
+hosts, port 443). Flag off the blob derives nothing, exactly as before. A
+blob that is not JSON derives nothing here and is refused at the enqueue
+gate by name (`harness-config-unparseable`) rather than judged half-read.
+
 Merge semantics (`withProviderEgress`): hosts only, port 443, de-duplicated,
 appended after the project's own entries, which always survive. A derived
 `host:443` is skipped when the explicit list already carries the bare host (a
 portless entry admits 443). If the merged list would fail validation or pass
 the daemon's 64-entry bound, the derived entries are dropped rather than the
 enqueue refused — the same discipline the preview hosts follow
-(`withPreviewEgress`, deploy.ts).
+(`withPreviewEgress`, deploy.ts). Each attempt's hosts are derived from that
+attempt's OWN env overlay (`SHIP_HARNESS_CRED`): a credential sealed for one
+profile never reroutes another profile's derivation by env-name collision.
 
 The fence: nothing is derived for native runs, or for an external run with
 nothing derivable, and those inputs are byte-identical to what this build's
@@ -216,6 +225,104 @@ fingerprint moves — the upgrade fence treats it as data, not behaviour.
 derives as the `harness-egress` line — pass with the host list, or UNKNOWN
 with the remedy when an external harness is configured but nothing can be
 derived from the forwarded credentials.
+
+## Sealed harness credentials (H2, `SHIP_HARNESS_CRED=on`)
+
+The deployment environment is one way a harness gets its API key — and until
+H2 the only one: every project on a worker shared every key the worker held.
+The sealed credential store is the other way: an operator with the `policies`
+grant stores a key against ONE project and ONE harness profile on the
+project's page (Project settings → Harness credentials), it is sealed at rest
+with the same `SHIP_CONFIG_KEY` material as the runtime config's sealed keys,
+and only presence is ever shown — which name, when, who, which version. The
+value is never rendered, never returned by an API, never recorded: the run
+input carries a reference (project, profile, env name, version) and the
+worker unseals it into the same exec-env delivery H1 built, where the
+exact-value scrub covers it like any forwarded secret. A stored value wins
+over the deployment environment for its name. Storing is refused while
+`SHIP_CONFIG_KEY` is unset — a plaintext key in the state store is strictly
+worse than the env var it replaces.
+
+The flag also turns on two enqueue gates, both fail-closed and both refused
+by name before any run exists:
+
+- **Presence.** A profile that authenticates with a credential (the
+  credential-shaped names on its forward list — e.g. claude-code:
+  `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`)
+  finds none of them in the deployment environment or the store → the
+  enqueue is refused (`harness-credential-missing`).
+- **Data destination.** Every provider host the harness will dial — derived
+  exactly as the egress section describes, from the env overlaid with the
+  store's unsealed values, so a base URL in the store routes the check where
+  the run dials — must be declared in the routing policy
+  (`SHIP_MODEL_ROUTING_POLICY`) and permitted for the deployment's data class
+  (`SHIP_MODEL_ROUTING_DESTINATIONS`, `SHIP_MODEL_ROUTING_DATA_CLASS`;
+  `checkDestinationHost` applies the same destination/retention gates
+  delegate targets answer to). A credential whose host cannot be derived — a
+  subscription token — is refused (`credential-destination-unknown`): per
+  Decision 11 API keys are the default path, and subscription logins are a
+  later, explicitly opted-in slice (H7). Under the flag the destination set
+  also covers what nothing else can read: an `OPENCODE_CONFIG_CONTENT` blob
+  is judged in full — provider `baseURL`s, the provider `api` field,
+  providers with a key but no baseURL (known provider ids derive their
+  default host), remote MCP `url`s, remote `instructions` URLs — and
+  anything in it that cannot be derived exactly is refused: not JSON
+  (`harness-config-unparseable`), a run-time `{env:}`/`{file:}`
+  substitution, a bedrock/vertex api, an npm provider package, an unknown
+  provider default, a local MCP server, `share` other than `"disabled"`,
+  legacy `autoshare`, or `plugin`
+  (`harness-config-destination-unreadable`) — never guessed at. A
+  `SHIP_HARNESS_ENV` addition is permitted only on an explicit allowlist of
+  destination-free knobs; proxy overrides, config-file pointers and
+  cloud-provider switches (Bedrock/Vertex) are refused by name
+  (`harness-env-forward-refused`) — forward a base URL the derivation reads
+  (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `AI_GATEWAY_URL`, as fits the
+  harness) and its host is judged like any other.
+
+Delivery is BY REFERENCE for every binding the gate's overlay carried,
+credential-shaped or not: a stored base URL or config blob reroutes the dial,
+so the worker unseals it into the exec env too (`forwardEnv`, with its
+exact-value scrub and the `SHIP_B64_` carrier) — the environment the harness
+executes with is exactly the environment the gate judged. References are
+delivered only to the profile they were sealed for: with
+`SHIP_HARNESS_ATTEMPTS=codex,opencode`, an `OPENAI_API_KEY` stored for codex
+never reaches the opencode attempt by name-collision. A binding rotated
+after enqueue is delivered at its current value, and the `harness-run` step
+records a `credentialRotation` note saying which version moved — rotation is
+allowed, silent substitution is not. Versions never restart: a clear leaves
+a tombstone (no ciphertext, the version kept), the file store computes the
+next version inside its per-path lock, and the Nucleus store claims each
+(binding, version) slot through the KV's atomic `setNX`, so two stores of
+one binding can never mint the same version.
+
+The worker re-judges the destination too: the enqueue gate saw the
+enqueuing process's env, the exec uses the worker's. The approved host set
+is recorded on the input (`harnessDestinations`), and the `harness-run`
+step re-derives the hosts from the env it is about to deliver — refusing by
+name (`harness-destination-changed`, a recorded refusal, the vendor binary
+not started) when a worker's base URL, model, forward list or config blob
+moved the dial somewhere admission never approved, or when the worker's own
+routing policy cannot or will not permit the destination again.
+
+The production ensemble this must not break is pinned by test: claude-code or
+opencode rerouted to `api.z.ai` under a policy whose `api.z.ai` entry retains
+nothing, with `SHIP_MODEL_ROUTING_DESTINATIONS=api.z.ai`, enqueues unchanged.
+Flag off — the default — runs neither gate, records no reference, and
+enqueues byte-identically to a pre-H2 build.
+
+A reference the executing worker cannot resolve (the binding was cleared, a
+worker with no store, a rotated `SHIP_CONFIG_KEY`) stops the attempt with a
+recorded, named refusal on the `harness-run` step; the vendor binary is not
+started.
+
+One hardening applies with or without the flag: before anything leaves the
+sandbox, the publish path and every thread/merge snapshot grep the workspace
+for the exact credential VALUES the run forwarded (the value and its base64
+form, never in the command line — the needle rides the exec env), and refuse
+by name (`credential-material-in-workspace`) when one is found — an agent
+that ran `env > x` must not publish or snapshot a key. Tuning values (a base
+URL, the opencode config blob) are not scanned: their exact bytes can be
+legitimate repository content.
 
 ## claude-code
 

@@ -71,6 +71,7 @@ import {
   summarisePlan,
 } from "./join.js";
 import { externalAdapters } from "./harness-external.js";
+import { harnessCredentialResolver } from "./harness-credentials.js";
 import type { ExecutorProvider } from "./durable.js";
 import { formatReport, runEval } from "./eval.js";
 import type { EvalTask } from "./eval.js";
@@ -1073,7 +1074,9 @@ async function executePass(
     steer: runtime.steer,
     live: runtime.live,
     ...(envNum("SHIP_MAX_OUTPUT_TOKENS") !== undefined ? { maxOutputTokens: envNum("SHIP_MAX_OUTPUT_TOKENS")! } : {}),
-    harnesses: externalAdapters({ steer: runtime.steer }),
+    // H2: same wiring as the worker — an input that references sealed
+    // credentials unseals them at exec time; one that does not is untouched.
+    harnesses: externalAdapters({ steer: runtime.steer, credentials: harnessCredentialResolver(runtime.harnessCredentials) }),
     ...((): { codeSearch?: CodeSearch } => {
       const codeSearch = resolveCodeSearch(runtime);
       return codeSearch !== undefined ? { codeSearch } : {};

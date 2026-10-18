@@ -76,7 +76,11 @@ import { surfacedTestIntegrity } from "./test-integrity-surface.js";
 import { shortHash, warmClient, warmSlugOf, type WarmState } from "./warm.js";
 import {
   sandboxOverridesDigest,
+  credentialScanMode,
+  snapshotCredentialGate,
+  snapshotScanRoots,
   workspaceCredentialReason,
+  workspaceSecretValueScan,
   type ThreadWarmRef,
   type ThreadWarmStore,
 } from "./thread-warm.js";
@@ -94,6 +98,7 @@ import { assertRepoAllowed, credentialFor, policyFromEnv } from "./repo-policy.j
 import type { RepoPolicyConfig, RepoTrust } from "./repo-policy.js";
 import type { ForkSourceRecord } from "./fork.js";
 import type { KnownSecret } from "./redact.js";
+import { scrubExact } from "./redact.js";
 import { condenseIfNeeded, defaultCondenseConfig } from "./memory.js";
 import type { CondenseConfig } from "./memory.js";
 import { RecoveryTracker, defaultRecoveryConfig } from "./recovery.js";
@@ -150,6 +155,7 @@ import { compareWithPrior, findingContinuityEnabled, loadPriorReview, revisionDi
 import type { ParsedFindings, ScanFinding } from "./findings.js";
 import { costUSD } from "./pricing.js";
 import { HARNESS_VERSIONS, NATIVE_HARNESS_ID, selectAdapter } from "./harness.js";
+import type { HarnessCredentialRef } from "./harness-credentials.js";
 import type { HarnessAdapter, HarnessBudget, HarnessRef, HarnessResult, HarnessTask, HarnessUsage, HarnessWorkspace, StreamExec } from "./harness.js";
 import { attemptOutcomeLine, rankAttempts } from "./attempt-rank.js";
 import type { AttemptOutcome } from "./attempt-rank.js";
@@ -838,6 +844,30 @@ export interface DurableAgentInput {
    * default — the measurements argue for diverse harnesses, not more loops.
    */
   harnessAttempts?: HarnessRef[];
+  /**
+   * H2 (SHIP_HARNESS_CRED): references to the sealed per-project harness
+   * credentials this run delivers, materialised at ENQUEUE — project, profile,
+   * env name, version, NEVER a value. The worker unseals each reference at
+   * exec time and hands the value to the harness through the exec env (H1
+   * forwardEnv), whose exact-value scrub covers it like any forwarded secret.
+   * Admits no step of its own, so a run without it (every log written before
+   * the flag, and every run on a flag-off deployment) replays byte-identically.
+   * A reference the executing worker cannot resolve is a recorded refusal on
+   * the harness-run step, not a silently unauthenticated run.
+   */
+  harnessCredentials?: HarnessCredentialRef[];
+  /**
+   * H2/S2 (SHIP_HARNESS_CRED): the provider hosts the enqueue's destination
+   * gate APPROVED per external harness profile, materialised at ENQUEUE so
+   * the worker can re-judge the env its exec will actually deliver against
+   * what admission approved — and refuse by name (harness-destination-changed,
+   * a recorded refusal on the harness-run step, nothing started) when a
+   * worker's env moved the dial or its routing policy no longer permits it.
+   * Recorded on every flag-on external run, including ones whose credentials
+   * all came from the deployment env. Absent on every flag-off input, and
+   * admits no step, so those inputs replay byte-identically.
+   */
+  harnessDestinations?: Record<string, string[]>;
   /**
    * How many independent attempts this run makes of the same task (P6-1),
    * materialised at ENQUEUE from `SHIP_ATTEMPTS` (default 3, max 5) on repo
@@ -2046,6 +2076,7 @@ export function durableAgent(
                 primary.handle,
                 facts,
                 parkWarmth,
+                primary.secrets,
               );
         // D4-c: THREAD SNAPSHOT — the run's warmth, handed to its follow-ups.
         //
@@ -2119,6 +2150,24 @@ export function durableAgent(
             if (credential !== null) {
               return { skipped: `no snapshot: ${credential}` };
             }
+            // H2 hardening, the exact-value half: the shape checks above catch
+            // what Ship knows how to name; this one scans for the credential
+            // VALUES this run actually forwarded across everything the image
+            // freezes — the workspace tree (gitignored files included) plus
+            // the vendor session stores of the harnesses this run's input
+            // names, and /tmp — so an agent that ran `env > x` cannot hand
+            // its key to the thread's next turn.
+            // SHIP_CREDENTIAL_SCAN=warn records the would-be refusal on this
+            // step and snapshots anyway; =off skips the scan.
+            const gate = await snapshotCredentialGate(
+              primary.executor,
+              primary.secrets,
+              "thread snapshot",
+              snapshotScanRoots([...(input.harness !== undefined ? [input.harness.id] : []), ...(input.harnessAttempts ?? []).map((a) => a.id)]),
+            );
+            if ("refuse" in gate) {
+              return { skipped: `no snapshot: ${gate.refuse}` };
+            }
             let head = "";
             try {
               head = (await primary.executor.exec("git rev-parse --verify HEAD", { timeoutMs: 15_000 })).stdout.trim();
@@ -2136,7 +2185,12 @@ export function durableAgent(
               overridesDigest: sandboxOverridesDigest(sandboxOverridesOf(input)),
               createdAt: new Date().toISOString(),
             });
-            return { image, head, ...(evicted.length > 0 ? { evicted: evicted.length } : {}) };
+            return {
+              image,
+              head,
+              ...(evicted.length > 0 ? { evicted: evicted.length } : {}),
+              ...(gate.warning !== undefined ? { credentialScanWarning: gate.warning } : {}),
+            };
            } catch (error) {
             // Found live 2026-10-18: a run that parked at approve-merge had its
             // original sandbox snapshotted and destroyed by the merge park, so
@@ -2358,6 +2412,8 @@ export function durableAgent(
               baseline,
               winner.ws.handle,
               facts,
+              undefined,
+              winner.ws.secrets,
             );
       await dispose(config, winner.ws.handle);
       return {
@@ -3781,6 +3837,8 @@ async function rescuePublish(
       // built from what had actually been recorded when the run threw —
       // usually only the baseline — and the fact that it ended as a failure.
       { status: "failed", ...(baseline !== undefined ? { baseline } : {}) },
+      undefined,
+      ws.secrets,
     );
   } catch {
     return null;
@@ -3804,6 +3862,13 @@ async function publishIfRepoRun(
   facts: VerificationFacts = {},
   /** D4-c2: what a boundary park leaves for this run's thread warmth. */
   parkWarmth?: MergeParkWarmth,
+  /**
+   * H2 hardening: the run's live secret set (the checkout's forge tokens plus
+   * whatever the external adapter parked there after delivering credentials).
+   * The push and the merge-park snapshot below refuse by name over the exact
+   * credential VALUES it carries; never recorded anywhere.
+   */
+  harnessSecrets?: readonly KnownSecret[],
 ): Promise<string | null> {
   // Q3b (SHIP_LOOK_RECORD): finalise the look session's screencast BEFORE the
   // push — one recorded step, admitted by input.lookRecord alone, covering
@@ -3925,9 +3990,44 @@ async function publishIfRepoRun(
   }
 
   // 1. Commit + push. Screened first; a refusal is recorded and stops here.
+  // The H2 exact-value scan runs before anything leaves the sandbox: a
+  // workspace that carries a forwarded credential value (an agent that ran
+  // `env > x`) must not publish it, and a refusal says so by name.
   const push = await ctx.step(
     "repo-push",
     async () => {
+    // The push scan covers exactly what would leave the sandbox: every
+    // commit since the base plus the staged tree (thread-warm.ts
+    // pushScanCommand) — not the whole tree, so gitignored bytes
+    // never refuse a publish, and an add-commit-remove history still does.
+    //
+    // Only a FINDING is a refusal that says "rotate". A scan that could not
+    // run judged nothing: it throws (EXTERNAL_EFFECT_RETRY retries the step)
+    // with its own words, and nothing is pushed. A missing origin/<base> is
+    // left to commitAndPush, whose own `origin/<base>` read fails the same
+    // way and reports it on the existing error path — still before any push.
+    // SHIP_CREDENTIAL_SCAN=warn records the would-be refusal on this step
+    // and pushes anyway; =off skips the scan.
+    const scanMode = credentialScanMode();
+    let credentialScanWarning: string | undefined;
+    if (scanMode !== "off") {
+      const scan = await workspaceSecretValueScan(executor, harnessSecrets, "push", {
+        ...(typeof checkout?.base === "string" ? { base: checkout.base } : {}),
+      });
+      const blocking = scan.kind === "material" || (scan.kind === "failed" && !scan.noBase);
+      if (blocking && scanMode === "warn") {
+        credentialScanWarning = scan.reason;
+        console.warn(`SHIP_CREDENTIAL_SCAN=warn: run ${ctx.runId} pushed despite: ${scan.reason}`);
+      } else if (scan.kind === "material") {
+        return {
+          kind: "refused" as const,
+          message: `Ship refused to push this run's diff: ${scan.reason}. The work is still in this run's log. Remove the file and rotate the credential, then run the task again.`,
+        };
+      } else if (scan.kind === "failed" && !scan.noBase) {
+        throw new Error(`the credential scan could not run: ${scan.why}; the push was held`);
+      }
+    }
+    const warned = credentialScanWarning !== undefined ? { credentialScanWarning } : {};
     const result = await commitAndPush(executor, {
       ref,
       token,
@@ -3937,17 +4037,21 @@ async function publishIfRepoRun(
       ...(trailers.length > 0 ? { trailers } : {}),
     });
     return result.kind === "refused"
-      ? { kind: "refused" as const, message: refusalMessage(result.screen) }
+      ? { kind: "refused" as const, message: refusalMessage(result.screen), ...warned }
       : result.kind === "pushed"
         ? {
             kind: "pushed" as const,
             sha: result.sha,
-            diff: await publishedDiff(executor, co.base),
+            // Scrubbed of the run's forwarded values before it is recorded: a
+            // push the operator let through under SHIP_CREDENTIAL_SCAN=warn
+            // (or =off) must not copy the value into this log as well.
+            diff: await publishedDiff(executor, co.base).then((d) => (d === undefined ? d : scrubExact(d, harnessSecrets ?? []))),
             // An unusual-looking diff is published, but as a draft that says
             // what looked unusual — the reviewer decides, not the limit.
             ...(result.screen !== undefined ? { warning: warningMessage(result.screen) } : {}),
+            ...warned,
           }
-        : { kind: "empty" as const };
+        : { kind: "empty" as const, ...warned };
     },
     EXTERNAL_EFFECT_RETRY,
   );
@@ -4166,7 +4270,7 @@ async function publishIfRepoRun(
       ...(tests !== undefined ? { tests } : {}),
       ...(regression !== undefined ? { regression } : {}),
       ...(repro !== undefined ? { repro } : {}),
-    }, parkWarmth);
+    }, parkWarmth, harnessSecrets);
     // The boundary decision supersedes whatever the auto-merge gate said about
     // the same pull request, and a rebase's re-run suite — when it happened —
     // supersedes the pre-rebase one: the paragraph describes the tree that was
@@ -4253,6 +4357,8 @@ async function mergeBoundaryGate(
   target: { ref: RepoRef; token: string; checkout: RepoCheckout; pr: { url: string; number: number }; handle?: string },
   facts: { verdict: ChangeVerdict; files: ChangedFile[]; tests?: TestOutcome; regression?: { worse: boolean; reasons: string[] }; repro?: ReproTestStep },
   parkWarmth?: MergeParkWarmth,
+  /** The run's live secret set — the publish gate's exact-value scan runs over it below. */
+  harnessSecrets?: readonly KnownSecret[],
 ): Promise<{ decision: MergeDecisionStep | undefined; tests?: TestOutcome }> {
   const { ref, token, checkout, pr } = target;
   let exec = executor;
@@ -4280,10 +4386,30 @@ async function mergeBoundaryGate(
       ...(facts.repro !== undefined ? { repro: { verdict: facts.repro.verdict, testFiles: facts.repro.testFiles } } : {}),
       ...(conflict !== undefined ? { conflict } : {}),
     }));
-    let parkImage: string | undefined;
+    let parkImage: string | { skipped: string } | undefined;
     if (canSnapshot && handle !== undefined) {
       const h = handle;
-      parkImage = await ctx.step("merge-snapshot", () => config.executor.snapshot!(h));
+      // The scan runs BEFORE the image and across everything it freezes —
+      // the workspace tree plus the vendor session stores of the harnesses
+      // this run's input names, and /tmp (thread-warm.ts): bytes that carry
+      // a forwarded credential value must not be frozen into something that
+      // outlives the container. A refusal skips the image (the park still
+      // asks its question; the approval falls back to a fresh checkout, the
+      // same degradation a provider that cannot snapshot takes).
+      // SHIP_CREDENTIAL_SCAN=warn logs the would-be refusal and takes the
+      // image anyway. The step still records the bare image ref: the park
+      // sweeper and the liveness probe read exactly that shape.
+      parkImage = await ctx.step("merge-snapshot", async () => {
+        const gate = await snapshotCredentialGate(
+          exec,
+          harnessSecrets,
+          "merge park snapshot",
+          snapshotScanRoots([...(input.harness !== undefined ? [input.harness.id] : []), ...(input.harnessAttempts ?? []).map((a) => a.id)]),
+        );
+        if ("refuse" in gate) return { skipped: `no image: ${gate.refuse}` };
+        return await config.executor.snapshot!(h);
+      });
+      const image = typeof parkImage === "string" ? parkImage : undefined;
       // D4-c2: the park image is also the thread's warmth-in-waiting, and
       // THIS is the last moment the workspace it came from can be inspected —
       // the restore below disposes the container and the image itself is
@@ -4296,20 +4422,20 @@ async function mergeBoundaryGate(
       // for the rebase either way. Gated on the recorded input, so the step
       // is present exactly when the run could consume it.
       if (input.warmThread === true) {
-        const image = parkImage;
         const verdict = await ctx.step("merge-hygiene", async () => {
           if (config.threadWarm === undefined) return { skipped: "this worker has no thread-warm store configured" };
+          if (image === undefined) return { skipped: "no image was taken (the merge-snapshot step skipped or refused)" };
           const reason = await workspaceCredentialReason(exec);
           return reason === null ? { clean: true as const } : { clean: false as const, reason };
         });
-        if (parkWarmth !== undefined) {
+        if (parkWarmth !== undefined && image !== undefined) {
           parkWarmth.image = image;
           parkWarmth.hygiene = verdict;
         }
       }
     }
     const decision = await ctx.waitForEvent<MergeDecisionPayload>(MERGE_EVENT);
-    if (parkImage !== undefined) {
+    if (typeof parkImage === "string") {
       const image = parkImage;
       const superseded = handle;
       handle = (await ctx.step("merge-restore", async () => restoreChecked(config, input, image))).handle;

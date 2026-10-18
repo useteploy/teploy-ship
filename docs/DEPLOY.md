@@ -944,6 +944,37 @@ exec per batch, recorded like every other step. The steer box on the run
 page appears for it as soon as the run's harness contract is 2 or later; see
 docs/adapters.md for the exact semantics and the 1.x refusal.
 
+**Sealed harness credentials (H2, `SHIP_HARNESS_CRED=on`).** With the flag on
+(set it on BOTH web and worker — enqueue admits, the worker delivers), the
+Projects page stores an API key per project and harness profile, sealed with
+`SHIP_CONFIG_KEY`. The run input records only references (project, profile,
+env name, version); the worker unseals at exec time and hands the value to the
+harness through the exec env. Enqueue refuses, before the run exists, a
+profile with no credential and any provider host the routing policy does not
+permit — including hosts an `OPENCODE_CONFIG_CONTENT` blob declares (baseURLs,
+remote MCP servers, remote `instructions` URLs); a blob that names an npm
+provider package, plugins, a local MCP command, or leaves session sharing on
+(`share` other than `"disabled"`, legacy `autoshare: true`) is refused. Flag
+off: nothing is stored, admitted or recorded, and inputs are byte-identical.
+
+**The forwarded-credential scan (`SHIP_CREDENTIAL_SCAN`, default `on`).** Runs
+for every run, flag or not: before a push and before any snapshot image, Ship
+looks for the exact credential values the run was handed (verbatim or base64).
+The push scan stages the tree and reads `git diff --cached` plus `git log -p`
+since the base, so it judges exactly what would ship; the snapshot scan walks
+the workspace (gitignored files included), `/tmp`, `/var/tmp` and the vendor
+session stores of the run's harnesses under the container's `$HOME`, reading
+regular files only (POSIX `find` + `grep -F`, BusyBox images included). A
+finding refuses the push or skips the image and names the credential, never
+the file or value. A scan that could not run (timeout, unreadable root, a
+failing producer) is never a pass: the push is held and the step retried with
+"the credential scan could not run: <reason>", not a request to rotate
+anything. Values: `on` refuses; `warn` records the would-be refusal on the
+`repo-push` / `thread-snapshot` step (the merge-park snapshot logs it) and lets
+the push or snapshot proceed; `off` skips the scan. Any other value means
+`on`. `warn` and `off` are for an image the scan misjudges while it is being
+fixed — they let a leaked key leave the sandbox.
+
 <a id="test-detect"></a>
 ### Detecting the test command
 
@@ -1064,6 +1095,8 @@ new deployment actually has to set.
 |---|---|---|
 | `SHIP_GIT_TOKENS` | unset | JSON of origin → token: `{"https://github.com":"ghp_…","https://git.example.com":"…"}`. **This is the recommended way to configure credentials**, and it doubles as the allowlist — naming an origin here says Ship may talk to it, so there is no second variable to remember. |
 | `SHIP_REPO_ALLOWLIST` | derived from `SHIP_GIT_TOKENS` | Only needed when you use the origin-less `SHIP_GIT_TOKEN`, which has no host attached and would otherwise go wherever a URL says. Comma-separated, and can be narrower than an origin: `https://github.com/your-org`. |
+| `SHIP_HARNESS_CRED` | unset | `on` enables sealed per-project harness credentials and the enqueue-time destination gate for external harnesses (see *Sealed harness credentials* under Harnesses). Set on both web and worker. |
+| `SHIP_CREDENTIAL_SCAN` | **on** | The forwarded-credential scan before every push and snapshot. `warn` records and proceeds, `off` skips; anything else is `on`. See *The forwarded-credential scan* under Harnesses. |
 | `SHIP_ALLOW_UNSANDBOXED_INTAKE` | unset | Lets externally-sourced tasks run without a sandbox. Only for a disposable box. |
 | `SHIP_MODEL_PRICING` | unset | JSON of model → rates for a model Ship does not ship a price for: `{"my-model":{"inputPer1M":2,"outputPer1M":8}}`. Without it an unrecognised **hosted** model is charged the highest known rate so the spend cap cannot fail open. |
 | `SHIP_LOCAL_MODEL_PREFIXES` | `ollama/ local/ lmstudio/ vllm/ …` | Model prefixes that run on your own hardware and therefore cost nothing. Extend if your local runtime uses a different prefix. |

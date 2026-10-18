@@ -36,13 +36,16 @@ import type { PolicyStore } from "./policies.js";
 import { FileEvidenceStore, NucleusEvidenceStore } from "./evidence.js";
 import { FileRuntimeConfig, NucleusRuntimeConfig } from "./runtime-config.js";
 import type { RuntimeConfigStore } from "./runtime-config.js";
+import { FileHarnessCredentials, NucleusHarnessCredentials } from "./harness-credentials.js";
 import { FileConnectRequests, NucleusConnectRequests } from "./connect-requests.js";
 import type { ConnectRequestStore } from "./connect-requests.js";
 import { FileAkirooCursor, NucleusAkirooCursor } from "./akiroo.js";
 import type { AkirooCursorStore } from "./akiroo.js";
 import { FileRepoStatsStore, NucleusRepoStatsStore } from "./repo-stats.js";
 import type { RepoStatsStore } from "./repo-stats.js";
-import { attemptsCount, harnessAttempts, harnessRef } from "./harness.js";
+import { attemptsCount, harnessAttempts, harnessRef, NATIVE_HARNESS_ID } from "./harness.js";
+import { admitHarnessCredentials, harnessCredEnabled } from "./harness-credentials.js";
+import type { HarnessCredentialStore } from "./harness-credentials.js";
 import { PLAN_REVIEW_REFUSAL, refusalFor } from "./harness-capabilities.js";
 import { assertAcpHarnessAdmitted, withAcpProviderEgress } from "./harness-acp.js";
 import { harnessIdentity, harnessRecordEnabled } from "./harness-identity.js";
@@ -344,6 +347,8 @@ export { PLAN_EVENT, MERGE_EVENT } from "./plan.js";
 export type { PlanDecisionPayload } from "./plan.js";
 export type { ModelPricing, UsageLike } from "./pricing.js";
 export { costUSD, pricingFor, isPricedModel, UNKNOWN_MODEL_PRICING } from "./pricing.js";
+export { harnessCredEnabled, harnessCredentialRefusal, allProfileCredentialNames } from "./harness-credentials.js";
+export type { HarnessCredentialPresence, HarnessCredentialRef } from "./harness-credentials.js";
 
 /**
  * Where durable runs live. The file runtime keeps everything on this
@@ -450,6 +455,16 @@ export interface ShipRuntime {
    * See runtime-config.ts.
    */
   config: RuntimeConfigStore;
+  /**
+   * Sealed harness credentials (H2, SHIP_HARNESS_CRED): the API keys an
+   * operator stored per project and harness profile, sealed with the same
+   * SHIP_CONFIG_KEY material as `config`'s sealed keys. Optional like
+   * `skills` so a legacy injected adapter still satisfies the interface; both
+   * built-in runtimes carry one. Values leave it only through the enqueue
+   * gate and the worker's exec-env delivery — every listing surface gets
+   * presence metadata (harness-credentials.ts). See harness-credentials.ts.
+   */
+  harnessCredentials?: HarnessCredentialStore;
   artifacts?: ArtifactStore;
   workspaceContent?: WorkspaceContentStore;
   /**
@@ -530,6 +545,7 @@ export function fileRuntime(): ShipRuntime {
     skills: new FileSkillStore(),
     evidence: new ProjectEvidenceStore(projects, new FileEvidenceStore()),
     config: new FileRuntimeConfig(),
+    harnessCredentials: new FileHarnessCredentials(),
     artifacts: new FileArtifacts(),
     workspaceContent: new FileWorkspaceContent(),
     connectRequests: new FileConnectRequests(),
@@ -659,6 +675,7 @@ export async function nucleusRuntime(
     skills: new NucleusSkillStore(db),
     evidence: new ProjectEvidenceStore(projects, new NucleusEvidenceStore(db)),
     config: new NucleusRuntimeConfig(db),
+    harnessCredentials: new NucleusHarnessCredentials(db),
     artifacts: new NucleusArtifacts(db),
     workspaceContent: new NucleusWorkspaceContent(db),
     connectRequests: new NucleusConnectRequests(db),
@@ -1612,6 +1629,34 @@ export async function enqueueRun(
   if (planReview && (harness.id !== "native" || attempts.some(h => h.id !== "native"))) {
     throw new Error(`${refusalFor([harness.id, ...attempts.map(h => h.id)].find(i => i !== "native") ?? "", "plan-review") ?? PLAN_REVIEW_REFUSAL} Select native in Project settings. A required project checkpoint cannot be disabled for an individual task.`);
   }
+  // H2 (SHIP_HARNESS_CRED): the sealed credential store plus the
+  // data-destination gate, admitted HERE so a refusal lands before the run
+  // exists — the same no-ghost-run rule as the budget cap below. Two gates,
+  // both fail-closed and both named:
+  //   - presence: a profile that authenticates with a credential gets none
+  //     (deployment env empty for every name, nothing stored for the
+  //     project) => refused;
+  //   - destination: every provider host the harness will dial — derived
+  //     from the env OVERLAID with the store's unsealed values, so a base
+  //     URL in the store routes the check the same place the run dials —
+  //     must be declared in the routing policy and permitted for the
+  //     deployment's data class (the DT2 floor, applied to every external
+  //     harness instead of only delegate targets).
+  // The run input records only REFERENCES (project, profile, env name,
+  // version) for the bindings the store holds; the worker unseals at exec
+  // time. Flag off admits nothing, records nothing, and derives from the
+  // plain env exactly as before — byte-identical inputs.
+  const externalHarnessRefs = [...attempts, harness].filter((h) => h.id !== NATIVE_HARNESS_ID);
+  const harnessCred =
+    harnessCredEnabled() && externalHarnessRefs.length > 0
+      ? await admitHarnessCredentials({
+          refs: externalHarnessRefs,
+          project: options.repo !== undefined ? (project?.repo ?? null) : null,
+          store: runtime.harnessCredentials,
+          env: process.env,
+        })
+      : undefined;
+  if (harnessCred !== undefined && !harnessCred.ok) throw new Error(harnessCred.reason);
   // Independent attempts of one task, ranked by the project's own verification
   // (P6-1). Repo runs only — a second attempt is a second checkout — and never
   // on a scan, which produces findings rather than a tree to rank. Only where
@@ -1674,10 +1719,21 @@ export async function enqueueRun(
   // this existed — byte-identical inputs, and no step is admitted by the
   // field, so fingerprints do not move. The ACP profiles' hosts ride the same
   // merge (harness-acp.ts withAcpProviderEgress), derived per profile.
+  // Under SHIP_HARNESS_CRED the env each profile's derivation runs over is
+  // that profile's OWN overlay (S1): bindings are sealed per profile, so a
+  // credential or base URL held in the store derives the same host the exec
+  // will really dial, and a codex-stored OPENAI_API_KEY is never merged into
+  // opencode's derivation by env name. Flag off derives from the plain env
+  // exactly as before.
+  const credOverlayEnvFor = (id: string): NodeJS.ProcessEnv => {
+    const overlay = harnessCred?.ok === true ? harnessCred.overlays[id] : undefined;
+    return overlay !== undefined && Object.keys(overlay).length > 0 ? { ...process.env, ...overlay } : process.env;
+  };
   const sandboxEgressAllow = withAcpProviderEgress(
     withProviderEgress(
       scan ? project?.sandboxEgressAllow : withPreviewEgress(project?.sandboxEgressAllow, project?.verification),
       [harness, ...attempts],
+      (ref) => credOverlayEnvFor(ref.id),
     ),
     [harness, ...attempts],
   );
@@ -1864,6 +1920,20 @@ export async function enqueueRun(
         ...(warmRun ? { warm: true, ...(envFlag("SHIP_WARM_PARKS") ? { warmParks: true } : {}) } : {}),
         harness,
         ...(attempts.length >= 2 ? { harnessAttempts: attempts } : {}),
+        // H2: the sealed-credential references this run delivers — never
+        // values (see the admission above). Absent on every run the flag did
+        // not admit, which keeps those inputs byte-identical and their
+        // fingerprints unmoved: no step is gated on this field.
+        ...(harnessCred?.ok === true && harnessCred.refs.length > 0 ? { harnessCredentials: harnessCred.refs } : {}),
+        // H2/S2: the provider hosts the enqueue's destination gate approved,
+        // per profile, recorded so the worker can re-judge the env its exec
+        // will actually deliver against what admission approved and refuse by
+        // name (harness-destination-changed) when they differ. Recorded on
+        // every flag-on run — including ones whose credentials all came from
+        // the deployment env and carry no references, because the worker-side
+        // re-check must run for those too. Absent on every flag-off input,
+        // and admits no step, so fingerprints do not move.
+        ...(harnessCred?.ok === true ? { harnessDestinations: harnessCred.destinations } : {}),
         // K, clamped and defaulted at enqueue so a replay launches exactly the
         // attempts the log was written under. Never recorded on a scan or a
         // workspace run (see attemptsK above), which keeps those runs' step

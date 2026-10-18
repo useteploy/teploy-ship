@@ -18,6 +18,7 @@ import { durableAgent } from "./durable.js";
 import { repoLockKey } from "./repository-scope.js";
 import { resolveApprovalPolicy } from "./approval.js";
 import { externalAdapters } from "./harness-external.js";
+import { harnessCredentialResolver } from "./harness-credentials.js";
 import { acpAdapters } from "./harness-acp.js";
 import { isAskEvent, pendingQuestion } from "./ask.js";
 import { hostRunner, previewTargetFromEnv, sweepStalePreviewCheckouts } from "./deploy.js";
@@ -967,10 +968,15 @@ export function startWorker(options: WorkerOptions): {
     // binary is in the sandbox image is a recorded preflight step per run.
     // The steer store rides along so steering-capable lines (D6/D7) can drain
     // operator notes between vendor processes; an absent store drains empty.
-    // The ACP adapters (E7 H3) ride beside them: enqueue gates their ids on
-    // SHIP_ACP_HARNESS; the worker carries them regardless so on-flag runs
-    // stay replayable wherever they were recorded.
-    harnesses: [...externalAdapters({ steer: options.runtime.steer }), ...acpAdapters()],
+    // The credential resolver (H2) unseals what a run's input REFERENCES at
+    // exec time — inert on inputs that carry no references. The ACP adapters
+    // (E7 H3) ride beside them: enqueue gates their ids on SHIP_ACP_HARNESS;
+    // the worker carries them regardless so on-flag runs stay replayable
+    // wherever they were recorded.
+    harnesses: [
+      ...externalAdapters({ steer: options.runtime.steer, credentials: harnessCredentialResolver(options.runtime.harnessCredentials) }),
+      ...acpAdapters(),
+    ],
     // Where this worker may deploy previews (SHIP_PREVIEW_DIR and friends).
     // Absent on a worker that has no app checkout to run the CLI in; a run
     // that asked for a preview then records the step as disabled rather than
