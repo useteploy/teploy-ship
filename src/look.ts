@@ -556,10 +556,12 @@ try {
   await page.setContent("<!doctype html><canvas id='c'></canvas>");
   const cols = Math.max(4, Math.ceil(frames.length / 80)); // keep the canvas inside Chromium's limits
   const tileW = 240, tileH = 150;
-  await page.evaluate((w, h) => { const c = document.getElementById("c"); c.width = w; c.height = h; }, cols * tileW, Math.ceil(frames.length / cols) * tileH);
+  // page.evaluate takes ONE argument: several are wrapped in an object
+  // (found live 2026-10-18: "Too many arguments").
+  await page.evaluate(({ w, h }) => { const c = document.getElementById("c"); c.width = w; c.height = h; }, { w: cols * tileW, h: Math.ceil(frames.length / cols) * tileH });
   for (let i = 0; i < frames.length; i++) {
     const b64 = readFileSync(REC + "/" + frames[i]).toString("base64");
-    await page.evaluate((i, b64, cols, tileW, tileH) => new Promise((resolve, reject) => {
+    await page.evaluate(({ i, b64, cols, tileW, tileH }) => new Promise((resolve, reject) => {
       const ctx = document.getElementById("c").getContext("2d");
       const img = new Image();
       img.onload = () => {
@@ -570,7 +572,7 @@ try {
       };
       img.onerror = () => reject(new Error("frame " + i + " did not decode"));
       img.src = "data:image/jpeg;base64," + b64;
-    }), i, b64, cols, tileW, tileH);
+    }), { i, b64, cols, tileW, tileH });
   }
   const data = await page.evaluate(() => document.getElementById("c").toDataURL("image/jpeg", 0.55));
   writeFileSync(REC + "/look-record.jpg", Buffer.from(data.slice(data.indexOf(",") + 1), "base64"));
