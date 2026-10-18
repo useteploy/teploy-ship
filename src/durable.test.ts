@@ -5997,3 +5997,169 @@ test("D4-c replay: a warm follow-up replays from its log after the image was del
   assert.equal(replay.status, "completed", "a completed run replays from its log; live host state is irrelevant to it");
   assert.equal(rig.createFromCalls.length, calls, "replay never re-asked the daemon");
 });
+
+// ------------------------------------------------------------- DS1 stack ----
+
+/**
+ * A squash-merged stack against a local bare remote: main, ship/run-base one
+ * commit ahead, ship/run-stack = that commit + the stack's own. `conflicting`
+ * makes main's squash also carry the stack's file with different content.
+ */
+async function stackRebaseFixture(tag: string, conflicting: boolean): Promise<{ repoUrl: string; bareDir: string; baseSha: string; stackSha: string }> {
+  const bareDir = await mkdtemp(join(tmpdir(), `durable-ds1-bare-${tag}-`));
+  const seedDir = await mkdtemp(join(tmpdir(), `durable-ds1-seed-${tag}-`));
+  const seeder = new LocalExecutor({ root: seedDir });
+  await seeder.exec(
+    `git init -q -b main . && git config user.email t@t && git config user.name t && echo one > f.txt && git add -A && git commit -qm seed && ` +
+      `git checkout -q -b ship/run-base && echo base >> f.txt && git add -A && git commit -qm "base: extend f"`,
+  );
+  const baseSha = (await seeder.exec("git rev-parse HEAD")).stdout.trim();
+  await seeder.exec(
+    `git checkout -q -b ship/run-stack && echo "own work" > own.txt && git add -A && git commit -qm "stack: own work"`,
+  );
+  const stackSha = (await seeder.exec("git rev-parse HEAD")).stdout.trim();
+  await seeder.exec(
+    `git checkout -q main && git merge --squash ship/run-base` +
+      (conflicting ? ` && echo the-squash-took-this-file > own.txt && git add -A` : ``) +
+      ` && git commit -qm "squash: the base pull request"`,
+  );
+  await seeder.exec(`git clone -q --bare . ${bareDir}/owner/repo.git`);
+  return { repoUrl: `file://${bareDir}/owner/repo.git`, bareDir, baseSha, stackSha };
+}
+
+interface ForgeCall {
+  method: string;
+  url: string;
+  body?: Record<string, unknown>;
+}
+
+/**
+ * The forge double for a PR-mode run on PR #5 over the stacked branch: resolvePr
+ * and the body read GET `/pulls/5`; the retarget PATCHes it; comments and body
+ * updates answer ok. Every call is captured.
+ */
+function forgeDouble(stackSha: string): { calls: ForgeCall[]; fetch: () => Promise<Response> } {
+  const calls: ForgeCall[] = [];
+  const ok = (body: unknown): Response => ({ ok: true, json: async () => body, text: async () => "" }) as unknown as Response;
+  const fetch = (async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const u = String(url);
+    const method = (init?.method ?? "GET").toUpperCase();
+    calls.push({ method, url: u, ...(init?.body !== undefined ? { body: JSON.parse(String(init.body)) as Record<string, unknown> } : {}) });
+    if (/\/pulls\/5$/.test(u) && method === "GET") {
+      return ok({
+        state: "open",
+        merged: false,
+        body: "the pull request body",
+        head: { ref: "ship/run-stack", sha: stackSha, repo: { full_name: "owner/repo", clone_url: u.replace(/\/api\/v1\/repos\/[^/]+\/[^/]+\/pulls\/5$/, "/owner/repo.git") } },
+        base: { ref: "ship/run-base", repo: { full_name: "owner/repo" } },
+      });
+    }
+    if (method === "GET") return ok([]);
+    return ok({});
+  }) as unknown as () => Promise<Response>;
+  return { calls, fetch };
+}
+
+test("DS1: the woken stack-rebase run rebases onto the default branch, retargets, and replays without touching the forge again", async () => {
+  const { repoUrl, bareDir, baseSha, stackSha } = await stackRebaseFixture("clean", false);
+  const forge = forgeDouble(stackSha);
+  const { model, callCount } = reactiveModel(["```finish\nverified on the rebased tree\n```"]);
+
+  const work = await mkdtemp(join(tmpdir(), "durable-ds1-work-"));
+  const provider: ExecutorProvider = {
+    async create() {
+      return { handle: work };
+    },
+    attach(handle: string) {
+      return new LocalExecutor({ root: handle });
+    },
+  };
+  const orig = globalThis.fetch;
+  (globalThis as unknown as { fetch: unknown }).fetch = forge.fetch;
+  try {
+    const wf = durableAgent({ model, executor: provider, workdir: "." });
+    const store = new MemoryEventStore();
+    const input = { task: "rebase the stack", repo: repoUrl, pr: 5 as const, stackRebase: { oldBaseHeadSha: baseSha, defaultBranch: "main" } };
+    const outcome = await executeRun({ workflow: wf, runId: "run-rev1", store, input });
+
+    assert.equal(outcome.status, "completed");
+    const out = outcome.output as { status: string; summary: string; pr?: string };
+    assert.equal(out.pr, "file:///owner/repo/pulls/5");
+
+    const events = await store.load("run-rev1");
+    const step = events.find((e) => e.type === "step-completed" && e.name === "stack-rebase")?.data as { result?: { kind?: string } } | undefined;
+    assert.equal(step?.result?.kind, "rebased");
+
+    // The branch on the remote: exactly its own commit, directly on main.
+    const check = new LocalExecutor({ root: bareDir });
+    assert.equal((await check.exec("cd owner/repo.git && git rev-list --count main..ship/run-stack")).stdout.trim(), "1");
+    assert.equal(
+      (await check.exec("cd owner/repo.git && git merge-base main ship/run-stack")).stdout.trim(),
+      (await check.exec("cd owner/repo.git && git rev-parse main")).stdout.trim(),
+      "the squashed base's commits are gone from the stack's history",
+    );
+    // The retarget happened exactly once, with the default branch.
+    const retargets = forge.calls.filter((c) => c.method === "PATCH" && c.body?.base === "main" && /\/pulls\/5$/.test(c.url));
+    assert.equal(retargets.length, 1);
+    assert.ok(callCount() >= 1, "the agent still ran — the suite side of the revision");
+
+    // Replay: the recorded outcome returns; no forge call and no push repeats.
+    const callsBefore = forge.calls.length;
+    const remoteHeadBefore = (await check.exec("cd owner/repo.git && git rev-parse ship/run-stack")).stdout.trim();
+    const again = await executeRun({ workflow: wf, runId: "run-rev1", store });
+    assert.equal(again.status, "completed");
+    assert.equal(forge.calls.length, callsBefore, "a replay re-runs nothing external");
+    assert.equal((await check.exec("cd owner/repo.git && git rev-parse ship/run-stack")).stdout.trim(), remoteHeadBefore);
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+test("DS1 negative: a conflicting stack rebase aborts, parks with the file list, and never reaches the agent", async () => {
+  const { repoUrl, bareDir, baseSha, stackSha } = await stackRebaseFixture("conflict", true);
+  const forge = forgeDouble(stackSha);
+  const { model, callCount } = reactiveModel(["```finish\nshould never run\n```"]);
+
+  const work = await mkdtemp(join(tmpdir(), "durable-ds1-conflict-"));
+  const provider: ExecutorProvider = {
+    async create() {
+      return { handle: work };
+    },
+    attach(handle: string) {
+      return new LocalExecutor({ root: handle });
+    },
+  };
+  const orig = globalThis.fetch;
+  (globalThis as unknown as { fetch: unknown }).fetch = forge.fetch;
+  try {
+    const wf = durableAgent({ model, executor: provider, workdir: "." });
+    const store = new MemoryEventStore();
+    const outcome = await executeRun({
+      workflow: wf,
+      runId: "run-rev2",
+      store,
+      input: { task: "rebase the stack", repo: repoUrl, pr: 5 as const, stackRebase: { oldBaseHeadSha: baseSha, defaultBranch: "main" } },
+    });
+
+    assert.equal(outcome.status, "completed");
+    const out = outcome.output as { status: string; summary: string };
+    assert.equal(out.status, "finished");
+    assert.match(out.summary, /conflicts on own\.txt/);
+    assert.match(out.summary, /keeps its base/);
+
+    const events = await store.load("run-rev2");
+    const step = events.find((e) => e.type === "step-completed" && e.name === "stack-rebase")?.data as { result?: { kind?: string; files?: string[] } } | undefined;
+    assert.deepEqual(step?.result, { kind: "conflict", files: ["own.txt"] }, "aborted with the file list, never force-resolved");
+
+    assert.equal(callCount(), 0, "the hold precedes any model call");
+    const check = new LocalExecutor({ root: bareDir });
+    assert.equal((await check.exec("cd owner/repo.git && git rev-parse ship/run-stack")).stdout.trim(), stackSha, "the remote branch is untouched");
+    assert.equal(forge.calls.filter((c) => c.method === "PATCH" && c.body?.base === "main").length, 0, "no retarget onto an unrebased head");
+    // The park surface: the PR comment names the files and the hand command.
+    const comment = forge.calls.find((c) => c.method === "POST" && /\/issues\/5\/comments$/.test(c.url))?.body;
+    assert.match(String((comment as { body?: string } | undefined)?.body ?? ""), /conflicts on: own\.txt/);
+    assert.match(String((comment as { body?: string } | undefined)?.body ?? ""), /rebase --onto/);
+  } finally {
+    globalThis.fetch = orig;
+  }
+});

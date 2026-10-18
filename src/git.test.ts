@@ -26,6 +26,8 @@ import {
   parseRepoUrl,
   pullRequestUrl,
   rebaseOntoBase,
+  rebaseStackedOnto,
+  retargetPullRequest,
   resolvePr,
   checkoutRepo,
   checkoutRepoAtSha,
@@ -33,6 +35,7 @@ import {
   reuseRepo,
   reuseRepoForPr,
   setupRepo,
+  setupStackedRepo,
   SHIP_COMMENT_MARKER,
   truncateMiddle,
   withTrailers,
@@ -1042,4 +1045,210 @@ test("DF1: a recorded commit that cannot be fetched fails naming the sha", async
     },
     "the checkout is the arbiter: its error names the sha nothing fetched",
   );
+});
+
+// ---------------------------------------------------------------- DS1 ----
+
+/**
+ * A stack scenario against a local bare remote: main seeded, ship/run-base
+ * one commit ahead (the future squash-merge payload), nothing else. The
+ * stacked run's own commit is made through the real setupStackedRepo +
+ * commitAndPush path by the test that needs it.
+ */
+async function stackFixture(tag: string): Promise<{ ref: NonNullable<Parameters<typeof setupRepo>[1]>["ref"]; bare: string; baseSha: string }> {
+  const bare = await mkdtemp(join(tmpdir(), `ship-ds1-bare-${tag}-`));
+  const seed = await mkdtemp(join(tmpdir(), `ship-ds1-seed-${tag}-`));
+  const seeder = new LocalExecutor({ root: seed });
+  await seeder.exec(
+    `git init -q -b main . && git config user.email t@t && git config user.name t && echo one > f.txt && git add -A && git commit -qm seed && ` +
+      `git checkout -q -b ship/run-base && echo base >> f.txt && git add -A && git commit -qm "base: extend f"`,
+  );
+  const baseSha = (await seeder.exec("git rev-parse HEAD")).stdout.trim();
+  await seeder.exec(`git clone -q --bare . ${bare}/repo.git`);
+  const ref = {
+    kind: "forgejo" as const,
+    base: "file://",
+    owner: "local",
+    repo: "repo",
+    cloneUrl: `${bare}/repo.git`,
+  };
+  return { ref, bare, baseSha };
+}
+
+/** The stacked run: stand at the recorded base head, make one own commit, push. */
+async function stackedRun(
+  ref: NonNullable<Parameters<typeof setupRepo>[1]>["ref"],
+  tag: string,
+  baseSha: string,
+): Promise<{ work: LocalExecutor; ownSha: string; checkout: Awaited<ReturnType<typeof setupStackedRepo>> }> {
+  const work = new LocalExecutor({ root: await mkdtemp(join(tmpdir(), `ship-ds1-work-${tag}-`)) });
+  const checkout = await setupStackedRepo(work, { ref, token: "", runId: "run-stack", branch: "ship/run-base", sha: baseSha });
+  await work.exec("echo own work > own.txt");
+  const pushed = await commitAndPush(work, { ref, token: "", checkout, message: "stack: own work\n\nrun-stack" });
+  assert.equal(pushed.kind, "pushed");
+  return { work, ownSha: (pushed as { sha: string }).sha, checkout };
+}
+
+/**
+ * Squash-merge ship/run-base into main the way the forge does it: one new
+ * commit on main carrying the base's diff (NOT a descendant of the base's
+ * commits). `alsoTouch` writes an extra conflicting file into that squash.
+ */
+async function squashMergeBase(bare: string, tag: string, alsoTouch?: string): Promise<void> {
+  const forge = new LocalExecutor({ root: await mkdtemp(join(tmpdir(), `ship-ds1-forge-${tag}-`)) });
+  await forge.exec(
+    `git clone -q ${bare}/repo.git . && git config user.email t@t && git config user.name forge && ` +
+      `git checkout -q main && git merge --squash origin/ship/run-base` +
+      (alsoTouch !== undefined ? ` && echo ${alsoTouch} > own.txt && git add -A` : ``) +
+      ` && git commit -qm "squash: the base pull request" && git push -q origin main`,
+  );
+}
+
+/** Captures PATCHes (the retarget) and answers every forge call with ok. */
+function patchCapture(): { fetchImpl: typeof fetch; patches: Array<{ url: string; body: Record<string, unknown> }> } {
+  const patches: Array<{ url: string; body: Record<string, unknown> }> = [];
+  const fetchImpl = (async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    if ((init?.method ?? "GET").toUpperCase() === "PATCH") {
+      patches.push({ url: String(url), body: JSON.parse(String(init?.body)) as Record<string, unknown> });
+    }
+    return { ok: true, json: async () => ({}) } as unknown as Response;
+  }) as typeof fetch;
+  return { fetchImpl, patches };
+}
+
+test("DS1: setupStackedRepo cuts the branch at the recorded base head; base IS the stack branch", async () => {
+  const { ref, bare, baseSha } = await stackFixture("setup");
+  const { work, checkout, ownSha } = await stackedRun(ref, "setup", baseSha);
+
+  assert.equal(checkout.branch, "ship/run-stack");
+  assert.equal(checkout.base, "ship/run-base", "the PR base and the diff base are the stack branch");
+  assert.equal((await work.exec("git rev-parse HEAD~1")).stdout.trim(), baseSha, "the own commit sits exactly on the recorded base head");
+
+  const check = new LocalExecutor({ root: bare });
+  // The remote branch holds the base's work plus this run's own commit: 1
+  // above the base branch, 2 above main — the forge diff against ship/run-base
+  // (what the PR shows) is this run's own commit only.
+  assert.equal((await check.exec("cd repo.git && git rev-list --count ship/run-base..ship/run-stack")).stdout.trim(), "1");
+  assert.equal((await check.exec("cd repo.git && git rev-list --count main..ship/run-stack")).stdout.trim(), "2");
+  assert.equal((await check.exec("cd repo.git && git rev-parse ship/run-stack")).stdout.trim(), ownSha);
+});
+
+test("DS1: after the base squash-merges, --onto the recorded old base head keeps only the stack's own commits", async () => {
+  const { ref, bare, baseSha } = await stackFixture("onto");
+  const { work, ownSha, checkout } = await stackedRun(ref, "onto", baseSha);
+  await squashMergeBase(bare, "onto");
+
+  const { fetchImpl, patches } = patchCapture();
+  const outcome = await rebaseStackedOnto(work, {
+    ref,
+    token: "",
+    checkout: { ...checkout, headSha: ownSha },
+    pr: 7,
+    oldBase: baseSha,
+    onto: "main",
+    fetchImpl,
+  });
+  assert.deepEqual(Object.keys(outcome).sort(), ["base", "kind", "sha"]);
+  assert.equal(outcome.kind, "rebased");
+  assert.equal((outcome as { base: string }).base, "main");
+
+  const check = new LocalExecutor({ root: bare });
+  const remoteHead = (await check.exec("cd repo.git && git rev-parse ship/run-stack")).stdout.trim();
+  assert.notEqual(remoteHead, ownSha, "the rebased branch is new bytes");
+  assert.equal(
+    (await check.exec("cd repo.git && git rev-list --count main..ship/run-stack")).stdout.trim(),
+    "1",
+    "the PR diff after the retarget holds ONLY the stack's own commit",
+  );
+  assert.equal(
+    (await check.exec("cd repo.git && git merge-base main ship/run-stack")).stdout.trim(),
+    (await check.exec("cd repo.git && git rev-parse main")).stdout.trim(),
+    "the stack now sits directly on the default branch",
+  );
+  assert.equal((await check.exec("cd repo.git && git show ship/run-stack:own.txt")).stdout.trim(), "own work", "the own commit's content survived");
+  assert.deepEqual(
+    patches.map((p) => ({ url: p.url, base: p.body.base })),
+    [{ url: `${ref.base}/api/v1/repos/${ref.owner}/${ref.repo}/pulls/7`, base: "main" }],
+    "the PR was retargeted to main exactly once",
+  );
+});
+
+test("DS1 negative: a conflicting --onto rebase aborts, reports the files and changes nothing anywhere", async () => {
+  const { ref, bare, baseSha } = await stackFixture("conflict");
+  const { work, ownSha, checkout } = await stackedRun(ref, "conflict", baseSha);
+  // The squash-merge also carries the stack's file with different content.
+  await squashMergeBase(bare, "conflict", "the-squash-took-this-file");
+
+  const { fetchImpl, patches } = patchCapture();
+  const outcome = await rebaseStackedOnto(work, {
+    ref,
+    token: "",
+    checkout: { ...checkout, headSha: ownSha },
+    pr: 7,
+    oldBase: baseSha,
+    onto: "main",
+    fetchImpl,
+  });
+  assert.deepEqual(outcome, { kind: "conflict", files: ["own.txt"] }, "the conflicted file, and nothing else");
+
+  const check = new LocalExecutor({ root: bare });
+  assert.equal((await check.exec("cd repo.git && git rev-parse ship/run-stack")).stdout.trim(), ownSha, "the remote branch is untouched");
+  assert.equal((await work.exec("git rev-parse HEAD")).stdout.trim(), ownSha, "the local branch was put back — never force-resolved");
+  assert.equal((await work.exec("git status --porcelain --untracked-files=no")).stdout.trim(), "", "no rebase left running");
+  assert.deepEqual(patches, [], "the PR was not retargeted: its base still describes its head");
+});
+
+test("DS1 negative: the expected-heads check refuses a branch that moved, before anything runs", async () => {
+  const { ref, bare, baseSha } = await stackFixture("moved");
+  const { work, ownSha, checkout } = await stackedRun(ref, "moved", baseSha);
+  // A person pushes to the stack's branch between the watch and the revision.
+  const human = new LocalExecutor({ root: await mkdtemp(join(tmpdir(), "ship-ds1-human-")) });
+  await human.exec(
+    `git clone -q ${bare}/repo.git . && git config user.email h@h && git config user.name human && ` +
+      `git checkout -q ship/run-stack && echo human >> f.txt && git add -A && git commit -qm human && git push -q origin ship/run-stack`,
+  );
+  const humanHead = (await human.exec("git rev-parse HEAD")).stdout.trim();
+
+  const { fetchImpl, patches } = patchCapture();
+  const outcome = await rebaseStackedOnto(work, {
+    ref,
+    token: "",
+    checkout: { ...checkout, headSha: ownSha },
+    pr: 7,
+    oldBase: baseSha,
+    onto: "main",
+    fetchImpl,
+  });
+  assert.equal(outcome.kind, "failed");
+  assert.match((outcome as { reason: string }).reason, /moved on the remote/);
+
+  const check = new LocalExecutor({ root: bare });
+  assert.equal((await check.exec("cd repo.git && git rev-parse ship/run-stack")).stdout.trim(), humanHead, "the human's head stands");
+  assert.deepEqual(patches, []);
+});
+
+test("DS1: retargetPullRequest PATCHes the pull endpoint with the new base on both forges", async () => {
+  const seen: Array<{ url: string; auth: string; method: string; body: Record<string, unknown> }> = [];
+  const fetchImpl = (async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    seen.push({
+      url: String(url),
+      auth: String((init?.headers as Record<string, string>)?.authorization ?? ""),
+      method: (init?.method ?? "GET").toUpperCase(),
+      body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+    });
+    return { ok: true, json: async () => ({}) } as unknown as Response;
+  }) as typeof fetch;
+
+  assert.deepEqual(await retargetPullRequest(parseRepoUrl("https://github.com/useteploy/teploy-ship"), "tok", 12, "main", fetchImpl), { ok: true });
+  assert.deepEqual(await retargetPullRequest(parseRepoUrl("http://forgejo.example.com:3000/Tyler/teploy-ship.git"), "tok", 13, "main", fetchImpl), { ok: true });
+  assert.deepEqual(seen, [
+    { url: "https://api.github.com/repos/useteploy/teploy-ship/pulls/12", auth: "Bearer tok", method: "PATCH", body: { base: "main" } },
+    { url: "http://forgejo.example.com:3000/api/v1/repos/Tyler/teploy-ship/pulls/13", auth: "token tok", method: "PATCH", body: { base: "main" } },
+  ]);
+
+  // A forge refusal is a value, not a throw — the caller records it.
+  const refused = (async (): Promise<Response> => ({ ok: false, status: 422, text: async () => "base refused" }) as unknown as Response) as typeof fetch;
+  const outcome = await retargetPullRequest(parseRepoUrl("https://github.com/useteploy/teploy-ship"), "tok", 14, "main", refused);
+  assert.equal(outcome.ok, false);
+  assert.match((outcome as { reason: string }).reason, /422/);
 });

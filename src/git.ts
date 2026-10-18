@@ -405,6 +405,72 @@ export async function checkoutRepoAtSha(
 }
 
 /**
+ * A stacked run's checkout (DS1, SHIP_STACKED_PRS): stand on the base run's
+ * recorded head commit, on a NEW work branch of this run's own, with the base
+ * branch present as a real remote-tracking ref. The sha is a fact of the
+ * stack's input, recorded at enqueue from the base run's log — cutting at
+ * exactly that commit is what later lets the post-merge rebase drop the
+ * base's commits with `--onto` and keep only this run's own.
+ *
+ * `base` in the returned checkout IS the stack branch, deliberately: the push
+ * ahead-count, the PR base, the published diff and the merge-time rebase all
+ * read `checkout.base`, so pointing it here makes every one of them describe
+ * "this run's own commits on top of the base branch" without a special case
+ * anywhere else.
+ */
+export async function setupStackedRepo(
+  executor: AgentExecutor,
+  options: { ref: RepoRef; token: string; runId: string; branch: string; sha: string; warm?: boolean },
+): Promise<RepoCheckout> {
+  const { ref, token, runId } = options;
+  const branch = assertGitSafe("branch", options.branch);
+  const sha = assertGitSafe("sha", options.sha);
+  // Warm reuse follows checkoutRepoAtSha's shape: refresh the remote's refs,
+  // drop the previous run's tree, keep what git ignores. The cold path is a
+  // fresh credential-free clone.
+  const warmReuse = options.warm === true && (await hasClone(executor));
+  if (warmReuse) {
+    const refresh = gitCredential(ref, token);
+    await git(
+      executor,
+      `git remote set-url origin ${refresh.url} && ` +
+        "{ git fetch --depth 50 --prune origin 2>&1 && git remote set-head origin -a 2>&1; }; rc=$?; " +
+        `git remote set-url origin ${ref.cloneUrl} >/dev/null 2>&1; exit $rc`,
+      300_000,
+      refresh.env,
+    );
+  } else {
+    await cloneCredentialFree(executor, ref, token);
+  }
+  await git(executor, 'git config user.name "Teploy Ship" && git config user.email "ship@teploy.dev"');
+  await git(executor, excludeCommand());
+  const defaultBranch = warmReuse
+    ? assertGitSafe("branch", (await git(executor, "git symbolic-ref --short refs/remotes/origin/HEAD")).replace(/^origin\//, ""))
+    : await git(executor, "git rev-parse --abbrev-ref HEAD");
+  if (warmReuse) {
+    await git(executor, "git reset --hard");
+    await git(executor, "git clean -fd");
+    // Harness scratch is EXCLUDED from clean, and a previous run's kernel
+    // state in this run's workspace is a correctness problem (reuseRepo).
+    await git(executor, "git rm -rf .teploy-agent");
+  }
+  const cred = gitCredential(ref, token);
+  const work = `ship/${runId}`;
+  // The explicit refspec (not a bare branch fetch) is what establishes
+  // refs/remotes/origin/<branch> — the ref the push ahead-count and the
+  // published diff count from. The checkout then stands on the RECORDED sha,
+  // not the branch tip: the tip may have moved since enqueue, and the rebase
+  // contract is "commits above the recorded head are this stack's own".
+  await git(
+    executor,
+    `git fetch --depth 50 ${cred.url} +refs/heads/${branch}:refs/remotes/origin/${branch} 2>&1 && git checkout -B ${work} ${sha}`,
+    300_000,
+    cred.env,
+  );
+  return { branch: work, base: branch };
+}
+
+/**
  * Commit whatever the agent left in the tree and push the work branch.
  * Returns null when there is nothing to push (empty diff = no PR). The
  * commit happens harness-side so the agent never needs git etiquette —
@@ -1383,6 +1449,134 @@ export async function rebaseOntoBase(
       forceCred.env,
     );
     return { kind: "rebased", sha, base };
+  } catch (error) {
+    // Put the branch back so a retry starts from the recorded state.
+    await executor.exec(`git reset --hard ${before}`, { timeoutMs: 60_000 }).catch(() => undefined);
+    return { kind: "failed", reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
+ * Retarget a pull request to another base branch (DS1): the forge PATCH both
+ * hosts expose on the pull endpoint. Returns false rather than throwing so
+ * the caller can record the outcome — a PR that keeps its base is no less
+ * real, and the recorded step says exactly what happened.
+ */
+export async function retargetPullRequest(
+  ref: RepoRef,
+  token: string,
+  pr: number,
+  base: string,
+  fetchImpl: typeof fetch = forgeFetch,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const safeBase = assertGitSafe("branch", base);
+  try {
+    const response = await fetchImpl(pullEndpoint(ref, pr), {
+      method: "PATCH",
+      headers: forgeHeaders(ref, token),
+      body: JSON.stringify({ base: safeBase }),
+    });
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      return { ok: false, reason: `retarget refused (${response.status}): ${detail.slice(0, 300)}` };
+    }
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
+ * DS1 — rebase a stacked branch after its base pull request squash-merged.
+ *
+ * Ship squash-merges, so the base's commits are NOT ancestors of the default
+ * branch. `rebaseOntoBase`'s plain rebase onto the new base would replay them
+ * (and conflict); `--onto <default> <recorded old base head>` replays only the
+ * commits above the recorded head — this stack's own. That rule and the
+ * expected-heads check below are T3 Code's cascadeRebaseStack and
+ * githubStackActions (packages/source-control-github, MIT), on Ship's
+ * executor: the branch's remote head is fetched and compared with the head
+ * the checkout resolved BEFORE anything moves, and the push is a
+ * force-with-lease against that same head, so a commit nobody saw refuses
+ * rather than vanishes.
+ *
+ * Order matters and is deliberate: rebase locally, retarget the pull request
+ * (forge PATCH), then push. A conflict aborts before any external state
+ * moves; a retarget failure leaves the branch un-rebased and un-pushed
+ * (nothing half-done on the forge); a push failure after the retarget is
+ * recorded honestly in the reason.
+ */
+export async function rebaseStackedOnto(
+  executor: AgentExecutor,
+  options: {
+    ref: RepoRef;
+    token: string;
+    checkout: RepoCheckout;
+    /** The pull request being retargeted (its base is the stack branch). */
+    pr: number;
+    /** The base run's recorded head; commits above it are this stack's own. */
+    oldBase: string;
+    /** The branch the PR retargets onto (the default branch). */
+    onto: string;
+    fetchImpl?: typeof fetch;
+  },
+): Promise<RebaseOutcome> {
+  const { ref, token, checkout } = options;
+  const onto = assertGitSafe("branch", options.onto);
+  const oldBase = assertGitSafe("sha", options.oldBase);
+  const cred = gitCredential(ref, token);
+  let before: string;
+  try {
+    before = await git(executor, "git rev-parse HEAD");
+    // The branch first (its head is the expected-heads value), then the new
+    // base — a bare fetch leaves each at FETCH_HEAD, so the order is load-bearing.
+    await git(executor, `git fetch --depth 50 ${cred.url} +refs/heads/${checkout.branch}:refs/remotes/origin/${checkout.branch} 2>&1`, 300_000, cred.env);
+    await git(executor, `git fetch --depth 50 ${cred.url} +refs/heads/${onto}:refs/remotes/origin/${onto} 2>&1`, 300_000, cred.env);
+  } catch (error) {
+    return { kind: "failed", reason: error instanceof Error ? error.message : String(error) };
+  }
+  // Expected-heads check (githubStackActions): the branch on the remote must
+  // still be the head this checkout resolved. Anything else means a person or
+  // another run pushed in between — refuse before touching anything.
+  const expected = checkout.headSha ?? before;
+  const remoteHead = await git(executor, `git rev-parse refs/remotes/origin/${checkout.branch}`).catch(() => "");
+  if (remoteHead !== expected) {
+    return {
+      kind: "failed",
+      reason: `the branch moved on the remote (expected ${expected.slice(0, 10)}, found ${remoteHead === "" ? "nothing" : remoteHead.slice(0, 10)}); nothing was rebased or pushed`,
+    };
+  }
+  const ancestor = await executor.exec(`git merge-base --is-ancestor refs/remotes/origin/${onto} HEAD`, { timeoutMs: 60_000 });
+  if (ancestor.exitCode === 0) {
+    // Already on the new base (a hand rebase, or a previous partial run):
+    // no bytes change, only the retarget may still be owed.
+    if (checkout.base === onto) return { kind: "up-to-date", sha: before };
+    const retargeted = await retargetPullRequest(ref, token, options.pr, onto, options.fetchImpl);
+    return retargeted.ok ? { kind: "up-to-date", sha: before } : { kind: "failed", reason: `the branch is already on ${onto} but the retarget failed: ${retargeted.reason}` };
+  }
+  const rebase = await executor.exec(`git rebase --onto refs/remotes/origin/${onto} ${oldBase} 2>&1`, { timeoutMs: 300_000 });
+  if (rebase.exitCode !== 0) {
+    const unmerged = await executor.exec("git diff --name-only --diff-filter=U", { timeoutMs: 60_000 });
+    const files = unmerged.exitCode === 0 ? unmerged.stdout.split("\n").map((l) => l.trim()).filter((l) => l !== "") : [];
+    await executor.exec("git rebase --abort", { timeoutMs: 60_000 }).catch(() => undefined);
+    if (files.length > 0) return { kind: "conflict", files };
+    return { kind: "failed", reason: `rebase failed: ${(rebase.stdout + rebase.stderr).slice(0, 500)}` };
+  }
+  try {
+    const sha = await git(executor, "git rev-parse HEAD");
+    // Retarget before the push: if the PATCH fails the branch goes back to
+    // where it was and the PR keeps a base its diff still describes.
+    if (checkout.base !== onto) {
+      const retargeted = await retargetPullRequest(ref, token, options.pr, onto, options.fetchImpl);
+      if (!retargeted.ok) throw new Error(`the rebase succeeded but the retarget failed (the pull request keeps its base): ${retargeted.reason}`);
+    }
+    await git(
+      executor,
+      `git push --force-with-lease=refs/heads/${checkout.branch}:${before} ${cred.url} HEAD:refs/heads/${checkout.branch} 2>&1`,
+      300_000,
+      cred.env,
+    );
+    return { kind: "rebased", sha, base: onto };
   } catch (error) {
     // Put the branch back so a retry starts from the recorded state.
     await executor.exec(`git reset --hard ${before}`, { timeoutMs: 60_000 }).catch(() => undefined);
