@@ -24,6 +24,9 @@
 //                               driver must deny, never select allow_always
 //   ACP_MOCK_ECHO               echo env and the base64 of GEMINI_API_KEY in
 //                               an agent message (the H1 scrub control)
+//   ACP_MOCK_SPLIT_LEAK         leak GEMINI_API_KEY split across message
+//                               chunks, the driver's non-JSON relay cap and
+//                               two stderr stream chunks (the H1 join control)
 //   ACP_MOCK_VERSION_LINE       what `--version` prints
 // argv[2] === "--version" prints a version line and exits (preflight).
 
@@ -151,6 +154,21 @@ const runPrompt = async (promptText) => {
     const key = process.env.GEMINI_API_KEY ?? "";
     update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `GEMINI_API_KEY=${key}\n` } });
     update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `b64=${Buffer.from(key, "utf8").toString("base64")}\n` } });
+  }
+  if (process.env.ACP_MOCK_SPLIT_LEAK === "1") {
+    // The credential split across every boundary a stream has, each of which
+    // defeats per-chunk/per-line redaction on its own: two message chunks of
+    // one agent message (rejoined by the worker's parser), a non-JSON stdout
+    // line whose secret straddles the driver's 500-char relay cap, and two
+    // stderr stream chunks split mid-value.
+    const key = process.env.GEMINI_API_KEY ?? "";
+    process.stdout.write(`${"N".repeat(480)}${key}${"N".repeat(80)}\n`);
+    update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `GEMINI_API_KEY=${key.slice(0, 12)}` } });
+    update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `${key.slice(12)} done.` } });
+    process.stderr.write(`agent stderr says: ${key.slice(0, 12)}`);
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, 100));
+    process.stderr.write(`${key.slice(12)} tail\n`);
+    return { stopReason: "end_turn" };
   }
   update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Wrote notes.md." } });
   return { stopReason: "end_turn" };

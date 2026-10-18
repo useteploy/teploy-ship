@@ -244,8 +244,7 @@ test("negative control: allow-always is never granted — an allow that only exi
   assert.equal(await readFile(join(rig.work, "notes.md"), "utf8").catch(() => "absent"), "absent", "nothing was written");
 });
 
-test("negative control (H1): the token is absent from argv, the recorded events and the live feed", async () => {
-  const rig = await acpRig({ mockEnv: { ACP_MOCK_ECHO: "1" } });
+test("negative control (H1): the token is absent from argv, the recorded events and the live feed", async () => {  const rig = await acpRig({ mockEnv: { ACP_MOCK_ECHO: "1" } });
   // A streamed exec over the same executor (the daemon's shape), with the
   // live store capturing every update the run page would see.
   const phases: Array<{ phase: string; turn?: number; detail?: string }> = [];
@@ -296,6 +295,32 @@ test("negative control (H1): the token is absent from argv, the recorded events 
     const text = await readFile(path, "utf8").catch(() => "");
     assert.ok(!text.includes(FAKE_KEY), `${path} must not carry the token`);
   }
+});
+
+test("negative control (H1, joined): a credential split across stream boundaries never reaches the record", async () => {
+  // The peer leaks the key split across (1) two agent_message_chunk events
+  // of one message — chunks neither side can recognise, rejoined by
+  // parseAcpStream into the summary, (2) a non-JSON stdout line whose secret
+  // straddles the driver's 500-char relay cap, and (3) two stderr stream
+  // chunks split mid-value. Per-chunk and per-line redaction see only
+  // halves; the joins and the caps are where the whole value reappears.
+  const rig = await acpRig({ mockEnv: { ACP_MOCK_SPLIT_LEAK: "1" } });
+  const { events, record } = await driveGemini(rig);
+  assert.equal(record.status, "finished");
+  const whole = JSON.stringify(events);
+  assert.ok(!whole.includes(FAKE_KEY), "the token appears nowhere in the event log, in any split form rejoined");
+  // 1. The joined summary: the value exists whole only after the parser
+  // reassembles the chunks, so this is the scrub that must catch it.
+  assert.ok(!record.summary.includes(FAKE_KEY), "the joined summary was scrubbed after the join");
+  assert.ok(record.summary.includes("[redacted GEMINI_API_KEY]"), `the joined echo is visibly redacted: ${record.summary.slice(0, 160)}`);
+  // 2. The relay cap: redaction runs BEFORE truncation, so a secret
+  // straddling the cap leaves as a [redacted …] marker, never as a half.
+  assert.ok(!record.stderrTail.includes(FAKE_KEY.slice(0, 20)), `no leading half survives the 500-char relay cap: ${record.stderrTail.slice(0, 200)}`);
+  assert.ok(record.stderrTail.includes("[redacted GEMINI"), "the capped relay shows the redaction marker");
+  // 3. The stderr stream: the driver's carry scrubber joins the chunks
+  // before relaying, so the split halves never leave the sandbox either.
+  assert.ok(!record.stderrTail.includes(FAKE_KEY.slice(0, 12)), `no stderr half-token leaks: ${record.stderrTail.slice(0, 200)}`);
+  assert.ok(record.stderrTail.includes("[redacted GEMINI_API_KEY] tail"), "the split stderr echo is redacted whole");
 });
 
 // ---------------------------------------------------------------------------

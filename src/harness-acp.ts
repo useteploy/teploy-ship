@@ -576,13 +576,22 @@ export function acpAdapter(id: string, options: AcpHarnessOptions = {}, version:
           const exec: ExecResult = { ...raw, stdout: scrubExact(raw.stdout, secrets), stderr: scrubExact(raw.stderr, secrets) };
           const parsed = parseAcpStream(exec.stdout);
           const timedOut = exec.timedOut === true;
-          const summary = timedOut
-            ? `the ACP session did not finish within ${Math.round(config.timeoutMs / 60_000)} minutes`
-            : parsed.error !== undefined
-              ? parsed.summary
-              : parsed.summary === ""
-                ? `${profile.binary} finished without a message`
-                : parsed.summary;
+          // The scrub above runs over the raw stream, where a credential the
+          // agent streamed as two message chunks exists only as two
+          // unrecognisable halves; parseAcpStream then JOINS the chunks, and
+          // the joined text is what the record carries — so the joined
+          // summary (and the error text inside it) is scrubbed here, after
+          // the join, where the whole value finally appears.
+          const summary = scrubExact(
+            timedOut
+              ? `the ACP session did not finish within ${Math.round(config.timeoutMs / 60_000)} minutes`
+              : parsed.error !== undefined
+                ? parsed.summary
+                : parsed.summary === ""
+                  ? `${profile.binary} finished without a message`
+                  : parsed.summary,
+            secrets,
+          );
           return {
             exitCode: exec.exitCode,
             timedOut,

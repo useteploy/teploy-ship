@@ -103,6 +103,49 @@ function scrubber(forms) {
   };
 }
 
+/**
+ * A value cut off at the end of the text is still most of a credential: a
+ * trailing prefix of at least EXACT_SCRUB_MIN_LENGTH characters is replaced
+ * too (the rule src/redact.ts replaceTrailingPrefix applies).
+ */
+function scrubTrailingPrefix(text, forms) {
+  for (const { needle, label } of forms) {
+    for (let k = Math.min(needle.length - 1, text.length); k >= EXACT_SCRUB_MIN_LENGTH; k--) {
+      if (text.endsWith(needle.slice(0, k))) return `${text.slice(0, text.length - k)}${label}`;
+    }
+  }
+  return text;
+}
+
+/**
+ * The same exact-value scrub over a stream that arrives in chunks: a chunk
+ * boundary can split a value, so per-chunk scrubbing alone lets the halves
+ * through. This holds back the last (longest needle - 1) characters until
+ * the next chunk proves they are not the start of a secret, and `flush`
+ * releases the remainder with a trailing prefix replaced — the worker's
+ * exactScrubber (src/redact.ts) applied to the driver's stderr relay.
+ */
+function streamScrubber(forms, scrub) {
+  const keep = forms.length === 0 ? 0 : Math.max(...forms.map((f) => f.needle.length)) - 1;
+  let held = "";
+  return {
+    push(chunk) {
+      if (forms.length === 0) return chunk;
+      held = scrub(held + chunk);
+      if (held.length <= keep) return "";
+      const out = held.slice(0, held.length - keep);
+      held = held.slice(held.length - keep);
+      return out;
+    },
+    flush() {
+      if (forms.length === 0) return held;
+      const out = scrubTrailingPrefix(held, forms);
+      held = "";
+      return out;
+    },
+  };
+}
+
 /** Scrub every string in a JSON value. */
 function scrubDeep(value, scrub) {
   if (typeof value === "string") return scrub(value);
@@ -290,7 +333,9 @@ async function main() {
   }
   const workspaceInput = typeof spec.cwd === "string" && spec.cwd.trim() !== "" ? spec.cwd : ".";
   const workspaceRoot = acpCanonicalPathForContainment(resolve(workspaceInput)) ?? resolve(workspaceInput);
-  const scrub = scrubber(secretForms(Array.isArray(spec.secretEnvNames) ? spec.secretEnvNames : [], process.env));
+  const forms = secretForms(Array.isArray(spec.secretEnvNames) ? spec.secretEnvNames : [], process.env);
+  const scrub = scrubber(forms);
+  const stderrScrub = streamScrubber(forms, scrub);
   const binary = spec.binary;
   const args = Array.isArray(spec.args) ? spec.args : [];
   if (typeof binary !== "string" || binary.trim() === "") {
@@ -330,10 +375,21 @@ async function main() {
   }, scrub);
 
   child.stderr.on("data", (chunk) => {
-    const text = scrub(String(chunk));
+    // Relayed through the stream scrubber, not scrub() per chunk: the agent
+    // writes its stderr in arbitrarily-split chunks, and a credential the
+    // agent printed whole on one line would otherwise leave this sandbox as
+    // two unrecognised halves.
+    const text = stderrScrub.push(String(chunk));
     stderrTail = (stderrTail + text).slice(-4096);
     process.stderr.write(`[agent stderr] ${text}`);
   });
+  /** Release the scrubber's held-back tail once the agent's stderr is closed. */
+  const relayStderrTail = () => {
+    const text = stderrScrub.flush();
+    if (text === "") return;
+    stderrTail = (stderrTail + text).slice(-4096);
+    process.stderr.write(`[agent stderr] ${text}`);
+  };
 
   let nextId = 1;
   const pending = new Map();
@@ -464,7 +520,11 @@ async function main() {
       try {
         message = JSON.parse(line);
       } catch {
-        process.stderr.write(`[agent stdout, non-JSON] ${scrub(line.slice(0, 500))}\n`);
+        // Redact BEFORE truncating: truncation first would cut a credential
+        // that straddles the cap in two, and the surviving half is secret
+        // material no later pass can recognise. Redacted first, the cap can
+        // only ever cut a [redacted …] marker, which is harmless.
+        process.stderr.write(`[agent stdout, non-JSON] ${scrub(line).slice(0, 500)}\n`);
         continue;
       }
       if (message?.jsonrpc === "2.0" && message.id !== undefined && message.method !== undefined) {
@@ -576,6 +636,7 @@ async function main() {
     emit("stop", { reason: sessionEnded.stopReason, by: sessionEnded.by }, scrub);
     killChild();
     await Promise.race([exited, sleep(5_000)]);
+    relayStderrTail();
     process.exitCode = 0;
   } catch (error) {
     if (sessionEnded === null) {
@@ -588,6 +649,7 @@ async function main() {
     }
     killChild();
     await Promise.race([exited, sleep(5_000)]);
+    relayStderrTail();
   }
 }
 
