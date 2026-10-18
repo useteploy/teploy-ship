@@ -15,7 +15,7 @@ import {
   sweepIncidents,
 } from "../../../dist/incidents.js";
 import type { IncidentRecord, IncidentStatus } from "../../../dist/incidents.js";
-import { enqueueRun, actorFromPrincipal } from "../lib/ship.server.js";
+import { enqueueRun, actorFromPrincipal, incidentEvidenceDeps } from "../lib/ship.server.js";
 import { shipRuntime, defaultModel } from "../lib/store.server.js";
 import { currentUser } from "../lib/session.server.js";
 import { may } from "../lib/authority.server.js";
@@ -100,12 +100,16 @@ export async function action({ request }: { request: Request }): Promise<Respons
       return redirect("/incidents");
     }
     if (intent === "diagnose") {
+      // EV5: evidence readers when SHIP_INCIDENT_EVIDENCE=on — undefined
+      // otherwise, and the diagnosis task is exactly the pre-EV5 text.
+      const evidence = incidentEvidenceDeps(runtime);
       const record = await diagnoseIncident(
         {
           config: runtime.config,
           enqueue: async (options) => { await enqueueRun(runtime, options); },
           model: defaultModel(),
           ...(me !== null ? { actor: actorFromPrincipal(me) } : {}),
+          ...(evidence !== undefined ? { evidence } : {}),
         },
         id,
       );
@@ -180,6 +184,46 @@ function Finding({ finding }: { finding: IncidentFinding }) {
         <p style="margin:0" class="meta">Proposed fix (not implemented): {finding.fix}</p>
       )}
     </li>
+  );
+}
+
+/** EV5: the gathered evidence, as recorded at diagnosis enqueue (SHIP_INCIDENT_EVIDENCE=on). */
+function Evidence({ incident }: { incident: IncidentRecord }) {
+  const e = incident.diagnosisEvidence;
+  if (e === undefined) return null;
+  return (
+    <details class="disclosure" style="margin:0 0 6px">
+      <summary>Recorded evidence — assessment {e.assessment}, {e.facts.length} fact(s), {e.hypotheses.length} hypothesis(es), {e.unknowns.length} unknown(s)</summary>
+      {e.facts.length > 0 && (
+        <p style="margin:6px 0 0"><strong style="font-weight:500">Facts (observed):</strong></p>
+      )}
+      <ul style="margin:4px 0 0;padding-left:18px">
+        {e.facts.map((f) => <li key={f.id} class="meta">{f.at !== undefined ? `${when(f.at)} — ` : ""}{f.statement}</li>)}
+      </ul>
+      <p style="margin:6px 0 0"><strong style="font-weight:500">Hypotheses (candidates, never causes):</strong></p>
+      <ul style="margin:4px 0 0;padding-left:18px">
+        {e.hypotheses.length === 0 && <li class="meta">none — nothing recorded correlates with onset</li>}
+        {e.hypotheses.map((h) => (
+          <li key={h.id} class="meta">{h.statement} ({h.confidence}) — {h.caveat}. Would confirm: {h.wouldConfirm.join("; ") || "nothing recorded"}.</li>
+        ))}
+      </ul>
+      {e.unknowns.length > 0 && (
+        <>
+          <p style="margin:6px 0 0"><strong style="font-weight:500">Unknowns:</strong></p>
+          <ul style="margin:4px 0 0;padding-left:18px">
+            {e.unknowns.map((u) => <li key={u.id} class="meta">{u.about} — {u.toResolve}</li>)}
+          </ul>
+        </>
+      )}
+      {e.setAside.length > 0 && (
+        <>
+          <p style="margin:6px 0 0"><strong style="font-weight:500">Set aside (another service's observations; not evidence here):</strong></p>
+          <ul style="margin:4px 0 0;padding-left:18px">
+            {e.setAside.map((s, i) => <li key={i} class="meta">[{s.kind}] {s.service} — {s.reason}</li>)}
+          </ul>
+        </>
+      )}
+    </details>
   );
 }
 
@@ -420,6 +464,7 @@ export default function Incidents({ data }: { data: IncidentsData }) {
             </div>
           ) : null}
 
+          <Evidence incident={incident} />
           <Diagnosis incident={incident} canAuthorize={data.canAuthorize} />
           <Recovery incident={incident} />
           <Remediation incident={incident} />

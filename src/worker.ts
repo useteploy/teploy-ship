@@ -4,7 +4,7 @@ import { sweepSchedulesForWorker, sweepScheduleDigests } from "./workflow-schedu
 import { serveWorkspaceRequests } from "./workspace-requests.js";
 import { clearLiveView, liveViewEnabled, serveLiveDiffs } from "./live-view.js";
 import { loadTakeover } from "./takeover.js";
-import { sweepIncidents, sweepIncidentRecovery, type IncidentRecoveryReader } from "./incidents.js";
+import { sweepIncidents, sweepIncidentRecovery, type IncidentDeliveryFact, type IncidentEvidenceReaders, type IncidentRecoveryReader } from "./incidents.js";
 import { launchNext, listCoordinations } from "./coordination.js";
 import { policyFromEnv as workspacePolicyFromEnv } from "./repo-policy.js";
 import { NondeterminismError, completeSleep, executeRunExclusive } from "@neutron-build/workflow";
@@ -211,6 +211,58 @@ function incidentRecoveryReader(env: NodeJS.ProcessEnv = process.env): IncidentR
       new Date(Date.now() - windowMs),
       new Date(),
     );
+  };
+}
+
+/**
+ * EV5 (E7.2 W2): SHIP_INCIDENT_EVIDENCE=on gates the diagnosis-evidence
+ * wiring. Read HERE rather than in incidents.ts because incidents.ts is
+ * loaded from the browser bundle (see its header) and must not touch env.
+ */
+export function incidentEvidenceEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return (env.SHIP_INCIDENT_EVIDENCE ?? "").trim().toLowerCase() === "on";
+}
+
+/** The delivery-store view incidentEvidenceDeps reads: delivery.ts's DeliveryStore, structural. */
+export type IncidentDeliveryRecords = {
+  list(limit?: number): Promise<readonly { repo: string; updatedAt: string; mergedSha?: string; state: string }[]>;
+};
+
+/**
+ * EV5: the evidence readers a diagnosis enqueue passes to diagnoseIncident —
+ * the SAME share-token health reader the recovery sweep above uses, plus
+ * Ship's own delivery records for the attributed repo (mapped to the
+ * structural shape incidents.ts accepts; the repo filter and the
+ * wrong-service guard live in gatherIncidentEvidence, with the tests).
+ *
+ * Undefined when the flag is off (the diagnosis task, its recorded input and
+ * the stored record are byte-identical to pre-EV5), and when neither reader
+ * can be built (no Observe read credential and no delivery store): an
+ * evidence block of nothing-but-unknowns would state only that the wiring is
+ * absent, which the operator already knows. One-sided wiring is fine — the
+ * missing half becomes an honest unknown in the evidence.
+ */
+export function incidentEvidenceDeps(
+  runtime: { deliveryRecords?: IncidentDeliveryRecords },
+  env: NodeJS.ProcessEnv = process.env,
+): IncidentEvidenceReaders | undefined {
+  if (!incidentEvidenceEnabled(env)) return undefined;
+  const readHealth = incidentRecoveryReader(env);
+  const records = runtime.deliveryRecords;
+  if (readHealth === undefined && records === undefined) return undefined;
+  return {
+    ...(readHealth !== undefined ? { readHealth } : {}),
+    ...(records !== undefined
+      ? {
+          recentDeliveries: async (repo: string): Promise<readonly IncidentDeliveryFact[]> =>
+            (await records.list(200)).map((d) => ({
+              repo: d.repo,
+              at: d.updatedAt,
+              ...(d.mergedSha !== undefined && d.mergedSha !== "" ? { revision: d.mergedSha } : {}),
+              state: d.state,
+            })),
+        }
+      : {}),
   };
 }
 

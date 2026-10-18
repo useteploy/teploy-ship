@@ -77,3 +77,9 @@ export { priorRunContext } from "../../../dist/prior-run-context.js";
 export { projectReference, ProjectIdentityError } from "../../../dist/projects.js";
 
 export { approveDelivery } from "../../../dist/delivery.js";
+
+// EV5 (SHIP_INCIDENT_EVIDENCE): the diagnosis-evidence readers — the worker's
+// own recovery reader plus the delivery records — built where the env and the
+// store live. Server-only like everything else here, so the worker loop stays
+// out of the client bundle.
+export { incidentEvidenceDeps } from "../../../dist/worker.js";
