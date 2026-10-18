@@ -411,6 +411,11 @@ test("flag off: the session the driver spawns is LOOK_SESSION verbatim; flag on:
   // load guarantees at least one frame (live finding 2026-10-18).
   assert.match(script, /Page\.captureScreenshot/);
   assert.match(script, /page\.on\("load"/);
+  // A launched Browser lists no default context, so the recorder must watch
+  // through its own CDP connection (probed in the sandbox image 2026-10-18:
+  // launched view 0 pages, CDP view 1).
+  assert.match(script, /const recView = await chromium\.connectOverCDP\("http:\/\/127\.0\.0\.1:9222"\)/);
+  assert.doesNotMatch(script.slice(LOOK_SESSION.length), /browser\.contexts\(\)/);
   assert.match(script, /format: "jpeg", quality: 60, maxWidth: 960, maxHeight: 600, everyNthFrame: 2/, "the design's capture parameters, verbatim");
   assert.match(script, /rec: cap reached/, "the frame/byte caps stop loudly");
   assert.ok(script.includes(`"${LOOK_REC_DIR}"`), "frames and the captured page text land under the rec dir");
