@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, readdir, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,6 +19,7 @@ import { DEFAULT_FORWARDED_ENV } from "./harness-external.js";
 import { shq } from "./harness-external.js";
 import { enqueueRun } from "./runtime.js";
 import type { ShipRuntime } from "./runtime.js";
+import { WORKSPACE_EXCLUDES } from "./git.js";
 import { admittedSteps, fingerprintOf, stepFingerprint } from "./step-fingerprint.js";
 import { WORKFLOW_STEPS } from "./step-fingerprint.js";
 
@@ -524,6 +525,31 @@ test("cleanup: the spec and prompt files never outlive the run", async () => {
   await driveGemini(rig);
   const agentDir = await readdir(join(rig.work, ".teploy-agent")).catch(() => [] as string[]);
   assert.deepEqual(agentDir, [], ".teploy-agent is empty after the run: no spec, no prompt");
+});
+
+test("the agent's session store lives in a per-exec home under /tmp and is deleted with it", async () => {
+  const rig = await acpRig();
+  const { record } = await driveGemini(rig);
+  assert.equal(record.status, "finished");
+  const log = (await readFile(rig.log, "utf8")).trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
+  const home = log.find((e) => e.event === "session-new")?.home;
+  assert.equal(typeof home, "string");
+  assert.ok((home as string).startsWith("/tmp/ship-acp-home-"), `HOME was the per-exec directory: ${home}`);
+  assert.notEqual(home, process.env.HOME, "never the worker's (or the image's) own home");
+  // The vendor store the peer wrote under HOME went with the directory:
+  // nothing rests in the container or in a snapshot of it.
+  await assert.rejects(() => access(home as string), /ENOENT/);
+  // And no vendor state directory landed in the workspace.
+  for (const dir of [".gemini", ".qwen", ".grok"]) {
+    await assert.rejects(() => access(join(rig.work, dir)), /ENOENT/, `${dir} never appears in the workspace`);
+  }
+  // The belt: an agent that writes project-level state (qwen searches
+  // ./.qwen/.env, gemini reads ./.gemini/settings.json) cannot get it
+  // committed — the excludes keep it out of `git add -A`.
+  const excludes: readonly string[] = WORKSPACE_EXCLUDES;
+  for (const exclude of [".gemini/", ".qwen/", ".grok/"]) {
+    assert.ok(excludes.includes(exclude), `${exclude} is workspace-excluded`);
+  }
 });
 
 test("a driver that fails before initialize is a recorded error, never a thrown step", async () => {

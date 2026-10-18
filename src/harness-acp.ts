@@ -71,6 +71,13 @@ export interface AcpProfile {
   args: readonly string[];
   /** K-class credential env names (forwarded, never recorded by value). */
   envNames: readonly string[];
+  /**
+   * Vendor env names that relocate the agent's state directory (checked
+   * against each vendor's docs/receipt). The adapter also points HOME at
+   * the same per-exec directory, which covers every agent that follows it;
+   * these cover the ones with an explicit override.
+   */
+  homeEnv?: readonly string[];
   /** Which forwarded key admits which provider host (egress derivation). */
   egress: ReadonlyArray<{ envs: readonly string[]; hosts: readonly string[] }>;
   /**
@@ -106,6 +113,9 @@ export const ACP_PROFILES: Record<string, AcpProfile> = {
     binary: "gemini",
     args: ["--acp"],
     envNames: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+    // GEMINI_CLI_HOME is gemini-cli's documented root for its user-level
+    // state (it creates .gemini inside it); HOME covers the default.
+    homeEnv: ["GEMINI_CLI_HOME"],
     egress: [
       // Vertex hosts are region-prefixed (<region>-aiplatform.googleapis.com)
       // and cannot be enumerated here; those deployments put the host on the
@@ -119,6 +129,9 @@ export const ACP_PROFILES: Record<string, AcpProfile> = {
     binary: "grok",
     args: ["--permission-mode", "default", "agent", "stdio"],
     envNames: ["XAI_API_KEY"],
+    // GROK_HOME relocates the login state dir (default ~/.grok) — the H0
+    // grok receipt's string evidence (evals/receipts/2026-10-18-acp-grok.txt).
+    homeEnv: ["GROK_HOME"],
     egress: [{ envs: ["XAI_API_KEY"], hosts: ["api.x.ai"] }],
   },
   cursor: {
@@ -133,6 +146,9 @@ export const ACP_PROFILES: Record<string, AcpProfile> = {
     binary: "qwen",
     args: ["--acp"],
     envNames: ["OPENAI_API_KEY"],
+    // QWEN_HOME relocates qwen-code's global state dir (default ~/.qwen) —
+    // documented upstream (QwenLM/qwen-code settings.ts).
+    homeEnv: ["QWEN_HOME"],
     egress: [{ envs: ["OPENAI_API_KEY"], hosts: ["dashscope.aliyuncs.com", "coding.dashscope.aliyuncs.com", "coding-intl.dashscope.aliyuncs.com"] }],
   },
 };
@@ -494,6 +510,28 @@ function driverCommand(env: NodeJS.ProcessEnv): string {
   return override !== "" ? override : "ship-acp";
 }
 
+/**
+ * The agent's per-exec home: a fresh directory under /tmp, outside /work.
+ *
+ * The sandbox's own HOME is not writable (the same fact that pushes pnpm's
+ * store into the worktree, src/git.ts), and without this every vendor keeps
+ * its session store — ~/.gemini/tmp, ~/.qwen, ~/.grok: tool output, possibly
+ * secrets — under whatever HOME the exec inherits, where it rests in the
+ * container and in park snapshots of it. Named from the run and attempt so
+ * the finally below can belt-delete one a timed-out exec left behind; the
+ * command itself creates and removes it in the same shell, so no window
+ * survives even a hard kill.
+ */
+function agentHomePath(runId: string, prefix: string): string {
+  return `/tmp/ship-acp-home-${`${runId}${prefix}`.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+}
+
+/** The shell that runs the driver with the agent's home pinned to that directory. */
+function agentHomeCommand(home: string, vars: readonly string[], driver: string): string {
+  const exports = ["HOME", ...vars].map((name) => `${name}=${shq(home)}`).join(" ");
+  return `h=${shq(home)}; rm -rf "$h"; mkdir -m 700 "$h" || exit 1; export ${exports}; ${driver}; rc=$?; rm -rf "$h"; exit $rc`;
+}
+
 export function acpAdapter(id: string, options: AcpHarnessOptions = {}, version: string = HARNESS_VERSIONS[id]!): HarnessAdapter {
   const profile = ACP_PROFILES[id];
   if (profile === undefined) throw new Error(`no ACP profile for harness "${id}"`);
@@ -557,7 +595,7 @@ export function acpAdapter(id: string, options: AcpHarnessOptions = {}, version:
             maxOutputBytes: 16 * 1_048_576,
             ...(Object.keys(forwarded.env).length > 0 ? { env: forwarded.env } : {}),
           };
-          const command = `${forwarded.prelude}${driverCommand(env)}`;
+          const command = agentHomeCommand(agentHomePath(ws.ctx.runId, p), profile.homeEnv ?? [], `${forwarded.prelude}${driverCommand(env)}`);
           ws.live?.({ phase: "harness", turn: 0, detail: `${profile.binary} starting (ACP)` });
           const tracker = acpLiveTracker();
           const liveScrub = exactScrubber(secrets);
@@ -619,7 +657,12 @@ export function acpAdapter(id: string, options: AcpHarnessOptions = {}, version:
             stderrTail: "",
           };
         } finally {
-          await ws.executor.exec(`rm -f ${shq(ACP_SPEC_PATH)} ${shq(ACP_PROMPT_PATH)}`, { timeoutMs: 30_000 }).catch(() => {});
+          // Belt for the home teardown inside the command: a timed-out exec
+          // kills the shell before its own `rm -rf` runs, and this step's
+          // scratch must not outlive the attempt. The spec and prompt go too.
+          await ws.executor
+            .exec(`rm -f ${shq(ACP_SPEC_PATH)} ${shq(ACP_PROMPT_PATH)}; rm -rf ${shq(agentHomePath(ws.ctx.runId, p))}`, { timeoutMs: 30_000 })
+            .catch(() => {});
         }
       });
       for (let turn = 0; turn < record.turns; turn++) onEvent({ kind: "turn", turn });

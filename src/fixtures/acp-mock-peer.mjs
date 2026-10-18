@@ -191,7 +191,16 @@ const handleRequest = async (message) => {
   }
   if (message.method === "session/new") {
     cwd = typeof message.params?.cwd === "string" ? message.params.cwd : process.cwd();
-    log({ event: "session-new", cwd });
+    // Simulate the vendor session store: a real agent writes state under its
+    // HOME the moment a session exists, which is exactly what must land in
+    // the per-exec home (and be deleted with it), never in the workspace.
+    try {
+      mkdirSync(join(process.env.HOME ?? "", ".gemini", "tmp"), { recursive: true });
+      writeFileSync(join(process.env.HOME ?? "", ".gemini", "tmp", "session.json"), JSON.stringify({ toolOutput: "possibly secret" }));
+    } catch {
+      // a HOME-less peer still runs
+    }
+    log({ event: "session-new", cwd, home: process.env.HOME ?? null });
     respond(message.id, { sessionId: SESSION_ID });
     return;
   }
