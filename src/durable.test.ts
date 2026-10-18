@@ -5440,6 +5440,36 @@ test("D4-c negative: a credential file planted in the workspace means NO snapsho
   assert.ok(rig.destroyed.length >= 1, "the container was disposed as on any other run end");
 });
 
+test("D4-c negative: a snapshot that throws (the merge park reaped the sandbox) skips and never fails the run", async () => {
+  const fixture = await threadFixture("reaped");
+  const rig = await threadWarmProvider();
+  // The live failure, 2026-10-18: the original sandbox was gone by the time
+  // the step ran, and the daemon answered "run not found".
+  rig.provider.snapshot = async () => {
+    throw new Error("run not found");
+  };
+  const store = new MemoryEventStore();
+  await fixture.seedRoot(store);
+  const cfg = new MemoryRuntimeConfig();
+  const wf = durableAgent({
+    model: reactiveModel(["```finish\nnothing to change\n\nFINDINGS_JSON\n[]\n```"]).model,
+    executor: rig.provider,
+    workdir: ".",
+    threadWarm: threadWarmStore(cfg),
+    loadEvents: (runId) => store.load(runId),
+  });
+  const done = await executeRun({
+    workflow: wf,
+    runId: "run-reaped",
+    store,
+    input: { task: "look around", repo: fixture.repo, mode: "scan", warm: true, warmParks: true, warmThread: true, parentRunId: "run-root" },
+  });
+  assert.equal(done.status, "completed", "a failed snapshot is a skipped optimisation, not a failed run");
+  const snap = stepOutput(await store.load("run-reaped"), "thread-snapshot") as { result?: { skipped?: string } } | undefined;
+  assert.match(snap?.result?.skipped ?? "", /run not found/, "the skip names why");
+  assert.equal((await threadWarmStore(cfg).get("run-root")), null, "and no record points at an image that was never taken");
+});
+
 test("D4-c negative: a snapshot on a removed host (or an image GC deleted) gives a cold run that completes", async () => {
   const fixture = await threadFixture("cold");
   const rig = await threadWarmProvider();
