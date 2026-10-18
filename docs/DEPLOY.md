@@ -10,6 +10,12 @@ optional gateway and sandbox daemon complete the production shape.
 > **Upgrading an install that already exists?** See
 > [UPGRADING.md](UPGRADING.md). Migrations are forward-only and a durable run
 > enqueued under old code is replayed under the new one — both have rules.
+>
+> **Looking for a specific environment variable?** [FLAGS.md](FLAGS.md) is the
+> generated reference for every key the code reads — default, accepted values,
+> where it is read, which side reads it. CI regenerates and checks it
+> (`node scripts/flag-reference.mjs --check`); this document remains the prose
+> authority for the model behind the settings that matter.
 
 ## What runs where
 

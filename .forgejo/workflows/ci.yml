@@ -12,6 +12,9 @@ jobs:
       - name: Claim ledger check (S20)
         run: node scripts/claim-ledger.mjs --check
 
+      - name: Flag reference check (O4)
+        run: node scripts/flag-reference.mjs --check
+
       - name: Install pnpm
         run: npm install -g pnpm@10
 
