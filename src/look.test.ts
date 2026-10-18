@@ -561,3 +561,12 @@ test("no session, a dead finaliser, and a worker with no store are honest record
   assert.equal(dropped.kind, "dropped");
   if (dropped.kind === "dropped") assert.match(dropped.reason, /no artifact store/);
 });
+
+test("the strip finaliser passes page.evaluate one argument (playwright refuses more)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("./look.js", import.meta.url), "utf8");
+  // Found live 2026-10-18: playwright throws "Too many arguments" past one.
+  assert.doesNotMatch(src, /page\.evaluate\(\(w, h\)/);
+  assert.doesNotMatch(src, /\}\), i, b64, cols, tileW, tileH\);/);
+  assert.match(src, /\{ i, b64, cols, tileW, tileH \}\);/);
+});
