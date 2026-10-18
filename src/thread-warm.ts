@@ -33,6 +33,8 @@ import type { AgentExecutor } from "@neutron-build/agents";
 
 import type { SandboxOverrides } from "./durable.js";
 import { canonicalRepositoryURL } from "./repository-reference.js";
+import { exactForms } from "./redact.js";
+import type { KnownSecret } from "./redact.js";
 
 /** Decision 16: the deployment default for SHIP_WARM_THREAD_TTL_SEC. */
 export const WARM_THREAD_DEFAULT_TTL_SEC = 7200;
@@ -181,6 +183,54 @@ export async function workspaceCredentialReason(executor: AgentExecutor): Promis
   const file = scratch.stdout.split("\n").map((l) => l.trim()).find((l) => l !== "");
   if (scratch.exitCode === 0 && file !== undefined) {
     return `harness scratch holds a credential-shaped file (${file})`;
+  }
+  return null;
+}
+
+/** The refusal code the exact-value scan below refuses with, so every surface names it the same way. */
+export const CREDENTIAL_MATERIAL_CODE = "credential-material-in-workspace";
+
+/**
+ * Which secret names carry a credential, for the exact-value scan: the value
+ * of a tuning variable (a base URL, the opencode config blob) can be
+ * legitimate repo content — an API key, token or password value is not.
+ */
+const CREDENTIAL_NAME = /(?:KEY|TOKEN|SECRET|PASSWORD)$/i;
+
+/**
+ * H2 hardening: does the workspace hold one of the run's FORWARDED
+ * CREDENTIAL VALUES, verbatim or base64-encoded? The shape checks above
+ * catch what Ship can name; this one greps the tree for the exact bytes that
+ * were handed to the vendor agent, so an agent that ran `env > x` cannot
+ * publish the key or freeze it into a snapshot that outlives the container.
+ *
+ * The values reach this check through the run's live secret set
+ * (`HarnessWorkspace.secrets`), which the external adapters extend with what
+ * they delivered — runtime state, never recorded. Names that are not
+ * credential-shaped are skipped: an exact-value match on a base URL would
+ * refuse legitimate repo content. The needle rides in the exec's own env
+ * (never the command string, which is recorded), and grep runs fixed-string
+ * over the tree minus `.git`. Returns the named reason, or null when clean.
+ */
+export async function workspaceSecretValueReason(
+  executor: AgentExecutor,
+  secrets: readonly KnownSecret[] | undefined,
+  what: string,
+): Promise<string | null> {
+  if (secrets === undefined) return null;
+  for (const form of exactForms(secrets)) {
+    if (!CREDENTIAL_NAME.test(form.name)) continue;
+    const found = await executor.exec(
+      `grep -r -l -F -e "$SHIP_SECRET_SCAN" --exclude-dir=.git . 2>/dev/null || true`,
+      { timeoutMs: 60_000, env: { SHIP_SECRET_SCAN: form.needle } },
+    );
+    const file = found.stdout.split("\n").map((l) => l.trim()).find((l) => l !== "");
+    if (file !== undefined) {
+      return (
+        `${CREDENTIAL_MATERIAL_CODE}: the workspace this ${what} would carry holds a forwarded credential value (${form.name}) in ${file}. ` +
+        "Nothing was published or snapshotted from these bytes; remove the file and rotate the credential"
+      );
+    }
   }
   return null;
 }

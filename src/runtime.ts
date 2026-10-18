@@ -1701,14 +1701,18 @@ export async function enqueueRun(
   // field, so fingerprints do not move. Under SHIP_HARNESS_CRED the env is
   // first overlaid with the store's unsealed values, so a credential or base
   // URL held in the store derives the same host the exec will really dial.
-  const credOverlayEnv: NodeJS.ProcessEnv =
-    harnessCred?.ok === true && Object.keys(harnessCred.envOverlay).length > 0
-      ? { ...process.env, ...harnessCred.envOverlay }
-      : process.env;
+  // Under SHIP_HARNESS_CRED the env each profile's derivation runs over is
+  // that profile's OWN overlay (S1): bindings are sealed per profile, and a
+  // codex-stored OPENAI_API_KEY must not be merged into opencode's derivation
+  // by env name. Flag off derives from the plain env exactly as before.
+  const credOverlayEnvFor = (id: string): NodeJS.ProcessEnv => {
+    const overlay = harnessCred?.ok === true ? harnessCred.overlays[id] : undefined;
+    return overlay !== undefined && Object.keys(overlay).length > 0 ? { ...process.env, ...overlay } : process.env;
+  };
   const sandboxEgressAllow = withProviderEgress(
     scan ? project?.sandboxEgressAllow : withPreviewEgress(project?.sandboxEgressAllow, project?.verification),
     [harness, ...attempts],
-    credOverlayEnv,
+    (ref) => credOverlayEnvFor(ref.id),
   );
   // EV6: the gate only passes when the agent writes the reproducing test, so
   // the task must SAY so — appended here, frozen into the recorded input's
@@ -1897,6 +1901,15 @@ export async function enqueueRun(
         // not admit, which keeps those inputs byte-identical and their
         // fingerprints unmoved: no step is gated on this field.
         ...(harnessCred?.ok === true && harnessCred.refs.length > 0 ? { harnessCredentials: harnessCred.refs } : {}),
+        // H2/S2: the provider hosts the enqueue's destination gate approved,
+        // per profile, recorded so the worker can re-judge the env its exec
+        // will actually deliver against what admission approved and refuse by
+        // name (harness-destination-changed) when they differ. Recorded on
+        // every flag-on run — including ones whose credentials all came from
+        // the deployment env and carry no references, because the worker-side
+        // re-check must run for those too. Absent on every flag-off input,
+        // and admits no step, so fingerprints do not move.
+        ...(harnessCred?.ok === true ? { harnessDestinations: harnessCred.destinations } : {}),
         // K, clamped and defaulted at enqueue so a replay launches exactly the
         // attempts the log was written under. Never recorded on a scan or a
         // workspace run (see attemptsK above), which keeps those runs' step

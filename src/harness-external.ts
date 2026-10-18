@@ -3,7 +3,7 @@ import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 import { HARNESS_ALIAS_VERSIONS, HARNESS_PACKAGES, HARNESS_VERSIONS } from "./harness.js";
 import { PLAN_REVIEW_REFUSAL, refusalFor } from "./harness-capabilities.js";
 import type { HarnessCredentialRef, HarnessCredentialResolution } from "./harness-credentials.js";
-import { resolveCredentialOverlay } from "./harness-credentials.js";
+import { HARNESS_CRED_FLAG, harnessCredEnabled, harnessDestinationCheck, resolveCredentialOverlay } from "./harness-credentials.js";
 import type { SteerStore } from "./steer.js";
 import { clipDetail } from "./live.js";
 import type { LiveUpdate } from "./live.js";
@@ -227,6 +227,77 @@ function egressEntryForBaseURL(raw: string): string | undefined {
   return egressEntryError(entry) === null ? entry : undefined;
 }
 
+/** A forward name that looks like it carries a URL (S3's rule is a NAME heuristic). */
+const URL_SHAPED_NAME = /^(?:[A-Z][A-Z0-9_]*_)?(?:URL|URI|ENDPOINT)$/;
+
+/**
+ * S3 (SHIP_HARNESS_CRED): the provider hosts an opencode config blob
+ * declares. OPENCODE_CONFIG_CONTENT is on opencode's default forward list and
+ * can name a baseURL for ANY provider — a dial the base-URL table above
+ * cannot see. Under the flag those hosts are derived like any base URL; a
+ * blob that is not JSON declares hosts this function cannot read, which it
+ * says by returning undefined (the enqueue gate refuses on that rather than
+ * guess, and this derivation adds nothing).
+ */
+export function opencodeConfigContentHosts(raw: string): string[] | undefined {
+  let doc: unknown;
+  try {
+    doc = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  const providers = doc !== null && typeof doc === "object" ? (doc as { provider?: unknown }).provider : undefined;
+  if (providers === null || typeof providers !== "object") return [];
+  const hosts: string[] = [];
+  for (const entry of Object.values(providers as Record<string, unknown>)) {
+    if (entry === null || typeof entry !== "object") continue;
+    const options = (entry as { options?: unknown }).options;
+    const bases = [
+      ...(options !== null && typeof options === "object" ? [readString(options, "baseURL"), readString(options, "base_url")] : []),
+      readString(entry, "baseURL"),
+    ].filter((base): base is string => base !== undefined);
+    for (const base of bases) {
+      try {
+        const host = new URL(base).hostname.toLowerCase();
+        if (host !== "" && !hosts.includes(host)) hosts.push(host);
+      } catch {
+        // Not a URL the harness could dial either; nothing to derive from it.
+      }
+    }
+  }
+  return hosts;
+}
+
+function readString(record: object, key: string): string | undefined {
+  const value = (record as Record<string, unknown>)[key];
+  return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+
+/**
+ * The URL-shaped forward names whose hosts the derivation DOES read, per
+ * harness — the remedy half of the S3 refusal (forward one of these and its
+ * host is judged like any base URL).
+ */
+export function gatedForwardedUrlNames(id: string): string[] {
+  return (PROVIDER_EGRESS[id]?.bases ?? []).map((base) => base.env);
+}
+
+/**
+ * S3 (SHIP_HARNESS_CRED): forward-list names that look like URL/base-URL
+ * variables the host derivation does NOT cover — SHIP_HARNESS_ENV additions,
+ * checked under the flag at enqueue and again at exec. A value like that
+ * could reroute the vendor's dial to a host nothing judges, so it is refused
+ * by name rather than forwarded on trust that the vendor ignores it.
+ */
+export function ungatedForwardedUrlNames(id: string, env: NodeJS.ProcessEnv = process.env): string[] {
+  const spec = PROVIDER_EGRESS[id];
+  if (spec === undefined) return [];
+  const forward = externalHarnessConfig(id, env).forward;
+  const defaults = DEFAULT_FORWARDED_ENV[id] ?? [];
+  const gated = new Set(spec.bases.map((base) => base.env));
+  return forward.filter((name) => URL_SHAPED_NAME.test(name) && !gated.has(name) && !defaults.includes(name));
+}
+
 /**
  * The provider API hosts a set of harness refs will call from inside the
  * sandbox, derived from the worker's own environment — the same forward list
@@ -273,6 +344,18 @@ export function providerEgressAllow(refs: readonly { id: string }[], env: NodeJS
       if (key.modelPrefixes !== undefined && !key.modelPrefixes.some((prefix) => model.startsWith(prefix))) continue;
       if (key.envs.some((name) => held(name) !== undefined)) push(`${key.host}:443`);
     }
+    // S3 (SHIP_HARNESS_CRED=on): an opencode config blob declares provider
+    // baseURLs nothing above can see. Under the flag those hosts are derived
+    // like any base URL — the daemon allowlist admits exactly the hosts the
+    // enqueue gate judges. An unparseable blob derives nothing here; the gate
+    // refuses it by name instead. Flag off changes nothing: byte-identical
+    // derivations, the fence every other flag-gated behaviour keeps.
+    if (ref.id === "opencode" && harnessCredEnabled(env)) {
+      const content = held("OPENCODE_CONFIG_CONTENT");
+      if (content !== undefined) {
+        for (const host of opencodeConfigContentHosts(content) ?? []) push(`${host}:443`);
+      }
+    }
   }
   return out;
 }
@@ -291,9 +374,16 @@ export function providerEgressAllow(refs: readonly { id: string }[], env: NodeJS
 export function withProviderEgress(
   explicit: string[] | undefined,
   refs: readonly { id: string }[],
-  env: NodeJS.ProcessEnv = process.env,
+  /**
+   * S1: the env each ref's derivation runs over, per ref. A run's sealed
+   * bindings belong to ONE profile each, and the overlay that carried a
+   * codex-stored OPENAI_API_KEY must not be merged into opencode's
+   * derivation by env name — each attempt is derived from its own profile's
+   * overlay. Defaults to the plain process env (nothing derived per profile).
+   */
+  envOf: (ref: { id: string }) => NodeJS.ProcessEnv = () => process.env,
 ): string[] | undefined {
-  const derived = providerEgressAllow(refs, env);
+  const derived = unionPerRef(refs, envOf);
   if (derived.length === 0) return explicit;
   const bare = new Set((explicit ?? []).map((entry) => entry.split(":")[0]!.trim().toLowerCase()).filter((host) => host !== ""));
   const add = derived.filter((entry) => !bare.has(entry.split(":")[0]!.toLowerCase()));
@@ -305,6 +395,18 @@ export function withProviderEgress(
     return explicit;
   }
   return merged !== undefined && merged.length <= MAX_EGRESS_ALLOW_ENTRIES ? merged : explicit;
+}
+
+/**
+ * One derivation PER REF over that ref's own env, then a union of the
+ * entries (S1): a single merged env would let one profile's stored base URL
+ * reroute another profile's derivation — the same env-name collision the
+ * per-profile overlays refuse at delivery.
+ */
+function unionPerRef(refs: readonly { id: string }[], envOf: (ref: { id: string }) => NodeJS.ProcessEnv): string[] {
+  const entries: string[] = [];
+  for (const ref of refs) entries.push(...providerEgressAllow([ref], envOf(ref)));
+  return [...new Set(entries)];
 }
 
 /**
@@ -472,6 +574,14 @@ export interface HarnessRunRecord {
    * exactly the session the binary reported, not the one Ship asked for.
    */
   sessionId?: string;
+  /**
+   * S4: credential bindings whose resolved version differs from the version
+   * the run's input recorded — rotation between enqueue and exec. Rotation
+   * is allowed (that is what references are for) and the run used the
+   * current value; this note is how the record says so instead of silently
+   * delivering a different value than admission recorded.
+   */
+  credentialRotation?: string[];
 }
 
 /**
@@ -1239,10 +1349,31 @@ export function externalAdapter(
       // cannot be resolved stops the exec with a recorded, named refusal: the
       // run was admitted on that credential, and proceeding without it would
       // be a silently unauthenticated vendor call.
-      const credentials = await resolveCredentialOverlay(task.input.harnessCredentials, options.credentials);
+      // B1: EVERY delivered binding is a reference, a stored base URL or
+      // config blob included, so the exec env is exactly the env the gate
+      // judged — a base URL that stopped at the gate would dial the vendor's
+      // default host with the token while the policy approved the stored one.
+      // S1: only THIS profile's references; a binding sealed for another
+      // attempt's profile is not this one's to receive by name-collision.
+      const credentials = await resolveCredentialOverlay(task.input.harnessCredentials, options.credentials, id);
       const credentialFailure = credentials.failure;
       const runEnv: NodeJS.ProcessEnv =
         credentialFailure === undefined && Object.keys(credentials.overlay).length > 0 ? { ...env, ...credentials.overlay } : env;
+      // S2: re-judge the destination over the env this exec will really
+      // deliver — the gate at enqueue judged the enqueue host's env, and a
+      // worker whose env or store moved the dial elsewhere refuses by name
+      // rather than send data where admission never approved. Gated on the
+      // input's recorded destinations (absent on every flag-off input), and
+      // the flag is forced on for the derivation so it matches the enqueue's.
+      const destinationFailure =
+        task.input.harnessDestinations !== undefined && credentialFailure === undefined
+          ? harnessDestinationCheck({
+              id,
+              approved: task.input.harnessDestinations[id],
+              env: { ...runEnv, [HARNESS_CRED_FLAG]: "on" },
+            })
+          : undefined;
+      const startupFailure = credentialFailure ?? destinationFailure;
       /**
        * One vendor exec: the command with its credentials in the exec's own
        * env, the output scrubbed of them, the parsed record. `startDetail` is
@@ -1254,12 +1385,12 @@ export function externalAdapter(
         writeFiles: () => Promise<void>,
         startDetail?: string,
       ): Promise<HarnessRunRecord> => {
-        if (credentialFailure !== undefined) {
+        if (startupFailure !== undefined) {
           return {
             exitCode: -1,
             timedOut: false,
             status: "error",
-            summary: credentialFailure,
+            summary: startupFailure,
             turns: 0,
             usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, priced: false },
             forwarded: [],
@@ -1269,6 +1400,16 @@ export function externalAdapter(
         const config = externalHarnessConfig(id, runEnv);
         const forwarded = forwardEnv(config.forward, runEnv);
         const priced = spec.priced(forwarded.names);
+        // H2 hardening: remember the exact values this run handed the vendor
+        // on the workspace's live secret set (runtime state, never recorded),
+        // so the publish gate and the snapshot hygiene steps can refuse a
+        // tree or an image that carries one (thread-warm.ts
+        // workspaceSecretValueReason).
+        if (ws.secrets !== undefined) {
+          for (const secret of forwarded.secrets) {
+            if (!ws.secrets.some((known) => known.name === secret.name && known.value === secret.value)) ws.secrets.push(secret);
+          }
+        }
         // The vendor process and every tool it spawns inherit the forwarded
         // credentials, so an agent that prints `env` prints them. Every value
         // Ship handed over (plus the run's forge token) is replaced in the
@@ -1357,13 +1498,17 @@ export function externalAdapter(
             stderrTail: "",
           };
         }
-        return await execRecord(
+        const run = await execRecord(
           (opts) => line.command(opts),
           async () => {
             await ws.executor.putFile(PROMPT_PATH, externalPrompt(task.prompt, task.input.mode));
           },
           `${spec.binary} starting`,
         );
+        // S4: rotation is allowed and delivered at the current value, but the
+        // record says so — a version that moved past the one the input
+        // recorded is a fact the run's log should carry, not absorb.
+        return credentials.rotation !== undefined ? { ...run, credentialRotation: credentials.rotation } : run;
       });
       // D6/D7 — steering by session resume, at process boundaries. Gated on
       // the input flag set at enqueue (the same gate the step fingerprint

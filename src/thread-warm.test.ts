@@ -17,6 +17,7 @@ import {
   warmThreadEnabled,
   warmThreadTtlSec,
   workspaceCredentialReason,
+  workspaceSecretValueReason,
   type ThreadWarmRecord,
 } from "./thread-warm.js";
 import { MemoryRuntimeConfig } from "./runtime-config.js";
@@ -85,6 +86,39 @@ test("a clean workspace snapshots; credential material refuses", async () => {
   const embedded = new LocalExecutor({ root: await mkdtemp(join(tmpdir(), "thread-warm-url-")) });
   await embedded.exec("git init -q -b main . && git remote add origin https://secret-token@forge.example.com/owner/repo.git");
   assert.match((await workspaceCredentialReason(embedded)) ?? "", /\.git config/, "a token-bearing remote URL refuses the snapshot");
+});
+
+test("workspaceSecretValueReason: exact values and base64 forms refuse; tuning values and short ones do not", async () => {
+  const root = await mkdtemp(join(tmpdir(), "thread-warm-values-"));
+  const ex = new LocalExecutor({ root });
+  await ex.exec("git init -q -b main . && git config user.email t@t && git config user.name t");
+  const key = { name: "ANTHROPIC_API_KEY", value: "sk-ant-api03-SCANTEST-0123456789" };
+  assert.equal(await workspaceSecretValueReason(ex, [key], "thread snapshot"), null, "a clean tree passes");
+
+  // The `env > x` shape: the value, verbatim, in a workspace file.
+  await ex.exec(`printf 'ANTHROPIC_API_KEY=%s\\n' "$V" > dump.txt`, { env: { V: key.value } });
+  const hit = await workspaceSecretValueReason(ex, [key], "thread snapshot");
+  assert.match(hit ?? "", /credential-material-in-workspace/);
+  assert.match(hit ?? "", /ANTHROPIC_API_KEY/);
+  assert.match(hit ?? "", /dump\.txt/);
+
+  // The base64 form is the same leak (an agent that encoded it first).
+  await ex.exec("rm -f dump.txt && printf '%s' \"$V\" | base64 > encoded.txt", { env: { V: key.value } });
+  assert.match((await workspaceSecretValueReason(ex, [key], "push")) ?? "", /encoded\.txt/);
+
+  // A value shorter than the scrub floor matches ordinary strings; a base URL
+  // is not a credential name and can be legitimate repo content.
+  await ex.exec("rm -f encoded.txt");
+  assert.equal(await workspaceSecretValueReason(ex, [{ name: "ANTHROPIC_API_KEY", value: "short" }], "push"), null, "below the exact-scrub floor");
+  await ex.exec("printf 'https://api.z.ai/api/anthropic\\n' > config.txt");
+  assert.equal(
+    await workspaceSecretValueReason(ex, [{ name: "ANTHROPIC_BASE_URL", value: "https://api.z.ai/api/anthropic" }], "push"),
+    null,
+    "a tuning variable's value is repo content, not credential material",
+  );
+  // .git is not scanned: the clone's own objects never refuse a publish.
+  await ex.exec("git add -A && git commit -qm x");
+  assert.equal(await workspaceSecretValueReason(ex, [key], "push"), null);
 });
 
 test("the store replaces a thread's prior image and evicts oldest-first per project per host", async () => {

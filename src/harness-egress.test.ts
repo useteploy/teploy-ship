@@ -213,7 +213,7 @@ test("derivation: only variables the harness actually forwards count (SHIP_HARNE
 
 test("merge: project entries survive, a derived host:443 beside a hand-added bare host is skipped, exact dupes collapse", () => {
   const refs = [{ id: "claude-code" }];
-  const env = { ANTHROPIC_BASE_URL: "https://api.z.ai/api/anthropic" };
+  const env = () => ({ ANTHROPIC_BASE_URL: "https://api.z.ai/api/anthropic" });
   assert.deepEqual(withProviderEgress(undefined, refs, env), ["api.z.ai:443"]);
   assert.deepEqual(withProviderEgress(["rubygems.org"], refs, env), ["rubygems.org", "api.z.ai:443"]);
   assert.deepEqual(withProviderEgress(["api.z.ai"], refs, env), ["api.z.ai"], "the portless project entry already admits 443");

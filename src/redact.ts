@@ -127,8 +127,13 @@ interface ExactForm {
  * Each secret as the strings to look for: the value itself and its base64
  * form (an agent that prints an encoded copy has still printed it). Longest
  * first, so a value that contains another is replaced whole.
+ *
+ * Exported for the workspace hygiene scans (thread-warm.ts
+ * workspaceSecretValueReason): the publish gate and the snapshot steps judge
+ * a tree with EXACTLY the needles the scrub would have replaced — same
+ * minimum length, same base64 forms, one rule everywhere a value can leak.
  */
-function exactForms(secrets: readonly KnownSecret[]): ExactForm[] {
+export function exactForms(secrets: readonly KnownSecret[]): ExactForm[] {
   const forms = new Map<string, ExactForm>();
   for (const { name, value } of secrets) {
     if (value.length < EXACT_SCRUB_MIN_LENGTH) continue;
