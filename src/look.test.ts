@@ -570,3 +570,10 @@ test("the strip finaliser passes page.evaluate one argument (playwright refuses 
   assert.doesNotMatch(src, /\}\), i, b64, cols, tileW, tileH\);/);
   assert.match(src, /\{ i, b64, cols, tileW, tileH \}\);/);
 });
+
+test("the strip finaliser exits instead of idling on its CDP connection (live finding 2026-10-18: exit 124)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("./look.js", import.meta.url), "utf8");
+  // The strip path ends by exiting the process, after the page closes.
+  assert.match(src, /await page\.close\(\)\.catch\(\(\) => \{\}\);\n\}\n(\/\/[^\n]*\n)*process\.exit\(0\);/);
+});

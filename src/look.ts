@@ -580,6 +580,11 @@ try {
 } finally {
   await page.close().catch(() => {});
 }
+// The CDP connection to the session browser keeps the event loop alive, so
+// the finaliser would idle until the exec timeout (found live 2026-10-18:
+// exit 124 after the strip was written). Exit; never browser.close(), which
+// would take the run's look session down with it.
+process.exit(0);
 `;
 }
 
