@@ -857,6 +857,11 @@ async function leakyClaude(recordTo: string): Promise<{ bin: string; work: strin
       `printf %s "$ANTHROPIC_API_KEY" | base64`,
       `echo '${tool.replace(/\$/g, "\\$")}'`,
       `env >&2`,
+      // The key AGAIN, as stderr's very last line: the recorded stderrTail
+      // keeps only the end, and a big runner env would otherwise push the
+      // scrubbed line out of the window — the marker assertion below wants
+      // the scrub PROVEN, not "probably inside the tail" (CI flake, round 3).
+      `echo "$ANTHROPIC_API_KEY" >&2`,
       `echo '${result.replace(/\$/g, "\\$")}'`,
     ].join("\n"),
   );
