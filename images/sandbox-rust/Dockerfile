@@ -13,7 +13,12 @@
 #
 # The ARG defaults below duplicate images/versions.json so that a plain
 # `docker build` still works and so a reader sees the pin without opening
-# another file. build.sh asserts the two agree and refuses to build otherwise.
+# another file. build.sh asserts the two agree and refuses to build otherwise,
+# so the duplication cannot rot. One caveat since the ACP driver landed: the
+# build CONTEXT is the images/ directory (every image COPYies
+# acp-driver/ship-acp.mjs, which a stack-subdir context cannot reach), so a
+# hand build is `docker build -f images/sandbox-rust/Dockerfile images/` —
+# not `docker build images/sandbox-rust`. Prefer images/build.sh.
 
 ARG NODE_BASE=node:22-trixie@sha256:2082d2bf902c8835655c6bcfee3594c00ea900498a9f6e2b96d3352536f9e8d8
 ARG RUST_BASE=rust:1-trixie

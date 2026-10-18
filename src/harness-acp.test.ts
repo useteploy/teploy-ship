@@ -682,3 +682,26 @@ test("the agent's whole process group is killed: a setsid-less background proces
     );
   }
 });
+
+test("baking the ACP vendor agents is opt-in, and the image build context is an allowlist", async () => {
+  // versions.json marks exactly the ACP vendor agents as opt-in bakes: a
+  // flag-off deployment (SHIP_ACP_HARNESS off) cannot enqueue them, so it
+  // should not ship three extra agent CLIs either.
+  const versions = JSON.parse(await readFile(join(HERE, "..", "images", "versions.json"), "utf8")) as {
+    harnesses: Record<string, { acpOptIn?: boolean }>;
+  };
+  const harnesses = Object.fromEntries(Object.entries(versions.harnesses).filter(([k]) => !k.startsWith("$")));
+  const optIn = Object.keys(harnesses)
+    .filter((id) => harnesses[id]?.acpOptIn === true)
+    .sort();
+  assert.deepEqual(optIn, ["gemini", "grok", "qwen"], "exactly the ACP vendor agents are opt-in bakes");
+  for (const id of optIn) assert.ok(isAcpHarness(id), `${id} is an ACP profile`);
+  const build = await readFile(join(HERE, "..", "images", "build.sh"), "utf8");
+  assert.ok(build.includes("--acp"), "build.sh carries the --acp flag");
+  assert.ok(/acpOptIn/.test(build), "build.sh reads the opt-in marker, so the default bake excludes them");
+  // The build context is images/ and the Dockerfiles COPY one file out of it
+  // (the driver); the dockerignore is an allowlist so nothing else rides in.
+  const dockerignore = await readFile(join(HERE, "..", "images", ".dockerignore"), "utf8");
+  assert.ok(/^\*$/m.test(dockerignore), "everything in the context is ignored by default");
+  assert.ok(dockerignore.includes("!acp-driver/ship-acp.mjs"), "the ACP driver is allowed through");
+});

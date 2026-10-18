@@ -8,7 +8,11 @@
 # else. See images/sandbox-go/Dockerfile for the full argument.
 #
 # The ARG default duplicates images/versions.json so a plain `docker build`
-# works; build.sh asserts they agree and refuses to build otherwise.
+# works; build.sh asserts they agree and refuses to build otherwise. Since the
+# ACP driver landed the build CONTEXT is the images/ directory (the image
+# COPYies acp-driver/ship-acp.mjs), so a hand build is
+# `docker build -f images/sandbox-node/Dockerfile images/` — not
+# `docker build images/sandbox-node`. Prefer images/build.sh.
 
 ARG NODE_BASE=node:22-trixie@sha256:2082d2bf902c8835655c6bcfee3594c00ea900498a9f6e2b96d3352536f9e8d8
 
