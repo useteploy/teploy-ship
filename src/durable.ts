@@ -1897,6 +1897,9 @@ export function durableAgent(
         // ordering is the guarantee, not the implementation.)
         const scanned = await collectFindings(result.summary);
         const facts = factsOf(result, baseline);
+        // D4-c2: what a merge park (if this run takes one) leaves behind for
+        // the thread-snapshot step below — see MergeParkWarmth.
+        const parkWarmth: MergeParkWarmth = {};
         const pr =
           result.status === "plan-rejected"
             ? null
@@ -1913,6 +1916,7 @@ export function durableAgent(
                 baseline,
                 primary.handle,
                 facts,
+                parkWarmth,
               );
         // D4-c: THREAD SNAPSHOT — the run's warmth, handed to its follow-ups.
         //
@@ -1932,6 +1936,54 @@ export function durableAgent(
             if (config.threadWarm === undefined) {
               return { skipped: "this worker has no thread-warm store configured" };
             }
+            // The record keys on the thread root: taskRootRunId is recorded
+            // on this run's own run-started (runtime.ts), and the walk below
+            // covers a hand-executed run whose log lacks the anchor. Resolved
+            // BEFORE any image is taken or recorded so a worker that cannot
+            // load history skips without stranding an image nothing points at.
+            let taskRoot = ctx.runId;
+            if (input.parentRunId !== undefined) {
+              if (config.loadEvents === undefined) return { skipped: "this worker cannot resolve the thread root" };
+              taskRoot = await taskRootRunId(
+                { load: async (id) => [...((await config.loadEvents!(id)) ?? [])] as WorkflowEvent[] },
+                input.parentRunId,
+              );
+            }
+            // D4-c2: a MERGE-PARKED run has no live workspace left — the park
+            // snapshotted the original container and the restore disposed it,
+            // which is the dead handle #129 turned into a skip. Its warmth is
+            // the park's OWN image (MergeParkWarmth), hygiene-checked at park
+            // time by the merge-hygiene step because that was the last moment
+            // the workspace the image came from could be inspected. Everything
+            // below reads recorded step outputs, so a replay takes the same
+            // branch; no verdict recorded (a pre-D4-c2 log resuming past its
+            // park) refuses the image rather than warm it unchecked, and a
+            // missing or reaped image or handle can only make the record point
+            // at warmth the follow-up falls back cold from — never fail here.
+            if (parkWarmth.image !== undefined) {
+              const hygiene = parkWarmth.hygiene;
+              if (!(hygiene !== undefined && "clean" in hygiene && hygiene.clean === true)) {
+                const reason =
+                  hygiene !== undefined && "reason" in hygiene
+                    ? hygiene.reason
+                    : hygiene !== undefined && "skipped" in hygiene
+                      ? hygiene.skipped
+                      : "the park image was never hygiene-checked";
+                return { skipped: `no snapshot: the merge park image is not warm (${reason})` };
+              }
+              const image = parkWarmth.image;
+              const head = parkWarmth.head ?? "";
+              const evicted = await config.threadWarm.record({
+                taskRootRunId: taskRoot,
+                repo: canonicalRepositoryURL(input.repo ?? "") ?? "",
+                image,
+                hostIndex: parsePoolHandle(image).index,
+                head,
+                overridesDigest: sandboxOverridesDigest(sandboxOverridesOf(input)),
+                createdAt: new Date().toISOString(),
+              });
+              return { image, head, via: "merge-park" as const, ...(evicted.length > 0 ? { evicted: evicted.length } : {}) };
+            }
             // The hygiene gate: a snapshot outlives its container, so nothing
             // that was supposed to die with the container may be in it.
             const credential = await workspaceCredentialReason(primary.executor);
@@ -1944,19 +1996,6 @@ export function durableAgent(
             } catch {
               // A workspace with no commit still snapshots; the follow-up's
               // repo-setup sees no .git and clones cold.
-            }
-            // The record keys on the thread root: taskRootRunId is recorded
-            // on this run's own run-started (runtime.ts), and the walk below
-            // covers a hand-executed run whose log lacks the anchor. Resolved
-            // BEFORE the snapshot so a worker that cannot load history skips
-            // without stranding an image nothing points at.
-            let taskRoot = ctx.runId;
-            if (input.parentRunId !== undefined) {
-              if (config.loadEvents === undefined) return { skipped: "this worker cannot resolve the thread root" };
-              taskRoot = await taskRootRunId(
-                { load: async (id) => [...((await config.loadEvents!(id)) ?? [])] as WorkflowEvent[] },
-                input.parentRunId,
-              );
             }
             const image = await config.executor.snapshot(primary.handle);
             const evicted = await config.threadWarm.record({
@@ -3585,6 +3624,8 @@ async function publishIfRepoRun(
   handle?: string,
   /** Filled in as the gate goes; rendered into the PR lead and the run output. */
   facts: VerificationFacts = {},
+  /** D4-c2: what a boundary park leaves for this run's thread warmth. */
+  parkWarmth?: MergeParkWarmth,
 ): Promise<string | null> {
   // A SCAN PUBLISHES NOTHING (L2 / D3). First line of the function, before any
   // step, so no call site can forget it — this one guard covers the
@@ -3919,13 +3960,16 @@ async function publishIfRepoRun(
   else if (merge?.outcome.kind === "failed") facts.merge = { kind: "merge-failed", reason: merge.outcome.reason };
   else if (merge?.outcome.kind === "unknown") facts.merge = { kind: "merge-unknown", reason: merge.outcome.reason };
   if (boundaryPark && changeVerdict !== undefined) {
+    // D4-c2: the PR head the thread's warmth records starts where the push
+    // left it; a successful rebase inside the gate supersedes it.
+    if (parkWarmth !== undefined && push.kind === "pushed") parkWarmth.head = push.sha;
     const decided = await mergeBoundaryGate(ctx, executor, config, input, { ref, token, checkout: co, pr, handle }, {
       verdict: changeVerdict,
       files: changedList,
       ...(tests !== undefined ? { tests } : {}),
       ...(regression !== undefined ? { regression } : {}),
       ...(repro !== undefined ? { repro } : {}),
-    });
+    }, parkWarmth);
     // The boundary decision supersedes whatever the auto-merge gate said about
     // the same pull request, and a rebase's re-run suite — when it happened —
     // supersedes the pre-rebase one: the paragraph describes the tree that was
@@ -3947,6 +3991,38 @@ type MergeDecisionStep =
   | { kind: "merge-failed"; rebase: "up-to-date" | "rebased"; status: number; reason: string }
   | { kind: "merge-unknown"; rebase: "up-to-date" | "rebased"; status: number; reason: string }
   | { kind: "blocked"; reasons: string[] };
+
+/**
+ * D4-c2 — what a merge park left for this run's thread warmth.
+ *
+ * A run that parks at approve-merge has its original sandbox snapshotted
+ * (`merge-snapshot`) and then disposed by the restore, so at the end of the
+ * run `primary.handle` no longer exists: the `thread-snapshot` step found a
+ * dead handle there (found live 2026-10-18; #129 made it a skip), and a
+ * merge-parked run — the normal case for a change run that produces a PR —
+ * never got thread warmth at all.
+ *
+ * The warmth is the park's OWN image: it is the workspace at park time —
+ * the PR head's tree, volume bytes included — and the daemon already made
+ * it, so no second snapshot and no kept-open container is needed. This
+ * carrier collects what the end-of-run `thread-snapshot` step needs to
+ * record that image as the thread's warm ref without touching a live
+ * container: the image ref, the credential-hygiene verdict the
+ * `merge-hygiene` step recorded against the workspace AT THE TIME IT WAS
+ * IMAGED (the last moment it could be inspected), and the PR branch head as
+ * the recorded steps left it (repo-push's sha, superseded by a successful
+ * merge-rebase's sha). Every field is filled from a recorded step's return
+ * value, so a replay refills the carrier identically and `thread-snapshot`
+ * takes the same branch its log took.
+ */
+interface MergeParkWarmth {
+  /** The LAST park image (a conflict re-park supersedes the earlier one). */
+  image?: string;
+  /** The `merge-hygiene` step's verdict for that image's workspace. */
+  hygiene?: { clean: true } | { clean: false; reason: string } | { skipped: string };
+  /** The PR branch head: repo-push's sha, superseded by a rebase's. */
+  head?: string;
+}
 
 /**
  * The boundary park (C1) and what follows it (C7).
@@ -3979,6 +4055,7 @@ async function mergeBoundaryGate(
   input: DurableAgentInput,
   target: { ref: RepoRef; token: string; checkout: RepoCheckout; pr: { url: string; number: number }; handle?: string },
   facts: { verdict: ChangeVerdict; files: ChangedFile[]; tests?: TestOutcome; regression?: { worse: boolean; reasons: string[] }; repro?: ReproTestStep },
+  parkWarmth?: MergeParkWarmth,
 ): Promise<{ decision: MergeDecisionStep | undefined; tests?: TestOutcome }> {
   const { ref, token, checkout, pr } = target;
   let exec = executor;
@@ -4010,6 +4087,29 @@ async function mergeBoundaryGate(
     if (canSnapshot && handle !== undefined) {
       const h = handle;
       parkImage = await ctx.step("merge-snapshot", () => config.executor.snapshot!(h));
+      // D4-c2: the park image is also the thread's warmth-in-waiting, and
+      // THIS is the last moment the workspace it came from can be inspected —
+      // the restore below disposes the container and the image itself is
+      // bytes on the daemon. The check runs against the container that was
+      // just imaged (nothing between the two steps touches the tree, so the
+      // verdict describes exactly the bytes in the image) and is recorded as
+      // its own step, so the end-of-run `thread-snapshot` replays the verdict
+      // instead of re-deriving it from a container that no longer exists. A
+      // dirty verdict refuses only the WARMTH: the park still needs its image
+      // for the rebase either way. Gated on the recorded input, so the step
+      // is present exactly when the run could consume it.
+      if (input.warmThread === true) {
+        const image = parkImage;
+        const verdict = await ctx.step("merge-hygiene", async () => {
+          if (config.threadWarm === undefined) return { skipped: "this worker has no thread-warm store configured" };
+          const reason = await workspaceCredentialReason(exec);
+          return reason === null ? { clean: true as const } : { clean: false as const, reason };
+        });
+        if (parkWarmth !== undefined) {
+          parkWarmth.image = image;
+          parkWarmth.hygiene = verdict;
+        }
+      }
     }
     const decision = await ctx.waitForEvent<MergeDecisionPayload>(MERGE_EVENT);
     if (parkImage !== undefined) {
@@ -4048,6 +4148,12 @@ ${reason}`).catch(() => undefined);
       });
       break;
     }
+    // D4-c2: a rebase that landed moved the PR branch (it is force-pushed
+    // above), so the head the thread's warmth records is the rebase's sha —
+    // which on "up-to-date" is the same HEAD the push left. A conflict or a
+    // failed rebase keeps the last recorded head: the branch still stands
+    // wherever the last successful push or rebase put it.
+    if (parkWarmth !== undefined && (rebase.kind === "up-to-date" || rebase.kind === "rebased")) parkWarmth.head = rebase.sha;
     // Rebased = different bytes from the ones the pull request's Verification
     // section describes. Re-run the suite instead of asking; up to date keeps
     // the recorded result.

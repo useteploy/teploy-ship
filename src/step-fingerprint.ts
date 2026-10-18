@@ -569,6 +569,12 @@ export const WORKFLOW_STEPS: readonly WorkflowStep[] = [
   // at, while a run with both flags gets the moved park.
   { key: "step:merge-park", admits: (i) => i.mergeGate === true },
   { key: "step:merge-snapshot", admits: (i) => i.mergeGate === true },
+  // D4-c2: the park image's credential hygiene, recorded at park time so the
+  // end-of-run thread snapshot can reuse the image the park already took.
+  // Admitted by mergeGate AND warmThread together: a merge-gated run without
+  // thread warmth keeps its exact pre-D4-c2 sequence, and a warm-thread run
+  // that never merge-parks never reaches it.
+  { key: "step:merge-hygiene", admits: (i) => i.mergeGate === true && i.warmThread === true },
   { key: "wait:MERGE_EVENT", admits: (i) => i.mergeGate === true },
   { key: "step:merge-restore", admits: (i) => i.mergeGate === true },
   { key: "step:merge-decision", admits: (i) => i.mergeGate === true },
