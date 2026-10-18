@@ -184,15 +184,12 @@ export async function runReproTestGate(
   if (stashed) {
     const pop = await executor.exec("git stash pop", { timeoutMs: 120_000 });
     if (pop.exitCode !== 0) {
-      // The workspace still holds the base tree. Say so rather than letting
-      // the publish gate commit half a change: the run's push screens would
-      // catch it, but this reason is the one a person can act on.
-      return {
-        verdict: "errored",
-        testFiles,
-        ...command(target),
-        reason: "could not restore the full change after the base leg (git stash pop failed) — the workspace may still hold the base tree",
-      };
+      // The workspace still holds the base tree. A held verdict would still
+      // let the publish path push that tree as the remediation, so this ends
+      // the step instead: the run fails visibly and nothing is pushed.
+      throw new Error(
+        `repro-test: could not restore the full change after the base leg (git stash pop exited ${pop.exitCode}); the workspace may hold the base tree, so nothing is published`,
+      );
     }
   }
   // Nothing stashed means every change is a test change: base and head are
