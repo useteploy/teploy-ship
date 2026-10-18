@@ -83,6 +83,7 @@ import { canonicalRepositoryURL } from "./repository-reference.js";
 import { resourceClassOf, type ResourceClass } from "./resource-class.js";
 import { mergeFact, verificationSummary, type VerificationFacts } from "./verification-summary.js";
 import { preExisting, runTests, testComment, testTargetFromInput, testsFailedNudge, type TestOutcome, type TestTarget } from "./tests.js";
+import { reproHoldReason, reproParkNote, runReproTestGate, type ReproTestStep } from "./repro-test.js";
 import { detectFromWorkspace } from "./test-detect.js";
 import { refusalMessage, warningMessage } from "./publish-policy.js";
 import type { RepoCheckout, RepoRef } from "./git.js";
@@ -594,6 +595,20 @@ export interface DurableAgentInput {
    * runs' sequence unchanged.
    */
   mergeGate?: boolean;
+  /**
+   * EV6 (SHIP_INCIDENT_FIX): this run is an AUTHORISED incident remediation
+   * (incidents.ts authorizeRemediation), gated on a reproducing test — the
+   * change must carry a test that fails on the base revision and passes on
+   * head. Materialised at enqueue ONLY under the flag (runtime.ts reads it;
+   * incidents.ts never touches env), and it implies `changeClass` and
+   * `mergeGate`: the outcome holds at the merge boundary, and a run without
+   * the boundary park has nowhere to hold.
+   *
+   * Admits the `repro-test` step (repro-test.ts), so a run without the field
+   * — every log written before the flag, and every remediation enqueued with
+   * it off — replays byte-identically and its fingerprint is untouched.
+   */
+  requireReproTest?: boolean;
   /**
    * Auto-rollback OBSERVATION (P1-4 / L4): after `preview-deploy` and
    * `telemetry-check`, judge the measured before/after and record a `rollback`
@@ -3600,6 +3615,19 @@ async function publishIfRepoRun(
   // long after this run's page is gone.
   const trailers = akirooTrailersFrom(input.task);
 
+  // EV6 (SHIP_INCIDENT_FIX): the reproducing-test gate, first leg of the
+  // publish path on an authorised remediation (repro-test.ts). Before
+  // anything leaves the sandbox, the change must carry a test that fails on
+  // the base revision and passes on head; anything else still publishes but
+  // holds at the merge boundary, and an approval cannot silently clear the
+  // hold (the blocked reasons name the outcome). Recorded BEFORE the build
+  // and suite legs so its outcome is on the record whatever they say.
+  const repro =
+    input.requireReproTest === true
+      ? await ctx.step("repro-test", () => runReproTestGate(executor, config, input))
+      : undefined;
+  if (repro !== undefined) facts.repro = repro;
+
   // 0. Run the suite BEFORE the push, so "tests passed" describes the code that
   // is about to become the pull request rather than an earlier state of it.
   // Unless the critic already ran it over this same tree — see testsIfAsked.
@@ -3880,6 +3908,7 @@ async function publishIfRepoRun(
       ...(tests !== undefined ? { tests } : {}),
       draft: asDraft,
       ...(regression !== undefined ? { regression } : {}),
+      ...(repro !== undefined ? { repro } : {}),
     },
     { executor, checkout: co, config },
     legs.rungs,
@@ -3895,6 +3924,7 @@ async function publishIfRepoRun(
       files: changedList,
       ...(tests !== undefined ? { tests } : {}),
       ...(regression !== undefined ? { regression } : {}),
+      ...(repro !== undefined ? { repro } : {}),
     });
     // The boundary decision supersedes whatever the auto-merge gate said about
     // the same pull request, and a rebase's re-run suite — when it happened —
@@ -3948,7 +3978,7 @@ async function mergeBoundaryGate(
   config: DurableAgentConfig,
   input: DurableAgentInput,
   target: { ref: RepoRef; token: string; checkout: RepoCheckout; pr: { url: string; number: number }; handle?: string },
-  facts: { verdict: ChangeVerdict; files: ChangedFile[]; tests?: TestOutcome; regression?: { worse: boolean; reasons: string[] } },
+  facts: { verdict: ChangeVerdict; files: ChangedFile[]; tests?: TestOutcome; regression?: { worse: boolean; reasons: string[] }; repro?: ReproTestStep },
 ): Promise<{ decision: MergeDecisionStep | undefined; tests?: TestOutcome }> {
   const { ref, token, checkout, pr } = target;
   let exec = executor;
@@ -3972,7 +4002,8 @@ async function mergeBoundaryGate(
       class: facts.verdict.class,
       reasons: facts.verdict.reasons,
       pr: pr.url,
-      summary: mergeParkSummary(facts.verdict, facts.files, pr.url, conflict),
+      summary: mergeParkSummary(facts.verdict, facts.files, pr.url, conflict, facts.repro !== undefined ? reproParkNote(facts.repro) : undefined),
+      ...(facts.repro !== undefined ? { repro: { verdict: facts.repro.verdict, testFiles: facts.repro.testFiles } } : {}),
       ...(conflict !== undefined ? { conflict } : {}),
     }));
     let parkImage: string | undefined;
@@ -4025,6 +4056,13 @@ ${reason}`).catch(() => undefined);
     const blocked: string[] = [];
     if (tests !== undefined && tests.kind !== "passed" && tests.kind !== "disabled") blocked.push(`the suite did not pass after the rebase (${tests.kind})`);
     if (facts.regression?.worse === true) blocked.push(`the service got worse after this change: ${facts.regression.reasons.join("; ")}`);
+    // EV6: a remediation the reproducing-test gate did not clear. The park
+    // above already showed the outcome; an approval that reaches here is
+    // recorded but cannot mark the pull request ready — the hold clears by a
+    // person acting on the forge, in the forge's own audit trail, never
+    // silently from a single click here.
+    const reproHold = facts.repro !== undefined ? reproHoldReason(facts.repro) : undefined;
+    if (reproHold !== undefined) blocked.push(reproHold);
     final = await ctx.step(
       "merge-decision",
       async (): Promise<MergeDecisionStep> => {
@@ -4202,6 +4240,10 @@ type AutoMergeStep =
  * timeline as `held`.
  */
 function mergesUnattended(input: DurableAgentInput, cls: ChangeVerdict["class"]): boolean {
+  // A repro-gated remediation (EV6) never merges unattended, whatever the
+  // repo's auto authority says: the merge question is a person's, and the
+  // reproducing-test outcome is exactly the evidence they are asked to read.
+  if (input.requireReproTest === true) return false;
   if (input.autoMerge !== true) return false;
   if (input.authority === undefined) return cls === "trivial";
   if (input.authority === "auto_normal") return cls === "trivial" || cls === "normal";
@@ -4220,6 +4262,7 @@ async function autoMergeIfAllowed(
     tests?: TestOutcome;
     draft: boolean;
     regression?: { worse: boolean; reasons: string[] };
+    repro?: ReproTestStep;
   },
   target?: { executor: AgentExecutor; checkout: RepoCheckout; config: DurableAgentConfig },
   /** The recorded rung list (`ladder` step), when the run declared a ladder. */
@@ -4245,6 +4288,11 @@ async function autoMergeIfAllowed(
     }
     if (facts.draft) held.push("the pull request opened as a draft, so a person is expected to read it");
     if (facts.regression?.worse === true) held.push(`the service got worse after this change: ${facts.regression.reasons.join("; ")}`);
+    // EV6: the reproducing-test gate holds the auto path too — a hand-crafted
+    // input could carry requireReproTest with auto authority, and a
+    // non-reproduced remediation never merges unattended.
+    const reproAutoHold = facts.repro !== undefined ? reproHoldReason(facts.repro) : undefined;
+    if (reproAutoHold !== undefined) held.push(reproAutoHold);
   } else {
     // LADDER gate (C4 / D3): recorded rungs only. The rung list comes from
     // the `ladder` step; its absence on an authority-carrying input means

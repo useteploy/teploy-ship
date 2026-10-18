@@ -5241,6 +5241,322 @@ test("the prompt mentions image mode only when the input admits it (durable equi
   assert.ok(!barePrompt.includes("```look"), "look off: no look vocabulary at all");
 });
 
+// --- EV6 (SHIP_INCIDENT_FIX): the reproducing-test gate on a remediation ---
+
+/**
+ * A mergeFixture-shaped forge whose seed is the caller's: every repro-gate
+ * scenario needs a different starting tree (a buggy module, a suite command
+ * or none). The fetch stub is mergeFixture's — a pull request that exists
+ * and a merge that answers.
+ */
+async function reproFixture(
+  name: string,
+  seed: string,
+): Promise<{
+  repo: string;
+  calls: { url: string; method: string; body: unknown }[];
+  merges: () => { url: string; method: string; body: unknown }[];
+  provider: ExecutorProvider;
+  restore: () => void;
+}> {
+  const bareDir = await mkdtemp(join(tmpdir(), `durable-${name}-bare-`));
+  const seedDir = await mkdtemp(join(tmpdir(), `durable-${name}-seed-`));
+  const seeder = new LocalExecutor({ root: seedDir });
+  await seeder.exec(
+    `git init -q -b main . && git config user.email t@t && git config user.name t && ${seed} && git add -A && git commit -qm seed && git clone -q --bare . ${bareDir}/owner/repo.git`,
+  );
+  const work = await mkdtemp(join(tmpdir(), `durable-${name}-work-`));
+  const calls: { url: string; method: string; body: unknown }[] = [];
+  const pr = { state: "open" as const, merged: false };
+  const orig = globalThis.fetch;
+  (globalThis as unknown as { fetch: unknown }).fetch = (url: unknown, init?: { method?: string; body?: string }) => {
+    const href = String(url);
+    calls.push({ url: href, method: init?.method ?? "GET", body: typeof init?.body === "string" ? (JSON.parse(init.body) as unknown) : undefined });
+    if (href.endsWith("/merge")) {
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ sha: "merged1234" }), text: () => Promise.resolve("") });
+    }
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          number: 1,
+          html_url: "http://example/owner/repo/pulls/1",
+          body: "",
+          title: "",
+          state: pr.state,
+          merged: pr.merged,
+        }),
+      text: () => Promise.resolve(""),
+    });
+  };
+  return {
+    repo: `file://${bareDir}/owner/repo.git`,
+    calls,
+    merges: () => calls.filter((c) => c.url.endsWith("/merge")),
+    provider: {
+      async create() {
+        return { handle: work };
+      },
+      attach(handle: string) {
+        return new LocalExecutor({ root: handle });
+      },
+    },
+    restore: () => {
+      globalThis.fetch = orig;
+    },
+  };
+}
+
+/** A seed whose bump() is wrong by one: the incident, as a repo. */
+const REPRO_SEED = `printf 'function bump(n){return n;}\\nmodule.exports={bump};\\n' > bump.js`;
+
+/** The agent turn that fixes the module AND writes the test that reproduces it. */
+const REPRO_FIX_WITH_TEST =
+  "```bash\n" +
+  "cat > bump.test.js <<'EOF'\n" +
+  'const assert = require("node:assert");\n' +
+  'const { bump } = require("./bump.js");\n' +
+  "assert.equal(bump(1), 2);\n" +
+  "EOF\n" +
+  "printf 'function bump(n){return n+1;}\\nmodule.exports={bump};\\n' > bump.js\n" +
+  "```";
+
+test("EV6: a remediation whose test fails on base and passes on head parks at approve-merge as reproduced, and the approval merges it", async () => {
+  const fixture = await reproFixture("ev6-ok", REPRO_SEED);
+  try {
+    const { model } = reactiveModel([
+      REPRO_FIX_WITH_TEST,
+      "```finish\nfixed the off-by-one and added the test that reproduces it\n```",
+      ...PROBES,
+    ]);
+    const store = new MemoryEventStore();
+    const input = {
+      task: "remediate the incident",
+      repo: fixture.repo,
+      requireReproTest: true,
+      changeClass: true,
+      mergeGate: true,
+      tests: true,
+      testCommand: "node bump.test.js",
+    };
+    const parked = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-ev6-ok",
+      store,
+      input,
+    });
+    assert.equal(parked.status, "waiting", "the boundary asks, as every gated change does");
+    assert.equal(parked.eventName, MERGE_EVENT);
+
+    const events = await store.load("run-ev6-ok");
+    const repro = stepResult(events, "repro-test");
+    assert.equal(repro?.verdict, "reproduced");
+    assert.equal(repro?.baseExit, 1, "the test fails on the base revision — the reproduction");
+    assert.equal(repro?.headExit, 0, "and passes with the change");
+    assert.deepEqual(repro?.testFiles, ["bump.test.js"]);
+    const park = stepResult(events, "merge-park");
+    assert.match(String(park?.summary), /Reproducing-test gate: reproduced/, "the park shows the outcome");
+    assert.equal((park?.repro as { verdict?: string } | undefined)?.verdict, "reproduced", "and carries it as a field of its own");
+    const created = fixture.calls.find((c) => c.method === "POST" && c.url.endsWith("/pulls"));
+    assert.match(String((created!.body as { body?: string }).body), /reproducing-test gate passed/);
+
+    await deliverEvent(store, "run-ev6-ok", MERGE_EVENT, { approved: true });
+    const done = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-ev6-ok",
+      store,
+      input,
+    });
+    assert.equal(done.status, "completed");
+    assert.equal(stepResult(await store.load("run-ev6-ok"), "merge-decision")?.kind, "merged", "reproduced clears the gate");
+    assert.equal(fixture.merges().length, 1);
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("EV6 NEG: a remediation that changes no test is held — the approval cannot silently clear it", async () => {
+  const fixture = await reproFixture("ev6-nochange", REPRO_SEED);
+  try {
+    const { model } = reactiveModel([
+      "```bash\nprintf 'function bump(n){return n+1;}\\nmodule.exports={bump};\\n' > bump.js\n```",
+      "```finish\nfixed the off-by-one\n```",
+      ...PROBES,
+    ]);
+    const store = new MemoryEventStore();
+    const input = {
+      task: "remediate the incident",
+      repo: fixture.repo,
+      requireReproTest: true,
+      changeClass: true,
+      mergeGate: true,
+      tests: true,
+      testCommand: "node --version",
+    };
+    const parked = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-ev6-nochange",
+      store,
+      input,
+    });
+    assert.equal(parked.eventName, MERGE_EVENT);
+    const events = await store.load("run-ev6-nochange");
+    const repro = stepResult(events, "repro-test");
+    assert.equal(repro?.verdict, "no-test-change");
+    assert.deepEqual(repro?.testFiles, []);
+    assert.match(String(stepResult(events, "merge-park")?.summary), /no-test-change/);
+
+    await deliverEvent(store, "run-ev6-nochange", MERGE_EVENT, { approved: true });
+    const done = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-ev6-nochange",
+      store,
+      input,
+    });
+    assert.equal(done.status, "completed");
+    const decision = stepResult(await store.load("run-ev6-nochange"), "merge-decision");
+    assert.equal(decision?.kind, "blocked", "an approval does not clear a held gate");
+    assert.match(String((decision as { reasons?: string[] })?.reasons?.[0]), /no-test-change/);
+    assert.equal(fixture.merges().length, 0, "nothing merged it");
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("EV6 NEG: a test that passes on the base revision is held as does-not-reproduce", async () => {
+  const fixture = await reproFixture("ev6-base-pass", REPRO_SEED);
+  try {
+    // The "test" asserts the buggy behaviour, so it is green with or without
+    // the fix — the shape of a remediation that wrote a test to match its
+    // output rather than the incident.
+    const { model } = reactiveModel([
+      "```bash\n" +
+        "cat > bump.test.js <<'EOF'\n" +
+        'const assert = require("node:assert");\n' +
+        'const { bump } = require("./bump.js");\n' +
+        "assert.equal(bump(1), 1);\n" +
+        "EOF\n" +
+        "printf 'function bump(n){return n+1;}\\nmodule.exports={bump};\\n' > bump.js\n" +
+        "```",
+      "```finish\ntidied the module\n```",
+      ...PROBES,
+    ]);
+    const store = new MemoryEventStore();
+    // No `tests` flag: the suite leg would nudge over the head failure this
+    // scenario produces, and the repro verdict is the thing under test.
+    const input = {
+      task: "remediate the incident",
+      repo: fixture.repo,
+      requireReproTest: true,
+      changeClass: true,
+      mergeGate: true,
+      testCommand: "node bump.test.js",
+    };
+    const parked = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-ev6-base-pass",
+      store,
+      input,
+    });
+    assert.equal(parked.eventName, MERGE_EVENT);
+    const events = await store.load("run-ev6-base-pass");
+    const repro = stepResult(events, "repro-test");
+    assert.equal(repro?.verdict, "does-not-reproduce");
+    assert.equal(repro?.baseExit, 0, "green on base: nothing here demonstrates the incident");
+
+    await deliverEvent(store, "run-ev6-base-pass", MERGE_EVENT, { approved: true });
+    await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-ev6-base-pass",
+      store,
+      input,
+    });
+    const decision = stepResult(await store.load("run-ev6-base-pass"), "merge-decision");
+    assert.equal(decision?.kind, "blocked");
+    assert.match(String((decision as { reasons?: string[] })?.reasons?.[0]), /does-not-reproduce/);
+    assert.equal(fixture.merges().length, 0);
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("EV6 NEG: a repo with no test command is held as unavailable", async () => {
+  const fixture = await reproFixture("ev6-nocmd", REPRO_SEED);
+  try {
+    const { model } = reactiveModel([
+      REPRO_FIX_WITH_TEST,
+      "```finish\nfixed the off-by-one and added a test\n```",
+      ...PROBES,
+    ]);
+    const store = new MemoryEventStore();
+    // No testCommand in the input, nothing detectable in the tree (a bare
+    // module, no package.json/Makefile/go.mod), and no worker default.
+    const input = {
+      task: "remediate the incident",
+      repo: fixture.repo,
+      requireReproTest: true,
+      changeClass: true,
+      mergeGate: true,
+    };
+    const parked = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-ev6-nocmd",
+      store,
+      input,
+    });
+    assert.equal(parked.eventName, MERGE_EVENT);
+    const events = await store.load("run-ev6-nocmd");
+    const repro = stepResult(events, "repro-test");
+    assert.equal(repro?.verdict, "unavailable");
+    assert.match(String(repro?.reason), /no test command/i);
+
+    await deliverEvent(store, "run-ev6-nocmd", MERGE_EVENT, { approved: true });
+    await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-ev6-nocmd",
+      store,
+      input,
+    });
+    const decision = stepResult(await store.load("run-ev6-nocmd"), "merge-decision");
+    assert.equal(decision?.kind, "blocked");
+    assert.match(String((decision as { reasons?: string[] })?.reasons?.[0]), /unavailable/);
+    assert.equal(fixture.merges().length, 0);
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("EV6: a run without the input field records no repro-test step — pre-flag logs replay unchanged", async () => {
+  const fixture = await reproFixture("ev6-off", REPRO_SEED);
+  try {
+    const { model } = reactiveModel([
+      REPRO_FIX_WITH_TEST,
+      "```finish\nfixed it\n```",
+      ...PROBES,
+    ]);
+    const store = new MemoryEventStore();
+    const done = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-ev6-off",
+      store,
+      input: {
+        task: "plain change",
+        repo: fixture.repo,
+        changeClass: true,
+        mergeGate: true,
+        tests: true,
+        testCommand: "node bump.test.js",
+      },
+    });
+    assert.equal(done.eventName, MERGE_EVENT, "the ordinary boundary park, nothing more");
+    const names = (await store.load("run-ev6-off")).filter((e) => e.type === "step-completed").map((e) => e.name ?? "");
+    assert.equal(names.includes("repro-test"), false, "no field on the input, no step in the log");
+  } finally {
+    fixture.restore();
+  }
+});
+
 // --- D4-c: warm threads — snapshot at end of turn, boot from it, cold fallback ---
 
 /**

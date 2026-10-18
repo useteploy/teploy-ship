@@ -847,6 +847,7 @@ test("authorize: enqueues ONE normal-mode change run on the attributed repo and 
   assert.equal(calls[0]!.source, "incidents");
   assert.equal(calls[0]!.trust, "external");
   assert.equal(calls[0]!.model, "remediate-model");
+  assert.equal(calls[0]!.requireReproTest, true, "EV6: the enqueue carries the reproducing-test ask; runtime.ts reads the flag");
 
   const again = await authorizeRemediation({ config, enqueue, model: "m", now, newRunId: () => `run-rem${++runSeq2}` }, id);
   assert.equal(again.queued, false, "idempotent: the existing run is surfaced, not re-enqueued");
@@ -875,10 +876,13 @@ test("remediation task assembly embeds the recorded diagnosis verbatim-bounded, 
   assert.equal(calls[0]!.task, task);
 });
 
-function remediationRunEvents(options: { mode?: string; repo?: string; terminal?: "run-completed" | "run-failed" | "run-cancelled"; error?: string } = {}): IncidentEventLog[] {
+function remediationRunEvents(options: { mode?: string; repo?: string; terminal?: "run-completed" | "run-failed" | "run-cancelled"; error?: string; repro?: { verdict: string; testFiles?: string[]; baseExit?: number; headExit?: number } } = {}): IncidentEventLog[] {
   const events: IncidentEventLog[] = [
     { type: "run-started", data: { input: { task: "remediate", repo: options.repo ?? "https://git.example.com/tyler/web.git", ...(options.mode !== undefined ? { mode: options.mode } : {}) } } },
   ];
+  if (options.repro !== undefined) {
+    events.push({ type: "step-completed", name: "repro-test", data: { result: { verdict: options.repro.verdict, testFiles: options.repro.testFiles ?? ["src/client.test.ts"], ...(options.repro.baseExit !== undefined ? { baseExit: options.repro.baseExit } : {}), ...(options.repro.headExit !== undefined ? { headExit: options.repro.headExit } : {}) } } });
+  }
   if (options.terminal === "run-failed") events.push({ type: "run-failed", data: { error: options.error ?? "boom" } });
   else if (options.terminal === "run-cancelled") events.push({ type: "run-cancelled", data: {} });
   else events.push({ type: "run-completed", data: { output: { status: "finished", summary: "buffered the body" } } });
@@ -906,6 +910,32 @@ test("remediation digest: completed -> remediated, failed -> remediation-failed 
   const running = await stagedIncident(config);
   await authorizeRemediation({ config, enqueue: async (o) => { runs.set(o.runId, [{ type: "run-started", data: { input: { repo: "https://git.example.com/tyler/web.git" } } }]); }, model: "m", now, newRunId: () => "run-rem-live" }, running);
   assert.deepEqual(await digestIncidentRemediation({ config, store }, running, { now }), { changed: false });
+});
+
+test("remediation digest (EV6): the recorded repro-test outcome is linked onto the record; no step links nothing", async () => {
+  const config = memoryConfig();
+  const runs = new Map<string, IncidentEventLog[]>();
+  const store = memoryStore(runs);
+
+  const reproduced = await stagedIncident(config);
+  await authorizeRemediation({ config, enqueue: async (o) => { runs.set(o.runId, remediationRunEvents({ repro: { verdict: "reproduced", baseExit: 1, headExit: 0 } })); }, model: "m", now, newRunId: () => "run-rem-repro" }, reproduced);
+  const ok = await digestIncidentRemediation({ config, store }, reproduced, { now });
+  assert.ok(ok.changed && ok.record.status === "remediated");
+  assert.deepEqual(ok.record.remediation?.outcome?.repro, { verdict: "reproduced", testFiles: ["src/client.test.ts"], baseExit: 1, headExit: 0 });
+
+  const held = await stagedIncident(config);
+  await authorizeRemediation({ config, enqueue: async (o) => { runs.set(o.runId, remediationRunEvents({ terminal: "run-failed", error: "gate held", repro: { verdict: "does-not-reproduce", baseExit: 0 } })); }, model: "m", now, newRunId: () => "run-rem-held" }, held);
+  const refused = await digestIncidentRemediation({ config, store }, held, { now });
+  assert.ok(refused.changed && refused.record.status === "remediation-failed");
+  assert.equal(refused.record.remediation?.outcome?.repro?.verdict, "does-not-reproduce", "a denied gate is still the linked outcome, whatever the terminal event said");
+
+  // A run whose log carries no repro-test step (pre-EV6, or the flag was off)
+  // links nothing — the digest is exactly what it was before.
+  const plain = await stagedIncident(config);
+  await authorizeRemediation({ config, enqueue: async (o) => { runs.set(o.runId, remediationRunEvents({})); }, model: "m", now, newRunId: () => "run-rem-plain" }, plain);
+  const plainResult = await digestIncidentRemediation({ config, store }, plain, { now });
+  assert.ok(plainResult.changed && plainResult.record.status === "remediated");
+  assert.equal(plainResult.record.remediation?.outcome?.repro, undefined);
 });
 
 test("REMEDIATION WRONG-REPO/SCAN GUARDS: a linked run that scanned or edited another repo is refused, not digested", async () => {

@@ -365,6 +365,18 @@ const GATE_CASES: Array<{ what: string; input: RecordedInput; admits: string[]; 
     admits: ["step:*tests", "step:tests"],
     denies: ["step:*turn-*-fix-exhausted"],
   },
+  {
+    what: "a repro-gated remediation (EV6)",
+    input: { task: "t", repo: "r", requireReproTest: true },
+    admits: ["step:repro-test"],
+    denies: [],
+  },
+  {
+    what: "a remediation enqueued before the flag, or with it off",
+    input: { task: "t", repo: "r", changeClass: true, mergeGate: true, tests: true },
+    admits: ["step:change-class", "step:merge-park"],
+    denies: ["step:repro-test"],
+  },
 ];
 
 for (const gate of GATE_CASES) {
@@ -436,6 +448,25 @@ test("two-way steering (D2) moves only the fingerprints of runs that carry steer
   }
   const on: RecordedInput = { task: "t", steer: true, ask: true, steerReply: true };
   assert.notEqual(stepFingerprint(on), fingerprintOf(beforeTable, on), "a flag-on run sees the new steps");
+});
+
+test("the reproducing-test gate (EV6) moves only the fingerprints of runs that carry requireReproTest", () => {
+  // The negative control the programme row names: a run enqueued before
+  // SHIP_INCIDENT_FIX existed (no requireReproTest in its recorded input)
+  // replays byte-identically — its fingerprint is exactly the table without
+  // the repro-test row, i.e. exactly what the pre-EV6 build computed for it.
+  const beforeTable = WORKFLOW_STEPS.filter((s) => s.key !== "step:repro-test");
+  for (const input of [
+    { task: "t" },
+    { task: "t", repo: "r", tests: true },
+    { task: "t", repo: "r", changeClass: true, mergeGate: true, tests: true },
+    { task: "t", repo: "r", mode: "scan" },
+  ] as RecordedInput[]) {
+    assert.equal(fingerprintOf(beforeTable, input), stepFingerprint(input), `flag-off input ${JSON.stringify(input)} is untouched`);
+  }
+  const on = { task: "t", repo: "r", requireReproTest: true } as RecordedInput;
+  assert.notEqual(stepFingerprint(on), fingerprintOf(beforeTable, on), "a repro-gated remediation sees the new step");
+  assert.equal(admittedSteps({ task: "t", repo: "r" }).includes("step:repro-test"), false, "and nothing else does");
 });
 
 test("fork lineage (DF1) moves no fingerprint at all: the field admits no step", () => {

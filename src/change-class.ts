@@ -298,8 +298,14 @@ export function changeClassSummary(verdict: ChangeVerdict, files: ChangedFile[])
   );
 }
 
-/** The boundary park's summary (C1): the work is done and verified; the question is the merge. */
-export function mergeParkSummary(verdict: ChangeVerdict, files: ChangedFile[], pr: string, conflict?: string[]): string {
+/**
+ * The boundary park's summary (C1): the work is done and verified; the
+ * question is the merge. `reproNote`, when a reproducing-test gate ran
+ * (EV6), is its already-rendered outcome line (repro-test.ts reproParkNote)
+ * — a string rather than the step's shape so this renderer never imports
+ * the module that runs the gate.
+ */
+export function mergeParkSummary(verdict: ChangeVerdict, files: ChangedFile[], pr: string, conflict?: string[], reproNote?: string): string {
   const total = files.reduce((n, f) => n + f.added + f.deleted, 0);
   const head =
     `This change is classified **${verdict.class}** — ${files.length} file${files.length === 1 ? "" : "s"}, ` +
@@ -308,12 +314,13 @@ export function mergeParkSummary(verdict: ChangeVerdict, files: ChangedFile[], p
     verdict.class === "serious"
       ? `\n\nIt is held at the merge boundary because:\n${verdict.reasons.map((r) => `- ${r}`).join("\n")}`
       : `\n\nIt is held at the merge boundary because this repository does not merge a ${verdict.class} change unattended; the classifier said:\n${verdict.reasons.map((r) => `- ${r}`).join("\n")}`;
+  const repro = reproNote !== undefined ? `\n\n${reproNote}` : "";
   const conflicts =
     conflict !== undefined && conflict.length > 0
       ? `\n\nThe branch could not be rebased onto the default branch; these files conflict:\n${conflict.map((f) => `- ${f}`).join("\n")}\n\nResolve the conflict on the branch (or on the default branch) and approve again.`
       : "";
   return (
-    `${head}${why}${conflicts}\n\n` +
+    `${head}${why}${repro}${conflicts}\n\n` +
     "Approve to rebase it, re-run its verification and merge it; " +
     "deny to close the pull request with your reason. The branch is kept either way."
   );

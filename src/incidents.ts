@@ -166,6 +166,21 @@ import type {
  * never as a cause; gradeDiagnosis downgrades a write-up that asserts a
  * deploy/release as THE cause without a code citation to carry it.
  *
+ * EV6 — REPRODUCING-TEST GATE ON REMEDIATION (SHIP_INCIDENT_FIX=on, E7.2
+ * W2). The enqueue this module's authorizeRemediation produces always
+ * carries `requireReproTest: true`; runtime.ts reads the flag (this module
+ * never touches env) and materialises it into the recorded input only when
+ * it is on. Flag on, the remediation's publish path gains the `repro-test`
+ * step (repro-test.ts): the changed test files run on the base revision
+ * (must fail) and on head (must pass), and anything but `reproduced` holds
+ * the pull request at the merge boundary with the outcome named. Flag off,
+ * the option is dropped and the run enqueues exactly as it did before EV6.
+ * The incident LINKS the outcome: digestIncidentRemediation reads the run's
+ * recorded repro-test step and stores it on remediation.outcome.repro, so
+ * the record answers "was this fix ever demonstrated?" long after the run's
+ * page is gone. Authorisation itself stays EXPLICIT-ONLY in v1 (Decision
+ * 13): no policy or event rule can reach this path.
+ *
  * REPLAY. Every new field is optional and every new status is a new value:
  *    a starter-era record (no source, no observe, no recovery, no
  *    remediation) walks the same transitions it always did — the recovery
@@ -331,6 +346,18 @@ export interface IncidentRecovery {
   recoveries?: number;
 }
 
+/**
+ * The reproducing-test gate's outcome, as the digest reads it off the run's
+ * recorded `repro-test` step (EV6). Structural and defensive — the digest
+ * trusts the log no further than it has to.
+ */
+export interface IncidentReproOutcome {
+  verdict: string;
+  testFiles: string[];
+  baseExit?: number;
+  headExit?: number;
+}
+
 /** The remediation journey recorded on the incident. */
 export interface IncidentRemediation {
   runId: string;
@@ -338,7 +365,7 @@ export interface IncidentRemediation {
   authorizedBy: string;
   authorizedAt: string;
   /** The run's terminal event, digested by the sweep. */
-  outcome?: { kind: "remediated" | "remediation-failed"; reason: string; at: string };
+  outcome?: { kind: "remediated" | "remediation-failed"; reason: string; at: string; repro?: IncidentReproOutcome };
 }
 
 /** The Observe-side facts an auto-created incident carries. */
@@ -1558,6 +1585,16 @@ export interface IncidentRemediationEnqueueOptions {
   source: string;
   trust: "external";
   actor?: { id: string; display?: string; kind: "user" | "cli" | "intake" | "unknown" };
+  /**
+   * EV6 (SHIP_INCIDENT_FIX): present on every remediation enqueue. This
+   * module never reads env (see the header), so the FLAG is runtime.ts's to
+   * read at materialisation: on, the run's recorded input carries
+   * requireReproTest and the repro-test step gates its publish; off, the
+   * option is dropped and the enqueue is byte-identical to pre-EV6. The
+   * literal `true` (not boolean) is the honest shape — there is no state
+   * under which a remediation asks for the gate "off" from here.
+   */
+  requireReproTest?: true;
 }
 
 export type IncidentRemediationEnqueue = (options: IncidentRemediationEnqueueOptions) => Promise<void>;
@@ -1623,6 +1660,7 @@ export async function authorizeRemediation(
     repo: record.attribution.repoUrl ?? record.attribution.repo,
     source: "incidents",
     trust: "external",
+    requireReproTest: true,
     ...(deps.actor !== undefined ? { actor: deps.actor } : {}),
   });
   const now = new Date(deps.now?.() ?? Date.now()).toISOString();
@@ -1637,6 +1675,25 @@ export async function authorizeRemediation(
 }
 
 export type RemediationDigestResult = { changed: false } | { changed: true; record: IncidentRecord };
+
+/**
+ * EV6: read the run's recorded `repro-test` step defensively. The step's
+ * shape is repro-test.ts's ReproTestStep; this reads only the fields the
+ * record keeps, bounded, so a malformed log degrades to "no outcome linked"
+ * rather than an unrunnable digest.
+ */
+function reproOutcomeOf(event: IncidentEventLog | undefined): IncidentReproOutcome | undefined {
+  const result = (event?.data as { result?: unknown } | undefined)?.result;
+  if (result === null || typeof result !== "object") return undefined;
+  const step = result as Record<string, unknown>;
+  if (typeof step.verdict !== "string" || step.verdict === "") return undefined;
+  return {
+    verdict: step.verdict,
+    testFiles: Array.isArray(step.testFiles) ? step.testFiles.map(String).slice(0, 10) : [],
+    ...(typeof step.baseExit === "number" ? { baseExit: step.baseExit } : {}),
+    ...(typeof step.headExit === "number" ? { headExit: step.headExit } : {}),
+  };
+}
 
 /**
  * Digest a settled remediation run into its incident.
@@ -1661,13 +1718,18 @@ export async function digestIncidentRemediation(
   const events = await deps.store.load(record.remediationRunId);
   const started = events.find((e) => e.type === "run-started");
   const input = (started?.data as { input?: { mode?: string; repo?: string } } | undefined)?.input;
+  // EV6: the reproducing-test outcome, off the run's own recorded step. It
+  // rides the digest whatever the terminal event was — a remediation that
+  // failed its gate and was denied at the boundary still says WHICH verdict
+  // held it, which is the question a person re-opening the incident asks.
+  const repro = reproOutcomeOf(events.find((e) => e.type === "step-completed" && e.name === "repro-test"));
   const settle = async (kind: "remediated" | "remediation-failed", reason: string): Promise<RemediationDigestResult> => {
     const next: IncidentRecord = {
       ...record,
       status: kind,
       remediation: {
         ...record.remediation!,
-        outcome: { kind, reason, at: new Date(options.now?.() ?? Date.now()).toISOString() },
+        outcome: { kind, reason, at: new Date(options.now?.() ?? Date.now()).toISOString(), ...(repro !== undefined ? { repro } : {}) },
       },
     };
     await saveRecord(deps.config, next);
