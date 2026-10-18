@@ -14,7 +14,7 @@ import { buildIfDeclared, comparePngs, flowIfPresent, mainUrlOf, observeIfDeclar
 import { FileArtifacts, RECORDING_DATA_CLASS, type ArtifactStore } from "./artifacts.js";
 import { assetSink } from "./durable.js";
 import { parseRepoUrl } from "./git.js";
-import { proofLinks } from "./ladder.js";
+import { proofLinks, ladderRungs } from "./ladder.js";
 import { verificationSection } from "./verification.js";
 import { PNG } from "pngjs";
 import type { ServiceHealth } from "./observe.js";
@@ -696,4 +696,84 @@ test("Q3a: assetSink never sends WebM bytes to the forge, even untagged and with
   // Without a store an untagged screenshot keeps the operator's forge path.
   assert.match(await sink.upload("shot.png", new Uint8Array([137, 80, 78, 71])), /attachments/);
   assert.equal(forge.calls.length, 1);
+});
+
+// --- Q3c: a recording whose captured page text carries a configured secret is withheld ---
+
+/** The flow rung's WebM bytes with the right magic, so the store accepts them. */
+const WEBM_BYTES = new Uint8Array([26, 69, 223, 163, 9, 8, 7, 6]);
+
+test("Q3c: a flow whose text.txt prints a seeded secret stores NO recording and records the refusal, never the value", async () => {
+  const { ctx, steps } = fakeCtx();
+  const { exec } = await localExecutor();
+  const fake = await fakePlaywrightOnPath();
+  const secret = "ghp_seeded-page-secret-1234567890";
+  const store = new FileArtifacts(await mkdtemp(join(tmpdir(), "q3c-store-")));
+  const forge = forgeSpy();
+  try {
+    // The contract's script: it drove the page, wrote the page's text beside
+    // its recording (prompt.ts's bullet), and the page printed the run's token.
+    await exec.exec(`mkdir -p .ship && cat > .ship/flow.mjs <<'EOF2'
+import { writeFileSync } from "node:fs";
+const out = process.argv[3];
+writeFileSync(out + "/01.png", Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1]));
+writeFileSync(out + "/walk.webm", Buffer.from([${WEBM_BYTES.join(",")}]));
+writeFileSync(out + "/text.txt", "Account\\npersonal access token ${secret}\\n");
+EOF2`);
+    const outcome = await flowIfPresent(ctx, exec, WITH_PREVIEW, PREVIEW_AT_A, assetSink(FORGEJO, "tok", 7, store, forge.fetchImpl), [{ name: "git-token", value: secret }]);
+    assert.equal(outcome?.kind, "passed", "the flow itself passed — the withhold is not a failure");
+    if (outcome?.kind !== "passed") return;
+    assert.equal(outcome.videos, undefined, "no recording was stored or listed");
+    assert.match(outcome.videosWithheld ?? "", /configured secret value \(git-token\)/);
+    assert.ok(!(outcome.videosWithheld ?? "").includes(secret), "the refusal names the secret, never the value");
+    assert.ok(!JSON.stringify(steps).includes(secret), "the step result carries no trace of the value");
+    assert.deepEqual(forge.calls, [], "no forge call of any kind");
+    // The ladder rung states the refusal where the video would have been.
+    const rung = ladderRungs({ testsDeclared: false, flow: outcome, verification: WITH_PREVIEW.verification }).find((r) => r.name === "flow");
+    assert.match(rung?.detail ?? "", /recordings withheld: a configured secret value \(git-token\)/);
+    assert.ok(!(rung?.detail ?? "").includes(secret));
+  } finally {
+    fake.restore();
+  }
+});
+
+test("Q3c: a flow whose page carries no secret records normally — the check is a gate, not a default refusal", async () => {
+  const { ctx } = fakeCtx();
+  const { exec } = await localExecutor();
+  const fake = await fakePlaywrightOnPath();
+  const store = new FileArtifacts(await mkdtemp(join(tmpdir(), "q3c-clean-")));
+  const forge = forgeSpy();
+  try {
+    await exec.exec(`mkdir -p .ship && cat > .ship/flow.mjs <<'EOF2'
+import { writeFileSync } from "node:fs";
+const out = process.argv[3];
+writeFileSync(out + "/01.png", Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1]));
+writeFileSync(out + "/walk.webm", Buffer.from([${WEBM_BYTES.join(",")}]));
+writeFileSync(out + "/text.txt", "Settings saved\\n");
+EOF2`);
+    const outcome = await flowIfPresent(ctx, exec, WITH_PREVIEW, PREVIEW_AT_A, assetSink(FORGEJO, "tok", 7, store, forge.fetchImpl), [{ name: "git-token", value: "ghp_seeded-page-secret-1234567890" }]);
+    assert.equal(outcome?.kind, "passed");
+    if (outcome?.kind !== "passed") return;
+    assert.ok(outcome.videos?.[0]?.artifact !== undefined, "the recording was stored, temporary and bound");
+    assert.equal(outcome.videosWithheld, undefined);
+  } finally {
+    fake.restore();
+  }
+});
+
+test("Q3c: a script that wrote no text.txt keeps the operator's existing behaviour — the proxy's documented limit", async () => {
+  const { ctx } = fakeCtx();
+  const { exec } = await localExecutor();
+  const fake = await fakePlaywrightOnPath();
+  const store = new FileArtifacts(await mkdtemp(join(tmpdir(), "q3c-pre-")));
+  try {
+    await exec.exec(FLOW_WITH_RECORDING);
+    const outcome = await flowIfPresent(ctx, exec, WITH_PREVIEW, PREVIEW_AT_A, assetSink(FORGEJO, "tok", 7, store), [{ name: "git-token", value: "ghp_any-old-secret-999888777" }]);
+    assert.equal(outcome?.kind, "passed");
+    if (outcome?.kind !== "passed") return;
+    assert.ok(outcome.videos?.[0]?.artifact !== undefined);
+    assert.equal(outcome.videosWithheld, undefined);
+  } finally {
+    fake.restore();
+  }
 });

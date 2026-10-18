@@ -549,6 +549,12 @@ export const WORKFLOW_STEPS: readonly WorkflowStep[] = [
     admits: (i) => i.recovery !== false && (i.recovery !== undefined || i.settle === true),
   },
   { key: "step:*turn-*-hold-recheck", admits: (i) => i.requireEdit === true },
+  // Q3b (SHIP_LOOK_RECORD): the look session's screencast, finalised after
+  // the agent loop and before the push. Admitted by input.lookRecord alone
+  // (materialised only when `look` is on) — no pre-flag log carries the field,
+  // so those fingerprints hold and their replays expect no look-record step.
+  // In source order it is publishIfRepoRun's first step, hence here.
+  { key: "step:look-record", admits: (i) => i.look === true && i.lookRecord === true },
   // EV6 (SHIP_INCIDENT_FIX): the reproducing-test gate on an authorised
   // remediation — first leg of the publish path, before the build/suite legs
   // and the classifier. Admitted by input.requireReproTest alone: no

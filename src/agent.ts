@@ -23,6 +23,7 @@ import { scrub } from "./redact.js";
 import { runLook } from "./look.js";
 import { DELEGATE_UNAVAILABLE } from "./delegate.js";
 import { MCP_UNAVAILABLE } from "./mcp.js";
+import { SKILL_UNAVAILABLE } from "./skills.js";
 import { RecoveryTracker, defaultRecoveryConfig } from "./recovery.js";
 import type { RecoveryConfig } from "./recovery.js";
 import { observeToolCall } from "./tool-manifest-shadow.js";
@@ -526,6 +527,16 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
       messages.push({ role: "user", content: MCP_UNAVAILABLE });
       steps.push({ index, thought, action });
       emit({ type: "observation", step: index, text: MCP_UNAVAILABLE });
+      continue;
+    }
+
+    // Same belt for ```skill (Q4-b): this loop's dialect never parses it, and
+    // a refusal here keeps a future dialect change from routing a skill load
+    // into executeAction. The durable loop is where skills load.
+    if (action.kind === "skill") {
+      messages.push({ role: "user", content: SKILL_UNAVAILABLE });
+      steps.push({ index, thought, action });
+      emit({ type: "observation", step: index, text: SKILL_UNAVAILABLE });
       continue;
     }
 

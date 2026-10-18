@@ -24,6 +24,7 @@ import { resolvePreviewTarget, destroyPreview, type PreviewOutcome } from "./dep
 import { compareHealth, effectiveTelemetryTarget, readServiceHealth, telemetryAppliesTo, telemetryRegression } from "./observe.js";
 import { runTests, testTargetFromInput, type TestOutcome } from "./tests.js";
 import { detectEgressRefusal } from "./egress.js";
+import { firstSecretIn, withheldRecordingReason, type KnownSecret } from "./redact.js";
 import type { ArtifactBinding } from "./artifacts.js";
 import {
   ladderRungs,
@@ -367,6 +368,8 @@ export async function flowIfPresent(
   input: DurableAgentInput,
   preview: PreviewOutcome | undefined,
   sink?: AssetSink,
+  /** The run's exact-value secret set (Q3c): a recording whose captured page text carries one is withheld. */
+  secrets: readonly KnownSecret[] = [],
 ): Promise<FlowOutcome | undefined> {
   if (input.verification?.preview === undefined) return undefined;
   return await ctx.step("flow", async (): Promise<FlowOutcome> => {
@@ -408,20 +411,44 @@ export async function flowIfPresent(
       }
       // Optional browser recordings. Bound count and bytes before transferring
       // from the sandbox; missing recordings never invent evidence or fail a flow.
+      // Q3c: before ANY recording is stored, the page text the flow captured
+      // (the text.txt its contract asks for — prompt.ts) is checked against the
+      // run's secret set: on a hit every recording is withheld, nothing is
+      // stored, and the outcome records the refusal naming the secret's NAME.
+      // A script that wrote no text file keeps the operator's existing
+      // behaviour — the check is a text proxy, not OCR, and scripts predate
+      // the contract.
       const videos: FlowShot[] = [];
       const videoList = await executor.exec(`find ${FLOW_OUT} -maxdepth 1 -type f -name '*.webm' -size -4096k | sort`, { timeoutMs: 15_000 }).catch(() => ({ stdout: "" }));
-      for (const file of videoList.stdout.split("\n").filter(p => /^\.ship\/flow-out\/[a-zA-Z0-9._-]+\.webm$/.test(p)).slice(0, 2)) {
+      const videoFiles = videoList.stdout.split("\n").filter(p => /^\.ship\/flow-out\/[a-zA-Z0-9._-]+\.webm$/.test(p)).slice(0, 2);
+      let videosWithheld: string | undefined;
+      if (videoFiles.length > 0) {
+        let pageText = "";
         try {
-          const bytes = await executor.getFile(file);
-          if (!bytes.byteLength || bytes.byteLength > MAX_SHOT_BYTES) continue;
-          const name = file.slice(file.lastIndexOf("/") + 1);
-          const kept = sink !== undefined ? await keepRecording(sink, `ship-${ctx.runId}-flow-${name}`, bytes, binding) : {};
-          videos.push({ name, sha256: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.byteLength, ...kept });
-        } catch { /* The flow result still reports its test outcome. */ }
+          pageText = new TextDecoder().decode(await executor.getFile(`${FLOW_OUT}/text.txt`));
+        } catch {
+          // No text file: nothing to match — the documented limit above.
+        }
+        const hit = firstSecretIn(pageText, secrets);
+        if (hit !== undefined) {
+          videosWithheld = withheldRecordingReason(hit);
+        }
       }
+      if (videosWithheld === undefined) {
+        for (const file of videoFiles) {
+          try {
+            const bytes = await executor.getFile(file);
+            if (!bytes.byteLength || bytes.byteLength > MAX_SHOT_BYTES) continue;
+            const name = file.slice(file.lastIndexOf("/") + 1);
+            const kept = sink !== undefined ? await keepRecording(sink, `ship-${ctx.runId}-flow-${name}`, bytes, binding) : {};
+            videos.push({ name, sha256: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.byteLength, ...kept });
+          } catch { /* The flow result still reports its test outcome. */ }
+        }
+      }
+      const withheld = videosWithheld !== undefined ? { videosWithheld } : {};
       if (r.timedOut) return { kind: "errored", script: FLOW_SCRIPT, reason: `timed out after ${Math.round(durationMs / 1000)}s` };
-      if (r.exitCode === 0) return { kind: "passed", script: FLOW_SCRIPT, durationMs, shots, ...(videos.length ? { videos } : {}) };
-      return { kind: "failed", script: FLOW_SCRIPT, exitCode: r.exitCode, output: tail(`${r.stdout}${r.stderr}`), shots, ...(videos.length ? { videos } : {}) };
+      if (r.exitCode === 0) return { kind: "passed", script: FLOW_SCRIPT, durationMs, shots, ...(videos.length ? { videos } : {}), ...withheld };
+      return { kind: "failed", script: FLOW_SCRIPT, exitCode: r.exitCode, output: tail(`${r.stdout}${r.stderr}`), shots, ...(videos.length ? { videos } : {}), ...withheld };
     } catch (error) {
       return { kind: "errored", script: FLOW_SCRIPT, reason: error instanceof Error ? error.message : String(error) };
     } finally {

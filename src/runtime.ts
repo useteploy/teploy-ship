@@ -113,6 +113,10 @@ import { askEnv, readDeploymentAsks } from "./deployment-asks.js";
 import { installPolicyShadowFromEnv } from "./policy-shadow.js";
 import { shadowObserve } from "./shadow-hook.js";
 import { materialiseMcp } from "./mcp.js";
+import { FileSkillStore, NucleusSkillStore, materialiseSkills } from "./skills.js";
+import type { SkillStore } from "./skills.js";
+export type { RepoSkillsMode, SkillPin, SkillRunInput, SkillSource, SkillStore, SkillVersion } from "./skills.js";
+export { FileSkillStore, NucleusSkillStore, importSkill, normalizeRepoSkills, normalizeSkillPins, skillsEnabled } from "./skills.js";
 import type { RunMeta } from "./run-store.js";
 
 export type { RunMeta } from "./run-store.js";
@@ -411,6 +415,15 @@ export interface ShipRuntime {
   policies: PolicyStore;
   /** One record per repo: allowlist, sandbox image, evidence, policy. See projects.ts. */
   projects: ProjectStore;
+  /**
+   * The skills registry (Q4-a): immutable, content-addressed versions an
+   * operator imported, read at ENQUEUE to resolve the versions a project
+   * pinned (materialiseSkills). Optional like `launches` so a legacy
+   * injected adapter still satisfies the interface; both built-in runtimes
+   * carry one. A project with pins and no registry is an enqueue-time
+   * refusal, never a silent skills-off run. See skills.ts.
+   */
+  skills?: SkillStore;
   /** Public request boards and their notes (L6). See bulletin.ts. */
   bulletin: BulletinStore;
   /** Per-repo evidence config — a view of `projects`, legacy rows read through. See projects.ts. */
@@ -498,6 +511,7 @@ export function fileRuntime(): ShipRuntime {
     unpricedRuns: new FileUnpricedRunStore(),
     policies: new FilePolicyStore(),
     projects,
+    skills: new FileSkillStore(),
     evidence: new ProjectEvidenceStore(projects, new FileEvidenceStore()),
     config: new FileRuntimeConfig(),
     artifacts: new FileArtifacts(),
@@ -626,6 +640,7 @@ export async function nucleusRuntime(
     unpricedRuns: new NucleusUnpricedRunStore(db),
     policies: new NucleusPolicyStore(db),
     projects,
+    skills: new NucleusSkillStore(db),
     evidence: new ProjectEvidenceStore(projects, new NucleusEvidenceStore(db)),
     config: new NucleusRuntimeConfig(db),
     artifacts: new NucleusArtifacts(db),
@@ -1324,6 +1339,13 @@ export async function enqueueRun(
           })(),
         }
       : undefined;
+  // Look-session recording (Q3b): SHIP_LOOK_RECORD, default off, and only
+  // when `look` itself is on — a run that was never offered the action has no
+  // session to record. Materialised for the standing replay reason: it admits
+  // the `look-record` step, and a replay must know from its log alone whether
+  // the session was recorded. Unset keeps the input byte-identical to a
+  // pre-Q3b run's.
+  const lookRecord = look === true && envFlag("SHIP_LOOK_RECORD") ? true : undefined;
   // Per-repo evidence, resolved HERE so every enqueue surface (CLI, dashboard,
   // webhook, intake sweep) gets the same treatment without each knowing about
   // the store. Materialised into the recorded input below, never re-read at
@@ -1346,6 +1368,13 @@ export async function enqueueRun(
   // input like every step-adding flag — and the record is editable, so the
   // log must carry the servers the run was offered. Off for scans, like look.
   const mcp = scan ? undefined : materialiseMcp(project?.mcp);
+  // Skills (Q4-a, SHIP_SKILLS): the registry versions this project pinned,
+  // resolved HERE — the registry is editable, and the run input has to carry
+  // the bodies the log was written under, never a live lookup (the same
+  // reason evidence and the ladder are copied at enqueue). Suppressed on
+  // scans, like look/mcp/delegate. Absent on every run that does not admit
+  // them, so those inputs stay byte-identical to pre-skills ones.
+  const skills = scan ? undefined : await materialiseSkills(project?.skills, runtime.skills);
   // Delegate targets (DT2): what this run may name with ```delegate target=,
   // materialised beside `delegate` and only when it is on — the deployment's
   // SHIP_DELEGATE_TARGETS narrowed by the project's list. Recorded so the
@@ -1711,6 +1740,10 @@ export async function enqueueRun(
         // run that does not admit it — including look-off runs, whose inputs
         // stay byte-identical to pre-image ones.
         ...(lookImage !== undefined ? { lookImage } : {}),
+        // ...and the session recording (SHIP_LOOK_RECORD above), absent on
+        // every run that does not admit it, so those inputs stay
+        // byte-identical to pre-Q3b ones.
+        ...(lookRecord === true ? { lookRecord: true } : {}),
         // ```delegate (S20/S22), from SHIP_DELEGATE above: default off, so a
         // run that does not set it enqueues exactly as it did before the
         // action existed — and the child marker, recorded only on spawned
@@ -1731,6 +1764,9 @@ export async function enqueueRun(
         // absent on every run that does not admit it, so those inputs stay
         // byte-identical to pre-MCP ones.
         ...(mcp !== undefined ? { mcp } : {}),
+        // Skills (Q4-a), from SHIP_SKILLS + the project's pins above: same
+        // rule — absent on every run that does not admit them.
+        ...(skills !== undefined ? { skills } : {}),
         index: true,
         guard: true,
         // The warm repo cache (SB-A). Repo runs that are not PR runs, on

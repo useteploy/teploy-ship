@@ -500,6 +500,27 @@ test("the park hygiene record (D4-c2) moves only merge-gated warm-thread fingerp
   assert.equal(admittedSteps({ task: "t", repo: "r", warmThread: true }).includes("step:merge-hygiene"), false, "warmThread alone does not");
 });
 
+test("the look-session recording (Q3b) moves only the fingerprints of runs that carry lookRecord", () => {
+  // The programme row's negative control, in the fence's own terms: flag off,
+  // byte-identical inputs and fingerprints. A run enqueued before
+  // SHIP_LOOK_RECORD existed fingerprints exactly as the table without the
+  // look-record row does — i.e. exactly what the pre-Q3b build computed for
+  // it — including a look run, whose session simply is not recorded.
+  const beforeTable = WORKFLOW_STEPS.filter((s) => s.key !== "step:look-record");
+  for (const input of [
+    { task: "t" },
+    { task: "t", repo: "r", look: true },
+    { task: "t", repo: "r", look: true, lookImage: { model: "vision-x", max: 3 }, tests: true },
+    { task: "t", repo: "r", mode: "scan" },
+  ] as RecordedInput[]) {
+    assert.equal(fingerprintOf(beforeTable, input), stepFingerprint(input), `flag-off input ${JSON.stringify(input)} is untouched`);
+  }
+  const on = { task: "t", repo: "r", look: true, lookRecord: true } as RecordedInput;
+  assert.notEqual(stepFingerprint(on), fingerprintOf(beforeTable, on), "a recording run sees the new step");
+  assert.deepEqual(admittedSteps(on).filter((k) => k === "step:look-record"), ["step:look-record"], "exactly one look-record step, at most");
+  assert.equal(admittedSteps({ task: "t", repo: "r", lookRecord: true }).includes("step:look-record"), false, "lookRecord without look admits nothing — the enqueue rule, held at the fence too");
+});
+
 test("fork lineage (DF1) moves no fingerprint at all: the field admits no step", () => {
   // forkOf changes WHERE repo-setup stands, never WHICH steps exist, so a
   // run without it (every log written before forks) replays byte-identically
