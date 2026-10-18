@@ -1,0 +1,19 @@
+DT1-DT4 soak (delegate targets), 2026-10-17
+
+Production web+worker 6c1f31a (#122). Backup /root/ship-pg-pre-6c1f31a-2026-10-17.dump
+  sha256 11042742b2821f887c32262b61d976cfe0c1538e0f341e7fe24f78d7513d86ef
+Secrets: SHIP_DELEGATE_TARGETS=flash=native:zai/glm-5.3-flash (web+worker); SHIP_DELEGATE=1,
+SHIP_DELEGATE_MAX=2, SHIP_MAX_RUN_COST_USD=1.00 unchanged. Routing policy
+2026-10-16.1-decision9-zai-retention-none (glm-5.3-flash: worker role, tools, api.z.ai, retention none).
+Migration 009 (ship_docs.claimed_at) ran at startup; aside table ship_docs_009 kept (838 rows = live rows).
+
+Run run-request-ead7d24c... (change journey, private scratch repo Tyler/ship-credential-proof):
+- turn 3: delegate target=flash -> child run-del-95713248... spawned; child ran native on
+  zai/glm-5.3-flash (harness identity row), mode scan (read-only), completed with no PR and
+  no park; parent (zai/glm-5.3) resumed with the child's summary as a context transfer.  PASS (DT1, DT2)
+- turn 4: delegate target=nonexistent -> refused: "delegation refused (target-not-allowed):
+  target nonexistent is not allowed for this project".  PASS (DT2 negative)
+- parent wrote FILES.md, opened PR #2, parked approve-merge (scratch, not merged).
+Not exercised live: DT3 budget-insufficient refusal and DT4 needs-input relay (unit-tested).
+Known limit: a glm-5.3 target is refused today because the policy's review-role glm-5.3 entry
+declares no "tools" capability and the strictest entry per model decides.
