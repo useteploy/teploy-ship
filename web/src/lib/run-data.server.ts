@@ -71,6 +71,14 @@ export interface RunData {
    * additive, so flag-off payloads render exactly as before.
    */
   forkedFrom?: { runId: string; sha?: string };
+  /**
+   * DS1 (SHIP_STACKED_PRS): the run this one is stacked on, with the base's
+   * pull request, work branch and recorded head it was cut at — read off the
+   * recorded input exactly like forkedFrom, never re-derived. Absent on every
+   * non-stacked run; the key is additive, so flag-off payloads render exactly
+   * as before.
+   */
+  stackedOn?: { runId: string; pr?: number; branch?: string; sha?: string };
   canSteer: boolean;
   canLaunch: boolean;
   /** DF1 (SHIP_FORK): the Fork action may be offered (flag on, forkable source, launch authority). */
@@ -377,6 +385,20 @@ export async function runData({ params, request }: { params: { id: string }; req
       typeof forkRaw?.runId === "string" && forkRaw.runId !== ""
         ? { runId: forkRaw.runId, ...(typeof forkRaw.sha === "string" && forkRaw.sha !== "" ? { sha: forkRaw.sha } : {}) }
         : undefined;
+    // DS1: the same lineage read for a stacked run — the base run id with the
+    // pull request, branch and head sha enqueue materialised into input.stack
+    // (StackOnRecord, stacked-pr.ts). Shape-checked like every field read out
+    // of a log; a record without a runId names no lineage and renders none.
+    const stackRaw = (started?.data as { input?: { stack?: { runId?: unknown; pr?: unknown; branch?: unknown; sha?: unknown } } } | undefined)?.input?.stack;
+    const stackedOn =
+      typeof stackRaw?.runId === "string" && stackRaw.runId !== ""
+        ? {
+            runId: stackRaw.runId,
+            ...(Number.isSafeInteger(Number(stackRaw.pr)) && Number(stackRaw.pr) > 0 ? { pr: Number(stackRaw.pr) } : {}),
+            ...(typeof stackRaw.branch === "string" && stackRaw.branch !== "" ? { branch: stackRaw.branch } : {}),
+            ...(typeof stackRaw.sha === "string" && stackRaw.sha !== "" ? { sha: stackRaw.sha } : {}),
+          }
+        : undefined;
     // The fork action stands where the follow-up does and asks for the same
     // authority (approve: editor or above) — forking commissions a new run.
     // Flag off, an in-flight source or a missing grant each hide the button
@@ -411,6 +433,7 @@ export async function runData({ params, request }: { params: { id: string }; req
       parentRunId: typeof (started?.data as any)?.input?.parentRunId === 'string' ? (started?.data as any).input.parentRunId : undefined,
       taskRootRunId: typeof (started?.data as any)?.taskRootRunId === 'string' ? (started?.data as any).taskRootRunId : undefined,
       forkedFrom,
+      stackedOn,
       canSteer: await may('steer', await currentUser(request)),
       planSupported,
       requirePlanReview: currentProject?.requirePlanReview === true,

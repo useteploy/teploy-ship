@@ -606,6 +606,7 @@ export default function RunDetail({ data: initialData }: { data: RunData }) {
       <div class="eyebrow"><a href="/runs">All runs</a> / {data.runId}</div>
       {data.parentRunId && <p class="meta">Continues <a href={`/runs/${encodeURIComponent(data.parentRunId)}`}>{data.parentRunId}</a></p>}
       {data.forkedFrom && <p class="meta">Forked from <a href={`/runs/${encodeURIComponent(data.forkedFrom.runId)}`}>{data.forkedFrom.runId}</a>{data.forkedFrom.sha ? ` at ${data.forkedFrom.sha.slice(0, 12)}` : " — it had pushed nothing, so this fork started from the default branch"}</p>}
+      {data.stackedOn && <p class="meta">Stacked on <a href={`/runs/${encodeURIComponent(data.stackedOn.runId)}`}>{data.stackedOn.runId}</a>{data.stackedOn.pr !== undefined ? ` — pull request #${data.stackedOn.pr}` : ""}{data.stackedOn.branch !== undefined ? `, branch ${data.stackedOn.branch}` : ""}{data.stackedOn.sha ? ` at ${data.stackedOn.sha.slice(0, 12)}` : ""}</p>}
       {data.taskRootRunId && data.taskRootRunId !== data.runId && <p class="meta">Original request: <a href={`/runs/${encodeURIComponent(data.taskRootRunId)}`}>{data.taskRootRunId}</a></p>}
       {data.threadView === true && thread !== null && thread.runs.length > 1 && <ThreadStrip thread={thread} runId={data.runId} />}
       {data.messageError && <p class="notice bad" role="alert">{data.messageError}</p>}
@@ -1582,7 +1583,14 @@ function TaskStatePanel({ data }: { data: RunData }) {
 /** A chain entry's hover text: what ran, when, on what — bounded. */
 function threadTitle(run: ThreadRunView): string {
   const line = (run.summary ?? "").split("\n")[0] ?? "";
-  return [utcStamp(run.createdAt), run.model, run.harness, run.forkOf !== undefined ? `forked from ${run.forkOf.runId}` : "", line !== "" ? line.slice(0, 200) : ""].filter((s) => s !== "").join(" · ");
+  return [
+    utcStamp(run.createdAt),
+    run.model,
+    run.harness,
+    run.forkOf !== undefined ? `forked from ${run.forkOf.runId}` : "",
+    run.stackedOn !== undefined ? `stacked on ${run.stackedOn.runId}` : "",
+    line !== "" ? line.slice(0, 200) : "",
+  ].filter((s) => s !== "").join(" · ");
 }
 
 /**
@@ -1598,8 +1606,9 @@ function ThreadStrip({ thread, runId }: { thread: ThreadView; runId: string }) {
       <span class="meta">Thread</span>
       {thread.runs.map((run, i) => {
         // DF1 (SHIP_FORK): a member that joined by forking is labelled so the
-        // strip does not present it as an ordinary follow-up.
-        const label = `#${i + 1} ${run.status}${run.forkOf !== undefined ? " (fork)" : ""}`;
+        // strip does not present it as an ordinary follow-up. DS1
+        // (SHIP_STACKED_PRS) labels a stacked member the same way.
+        const label = `#${i + 1} ${run.status}${run.forkOf !== undefined ? " (fork)" : ""}${run.stackedOn !== undefined ? " (stack)" : ""}`;
         // The current run is rendered the way the workspace nav renders the
         // active view: a link with class active, so one style rule covers
         // both and the strip never invents its own chrome.

@@ -11,7 +11,7 @@ process.env.SHIP_STORE = "file";
 process.env.TEPLOY_SHIP_STATE = mkdtempSync(join(tmpdir(), "ship-stack-web-"));
 process.env.SHIP_STACKED_PRS = "on";
 
-const { action } = await import("../routes/runs/[id].js");
+const { action, loader } = await import("../routes/runs/[id].js");
 const { shipRuntime } = await import("./store.server.js");
 const { signSession, SESSION_COOKIE } = await import("./session.server.js");
 
@@ -91,6 +91,15 @@ test("the stack action enqueues a change on the base's recorded head and touches
   const retry = await locationOf(action({ request: post("run-sbase1", form), params: { id: "run-sbase1" } }));
   assert.equal(retry.replace(/^\/runs\//, "").split("?")[0], stackRunId);
   assert.equal(await stackRunCount(), 1);
+
+  // The lineage line's payload (#132): the stacked run's page reads its base
+  // off the recorded input — runId, pr, branch and the head it was cut at —
+  // exactly the way the fork page reads forkedFrom. The base's own page
+  // carries no such key.
+  const page = await loader({ params: { id: stackRunId }, request: new Request(`http://ship.test/runs/${stackRunId}`) });
+  assert.deepEqual(page.stackedOn, { runId: "run-sbase1", pr: 3, branch: "ship/run-sbase1", sha: SHA });
+  const basePage = await loader({ params: { id: "run-sbase1" }, request: new Request("http://ship.test/runs/run-sbase1") });
+  assert.equal(basePage.stackedOn, undefined, "a non-stacked run renders no lineage: the key sits undefined exactly like forkedFrom");
 });
 
 test("the stack action refuses a base without an open pull request of its own and enqueues nothing", async () => {

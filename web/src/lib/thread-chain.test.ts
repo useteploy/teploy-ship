@@ -7,6 +7,7 @@ import {
   forkOfInput,
   harnessLabel,
   runThread,
+  stackedOnInput,
   steerHistory,
   threadViewEnabled,
   THREAD_SCAN_LIMIT,
@@ -242,6 +243,45 @@ test("DF1: forkOfInput is shape-checked and absent on a non-fork or a malformed 
   assert.equal(forkOfInput([started(0, { task: "t" })]), undefined);
   assert.equal(forkOfInput([started(0, { forkOf: { sha } })]), undefined, "no runId, no lineage");
   assert.equal(forkOfInput([started(0, { forkOf: "run-r3" })]), undefined, "a bare string is not the record");
+});
+
+test("DS1: a stacked run carries its lineage and joins the base run's thread; a stack on a stranger does not", async () => {
+  const fix = anchoredChain();
+  const sha = "abcdef0123456789abcdef0123456789abcdef01";
+  const record = { runId: "r3", pr: 7, branch: "ship/r3", sha };
+  fix.logs["s1"] = [
+    started(58, { task: "Stack the migration on it", stack: record }, "s1"),
+    ev("run-completed", 64, undefined, { output: { summary: "Opened the stacked PR against ship/r3." } }),
+  ];
+  fix.metas.push(meta("s1", { createdAt: at(58), updatedAt: at(64) }));
+  // A stack whose base run is outside the chain must not be swept in as a member.
+  fix.logs["s9"] = [started(59, { task: "Stranger's stack", stack: { runId: "r0", pr: 2, branch: "ship/r0", sha } }, "s9"), ev("run-completed", 60, undefined, { output: {} })];
+  fix.metas.push(meta("s9", { createdAt: at(59), updatedAt: at(60) }));
+
+  const { deps: d } = deps(fix);
+  const thread = await runThread(d, "r1");
+  assert.deepEqual(thread!.runs.map((r) => r.runId), ["r1", "r2", "r3", "s1"], "the stack is a member of the thread it rides, like a fork");
+  assert.deepEqual(thread!.runs[3]!.stackedOn, record, "its lineage reads off the recorded input");
+  assert.equal(thread!.runs[3]!.parentRunId, null, "a stacked run is no run's follow-up");
+  assert.ok(thread!.runs.every((r) => r.runId !== "s9"), "a stack on an unrelated run stays out");
+
+  // On the stacked run's own page the chain is the stack alone (it is a new
+  // task root, the same shape as a fork), and the lineage is still what the
+  // view reports — that is what the strip's "(stack)" label and hover read.
+  const own = await runThread(d, "s1");
+  assert.deepEqual(own!.runs.map((r) => r.runId), ["s1"]);
+  assert.deepEqual(own!.runs[0]!.stackedOn, record);
+});
+
+test("DS1: stackedOnInput is shape-checked and absent on a non-stacked or malformed record", () => {
+  const sha = "abcdef0123456789abcdef0123456789abcdef01";
+  assert.deepEqual(stackedOnInput([started(0, { stack: { runId: "r3", pr: 7, branch: "ship/r3", sha } })]), { runId: "r3", pr: 7, branch: "ship/r3", sha });
+  assert.deepEqual(stackedOnInput([started(0, { stack: { runId: "r3" } })]), { runId: "r3" }, "no optional key when none was recorded");
+  assert.equal(stackedOnInput([started(0, { task: "t" })]), undefined);
+  assert.equal(stackedOnInput([started(0, { stack: { sha } })]), undefined, "no runId, no lineage");
+  assert.equal(stackedOnInput([started(0, { stack: "run-r3" })]), undefined, "a bare string is not the record");
+  assert.deepEqual(stackedOnInput([started(0, { stack: { runId: "r3", pr: 0 } })]), { runId: "r3" }, "a non-positive pr is dropped rather than rendered as #0");
+  assert.deepEqual(stackedOnInput([started(0, { stack: { runId: "r3", pr: 3.5 } })]), { runId: "r3" }, "a fractional pr is dropped too");
 });
 
 test("an unknown run id reads as null (the route 404s)", async () => {
