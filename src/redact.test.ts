@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { clamp, redact, redactKnownValues, safeForDisplay, scrub } from "./redact.js";
+import { EXACT_SCRUB_MIN_LENGTH, clamp, exactScrubber, redact, redactKnownValues, safeForDisplay, scrub, scrubExact } from "./redact.js";
 
 test("TS-061: credentials embedded in URLs are stripped", () => {
   assert.equal(
@@ -69,4 +69,37 @@ test("safeForDisplay scrubs before it clamps", () => {
   const text = `${"x".repeat(500)} ghp_abcdefghijklmnopqrstuvwxyz012345 ${"y".repeat(500)}`;
   const out = safeForDisplay(text, 2000, {});
   assert.doesNotMatch(out, /ghp_abcdefghijklmnop/);
+});
+
+test("scrubExact replaces every forwarded value and its base64, whatever the variable is called", () => {
+  const secrets = [{ name: "OPENCODE_CONFIG_CONTENT", value: "plain-looking-value-123" }];
+  const encoded = Buffer.from("plain-looking-value-123").toString("base64");
+  const out = scrubExact(`a plain-looking-value-123 b ${encoded} c plain-looking-value-123`, secrets);
+  assert.equal(out, "a [redacted OPENCODE_CONFIG_CONTENT] b [redacted OPENCODE_CONFIG_CONTENT base64] c [redacted OPENCODE_CONFIG_CONTENT]");
+  // A value cut off at the end of the output is still replaced.
+  assert.equal(scrubExact("tail: plain-looking-va", secrets), "tail: [redacted OPENCODE_CONFIG_CONTENT]");
+});
+
+test("scrubExact leaves values shorter than the minimum alone (documented limit)", () => {
+  assert.equal(EXACT_SCRUB_MIN_LENGTH, 8);
+  const out = scrubExact("port 1234567 is open", [{ name: "SHORT", value: "1234567" }]);
+  assert.equal(out, "port 1234567 is open", "a 7-character value is not scrubbed: it would mangle ordinary output");
+  assert.equal(scrubExact("x 12345678 y", [{ name: "EIGHT", value: "12345678" }]), "x [redacted EIGHT] y");
+});
+
+test("exactScrubber catches a value split across chunk boundaries", () => {
+  const secret = "sk-live-0123456789abcdef";
+  const text = `{"line":"one"}\nenv: KEY=${secret}\n{"line":"two ${secret}"}\n`;
+  for (const size of [1, 3, 7, 16, 1000]) {
+    const scrubber = exactScrubber([{ name: "KEY", value: secret }]);
+    let out = "";
+    for (let i = 0; i < text.length; i += size) out += scrubber.push(text.slice(i, i + size));
+    out += scrubber.flush();
+    assert.ok(!out.includes(secret), `chunk size ${size} leaked the value`);
+    assert.equal(out, text.split(secret).join("[redacted KEY]"));
+  }
+  // No secrets: a pass-through, nothing held back.
+  const none = exactScrubber([]);
+  assert.equal(none.push("abc"), "abc");
+  assert.equal(none.flush(), "");
 });

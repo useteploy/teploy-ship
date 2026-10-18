@@ -4,6 +4,7 @@ import type { WorkflowContext } from "@neutron-build/workflow";
 import type { DurableAgentInput } from "./durable.js";
 import type { RepoCheckout } from "./git.js";
 import type { LiveSink } from "./live.js";
+import type { KnownSecret } from "./redact.js";
 import type { TestOutcome } from "./tests.js";
 
 /**
@@ -162,11 +163,18 @@ export interface HarnessWorkspace {
    * the chunks are the only addition. Absent means output arrives at exit.
    */
   execStream?: StreamExec;
+  /**
+   * Credentials this run holds that an adapter's output must never carry
+   * (the forge token the checkout used). An external adapter replaces each
+   * value in the vendor's output before parse, record and live feed, as it
+   * does the values it forwards itself. Runtime only, never recorded.
+   */
+  secrets?: KnownSecret[];
 }
 
 export type StreamExec = (
   command: string,
-  options: { timeoutMs?: number; maxOutputBytes?: number },
+  options: { timeoutMs?: number; maxOutputBytes?: number; env?: Record<string, string> },
   onChunk: (stream: "stdout" | "stderr", chunk: string) => void,
 ) => Promise<ExecResult>;
 

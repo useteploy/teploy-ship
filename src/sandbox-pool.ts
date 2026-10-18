@@ -364,7 +364,7 @@ export class SandboxPool implements ExecutorProvider {
   async execStream(
     handle: string,
     command: string,
-    options: { timeoutMs?: number; maxOutputBytes?: number },
+    options: { timeoutMs?: number; maxOutputBytes?: number; env?: Record<string, string> },
     onChunk: (stream: "stdout" | "stderr", chunk: string) => void,
   ): Promise<ExecResult> {
     const { index, handle: inner } = parsePoolHandle(handle);

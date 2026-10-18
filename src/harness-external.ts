@@ -7,6 +7,8 @@ import { clipDetail } from "./live.js";
 import type { LiveUpdate } from "./live.js";
 import type { HarnessAdapter, HarnessResult, HarnessStatus, HarnessUsage } from "./harness.js";
 import { MAX_EGRESS_ALLOW_ENTRIES, egressEntryError, normalizeEgressAllow } from "./egress.js";
+import { exactScrubber, scrubExact } from "./redact.js";
+import type { KnownSecret } from "./redact.js";
 
 /**
  * External harness adapters (P5-2): Ship drives a vendor coding agent that is
@@ -58,7 +60,6 @@ export const DEFAULT_FORWARDED_ENV: Record<string, string[]> = {
 };
 
 const PROMPT_PATH = ".teploy-agent/harness-prompt.md";
-const ENV_PATH = ".teploy-agent/harness.env";
 const STEER_PATH = ".teploy-agent/harness-steer.md";
 
 /**
@@ -221,7 +222,7 @@ function egressEntryForBaseURL(raw: string): string | undefined {
  * The provider API hosts a set of harness refs will call from inside the
  * sandbox, derived from the worker's own environment — the same forward list
  * (`externalHarnessConfig`) and the same variables the harness will read
- * after `harness.env` is sourced. Hosts only, port 443 (the URL's own port
+ * from its exec env. Hosts only, port 443 (the URL's own port
  * when it names one — the daemon's grammar admits 80 and 443 portless and
  * nothing else without it), de-duplicated, order preserved. Native and
  * unknown ids derive nothing: the native loop calls the model from the
@@ -242,7 +243,7 @@ export function providerEgressAllow(refs: readonly { id: string }[], env: NodeJS
     const spec = PROVIDER_EGRESS[ref.id];
     if (spec === undefined) continue;
     const config = externalHarnessConfig(ref.id, env);
-    // "Forwarded" is envFile's own rule: on the harness's forward list AND
+    // "Forwarded" is forwardEnv's own rule: on the harness's forward list AND
     // set to a non-empty value on the worker.
     const held = (name: string): string | undefined => {
       if (!config.forward.includes(name)) return undefined;
@@ -297,18 +298,40 @@ export function withProviderEgress(
   return merged !== undefined && merged.length <= MAX_EGRESS_ALLOW_ENTRIES ? merged : explicit;
 }
 
-/** The env file the harness sources: NAME='value' lines, sh-quoted. */
-export function envFile(forward: string[], env: NodeJS.ProcessEnv): { text: string; names: string[] } {
+/**
+ * The credentials forwarded into one harness exec, as that exec's own env.
+ *
+ * They travel in the exec request (the sandbox daemon hands them to the
+ * command through a private `--env-file` on the host), never as a file under
+ * the workspace and never on a command line. The daemon refuses a value with
+ * a line break (its env-file format is one NAME=VALUE per line), and a
+ * multi-line value is legitimate here — OPENCODE_CONFIG_CONTENT is JSON — so
+ * such a value rides base64-encoded under `SHIP_B64_<NAME>` and `prelude`
+ * decodes it back into `<NAME>` inside the shell, then unsets the carrier.
+ * A value with a NUL cannot live in an environment at all and is skipped.
+ */
+export function forwardEnv(forward: string[], env: NodeJS.ProcessEnv): { env: Record<string, string>; names: string[]; secrets: KnownSecret[]; prelude: string } {
   const names: string[] = [];
-  const lines: string[] = [];
+  const out: Record<string, string> = {};
+  const secrets: KnownSecret[] = [];
+  let prelude = "";
   for (const name of forward) {
     if (!/^[A-Z_][A-Z0-9_]*$/.test(name)) continue;
     const value = env[name];
-    if (value === undefined || value === "") continue;
+    if (value === undefined || value === "" || value.includes("\0")) continue;
     names.push(name);
-    lines.push(`${name}=${shq(value)}`);
+    secrets.push({ name, value });
+    if (/[\r\n]/.test(value)) {
+      const carrier = `SHIP_B64_${name}`;
+      out[carrier] = Buffer.from(value, "utf8").toString("base64");
+      // The trailing `x` survives command substitution's newline stripping,
+      // so a value that ends in a newline arrives byte-exact.
+      prelude += `${name}="$(printf %s "$${carrier}" | base64 -d; printf x)"; ${name}="\${${name}%x}"; export ${name}; unset ${carrier}; `;
+    } else {
+      out[name] = value;
+    }
   }
-  return { text: lines.join("\n") + (lines.length > 0 ? "\n" : ""), names };
+  return { env: out, names, secrets, prelude };
 }
 
 /** Preflight: the binary exists in the sandbox, and which version it is. */
@@ -975,13 +998,13 @@ export function codexLiveTracker(): LiveTracker {
 
 /**
  * The `--config` flags that point codex at teploy-gateway: a `teploy-gateway`
- * model provider whose base_url comes from the (already sourced) AI_GATEWAY_URL
+ * model provider whose base_url comes from the AI_GATEWAY_URL (exec env)
  * and whose key codex reads itself from AI_GATEWAY_KEY (`env_key`), then
  * `model_provider` selecting it. Values are TOML on the far side of `-c
  * key=value` (codex parses the value as TOML with a raw-string fallback —
  * codex-rs/utils/cli/src/config_override.rs), so literals are quoted and the
  * URL rides in single quotes inside a shell double-quoted arg so `$AI_GATEWAY_URL`
- * still expands after harness.env is sourced.
+ * still expands from the exec's env.
  *
  * codex speaks the Responses wire API only (`wire_api = "chat"` was removed
  * upstream), so the gateway endpoint must be Responses-compatible — see
@@ -1201,9 +1224,10 @@ export function externalAdapter(
       const line = spec.line(versionMajor(pre.version));
       const sessionFor = line.sessionFor?.({ runId: ws.ctx.runId, prefix: p });
       /**
-       * One vendor exec: the env-file dance, the command, the parsed record.
-       * `startDetail` is the live hint before the stream opens; the resume
-       * execs pass none because the steer round already announced itself.
+       * One vendor exec: the command with its credentials in the exec's own
+       * env, the output scrubbed of them, the parsed record. `startDetail` is
+       * the live hint before the stream opens; the resume execs pass none
+       * because the steer round already announced itself.
        */
       const execRecord = async (
         commandFor: (opts: ExecOpts & { session?: string }) => string,
@@ -1211,29 +1235,43 @@ export function externalAdapter(
         startDetail?: string,
       ): Promise<HarnessRunRecord> => {
         const config = externalHarnessConfig(id, env);
-        const forwardedEnv = envFile(config.forward, env);
-        const priced = spec.priced(forwardedEnv.names);
+        const forwarded = forwardEnv(config.forward, env);
+        const priced = spec.priced(forwarded.names);
+        // The vendor process and every tool it spawns inherit the forwarded
+        // credentials, so an agent that prints `env` prints them. Every value
+        // Ship handed over (plus the run's forge token) is replaced in the
+        // output BEFORE it is parsed, recorded or shown live.
+        const secrets: KnownSecret[] = [...forwarded.secrets, ...(ws.secrets ?? [])];
         try {
           await writeFiles();
-          await ws.executor.putFile(ENV_PATH, forwardedEnv.text);
           const command =
-            `set -a; . ${shq(ENV_PATH)}; set +a; rm -f ${shq(ENV_PATH)}; ` +
-            commandFor({ config, maxSteps: budget.maxSteps, maxRunCostUSD: budget.maxRunCostUSD, priced, forwarded: forwardedEnv.names, ...(sessionFor !== undefined ? { session: sessionFor } : {}) });
-          const execOptions = { timeoutMs: config.timeoutMs, maxOutputBytes: 16 * 1_048_576 };
+            forwarded.prelude +
+            commandFor({ config, maxSteps: budget.maxSteps, maxRunCostUSD: budget.maxRunCostUSD, priced, forwarded: forwarded.names, ...(sessionFor !== undefined ? { session: sessionFor } : {}) });
+          const execOptions = {
+            timeoutMs: config.timeoutMs,
+            maxOutputBytes: 16 * 1_048_576,
+            ...(Object.keys(forwarded.env).length > 0 ? { env: forwarded.env } : {}),
+          };
           // Streamed when the executor can (the sandbox daemon), so the run
           // page shows the harness's turns and tool calls as they happen
           // instead of a thirty-minute blank. Same result either way; the
           // recorded step is the exit, never the chunks.
           if (startDetail !== undefined) ws.live?.({ phase: "harness", turn: 0, detail: startDetail });
           const tracker = spec.live();
-          const exec =
+          const liveScrub = exactScrubber(secrets);
+          const feedLive = (chunk: string): void => {
+            if (chunk === "") return;
+            const update = tracker.feed(chunk);
+            if (update !== null) ws.live?.(update);
+          };
+          const raw =
             ws.execStream !== undefined
               ? await ws.execStream(command, execOptions, (stream, chunk) => {
-                  if (stream !== "stdout") return;
-                  const update = tracker.feed(chunk);
-                  if (update !== null) ws.live?.(update);
+                  if (stream === "stdout") feedLive(liveScrub.push(chunk));
                 })
               : await ws.executor.exec(command, execOptions);
+          feedLive(liveScrub.flush());
+          const exec: ExecResult = { ...raw, stdout: scrubExact(raw.stdout, secrets), stderr: scrubExact(raw.stderr, secrets) };
           const parsed = line.parse(exec, priced);
           const timedOut = exec.timedOut === true;
           const sessionId = parsed.sessionId ?? sessionFor;
@@ -1244,7 +1282,7 @@ export function externalAdapter(
             summary: timedOut ? `${spec.binary} did not finish within ${Math.round(config.timeoutMs / 60_000)} minutes` : parsed.summary,
             turns: parsed.turns,
             usage: parsed.usage,
-            forwarded: forwardedEnv.names,
+            forwarded: forwarded.names,
             stderrTail: tail(exec.stderr),
             // The session the binary actually ran (parsed) — or, on a line
             // with a caller-chosen id, the one we told it to. Recorded so
@@ -1259,14 +1297,14 @@ export function externalAdapter(
             exitCode: -1,
             timedOut: false,
             status: "error",
-            summary: `${spec.binary} could not be run: ${error instanceof Error ? error.message : String(error)}`,
+            summary: scrubExact(`${spec.binary} could not be run: ${error instanceof Error ? error.message : String(error)}`, secrets),
             turns: 0,
             usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, priced: false },
-            forwarded: forwardedEnv.names,
+            forwarded: forwarded.names,
             stderrTail: "",
           };
         } finally {
-          await ws.executor.exec(`rm -f ${shq(ENV_PATH)} ${shq(PROMPT_PATH)} ${shq(STEER_PATH)}`, { timeoutMs: 30_000 }).catch(() => {});
+          await ws.executor.exec(`rm -f ${shq(PROMPT_PATH)} ${shq(STEER_PATH)}`, { timeoutMs: 30_000 }).catch(() => {});
         }
       };
       const record = await ws.ctx.step(`${p}harness-run`, async (): Promise<HarnessRunRecord> => {
@@ -1283,7 +1321,7 @@ export function externalAdapter(
             summary: `${refusalFor(id, "plan-review") ?? PLAN_REVIEW_REFUSAL} No external agent was started.`,
             turns: 0,
             usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, priced: false },
-            forwarded: envFile(config.forward, env).names,
+            forwarded: forwardEnv(config.forward, env).names,
             stderrTail: "",
           };
         }
@@ -1338,7 +1376,7 @@ export function externalAdapter(
           // A harness that is unpriced by design (a subscription: claude with
           // an OAuth token, codex) has no dollar cap to honour and stays
           // bounded by its turn limit.
-          const spendUnknown = budget.maxRunCostUSD > 0 && usage.priced === false && spec.priced(envFile(externalHarnessConfig(id, env).forward, env).names);
+          const spendUnknown = budget.maxRunCostUSD > 0 && usage.priced === false && spec.priced(forwardEnv(externalHarnessConfig(id, env).forward, env).names);
           const spent = usage.priced === false ? 0 : (usage.costUSD ?? 0);
           const remainingCost = budget.maxRunCostUSD - spent;
           const resumed = await ws.ctx.step(`${p}harness-resume-${round}`, async (): Promise<HarnessRunRecord | { delivered: false; reason: string }> => {

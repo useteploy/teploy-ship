@@ -82,6 +82,13 @@ COPY deploy/package.ship.json package.json
 COPY deploy/package-lock.ship.json package-lock.json
 COPY dist/ dist/
 RUN npm ci --omit=dev --no-audit --no-fund
+# The patches pnpm applies locally (package.json pnpm.patchedDependencies).
+# npm ci does not read them, so without this step the image would run the
+# unpatched SDK the suites never tested: @neutron-build/agents' sandbox exec
+# would drop per-exec env, and every credential that travels by exec env
+# (SHIP_GIT_CREDENTIAL=env) would silently arrive empty.
+COPY patches/@neutron-build__agents.patch /tmp/agents.patch
+RUN cd node_modules/@neutron-build/agents && git apply /tmp/agents.patch && rm /tmp/agents.patch
 
 # web app runtime (the web command spawns `pnpm exec neutron-ts preview` here)
 COPY deploy/package.web.json web/package.json

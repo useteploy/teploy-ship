@@ -1,0 +1,13 @@
+diff --git a/dist/sandbox.js b/dist/sandbox.js
+index 7aa988fa188ddf1d29d2d377cec8ddf485050cf5..f89526bda464564a066534a0afd29b67fcff43c7 100644
+--- a/dist/sandbox.js
++++ b/dist/sandbox.js
+@@ -41,7 +41,7 @@ export class SandboxExecutor {
+     }
+     async exec(command, options = {}) {
+         const timeoutSec = Math.ceil((options.timeoutMs ?? 120_000) / 1000);
+-        const response = await request(this.#options, "POST", `/v1/runs/${this.runId}/exec`, JSON.stringify({ cmd: command, timeoutSec, ...(options.cwd !== undefined ? { cwd: options.cwd } : {}) }), { "content-type": "application/json" });
++        const response = await request(this.#options, "POST", `/v1/runs/${this.runId}/exec`, JSON.stringify({ cmd: command, timeoutSec, ...(options.cwd !== undefined ? { cwd: options.cwd } : {}), ...(options.env !== undefined ? { env: options.env } : {}) }), { "content-type": "application/json" });
+         if (response.body === null) {
+             throw new AgentError(problemFromStatus(500, "Sandbox exec response had no body."));
+         }
