@@ -474,6 +474,53 @@ export function parseAction(text: string, dialect?: ActionDialect): Action {
   return fenced?.action ?? xml?.action ?? { kind: "none" };
 }
 
+/**
+ * A ```skill fence's action: the name on the fence, the ```create shape.
+ * Whether a skill with that name is OFFERED is the loop's decision (a lookup
+ * in input.skills, pure of the parser), never the parser's.
+ */
+function skillActionFrom(arg: string): Extract<Action, { kind: "skill" | "invalid" }> {
+  const name = arg.trim();
+  if (name === "" || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name)) {
+    return {
+      kind: "invalid",
+      message: "```skill needs the skill's name on the fence, exactly as the index lists it, e.g.\n```skill deploy-checklist\n```",
+    };
+  }
+  return { kind: "skill", name };
+}
+
+/** One ```skill fence in the order it appears: where it sat, and the action it names. */
+export interface SkillLoad {
+  index: number;
+  action: Extract<Action, { kind: "skill" | "invalid" }>;
+}
+
+/**
+ * Every ```skill fence in the text, in order — including fences after the
+ * turn's first action block, which parseAction never reaches (the transcript
+ * is trimmed at the first action and the loop spends one action per turn).
+ *
+ * The loop uses this so a skill block that shares a turn with a real action
+ * still yields its observation instead of being dropped (#130): the load is
+ * read-only and records no step, so its body can ride along with the action's
+ * own observation without moving the step sequence or the fingerprint.
+ *
+ * Empty without the dialect, so a run without input.skills parses exactly as
+ * before the reader existed.
+ */
+export function parseSkillLoads(text: string, dialect?: ActionDialect): SkillLoad[] {
+  if (dialect?.skill !== true) return [];
+  const loads: SkillLoad[] = [];
+  for (const match of text.matchAll(FENCE)) {
+    const info = match[1]!.trim();
+    const [langRaw, ...argParts] = info.split(/\s+/);
+    if ((langRaw ?? "").toLowerCase() !== "skill") continue;
+    loads.push({ index: match.index, action: skillActionFrom(argParts.join(" ")) });
+  }
+  return loads;
+}
+
 function parseFencedAction(text: string, dialect?: ActionDialect): { index: number; action: Action } | null {
   for (const match of text.matchAll(FENCE)) {
     const index = match.index;
@@ -518,20 +565,7 @@ function parseFencedAction(text: string, dialect?: ActionDialect): { index: numb
       return { index, action: parseMcpBlock(arg, code) };
     }
     if (lang === "skill" && dialect?.skill === true) {
-      // The name on the fence, the ```create shape. Whether a skill with
-      // that name is OFFERED is the loop's decision (a lookup in
-      // input.skills, pure of the parser), never the parser's.
-      const name = arg.trim();
-      if (name === "" || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name)) {
-        return {
-          index,
-          action: {
-            kind: "invalid",
-            message: "```skill needs the skill's name on the fence, exactly as the index lists it, e.g.\n```skill deploy-checklist\n```",
-          },
-        };
-      }
-      return { index, action: { kind: "skill", name } };
+      return { index, action: skillActionFrom(arg) };
     }
     if (PYTHON_LANGS.has(lang)) {
       if (code.trim() === "") return { index, action: { kind: "invalid", message: "The Python action is empty. Put the code on a new line after ```python and close the block on its own line." } };
