@@ -261,6 +261,15 @@ export interface DurableAgentInput {
    */
   delegateChild?: boolean;
   /**
+   * The model this run EXECUTES on (DT1), when it is not the worker's own.
+   * Materialised at enqueue only when a caller names one (a delegate target
+   * today), so every other input stays byte-identical. Resolved per run
+   * through `config.modelFor` — the `lookImage` precedent: the input says
+   * WHICH model, only the worker says how to reach it — and the cost ceiling
+   * prices on it. Admits no step; the fingerprint does not read it.
+   */
+  model?: string;
+  /**
    * The MCP client (D1, SHIP_MCP; docs/MCP_DESIGN.md): the project's declared
    * servers plus the deployment facts the gates read (data class, remote host
    * allowlist, SHIP_TOOL_MANIFEST mode, the Decision 6 switch), materialised
@@ -913,6 +922,14 @@ export interface DurableAgentConfig {
    */
   lookImageModel?: (modelId: string) => ModelAdapter;
   /**
+   * Builds the adapter for a run whose input names its own model
+   * (input.model, DT1). Same factory shape and the same resolution path as
+   * `lookImageModel`. Absent on a worker that cannot build per-run models,
+   * in which case such a run FAILS before a sandbox is allocated rather than
+   * executing on `model` while its receipt names another.
+   */
+  modelFor?: (modelId: string) => ModelAdapter;
+  /**
    * Worker wiring for remote (streamable-HTTP) MCP servers: resolver/fetch
    * overrides and the address-rule loosening tests need to reach a loopback
    * server. Absent = production rules (resolved-address check, pinned fetch,
@@ -1226,7 +1243,11 @@ export function durableAgent(
       // on the run where whoever triggered it will actually read it.
       // Resolved before any step: a pure lookup, and a harness this worker does
       // not carry must fail the run before a sandbox is allocated for it.
-      const registry = [nativeAdapter(config), ...(config.harnesses ?? [])];
+      // The run's own model (DT1): everything that calls or prices a model
+      // below reads `runConfig`, which is `config` itself unless the input
+      // names a model.
+      const runConfig = runModelConfig(config, input);
+      const registry = [nativeAdapter(runConfig), ...(config.harnesses ?? [])];
       const adapter = selectAdapter(registry, input.harness);
       // Multi-attempt is a repo-run capability (each extra attempt clones its
       // own checkout); a recorded list on a workspace run is a single attempt.
@@ -1720,10 +1741,10 @@ export function durableAgent(
         // selects among the attempts that already finished rather than
         // spending the ceiling again on one more. Derived purely from the
         // usage already recorded, so a replay stops at the same attempt.
-        if (i > 0 && budget.maxRunCostUSD > 0 && costUSD(config.modelId ?? "", attemptsSpent(attempts)) >= budget.maxRunCostUSD) {
+        if (i > 0 && budget.maxRunCostUSD > 0 && costUSD(runConfig.modelId ?? "", attemptsSpent(attempts)) >= budget.maxRunCostUSD) {
           await ctx.step(`attempt-${i}-skipped`, () => ({
             reason: `the run's ${budget.maxRunCostUSD.toFixed(2)} cost ceiling was reached after ${attempts.length} attempt${attempts.length === 1 ? "" : "s"}; selecting among the attempts that finished`,
-            spent: costUSD(config.modelId ?? "", attemptsSpent(attempts)),
+            spent: costUSD(runConfig.modelId ?? "", attemptsSpent(attempts)),
           }));
           break;
         }
@@ -1808,7 +1829,7 @@ export function durableAgent(
         const tied = ranked.tied;
         if (tied.length > 1 && candidates.some((c) => tied.includes(c.attempt))) {
           try {
-            const verdict = await pickAttempt(config.model, { task: input.task, candidates: candidates.filter((c) => tied.includes(c.attempt)) });
+            const verdict = await pickAttempt(runConfig.model, { task: input.task, candidates: candidates.filter((c) => tied.includes(c.attempt)) });
             const chosen = parsePick(verdict.text, tied);
             const winner = chosen === null ? tied[0]! : chosen;
             const how =
@@ -3189,6 +3210,22 @@ function summaryFields(
  * the happy path. Returns the pull request URL, or null when there was nothing
  * to publish or the rescue itself failed.
  */
+/**
+ * The config a run executes under (DT1): `config` itself when the input names
+ * no model — the object identity, so a run without `input.model` takes exactly
+ * the path it always took — otherwise the worker's adapter for that model and
+ * its id for pricing. A run naming a model the worker cannot build fails here,
+ * before any step: executing it on the default model would make its receipt,
+ * its price and its policy check describe a model that never ran.
+ */
+export function runModelConfig(config: DurableAgentConfig, input: Pick<DurableAgentInput, "model">): DurableAgentConfig {
+  if (input.model === undefined || input.model === config.modelId) return config;
+  if (config.modelFor === undefined) {
+    throw new Error(`this run names model ${input.model}, and this worker cannot build per-run models (no modelFor wiring); refusing to run it on ${config.modelId ?? "the worker default"}`);
+  }
+  return { ...config, model: config.modelFor(input.model), modelId: input.model };
+}
+
 async function rescuePublish(
   ctx: WorkflowContext,
   ws: HarnessWorkspace,

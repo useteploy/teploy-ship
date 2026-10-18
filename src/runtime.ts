@@ -1116,9 +1116,18 @@ export async function enqueueRun(
      * loop's one-level refusal reads.
      */
     delegateChild?: boolean;
+    /**
+     * The model this run EXECUTES on (DT1), when it is not the worker's own:
+     * materialised as `input.model` ONLY when set (the `lookImage` shape), and
+     * recorded as the meta's model so the run is priced on what ran. Absent,
+     * the input and the meta are exactly what they were before the option
+     * existed. Internal to the delegation control today (a delegate target).
+     */
+    runModel?: string;
   },
 ): Promise<EnqueueReport | undefined> {
   const journey = options.journey === undefined ? undefined : parseJourney(options.journey);
+  if (options.runModel !== undefined && (options.runModel.trim() === "" || options.runModel !== options.runModel.trim())) throw new Error("runModel must name a model");
   const requestHash = options.requestIdentity ?? launchRequestHash(options);
   if (!/^[a-f0-9]{64}$/.test(requestHash)) throw new Error("Invalid request identity");
   const accepted = await runtime.launches?.get(options.runId);
@@ -1572,6 +1581,8 @@ export async function enqueueRun(
         // children, whose own inputs never admit delegation.
         ...(delegate === true ? { delegate: true } : {}),
         ...(options.delegateChild === true ? { delegateChild: true } : {}),
+        // The run's own model (DT1), absent unless the caller named one.
+        ...(options.runModel !== undefined ? { model: options.runModel } : {}),
         // Two-way steering (D2), from SHIP_STEER_REPLY=on (only `on`; the
         // SHIP_THREAD_VIEW grammar): default off, so a run that does not set
         // it enqueues exactly as before. Materialised for the standing
@@ -1624,13 +1635,15 @@ export async function enqueueRun(
       // Who ran it (S13): model, harness, expected revision, configuration
       // identity. A sibling like the fingerprint, and only under
       // SHIP_HARNESS_RECORD=on; off writes no key at all.
-      ...(harnessRecordEnabled() ? { harnessIdentity: harnessIdentity({ harness, attempts, shipModel: options.model }) } : {}),
+      ...(harnessRecordEnabled() ? { harnessIdentity: harnessIdentity({ harness, attempts, shipModel: options.runModel ?? options.model }) } : {}),
     },
   };
   const meta: RunMeta = {
     runId: options.runId,
     task: options.userMessage ?? options.task,
-    model: options.model,
+    // What the worker prices the run on (worker.ts settle): the model that
+    // executes it.
+    model: options.runModel ?? options.model,
     status: "queued",
     ...(options.source !== undefined ? { source: options.source } : {}),
     // Flat columns, never a nested object: the Nucleus doc store maps scalars.

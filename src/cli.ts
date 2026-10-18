@@ -1058,6 +1058,9 @@ async function executePass(
     // Image looks route through the same resolution path (the model id comes
     // from the run input; an input that never admitted one never asks).
     lookImageModel: resolveModel,
+    // A run whose input names its own model (DT1: a delegate target) resolves
+    // it the same way; the id comes from the recorded input.
+    modelFor: resolveModel,
     executor: provider,
     projects: runtime.projects,
     artifacts: runtime.artifacts,
@@ -2198,6 +2201,9 @@ async function workerCommand(rest: string[]): Promise<void> {
     // main model, so retries/timeouts/routing-fallback apply; the id always
     // comes from the run input (SHIP_LOOK_IMAGE_MODEL at enqueue).
     lookImageModel: resolveModel,
+    // A run whose input names its own model (DT1: a delegate target) resolves
+    // it the same way; the id comes from the recorded input.
+    modelFor: resolveModel,
     executor: durableProvider(args, config),
     workdir: usingSandbox ? "/work" : ".",
     ...(codeSearch !== undefined ? { codeSearch } : {}),
