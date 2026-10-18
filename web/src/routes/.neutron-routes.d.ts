@@ -6,6 +6,9 @@ declare module "@neutron-build/core" {
     | "/account"
     | `/api/artifacts/${string}`
     | "/api/bulletin/sweep"
+    | "/api/event-rules"
+    | `/api/event-rules/${string}/dry-run`
+    | "/api/event-sources"
     | "/api/incidents/intake"
     | "/api/policies"
     | `/api/runs/${string}/decide`
@@ -25,6 +28,7 @@ declare module "@neutron-build/core" {
     | "/events"
     | "/fleet"
     | "/health"
+    | `/hooks/events/${string}`
     | "/hooks/forgejo"
     | "/hooks/github"
     | "/hooks/linear"
