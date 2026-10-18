@@ -12,7 +12,7 @@ import { durableAgent } from "./durable.js";
 import type { DurableAgentOutput, ExecutorProvider } from "./durable.js";
 import { HARNESS_VERSIONS } from "./harness.js";
 import { externalAdapters, shq } from "./harness-external.js";
-import { FileHarnessCredentials, MemoryHarnessCredentials, NucleusHarnessCredentials, admitHarnessCredentials, harnessCredentialResolver, profileCredentialNames, resolveCredentialOverlay } from "./harness-credentials.js";
+import { FileHarnessCredentials, MemoryHarnessCredentials, NucleusHarnessCredentials, admitHarnessCredentials, harnessCredentialResolver, harnessDestinationCheck, profileCredentialNames, resolveCredentialOverlay } from "./harness-credentials.js";
 import type { HarnessCredentialRef } from "./harness-credentials.js";
 import { enqueueRun } from "./runtime.js";
 import type { ShipRuntime } from "./runtime.js";
@@ -463,13 +463,121 @@ test("gate: S3 — an unparseable config blob is refused by name, never guessed"
   });
   assert.equal(out.ok, false);
   assert.equal(out.code, "harness-config-unparseable");
+  // JSONC is the same refusal: a comment can hide a destination.
+  const jsonc = await admitHarnessCredentials({
+    refs: [{ id: "opencode" }],
+    project: null,
+    store: undefined,
+    env: { SHIP_HARNESS_CRED: "on", OPENAI_API_KEY: "sk-oai", OPENCODE_CONFIG_CONTENT: '{\n  // routed elsewhere\n  "provider": {}\n}', SHIP_MODEL_ROUTING_POLICY: policy, SHIP_MODEL_ROUTING_DESTINATIONS: "api.openai.com" },
+  });
+  assert.equal(jsonc.ok, false);
+  assert.equal(jsonc.code, "harness-config-unparseable");
 });
 
-test("gate: S3 — SHIP_HARNESS_ENV URL-shaped names the derivation cannot read are refused; gated ones pass", async () => {
+test("gate: S3 — run-time substitutions anywhere in the blob are refused (fail closed)", async () => {
+  const policy = await policyFile([{ host: "api.openai.com", class: "hosted", retention: "none" }]);
+  // The substituted baseURL: the URL parse fails silently in the old reader
+  // and the derivation approved the vendor's default host while the harness
+  // dialed the substituted one.
+  const substituted = await admitHarnessCredentials({
+    refs: [{ id: "opencode" }],
+    project: null,
+    store: undefined,
+    env: {
+      SHIP_HARNESS_CRED: "on",
+      OPENAI_API_KEY: "sk-oai",
+      OPENCODE_CONFIG_CONTENT: JSON.stringify({ provider: { "custom-gw": { options: { baseURL: "https://{env:GW_HOST}/v1", apiKey: "sk-x" } } } }),
+      SHIP_MODEL_ROUTING_POLICY: policy,
+      SHIP_MODEL_ROUTING_DESTINATIONS: "api.openai.com",
+    },
+  });
+  assert.equal(substituted.ok, false);
+  assert.equal(substituted.code, "harness-config-destination-unreadable");
+  assert.match(substituted.reason, /\{env:/);
+  // Even a substitution that only touches a KEY value refuses: the same blob
+  // can substitute into a URL elsewhere, and this reader does not parse
+  // vendor fields it has not been told about.
+  const keyOnly = await admitHarnessCredentials({
+    refs: [{ id: "opencode" }],
+    project: null,
+    store: undefined,
+    env: {
+      SHIP_HARNESS_CRED: "on",
+      OPENAI_API_KEY: "sk-oai",
+      OPENCODE_CONFIG_CONTENT: JSON.stringify({ provider: { openai: { options: { apiKey: "{env:OPENAI_API_KEY}" } } } }),
+      SHIP_MODEL_ROUTING_POLICY: policy,
+      SHIP_MODEL_ROUTING_DESTINATIONS: "api.openai.com",
+    },
+  });
+  assert.equal(keyOnly.ok, false);
+  assert.equal(keyOnly.code, "harness-config-destination-unreadable");
+});
+
+test("gate: S3 — cloud apis, underivable provider defaults, local MCP, share and plugins refuse", async () => {
+  const policy = await policyFile([{ host: "api.openai.com", class: "hosted", retention: "none" }]);
+  const cases: Array<[string, string, RegExp]> = [
+    ["a bedrock api", JSON.stringify({ provider: { "my-bedrock": { api: "bedrock", options: { apiKey: "k" } } } }), /bedrock/],
+    ["a vertex api", JSON.stringify({ provider: { v: { api: "vertex" } } }), /vertex/],
+    ["an unparseable baseURL", JSON.stringify({ provider: { gw: { options: { baseURL: "https://api.gw.example.com/v1", base_url: "not a url" } } } }), /not a URL/],
+    ["an unknown provider default", JSON.stringify({ provider: { "mystery-vendor": { options: { apiKey: "k" } } } }), /mystery-vendor/],
+    ["a local MCP server", JSON.stringify({ provider: {}, mcp: { tools: { type: "local", command: ["npx", "something"] } } }), /local/],
+    ["share", JSON.stringify({ provider: {}, share: true }), /share/],
+    ["plugins", JSON.stringify({ provider: {}, plugin: { pinner: {} } }), /plugin/],
+  ];
+  for (const [what, blob, why] of cases) {
+    const out = await admitHarnessCredentials({
+      refs: [{ id: "opencode" }],
+      project: null,
+      store: undefined,
+      env: { SHIP_HARNESS_CRED: "on", OPENAI_API_KEY: "sk-oai", OPENCODE_CONFIG_CONTENT: blob, SHIP_MODEL_ROUTING_POLICY: policy, SHIP_MODEL_ROUTING_DESTINATIONS: "api.openai.com" },
+    });
+    assert.equal(out.ok, false, what);
+    assert.equal(out.code, "harness-config-destination-unreadable", what);
+    assert.match(out.reason ?? "", why, what);
+  }
+});
+
+test("gate: S3 — known provider defaults and remote MCP urls are derived and judged", async () => {
+  // A provider with a key but no baseURL dials its id's default: the known
+  // ids derive that host, and the policy judges it.
+  const refusedDefault = await policyFile([{ host: "api.openai.com", class: "hosted", retention: "none" }]);
+  const anthropicKey = await admitHarnessCredentials({
+    refs: [{ id: "opencode" }],
+    project: null,
+    store: undefined,
+    env: { SHIP_HARNESS_CRED: "on", OPENAI_API_KEY: "sk-oai", OPENCODE_CONFIG_CONTENT: JSON.stringify({ provider: { anthropic: { options: { apiKey: "sk-ant" } } } }), SHIP_MODEL_ROUTING_POLICY: refusedDefault, SHIP_MODEL_ROUTING_DESTINATIONS: "api.openai.com" },
+  });
+  assert.equal(anthropicKey.ok, false);
+  assert.equal(anthropicKey.code, "destination-not-in-policy", "the derived default (api.anthropic.com) reaches the policy check");
+  assert.match(anthropicKey.reason, /api\.anthropic\.com/);
+  const allowed = await policyFile([
+    { host: "api.openai.com", class: "hosted", retention: "none" },
+    { host: "api.anthropic.com", class: "hosted", retention: "none" },
+    { host: "mcp.example.com", class: "hosted", retention: "none" },
+  ]);
+  const ok = await admitHarnessCredentials({
+    refs: [{ id: "opencode" }],
+    project: null,
+    store: undefined,
+    env: {
+      SHIP_HARNESS_CRED: "on",
+      OPENAI_API_KEY: "sk-oai",
+      OPENCODE_CONFIG_CONTENT: JSON.stringify({ provider: { anthropic: { options: { apiKey: "sk-ant" } } }, mcp: { docs: { type: "remote", url: "https://mcp.example.com/sse" } } }),
+      SHIP_MODEL_ROUTING_POLICY: allowed,
+      SHIP_MODEL_ROUTING_DESTINATIONS: "api.openai.com,api.anthropic.com,mcp.example.com",
+    },
+  });
+  assert.equal(ok.ok, true, ok.ok === false ? ok.reason : "");
+  assert.deepEqual(ok.destinations, { opencode: ["api.openai.com", "api.anthropic.com", "mcp.example.com"] }, "the known default and the remote MCP host are both judged");
+});
+
+test("gate: S3 — SHIP_HARNESS_ENV names outside the flag's allowlist are refused by name; permitted ones pass", async () => {
   const policy = await policyFile([
     { host: "api.openai.com", class: "hosted", retention: "none" },
     { host: "proxy.example.com", class: "hosted", retention: "none" },
   ]);
+  // An unknown URL-shaped addition is refused — not because it LOOKS like a
+  // URL, but because it is not on the allowlist of permitted additions.
   const refused = await admitHarnessCredentials({
     refs: [{ id: "opencode" }],
     project: null,
@@ -477,8 +585,36 @@ test("gate: S3 — SHIP_HARNESS_ENV URL-shaped names the derivation cannot read 
     env: { SHIP_HARNESS_CRED: "on", OPENAI_API_KEY: "sk-oai", SHIP_HARNESS_ENV: "OPENAI_API_KEY,MY_GW_URL", MY_GW_URL: "https://anywhere.example.com", SHIP_MODEL_ROUTING_POLICY: policy, SHIP_MODEL_ROUTING_DESTINATIONS: "api.openai.com" },
   });
   assert.equal(refused.ok, false);
-  assert.equal(refused.code, "harness-env-url-ungated");
+  assert.equal(refused.code, "harness-env-forward-refused");
   assert.match(refused.reason, /MY_GW_URL/);
+  // The explicit never-list: proxy overrides, config-file pointers and
+  // cloud-provider switches are refused with their reason, whatever they
+  // look like and whether or not they are even set.
+  for (const [name, why] of [
+    ["HTTPS_PROXY", /proxy override/],
+    ["https_proxy", /proxy override/i],
+    ["OPENCODE_CONFIG", /config FILE/],
+    ["OPENCODE_CONFIG_DIR", /config DIRECTORY/],
+    ["CLAUDE_CODE_USE_BEDROCK", /Bedrock/],
+    ["AWS_ACCESS_KEY_ID", /cloud-provider/],
+  ] as const) {
+    const out = await admitHarnessCredentials({
+      refs: [{ id: name === "CLAUDE_CODE_USE_BEDROCK" || name === "AWS_ACCESS_KEY_ID" ? "claude-code" : "opencode" }],
+      project: null,
+      store: undefined,
+      env: {
+        SHIP_HARNESS_CRED: "on",
+        ...(name === "CLAUDE_CODE_USE_BEDROCK" || name === "AWS_ACCESS_KEY_ID" ? { ANTHROPIC_AUTH_TOKEN: "tok", ANTHROPIC_BASE_URL: "https://proxy.example.com" } : { OPENAI_API_KEY: "sk-oai" }),
+        SHIP_HARNESS_ENV: `${name === "CLAUDE_CODE_USE_BEDROCK" || name === "AWS_ACCESS_KEY_ID" ? "ANTHROPIC_AUTH_TOKEN,ANTHROPIC_BASE_URL" : "OPENAI_API_KEY"},${name}`,
+        SHIP_MODEL_ROUTING_POLICY: policy,
+        SHIP_MODEL_ROUTING_DESTINATIONS: "api.openai.com,proxy.example.com",
+      },
+    });
+    assert.equal(out.ok, false, `${name} must refuse`);
+    assert.equal(out.code, "harness-env-forward-refused", name);
+    assert.match(out.reason ?? "", why, name);
+    assert.match(out.reason ?? "", new RegExp(name), `${name} is named`);
+  }
   // OPENAI_BASE_URL is in opencode's own derivation (PROVIDER_EGRESS), so
   // forwarding it is fine — and its host is judged like any base URL.
   const ok = await admitHarnessCredentials({
@@ -489,6 +625,14 @@ test("gate: S3 — SHIP_HARNESS_ENV URL-shaped names the derivation cannot read 
   });
   assert.equal(ok.ok, true, ok.ok === false ? ok.reason : "");
   assert.deepEqual(ok.destinations, { opencode: ["proxy.example.com"] });
+  // A deliberate extra (a destination-free knob) is permitted.
+  const extra = await admitHarnessCredentials({
+    refs: [{ id: "opencode" }],
+    project: null,
+    store: undefined,
+    env: { SHIP_HARNESS_CRED: "on", OPENAI_API_KEY: "sk-oai", SHIP_HARNESS_ENV: "OPENAI_API_KEY,OPENCODE_DISABLE_TELEMETRY", SHIP_MODEL_ROUTING_POLICY: policy, SHIP_MODEL_ROUTING_DESTINATIONS: "api.openai.com" },
+  });
+  assert.equal(extra.ok, true, extra.ok === false ? extra.reason : "");
 });
 
 // -------------------------------------------------------- the enqueue surface
@@ -852,6 +996,99 @@ test("worker: S2 NEGATIVE CONTROL — a worker env that dials somewhere else tha
   await assert.rejects(readFile(join(recordTo, "ran")), "the vendor binary never executed");
 });
 
+test("worker: S2 NEGATIVE CONTROL — a flag-on worker refuses an input that records no destinations (enqueued flag-off)", async () => {
+  const recordTo = await mkdtemp(join(tmpdir(), "h2-s2c-rec-"));
+  const bin = await mkdtemp(join(tmpdir(), "h2-s2c-bin-"));
+  const work = await mkdtemp(join(tmpdir(), "h2-s2c-work-"));
+  await fakeBin(bin, "claude", [`if [ "$1" = "--version" ]; then echo "claude 2.1.246 (fake)"; exit 0; fi`, `touch ${shq(join(recordTo, "ran"))}`].join("\n"));
+  const executor = new LocalExecutor({ root: work, env: { PATH: `${bin}:${process.env.PATH ?? ""}` } });
+  const provider: ExecutorProvider = { isolated: true, async create() { return { handle: work }; }, attach: () => executor };
+  // No harnessDestinations on the input at all — the flag-off enqueue shape —
+  // while THIS worker runs with the flag on. Skipping the re-check here is
+  // the hole: nobody ever judged this destination.
+  const wf = durableAgent({
+    model: neverModel,
+    executor: provider,
+    workdir: ".",
+    harnesses: externalAdapters({ env: { ANTHROPIC_AUTH_TOKEN: "tok", ANTHROPIC_BASE_URL: "https://api.z.ai/api/anthropic", SHIP_HARNESS_CRED: "on" } }),
+  });
+  const store = new MemoryEventStore();
+  const outcome = await executeRun({
+    workflow: wf,
+    runId: "run-h2-s2c",
+    store,
+    input: { task: "t", harness: { id: "claude-code", version: HARNESS_VERSIONS["claude-code"]! } },
+  });
+  const out = outcome.output as DurableAgentOutput;
+  assert.equal(out.status, "error");
+  assert.match(out.summary ?? "", /harness-destination-changed/);
+  assert.match(out.summary ?? "", /records no approved provider destinations/);
+  await assert.rejects(readFile(join(recordTo, "ran")), "the vendor binary never executed");
+});
+
+test("worker: S2 — the re-check reads the routing policy and data class from the WORKER env, not the overlaid run env", async () => {
+  const policy = await policyFile([{ host: "api.z.ai", class: "hosted", retention: "none" }]);
+  const base = {
+    id: "claude-code",
+    approved: ["api.z.ai"] as string[],
+    env: { ANTHROPIC_AUTH_TOKEN: "tok", ANTHROPIC_BASE_URL: "https://api.z.ai/api/anthropic", SHIP_HARNESS_CRED: "on" },
+  };
+  // The overlaid env claims a permissive policy and data class; the worker's
+  // own env carries none. The judgment must follow the WORKER: a stored
+  // binding must not steer the judgment of its own delivery.
+  const steered = harnessDestinationCheck({
+    ...base,
+    env: { ...base.env, SHIP_MODEL_ROUTING_POLICY: policy, SHIP_MODEL_ROUTING_DATA_CLASS: "hosted", SHIP_MODEL_ROUTING_DESTINATIONS: "api.z.ai" },
+    policyEnv: {},
+  });
+  assert.match(steered ?? "", /no routing policy is loaded on this worker/);
+  // And the other way round: the worker's env decides even when the run env
+  // carries a stricter-looking set.
+  const workerJudged = harnessDestinationCheck({
+    ...base,
+    env: { ...base.env, SHIP_MODEL_ROUTING_DATA_CLASS: "private" },
+    policyEnv: { SHIP_MODEL_ROUTING_POLICY: policy, SHIP_MODEL_ROUTING_DESTINATIONS: "api.z.ai", SHIP_MODEL_ROUTING_DATA_CLASS: "hosted" },
+  });
+  assert.equal(workerJudged, undefined, "the worker's policy and data class are what the re-check answered");
+  // A worker whose own data class cannot tolerate the host's retention
+  // refuses on the WORKER's facts, whatever the run env claims.
+  const retaining = await policyFile([{ host: "api.z.ai", class: "hosted", retention: "long" }]);
+  const workerRefuses = harnessDestinationCheck({
+    ...base,
+    env: { ...base.env, SHIP_MODEL_ROUTING_DATA_CLASS: "hosted" },
+    policyEnv: { SHIP_MODEL_ROUTING_POLICY: retaining, SHIP_MODEL_ROUTING_DESTINATIONS: "api.z.ai", SHIP_MODEL_ROUTING_DATA_CLASS: "private" },
+  });
+  assert.match(workerRefuses ?? "", /retention-exceeds|does not permit/);
+});
+
+test("worker: S3 — a config blob the worker cannot read refuses the re-check even when the derived hosts match", async () => {
+  // Approved api.openai.com (from the key); the worker's blob carries a
+  // substituted baseURL that derives NOTHING — so the host sets would
+  // compare equal while the harness dialed the substituted host.
+  const refusal = harnessDestinationCheck({
+    id: "opencode",
+    approved: ["api.openai.com"],
+    env: {
+      SHIP_HARNESS_CRED: "on",
+      OPENAI_API_KEY: "sk-oai",
+      OPENCODE_CONFIG_CONTENT: JSON.stringify({ provider: { "custom-gw": { options: { baseURL: "https://{env:GW_HOST}/v1", apiKey: "sk-x" } } } }),
+    },
+  });
+  assert.match(refusal ?? "", /\{env:/);
+  // And a readable blob's hosts are re-judged like any base URL: a blob that
+  // moved since enqueue refuses by name.
+  const moved = harnessDestinationCheck({
+    id: "opencode",
+    approved: ["api.openai.com"],
+    env: {
+      SHIP_HARNESS_CRED: "on",
+      OPENAI_API_KEY: "sk-oai",
+      OPENCODE_CONFIG_CONTENT: JSON.stringify({ provider: { "custom-gw": { options: { baseURL: "https://moved.example.com/v1", apiKey: "sk-x" } } } }),
+    },
+  });
+  assert.match(moved ?? "", /moved since enqueue/);
+});
+
 test("worker: S2 — a worker that cannot re-judge the approved destination refuses rather than inherit the approval", async () => {
   const recordTo = await mkdtemp(join(tmpdir(), "h2-s2b-rec-"));
   const bin = await mkdtemp(join(tmpdir(), "h2-s2b-bin-"));
@@ -1128,7 +1365,9 @@ test("publish: NEGATIVE CONTROL — a workspace carrying a forwarded credential 
   assert.equal(result?.kind, "refused", `the push refused: ${JSON.stringify(result)}`);
   assert.match(result?.message ?? "", /credential-material-in-workspace/);
   assert.match(result?.message ?? "", /ANTHROPIC_AUTH_TOKEN/);
-  assert.match(result?.message ?? "", /agent-env-dump\.txt/);
+  // The refusal names the credential and a count — never a filename (an
+  // agent controls those) and never the value.
+  assert.ok(!(result?.message ?? "").includes("agent-env-dump.txt"), "no filename in the refusal");
   assert.ok(!JSON.stringify(events).includes("sk-ant-PUBLISH-LEAK-9876"), "the value is never in the log");
   // The branch never left the sandbox: the bare repo has only the seed commit.
   const branches = await seeder.exec(`git --git-dir ${shq(join(bare, "owner/repo.git"))} for-each-ref --format='%(refname)' refs/heads`);

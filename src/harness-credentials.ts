@@ -6,7 +6,7 @@ import { stateDir } from "./run-store.js";
 import { upsertByKey } from "./upsert.js";
 import { seal, unseal, sealingStatus } from "./runtime-config.js";
 import { HARNESS_VERSIONS, NATIVE_HARNESS_ID } from "./harness.js";
-import { externalHarnessConfig, gatedForwardedUrlNames, opencodeConfigContentHosts, providerEgressAllow, ungatedForwardedUrlNames } from "./harness-external.js";
+import { externalHarnessConfig, gatedForwardedUrlNames, opencodeConfigDestinations, permittedForwardAdditions, providerEgressAllow, refusedForwardNames } from "./harness-external.js";
 import { loadRoutingPolicy } from "./model-routing-policy.js";
 import { routingTaskFromEnv } from "./model-routing-wire.js";
 import { checkDestinationHost } from "./model-routing.js";
@@ -49,12 +49,23 @@ import type { NucleusPgwire } from "./nucleus-pgwire.js";
  *   credential-destination-unknown  a credential travels but no provider host
  *                                   can be derived to judge (a subscription
  *                                   token — Decision 11's deferred case)
- *   harness-env-url-ungated         SHIP_HARNESS_ENV forwards a URL-shaped
- *                                   name the host derivation does not cover,
- *                                   so a rerouted dial could not be judged
+ *   harness-env-forward-refused     SHIP_HARNESS_ENV forwards a name the flag
+ *                                   does not permit — an unknown addition, a
+ *                                   proxy override, a config-file pointer, a
+ *                                   cloud-provider switch (Bedrock/Vertex):
+ *                                   a reroute the destination derivation
+ *                                   cannot read
  *   harness-config-unparseable      OPENCODE_CONFIG_CONTENT is not JSON, so
- *                                   the provider hosts it declares cannot be
+ *                                   the destinations it declares cannot be
  *                                   read (refused rather than guessed)
+ *   harness-config-destination-unreadable
+ *                                   OPENCODE_CONFIG_CONTENT declares a
+ *                                   destination that cannot be derived
+ *                                   exactly — a run-time {env:}/{file:}
+ *                                   substitution, a bedrock/vertex api, a
+ *                                   provider with no baseURL and no known
+ *                                   default host, a local MCP server, share
+ *                                   or plugins
  *   no-routing-policy / routing-policy-invalid /
  *   destination-not-in-policy / destination-not-allowed / retention-exceeds
  *                                   the DT2 data-class gate, applied to every
@@ -65,7 +76,8 @@ import type { NucleusPgwire } from "./nucleus-pgwire.js";
  * ACTUALLY deliver (harnessDestinationCheck): the gate at enqueue judged the
  * enqueuing process's env, and a worker whose env differs must refuse by name
  * (harness-destination-changed) rather than dial somewhere admission never
- * approved.
+ * approved. A flag-ON worker also refuses an input that records no approved
+ * destinations — it was enqueued before the gate judged any.
  *
  * The keying discipline (hash of a length-prefixed tuple, so an arbitrary
  * project or profile cannot escape or exceed a store key) is imitated from T3
@@ -658,29 +670,39 @@ export async function admitHarnessCredentials(args: {
     // sandboxEgressAllow derivation see the wire the harness will dial.
     const overlay = Object.fromEntries(delivered.map((b) => [b.envName, b.value]));
     const derivedEnv: NodeJS.ProcessEnv = Object.keys(overlay).length > 0 ? { ...env, ...overlay } : env;
-    // S3: a URL-shaped name SHIP_HARNESS_ENV added whose host the derivation
-    // does not cover. The value could reroute the vendor's dial anywhere, and
-    // providerEgressAllow cannot read it, so the gate refuses rather than
-    // approve an env it cannot judge. Names the derivation DOES cover pass —
-    // their hosts are derived and judged below like any base URL.
-    const ungated = ungatedForwardedUrlNames(ref.id, env);
-    if (ungated.length > 0) {
+    // S3: SHIP_HARNESS_ENV names the flag does not permit. A forwarded name
+    // is not judged by what it looks like — a name that does not look like a
+    // URL can still reroute a dial (a proxy override, a config-file pointer,
+    // a cloud-provider switch), and the host derivation cannot read any of
+    // them — so under the flag an addition must be on the harness's own
+    // lists (defaults, gated base-URL variables, deliberate extras), and
+    // everything else refuses with its reason.
+    const forwardRefusals = refusedForwardNames(ref.id, env);
+    if (forwardRefusals.length > 0) {
+      const additions = permittedForwardAdditions(ref.id);
       return refuse(
-        "harness-env-url-ungated",
-        `${ref.id} forwards ${ungated.join(", ")} (SHIP_HARNESS_ENV), a URL-shaped name whose host the destination derivation does not cover, so where this project's data would go cannot be judged. Forward base URLs the derivation reads (${gatedForwardedUrlNames(ref.id).join(", ") || "none for this harness"}), or leave the host to the project's declared egress list.`,
+        "harness-env-forward-refused",
+        `${ref.id} forwards ${forwardRefusals.map((f) => f.name).join(", ")} (SHIP_HARNESS_ENV), which SHIP_HARNESS_CRED does not permit: ` +
+          `${forwardRefusals.map((f) => `${f.name} ${f.why}`).join("; ")}. ` +
+          `Permitted additions: ${additions.join(", ") || "none"}; base URLs ride ${gatedForwardedUrlNames(ref.id).join(", ") || "no variable this harness reads"}, and their hosts are judged like any base URL.`,
       );
     }
-    // S3: an opencode config blob can declare ANY provider baseURL. Under the
-    // flag those hosts are derived like any base URL (providerEgressAllow);
-    // a blob that is not JSON declares hosts the gate cannot read, and
-    // guessing is the one thing this gate must not do.
+    // S3: an opencode config blob can route the dial for ANY provider, pull
+    // it onto a cloud provider, or add destinations nothing else sees
+    // (remote MCP, share, plugins). Under the flag every destination the
+    // blob declares or implies is derived exactly and judged below; a blob
+    // whose destinations cannot be read exactly refuses rather than approve
+    // by guess.
     if (ref.id === "opencode" && config.forward.includes("OPENCODE_CONFIG_CONTENT")) {
       const content = (derivedEnv.OPENCODE_CONFIG_CONTENT ?? "").trim();
-      if (content !== "" && opencodeConfigContentHosts(content) === undefined) {
-        return refuse(
-          "harness-config-unparseable",
-          "OPENCODE_CONFIG_CONTENT is not JSON, so the provider base URLs it declares cannot be read and the routing policy cannot judge where this project's data would go. Store or set a parseable config, or declare the hosts on the project's egress list.",
-        );
+      if (content !== "") {
+        const blob = opencodeConfigDestinations(content);
+        if (blob.refusal !== undefined) {
+          return refuse(
+            blob.refusal.code === "unparseable" ? "harness-config-unparseable" : "harness-config-destination-unreadable",
+            `OPENCODE_CONFIG_CONTENT ${blob.refusal.why}, so the routing policy cannot judge where this project's data would go. Store or set a config whose destinations can be read exactly, or declare the hosts on the project's egress list.`,
+          );
+        }
       }
     }
     const hosts = [...new Set(providerEgressAllow([ref], derivedEnv).map((entry) => entry.split(":")[0]!.toLowerCase()))];
@@ -732,16 +754,25 @@ export async function admitHarnessCredentials(args: {
  * The admission gate judged the ENQUEUING process's env; the worker's env is
  * a different process's, and the run's own overlay is resolved here, at exec
  * time. So the destination is re-derived from the run env with exactly the
- * derivation admission used (providerEgressAllow, flag forced on — the
- * input's destinations field is the proof the enqueue ran the gate) and:
+ * derivation admission used (providerEgressAllow, flag forced on) and:
  *
+ *   - an input that records NO approved destinations is refused: it was
+ *     enqueued with the flag off (or before the gate existed), nobody judged
+ *     its destination, and "the re-check has nothing to compare" is a hole,
+ *     not a pass;
  *   - compared with the hosts admission approved and recorded on the input:
  *     a worker whose base URL, model, forward list or config blob moved the
  *     dial elsewhere refuses rather than sending data somewhere the policy
  *     never judged;
- *   - re-checked against the WORKER's routing policy: the enqueue approved
- *     under its own policy, and a deployment whose workers run a different
- *     (or missing) policy must not inherit the approval.
+ *   - the config blob is judged on the WORKER too, over the env this exec
+ *     delivers: a blob the derivation cannot read derives nothing, and
+ *     "nothing moved" must not read as approved while the blob routes the
+ *     dial;
+ *   - re-checked against the WORKER's routing policy and data class, read
+ *     from the worker's OWN env (policyEnv, never the overlaid run env — a
+ *     stored binding must not steer the judgment of its own delivery): the
+ *     enqueue approved under its own policy, and a deployment whose workers
+ *     run a different (or missing) policy must not inherit the approval.
  *
  * Undefined means the destination stands. A refusal names
  * `harness-destination-changed` and is recorded on the harness-run step —
@@ -751,22 +782,41 @@ export function harnessDestinationCheck(args: {
   id: string;
   /** The destinations the enqueue's gate approved for this profile (input.harnessDestinations). */
   approved: string[] | undefined;
-  /** The env this attempt's exec will deliver (worker env + unsealed overlay). */
+  /** The env this attempt's exec will deliver (worker env + unsealed overlay, flag forced on). */
   env: NodeJS.ProcessEnv;
+  /**
+   * The WORKER's own env, for the routing policy and the data class.
+   * Defaults to process.env. Deliberately not `env`: the overlaid run env
+   * carries unsealed store values under operator-chosen names.
+   */
+  policyEnv?: NodeJS.ProcessEnv;
 }): string | undefined {
   const { env } = args;
+  const policyEnv = args.policyEnv ?? process.env;
   const refuse = (why: string): string => `run refused (harness-destination-changed): ${why}. The agent was not started.`;
-  const ungated = ungatedForwardedUrlNames(args.id, env);
-  if (ungated.length > 0) {
-    return refuse(`${args.id} would forward ${ungated.join(", ")} on this worker (SHIP_HARNESS_ENV), a URL-shaped name whose host the destination derivation cannot read`);
+  const forwardRefusals = refusedForwardNames(args.id, env);
+  if (forwardRefusals.length > 0) {
+    return refuse(
+      `${args.id} would forward ${forwardRefusals.map((f) => f.name).join(", ")} on this worker (SHIP_HARNESS_ENV): ${forwardRefusals.map((f) => `${f.name} ${f.why}`).join("; ")}`,
+    );
+  }
+  // S3: judge the blob over the env this exec delivers BEFORE comparing host
+  // sets — a refusing blob derives nothing, and "nothing derived" would
+  // otherwise compare equal to an approval that never saw it.
+  if (args.id === "opencode" && externalHarnessConfig(args.id, env).forward.includes("OPENCODE_CONFIG_CONTENT")) {
+    const content = (env.OPENCODE_CONFIG_CONTENT ?? "").trim();
+    if (content !== "") {
+      const blob = opencodeConfigDestinations(content);
+      if (blob.refusal !== undefined) {
+        return refuse(`OPENCODE_CONFIG_CONTENT on this worker ${blob.refusal.why}, so the destination it dials cannot be re-judged at exec time`);
+      }
+    }
   }
   const derived = [...new Set(providerEgressAllow([{ id: args.id }], env).map((entry) => entry.split(":")[0]!.toLowerCase()))];
   if (args.approved === undefined) {
-    // A profile admission recorded nothing for: the honest match is "still
-    // nothing derivable" — anything else moved since enqueue and refuses.
-    return derived.length === 0
-      ? undefined
-      : refuse(`admission approved no provider host for ${args.id}, but the env this exec would deliver dials ${derived.join(", ")}`);
+    return refuse(
+      `${args.id}'s input records no approved provider destinations — the run was enqueued before SHIP_HARNESS_CRED judged any (the flag was off), so this worker has nothing admission saw to re-judge. Re-enqueue the run with SHIP_HARNESS_CRED=on.`,
+    );
   }
   const approved = [...new Set(args.approved.map((host) => host.toLowerCase()))];
   const moved = [...derived.filter((host) => !approved.includes(host)), ...approved.filter((host) => !derived.includes(host))];
@@ -776,14 +826,14 @@ export function harnessDestinationCheck(args: {
     );
   }
   if (derived.length === 0) return undefined;
-  const loaded = loadRoutingPolicy(env);
+  const loaded = loadRoutingPolicy(policyEnv);
   if (loaded === undefined) {
     return refuse(`no routing policy is loaded on this worker (SHIP_MODEL_ROUTING_POLICY), so ${args.id}'s provider host ${derived.join(", ")} cannot be re-judged at exec time`);
   }
   if (!loaded.ok) {
     return refuse(`the routing policy does not load on this worker (${loaded.errors.join("; ")}), so ${args.id}'s provider destination cannot be re-judged at exec time`);
   }
-  const task = { ...routingTaskFromEnv(env), uncertainSideEffects: false };
+  const task = { ...routingTaskFromEnv(policyEnv), uncertainSideEffects: false };
   for (const host of derived) {
     const check = checkDestinationHost(loaded.policy, host, task);
     if (!check.ok) {

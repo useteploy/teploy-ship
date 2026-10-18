@@ -227,45 +227,251 @@ function egressEntryForBaseURL(raw: string): string | undefined {
   return egressEntryError(entry) === null ? entry : undefined;
 }
 
-/** A forward name that looks like it carries a URL (S3's rule is a NAME heuristic). */
-const URL_SHAPED_NAME = /^(?:[A-Z][A-Z0-9_]*_)?(?:URL|URI|ENDPOINT)$/;
+/**
+ * Known opencode provider ids and the host each one's DEFAULT dial is, for a
+ * config-blob provider that carries no baseURL of its own. From the provider
+ * registry opencode itself reads (models.dev, 2026-10-17), cut to the
+ * providers Ship's own key table (PROVIDER_EGRESS) knows the defaults of. An
+ * id not here and declaring no baseURL is refused under the flag: its
+ * default host is a fact of the vendor registry, and guessing a host into a
+ * data-destination gate is the one thing this file must not do.
+ */
+const OPENCODE_PROVIDER_DEFAULT_HOSTS: Record<string, string> = {
+  anthropic: "api.anthropic.com",
+  openai: "api.openai.com",
+  openrouter: "openrouter.ai",
+  zhipu: "api.z.ai",
+  "zai-coding-plan": "api.z.ai",
+  google: "generativelanguage.googleapis.com",
+};
 
 /**
- * S3 (SHIP_HARNESS_CRED): the provider hosts an opencode config blob
- * declares. OPENCODE_CONFIG_CONTENT is on opencode's default forward list and
- * can name a baseURL for ANY provider — a dial the base-URL table above
- * cannot see. Under the flag those hosts are derived like any base URL; a
- * blob that is not JSON declares hosts this function cannot read, which it
- * says by returning undefined (the enqueue gate refuses on that rather than
- * guess, and this derivation adds nothing).
+ * opencode `api` values that move the dial to a cloud provider (Bedrock,
+ * Vertex): the host then depends on the account and region no env var can
+ * name, so under the flag those provider entries are refused rather than
+ * approved by guess — the same rule Decision 11 applies to subscription
+ * tokens.
  */
-export function opencodeConfigContentHosts(raw: string): string[] | undefined {
+const OPENCODE_CLOUD_APIS = new Set(["bedrock", "vertex"]);
+
+/**
+ * opencode config substitutions that resolve at RUN time on the worker —
+ * `{env:VAR}` reads the exec env, `{file:PATH}` and `{command:…}` the
+ * container's disk. A baseURL carrying one dials a host nothing can judge at
+ * enqueue, so ANY occurrence anywhere in the blob refuses it: the same blob
+ * can substitute into a key harmlessly and into a URL dangerously, and
+ * telling those apart would mean parsing every vendor field this reader has
+ * not been told about.
+ */
+const OPENCODE_RUN_TIME_SUBSTITUTIONS = ["{env:", "{file:", "{command:"];
+
+/** What an opencode config blob declares about where the harness dials. */
+export interface OpencodeConfigDestinations {
+  /** Every destination host the blob declares or implies (never a port — the derivation adds 443). */
+  hosts: string[];
+  /**
+   * S3 (SHIP_HARNESS_CRED): why the blob's destinations CANNOT be derived
+   * exactly. Present means the enqueue gate refuses and the worker's
+   * re-check refuses; the derivation adds nothing, because an empty
+   * host list read as "approved" would wave the vendor's default host
+   * through while the harness dialed somewhere the blob names.
+   */
+  refusal?: { code: "unparseable" | "unreadable"; why: string };
+}
+
+/**
+ * S3 (SHIP_HARNESS_CRED): read an opencode config blob's data destinations
+ * EXACTLY, or refuse to read them at all. OPENCODE_CONFIG_CONTENT is on
+ * opencode's default forward list and can route the dial for ANY provider
+ * (a baseURL), pull it onto a cloud provider (the `api` field), or add
+ * destinations nothing else sees (remote MCP servers, `share`, `plugin`) —
+ * so under the flag every destination the blob declares or implies is
+ * derived here and judged like any base URL, and anything this reader
+ * cannot turn into a host is a refusal, never a silent skip.
+ */
+export function opencodeConfigDestinations(raw: string): OpencodeConfigDestinations {
+  const refuse = (code: "unparseable" | "unreadable", why: string): OpencodeConfigDestinations => ({ hosts: [], refusal: { code, why } });
+  for (const token of OPENCODE_RUN_TIME_SUBSTITUTIONS) {
+    if (raw.includes(token)) {
+      return refuse("unreadable", `carries a ${token}…} substitution, which resolves on the worker at run time, so the host it names cannot be judged at enqueue`);
+    }
+  }
   let doc: unknown;
   try {
     doc = JSON.parse(raw);
   } catch {
-    return undefined;
+    // JSONC included: a blob a parser cannot read is a blob whose
+    // destinations nobody can read.
+    return refuse("unparseable", "is not JSON (comments and trailing commas are refused too)");
   }
-  const providers = doc !== null && typeof doc === "object" ? (doc as { provider?: unknown }).provider : undefined;
-  if (providers === null || typeof providers !== "object") return [];
+  if (doc === null || typeof doc !== "object" || Array.isArray(doc)) return refuse("unparseable", "is not a JSON object at the top level");
+  const record = doc as Record<string, unknown>;
   const hosts: string[] = [];
-  for (const entry of Object.values(providers as Record<string, unknown>)) {
-    if (entry === null || typeof entry !== "object") continue;
-    const options = (entry as { options?: unknown }).options;
-    const bases = [
-      ...(options !== null && typeof options === "object" ? [readString(options, "baseURL"), readString(options, "base_url")] : []),
-      readString(entry, "baseURL"),
-    ].filter((base): base is string => base !== undefined);
-    for (const base of bases) {
-      try {
-        const host = new URL(base).hostname.toLowerCase();
-        if (host !== "" && !hosts.includes(host)) hosts.push(host);
-      } catch {
-        // Not a URL the harness could dial either; nothing to derive from it.
+  const push = (host: string): void => {
+    if (host !== "" && !hosts.includes(host)) hosts.push(host);
+  };
+  const hostOf = (url: string): string | undefined => {
+    try {
+      const host = new URL(url).hostname.toLowerCase();
+      return host === "" ? undefined : host;
+    } catch {
+      return undefined;
+    }
+  };
+  const providers = record.provider;
+  if (providers !== undefined) {
+    if (providers === null || typeof providers !== "object" || Array.isArray(providers)) return refuse("unreadable", "has a provider table that is not a JSON object");
+    for (const [id, value] of Object.entries(providers as Record<string, unknown>)) {
+      if (value === null || typeof value !== "object" || Array.isArray(value)) return refuse("unreadable", `has a ${id} provider entry that is not a JSON object`);
+      const entry = value as Record<string, unknown>;
+      const api = typeof entry.api === "string" ? entry.api.trim().toLowerCase() : "";
+      if (OPENCODE_CLOUD_APIS.has(api)) {
+        return refuse("unreadable", `has a ${id} provider whose api is "${api}", a cloud-provider switch whose hosts depend on the account and region and cannot be derived`);
       }
+      const options =
+        entry.options !== null && typeof entry.options === "object" && !Array.isArray(entry.options) ? (entry.options as Record<string, unknown>) : {};
+      const bases = [readString(options, "baseURL"), readString(options, "base_url"), readString(entry, "baseURL")].filter(
+        (base): base is string => base !== undefined,
+      );
+      if (bases.length > 0) {
+        // A baseURL the URL constructor cannot read used to be swallowed
+        // (nothing derived, nothing refused) while the harness dialed it.
+        for (const base of bases) {
+          const host = hostOf(base);
+          if (host === undefined) {
+            return refuse("unreadable", `has a ${id} provider whose baseURL (${JSON.stringify(base.slice(0, 60))}) is not a URL a host can be read from`);
+          }
+          push(host);
+        }
+        continue;
+      }
+      // No baseURL: the provider dials its id's default — a host here for
+      // the ids Ship knows, a refusal for the ones it cannot look up.
+      const known = OPENCODE_PROVIDER_DEFAULT_HOSTS[id];
+      if (known === undefined) {
+        return refuse(
+          "unreadable",
+          `has a ${id} provider with no baseURL and an id whose default host Ship does not know (${Object.keys(OPENCODE_PROVIDER_DEFAULT_HOSTS).join(", ")})`,
+        );
+      }
+      push(known);
     }
   }
-  return hosts;
+  const mcp = record.mcp;
+  if (mcp !== undefined) {
+    if (mcp === null || typeof mcp !== "object" || Array.isArray(mcp)) return refuse("unreadable", "has an mcp table that is not a JSON object");
+    for (const [name, value] of Object.entries(mcp as Record<string, unknown>)) {
+      if (value === null || typeof value !== "object" || Array.isArray(value)) return refuse("unreadable", `has a ${name} MCP server entry that is not a JSON object`);
+      const server = value as Record<string, unknown>;
+      const type = typeof server.type === "string" ? server.type.trim().toLowerCase() : "";
+      const url = readString(server, "url");
+      // Remote servers are derived and gated; anything else is a command
+      // Ship cannot judge.
+      const host = type === "remote" && url !== undefined ? hostOf(url) : undefined;
+      if (host === undefined) {
+        return refuse("unreadable", `has a ${name} MCP server that is not a remote server with a readable url (a local command server's egress no derivation can judge)`);
+      }
+      push(host);
+    }
+  }
+  if (record.share !== undefined && record.share !== false) {
+    return refuse("unreadable", "enables opencode share, which publishes the session to opencode's cloud service");
+  }
+  const plugin = record.plugin;
+  if (plugin !== undefined && (plugin === null || typeof plugin !== "object" || Array.isArray(plugin) ? true : Object.keys(plugin).length > 0)) {
+    return refuse("unreadable", "declares opencode plugins, code that runs inside the harness and can dial anywhere");
+  }
+  return { hosts };
+}
+
+/**
+ * Env names SHIP_HARNESS_ENV may ADD to a harness's forward list under
+ * SHIP_HARNESS_CRED — S3's remedy, an explicit allowlist. A name heuristic
+ * cannot tell which additions reroute a dial and which are inert, so nothing
+ * is judged by what it looks like: an operator-chosen forward name is
+ * permitted only when it is on this small, deliberate list, and everything
+ * else refuses by name (refusedForwardNames below). Additions here must be
+ * knobs that cannot move a data destination.
+ */
+const EXTRA_FORWARD_ALLOWED: Record<string, readonly string[]> = {
+  // claude: model selection, spend and noise knobs. The dial stays wherever
+  // ANTHROPIC_BASE_URL (gated) or the vendor default put it.
+  "claude-code": [
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_SMALL_FAST_MODEL",
+    "ANTHROPIC_CUSTOM_HEADERS",
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    "BASH_DEFAULT_TIMEOUT_MS",
+    "BASH_MAX_TIMEOUT_MS",
+    "BASH_MAX_OUTPUT_LENGTH",
+    "MCP_TIMEOUT",
+    "MCP_TOOL_TIMEOUT",
+    "USE_BUILTIN_RIPGREP",
+  ],
+  // opencode: telemetry and update opt-outs, which REDUCE where data goes.
+  opencode: ["OPENCODE_DISABLE_TELEMETRY", "OPENCODE_DISABLE_UPDATE"],
+  codex: ["RUST_LOG"],
+};
+
+/**
+ * Forward names refused wherever they appear in a forward list, each with its
+ * reason: the reroutes and pointers the destination derivation cannot read
+ * at all. Matched case-insensitively (forwardEnv only delivers the upper
+ * spelling, but a lower-case override in SHIP_HARNESS_ENV should refuse with
+ * the reason, not pass because it is inert).
+ */
+const FORWARD_NEVER: Record<string, string> = {
+  HTTP_PROXY: "a proxy override would reroute every dial the destination gate judged",
+  HTTPS_PROXY: "a proxy override would reroute every dial the destination gate judged",
+  ALL_PROXY: "a proxy override would reroute every dial the destination gate judged",
+  NO_PROXY: "a proxy carve-out would send dials around the route the egress list judged",
+  OPENCODE_CONFIG: "a config FILE path declares destinations Ship cannot read; put the config in OPENCODE_CONFIG_CONTENT, which the gate parses",
+  OPENCODE_CONFIG_DIR: "a config DIRECTORY path declares destinations Ship cannot read; put the config in OPENCODE_CONFIG_CONTENT, which the gate parses",
+  CLAUDE_CODE_USE_BEDROCK: "a Bedrock switch dials cloud-provider hosts no derivation can read",
+  CLAUDE_CODE_USE_VERTEX: "a Vertex switch dials cloud-provider hosts no derivation can read",
+  AWS_BEARER_TOKEN_BEDROCK: "a Bedrock credential dials cloud-provider hosts no derivation can read",
+  AWS_ACCESS_KEY_ID: "a cloud-provider credential dials hosts no derivation can read",
+  AWS_SECRET_ACCESS_KEY: "a cloud-provider credential dials hosts no derivation can read",
+  AWS_SESSION_TOKEN: "a cloud-provider credential dials hosts no derivation can read",
+  GOOGLE_APPLICATION_CREDENTIALS: "a cloud-provider credential dials hosts no derivation can read",
+  GOOGLE_CLOUD_PROJECT: "a cloud-provider credential dials hosts no derivation can read",
+  GOOGLE_VERTEX_PROJECT: "a Vertex credential dials hosts no derivation can read",
+  GOOGLE_VERTEX_LOCATION: "a Vertex credential dials hosts no derivation can read",
+  ANTHROPIC_VERTEX_PROJECT_ID: "a Vertex credential dials hosts no derivation can read",
+};
+
+/** One SHIP_HARNESS_ENV name this harness may not forward under the flag, with the reason. */
+export interface ForwardRefusal {
+  name: string;
+  why: string;
+}
+
+/** The deliberate SHIP_HARNESS_ENV additions one harness permits under the flag (S3's allowlist). */
+export function permittedForwardAdditions(id: string): string[] {
+  return [...(EXTRA_FORWARD_ALLOWED[id] ?? [])];
+}
+
+/**
+ * S3 (SHIP_HARNESS_CRED): forward names this harness's SHIP_HARNESS_ENV list
+ * may NOT carry — every name that is not on the harness's default forward
+ * list, not a base-URL variable the host derivation reads, and not a
+ * deliberate extra (EXTRA_FORWARD_ALLOWED). Checked at enqueue under the
+ * flag and again at exec; each refused name carries its reason so the
+ * refusal can say what to do instead.
+ */
+export function refusedForwardNames(id: string, env: NodeJS.ProcessEnv = process.env): ForwardRefusal[] {
+  const spec = PROVIDER_EGRESS[id];
+  if (spec === undefined) return [];
+  const forward = externalHarnessConfig(id, env).forward;
+  const defaults = DEFAULT_FORWARDED_ENV[id] ?? [];
+  const allowed = new Set<string>([...defaults, ...spec.bases.map((base) => base.env), ...(EXTRA_FORWARD_ALLOWED[id] ?? [])]);
+  return forward
+    .filter((name) => !allowed.has(name))
+    .map((name) => ({
+      name,
+      why: FORWARD_NEVER[name.toUpperCase()] ?? `is not one of ${id}'s permitted SHIP_HARNESS_ENV additions under SHIP_HARNESS_CRED`,
+    }));
 }
 
 function readString(record: object, key: string): string | undefined {
@@ -275,27 +481,12 @@ function readString(record: object, key: string): string | undefined {
 
 /**
  * The URL-shaped forward names whose hosts the derivation DOES read, per
- * harness — the remedy half of the S3 refusal (forward one of these and its
- * host is judged like any base URL).
+ * harness — the base-URL variables a SHIP_HARNESS_ENV addition may carry
+ * under the flag: forward one of these and its host is judged like any base
+ * URL.
  */
 export function gatedForwardedUrlNames(id: string): string[] {
   return (PROVIDER_EGRESS[id]?.bases ?? []).map((base) => base.env);
-}
-
-/**
- * S3 (SHIP_HARNESS_CRED): forward-list names that look like URL/base-URL
- * variables the host derivation does NOT cover — SHIP_HARNESS_ENV additions,
- * checked under the flag at enqueue and again at exec. A value like that
- * could reroute the vendor's dial to a host nothing judges, so it is refused
- * by name rather than forwarded on trust that the vendor ignores it.
- */
-export function ungatedForwardedUrlNames(id: string, env: NodeJS.ProcessEnv = process.env): string[] {
-  const spec = PROVIDER_EGRESS[id];
-  if (spec === undefined) return [];
-  const forward = externalHarnessConfig(id, env).forward;
-  const defaults = DEFAULT_FORWARDED_ENV[id] ?? [];
-  const gated = new Set(spec.bases.map((base) => base.env));
-  return forward.filter((name) => URL_SHAPED_NAME.test(name) && !gated.has(name) && !defaults.includes(name));
 }
 
 /**
@@ -345,15 +536,16 @@ export function providerEgressAllow(refs: readonly { id: string }[], env: NodeJS
       if (key.envs.some((name) => held(name) !== undefined)) push(`${key.host}:443`);
     }
     // S3 (SHIP_HARNESS_CRED=on): an opencode config blob declares provider
-    // baseURLs nothing above can see. Under the flag those hosts are derived
-    // like any base URL — the daemon allowlist admits exactly the hosts the
-    // enqueue gate judges. An unparseable blob derives nothing here; the gate
-    // refuses it by name instead. Flag off changes nothing: byte-identical
-    // derivations, the fence every other flag-gated behaviour keeps.
+    // destinations nothing above can see. Under the flag those hosts are
+    // derived exactly like any base URL — the daemon allowlist admits
+    // exactly the hosts the enqueue gate judges. A blob whose destinations
+    // cannot be read exactly derives nothing here; the gate refuses it by
+    // name instead. Flag off changes nothing: byte-identical derivations,
+    // the fence every other flag-gated behaviour keeps.
     if (ref.id === "opencode" && harnessCredEnabled(env)) {
       const content = held("OPENCODE_CONFIG_CONTENT");
       if (content !== undefined) {
-        for (const host of opencodeConfigContentHosts(content) ?? []) push(`${host}:443`);
+        for (const host of opencodeConfigDestinations(content).hosts) push(`${host}:443`);
       }
     }
   }
@@ -1359,18 +1551,38 @@ export function externalAdapter(
       const credentialFailure = credentials.failure;
       const runEnv: NodeJS.ProcessEnv =
         credentialFailure === undefined && Object.keys(credentials.overlay).length > 0 ? { ...env, ...credentials.overlay } : env;
+      // H2 hardening: arm the workspace's live secret set OUTSIDE every
+      // recorded step. The step body below used to be the only place the
+      // delivered values reached it, and a replayed or resumed run replays
+      // the RECORDED harness-run value without executing the body — so the
+      // publish gate and the snapshot hygiene scans after the resume would
+      // judge a tree with no needles at all. Runtime state, never recorded.
+      const armed = forwardEnv(externalHarnessConfig(id, runEnv).forward, runEnv);
+      if (ws.secrets !== undefined) {
+        for (const secret of armed.secrets) {
+          if (!ws.secrets.some((known) => known.name === secret.name && known.value === secret.value)) ws.secrets.push(secret);
+        }
+      }
       // S2: re-judge the destination over the env this exec will really
       // deliver — the gate at enqueue judged the enqueue host's env, and a
       // worker whose env or store moved the dial elsewhere refuses by name
-      // rather than send data where admission never approved. Gated on the
-      // input's recorded destinations (absent on every flag-off input), and
-      // the flag is forced on for the derivation so it matches the enqueue's.
+      // rather than send data where admission never approved. Runs on every
+      // flag-ON worker: an input that records no destinations at all was
+      // enqueued before the gate judged any (flag off, or older code), and
+      // this worker refuses it rather than skip the re-check — inheriting
+      // "nobody looked" is not the same as being approved. The flag is
+      // forced on inside the derivation env so it reads the config blob
+      // exactly as the enqueue's derivation did; the routing policy and the
+      // data class are read from the WORKER's own env (policyEnv) — the
+      // overlaid run env carries unsealed store values, and a binding must
+      // not steer the judgment of its own delivery.
       const destinationFailure =
-        task.input.harnessDestinations !== undefined && credentialFailure === undefined
+        harnessCredEnabled(env) && credentialFailure === undefined
           ? harnessDestinationCheck({
               id,
-              approved: task.input.harnessDestinations[id],
+              approved: task.input.harnessDestinations?.[id],
               env: { ...runEnv, [HARNESS_CRED_FLAG]: "on" },
+              policyEnv: env,
             })
           : undefined;
       const startupFailure = credentialFailure ?? destinationFailure;
@@ -1400,20 +1612,12 @@ export function externalAdapter(
         const config = externalHarnessConfig(id, runEnv);
         const forwarded = forwardEnv(config.forward, runEnv);
         const priced = spec.priced(forwarded.names);
-        // H2 hardening: remember the exact values this run handed the vendor
-        // on the workspace's live secret set (runtime state, never recorded),
-        // so the publish gate and the snapshot hygiene steps can refuse a
-        // tree or an image that carries one (thread-warm.ts
-        // workspaceSecretValueReason).
-        if (ws.secrets !== undefined) {
-          for (const secret of forwarded.secrets) {
-            if (!ws.secrets.some((known) => known.name === secret.name && known.value === secret.value)) ws.secrets.push(secret);
-          }
-        }
         // The vendor process and every tool it spawns inherit the forwarded
         // credentials, so an agent that prints `env` prints them. Every value
-        // Ship handed over (plus the run's forge token) is replaced in the
-        // output BEFORE it is parsed, recorded or shown live.
+        // Ship handed over rides the workspace's live secret set (armed
+        // above, OUTSIDE the step, so a replayed run keeps the scan too)
+        // plus the run's own forge tokens, and is replaced in the output
+        // BEFORE it is parsed, recorded or shown live.
         const secrets: KnownSecret[] = [...forwarded.secrets, ...(ws.secrets ?? [])];
         try {
           await writeFiles();

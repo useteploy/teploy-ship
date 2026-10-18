@@ -255,14 +255,20 @@ by name before any run exists:
   subscription token — is refused (`credential-destination-unknown`): per
   Decision 11 API keys are the default path, and subscription logins are a
   later, explicitly opted-in slice (H7). Under the flag the destination set
-  also covers what nothing else can read: the provider `baseURL`s an
-  `OPENCODE_CONFIG_CONTENT` blob declares are derived like any base URL, and
-  a blob that is not JSON is refused (`harness-config-unparseable`) rather
-  than guessed at; a URL-shaped name `SHIP_HARNESS_ENV` added whose host the
-  derivation does not cover is refused (`harness-env-url-ungated`) — forward
-  a base URL the derivation reads (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`,
-  `AI_GATEWAY_URL`, as fits the harness) and its host is judged like any
-  other.
+  also covers what nothing else can read: an `OPENCODE_CONFIG_CONTENT` blob
+  is judged in full — provider `baseURL`s, the provider `api` field,
+  providers with a key but no baseURL (known provider ids derive their
+  default host), remote MCP `url`s — and anything in it that cannot be
+  derived exactly is refused: not JSON (`harness-config-unparseable`), a
+  run-time `{env:}`/`{file:}` substitution, a bedrock/vertex api, an unknown
+  provider default, a local MCP server, `share`, or `plugin`
+  (`harness-config-destination-unreadable`) — never guessed at. A
+  `SHIP_HARNESS_ENV` addition is permitted only on an explicit allowlist of
+  destination-free knobs; proxy overrides, config-file pointers and
+  cloud-provider switches (Bedrock/Vertex) are refused by name
+  (`harness-env-forward-refused`) — forward a base URL the derivation reads
+  (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `AI_GATEWAY_URL`, as fits the
+  harness) and its host is judged like any other.
 
 Delivery is BY REFERENCE for every binding the gate's overlay carried,
 credential-shaped or not: a stored base URL or config blob reroutes the dial,

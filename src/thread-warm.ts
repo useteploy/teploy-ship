@@ -33,7 +33,7 @@ import type { AgentExecutor } from "@neutron-build/agents";
 
 import type { SandboxOverrides } from "./durable.js";
 import { canonicalRepositoryURL } from "./repository-reference.js";
-import { exactForms } from "./redact.js";
+import { EXACT_SCRUB_MIN_LENGTH, scrubExact } from "./redact.js";
 import type { KnownSecret } from "./redact.js";
 
 /** Decision 16: the deployment default for SHIP_WARM_THREAD_TTL_SEC. */
@@ -191,6 +191,13 @@ export async function workspaceCredentialReason(executor: AgentExecutor): Promis
 export const CREDENTIAL_MATERIAL_CODE = "credential-material-in-workspace";
 
 /**
+ * The refusal code when the scan itself could not run. A publish or snapshot
+ * is then refused UNJUDGED — never passed: a scan that failed is a scan that
+ * found nothing, which is not the same as a clean tree.
+ */
+export const CREDENTIAL_SCAN_CODE = "credential-scan-failed";
+
+/**
  * Which secret names carry a credential, for the exact-value scan: the value
  * of a tuning variable (a base URL, the opencode config blob) can be
  * legitimate repo content — an API key, token or password value is not.
@@ -198,41 +205,189 @@ export const CREDENTIAL_MATERIAL_CODE = "credential-material-in-workspace";
 const CREDENTIAL_NAME = /(?:KEY|TOKEN|SECRET|PASSWORD)$/i;
 
 /**
- * H2 hardening: does the workspace hold one of the run's FORWARDED
- * CREDENTIAL VALUES, verbatim or base64-encoded? The shape checks above
- * catch what Ship can name; this one greps the tree for the exact bytes that
- * were handed to the vendor agent, so an agent that ran `env > x` cannot
- * publish the key or freeze it into a snapshot that outlives the container.
+ * Placeholder values local model gateways accept instead of a real key —
+ * LM Studio's `lm-studio`, the openai-compatible `sk-no-key-required`, and
+ * friends. They are documented non-secrets that appear verbatim in example
+ * configs an agent may legitimately write, so a needle matching one blocks
+ * every push while protecting nothing. Excluded from the needle set, both as
+ * whole values and as the individual lines of a multi-line value.
+ */
+const PLACEHOLDER_VALUES = new Set(["sk-no-key-required", "no-key-required", "lm-studio", "not-needed", "dummy"]);
+
+/**
+ * The scan's deadline. The push scan walks every commit since base plus the
+ * working tree; the snapshot scan additionally greps the vendor session
+ * stores and /tmp — all bounded, but not instant.
+ */
+const SCAN_TIMEOUT_MS = 120_000;
+
+/**
+ * The needle set for one scan: one fixed string per DISTINCTIVE line of each
+ * credential value (and its base64 form), mapped to the credential's NAME —
+ * the only thing a refusal may report. A value with line breaks cannot be
+ * one grep pattern (a trailing newline or blank line becomes the empty
+ * pattern, which matches everything and blocks every push), so multi-line
+ * values are matched on their distinctive lines: every line at least the
+ * scrub floor long, placeholders dropped.
+ */
+function scanNeedles(secrets: readonly KnownSecret[]): Map<string, string> {
+  const needles = new Map<string, string>();
+  const add = (line: string, name: string): void => {
+    const trimmed = line.trim();
+    if (trimmed.length < EXACT_SCRUB_MIN_LENGTH || PLACEHOLDER_VALUES.has(trimmed.toLowerCase())) return;
+    if (!needles.has(trimmed)) needles.set(trimmed, name);
+  };
+  for (const { name, value } of secrets) {
+    if (!CREDENTIAL_NAME.test(name)) continue;
+    if (PLACEHOLDER_VALUES.has(value.trim().toLowerCase())) continue;
+    for (const line of value.split(/\r?\n/)) add(line, name);
+    add(Buffer.from(value, "utf8").toString("base64"), name);
+  }
+  return needles;
+}
+
+/** A fixed marker needle: proves the base64 needle delivery survived the exec intact (see workspaceSecretValueReason). */
+const NEEDLE_CHECK = "ship-needle-check-5f3d9a";
+
+/**
+ * The vendor session stores each harness profile writes inside the
+ * container, keyed by adapter id — the directories outside the workspace
+ * whose bytes a whole-container snapshot freezes (claude `~/.claude`, codex
+ * `~/.codex`, opencode `~/.config/opencode` and `~/.local/share/opencode`).
+ * The snapshot scan covers the stores of exactly the harnesses a run's input
+ * names, plus /tmp: bounded to what this run could have written, instead of
+ * grepping a whole home directory that may carry gigabytes of unrelated
+ * vendor state.
+ */
+const VENDOR_SESSION_ROOTS: Record<string, readonly string[]> = {
+  "claude-code": ["$HOME/.claude"],
+  opencode: ["$HOME/.config/opencode", "$HOME/.local/share/opencode"],
+  codex: ["$HOME/.codex"],
+};
+
+/** Extra snapshot-scan roots for the harnesses a run executes under (vendor session stores), plus /tmp. Unknown ids contribute nothing. */
+export function snapshotScanRoots(harnessIds: readonly string[]): string[] {
+  const roots = new Set<string>(["/tmp"]);
+  for (const id of harnessIds) for (const root of VENDOR_SESSION_ROOTS[id] ?? []) roots.add(root);
+  return [...roots];
+}
+
+/**
+ * H2 hardening: does what this run is about to carry hold one of the
+ * FORWARDED CREDENTIAL VALUES it delivered, verbatim or base64-encoded? The
+ * shape checks above catch what Ship can name; this one looks for the exact
+ * bytes that were handed to the vendor agent, so an agent that ran `env > x`
+ * cannot publish the key or freeze it into a snapshot that outlives the
+ * container.
  *
- * The values reach this check through the run's live secret set
- * (`HarnessWorkspace.secrets`), which the external adapters extend with what
- * they delivered — runtime state, never recorded. Names that are not
- * credential-shaped are skipped: an exact-value match on a base URL would
- * refuse legitimate repo content. The needle rides in the exec's own env
- * (never the command string, which is recorded), and grep runs fixed-string
- * over the tree minus `.git`. Returns the named reason, or null when clean.
+ * WHAT is scanned is what would actually be carried:
+ *
+ *   - push (options.base): every commit since `origin/<base>`
+ *     (`git log -p`, binary patches forced to text) plus the working-tree
+ *     diff and the untracked, non-ignored files `git add -A` is about to
+ *     commit. That catches an add-commit-remove history the tree no longer
+ *     shows, and stops refusing over gitignored bytes (.env,
+ *     node_modules) that never leave the sandbox.
+ *   - snapshot (no base): the whole workspace tree — gitignored files
+ *     included, the image freezes them too — plus options.roots (the
+ *     vendor session stores of the harnesses the run's input names, and
+ *     /tmp; see snapshotScanRoots), the container paths outside the
+ *     workspace a whole-container snapshot also freezes.
+ *
+ * One grep pass with all needles (they ride base64-encoded in the exec's own
+ * env, never the recorded command; the decoded file lives outside every
+ * scanned root and is deleted before the shell returns), and the scan FAILS
+ * CLOSED: a timeout, a thrown exec, a nonzero grep status or a needle set
+ * that arrived empty or corrupted is the named refusal
+ * `credential-scan-failed`, never a pass. The refusal names a count and the
+ * credential NAMES only — never a filename (an agent controls those) and
+ * never a value.
  */
 export async function workspaceSecretValueReason(
   executor: AgentExecutor,
   secrets: readonly KnownSecret[] | undefined,
   what: string,
+  options: { base?: string; roots?: string[] } = {},
 ): Promise<string | null> {
   if (secrets === undefined) return null;
-  for (const form of exactForms(secrets)) {
-    if (!CREDENTIAL_NAME.test(form.name)) continue;
-    const found = await executor.exec(
-      `grep -r -l -F -e "$SHIP_SECRET_SCAN" --exclude-dir=.git . 2>/dev/null || true`,
-      { timeoutMs: 60_000, env: { SHIP_SECRET_SCAN: form.needle } },
-    );
-    const file = found.stdout.split("\n").map((l) => l.trim()).find((l) => l !== "");
-    if (file !== undefined) {
-      return (
-        `${CREDENTIAL_MATERIAL_CODE}: the workspace this ${what} would carry holds a forwarded credential value (${form.name}) in ${file}. ` +
-        "Nothing was published or snapshotted from these bytes; remove the file and rotate the credential"
-      );
-    }
+  const needles = scanNeedles(secrets);
+  // No needles means every value was under the scrub floor or a documented
+  // placeholder: clean by construction (nothing was handed over that this
+  // scan could match) — distinct from a scan that ran and found nothing,
+  // and distinct from a scan that could not run (below).
+  if (needles.size === 0) return null;
+  const env = {
+    SHIP_NEEDLES_B64: Buffer.from([...needles.keys(), NEEDLE_CHECK].join("\n"), "utf8").toString("base64"),
+    SHIP_SCAN_CHECK: NEEDLE_CHECK,
+  };
+  // The needle file: outside every scanned root (/var/tmp, with a /tmp
+  // fallback the --exclude by name keeps out of the scan), proven non-empty,
+  // proven intact (the marker needle must have survived the env delivery) —
+  // a dropped or mangled env is a scan error, never a clean tree.
+  const preamble =
+    'f=$(mktemp /var/tmp/ship-needles.XXXXXX 2>/dev/null) || f=$(mktemp /tmp/ship-needles.XXXXXX 2>/dev/null) || f=/tmp/ship-needles.$$; ' +
+    'printf %s "$SHIP_NEEDLES_B64" | base64 -d >"$f" || exit 3; ' +
+    'grep -q . "$f" || { echo scan-needles-empty; exit 9; }; ' +
+    'grep -qx "$SHIP_SCAN_CHECK" "$f" || { echo scan-needles-corrupt; exit 10; }; ';
+  const cleanup = 'rm -f "$f"';
+  let command: string;
+  if (options.base !== undefined) {
+    // The push scan: history since base + working diff + untracked files.
+    // A missing origin/<base> is itself a scan error (exit 8) — it would
+    // silently narrow the history walked.
+    const range = shqScan(`origin/${options.base}..HEAD`);
+    command =
+      preamble +
+      `git rev-parse --verify -q ${shqScan(`origin/${options.base}`)} >/dev/null 2>&1 || { echo scan-no-base; exit 8; }; ` +
+      `out=$({ git log --text -p ${range} 2>/dev/null; git diff --text HEAD 2>/dev/null; ` +
+      'git ls-files --others --exclude-standard 2>/dev/null | while IFS= read -r x; do [ -f "$x" ] && cat "./$x" 2>/dev/null; done; } ' +
+      `| grep -a -F -o -f "$f"); rc=$?; ${cleanup}; [ "$rc" -le 1 ] || exit "$rc"; ` +
+      'printf \'%s\\n\' "$out"; exit 0';
+  } else {
+    // The snapshot scan: the workspace tree first, then the caller's extra
+    // roots (snapshotScanRoots: the run's own vendor session stores and
+    // /tmp). Everything except .git and package caches is scanned —
+    // gitignored files freeze into the image too. Roots that do not exist
+    // are skipped (a container with no ~/.codex is normal); a root that
+    // exists and fails to scan fails the whole scan. The default roots are
+    // literals without spaces, so $HOME expands in the shell;
+    // caller-supplied roots are quoted. The loop stops at the first root
+    // that matches — the refusal is already certain, and a leak in the
+    // workspace does not need the rest of the container walked.
+    const extraRoots = options.roots !== undefined ? ` ${options.roots.map(shqScan).join(" ")}` : "";
+    command =
+      preamble +
+      `rc_all=0; for r in .${extraRoots}; do if [ -e "$r" ]; then ` +
+      'out=$(grep -r -a -h -F -o -f "$f" --exclude-dir=.git --exclude-dir=.npm --exclude-dir=.cache --exclude=ship-needles.* -- "$r" 2>/dev/null); ' +
+      'rc=$?; [ "$rc" -le 1 ] || rc_all=7; if [ -n "$out" ]; then printf \'%s\\n\' "$out"; break; fi; fi; done; ' +
+      `${cleanup}; [ "$rc_all" -eq 0 ] || exit "$rc_all"; exit 0`;
   }
-  return null;
+  const scanFailure = (why: string): string =>
+    `${CREDENTIAL_SCAN_CODE}: the forwarded-credential scan over this ${what} could not run (${why}). ` +
+    "Nothing was published or snapshotted from these bytes until the scan runs";
+  let result;
+  try {
+    result = await executor.exec(command, { timeoutMs: SCAN_TIMEOUT_MS, env });
+  } catch (error) {
+    return scanFailure(error instanceof Error ? error.message : String(error));
+  }
+  if (result.timedOut) return scanFailure(`timed out after ${Math.round(SCAN_TIMEOUT_MS / 1000)}s`);
+  if (result.exitCode !== 0) {
+    const first = scrubExact(result.stdout.split("\n").map((l) => l.trim()).find((l) => l !== "") ?? "", [...secrets]);
+    return scanFailure(`exit ${result.exitCode}${first !== "" ? `: ${first}` : ""}`);
+  }
+  const matched = [...new Set(result.stdout.split("\n").map((l) => l.trim()).filter((l) => l !== "" && l !== NEEDLE_CHECK))];
+  const names = [...new Set(matched.flatMap((m) => (needles.get(m) !== undefined ? [needles.get(m)!] : [])))];
+  if (names.length === 0) return null;
+  return (
+    `${CREDENTIAL_MATERIAL_CODE}: what this ${what} would carry holds ${matched.length} forwarded credential value form(s) ` +
+    `(${names.join(", ")}). Nothing was published or snapshotted from these bytes; remove the material and rotate the credential`
+  );
+}
+
+/** Shell-quote one scan argument (POSIX single quotes; harness-external.shq is not imported to keep this module standalone). */
+function shqScan(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 /** What the enqueue side needs to decide a follow-up's boot. */

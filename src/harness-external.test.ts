@@ -483,6 +483,54 @@ test("H1: the run's forge token is scrubbed from harness output like a forwarded
   assert.ok(!text.includes(LEAK_KEY));
 });
 
+test("H2: the workspace secret set is armed OUTSIDE the harness-run step, so a replayed step still arms the scan", async () => {
+  const REPLAY_KEY = "sk-ant-api03-REPLAYARM-1122334455";
+  const work = await mkdtemp(join(tmpdir(), "h2-replay-work-"));
+  // A workspace whose step bodies must NEVER run: the executor refuses.
+  const executor = {
+    exec: async () => {
+      throw new Error("a replayed run must not exec");
+    },
+    putFile: async () => {},
+    getFile: async () => new Uint8Array(),
+    destroy: async () => {},
+  };
+  // The REPLAY shape (durable.ts): a recorded step returns its recorded value
+  // without executing the body — this run's harness-preflight and harness-run
+  // are both already on the log.
+  const recorded = new Map<string, unknown>([
+    ["harness-preflight", { found: true, version: "claude 2.1.246 (fake)" }],
+    [
+      "harness-run",
+      { exitCode: 0, timedOut: false, status: "finished", summary: "recorded", turns: 1, usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, priced: false }, forwarded: ["ANTHROPIC_API_KEY"], stderrTail: "" },
+    ],
+  ]);
+  const ctx = {
+    runId: "run-replay",
+    async step<T>(name: string, fn: () => Promise<T> | T): Promise<T> {
+      if (recorded.has(name)) return recorded.get(name) as T;
+      return await fn();
+    },
+  };
+  const secrets: import("./redact.js").KnownSecret[] = [];
+  const adapter = externalAdapters({ env: { ANTHROPIC_API_KEY: REPLAY_KEY } }).find((a) => a.id === "claude-code" && a.version === HARNESS_VERSIONS["claude-code"])!;
+  const result = await adapter.run(
+    { prompt: "t", task: "t", input: { task: "t" } },
+    { ctx: ctx as never, handle: work, executor: executor as never, workdir: ".", checkout: null, scopeKey: null, stepPrefix: "", secrets },
+    { maxSteps: 5, maxRunCostUSD: 0 },
+    () => {},
+  );
+  assert.equal(result.status, "finished");
+  // The publish/snapshot scans after a resume judge real needles: the values
+  // this run's input says were delivered reach the secret set even though no
+  // step body ran. (The old code armed the set only inside harness-run, so a
+  // replayed run scanned with an empty needle set — clean by construction.)
+  assert.ok(
+    secrets.some((s) => s.name === "ANTHROPIC_API_KEY" && s.value === REPLAY_KEY),
+    "the forwarded credential arms the workspace secret set outside the recorded step",
+  );
+});
+
 test("a missing binary is a recorded error result, not a thrown step", async () => {
   const work = await mkdtemp(join(tmpdir(), "fake-harness-nobin-"));
   const bin = await mkdtemp(join(tmpdir(), "fake-harness-emptybin-"));

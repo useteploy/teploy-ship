@@ -76,6 +76,7 @@ import { surfacedTestIntegrity } from "./test-integrity-surface.js";
 import { shortHash, warmClient, warmSlugOf, type WarmState } from "./warm.js";
 import {
   sandboxOverridesDigest,
+  snapshotScanRoots,
   workspaceCredentialReason,
   workspaceSecretValueReason,
   type ThreadWarmRef,
@@ -2141,10 +2142,15 @@ export function durableAgent(
               return { skipped: `no snapshot: ${credential}` };
             }
             // H2 hardening, the exact-value half: the shape checks above catch
-            // what Ship knows how to name; this one greps the tree for the
-            // credential VALUES this run actually forwarded, so an agent that
-            // ran `env > x` cannot hand its key to the thread's next turn.
-            const leaked = await workspaceSecretValueReason(primary.executor, primary.secrets, "thread snapshot");
+            // what Ship knows how to name; this one scans for the credential
+            // VALUES this run actually forwarded across everything the image
+            // freezes — the workspace tree (gitignored files included) plus
+            // the vendor session stores of the harnesses this run's input
+            // names, and /tmp — so an agent that ran `env > x` cannot hand
+            // its key to the thread's next turn.
+            const leaked = await workspaceSecretValueReason(primary.executor, primary.secrets, "thread snapshot", {
+              roots: snapshotScanRoots([...(input.harness !== undefined ? [input.harness.id] : []), ...(input.harnessAttempts ?? []).map((a) => a.id)]),
+            });
             if (leaked !== null) {
               return { skipped: `no snapshot: ${leaked}` };
             }
@@ -3971,7 +3977,13 @@ async function publishIfRepoRun(
   const push = await ctx.step(
     "repo-push",
     async () => {
-    const leaked = await workspaceSecretValueReason(executor, harnessSecrets, "push");
+    // The push scan covers exactly what would leave the sandbox: every
+    // commit since the base plus the working tree (thread-warm.ts
+    // workspaceSecretValueReason) — not the whole tree, so gitignored bytes
+    // never refuse a publish, and an add-commit-remove history still does.
+    const leaked = await workspaceSecretValueReason(executor, harnessSecrets, "push", {
+      ...(typeof checkout?.base === "string" ? { base: checkout.base } : {}),
+    });
     if (leaked !== null) {
       return {
         kind: "refused" as const,
@@ -4335,13 +4347,17 @@ async function mergeBoundaryGate(
     let parkImage: string | { skipped: string } | undefined;
     if (canSnapshot && handle !== undefined) {
       const h = handle;
-      // The scan runs BEFORE the image: bytes that carry a forwarded
-      // credential value must not be frozen into something that outlives the
-      // container. A refusal skips the image (the park still asks its
-      // question; the approval falls back to a fresh checkout, the same
-      // degradation a provider that cannot snapshot takes).
+      // The scan runs BEFORE the image and across everything it freezes —
+      // the workspace tree plus the vendor session stores of the harnesses
+      // this run's input names, and /tmp (thread-warm.ts): bytes that carry
+      // a forwarded credential value must not be frozen into something that
+      // outlives the container. A refusal skips the image (the park still
+      // asks its question; the approval falls back to a fresh checkout, the
+      // same degradation a provider that cannot snapshot takes).
       parkImage = await ctx.step("merge-snapshot", async () => {
-        const leaked = await workspaceSecretValueReason(exec, harnessSecrets, "merge park snapshot");
+        const leaked = await workspaceSecretValueReason(exec, harnessSecrets, "merge park snapshot", {
+          roots: snapshotScanRoots([...(input.harness !== undefined ? [input.harness.id] : []), ...(input.harnessAttempts ?? []).map((a) => a.id)]),
+        });
         if (leaked !== null) return { skipped: `no image: ${leaked}` };
         return await config.executor.snapshot!(h);
       });
