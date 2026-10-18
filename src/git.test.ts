@@ -1252,3 +1252,15 @@ test("DS1: retargetPullRequest PATCHes the pull endpoint with the new base on bo
   assert.equal(outcome.ok, false);
   assert.match((outcome as { reason: string }).reason, /422/);
 });
+
+test("DS1: a warm stacked checkout on a volume with no harness scratch succeeds (live finding 2026-10-18)", async () => {
+  const { ref, baseSha } = await stackFixture("warm-noscratch");
+  // A warm volume: a previous clone exists, but no .teploy-agent directory.
+  const work = new LocalExecutor({ root: await mkdtemp(join(tmpdir(), "ship-ds1-warm-")) });
+  await setupStackedRepo(work, { ref, token: "", runId: "run-prev", branch: "ship/run-base", sha: baseSha });
+  await work.exec("rm -rf .teploy-agent");
+  // Production failed here with `git rm -rf .teploy-agent`: pathspec did not match.
+  const checkout = await setupStackedRepo(work, { ref, token: "", runId: "run-stack2", branch: "ship/run-base", sha: baseSha, warm: true });
+  assert.equal(checkout.branch, "ship/run-stack2");
+  assert.equal((await work.exec("git rev-parse HEAD")).stdout.trim(), baseSha);
+});
