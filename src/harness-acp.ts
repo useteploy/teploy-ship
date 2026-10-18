@@ -575,6 +575,7 @@ export function acpAdapter(id: string, options: AcpHarnessOptions = {}, version:
         }
         try {
           await ws.executor.putFile(ACP_PROMPT_PATH, externalPrompt(task.prompt, task.input.mode));
+          const cancelGraceMs = Number(env.SHIP_ACP_CANCEL_GRACE_MS);
           await ws.executor.putFile(
             ACP_SPEC_PATH,
             JSON.stringify({
@@ -586,6 +587,7 @@ export function acpAdapter(id: string, options: AcpHarnessOptions = {}, version:
               promptPath: ACP_PROMPT_PATH,
               maxSteps: budget.maxSteps,
               timeoutMs: config.timeoutMs,
+              ...(Number.isFinite(cancelGraceMs) && cancelGraceMs > 0 ? { cancelGraceMs } : {}),
               secretEnvNames: forwarded.names,
               ...(profile.authMethodId !== undefined ? { authMethodId: profile.authMethodId } : {}),
             }),

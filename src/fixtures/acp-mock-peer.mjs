@@ -23,6 +23,13 @@
 //                               in-workspace
 //   ACP_MOCK_ALLOW_ALWAYS_ONLY  offer ONLY allow_always + reject_once: the
 //                               driver must deny, never select allow_always
+//   ACP_MOCK_JOURNEY=hang       stream tool calls past any budget, then
+//                               ignore session/cancel and never answer the
+//                               prompt (the driver's cancel-grace control)
+//   ACP_MOCK_JOURNEY=bg         spawn a background `sleep` that inherits our
+//                               stdio and outlives us; ACP_MOCK_BG_SETSID
+//                               gives it its own session so even a group kill
+//                               cannot reach it (the stdio-hold control)
 //   ACP_MOCK_ECHO               echo env and the base64 of GEMINI_API_KEY in
 //                               an agent message (the H1 scrub control)
 //   ACP_MOCK_SPLIT_LEAK         leak GEMINI_API_KEY split across message
@@ -31,6 +38,7 @@
 //   ACP_MOCK_VERSION_LINE       what `--version` prints
 // argv[2] === "--version" prints a version line and exits (preflight).
 
+import { spawn } from "node:child_process";
 import { appendFileSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -147,6 +155,36 @@ const runPrompt = async (promptText) => {
     return { stopReason: "end_turn" };
   }
 
+  if (process.env.ACP_MOCK_JOURNEY === "hang") {
+    // Stream tool calls past any budget, then ignore session/cancel and
+    // never answer the prompt: the driver must kill the agent after its
+    // grace and record the budget stop itself.
+    for (let i = 0; i < 12; i++) {
+      update({
+        sessionUpdate: "tool_call",
+        toolCallId: `tool-hang-${i}`,
+        title: `step ${i}`,
+        kind: "execute",
+        status: "completed",
+        rawInput: { command: `echo ${i}` },
+      });
+    }
+    return await new Promise(() => {});
+  }
+
+  if (process.env.ACP_MOCK_JOURNEY === "bg") {
+    // A background grandchild that inherits our stdio and outlives us. With
+    // ACP_MOCK_BG_SETSID it gets its own session, so even the driver's
+    // process-group kill cannot reach it — only the driver destroying its
+    // streams and exiting ends the exec; without it, the group kill is what
+    // must take it down.
+    const bg = spawn("sleep", ["45"], { stdio: ["inherit", "inherit", "inherit"], detached: process.env.ACP_MOCK_BG_SETSID === "1" });
+    bg.unref();
+    log({ event: "bg", pid: bg.pid ?? null, setsid: process.env.ACP_MOCK_BG_SETSID === "1" });
+    update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Backgrounded." } });
+    return { stopReason: "end_turn" };
+  }
+
   // The declared journey: a read, one permitted write inside the workspace, a
   // final message. The write is the whole point — the diff is the deliverable.
   update({
@@ -257,7 +295,10 @@ process.stdin.on("data", (chunk) => {
       resolveRequest(message.result ?? message.error ?? null);
       continue;
     }
-    // Client notifications (session/cancel): nothing to do in the mock.
+    // Client notifications (session/cancel): recorded, nothing to do.
+    if (message.method !== undefined) {
+      log({ event: "notify", method: message.method });
+    }
   }
 });
 // A real agent stays alive; the driver kills us when the turn ends.

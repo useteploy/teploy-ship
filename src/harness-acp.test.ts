@@ -578,8 +578,7 @@ test("the agent's session store lives in a per-exec home under /tmp and is delet
   }
 });
 
-test("a driver that fails before initialize is a recorded error, never a thrown step", async () => {
-  const bin = await mkdtemp(join(tmpdir(), "acp-dead-"));
+test("a driver that fails before initialize is a recorded error, never a thrown step", async () => {  const bin = await mkdtemp(join(tmpdir(), "acp-dead-"));
   await writeFile(join(bin, "gemini"), "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"0.64.0 (dead)\"; exit 0; fi\necho 'no ACP here' >&2\nexit 3\n");
   await chmod(join(bin, "gemini"), 0o755);
   const work = await mkdtemp(join(tmpdir(), "acp-dead-work-"));
@@ -603,4 +602,64 @@ test("a driver that fails before initialize is a recorded error, never a thrown 
   const record = stepResult<AcpHarnessRunRecord>((await store.load("run-acp-dead")), "harness-run");
   assert.equal(record.status, "error");
   assert.match(record.summary, /no ACP here|exited|initialize/i);
+});
+
+// ---------------------------------------------------------------------------
+// Driver lifecycle: the budget backstop and the process tree
+// ---------------------------------------------------------------------------
+
+const readLog = async (path: string): Promise<Record<string, unknown>[]> =>
+  (await readFile(path, "utf8")).trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
+
+test("an agent that ignores session/cancel is killed after the grace and the budget stop is recorded", async () => {
+  const rig = await acpRig({ mockEnv: { ACP_MOCK_JOURNEY: "hang" } });
+  const started = Date.now();
+  // The grace is the worker's SHIP_ACP_CANCEL_GRACE_MS knob, materialised
+  // into the spec; 500ms here so the test proves the mechanism, not the wait.
+  const { record } = await driveGemini(rig, { ...workerEnv(), SHIP_ACP_CANCEL_GRACE_MS: "500" });
+  const elapsed = Date.now() - started;
+  assert.equal(record.status, "max-steps", `the driver recorded its own budget stop: ${record.summary}`);
+  assert.ok(elapsed < 15_000, `the driver did not wait out the run timeout (${elapsed}ms) for an agent ignoring cancel`);
+  const log = await readLog(rig.log);
+  assert.ok(log.some((e) => e.event === "notify" && e.method === "session/cancel"), "session/cancel was sent before the kill");
+});
+
+test("a background grandchild holding the agent's stdio does not keep the driver alive", async () => {
+  const rig = await acpRig({ mockEnv: { ACP_MOCK_JOURNEY: "bg", ACP_MOCK_BG_SETSID: "1" } });
+  const started = Date.now();
+  const { record } = await driveGemini(rig);
+  const elapsed = Date.now() - started;
+  assert.equal(record.status, "finished");
+  assert.ok(elapsed < 15_000, `the driver exited when the session ended, not when the grandchild's sleep did (${elapsed}ms)`);
+  const log = await readLog(rig.log);
+  const pid = log.find((e) => e.event === "bg")?.pid;
+  assert.equal(typeof pid, "number", "the peer logged its grandchild");
+  // The setsid grandchild escaped the group kill on purpose; the test kills
+  // what is left of it so nothing lingers on the machine.
+  if (typeof pid === "number") {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // already gone
+    }
+  }
+});
+
+test("the agent's whole process group is killed: a setsid-less background process does not outlive the exec", async () => {
+  const rig = await acpRig({ mockEnv: { ACP_MOCK_JOURNEY: "bg" } });
+  const started = Date.now();
+  const { record } = await driveGemini(rig);
+  const elapsed = Date.now() - started;
+  assert.equal(record.status, "finished");
+  assert.ok(elapsed < 15_000, `the driver exited promptly (${elapsed}ms)`);
+  const log = await readLog(rig.log);
+  const pid = log.find((e) => e.event === "bg")?.pid;
+  assert.equal(typeof pid, "number");
+  if (typeof pid === "number") {
+    assert.throws(
+      () => process.kill(pid, 0),
+      /ESRCH/,
+      "the grandchild died with the agent's process group, not after its own sleep",
+    );
+  }
 });

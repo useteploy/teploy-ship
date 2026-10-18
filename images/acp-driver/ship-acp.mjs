@@ -68,6 +68,15 @@ export const SHIP_ACP_DRIVER_VERSION = "1.0.0";
  */
 export const SHIP_ACP_PROTOCOL_VERSION = 1;
 
+/**
+ * How long the agent has to honour a session/cancel before the driver kills
+ * it (the tool-call budget backstop). A request, not a deadline: an agent
+ * that ignores the cancel must not keep the exec — and the credential env it
+ * holds — open until the run timeout. Overridable per exec via the spec's
+ * cancelGraceMs (the worker's SHIP_ACP_CANCEL_GRACE_MS).
+ */
+export const ACP_CANCEL_GRACE_MS = 15_000;
+
 const SPEC_DEFAULT = ".teploy-agent/acp-run.json";
 
 const sleep = (ms) =>
@@ -377,6 +386,7 @@ async function main() {
     return;
   }
   const maxSteps = Number.isInteger(spec.maxSteps) && spec.maxSteps > 0 ? spec.maxSteps : null;
+  const cancelGraceMs = Number.isFinite(spec.cancelGraceMs) && spec.cancelGraceMs > 0 ? spec.cancelGraceMs : ACP_CANCEL_GRACE_MS;
   // The exec request's own timeout is the hard boundary; the driver keeps a
   // backstop just inside it so the run records a driver error instead of a
   // killed process, whenever the agent stalls before answering.
@@ -386,6 +396,11 @@ async function main() {
   const child = spawn(binary, args, {
     cwd: workspaceRoot,
     stdio: ["pipe", "pipe", "pipe"],
+    // The agent runs detached, in a process group of its own, so a kill can
+    // reach the whole tree and not just the agent process (killChild below):
+    // a background process the agent spawned without its own session must
+    // not outlive the exec that holds the credential env.
+    detached: true,
     ...(asUser !== undefined ? { uid: asUser.uid, gid: asUser.gid, env: { ...process.env, HOME: asUser.home } } : {}),
   });
 
@@ -452,12 +467,50 @@ async function main() {
   };
 
   const killChild = () => {
-    if (agentExited) return;
-    child.kill("SIGTERM");
-    const force = setTimeout(() => child.kill("SIGKILL"), 3_000);
+    if (agentExited || child.pid === undefined) return;
+    // The GROUP is signalled (negative pid), because the agent was spawned
+    // detached as a group leader; a group signal that fails — the group is
+    // already gone, or the platform refuses — falls back to the child alone.
+    let signalledGroup = false;
+    try {
+      process.kill(-child.pid, "SIGTERM");
+      signalledGroup = true;
+    } catch {
+      child.kill("SIGTERM");
+    }
+    const force = setTimeout(() => {
+      if (agentExited) return;
+      if (signalledGroup) {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch {
+          // already gone
+        }
+      } else {
+        child.kill("SIGKILL");
+      }
+    }, 3_000);
     force.unref();
   };
   const exited = new Promise((resolveExit) => child.on("exit", (code, signal) => resolveExit({ code, signal })));
+  /**
+   * The one exit path. A background grandchild that inherited the agent's
+   * stdio keeps those pipes — and with them this process — alive long after
+   * the agent itself exited, so after the kill race the driver destroys the
+   * streams and exits explicitly: the exec that carries the credential env
+   * must end when the session does, not when the agent's process tree
+   * happens to. Everything meant for the record was written before this is
+   * called.
+   */
+  const finish = async (code) => {
+    killChild();
+    await Promise.race([exited, sleep(5_000)]);
+    relayStderrTail();
+    child.stdin.destroy();
+    child.stdout.destroy();
+    child.stderr.destroy();
+    process.exit(code);
+  };
   child.on("exit", (code, signal) => {
     agentExited = true;
     // Every request still waiting dies with the agent: an EPIPE on the next
@@ -596,9 +649,15 @@ async function main() {
             },
             scrub,
           );
-          if (maxSteps !== null && toolCalls.size >= maxSteps && sessionEnded === null) {
+          if (maxSteps !== null && !budgetCancelled && toolCalls.size >= maxSteps && sessionEnded === null) {
             budgetCancelled = true;
             notify("session/cancel", { sessionId });
+            // A cancel is a request. An agent that ignores it must not keep
+            // the exec (and the credential env it holds) open until the run
+            // timeout: after the grace the driver kills the agent and
+            // records the budget stop itself (the catch below).
+            const grace = setTimeout(() => killChild(), cancelGraceMs);
+            grace.unref();
           }
         }
         // Other updates (plans, thoughts, user echoes) are not Ship events.
@@ -668,11 +727,18 @@ async function main() {
     const byDriver = budgetCancelled && stopReason === "cancelled";
     sessionEnded = { stopReason: byDriver ? "max_turn_requests" : stopReason, by: byDriver ? "driver-budget" : "agent" };
     emit("stop", { reason: sessionEnded.stopReason, by: sessionEnded.by }, scrub);
-    killChild();
-    await Promise.race([exited, sleep(5_000)]);
-    relayStderrTail();
-    process.exitCode = 0;
+    await finish(0);
   } catch (error) {
+    if (budgetCancelled && sessionEnded === null) {
+      // The grace timer killed an agent that ignored session/cancel. The
+      // budget is still the truth about why the session ended, so the stop
+      // is the driver-budget one — not an "exited before answering" error an
+      // operator would have to decode back into a budget stop.
+      sessionEnded = { stopReason: "max_turn_requests", by: "driver-budget" };
+      emit("stop", { reason: sessionEnded.stopReason, by: sessionEnded.by }, scrub);
+      await finish(0);
+      return;
+    }
     if (sessionEnded === null) {
       const tailText = stderrTail.trim();
       fail(
@@ -681,9 +747,7 @@ async function main() {
       );
       emit("stop", { reason: "refusal", by: "driver" }, scrub);
     }
-    killChild();
-    await Promise.race([exited, sleep(5_000)]);
-    relayStderrTail();
+    await finish(1);
   }
 }
 
