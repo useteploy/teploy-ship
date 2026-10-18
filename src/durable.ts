@@ -13,7 +13,7 @@ import { isSuspension, workflow } from "@neutron-build/workflow";
 import type { WorkflowContext, WorkflowDefinition, WorkflowEvent } from "@neutron-build/workflow";
 
 import { DEFAULT_MAX_OUTPUT_TOKENS, executeAction, workspaceFingerprint } from "./agent.js";
-import { FINISH_NUDGE_CLEAN_TREE, FINISH_NUDGE_FAILED, FINISH_NUDGE_NO_EVIDENCE, FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, describeAction, parseAction, parseReply, transcriptTurn } from "./actions.js";
+import { FINISH_NUDGE_CLEAN_TREE, FINISH_NUDGE_FAILED, FINISH_NUDGE_NO_EVIDENCE, FINISH_NUDGE_NO_WORK, FINISH_NUDGE_VERIFY, describeAction, parseAction, parseReply, parseSkillLoads, transcriptTurn } from "./actions.js";
 import type { ActionDialect } from "./actions.js";
 import { ASK_UNAVAILABLE, askAnswerMessage, askEvent } from "./ask.js";
 import type { AskDecisionPayload } from "./ask.js";
@@ -313,6 +313,12 @@ export interface DurableAgentInput {
    * (Q3c).
    */
   lookRecord?: boolean;
+  /**
+   * One-line ```look / ```skill fences (actions.ts inlineFences). Materialised
+   * at enqueue for runs that can look or load skills; absent on older logs,
+   * which keep parsing exactly as they did.
+   */
+  inlineFences?: boolean;
   /**
    * Bounded child work (S20/S22): the ```delegate action — spawn one child
    * run, park until it finishes, merge its result back as an observation.
@@ -2460,7 +2466,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
       }
       // One dialect for both optional surfaces; flag-off runs get exactly
       // { look, delegate }, as before either feature existed.
-      const dialect: ActionDialect = { look, delegate, ...(steerReply ? { reply: true } : {}), ...(mcpInput !== undefined ? { mcp: true } : {}), ...(input.skills !== undefined ? { skill: true } : {}) };
+      const dialect: ActionDialect = { look, delegate, ...(steerReply ? { reply: true } : {}), ...(mcpInput !== undefined ? { mcp: true } : {}), ...(input.skills !== undefined ? { skill: true } : {}), ...(input.inlineFences === true ? { inlineFences: true } : {}) };
       let messages: Message[] = [
         {
           role: "system",
@@ -2752,6 +2758,32 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
         messages.push({ role: "assistant", content: thought.trim() === "" ? "(no response)" : transcriptTurn(thought, dialect) });
 
         const action = parseAction(thought, dialect);
+        // #130 (2026-10-18 live finding): a turn that emitted a ```skill block
+        // AND a real action delivered only the action's observation — the skill
+        // body arrived a turn late, after the agent asked again. The loop still
+        // executes exactly one action per turn (the transcript is trimmed at
+        // first action block, and executing a second step-recording action here
+        // would run steps an old log never recorded), but a skill load is pure:
+        // it records no step and its observation is a function of input alone.
+        // So every OTHER ```skill fence in the same turn rides along with the
+        // action's own observation, after it — their fences always sit below
+        // the parsed action's (parseAction takes the lowest-index action, and
+        // the only block that can precede a rider is the parsed action itself),
+        // which keeps the order the model wrote them in. A turn whose action is
+        // itself a skill keeps that branch's delivery; the riders then are the
+        // skill fences after the first. Gates, nudges and parks that delivered
+        // no action keep dropping riders: nothing ran, so there is nothing to
+        // combine with, and the model re-asks as it always has.
+        const skillRiderNote = parseSkillLoads(thought, dialect)
+          .slice(action.kind === "skill" ? 1 : 0)
+          .map((load) =>
+            load.action.kind === "skill"
+              ? untrusted(skillObservation(load.action.name, input.skills, maxObs), "[skill text, not the operator]")
+              : load.action.message,
+          )
+          .join("\n\n");
+        /** The turn's observation plus any ```skill riders that shared it. */
+        const withSkillRiders = (observation: string): string => (skillRiderNote === "" ? observation : `${observation}\n\n${skillRiderNote}`);
         // D2: a ```reply before the action is the agent's message into the
         // operator's thread. It needs no step — the think step already holds
         // its bytes — and it does not end the turn: the action after it runs
@@ -3097,7 +3129,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
               return `Code search failed (${error instanceof Error ? error.message : String(error)}). Use grep/rg via \`\`\`bash instead.`;
             }
           });
-          messages.push({ role: "user", content: truncate(untrusted(observation), maxObs) });
+          messages.push({ role: "user", content: withSkillRiders(truncate(untrusted(observation), maxObs)) });
           continue;
         }
 
@@ -3192,10 +3224,10 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
                 ? `[screenshot: sha256:${shot.digest}, ${shot.bytes} bytes — attached as the next content part]`
                 : `[screenshot: sha256:${shot.digest} — no longer retrievable from the artifact store; the text snapshot above is the observation]`;
             if (artifact === null) {
-              messages.push({ role: "user", content: `${text}\n${note}` });
+              messages.push({ role: "user", content: withSkillRiders(`${text}\n${note}`) });
             } else {
               const image: ImagePart = { type: "image", mediaType: artifact.mime, data: artifact.data };
-              messages.push({ role: "user", content: [{ type: "text", text: `${text}\n${note}` }, image] });
+              messages.push({ role: "user", content: [{ type: "text", text: withSkillRiders(`${text}\n${note}`) }, image] });
               pruneLookImageHistory(messages);
             }
             continue;
@@ -3215,7 +3247,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
           // declares as data-not-instructions, with embedded delimiters
           // defanged. Framed AFTER truncation so the pair can never be cut
           // apart by an oversized snapshot.
-          messages.push({ role: "user", content: frameUntrusted(truncate(untrusted(formatObservation(result)), maxObs)) });
+          messages.push({ role: "user", content: withSkillRiders(frameUntrusted(truncate(untrusted(formatObservation(result)), maxObs))) });
           continue;
         }
 
@@ -3235,7 +3267,8 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
           // The loop's `untrusted` wrapper (fenceOperatorLines) applies on
           // steerReply runs so a skill body imitating an operator message is
           // re-framed exactly like a command output that tries the same.
-          messages.push({ role: "user", content: untrusted(skillObservation(action.name, input.skills, maxObs), "[skill text, not the operator]") });
+          // Sibling ```skill fences in the same turn ride along (#130).
+          messages.push({ role: "user", content: withSkillRiders(untrusted(skillObservation(action.name, input.skills, maxObs), "[skill text, not the operator]")) });
           continue;
         }
 
@@ -3265,7 +3298,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
             if (mcpInput.manifestMode === "shadow") void recordToolFindings(action.tool, prepared.findings);
             return callMcpTool(mcpInput, prepared, action.args, { executor: ws.executor, suffix: `t${turn}`, ...(config.mcpHttp !== undefined ? { http: config.mcpHttp } : {}) });
           });
-          messages.push({ role: "user", content: mcpObservation(action.tool, result, maxObs) });
+          messages.push({ role: "user", content: withSkillRiders(mcpObservation(action.tool, result, maxObs)) });
           continue;
         }
 
@@ -3386,7 +3419,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
             Object.assign(ws, liveWiring(config, ws.ctx.runId, ws.handle, p));
             if (superseded !== ws.handle) await dispose(config, superseded);
           }
-          messages.push({ role: "user", content: truncate(untrusted(transferObservation(transfer)), maxObs) });
+          messages.push({ role: "user", content: withSkillRiders(truncate(untrusted(transferObservation(transfer)), maxObs)) });
           continue;
         }
 
@@ -3514,7 +3547,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
         const observed = truncate(untrusted(formatObservation(result)), maxObs);
         messages.push({
           role: "user",
-          content: result.interrupt !== undefined ? `${observed}\n\n${interruptObservation(result.interrupt, action.kind)}` : observed,
+          content: withSkillRiders(result.interrupt !== undefined ? `${observed}\n\n${interruptObservation(result.interrupt, action.kind)}` : observed),
         });
 
         // Recovery: break loops, thrashing and busywork before they burn the

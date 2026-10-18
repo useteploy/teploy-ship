@@ -411,6 +411,11 @@ test("flag off: the session the driver spawns is LOOK_SESSION verbatim; flag on:
   // load guarantees at least one frame (live finding 2026-10-18).
   assert.match(script, /Page\.captureScreenshot/);
   assert.match(script, /page\.on\("load"/);
+  // A launched Browser lists no default context, so the recorder must watch
+  // through its own CDP connection (probed in the sandbox image 2026-10-18:
+  // launched view 0 pages, CDP view 1).
+  assert.match(script, /const recView = await chromium\.connectOverCDP\("http:\/\/127\.0\.0\.1:9222"\)/);
+  assert.doesNotMatch(script.slice(LOOK_SESSION.length), /browser\.contexts\(\)/);
   assert.match(script, /format: "jpeg", quality: 60, maxWidth: 960, maxHeight: 600, everyNthFrame: 2/, "the design's capture parameters, verbatim");
   assert.match(script, /rec: cap reached/, "the frame/byte caps stop loudly");
   assert.ok(script.includes(`"${LOOK_REC_DIR}"`), "frames and the captured page text land under the rec dir");
@@ -555,4 +560,20 @@ test("no session, a dead finaliser, and a worker with no store are honest record
   const dropped = await runLookRecordFinalise(homeless.executor, undefined, { runId: "r" });
   assert.equal(dropped.kind, "dropped");
   if (dropped.kind === "dropped") assert.match(dropped.reason, /no artifact store/);
+});
+
+test("the strip finaliser passes page.evaluate one argument (playwright refuses more)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("./look.js", import.meta.url), "utf8");
+  // Found live 2026-10-18: playwright throws "Too many arguments" past one.
+  assert.doesNotMatch(src, /page\.evaluate\(\(w, h\)/);
+  assert.doesNotMatch(src, /\}\), i, b64, cols, tileW, tileH\);/);
+  assert.match(src, /\{ i, b64, cols, tileW, tileH \}\);/);
+});
+
+test("the strip finaliser exits instead of idling on its CDP connection (live finding 2026-10-18: exit 124)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("./look.js", import.meta.url), "utf8");
+  // The strip path ends by exiting the process, after the page closes.
+  assert.match(src, /await page\.close\(\)\.catch\(\(\) => \{\}\);\n\}\n(\/\/[^\n]*\n)*process\.exit\(0\);/);
 });

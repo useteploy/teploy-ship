@@ -290,7 +290,13 @@ async function watch(page) {
     await captureText(page);
   } catch { /* a closing page is not a failure of the session */ }
 }
-for (const context of browser.contexts()) for (const page of context.pages()) await watch(page);
+// The driver opens its pages in the browser's DEFAULT context over its own
+// CDP connection, and a launched Browser does not list that context in
+// contexts() — so the recorder watched nothing (found live 2026-10-18). It
+// connects over CDP the same way the driver does and watches those pages.
+const recView = await chromium.connectOverCDP("http://127.0.0.1:${LOOK_CDP_PORT}");
+const recPages = () => recView.contexts().flatMap((context) => context.pages());
+for (const page of recPages()) await watch(page);
 // New pages and tabs join on the next tick; the same tick is the finaliser's
 // stop signal, so capture ends when the recording is assembled.
 setInterval(() => {
@@ -298,7 +304,7 @@ setInterval(() => {
     if (!capped) { capped = "finalised"; try { fs.unlinkSync(REC + "/stop"); } catch {} }
     return;
   }
-  for (const context of browser.contexts()) for (const page of context.pages()) void watch(page);
+  for (const page of recPages()) void watch(page);
 }, 1000);
 `;
 
@@ -550,10 +556,12 @@ try {
   await page.setContent("<!doctype html><canvas id='c'></canvas>");
   const cols = Math.max(4, Math.ceil(frames.length / 80)); // keep the canvas inside Chromium's limits
   const tileW = 240, tileH = 150;
-  await page.evaluate((w, h) => { const c = document.getElementById("c"); c.width = w; c.height = h; }, cols * tileW, Math.ceil(frames.length / cols) * tileH);
+  // page.evaluate takes ONE argument: several are wrapped in an object
+  // (found live 2026-10-18: "Too many arguments").
+  await page.evaluate(({ w, h }) => { const c = document.getElementById("c"); c.width = w; c.height = h; }, { w: cols * tileW, h: Math.ceil(frames.length / cols) * tileH });
   for (let i = 0; i < frames.length; i++) {
     const b64 = readFileSync(REC + "/" + frames[i]).toString("base64");
-    await page.evaluate((i, b64, cols, tileW, tileH) => new Promise((resolve, reject) => {
+    await page.evaluate(({ i, b64, cols, tileW, tileH }) => new Promise((resolve, reject) => {
       const ctx = document.getElementById("c").getContext("2d");
       const img = new Image();
       img.onload = () => {
@@ -564,7 +572,7 @@ try {
       };
       img.onerror = () => reject(new Error("frame " + i + " did not decode"));
       img.src = "data:image/jpeg;base64," + b64;
-    }), i, b64, cols, tileW, tileH);
+    }), { i, b64, cols, tileW, tileH });
   }
   const data = await page.evaluate(() => document.getElementById("c").toDataURL("image/jpeg", 0.55));
   writeFileSync(REC + "/look-record.jpg", Buffer.from(data.slice(data.indexOf(",") + 1), "base64"));
@@ -572,6 +580,11 @@ try {
 } finally {
   await page.close().catch(() => {});
 }
+// The CDP connection to the session browser keeps the event loop alive, so
+// the finaliser would idle until the exec timeout (found live 2026-10-18:
+// exit 124 after the strip was written). Exit; never browser.close(), which
+// would take the run's look session down with it.
+process.exit(0);
 `;
 }
 

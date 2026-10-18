@@ -1810,6 +1810,7 @@ export async function enqueueRun(
         // every run that does not admit it, so those inputs stay
         // byte-identical to pre-Q3b ones.
         ...(lookRecord === true ? { lookRecord: true } : {}),
+        ...(look === true || skills !== undefined ? { inlineFences: true } : {}),
         // ```delegate (S20/S22), from SHIP_DELEGATE above: default off, so a
         // run that does not set it enqueues exactly as it did before the
         // action existed — and the child marker, recorded only on spawned
