@@ -959,17 +959,30 @@ off: nothing is stored, admitted or recorded, and inputs are byte-identical.
 
 **The forwarded-credential scan (`SHIP_CREDENTIAL_SCAN`, default `on`).** Runs
 for every run, flag or not: before a push and before any snapshot image, Ship
-looks for the exact credential values the run was handed (verbatim or base64).
+looks for the exact credential values the run was handed: verbatim (each
+distinctive line of a multi-line value) or base64-encoded at any byte offset,
+followed by anything (so `echo $KEY | base64` and a key inside a larger
+encoded blob both match). Only unwrapped base64 is matched: a long value
+encoded with line wrapping (GNU `base64` breaks at 76 columns) is not.
 The push scan stages the tree and reads `git diff --cached` plus `git log -p`
-since the base, so it judges exactly what would ship; the snapshot scan walks
-the workspace (gitignored files included), `/tmp`, `/var/tmp` and the vendor
-session stores of the run's harnesses under the container's `$HOME`, reading
-regular files only (POSIX `find` + `grep -F`, BusyBox images included). A
-finding refuses the push or skips the image and names the credential, never
-the file or value. A scan that could not run (timeout, unreadable root, a
-failing producer) is never a pass: the push is held and the step retried with
-"the credential scan could not run: <reason>", not a request to rotate
-anything. Values: `on` refuses; `warn` records the would-be refusal on the
+since the base commit recorded at checkout (fetched from the remote before the
+agent runs, so moving `origin/<base>` inside the sandbox cannot narrow it; the
+push counts its commits from the same sha), with replacement refs ignored, so
+it judges exactly what would ship. The snapshot scan walks the workspace
+(gitignored files included), `/tmp`, `/var/tmp`, the vendor session stores of
+the run's harnesses under the container's `$HOME`, and bounded home leak
+sites: `$HOME` two levels deep (`~/.npmrc`, `~/.git-credentials`,
+`~/.gitconfig`, `~/.netrc`, shell history, `~/.docker/config.json`, ...),
+`~/.config` four deep, and `~/.cache` three deep with bulk caches (go-build,
+pip, ms-playwright, huggingface, torch, node-gyp) pruned, files over 1 MiB
+(256 KiB in `~/.cache`) skipped. It reads regular files only (POSIX `find` +
+`grep -F`, BusyBox images included). A finding refuses the push or skips the
+image and names the credential, never the file or value. A scan that could
+not run (timeout, unreadable root, a failing producer) is never a pass: the
+push is held and the step retried with "the credential scan could not run:
+<reason>", not a request to rotate anything; before any snapshot after such a
+failure, the scan's temporary needle files are swept in a separate exec, and
+if that sweep cannot be confirmed the image is refused even under `warn`. Values: `on` refuses; `warn` records the would-be refusal on the
 `repo-push` / `thread-snapshot` step (the merge-park snapshot logs it) and lets
 the push or snapshot proceed; `off` skips the scan. Any other value means
 `on`. `warn` and `off` are for an image the scan misjudges while it is being

@@ -29,6 +29,7 @@ import {
   type ThreadWarmRecord,
 } from "./thread-warm.js";
 import { MemoryRuntimeConfig } from "./runtime-config.js";
+import { baseRevision, commitAndPush, recordBaseSha, setupRepo } from "./git.js";
 
 /** A memory config store, the shape the runtime hands the enqueue path. */
 const config = () => new MemoryRuntimeConfig();
@@ -134,11 +135,119 @@ test("workspaceSecretValueReason: exact values and base64 forms refuse by name; 
   assert.equal(await workspaceSecretValueReason(ex, [key], "thread snapshot"), null);
 });
 
-test("snapshotScanRoots: the vendor stores of the harnesses the input names, plus /tmp and /var/tmp", () => {
-  assert.deepEqual(snapshotScanRoots([]), ["/tmp", "/var/tmp"]);
-  assert.deepEqual(snapshotScanRoots(["native"]), ["/tmp", "/var/tmp"], "the native loop keeps no vendor store");
-  assert.deepEqual(snapshotScanRoots(["claude-code"]), ["/tmp", "/var/tmp", "$HOME/.claude"]);
-  assert.deepEqual(snapshotScanRoots(["codex", "opencode"]), ["/tmp", "/var/tmp", "$HOME/.codex", "$HOME/.config/opencode", "$HOME/.local/share/opencode"]);
+test("snapshotScanRoots: /tmp, /var/tmp, the vendor stores of the harnesses the input names, then the bounded home leak sites", () => {
+  const plain = (roots: ReturnType<typeof snapshotScanRoots>) => roots.filter((r): r is string => typeof r === "string");
+  const bounded = snapshotScanRoots([]).filter((r) => typeof r !== "string").map((r) => (typeof r === "string" ? r : r.path));
+  assert.deepEqual(bounded, ["$HOME", "$HOME/.config", "$HOME/.cache"]);
+  assert.deepEqual(plain(snapshotScanRoots([])), ["/tmp", "/var/tmp"]);
+  assert.deepEqual(plain(snapshotScanRoots(["native"])), ["/tmp", "/var/tmp"], "the native loop keeps no vendor store");
+  assert.deepEqual(plain(snapshotScanRoots(["claude-code"])), ["/tmp", "/var/tmp", "$HOME/.claude"]);
+  assert.deepEqual(plain(snapshotScanRoots(["codex", "opencode"])), ["/tmp", "/var/tmp", "$HOME/.codex", "$HOME/.config/opencode", "$HOME/.local/share/opencode"]);
+});
+
+test("the snapshot scan reaches $HOME dotfiles, ~/.config and ~/.cache within their bounds", async () => {
+  const key = { name: "ANTHROPIC_API_KEY", value: "sk-ant-HOMEDOT-0123456789" };
+  const base = await mkdtemp(join(tmpdir(), "tw-scan-tmp-"));
+  const root = await mkdtemp(join(tmpdir(), "tw-homedot-ws-"));
+  const home = await mkdtemp(join(tmpdir(), "tw-homedot-"));
+  // The bounded home roots alone: /tmp on a dev machine holds this file.
+  const roots = snapshotScanRoots([]).filter((r) => typeof r !== "string");
+  const scan = async () => await workspaceSecretValueScan(scanExec(root, base, { env: { HOME: home } }), [key], "thread snapshot", { roots });
+  assert.equal((await scan()).kind, "clean", "an empty home is clean");
+  const sites = [
+    ".npmrc",
+    ".git-credentials",
+    ".gitconfig",
+    ".netrc",
+    ".bash_history",
+    ".docker/config.json",
+    ".config/gh/hosts.yml",
+    ".config/a/b/c/settings.json",
+    ".cache/tool/run.log",
+    ".cache/a/b/c.log",
+  ];
+  for (const site of sites) {
+    await mkdir(join(home, site, ".."), { recursive: true });
+    await writeFile(join(home, site), `token=${key.value}\n`);
+    const out = await scan();
+    assert.equal(out.kind, "material", `~/${site} is scanned`);
+    await new LocalExecutor({ root: home }).exec(`rm -f ${shq(site)}`);
+  }
+  // Outside the bounds: too deep, too large, or a pruned bulk cache.
+  const skipped = [".cache/a/b/c/deep.log", ".config/a/b/c/d/deep.json", ".cache/go-build/ab/entry", "projects/repo/src/deep.txt"];
+  for (const site of skipped) {
+    await mkdir(join(home, site, ".."), { recursive: true });
+    await writeFile(join(home, site), `token=${key.value}\n`);
+  }
+  await writeFile(join(home, ".cache", "tool", "big.bin"), `${"x".repeat(300 * 1024)}${key.value}\n`);
+  assert.equal((await scan()).kind, "clean", "bounded roots stop at their depth, size and prunes");
+});
+
+test("the push scan counts from the recorded base sha: moving origin/<base> (git update-ref) no longer hides a commit the push carries", async () => {
+  const key = { name: "OPENAI_API_KEY", value: "sk-oai-UPDATEREF-0123456789" };
+  const bare = await mkdtemp(join(tmpdir(), "tw-updref-bare-"));
+  const seed = await mkdtemp(join(tmpdir(), "tw-updref-seed-"));
+  await new LocalExecutor({ root: seed }).exec(
+    `git init -q -b main . && git config user.email t@t && git config user.name t && echo hello > readme.md && git add -A && git commit -qm seed && git clone -q --bare . ${shq(join(bare, "repo.git"))}`,
+  );
+  const ref = { kind: "forgejo" as const, base: "file://", owner: "local", repo: "repo", cloneUrl: join(bare, "repo.git") };
+  const work = await mkdtemp(join(tmpdir(), "tw-updref-work-"));
+  const ex = new LocalExecutor({ root: work });
+  const remoteMain = (await new LocalExecutor({ root: seed }).exec("git rev-parse HEAD")).stdout.trim();
+  // A tampered remote-tracking ref before the checkout records its base (a
+  // warm volume's .git came from an earlier agent): the sha is re-read from
+  // the real remote, never trusted from the ref.
+  const plain = await setupRepo(ex, { ref, token: "", runId: "run-updref" });
+  await ex.exec("git commit -q --allow-empty -m tamper && git update-ref refs/remotes/origin/main HEAD && git reset -q --hard HEAD~1");
+  const checkout = await recordBaseSha(ex, ref, "", plain);
+  assert.equal(checkout.baseSha, remoteMain, "the recorded base is the remote's main");
+
+  // The agent commits the value, moves origin/main onto that commit, and
+  // leaves an innocuous change so the push has something to carry.
+  await ex.exec(`printf '%s\\n' "$V" > leak.txt && git add -A && git commit -qm leak && git update-ref refs/remotes/origin/main HEAD && echo ok >> readme.md`, { env: { V: key.value } });
+  assert.equal(await workspaceSecretValueReason(ex, [key], "push", { base: "main" }), null, "the bypass, reproduced: the ref-based range is empty of the leak");
+  const trusted = await workspaceSecretValueScan(ex, [key], "push", { base: "main", ...(checkout.baseSha !== undefined ? { baseSha: checkout.baseSha } : {}) });
+  assert.equal(trusted.kind, "material", "the recorded-sha range carries the leaking commit");
+
+  // commitAndPush counts from the same sha: the push carries both commits.
+  assert.equal(baseRevision(checkout), remoteMain);
+  const pushed = await commitAndPush(ex, { ref, token: "", checkout, message: "x" });
+  assert.equal(pushed.kind, "pushed");
+  const count = await new LocalExecutor({ root: bare }).exec(`cd repo.git && git rev-list --count ${remoteMain}..ship/run-updref`);
+  assert.equal(count.stdout.trim(), "2", "what the scan judged is what the push carried");
+  // A malformed recorded sha is a scan failure, never a fallback.
+  const bad = await workspaceSecretValueScan(ex, [key], "push", { base: "main", baseSha: "origin/main" });
+  assert.equal(bad.kind, "failed");
+});
+
+test("the push scan reads past replacement refs: git replace cannot show it a clean commit in place of the one the push carries", async () => {
+  const key = { name: "OPENAI_API_KEY", value: "sk-oai-REPLACEREF-0123456789" };
+  const ex = new LocalExecutor({ root: await pushRepo("tw-replace-") });
+  await ex.exec(
+    'printf "%s\\n" "$V" > leak.txt && git add -A && git commit -qm leak && ' +
+      'c=$(git commit-tree -p HEAD~1 -m clean "$(git rev-parse "HEAD~1^{tree}")") && git replace HEAD "$c"',
+    { env: { V: key.value } },
+  );
+  assert.equal((await ex.exec("git log -p origin/main..HEAD")).stdout.includes(key.value), false, "the replacement hides the leak from a plain git log");
+  assert.equal((await workspaceSecretValueScan(ex, [key], "push", { base: "main" })).kind, "material");
+});
+
+test("base64 needles match at every byte offset and with a trailing newline", async () => {
+  const key = { name: "ANTHROPIC_API_KEY", value: "sk-ant-B64OFFSET-0123456789" };
+  const root = await mkdtemp(join(tmpdir(), "tw-b64-"));
+  const ex = new LocalExecutor({ root });
+  const encodings = [
+    Buffer.from(`${key.value}\n`).toString("base64"),
+    Buffer.from(`A${key.value}`).toString("base64"),
+    Buffer.from(`AB${key.value}`).toString("base64"),
+    Buffer.from(`{"env":{"ANTHROPIC_API_KEY":"${key.value}"},"x":1}`).toString("base64"),
+  ];
+  for (const encoded of encodings) {
+    await writeFile(join(root, "blob.txt"), `${encoded}\n`);
+    assert.equal((await workspaceSecretValueScan(ex, [key], "thread snapshot")).kind, "material", encoded);
+  }
+  await writeFile(join(root, "blob.txt"), `${Buffer.from("sk-ant-B64OFFSET-9999999999").toString("base64")}\n`);
+  assert.equal((await workspaceSecretValueScan(ex, [key], "thread snapshot")).kind, "clean", "a different value does not match");
 });
 
 test("the push scan judges what would leave: history since base, the working diff, untracked files — not gitignored bytes", async () => {
@@ -471,6 +580,39 @@ test("SHIP_CREDENTIAL_SCAN: on by default and for junk; warn proceeds with the f
   const counting: AgentExecutor = { ...ex, exec: async (c, o) => { calls++; return await ex.exec(c, o); } };
   assert.deepEqual(await snapshotCredentialGate(counting, [key], "thread snapshot", [], () => {}, "off"), {});
   assert.equal(calls, 0, "off never runs the scan");
+});
+
+test("a failed snapshot scan sweeps the needle files before any image; an unconfirmed sweep refuses even in warn mode", async () => {
+  const key = { name: "ANTHROPIC_API_KEY", value: "sk-ant-WARNSWEEP-0123456789" };
+  const base = await mkdtemp(join(tmpdir(), "tw-scan-tmp-"));
+  const root = await mkdtemp(join(tmpdir(), "tw-warnsweep-"));
+  const real = scanExec(root, base);
+  // The scan "times out" after leaving its needle dir behind (a SIGKILL
+  // skips the EXIT trap); every other exec runs for real.
+  const commands: string[] = [];
+  const killedScan = (sweep: "real" | "fails"): AgentExecutor => ({
+    ...real,
+    exec: async (command, options) => {
+      commands.push(command);
+      if (command.includes("SHIP_NEEDLES_B64")) {
+        await mkdir(join(base, "ship-scan.KILLED"), { recursive: true });
+        await writeFile(join(base, "ship-scan.KILLED", "needles"), `${key.value}\n`);
+        return { exitCode: 0, stdout: "", stderr: "", timedOut: true, truncated: false };
+      }
+      if (sweep === "fails") return { exitCode: 1, stdout: "", stderr: "", timedOut: false, truncated: false };
+      return await real.exec(command, options);
+    },
+  });
+  const warn = await snapshotCredentialGate(killedScan("real"), [key], "thread snapshot", [], () => {}, "warn");
+  assert.ok(!("refuse" in warn), "a confirmed sweep lets warn proceed");
+  assert.match("warning" in warn ? (warn.warning ?? "") : "", /credential-scan-failed.*timed out/);
+  assert.deepEqual(await readdir(base), [], "the needle dir was swept before the gate returned");
+  assert.equal(commands.length, 2, "the sweep is its own exec");
+
+  const unconfirmed = await snapshotCredentialGate(killedScan("fails"), [key], "thread snapshot", [], () => {}, "warn");
+  assert.match("refuse" in unconfirmed ? unconfirmed.refuse : "", /could not be confirmed removed/, "warn refuses when the sweep is unconfirmed");
+  const thrown: AgentExecutor = { ...real, exec: async (command) => { if (command.includes("SHIP_NEEDLES_B64")) return { exitCode: 0, stdout: "", stderr: "", timedOut: true, truncated: false }; throw new Error("gone"); } };
+  assert.ok("refuse" in (await snapshotCredentialGate(thrown, [key], "thread snapshot", [], () => {}, "warn")), "a thrown sweep is unconfirmed");
 });
 
 test("the store replaces a thread's prior image and evicts oldest-first per project per host", async () => {

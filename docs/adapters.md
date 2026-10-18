@@ -317,8 +317,9 @@ started.
 
 One hardening applies with or without the flag: before anything leaves the
 sandbox, the publish path and every thread/merge snapshot grep the workspace
-for the exact credential VALUES the run forwarded (the value and its base64
-form, never in the command line — the needle rides the exec env), and refuse
+for the exact credential VALUES the run forwarded (the value and its
+unwrapped base64 at any byte offset, never in the command line — the needle
+rides the exec env), and refuse
 by name (`credential-material-in-workspace`) when one is found — an agent
 that ran `env > x` must not publish or snapshot a key. Tuning values (a base
 URL, the opencode config blob) are not scanned: their exact bytes can be

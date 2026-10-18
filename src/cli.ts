@@ -38,7 +38,7 @@ import type { Routing, SegmentSink } from "./model-routing-wire.js";
 import { auditRow, toCsv, withinWindow } from "./audit.js";
 import { auditTiming } from "./audit-timing.js";
 import type { NumberRange } from "./args.js";
-import { commitAndPush, fixPrompt, openPullRequest, setupRepo } from "./git.js";
+import { commitAndPush, fixPrompt, openPullRequest, recordBaseSha, setupRepo } from "./git.js";
 import { runTests, testTargetFromEnv } from "./tests.js";
 import { attachEvidence, envAsked } from "./fix-evidence.js";
 import type { Evidence } from "./verification.js";
@@ -860,7 +860,7 @@ async function fixCommand(rest: string[]): Promise<void> {
   let runtimeRef: ShipRuntime | undefined;
   try {
   process.stderr.write(dim(`cloning ${ref.owner}/${ref.repo}…\n`));
-  const checkout = await setupRepo(executor, { ref, token, runId });
+  const checkout = await recordBaseSha(executor, ref, token, await setupRepo(executor, { ref, token, runId }));
   process.stderr.write(dim(`on ${checkout.branch} (from ${checkout.base})\n`));
 
   const runtime = await makeRuntime(args, config);
