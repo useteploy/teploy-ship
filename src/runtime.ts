@@ -7,6 +7,7 @@ import { finishReviewReplacement } from "./revision-launch.js";
 import { projectReadinessRecord } from "./project-readiness.js";
 import { stackDetectEnabled } from "./stack-propose.js";
 import { taskRootRunId } from "./task-session.js";
+import { threadWarmForEnqueue, warmThreadEnabled, type ThreadWarmDecision } from "./thread-warm.js";
 import { FileLaunchJournal, NucleusLaunchJournal, assertSameLaunch, launchRequestHash, type LaunchJournal } from "./launch-journal.js";
 import { parseJourney, journeyInstruction, type Journey } from "./journeys.js";
 import { FileArtifacts, NucleusArtifacts, type ArtifactStore } from "./artifacts.js";
@@ -102,10 +103,10 @@ import { warmCacheEnabled, warmSlugOf } from "./warm.js";
 import { assertRepoAllowed, policyFromEnv } from "./repo-policy.js";
 import { forkEnabled, forkNote, resolveForkSource } from "./fork.js";
 import type { ForkSourceRecord } from "./fork.js";
-import { effectiveRunCap, withProjects } from "./durable.js";
+import { effectiveRunCap, sandboxOverridesOf, withProjects } from "./durable.js";
 import { costUSD } from "./pricing.js";
 import type { RepoTrust } from "./repo-policy.js";
-import type { RecoveryTuning, RunUsage } from "./durable.js";
+import type { DurableAgentInput, RecoveryTuning, RunUsage } from "./durable.js";
 import type { ProposeInput as IntakeProposeInput, IntakeTask as IntakeTaskType } from "./intake.js";
 import { FileEventStore, RunMetaStore } from "./run-store.js";
 import { askEnv, readDeploymentAsks } from "./deployment-asks.js";
@@ -944,6 +945,14 @@ export interface EnqueueReport {
   /** The command recorded at enqueue; absent = the worker resolves it from its checkout. */
   testCommand?: string;
   testCommandSource?: "project" | "detected";
+  /**
+   * D4-c: whether a follow-up will boot from its thread's snapshot, and —
+   * when it will not — the recorded reason (expired, repo or sandbox-shape
+   * mismatch, none recorded). Present only on a run that went looking, so
+   * first turns and flag-off deployments report exactly what they did before
+   * this field existed.
+   */
+  threadWarm?: { used: boolean; reason?: string };
 }
 
 export async function enqueueRun(
@@ -1491,6 +1500,19 @@ export async function enqueueRun(
   // volume would not be the repository's steady state).
   const warmRun =
     options.environmentCheckOnly !== true && options.repo !== undefined && options.pr === undefined && warmCacheEnabled() && warmSlugOf(options.repo) !== null;
+  // Warm threads (D4-c): which runs may leave a snapshot behind for the
+  // thread's next turn. Repo runs, single attempt (a multi-attempt run has
+  // no ONE workspace to hand forward), never a delegation child (its spawn
+  // owns the child's shape) and never a setup-only check. The FLAG pair is
+  // the operator's assertion that the daemon bakes warm-volume bytes into
+  // snapshots (SHIP_WARM_PARKS, teploy-sandbox 2a89f72) — without it a
+  // snapshot restores an empty workspace and warmth would be a lie.
+  const warmThreadEligible =
+    warmThreadEnabled() &&
+    options.environmentCheckOnly !== true &&
+    options.repo !== undefined &&
+    attempts.length < 2 &&
+    options.delegateChild !== true;
   // The spend cap, checked BEFORE the run exists. Order matters: a refusal
   // after `store.append` would leave a `run-started` event for a run no worker
   // is allowed to execute — a ghost in the runs list that no surface can
@@ -1519,7 +1541,7 @@ export async function enqueueRun(
   );
   // Hoisted out of the append below so the upgrade fence can fingerprint the
   // exact object the log will carry, rather than a reconstruction of it.
-  const input = {
+  const inputBase = {
         restoreValidation: 1 as const,
         task: journey ? `${baseTask}\n\n${journeyInstruction(journey)}` : baseTask,
         ...(journey ? { journey, userMessage: options.userMessage ?? options.task } : {}),
@@ -1681,6 +1703,22 @@ export async function enqueueRun(
         // sequences — and therefore their fingerprints — untouched.
         ...(attemptsK !== undefined && attemptsK > 1 ? { attempts: attemptsK } : {}),
   };
+  // The follow-up half of D4-c, resolved from the thread's record AFTER the
+  // rest of the input exists (the shape match is against the input this run
+  // will actually carry) and BEFORE anything is appended, so the recorded
+  // input and its fingerprint include it. Decided HERE, never inside a step:
+  // the record is live host state, the same reason `warm` is materialised
+  // (warm.ts). A refusal names itself — the report below carries it so a
+  // cold follow-up is a stated fact rather than a mystery.
+  const warmFollowUp: ThreadWarmDecision | undefined =
+    warmThreadEligible && options.parentRunId !== undefined && options.repo !== undefined
+      ? await threadWarmForEnqueue(runtime.config, taskRoot, options.repo, sandboxOverridesOf(inputBase))
+      : undefined;
+  const input: DurableAgentInput = {
+    ...inputBase,
+    ...(warmThreadEligible ? { warmThread: true } : {}),
+    ...(warmFollowUp !== undefined && "ref" in warmFollowUp ? { threadWarm: warmFollowUp.ref } : {}),
+  };
   const started: WorkflowEvent = {
     v: WIRE_FORMAT_VERSION,
     seq: 0,
@@ -1727,6 +1765,11 @@ export async function enqueueRun(
   const report: EnqueueReport = {
     tests: tests === true,
     ...(testTarget !== undefined ? { testCommand: testTarget.command, testCommandSource: testTarget.source } : {}),
+    ...(warmFollowUp !== undefined
+      ? "ref" in warmFollowUp
+        ? { threadWarm: { used: true } }
+        : { threadWarm: { used: false, reason: warmFollowUp.reason } }
+      : {}),
   };
   if (runtime.launches) {
     const intent = await runtime.launches.prepare({runId:options.runId,requestHash,started,meta,...(options.reviewParent ? {reviewParent:options.reviewParent} : {})});

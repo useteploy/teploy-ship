@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp } from "node:fs/promises";
+import { cp, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -12,6 +12,9 @@ import { MemoryEventStore, cancelRun, deliverEvent, executeRun } from "@neutron-
 
 import type { ArtifactStore } from "./artifacts.js";
 import { CHANGE_EVENT, MERGE_EVENT, PLAN_EVENT, approvalEvent, askEvent, durableAgent, livenessProbeTarget } from "./durable.js";
+import { threadWarmStore } from "./thread-warm.js";
+import { MemoryRuntimeConfig } from "./runtime-config.js";
+import { runTiming } from "./run-timing.js";
 import type { CommandRunner, PreviewTarget } from "./deploy.js";
 import type { TelemetryTarget } from "./observe.js";
 import { ladderRungsFromEvents } from "./ladder.js";
@@ -5236,4 +5239,264 @@ test("the prompt mentions image mode only when the input admits it (durable equi
   });
   const barePrompt = String(neither.calls[0]?.[0]?.content);
   assert.ok(!barePrompt.includes("```look"), "look off: no look vocabulary at all");
+});
+
+// --- D4-c: warm threads — snapshot at end of turn, boot from it, cold fallback ---
+
+/**
+ * A provider that models the FIXED daemon (teploy-sandbox 2a89f72): a
+ * snapshot copies the workspace's bytes — a warm volume included, `.git` and
+ * uncommitted files and all — into a self-contained image, and createFrom
+ * boots a fresh workspace seeded from that image. The sandbox README's older
+ * claim that bind-mounted volumes stay outside image snapshots predates that
+ * commit (f291962, 2026-09-19 vs 2a89f724, 2026-09-21) and was never
+ * updated; the code and its integration test are the truth this provider
+ * mirrors.
+ */
+async function threadWarmProvider(): Promise<{
+  provider: ExecutorProvider;
+  images: Map<string, string>;
+  workspaces: Map<string, string>;
+  destroyed: string[];
+  createFromCalls: string[];
+  createCalls: () => number;
+}> {
+  let n = 0;
+  let created = 0;
+  const images = new Map<string, string>();
+  const workspaces = new Map<string, string>();
+  const destroyed: string[] = [];
+  const createFromCalls: string[] = [];
+  const provider: ExecutorProvider = {
+    async create() {
+      created++;
+      const handle = `ws-${n++}`;
+      workspaces.set(handle, await mkdtemp(join(tmpdir(), `d4c-${handle}-`)));
+      return { handle };
+    },
+    attach: (handle: string) => new LocalExecutor({ root: workspaces.get(handle) ?? handle }),
+    async snapshot(handle: string) {
+      const dir = workspaces.get(handle);
+      if (dir === undefined) throw new Error("cannot snapshot a reaped workspace");
+      const image = `teploy-sbx-snap:${n++}`;
+      const imageDir = await mkdtemp(join(tmpdir(), "d4c-image-"));
+      await cp(dir, imageDir, { recursive: true });
+      images.set(image, imageDir);
+      return image;
+    },
+    async createFrom(image: string) {
+      createFromCalls.push(image);
+      const imageDir = images.get(image);
+      if (imageDir === undefined) throw new Error(`no such image ${image}`);
+      const handle = `ws-${n++}`;
+      const dir = await mkdtemp(join(tmpdir(), `d4c-${handle}-`));
+      await cp(imageDir, dir, { recursive: true });
+      workspaces.set(handle, dir);
+      return { handle };
+    },
+    async destroy(handle: string) {
+      destroyed.push(handle);
+    },
+  };
+  return { provider, images, workspaces, destroyed, createFromCalls, createCalls: () => created };
+}
+
+/** A bare repo plus a run-started event for a thread ROOT, so a run with
+ * parentRunId can resolve its anchor the way the worker would. */
+async function threadFixture(name: string): Promise<{ repo: string; seedRoot: (store: MemoryEventStore) => Promise<void> }> {
+  const bareDir = await mkdtemp(join(tmpdir(), `d4c-${name}-bare-`));
+  const seedDir = await mkdtemp(join(tmpdir(), `d4c-${name}-seed-`));
+  const seeder = new LocalExecutor({ root: seedDir });
+  await seeder.exec(
+    `git init -q -b main . && git config user.email t@t && git config user.name t && printf 'hello\\n' > f.txt && git add -A && git commit -qm seed && git clone -q --bare . ${bareDir}/owner/repo.git`,
+  );
+  return {
+    repo: `file://${bareDir}/owner/repo.git`,
+    seedRoot: async (store) => {
+      await store.append("run-root", { v: 1, seq: 0, type: "run-started", at: "2026-10-17T00:00:00Z", data: { workflow: "coding-agent", input: { task: "root" } } });
+    },
+  };
+}
+
+const stepOutput = (events: Awaited<ReturnType<MemoryEventStore["load"]>>, name: string): unknown =>
+  events.find((e) => e.type === "step-completed" && e.name === name)?.data;
+
+test("D4-c FIRST TEST: a snapshot of a warm run retains .git and an uncommitted file", async () => {
+  const fixture = await threadFixture("retain");
+  const rig = await threadWarmProvider();
+  const store = new MemoryEventStore();
+  await fixture.seedRoot(store);
+  const cfg = new MemoryRuntimeConfig();
+  const wf = durableAgent({
+    model: reactiveModel([
+      "```bash\nprintf 'uncommitted proof\\n' > warm-proof.txt\n```",
+      "```finish\nlooked around; nothing to report\n\nFINDINGS_JSON\n[]\n```",
+    ]).model,
+    executor: rig.provider,
+    workdir: ".",
+    threadWarm: threadWarmStore(cfg),
+    loadEvents: (runId) => store.load(runId),
+  });
+  const done = await executeRun({
+    workflow: wf,
+    runId: "run-retain",
+    store,
+    input: { task: "look around", repo: fixture.repo, mode: "scan", warm: true, warmParks: true, warmThread: true, parentRunId: "run-root" },
+  });
+  assert.equal(done.status, "completed");
+  const snap = stepOutput(await store.load("run-retain"), "thread-snapshot");
+  assert.ok(snap !== undefined, "the thread-snapshot step recorded");
+  const image = (snap as { result?: { image?: string } }).result?.image;
+  assert.ok(image !== undefined && rig.images.has(image), "the image exists");
+  const seeded = new LocalExecutor({ root: rig.images.get(image)! });
+  assert.equal((await seeded.exec("test -d .git && printf yes")).stdout, "yes", ".git survives the snapshot (the 2a89f72 daemon bakes volume bytes in)");
+  assert.equal((await seeded.exec("cat warm-proof.txt")).stdout.trim(), "uncommitted proof", "and so does an uncommitted file");
+  const record = await threadWarmStore(cfg).get("run-root");
+  assert.equal(record?.image, image, "the record is keyed by the thread root");
+  assert.match(record?.head ?? "", /^[a-f0-9]{40}$/, "and carries the head the snapshot stood on");
+});
+
+test("D4-c: a follow-up boots from the snapshot, fetches instead of cloning, and TTFT is derivable", async () => {
+  const fixture = await threadFixture("follow");
+  const rig = await threadWarmProvider();
+  const store = new MemoryEventStore();
+  await fixture.seedRoot(store);
+  const cfg = new MemoryRuntimeConfig();
+  const wf = durableAgent({
+    model: reactiveModel(["```finish\nfollow-up done\n\nFINDINGS_JSON\n[]\n```"]).model,
+    executor: rig.provider,
+    workdir: ".",
+    threadWarm: threadWarmStore(cfg),
+    loadEvents: (runId) => store.load(runId),
+  });
+  // Turn 1: the parent scan leaves a snapshot behind, keyed on run-root.
+  await executeRun({
+    workflow: wf,
+    runId: "run-parent",
+    store,
+    input: { task: "look around", repo: fixture.repo, mode: "scan", warm: true, warmParks: true, warmThread: true, parentRunId: "run-root" },
+  });
+  const record = await threadWarmStore(cfg).get("run-root");
+  assert.ok(record !== null, "the parent left a record");
+  const coldCreates = rig.createCalls();
+
+  // Turn 2: the follow-up materialises threadWarm (enqueue does this; a
+  // direct execution stands in for it) and boots from the image.
+  const done = await executeRun({
+    workflow: wf,
+    runId: "run-follow",
+    store,
+    input: { task: "continue", repo: fixture.repo, mode: "scan", warmThread: true, parentRunId: "run-parent", threadWarm: { image: record.image, head: record.head } },
+  });
+  assert.equal(done.status, "completed");
+  const events = await store.load("run-follow");
+  const sandbox = stepOutput(events, "sandbox") as { result?: { handle?: string; boot?: string } } | undefined;
+  assert.equal(sandbox?.result?.boot, "thread-warm", "the sandbox step says which boot ran");
+  const repoSetup = stepOutput(events, "repo-setup") as { result?: { via?: string } } | undefined;
+  assert.equal(repoSetup?.result?.via, "thread-warm", "repo-setup restored by fetch, not clone");
+  assert.deepEqual(rig.createFromCalls, [record.image], "exactly one createFrom, on the recorded image");
+  assert.equal(rig.createCalls(), coldCreates, "no cold create happened for the follow-up");
+  const work = rig.workspaces.get(((await store.load("run-follow")).find((e) => e.type === "step-completed" && e.name === "sandbox")?.data as { result?: { handle?: string } } | undefined)?.result?.handle ?? "");
+  assert.ok(work !== undefined && (await new LocalExecutor({ root: work }).exec("test -d .git")).exitCode === 0, "the follow-up's workspace holds the repository");
+  // D4-a's derivation is what makes cold vs warm comparable: the follow-up's
+  // log must yield a TTFT, so the comparison the slice is judged on is possible.
+  const timing = runTiming(events as Parameters<typeof runTiming>[0]);
+  assert.ok(typeof timing.ttftMs === "number", `ttftMs is derivable (${timing.ttftWhy ?? "set"})`);
+  // The follow-up is itself followable, so its own snapshot REPLACED the
+  // thread's image rather than stranding the parent's.
+  const followSnap = stepOutput(events, "thread-snapshot") as { result?: { image?: string } } | undefined;
+  const after = await threadWarmStore(cfg).get("run-root");
+  assert.equal(after?.image, followSnap?.result?.image, "one image per thread root");
+  assert.notEqual(after?.image, record.image, "the parent's image was replaced, not leaked");
+});
+
+test("D4-c negative: a credential file planted in the workspace means NO snapshot, and the container is disposed", async () => {
+  const fixture = await threadFixture("cred");
+  const rig = await threadWarmProvider();
+  const store = new MemoryEventStore();
+  await fixture.seedRoot(store);
+  const cfg = new MemoryRuntimeConfig();
+  const wf = durableAgent({
+    model: reactiveModel([
+      "```bash\nmkdir -p .teploy-agent && printf 'ANTHROPIC_API_KEY=sk-ant-x\\n' > .teploy-agent/harness.env\n```",
+      "```finish\nplanted and done\n\nFINDINGS_JSON\n[]\n```",
+    ]).model,
+    executor: rig.provider,
+    workdir: ".",
+    threadWarm: threadWarmStore(cfg),
+    loadEvents: (runId) => store.load(runId),
+  });
+  const done = await executeRun({
+    workflow: wf,
+    runId: "run-cred",
+    store,
+    input: { task: "look around", repo: fixture.repo, mode: "scan", warm: true, warmParks: true, warmThread: true, parentRunId: "run-root" },
+  });
+  assert.equal(done.status, "completed", "the refusal costs nothing: the run still completes");
+  const snap = stepOutput(await store.load("run-cred"), "thread-snapshot") as { result?: { skipped?: string } } | undefined;
+  assert.match(snap?.result?.skipped ?? "", /credential/, "the refusal names the credential");
+  assert.equal(rig.images.size, 0, "no image was taken");
+  assert.equal((await threadWarmStore(cfg).get("run-root")), null, "and no record exists");
+  assert.ok(rig.destroyed.length >= 1, "the container was disposed as on any other run end");
+});
+
+test("D4-c negative: a snapshot on a removed host (or an image GC deleted) gives a cold run that completes", async () => {
+  const fixture = await threadFixture("cold");
+  const rig = await threadWarmProvider();
+  const store = new MemoryEventStore();
+  await fixture.seedRoot(store);
+  const wf = durableAgent({
+    model: reactiveModel(["```finish\ncold but done\n\nFINDINGS_JSON\n[]\n```"]).model,
+    executor: rig.provider,
+    workdir: ".",
+  });
+  const before = rig.createCalls();
+  const done = await executeRun({
+    workflow: wf,
+    runId: "run-cold",
+    store,
+    input: { task: "continue", repo: fixture.repo, mode: "scan", parentRunId: "run-root", threadWarm: { image: "9@teploy-sbx-snap:gone", head: "" } },
+  });
+  assert.equal(done.status, "completed", "a missing image is a cold boot, never a failed run");
+  const sandbox = stepOutput(await store.load("run-cold"), "sandbox") as { result?: { boot?: string; coldWhy?: string } } | undefined;
+  assert.equal(sandbox?.result?.boot, "cold");
+  assert.match(sandbox?.result?.coldWhy ?? "", /no such image/, "the fallback reason is on the timeline");
+  assert.equal(rig.createCalls(), before + 1, "the cold create happened");
+  const repoSetup = stepOutput(await store.load("run-cold"), "repo-setup") as { result?: { via?: string } } | undefined;
+  assert.notEqual(repoSetup?.result?.via, "thread-warm", "repo-setup cloned cold");
+});
+
+test("D4-c replay: a warm follow-up replays from its log after the image was deleted, without createFrom", async () => {
+  const fixture = await threadFixture("replay");
+  const rig = await threadWarmProvider();
+  const store = new MemoryEventStore();
+  await fixture.seedRoot(store);
+  const cfg = new MemoryRuntimeConfig();
+  const wf = durableAgent({
+    model: reactiveModel(["```finish\nreplayable\n\nFINDINGS_JSON\n[]\n```"]).model,
+    executor: rig.provider,
+    workdir: ".",
+    threadWarm: threadWarmStore(cfg),
+    loadEvents: (runId) => store.load(runId),
+  });
+  await executeRun({
+    workflow: wf,
+    runId: "run-replay-parent",
+    store,
+    input: { task: "look", repo: fixture.repo, mode: "scan", warm: true, warmParks: true, warmThread: true, parentRunId: "run-root" },
+  });
+  const record = await threadWarmStore(cfg).get("run-root");
+  assert.ok(record !== null);
+  await executeRun({
+    workflow: wf,
+    runId: "run-replay",
+    store,
+    input: { task: "continue", repo: fixture.repo, mode: "scan", warmThread: true, parentRunId: "run-replay-parent", threadWarm: { image: record.image, head: record.head } },
+  });
+  // GC deletes the image after the run completed.
+  rig.images.delete(record.image);
+  const calls = rig.createFromCalls.length;
+  const replay = await executeRun({ workflow: wf, runId: "run-replay", store });
+  assert.equal(replay.status, "completed", "a completed run replays from its log; live host state is irrelevant to it");
+  assert.equal(rig.createFromCalls.length, calls, "replay never re-asked the daemon");
 });

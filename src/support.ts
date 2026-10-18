@@ -208,6 +208,8 @@ const CONFIG_WHITELIST = [
   "SHIP_MAX_STEPS",
   "SHIP_SANDBOX_TTL_SEC",
   "SHIP_WARM_PARKS",
+  "SHIP_WARM_THREAD",
+  "SHIP_WARM_THREAD_TTL_SEC",
   "SHIP_PUBLIC_URL",
   "SHIP_TELEMETRY",
   "SHIP_INTAKE_POLICIES",
@@ -273,6 +275,8 @@ export function configSummary(env: NodeJS.ProcessEnv, config?: SupportConfigInpu
   put("SHIP_MAX_STEPS", envNum(env, "SHIP_MAX_STEPS"));
   put("SHIP_SANDBOX_TTL_SEC", envNum(env, "SHIP_SANDBOX_TTL_SEC"));
   put("SHIP_WARM_PARKS", envFlag(env.SHIP_WARM_PARKS));
+  put("SHIP_WARM_THREAD", envFlag(env.SHIP_WARM_THREAD));
+  put("SHIP_WARM_THREAD_TTL_SEC", envNum(env, "SHIP_WARM_THREAD_TTL_SEC"));
   put("SHIP_PUBLIC_URL", urlHost(env.SHIP_PUBLIC_URL ?? ""));
   put("SHIP_TELEMETRY", envFlag(env.SHIP_TELEMETRY));
   const rawPolicies = str("SHIP_INTAKE_POLICIES");
