@@ -48,6 +48,13 @@ the same recorded history, a new branch from that run's pushed commit, and a
 pull request of its own — the source run's PR is untouched. An in-flight
 source, or a deployment with the flag off, is refused with the reason in the
 error.
+`stack(id, ...)` (behind `SHIP_STACKED_PRS=on`) stacks a change on a run's
+OPEN pull request: the new run's branch starts at that run's recorded pull
+request head and its own pull request opens against the run's branch, so its
+diff carries only the stacked change's commits. A run that opened no pull
+request of its own, or a deployment with the flag off, is refused with the
+reason in the error. Both take the same persisted requestId as the other
+create-form calls.
 
 The create/follow-up form endpoints return redirects; this client parses those
 without following them or forwarding a bearer token elsewhere. Persist requestId

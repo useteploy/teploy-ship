@@ -9,7 +9,7 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import { freshForge, requestWorkspace, threadHistory } from "../../lib/workspace.server.js";
 import { submissionIdentity } from "../../lib/submission.server.js";
 import { Conversation, Changes, Verification } from "../../views/workspace.js";
-import { cancelRun, deliverEvent, actorFromPrincipal, verificationFactsFromEvents, enqueueRun, priorRunContext, forkEnabled } from "../../lib/ship.server.js";
+import { cancelRun, deliverEvent, actorFromPrincipal, verificationFactsFromEvents, enqueueRun, priorRunContext, forkEnabled, stackedPrsEnabled } from "../../lib/ship.server.js";
 import { roughDuration } from "../../lib/expect.js";
 
 // PLAN_EVENT comes from the dependency-free plan module: it's used in the
@@ -237,6 +237,52 @@ export async function action({
       await enqueueRun(runtime, { runId: next, requestIdentity: identity.requestIdentity, userMessage: message, task, model: meta.model, source: "manual", actor: actorFromPrincipal(me), trust: input?.trust === "operator" ? "operator" : "external", ...(input?.repo ? { repo: input.repo } : {}), forkOf: runId, ...journeyOptions(journey) });
     } catch (e) {
       return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(e instanceof Error ? e.message : "Could not start fork")}`);
+    }
+    return redirectTo(`/runs/${next}`);
+  }
+
+  // DS1 (SHIP_STACKED_PRS): stack a change on this run's open pull request —
+  // a change run whose branch starts at the base run's recorded head and
+  // whose pull request opens against the base's branch instead of the default
+  // branch. Same wiring as the fork above: the layout's same-origin gate plus
+  // a scoped requestId, the follow-up's authority (approve = editor or
+  // above), and the enqueue behind this resolves the base ONCE and refuses BY
+  // NAME (no pull request of its own, nothing pushed, a chained stack, the
+  // flag off) so no refused stack ever exists as a run.
+  if (intent === "stack") {
+    if (!(await may("approve", me))) return redirectTo(`/runs/${runId}?denied=approve`);
+    if (!stackedPrsEnabled()) return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent("Stacked pull requests are off on this deployment (SHIP_STACKED_PRS).")}`);
+    const message = String(form.get("message") ?? "").trim();
+    let identity;
+    try {
+      identity = submissionIdentity(me!.user, `stack:${runId}`, form.get("requestId"), { message, journey: form.get("journey") });
+      const accepted = await runtime.launches?.get(identity.runId);
+      if (accepted) {
+        if (accepted.requestHash !== identity.requestIdentity) throw new Error("This request ID already belongs to a different stacked change");
+        await runtime.launches!.publish(accepted);
+        return redirectTo(`/runs/${identity.runId}`);
+      }
+    } catch (error) {
+      return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(error instanceof Error ? error.message : "Could not recover stacked change")}`);
+    }
+    if (meta === null) return redirectTo(`/runs/${runId}?messageError=Unknown+run`);
+    if (!message || message.length > 12000) return redirectTo(`/runs/${runId}?messageError=Enter+a+message+of+up+to+12000+characters`);
+    let journey;
+    try { journey = parseJourney(form.get("journey") ?? "change"); }
+    catch { return redirectTo(`/runs/${runId}?messageError=Choose+a+supported+task+type`); }
+    const events = await runtime.store.load(runId);
+    const started = events.find(e => e.type === "run-started");
+    const input = (started?.data as { input?: { repo?: string; trust?: string } })?.input;
+    const next = identity.runId;
+    try {
+      // No pr, no parentRunId, and always a change run: the stacked run opens
+      // its own PR against the base's branch and stands alone as a task —
+      // input.stack is its only tie to the base, which is what pr-watch reads.
+      // A hand-crafted non-change journey is refused by the enqueue's own
+      // named rule; the plan park applies via the project record.
+      await enqueueRun(runtime, { runId: next, requestIdentity: identity.requestIdentity, userMessage: message, task: message, model: meta.model, source: "manual", actor: actorFromPrincipal(me), trust: input?.trust === "operator" ? "operator" : "external", ...(input?.repo ? { repo: input.repo } : {}), stackOn: runId, ...journeyOptions(journey) });
+    } catch (e) {
+      return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(e instanceof Error ? e.message : "Could not start stacked change")}`);
     }
     return redirectTo(`/runs/${next}`);
   }
@@ -972,6 +1018,7 @@ function RunComposer({data}: {data: RunData}) {
           )}
           {(!active || reviewing && data.canSteer) && data.meta.status !== 'cancelling' && data.canLaunch && <form method="post" class="message-composer"><input type="hidden" name="requestId" value={followRequestId}/><input type="hidden" name="eventName" value={followEvent}/>{reviewing && <p class="notice">Request changes on this PR before merging. A change request cancels this run’s pending merge decision and starts a linked run; the PR stays open. Read-only investigations leave the merge decision pending.</p>}<label class="field">Continue this work<textarea name="message" rows={3} required maxLength={12000} placeholder="What should Ship change or investigate next?" /></label>{data.hasPr && <label class="field">Start from<select name="target"><option value="pr">Existing pull request (checked before launch)</option><option value="base">Current default branch</option></select></label>}<label class="field">What should happen next?<select name="journey" value={followJourney} onChange={e => setFollowJourney(e.currentTarget.value)}>{JOURNEYS.map(j => <option value={j.id}>{j.label}</option>)}</select></label>{followJourney === "change" && data.requirePlanReview && <p class="notice">This project requires plan approval before code changes. The native harness is required; merge and deployment permissions remain separate.</p>}{followJourney === "change" && !data.requirePlanReview && (data.planSupported ? <label class="check-field"><input type="checkbox" name="plan" checked={followPlan} onInput={e => setFollowPlan(e.currentTarget.checked)} />Review the plan before code changes</label> : <p class="meta">This project uses an external harness, which starts work immediately. For plan review, select the native harness in Project settings before launching.</p>)}<button type="submit" name="intent" value="follow-up">Start follow-up</button><p class="meta">Keeps the conversation history and starts a fresh sandbox. The existing pull request is checked with the forge before launch. Current project approvals and budgets apply.</p></form>}
            {data.canFork && <form method="post" class="message-composer"><input type="hidden" name="requestId" value={followRequestId}/><label class="field">Fork this work<textarea name="message" rows={2} required maxLength={12000} placeholder="What should the forked run change or investigate? It inherits this run's recorded history." /></label><label class="field">What should happen next?<select name="journey">{JOURNEYS.map(j => <option value={j.id}>{j.label}</option>)}</select></label><button type="submit" name="intent" value="fork">Fork run</button><p class="meta">Starts a new branch at this run's recorded pushed commit — or the default branch when it pushed nothing — and opens a separate pull request. This run's pull request and branch are untouched. A required plan checkpoint still applies.</p></form>}
+           {data.canStack && <form method="post" class="message-composer"><input type="hidden" name="requestId" value={followRequestId}/><label class="field">Stack a change on this PR<textarea name="message" rows={2} required maxLength={12000} placeholder="What should the stacked change do? Its branch starts where this run's pull request stands." /></label><button type="submit" name="intent" value="stack">Stack change</button><p class="meta">Starts a new branch at this run's recorded pull request head and opens a separate pull request against this run's branch, so reviewers see only the stacked change's own commits. When this run's pull request merges, the stack is rebased onto the default branch. A change run; a required plan checkpoint still applies.</p></form>}
 
  </>;
 }

@@ -30,6 +30,7 @@ import { enqueueRun, proposeExternal } from "./runtime.js";
 import { changeClassRequired, sweepBulletin } from "./bulletin.js";
 import { parseSandboxUrls } from "./sandbox-pool.js";
 import { sweepThreadWarm, threadWarmStore, warmThreadEnabled } from "./thread-warm.js";
+import { parkSnapshotSweeper } from "./snapshot-gc.js";
 import { attributionsFrom } from "./attributed-spend.js";
 import {
   deliveryFromEvents,
@@ -1687,6 +1688,30 @@ export function startWorker(options: WorkerOptions): {
   const threadWarmTimer = threadWarmSweepStore !== undefined ? setInterval(() => { void sweepThreadWarm(threadWarmSweepStore, { log }).catch(() => {}); }, 60_000) : undefined;
   threadWarmTimer?.unref?.();
 
+  // Park-snapshot GC (snapshot-gc.ts): the merge-park and delegate-park
+  // images no record owns. Same minute cadence as the thread-warm sweeper,
+  // same never-throws posture, and the provider's deleteSnapshot routing
+  // (host-tag aware). Absent on a provider that cannot delete snapshots —
+  // every delete would fail, which is log noise, not cleaning. The warm
+  // reference list is read through the same store the thread-warm sweeper
+  // expires, whatever this worker's own flags, so a merge-park image that is
+  // some thread's warmth is never this sweeper's to delete.
+  const parkSnapshots = executor.deleteSnapshot !== undefined
+    ? parkSnapshotSweeper(
+        {
+          listMeta: (listOptions) => options.runtime.listMeta(listOptions),
+          loadEvents: (runId) => options.runtime.store.load(runId),
+          warmImages: async () => (await threadWarmStore(options.runtime.config).list()).map((r) => r.image),
+          deleteSnapshot: (image) => executor.deleteSnapshot!(image),
+        },
+        { log },
+      )
+    : undefined;
+  const parkSnapshotTimer = parkSnapshots !== undefined
+    ? setInterval(() => { void parkSnapshots.sweep().catch((error) => log(`[snapshot-gc] sweep failed: ${error instanceof Error ? error.message : String(error)}`)); }, 60_000)
+    : undefined;
+  parkSnapshotTimer?.unref?.();
+
   // The policy store is dashboard-authoritative; seed it from the env defaults
   // once (first run) so an operator who never opens the UI keeps the same
   // behavior, then let store edits win on every subsequent sweep.
@@ -2340,6 +2365,7 @@ export function startWorker(options: WorkerOptions): {
       clearInterval(deliveryTimer);
       if (selfwatchTimer !== undefined) clearInterval(selfwatchTimer);
       if (threadWarmTimer !== undefined) clearInterval(threadWarmTimer);
+      if (parkSnapshotTimer !== undefined) clearInterval(parkSnapshotTimer);
       clearInterval(driveTimer);
       // The wait the rewritten shutdown dropped: a sweep that was mid-pass
       // when the timers cleared. The chain never rejects (every leg catches),
