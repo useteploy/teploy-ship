@@ -1,0 +1,69 @@
+{
+  "object_kind": "pipeline",
+  "object_attributes": {
+    "id": 31,
+    "iid": 3,
+    "name": "Pipeline for branch: ship/checkout-fix",
+    "ref": "ship/checkout-fix",
+    "tag": false,
+    "sha": "bcbb5ec396a2c0f828686f14fac9b80b780504f2",
+    "before_sha": "bcbb5ec396a2c0f828686f14fac9b80b780504f2",
+    "source": "merge_request_event",
+    "status": "failed",
+    "detailed_status": "failed",
+    "stages": ["build", "test", "deploy"],
+    "created_at": "2016-08-12T15:23:28.000Z",
+    "finished_at": "2016-08-12T15:26:29.000Z",
+    "duration": 63,
+    "queued_duration": 10,
+    "protected_ref": false,
+    "default_branch": false,
+    "variables": [],
+    "url": "http://example.com/gitlab-org/gitlab-test/-/pipelines/31",
+    "root_pipeline_id": 31
+  },
+  "merge_request": {
+    "id": 1,
+    "iid": 7,
+    "title": "Test",
+    "source_branch": "ship/checkout-fix",
+    "source_project_id": 1,
+    "target_branch": "master",
+    "target_project_id": 1,
+    "state": "opened",
+    "merge_status": "can_be_merged",
+    "detailed_merge_status": "mergeable",
+    "url": "http://192.168.64.1:3005/gitlab-org/gitlab-test/merge_requests/7"
+  },
+  "user": {
+    "id": 1,
+    "name": "Administrator",
+    "username": "root",
+    "email": "admin@example.com"
+  },
+  "project": {
+    "id": 1,
+    "name": "Gitlab Test",
+    "description": "Atque in sunt eos similique dolores voluptatem.",
+    "web_url": "http://192.168.64.1:3005/gitlab-org/gitlab-test",
+    "git_ssh_url": "git@192.168.64.1:3005:gitlab-org/gitlab-test.git",
+    "git_http_url": "http://192.168.64.1:3005/gitlab-org/gitlab-test.git",
+    "namespace": "Gitlab Org",
+    "visibility_level": 20,
+    "path_with_namespace": "gitlab-org/gitlab-test",
+    "default_branch": "master",
+    "ci_config_path": null
+  },
+  "commit": {
+    "id": "bcbb5ec396a2c0f828686f14fac9b80b780504f2",
+    "message": "test\n",
+    "title": "test",
+    "timestamp": "2016-08-12T17:23:21+02:00",
+    "url": "http://example.com/gitlab-org/gitlab-test/commit/bcbb5ec396a2c0f828686f14fac9b80b780504f2",
+    "author": {
+      "name": "User",
+      "email": "user@example.com"
+    }
+  },
+  "builds": []
+}

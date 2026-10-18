@@ -17,9 +17,12 @@ export const config = { mode: "app" };
  *
  * The body is the S24 EventEnvelope JSON: {eventId, schemaVersion: "1.x",
  * type, cursor, occurredAt, data: {subject, title, detail?, attrs?, seq?,
- * repoHint?}}. Everything else — matching, ordering, dedupe, the propose
- * itself — lives behind lib/event-rules.server.ts and src/event-rules.ts,
- * in front of the SAME intake.propose every other source uses.
+ * repoHint?}} — UNLESS the source declares a vendor (EV4: Sentry, Datadog,
+ * PagerDuty v3, Jira, GitLab), in which case the body is that vendor's own
+ * webhook payload, verified and mapped by src/event-adapters/<vendor>.ts.
+ * Everything else — matching, ordering, dedupe, the propose itself — lives
+ * behind lib/event-rules.server.ts and src/event-rules.ts, in front of the
+ * SAME intake.propose every other source uses.
  *
  * Off by default: SHIP_EVENT_RULES unset means this route answers 503 and
  * nothing is stored. shadow evaluates and logs; on acts.

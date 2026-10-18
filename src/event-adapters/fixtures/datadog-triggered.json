@@ -1,0 +1,14 @@
+{
+  "id": "1234567",
+  "transition": "Triggered",
+  "monitor": "1234",
+  "cycle": "9bd4ac313a4d1e8fae2482df7b77628",
+  "aggreg": "9bd4ac313a4d1e8fae2482df7b77628",
+  "title": "[Triggered on {host:ip-012345}] Host is Down",
+  "priority": "P1",
+  "scope": "availability-zone:us-east-1a, role:computing-node",
+  "tags": "monitor, name:myService, role:computing-node",
+  "service": "myService",
+  "at": "1406662672",
+  "link": "https://app.datadoghq.com/event/jump_to?event_id=123456"
+}
