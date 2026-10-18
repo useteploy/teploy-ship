@@ -1177,11 +1177,14 @@ test("DS1: after the base squash-merges, --onto the recorded old base head keeps
     onto: "main",
     fetchImpl,
   });
-  assert.deepEqual(Object.keys(outcome).sort(), ["base", "kind", "sha"]);
+  assert.deepEqual(Object.keys(outcome).sort(), ["base", "baseSha", "kind", "sha"]);
   assert.equal(outcome.kind, "rebased");
   assert.equal((outcome as { base: string }).base, "main");
 
   const check = new LocalExecutor({ root: bare });
+  // The new base's sha, read from the fetch before any agent turn: the push
+  // counts the stack's own commits from it.
+  assert.equal((outcome as { baseSha?: string }).baseSha, (await check.exec("cd repo.git && git rev-parse main")).stdout.trim());
   const remoteHead = (await check.exec("cd repo.git && git rev-parse ship/run-stack")).stdout.trim();
   assert.notEqual(remoteHead, ownSha, "the rebased branch is new bytes");
   assert.equal(

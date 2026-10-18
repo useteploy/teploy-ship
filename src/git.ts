@@ -248,6 +248,14 @@ export interface RepoCheckout {
   /** Exact head commit at resolve time — what the review feedback was about. */
   headSha?: string;
   /**
+   * The remote's `base` commit, read at checkout before the agent runs
+   * (recordBaseSha). The push ahead-count and the credential scan range
+   * count from it: `origin/<base>` lives in the agent's .git and moves with
+   * one `git update-ref`. Absent on checkouts recorded before it existed,
+   * which fall back to the ref.
+   */
+  baseSha?: string;
+  /**
    * Which path produced this checkout, when it is not the plain clone.
    * "thread-warm" (D4-c) says the workspace came from the thread's snapshot
    * and repo-setup fetched instead of cloning — recorded on the step's
@@ -486,6 +494,34 @@ export async function setupStackedRepo(
 }
 
 /**
+ * The checkout with `baseSha` set: the base branch fetched from the real
+ * remote into its remote-tracking ref, then read back. Runs inside the
+ * repo-setup step, before the agent, so the recorded sha is one the agent
+ * cannot move. Best effort: a base the remote does not have leaves the
+ * checkout unchanged and the push counts from the ref as before.
+ */
+export async function recordBaseSha(executor: AgentExecutor, ref: RepoRef, token: string, checkout: RepoCheckout): Promise<RepoCheckout> {
+  const base = assertGitSafe("base", checkout.base);
+  const cred = gitCredential(ref, token);
+  try {
+    const result = await executor.exec(
+      `git fetch --depth 50 ${cred.url} +refs/heads/${base}:refs/remotes/origin/${base} >/dev/null 2>&1; ` +
+        `git rev-parse --verify -q 'refs/remotes/origin/${base}^{commit}'`,
+      cred.env === undefined ? { timeoutMs: 300_000 } : { timeoutMs: 300_000, env: cred.env },
+    );
+    const sha = result.stdout.trim();
+    return result.exitCode === 0 && /^[0-9a-f]{40,64}$/.test(sha) ? { ...checkout, baseSha: sha } : checkout;
+  } catch {
+    return checkout;
+  }
+}
+
+/** The revision a checkout's own commits count from: the recorded base sha, else `origin/<base>`. */
+export function baseRevision(checkout: Pick<RepoCheckout, "base" | "baseSha">): string {
+  return checkout.baseSha ?? `origin/${checkout.base}`;
+}
+
+/**
  * Commit whatever the agent left in the tree and push the work branch.
  * Returns null when there is nothing to push (empty diff = no PR). The
  * commit happens harness-side so the agent never needs git etiquette —
@@ -533,7 +569,7 @@ export async function commitAndPush(
     const safe = message.replace(/'/g, "'\\''");
     await git(executor, `git commit -m '${safe}'`);
   }
-  const ahead = await git(executor, `git rev-list --count origin/${checkout.base}..HEAD`);
+  const ahead = await git(executor, `git rev-list --count ${baseRevision(checkout)}..HEAD`);
   if (ahead === "0") return { kind: "empty" };
   const sha = await git(executor, "git rev-parse HEAD");
   // A fork PR's branch lives in the fork; pushing it to the base repo would
@@ -640,8 +676,8 @@ export function truncateMiddle(text: string, maxChars: number): string {
 }
 
 /** Bounded review snapshot of the commit just published; no workspace mutation. */
-export async function publishedDiff(executor: AgentExecutor, base: string): Promise<string | undefined> {
-  const ref = `origin/${base}...HEAD`;
+export async function publishedDiff(executor: AgentExecutor, base: string, baseSha?: string): Promise<string | undefined> {
+  const ref = `${baseSha ?? `origin/${base}`}...HEAD`;
   const quoted = "'" + ref.replace(/'/g, "'\\''") + "'";
   try {
     const result = await executor.exec(`git --no-pager diff --no-ext-diff --no-textconv ${quoted} --`, { timeoutMs: 30_000 });
@@ -1413,7 +1449,7 @@ export type RebaseOutcome =
   /** The base had not moved; nothing to redo. */
   | { kind: "up-to-date"; sha: string }
   /** Rebased cleanly and force-pushed (with lease) — the branch is new bytes and must be re-verified. */
-  | { kind: "rebased"; sha: string; base: string }
+  | { kind: "rebased"; sha: string; base: string; baseSha?: string }
   /** The rebase stopped on these files; the tree is back where it was. */
   | { kind: "conflict"; files: string[] }
   /** Something other than a conflict went wrong (fetch, push). The tree is back where it was. */
@@ -1591,7 +1627,8 @@ export async function rebaseStackedOnto(
       300_000,
       cred.env,
     );
-    return { kind: "rebased", sha, base: onto };
+    const ontoSha = await git(executor, `git rev-parse --verify refs/remotes/origin/${onto}^{commit}`).catch(() => "");
+    return { kind: "rebased", sha, base: onto, ...(/^[0-9a-f]{40,64}$/.test(ontoSha) ? { baseSha: ontoSha } : {}) };
   } catch (error) {
     // Put the branch back so a retry starts from the recorded state.
     await executor.exec(`git reset --hard ${before}`, { timeoutMs: 60_000 }).catch(() => undefined);

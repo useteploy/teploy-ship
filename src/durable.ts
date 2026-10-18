@@ -46,6 +46,7 @@ import {
   checkoutRepoAtSha,
   setupRepo,
   setupRepoForPr,
+  recordBaseSha,
   setupStackedRepo,
   reuseRepoForPr,
   hasClone,
@@ -1613,7 +1614,7 @@ export function durableAgent(
       try {
         if (input.repo !== undefined) {
           const repoUrl = input.repo;
-          checkout = await ctx.step("repo-setup", async () => {
+          const setupCheckout = async (): Promise<RepoCheckout> => {
             // The last gate before a credential meets an origin. Intake screens
             // the URL too, but this run may have been enqueued by an older
             // binary or a surface that forgot to — so the check that actually
@@ -1678,6 +1679,13 @@ export function durableAgent(
               }
             }
             return setupRepoForPr(executor, { ref, token, pr: input.pr, requireOpen: input.requireOpenPr === true, ...(headToken !== "" ? { headToken } : {}) });
+          };
+          checkout = await ctx.step("repo-setup", async () => {
+            const co = await setupCheckout();
+            // The base sha is read here, before the agent runs: the push range
+            // counts from it, never from a ref the agent's .git can move.
+            const ref = assertRepoAllowed(repoUrl, { trust: input.trust ?? "operator", config: repoPolicy });
+            return recordBaseSha(executor, ref, credentialFor(ref, repoPolicy), co);
           });
         }
         // DS1 (SHIP_STACKED_PRS): the revision pr-watch wakes when the stack's
@@ -1741,7 +1749,10 @@ export function durableAgent(
           // From here the branch is this stack's own commits on the default
           // branch: downstream counts, diffs and prompts must read the new
           // base. Deterministic on replay — the step's outcome is recorded.
-          if (stacked.kind === "rebased") checkout = { ...checkout, base: input.stackRebase.defaultBranch };
+          if (stacked.kind === "rebased") {
+            const { baseSha: _stale, ...rest } = checkout;
+            checkout = { ...rest, base: input.stackRebase.defaultBranch, ...(stacked.baseSha !== undefined ? { baseSha: stacked.baseSha } : {}) };
+          }
         }
         if (input.preparation !== undefined && checkout !== null) {
           const prepared = await ctx.step("environment-prepare", () => prepareEnvironment(executor, input.preparation!));
@@ -4003,9 +4014,10 @@ async function publishIfRepoRun(
     //
     // Only a FINDING is a refusal that says "rotate". A scan that could not
     // run judged nothing: it throws (EXTERNAL_EFFECT_RETRY retries the step)
-    // with its own words, and nothing is pushed. A missing origin/<base> is
-    // left to commitAndPush, whose own `origin/<base>` read fails the same
-    // way and reports it on the existing error path — still before any push.
+    // with its own words, and nothing is pushed. A missing base is left to
+    // commitAndPush, whose own read of the same base (the recorded sha, else
+    // `origin/<base>`) fails the same way and reports it on the existing
+    // error path — still before any push.
     // SHIP_CREDENTIAL_SCAN=warn records the would-be refusal on this step
     // and pushes anyway; =off skips the scan.
     const scanMode = credentialScanMode();
@@ -4013,6 +4025,7 @@ async function publishIfRepoRun(
     if (scanMode !== "off") {
       const scan = await workspaceSecretValueScan(executor, harnessSecrets, "push", {
         ...(typeof checkout?.base === "string" ? { base: checkout.base } : {}),
+        ...(typeof checkout?.baseSha === "string" ? { baseSha: checkout.baseSha } : {}),
       });
       const blocking = scan.kind === "material" || (scan.kind === "failed" && !scan.noBase);
       if (blocking && scanMode === "warn") {
@@ -4045,7 +4058,7 @@ async function publishIfRepoRun(
             // Scrubbed of the run's forwarded values before it is recorded: a
             // push the operator let through under SHIP_CREDENTIAL_SCAN=warn
             // (or =off) must not copy the value into this log as well.
-            diff: await publishedDiff(executor, co.base).then((d) => (d === undefined ? d : scrubExact(d, harnessSecrets ?? []))),
+            diff: await publishedDiff(executor, co.base, co.baseSha).then((d) => (d === undefined ? d : scrubExact(d, harnessSecrets ?? []))),
             // An unusual-looking diff is published, but as a draft that says
             // what looked unusual — the reviewer decides, not the limit.
             ...(result.screen !== undefined ? { warning: warningMessage(result.screen) } : {}),

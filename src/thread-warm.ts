@@ -241,9 +241,27 @@ function scanNeedles(secrets: readonly KnownSecret[]): Map<string, string> {
     if (!CREDENTIAL_NAME.test(name)) continue;
     if (PLACEHOLDER_VALUES.has(value.trim().toLowerCase())) continue;
     for (const line of value.split(/\r?\n/)) add(line, name);
-    add(Buffer.from(value, "utf8").toString("base64"), name);
+    for (const form of base64Forms(value)) add(form, name);
   }
   return needles;
+}
+
+/**
+ * The value's base64 as it can appear inside a longer encoded stream: one
+ * form per byte offset (0, 1, 2 mod 3), each cut to the characters that
+ * depend on the value's bytes alone. Matches the value encoded on its own,
+ * with a trailing newline (`echo $KEY | base64`), or inside a larger encoded
+ * blob — on one line only: a wrapped encoding (GNU `base64` breaks at 76
+ * columns) of a long value is not matched.
+ */
+function base64Forms(value: string): string[] {
+  const bytes = Buffer.from(value, "utf8");
+  const forms: string[] = [];
+  for (let k = 0; k < 3; k++) {
+    const encoded = Buffer.concat([Buffer.alloc(k), bytes]).toString("base64");
+    forms.push(encoded.slice(Math.ceil((8 * k) / 6), Math.floor((8 * (k + bytes.length)) / 6)));
+  }
+  return forms;
 }
 
 /** A fixed marker needle: proves the base64 needle delivery survived the exec intact (see workspaceSecretValueReason). */
@@ -268,11 +286,33 @@ const VENDOR_SESSION_ROOTS: Record<string, readonly string[]> = {
   codex: ["$HOME/.codex"],
 };
 
-/** Extra snapshot-scan roots for the harnesses a run executes under (vendor session stores), plus /tmp and /var/tmp. Unknown ids contribute nothing. */
-export function snapshotScanRoots(harnessIds: readonly string[]): string[] {
+/**
+ * A snapshot-scan root. A bare path is walked whole; a bounded root stops at
+ * `maxDepth` below the root, reads only files under `maxKiB`, and prunes the
+ * directory names in `skip` — for the parts of a home directory where a
+ * leaked value plausibly lands (dotfiles, tool configs, tool caches) but
+ * whose full size would not fit the scan's deadline.
+ */
+export type ScanRoot = string | { path: string; maxDepth: number; maxKiB: number; skip?: readonly string[] };
+
+/**
+ * The home-directory leak sites outside any vendor store: `$HOME` two deep
+ * (`~/.npmrc`, `~/.git-credentials`, `~/.gitconfig`, `~/.netrc`, shell
+ * history, `~/.docker/config.json`, `~/.aws/credentials`), `~/.config`, and
+ * `~/.cache` with the bulk build/model caches pruned. `proc`, `sys` and
+ * `dev` are pruned for an image whose HOME is `/`.
+ */
+const HOME_SCAN_ROOTS: readonly ScanRoot[] = [
+  { path: "$HOME", maxDepth: 2, maxKiB: 1024, skip: [".config", "proc", "sys", "dev", "node_modules"] },
+  { path: "$HOME/.config", maxDepth: 4, maxKiB: 1024, skip: ["node_modules"] },
+  { path: "$HOME/.cache", maxDepth: 3, maxKiB: 256, skip: ["go-build", "ms-playwright", "huggingface", "torch", "pip", "node-gyp"] },
+];
+
+/** Extra snapshot-scan roots: /tmp, /var/tmp, the bounded home leak sites, and the vendor session stores of the harnesses a run executes under. Unknown ids contribute nothing. */
+export function snapshotScanRoots(harnessIds: readonly string[]): ScanRoot[] {
   const roots = new Set<string>(["/tmp", "/var/tmp"]);
   for (const id of harnessIds) for (const root of VENDOR_SESSION_ROOTS[id] ?? []) roots.add(root);
-  return [...roots];
+  return [...roots, ...HOME_SCAN_ROOTS];
 }
 
 /**
@@ -330,19 +370,26 @@ function scanPreamble(): string {
  * staged as links, FIFOs are never read), `git diff --cached` carries the
  * staged content plus every filename in its headers, and `git log -p`
  * covers the history since base — an add-commit-remove the tree no longer
- * shows. Each producer writes to a file and its status is checked: a
- * producer that fails is a scan error, never an empty stream.
+ * shows. Both read with GIT_NO_REPLACE_OBJECTS: replacement refs are an
+ * agent-writable view, and the push transfers the real objects. Each
+ * producer writes to a file and its status is checked: a producer that
+ * fails is a scan error, never an empty stream.
  */
-export function pushScanCommand(base: string): string {
-  const ref = shqScan(`origin/${base}`);
-  const range = shqScan(`origin/${base}..HEAD`);
+export function pushScanCommand(base: string, baseSha?: string): string {
+  // A recorded base sha is what the range counts from: `origin/<base>` is a
+  // ref inside the agent's .git, and moving it (`git update-ref`) would hide
+  // a commit from the scan that the push still carries. The ref is the
+  // fallback for a checkout recorded before the sha was.
+  if (baseSha !== undefined && !/^[0-9a-f]{40,64}$/.test(baseSha)) throw new Error("invalid base sha");
+  const ref = shqScan(baseSha !== undefined ? `${baseSha}^{commit}` : `origin/${base}`);
+  const range = shqScan(baseSha !== undefined ? `${baseSha}..HEAD` : `origin/${base}..HEAD`);
   const plain = "--text --no-color --no-ext-diff --no-textconv --no-renames";
   return (
     scanPreamble() +
     `git rev-parse --verify -q ${ref} >/dev/null 2>&1 || { echo ${SCAN_NO_BASE}; exit 8; }; ` +
     'git add -A >/dev/null 2>&1 || { echo scan-producer-failed: git add; exit 6; }; ' +
-    `git log ${plain} -p ${range} >"$d/log" 2>/dev/null || { echo scan-producer-failed: git log; exit 6; }; ` +
-    `git diff --cached ${plain} >"$d/diff" 2>/dev/null || { echo scan-producer-failed: git diff; exit 6; }; ` +
+    `GIT_NO_REPLACE_OBJECTS=1 git log ${plain} -p ${range} >"$d/log" 2>/dev/null || { echo scan-producer-failed: git log; exit 6; }; ` +
+    `GIT_NO_REPLACE_OBJECTS=1 git diff --cached ${plain} >"$d/diff" 2>/dev/null || { echo scan-producer-failed: git diff; exit 6; }; ` +
     'grep -a -h -F -o -f "$f" -- "$d/log" "$d/diff" >"$d/hits"; rc=$?; [ "$rc" -le 1 ] || { echo scan-grep-failed; exit 2; }; ' +
     'sort -u "$d/hits" || exit 2; exit 0'
   );
@@ -356,33 +403,48 @@ export function pushScanCommand(base: string): string {
  * an agent left behind cannot hang it, and symlinks are not followed below
  * the root. A root that does not exist is skipped (a container with no
  * ~/.codex is normal); one that exists but cannot be read, or a walk that
- * errors anywhere, is a scan error. The loop stops at the first root that
- * matches: the refusal is already certain.
+ * errors anywhere, is a scan error. A bounded root (ScanRoot) adds
+ * `-maxdepth`, `-size` and its own prunes. The walk stops at the first root
+ * that matches: the refusal is already certain.
  */
-export function snapshotScanCommand(roots: readonly string[]): string {
-  const words = roots.map((root) => {
-    if (root === "$HOME" || root.startsWith("$HOME/")) {
-      const suffix = root.slice("$HOME".length).replace(/^\/+/, "");
-      // Only a plain relative suffix rides after the unquoted "$HOME".
-      if (suffix !== "" && !/^[A-Za-z0-9._/-]+$/.test(suffix)) throw new Error(`invalid scan root suffix: ${root}`);
-      return suffix === "" ? '"$HOME"' : `"$HOME"/${shqScan(suffix)}`;
-    }
-    return shqScan(root);
+export function snapshotScanCommand(roots: readonly ScanRoot[]): string {
+  const homeWord = (root: string): string => {
+    const suffix = root.slice("$HOME".length).replace(/^\/+/, "");
+    // Only a plain relative suffix rides after the unquoted "$HOME".
+    if (suffix !== "" && !/^[A-Za-z0-9._/-]+$/.test(suffix)) throw new Error(`invalid scan root suffix: ${root}`);
+    return suffix === "" ? '"$HOME"' : `"$HOME"/${shqScan(suffix)}`;
+  };
+  const isHome = (path: string): boolean => path === "$HOME" || path.startsWith("$HOME/");
+  const pathOf = (root: ScanRoot): string => (typeof root === "string" ? root : root.path);
+  const block = (word: string, bound?: { maxDepth: number; maxKiB: number; skip?: readonly string[] }): string => {
+    const prune = [".git", ".npm", ".cache", ...(bound?.skip ?? [])].map((name) => `-name ${shqScan(name)} -o `).join("");
+    const depth = bound !== undefined ? ` -maxdepth ${Math.max(1, Math.floor(bound.maxDepth))}` : "";
+    const size = bound !== undefined ? ` -size -${Math.max(1, Math.floor(bound.maxKiB))}k` : "";
+    return (
+      `r=${word}; ` +
+      'if [ -e "$r" ] || [ -L "$r" ]; then ' +
+      '[ -r "$r" ] || { echo scan-root-unreadable; exit 7; }; p="$r"; m=; ' +
+      // -mindepth 1 keeps the prune off the root itself (the ~/.cache root).
+      'if [ -d "$r" ]; then [ -x "$r" ] || { echo scan-root-unreadable; exit 7; }; p="$r/"; m="-mindepth 1"; fi; ' +
+      `find "$p" $m${depth} \\( ${prune}-name "$b" \\) -prune -o -type f${size} ` +
+      `-exec sh -c 'grep -a -h -F -o -f "$0" -- "$@"; [ $? -le 1 ]' "$f" {} + >>"$d/hits" 2>/dev/null ` +
+      '|| { echo scan-walk-failed; exit 7; }; ' +
+      '[ -s "$d/hits" ] && { sort -u "$d/hits" || exit 2; exit 0; }; ' +
+      "fi; "
+    );
+  };
+  const blocks = roots.map((root) => {
+    const path = pathOf(root);
+    const word = isHome(path) ? homeWord(path) : shqScan(path);
+    return typeof root === "string" ? block(word) : block(word, root);
   });
-  const needsHome = roots.some((root) => root === "$HOME" || root.startsWith("$HOME/"));
+  const needsHome = roots.some((root) => isHome(pathOf(root)));
   return (
     scanPreamble() +
     (needsHome ? '[ -n "${HOME:-}" ] || { echo scan-no-home; exit 7; }; ' : "") +
     'b=${d##*/}; : >"$d/hits"; ' +
-    `for r in .${words.length > 0 ? ` ${words.join(" ")}` : ""}; do ` +
-    'if [ -e "$r" ] || [ -L "$r" ]; then ' +
-    '[ -r "$r" ] || { echo scan-root-unreadable; exit 7; }; p="$r"; ' +
-    'if [ -d "$r" ]; then [ -x "$r" ] || { echo scan-root-unreadable; exit 7; }; p="$r/"; fi; ' +
-    'find "$p" \\( -name .git -o -name .npm -o -name .cache -o -name "$b" \\) -prune -o -type f ' +
-    `-exec sh -c 'grep -a -h -F -o -f "$0" -- "$@"; [ $? -le 1 ]' "$f" {} + >>"$d/hits" 2>/dev/null ` +
-    '|| { echo scan-walk-failed; exit 7; }; ' +
-    '[ -s "$d/hits" ] && break; ' +
-    "fi; done; " +
+    block(".") +
+    blocks.join("") +
     'sort -u "$d/hits" || exit 2; exit 0'
   );
 }
@@ -398,7 +460,8 @@ export function snapshotScanCommand(roots: readonly string[]): string {
  * WHAT is scanned is what would actually be carried:
  *
  *   - push (options.base): see pushScanCommand — the staged tree plus the
- *     history since `origin/<base>`.
+ *     history since the checkout's recorded base sha (options.baseSha), or
+ *     `origin/<base>` for a checkout recorded without one.
  *   - snapshot (no base): see snapshotScanCommand — the whole workspace
  *     tree, gitignored files included (the image freezes them too), plus
  *     options.roots (snapshotScanRoots).
@@ -414,7 +477,7 @@ export async function workspaceSecretValueScan(
   executor: AgentExecutor,
   secrets: readonly KnownSecret[] | undefined,
   what: string,
-  options: { base?: string; roots?: string[] } = {},
+  options: { base?: string; baseSha?: string; roots?: ScanRoot[] } = {},
 ): Promise<CredentialScanOutcome> {
   if (secrets === undefined) return { kind: "clean" };
   const needles = scanNeedles(secrets);
@@ -437,7 +500,7 @@ export async function workspaceSecretValueScan(
   });
   let command: string;
   try {
-    command = options.base !== undefined ? pushScanCommand(options.base) : snapshotScanCommand(options.roots ?? []);
+    command = options.base !== undefined ? pushScanCommand(options.base, options.baseSha) : snapshotScanCommand(options.roots ?? []);
   } catch (error) {
     return failed(error instanceof Error ? error.message : String(error));
   }
@@ -470,7 +533,7 @@ export async function workspaceSecretValueReason(
   executor: AgentExecutor,
   secrets: readonly KnownSecret[] | undefined,
   what: string,
-  options: { base?: string; roots?: string[] } = {},
+  options: { base?: string; baseSha?: string; roots?: ScanRoot[] } = {},
 ): Promise<string | null> {
   const outcome = await workspaceSecretValueScan(executor, secrets, what, options);
   return outcome.kind === "clean" ? null : outcome.reason;
@@ -485,18 +548,40 @@ export async function snapshotCredentialGate(
   executor: AgentExecutor,
   secrets: readonly KnownSecret[] | undefined,
   what: string,
-  roots: string[],
+  roots: ScanRoot[],
   log: (line: string) => void = (line) => console.warn(line),
   mode: CredentialScanMode = credentialScanMode(),
 ): Promise<{ refuse: string } | { warning?: string }> {
   if (mode === "off") return {};
   const outcome = await workspaceSecretValueScan(executor, secrets, what, { roots });
   if (outcome.kind === "clean") return {};
+  // A scan killed on its deadline never ran its EXIT trap, so its needle
+  // file (the plaintext values) may still sit in /var/tmp — a snapshot
+  // root. Sweep it as its own exec before any image; unconfirmed, the
+  // image is refused whatever the mode.
+  if (outcome.kind === "failed" && !(await sweepScanTemp(executor))) {
+    return { refuse: `${outcome.reason}; the scan's temporary needle files could not be confirmed removed` };
+  }
   if (mode === "warn") {
     log(`SHIP_CREDENTIAL_SCAN=warn: ${what} proceeded despite: ${outcome.reason}`);
     return { warning: outcome.reason };
   }
   return { refuse: outcome.reason };
+}
+
+/** The command that removes every scan temp dir and confirms none is left. */
+export const SCAN_TEMP_SWEEP =
+  'for t in /var/tmp /tmp; do rm -rf "$t"/ship-scan.* "$t"/ship-needles.* 2>/dev/null; ' +
+  'for p in "$t"/ship-scan.* "$t"/ship-needles.*; do [ -e "$p" ] && exit 1; done; done; ' +
+  "echo scan-temp-swept";
+
+async function sweepScanTemp(executor: AgentExecutor): Promise<boolean> {
+  try {
+    const result = await executor.exec(SCAN_TEMP_SWEEP, { timeoutMs: 30_000 });
+    return result.exitCode === 0 && result.timedOut !== true && result.stdout.trim() === "scan-temp-swept";
+  } catch {
+    return false;
+  }
 }
 
 /** Shell-quote one scan argument (POSIX single quotes; harness-external.shq is not imported to keep this module standalone). */
