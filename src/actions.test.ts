@@ -357,3 +357,22 @@ test("transcriptTurn cuts the turn at the first action block; a turn with no blo
   assert.equal(transcriptTurn("no block here"), "no block here");
   assert.equal(transcriptTurn("```finish\ndone\n```\ntrailing"), "```finish\ndone\n```");
 });
+
+test("one-line look and skill fences parse only where the input admits inlineFences (live finding 2026-10-18)", () => {
+  const text = "Server is up. Now the look at the page. ```look http://127.0.0.1:8000/index.html```";
+  const off = parseAction(text, { look: true });
+  assert.equal(off.kind, "none", "an older log keeps parsing exactly as it did");
+  const on = parseAction(text, { look: true, inlineFences: true });
+  assert.equal(on.kind, "look");
+  assert.equal(on.kind === "look" ? on.url : undefined, "http://127.0.0.1:8000/index.html");
+  const skill = parseAction("Loading the style. ```skill proof-style```", { skill: true, inlineFences: true });
+  assert.equal(skill.kind, "skill");
+});
+
+test("one-line fences NEGATIVE: prose naming a fence with no payload, and other languages, stay prose", () => {
+  assert.equal(parseAction("The ```look``` fence is not being accepted.", { look: true, inlineFences: true }).kind, "none");
+  assert.equal(parseAction("Run ```bash ls```", { look: true, inlineFences: true }).kind, "none");
+  // A block fence still wins in order when both forms appear.
+  const both = parseAction("```bash\nls\n```\nthen ```look http://127.0.0.1:8000/```", { look: true, inlineFences: true });
+  assert.equal(both.kind, "bash");
+});
