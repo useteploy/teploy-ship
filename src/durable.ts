@@ -112,7 +112,7 @@ import type { HeldItem, InterruptibleResult } from "./steer-reply.js";
 import { formatSearchHits } from "./code-index.js";
 import { frameUntrusted, screenUntrusted } from "./guard.js";
 import type { DelegateTarget, RecordedDelegateTarget } from "./delegate-targets.js";
-import { LOOK_IMAGE_NO_MODEL, LOOK_IMAGE_NO_STORE, LOOK_OPEN_PLAN, LOOK_SEALED, lookImageCap, runLook, runLookImage } from "./look.js";
+import { LOOK_IMAGE_NO_MODEL, LOOK_IMAGE_NO_STORE, LOOK_OPEN_PLAN, LOOK_SEALED, lookImageCap, runLook, runLookImage, runLookRecordFinalise } from "./look.js";
 import {
   DELEGATE_CHILD_APPROVAL_REFUSED,
   DELEGATE_CHILD_ASK_REFUSED,
@@ -277,6 +277,19 @@ export interface DurableAgentInput {
    * which is why the upgrade fence admits that step on this field alone.
    */
   lookImage?: { model: string; max: number };
+  /**
+   * Look-session recording (Q3b): the ```look session's CDP screencast,
+   * assembled once into a run-page recording after the agent loop ends and
+   * before the push (look.ts runLookRecordFinalise). Materialised at enqueue
+   * from SHIP_LOOK_RECORD, default off and only when `look` itself is on,
+   * because it admits the `look-record` step — the standing replay reason.
+   * The recording is CONTEXT, never proof: `look` runs on the unpushed tree,
+   * so its artifact carries the tree digest and no revision, is never linked
+   * from the pull request (the `recording` data class), and is withheld
+   * entirely when the captured page text contains a configured secret value
+   * (Q3c).
+   */
+  lookRecord?: boolean;
   /**
    * Bounded child work (S20/S22): the ```delegate action — spawn one child
    * run, park until it finishes, merge its result back as an observation.
@@ -2297,6 +2310,8 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
         lookImage !== undefined && config.lookImageModel !== undefined ? config.lookImageModel(lookImage.model) : undefined;
       /** Image looks executed this run, for the input.lookImage.max cap. */
       let imageLooks = 0;
+      /** Q3b: the session records only when the input admitted it (look.ts lookSessionScript). */
+      const lookRecord = input.look === true && input.lookRecord === true;
       onEvent({ kind: "started", harness: NATIVE_HARNESS_ID });
       // D1: the MCP client. Present only on runs whose input carries `mcp`
       // (SHIP_MCP at enqueue, servers declared); absent leaves the dialect,
@@ -3016,7 +3031,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
             // bytes, so a crash between put and record re-runs idempotently.
             const result = await ws.ctx.step(`${p}turn-${turn}-look-image`, () => {
               ws.live?.({ phase: "running", turn, detail: clipDetail(describeAction(action)) });
-              return runLookImage(ws.executor, `t${turn}`, action, config.artifacts!, config.actionTimeoutMs, { runId: ws.ctx.runId });
+              return runLookImage(ws.executor, `t${turn}`, action, config.artifacts!, config.actionTimeoutMs, { runId: ws.ctx.runId }, lookRecord);
             });
             imageLooks += 1;
             // Text first, exactly like a text look: framed after truncation
@@ -3055,7 +3070,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
           // command.
           const result = await ws.ctx.step(`${p}turn-${turn}-look`, () => {
             ws.live?.({ phase: "running", turn, detail: clipDetail(describeAction(action)) });
-            return runLook(ws.executor, `t${turn}`, action, config.actionTimeoutMs);
+            return runLook(ws.executor, `t${turn}`, action, config.actionTimeoutMs, lookRecord);
           });
           // INJECTION FENCE. Unlike a command's output — which the agent chose
           // to produce — a page's content is a channel written by whoever owns
@@ -3620,10 +3635,26 @@ async function publishIfRepoRun(
   /** Filled in as the gate goes; rendered into the PR lead and the run output. */
   facts: VerificationFacts = {},
 ): Promise<string | null> {
-  // A SCAN PUBLISHES NOTHING (L2 / D3). First line of the function, before any
-  // step, so no call site can forget it — this one guard covers the
+  // Q3b (SHIP_LOOK_RECORD): finalise the look session's screencast BEFORE the
+  // push — one recorded step, admitted by input.lookRecord alone, covering
+  // every path that reaches this gate, including a non-repo run that owns a
+  // look session but publishes nothing. The session's frames and captured
+  // page text live in the sandbox this run's executor owns, so this is the
+  // last moment they exist at all; the outcome — stored, withheld (Q3c),
+  // dropped over cap, or none — is run-page context only and never reaches a
+  // pull request. The secret set is the run's exact-value set
+  // (checkoutSecrets: the forge tokens), recomputed here rather than recorded,
+  // the same rule the external adapters' scrub follows — and the same set the
+  // flow recording's withhold check below runs on.
+  const secrets = checkoutSecrets(input.repo, checkout, policy);
+  if (input.look === true && input.lookRecord === true) {
+    await ctx.step("look-record", () => runLookRecordFinalise(executor, config.artifacts, { runId: ctx.runId }, secrets, config.actionTimeoutMs));
+  }
+  // A SCAN PUBLISHES NOTHING (L2 / D3). Before anything that publishes, so no
+  // call site can forget it — this one guard covers the
   // single-attempt path, the multi-attempt path and `rescuePublish`, and covers
-  // any call site added later.
+  // any call site added later. (The look-record step above is not a publish:
+  // a scan's input can never admit it, `look` being suppressed at enqueue.)
   //
   // This is the whole fix. The MVP asked the model in prose not to change
   // files; on 2026-08-26 five of seven nightly scans pushed code anyway (an
@@ -3802,7 +3833,7 @@ async function publishIfRepoRun(
     // nothing was pushed.
     const followUpPreview = push.kind === "pushed" ? await previewIfAsked(ctx, config, input, co.branch, push.sha) : undefined;
     if (followUpPreview !== undefined && input.supersedePreviews === true) await supersedeOlderPreviews(ctx, config, input, followUpPreview);
-    const legs = await runLadderLegs(ctx, executor, config, input, followUpPreview, co.branch, { baseline, build, tests }, assetSink(ref, token, input.pr, config.artifacts));
+    const legs = await runLadderLegs(ctx, executor, config, input, followUpPreview, co.branch, { baseline, build, tests }, assetSink(ref, token, input.pr, config.artifacts), secrets);
     const followUpProof = proofLinks(legs);
     // S08 surfacing: the detector over the diff this follow-up just published,
     // rendered into the same Verification section as the rest of the evidence.
@@ -3897,7 +3928,7 @@ async function publishIfRepoRun(
   // against main, the observe window after it — then the rung list, recorded
   // as its own step so the webhook and the run page read ONE list instead of
   // each re-deriving it from six steps and disagreeing.
-  const legs = await runLadderLegs(ctx, executor, config, input, preview, co.branch, { baseline, build, tests }, assetSink(ref, token, pr.number, config.artifacts));
+  const legs = await runLadderLegs(ctx, executor, config, input, preview, co.branch, { baseline, build, tests }, assetSink(ref, token, pr.number, config.artifacts), secrets);
   if (legs.smoke !== undefined) facts.smoke = legs.smoke;
   if (legs.visual !== undefined) facts.visual = legs.visual;
   if (legs.flow !== undefined) facts.flow = legs.flow;
@@ -4516,11 +4547,13 @@ async function runLadderLegs(
   branch: string,
   suite: { baseline?: TestOutcome; build?: TestOutcome; tests?: TestOutcome },
   sink: AssetSink | undefined,
+  /** The run's exact-value secret set (Q3c), for the flow recording's withhold check. */
+  secrets: readonly KnownSecret[] = [],
 ): Promise<{ smoke?: SmokeOutcome; visual?: VisualOutcome; flow?: FlowOutcome; observe?: ObserveOutcome; rungs?: Rung[] }> {
   if (input.verification === undefined) return {};
   const smoke = await smokeIfDeclared(ctx, executor, input, preview);
   const visual = await visualIfDeclared(ctx, executor, input, preview, sink);
-  const flow = await flowIfPresent(ctx, executor, input, preview, sink);
+  const flow = await flowIfPresent(ctx, executor, input, preview, sink, secrets);
   const observe = await observeIfDeclared(ctx, config, input, preview, branch);
   const rungs = await recordLadder(ctx, input, {
     ...suite,

@@ -1339,6 +1339,13 @@ export async function enqueueRun(
           })(),
         }
       : undefined;
+  // Look-session recording (Q3b): SHIP_LOOK_RECORD, default off, and only
+  // when `look` itself is on — a run that was never offered the action has no
+  // session to record. Materialised for the standing replay reason: it admits
+  // the `look-record` step, and a replay must know from its log alone whether
+  // the session was recorded. Unset keeps the input byte-identical to a
+  // pre-Q3b run's.
+  const lookRecord = look === true && envFlag("SHIP_LOOK_RECORD") ? true : undefined;
   // Per-repo evidence, resolved HERE so every enqueue surface (CLI, dashboard,
   // webhook, intake sweep) gets the same treatment without each knowing about
   // the store. Materialised into the recorded input below, never re-read at
@@ -1733,6 +1740,10 @@ export async function enqueueRun(
         // run that does not admit it — including look-off runs, whose inputs
         // stay byte-identical to pre-image ones.
         ...(lookImage !== undefined ? { lookImage } : {}),
+        // ...and the session recording (SHIP_LOOK_RECORD above), absent on
+        // every run that does not admit it, so those inputs stay
+        // byte-identical to pre-Q3b ones.
+        ...(lookRecord === true ? { lookRecord: true } : {}),
         // ```delegate (S20/S22), from SHIP_DELEGATE above: default off, so a
         // run that does not set it enqueues exactly as it did before the
         // action existed — and the child marker, recorded only on spawned

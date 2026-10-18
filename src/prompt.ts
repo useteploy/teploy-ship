@@ -44,6 +44,7 @@ await browser.close();
 - Find elements by role, label and text (getByRole, getByLabel, getByText), never by coordinates or brittle CSS.
 - Wait for the state you expect, then assert it (throw when it is wrong): a screenshot of the wrong page is not proof.
 - Keep the walkthrough short. Ship attaches up to two WebM recordings below 4 MiB each when the forge supports attachments. Close the browser context to finish saving the video.
+- If the flow records a video, also write the pages' visible text to \`\${out}/text.txt\` as it goes (each page's \`document.body.innerText\`, concatenated): a recording whose captured page text contains a configured secret value is withheld rather than stored, and that file is what the check reads.
 - Name screenshots in the order they should be read (01-, 02-). Keep the flow to the changed path.
 - A change with no user-visible face needs no flow; do not write one for its own sake.
 - The preview does not exist yet, so you cannot run the flow against it. To try it against a local dev server: \`mkdir -p .ship/node_modules && ln -sfn "$(npm root -g)/playwright" .ship/node_modules/playwright && node .ship/flow.mjs http://localhost:PORT .ship/flow-out\` (\`.ship/flow-out/\` and \`.ship/node_modules/\` are excluded from git).

@@ -4948,29 +4948,36 @@ function imageParts(messages: Message[]): Array<Extract<UserContentPart, { type:
 
 /** An in-memory artifact store: put/get, records ids, and can be emptied to simulate expiry. */
 function memoryArtifacts(): { store: ArtifactStore; ids: () => string[]; empty: () => void } {
-  const byId = new Map<string, { id: string; name: string; mime: "image/png"; data: string; bytes: number; dataClass?: string }>();
+  const byId = new Map<string, Record<string, unknown>>();
   const order: string[] = [];
+  const record = (name: string, bytes: Uint8Array, dataClass?: string, binding?: { runId: string; revision?: string; treeDigest?: string }): string => {
+    const id = createHash("sha256").update(bytes).digest("hex");
+    byId.set(id, {
+      id,
+      name,
+      mime: "image/png",
+      data: Buffer.from(bytes).toString("base64"),
+      bytes: bytes.length,
+      ...(dataClass !== undefined ? { dataClass } : {}),
+      ...(binding !== undefined ? { runId: binding.runId, ...(binding.revision !== undefined ? { revision: binding.revision } : {}), ...(binding.treeDigest !== undefined ? { treeDigest: binding.treeDigest } : {}) } : {}),
+    });
+    order.push(id);
+    return id;
+  };
   return {
     ids: () => order,
     empty: () => {
       byId.clear();
     },
     store: {
-      async put(name, bytes, dataClass) {
-        const artifact = {
-          id: createHash("sha256").update(bytes).digest("hex"),
-          name,
-          mime: "image/png" as const,
-          data: Buffer.from(bytes).toString("base64"),
-          bytes: bytes.length,
-          ...(dataClass !== undefined ? { dataClass } : {}),
-        };
-        byId.set(artifact.id, artifact);
-        order.push(artifact.id);
-        return artifact.id;
+      async put(name, bytes, dataClass, binding) {
+        return record(name, bytes, dataClass, binding);
+      },
+      async putTemporary(name, bytes, dataClass, binding) {
+        return record(name, bytes, dataClass, binding);
       },
       async get(id) {
-        return byId.get(id) ?? null;
+        return (byId.get(id) as unknown as Awaited<ReturnType<ArtifactStore["get"]>>) ?? null;
       },
     },
   };
@@ -5204,6 +5211,150 @@ test("a replayed image look rebuilds the ImagePart from the store, or degrades t
     input: { task: "look", look: true, lookImage: { model: "vision-x", max: 3 } },
   });
   assert.equal(degraded.status, "completed", "the degraded replay still completes — text + pointer, documented");
+});
+
+// --- look recording (Q3b): one finaliser step, run-page context, replay-safe ---
+
+/** A JPEG-shaped strip, so the fake store and the assertions read honestly. */
+const LOOK_JPEG = new Uint8Array([255, 216, 255, 224, 4, 3, 2, 1]);
+
+/**
+ * A look-run provider whose session ALSO recorded: exec answers the turn
+ * driver, the finaliser's node run (with the report a real finaliser would
+ * print), and the rec-dir cleanup; getFile answers the captured page text and
+ * the assembled recording. Only the browser half is faked, like every look
+ * provider above.
+ */
+function lookRecordProvider(snapshot: string, report: string, options: { text?: string; recording?: Uint8Array } = {}): { provider: ExecutorProvider; commands: string[] } {
+  const commands: string[] = [];
+  const executor: AgentExecutor = {
+    async exec(cmd) {
+      commands.push(cmd);
+      if (/^node \.teploy-agent\/look-t\d+\.mjs$/m.test(cmd)) {
+        return { exitCode: 0, stdout: snapshot, stderr: "", timedOut: false, truncated: false };
+      }
+      if (/^node \.teploy-agent\/look-record\.mjs$/m.test(cmd)) {
+        return { exitCode: 0, stdout: report, stderr: "", timedOut: false, truncated: false };
+      }
+      if (cmd === "rm -rf .teploy-agent/rec") return { exitCode: 0, stdout: "", stderr: "", timedOut: false, truncated: false };
+      return { exitCode: 42, stdout: "", stderr: `not a look command: ${cmd}`, timedOut: false, truncated: false };
+    },
+    putFile: async () => {},
+    getFile: async (path) => {
+      if (path === ".teploy-agent/rec/text.txt") return new TextEncoder().encode(options.text ?? "");
+      if (path.endsWith(".jpg") || path.endsWith(".webm")) return options.recording ?? LOOK_JPEG;
+      throw new Error(`unused: ${path}`);
+    },
+    destroy: async () => {},
+  };
+  return {
+    commands,
+    provider: {
+      async create() {
+        return { handle: "look-record-fake" };
+      },
+      attach() {
+        return executor;
+      },
+    },
+  };
+}
+
+test("a recording look run records exactly one look-record step; the artifact is run-page context, never PR proof (Q3b)", async () => {
+  const snapshot = '[page] https://example.com — Example\n- heading "Hello" [ref=e1]';
+  const tree = "c".repeat(40);
+  const report = JSON.stringify({ kind: "strip", file: ".teploy-agent/rec/look-record.jpg", frames: 3, treeDigest: tree });
+  const { provider, commands } = lookRecordProvider(snapshot, report);
+  const { model } = reactiveModel(["```look url=https://example.com\n```", "```finish\nsaw the page\n```"]);
+  const artifacts = memoryArtifacts();
+  const store = new MemoryEventStore();
+  const outcome = await executeRun({
+    workflow: durableAgent({ model, executor: provider, artifacts: artifacts.store }),
+    runId: "run-look-record",
+    store,
+    input: { task: "look", look: true, lookRecord: true },
+  });
+  assert.equal(outcome.status, "completed", "a recording that lands is never a run failure");
+  const events = await store.load("run-look-record");
+  const recorded = events.filter((e) => e.type === "step-completed" && e.name === "look-record");
+  assert.equal(recorded.length, 1, "exactly one look-record step, after the loop");
+  const result = (recorded[0]?.data as { result?: { kind?: string; artifact?: string; format?: string; treeDigest?: string } }).result;
+  assert.equal(result?.kind, "stored");
+  assert.equal(result?.format, "strip", "no ffmpeg in the image: the step says it is a strip");
+  const kept = await artifacts.store.get(result!.artifact!);
+  assert.equal(kept?.dataClass, "recording");
+  assert.equal(kept?.runId, "run-look-record");
+  assert.equal(kept?.revision, undefined, "a look recording claims no revision — it ran before the commit");
+  assert.equal(kept?.treeDigest, tree, "it is bound to the tree it observed");
+  assert.ok(commands.some((c) => /^node \.teploy-agent\/look-record\.mjs$/m.test(c)), "the finaliser ran once in the sandbox");
+  // Run-page only: the ladder a PR body is built from never sees it — no
+  // rung, no proof link, no artifact id outside the look-record step itself.
+  assert.ok(!JSON.stringify(ladderRungsFromEvents(events)).includes(result!.artifact!), "no ladder rung quotes the recording");
+  const names = events.filter((e) => e.type === "step-completed").map((e) => e.name);
+  assert.equal(names.filter((n) => n === "look-record").length, 1);
+
+  // And the flag-off run records NO step at all (the fence's rule, at the
+  // engine): same look, no lookRecord in the input, no finaliser run.
+  const plain = lookRecordProvider(snapshot, report);
+  const plainStore = new MemoryEventStore();
+  await executeRun({
+    workflow: durableAgent({ model: reactiveModel(["```look url=https://example.com\n```", "```finish\nsaw the page\n```"]).model, executor: plain.provider }),
+    runId: "run-look-record-off",
+    store: plainStore,
+    input: { task: "look", look: true },
+  });
+  const offEvents = await plainStore.load("run-look-record-off");
+  assert.equal(offEvents.filter((e) => e.type === "step-completed" && e.name === "look-record").length, 0, "flag off: no look-record step exists");
+  assert.ok(plain.commands.every((c) => !/^node \.teploy-agent\/look-record\.mjs$/m.test(c)), "the finaliser never ran");
+});
+
+test("a replayed look-record step returns the recorded artifact id without exec (Q3b)", async () => {
+  const snapshot = '[page] https://example.com — Example\n- heading "Hello" [ref=e1]';
+  const report = JSON.stringify({ kind: "strip", file: ".teploy-agent/rec/look-record.jpg", frames: 3 });
+  const { provider } = lookRecordProvider(snapshot, report);
+  const { model } = reactiveModel(["```look url=https://example.com\n```", "```finish\nsaw the page\n```"]);
+  const artifacts = memoryArtifacts();
+  const store = new MemoryEventStore();
+  await executeRun({
+    workflow: durableAgent({ model, executor: provider, artifacts: artifacts.store }),
+    runId: "run-look-record-replay",
+    store,
+    input: { task: "look", look: true, lookRecord: true },
+  });
+  const events = await store.load("run-look-record-replay");
+  const artifact = ((events.find((e) => e.type === "step-completed" && e.name === "look-record")?.data as { result?: { artifact?: string } }).result ?? {}).artifact;
+  assert.ok(artifact !== undefined, "the first pass stored a recording");
+
+  // Replay with an executor that must never be used: the recorded step result
+  // is the whole answer.
+  const stripped = new MemoryEventStore();
+  for (const event of events) {
+    if (event.type === "run-completed") continue;
+    await stripped.append("run-look-record-replay", event);
+  }
+  const refuse = (): never => {
+    throw new Error("the replay must reuse the recorded look-record result");
+  };
+  const refusing: ExecutorProvider = {
+    async create() {
+      return { handle: "refused" };
+    },
+    attach() {
+      return { exec: refuse, putFile: refuse, getFile: refuse, destroy: async () => {} };
+    },
+  };
+  const { model: deadModel } = reactiveModel([]);
+  (deadModel as { doGenerate: unknown }).doGenerate = refuse;
+  const replayed = await executeRun({
+    workflow: durableAgent({ model: deadModel, executor: refusing, artifacts: artifacts.store }),
+    runId: "run-look-record-replay",
+    store: stripped,
+    input: { task: "look", look: true, lookRecord: true },
+  });
+  assert.equal(replayed.status, "completed");
+  const replayedArtifact = ((await stripped.load("run-look-record-replay")).find((e) => e.type === "step-completed" && e.name === "look-record")?.data as { result?: { artifact?: string } }).result?.artifact;
+  assert.equal(replayedArtifact, artifact, "the recorded artifact id, returned without exec");
+  assert.ok(await artifacts.store.get(artifact) !== null, "and the bytes are still in the store");
 });
 
 test("the prompt mentions image mode only when the input admits it (durable equivalence)", async () => {

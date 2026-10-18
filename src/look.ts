@@ -19,8 +19,9 @@ import { createHash } from "node:crypto";
 
 import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 
-import { LOOK_IMAGE_DATA_CLASS, type ArtifactBinding, type ArtifactStore } from "./artifacts.js";
+import { LOOK_IMAGE_DATA_CLASS, RECORDING_DATA_CLASS, type ArtifactBinding, type ArtifactStore } from "./artifacts.js";
 import type { Action } from "./actions.js";
+import { firstSecretIn, withheldRecordingReason, type KnownSecret } from "./redact.js";
 
 export type LookAction = Extract<Action, { kind: "look" }>;
 
@@ -202,6 +203,88 @@ setInterval(() => {}, 1 << 30);
 `;
 
 /**
+ * Q3b (SHIP_LOOK_RECORD): the session's screencast recorder, appended to
+ * LOOK_SESSION only when the run input admitted recording (input.lookRecord,
+ * materialised from SHIP_LOOK_RECORD at enqueue). Off runs spawn the exact
+ * LOOK_SESSION bytes above — pinned by tests, the lookImage convention.
+ *
+ * A CDP session per page runs `Page.startScreencast`, which emits a frame
+ * ONLY on repaint: an idle page costs nothing, which is what keeps a session
+ * that lives for the whole run inside the 4 MiB store ceiling. Frame and byte
+ * caps stop capture loudly (`rec/stopped.txt` names which cap), and the page's
+ * DOM text is captured beside the frames — deduped per page, capped — because
+ * pixels cannot be scrubbed; the text is the proxy the secret check (Q3c)
+ * reads before anything is stored. The recorder never starts or stops on the
+ * agent's word: capture is Ship-owned and input-gated, so replay stays
+ * deterministic.
+ */
+const LOOK_RECORDER = `
+// --- look recording (Q3b): screencast to .teploy-agent/rec -----------------
+const fs = await import("node:fs");
+const REC = "${LOOK_DIR}/rec";
+const MAX_FRAMES = 600, MAX_BYTES = ${4 * 1024 * 1024}, MAX_TEXT = ${512 * 1024};
+fs.mkdirSync(REC, { recursive: true });
+fs.writeFileSync(REC + "/text.txt", "");
+let frames = 0, bytes = 0, frameSeq = 0, capped = "";
+const watched = new WeakSet(), lastText = new WeakMap();
+function stopCapture(why) {
+  if (capped) return;
+  capped = why;
+  fs.writeFileSync(REC + "/stopped.txt", "rec: cap reached (" + why + ")\\n");
+}
+async function captureText(page) {
+  // The DOM text is the secret check's proxy (Q3c); it stays in the sandbox
+  // and never reaches the model.
+  try {
+    const text = await page.evaluate(() => (document.body ? document.body.innerText : ""));
+    if (text !== "" && text !== lastText.get(page)) {
+      lastText.set(page, text);
+      if (fs.statSync(REC + "/text.txt").size < MAX_TEXT) {
+        fs.appendFileSync(REC + "/text.txt", "\\n--page-- " + page.url() + "\\n" + text);
+      } else stopCapture("text");
+    }
+  } catch { /* a page mid-navigation answers nothing */ }
+}
+async function watch(page) {
+  if (watched.has(page) || capped) return;
+  watched.add(page);
+  try {
+    const cdp = await page.context().newCDPSession(page);
+    cdp.on("Page.screencastFrame", async (frame) => {
+      try { await cdp.send("Page.screencastFrameAck", { sessionId: frame.sessionId }); } catch {}
+      if (capped) { try { await cdp.send("Page.stopScreencast"); } catch {} return; }
+      const jpg = Buffer.from(frame.data, "base64");
+      if (frames >= MAX_FRAMES || bytes + jpg.length > MAX_BYTES) {
+        stopCapture(frames >= MAX_FRAMES ? "frame" : "byte");
+        try { await cdp.send("Page.stopScreencast"); } catch {}
+        return;
+      }
+      fs.writeFileSync(REC + "/f" + String(frameSeq++).padStart(5, "0") + ".jpg", jpg);
+      frames += 1; bytes += jpg.length;
+      await captureText(page);
+    });
+    await cdp.send("Page.startScreencast", { format: "jpeg", quality: 60, maxWidth: 960, maxHeight: 600, everyNthFrame: 2 });
+    await captureText(page);
+  } catch { /* a closing page is not a failure of the session */ }
+}
+for (const context of browser.contexts()) for (const page of context.pages()) await watch(page);
+// New pages and tabs join on the next tick; the same tick is the finaliser's
+// stop signal, so capture ends when the recording is assembled.
+setInterval(() => {
+  if (fs.existsSync(REC + "/stop")) {
+    if (!capped) { capped = "finalised"; try { fs.unlinkSync(REC + "/stop"); } catch {} }
+    return;
+  }
+  for (const context of browser.contexts()) for (const page of context.pages()) void watch(page);
+}, 1000);
+`;
+
+/** The session script: LOOK_SESSION verbatim, plus the recorder when the run input admitted recording. */
+export function lookSessionScript(record: boolean): string {
+  return record ? LOOK_SESSION + LOOK_RECORDER : LOOK_SESSION;
+}
+
+/**
  * The per-turn driver: connect to the session (starting it if needed),
  * navigate if asked, observe, print the observation as text. Ref resolution
  * goes through the aria-ref selector engine — playwright 1.63 has no
@@ -321,8 +404,8 @@ export function lookCommand(scriptSuffix: string): string {
  * the tests pin — stdout is the observation text, a non-zero exit with stderr
  * is a loud failure the agent can act on.
  */
-export async function runLook(executor: AgentExecutor, scriptSuffix: string, action: LookAction, timeoutMs?: number): Promise<ExecResult> {
-  await executor.putFile(`${LOOK_DIR}/look-session.mjs`, LOOK_SESSION);
+export async function runLook(executor: AgentExecutor, scriptSuffix: string, action: LookAction, timeoutMs?: number, record = false): Promise<ExecResult> {
+  await executor.putFile(`${LOOK_DIR}/look-session.mjs`, lookSessionScript(record));
   await executor.putFile(`${LOOK_DIR}/look-${scriptSuffix}.mjs`, lookDriverScript(action, action.image === true ? lookShotPath(scriptSuffix) : undefined));
   return executor.exec(lookCommand(scriptSuffix), timeoutMs !== undefined ? { timeoutMs } : {});
 }
@@ -343,8 +426,8 @@ export async function runLook(executor: AgentExecutor, scriptSuffix: string, act
  * observation (exit code, stderr) is the honest failure the agent reads,
  * same as a text look.
  */
-export async function runLookImage(executor: AgentExecutor, scriptSuffix: string, action: LookAction, artifacts: ArtifactStore, timeoutMs?: number, binding?: ArtifactBinding): Promise<LookImageResult> {
-  const result = await runLook(executor, scriptSuffix, { ...action, image: true }, timeoutMs);
+export async function runLookImage(executor: AgentExecutor, scriptSuffix: string, action: LookAction, artifacts: ArtifactStore, timeoutMs?: number, binding?: ArtifactBinding, record = false): Promise<LookImageResult> {
+  const result = await runLook(executor, scriptSuffix, { ...action, image: true }, timeoutMs, record);
   if (result.exitCode !== 0 || result.truncated) return result;
   let bytes: Uint8Array;
   try {
@@ -360,4 +443,232 @@ export async function runLookImage(executor: AgentExecutor, scriptSuffix: string
       : (name: string, b: Uint8Array, dataClass?: string, bound?: ArtifactBinding) => artifacts.put(name, b, dataClass, bound);
   const artifact = await put(`look-${scriptSuffix}.png`, bytes, LOOK_IMAGE_DATA_CLASS, binding);
   return { ...result, image: { artifact, digest: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length } };
+}
+
+// --- look recording (Q3b) ------------------------------------------------------
+
+/** Where the session recorder writes frames and the captured page text. */
+export const LOOK_REC_DIR = `${LOOK_DIR}/rec`;
+/** The artifact store's hard ceiling (artifacts.ts), stated here so the drop reason can name it. */
+export const LOOK_RECORD_MAX_BYTES = 4 * 1024 * 1024;
+
+/**
+ * What the `look-record` step recorded. Every branch is run-page context:
+ * NONE of it reaches a pull request — `look` runs on the unpushed tree before
+ * the commit, so a look recording can never be verification of a revision
+ * (the perception design's false-proof rule; the artifact carries the tree
+ * digest and no revision, and `recording` is the data class every
+ * PR-attachment boundary refuses).
+ */
+export type LookRecordOutcome =
+  | {
+      kind: "stored";
+      /** The temporary artifact id — 7-day screenshot retention, like a look-image. */
+      artifact: string;
+      digest: string;
+      bytes: number;
+      frames: number;
+      /** How the frames were assembled: VP8 WebM when the image carries ffmpeg, a JPEG strip when it does not. */
+      format: "webm" | "strip";
+      /** The recorder's own stop reason, when a cap ended capture before the session did. */
+      capped?: string;
+      /** `git write-tree` over the working tree at finalisation, when the run had one. */
+      treeDigest?: string;
+    }
+  | { kind: "withheld"; reason: string }
+  | { kind: "dropped"; reason: string }
+  | { kind: "none"; reason: string }
+  | { kind: "failed"; reason: string };
+
+/**
+ * The finaliser, run inside the sandbox ONCE after the agent loop ends: stop
+ * capture, then assemble the frames. VP8 WebM at one frame per second (gaps
+ * collapsed) when the image carries ffmpeg; the sandbox images bake none
+ * (images/sandbox-*), so the ordinary path is a compact JPEG strip drawn by
+ * the session's own browser — a canvas is the only image tool guaranteed
+ * present — and the step result SAYS it is a strip, never passing one off as
+ * video.
+ */
+function lookRecordScript(): string {
+  return `import { chromium } from "playwright";
+import { execFile } from "node:child_process";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { promisify } from "node:util";
+const run = promisify(execFile);
+const REC = "${LOOK_REC_DIR}";
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Ask the recorder to stop, then let one tick pass so frames in flight land
+// and the strip page below is never itself captured.
+if (!existsSync(REC + "/stop")) writeFileSync(REC + "/stop", "");
+await sleep(1300);
+const frames = readdirSync(REC).filter((f) => /^f\\d{5}\\.jpg$/.test(f)).sort();
+if (frames.length === 0) {
+  console.log(JSON.stringify({ kind: "none", reason: "the look session captured no frames — a page that never repainted records nothing" }));
+  process.exit(0);
+}
+const capped = existsSync(REC + "/stopped.txt") ? readFileSync(REC + "/stopped.txt", "utf8").trim() : "";
+const tree = existsSync(REC + "/tree.txt") ? readFileSync(REC + "/tree.txt", "utf8").trim() : "";
+const common = { frames: frames.length, ...(capped !== "" ? { capped } : {}), ...( /^[a-f0-9]{40,64}$/.test(tree) ? { treeDigest: tree } : {}) };
+if (existsSync(REC + "/ffmpeg")) {
+  try {
+    await run("ffmpeg", ["-y", "-loglevel", "error", "-framerate", "1", "-i", REC + "/f%05d.jpg", "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-c:v", "libvpx", "-b:v", "0", "-crf", "35", REC + "/look-record.webm"], { timeout: 120000 });
+    console.log(JSON.stringify({ kind: "webm", file: REC + "/look-record.webm", ...common }));
+    process.exit(0);
+  } catch (error) {
+    console.error("look-record: ffmpeg failed (" + String((error && error.message) || error) + "), falling back to the strip");
+  }
+}
+// No ffmpeg in this image: assemble the frames into one compact JPEG strip
+// through the session's own browser.
+const browser = await chromium.connectOverCDP("http://127.0.0.1:${LOOK_CDP_PORT}");
+const context = browser.contexts()[0];
+const page = await context.newPage();
+try {
+  await page.setContent("<!doctype html><canvas id='c'></canvas>");
+  const cols = Math.max(4, Math.ceil(frames.length / 80)); // keep the canvas inside Chromium's limits
+  const tileW = 240, tileH = 150;
+  await page.evaluate((w, h) => { const c = document.getElementById("c"); c.width = w; c.height = h; }, cols * tileW, Math.ceil(frames.length / cols) * tileH);
+  for (let i = 0; i < frames.length; i++) {
+    const b64 = readFileSync(REC + "/" + frames[i]).toString("base64");
+    await page.evaluate((i, b64, cols, tileW, tileH) => new Promise((resolve, reject) => {
+      const ctx = document.getElementById("c").getContext("2d");
+      const img = new Image();
+      img.onload = () => {
+        const x = (i % cols) * tileW, y = Math.floor(i / cols) * tileH;
+        const s = Math.min(tileW / img.width, tileH / img.height);
+        ctx.drawImage(img, x + (tileW - img.width * s) / 2, y + (tileH - img.height * s) / 2, img.width * s, img.height * s);
+        resolve();
+      };
+      img.onerror = () => reject(new Error("frame " + i + " did not decode"));
+      img.src = "data:image/jpeg;base64," + b64;
+    }), i, b64, cols, tileW, tileH);
+  }
+  const data = await page.evaluate(() => document.getElementById("c").toDataURL("image/jpeg", 0.55));
+  writeFileSync(REC + "/look-record.jpg", Buffer.from(data.slice(data.indexOf(",") + 1), "base64"));
+  console.log(JSON.stringify({ kind: "strip", file: REC + "/look-record.jpg", ...common }));
+} finally {
+  await page.close().catch(() => {});
+}
+`;
+}
+
+/**
+ * The shell that runs the finaliser: the look command's node/playwright
+ * prelude, an honest "nothing was captured" for a run whose look never
+ * spawned a session, an ffmpeg probe the script reads, and the tree digest —
+ * `git write-tree` over a THROWAWAY index so the working tree is captured
+ * without touching the real one (.teploy-agent is excludeCommand's, so the
+ * scratch never lands in the tree).
+ */
+export function lookRecordCommand(): string {
+  return [
+    'command -v node >/dev/null 2>&1 || { echo "look: this sandbox has no node to drive a browser session with" >&2; exit 4; }',
+    'pw="$(npm root -g 2>/dev/null)/playwright"; test -d "$pw" || { echo "look: this sandbox image has no playwright (npm root -g)/playwright" >&2; exit 5; }',
+    `mkdir -p ${LOOK_DIR}/node_modules && ln -sfn "$pw" ${LOOK_DIR}/node_modules/playwright`,
+    `if [ ! -d ${LOOK_REC_DIR} ]; then echo '{"kind":"none","reason":"no look session ran, so nothing was captured"}'; exit 0; fi`,
+    `if command -v ffmpeg >/dev/null 2>&1; then : > ${LOOK_REC_DIR}/ffmpeg; fi`,
+    `if git rev-parse --verify -q HEAD >/dev/null 2>&1; then ( export GIT_INDEX_FILE="$PWD/${LOOK_REC_DIR}/index"; git read-tree HEAD && git add -A . && git write-tree ) > ${LOOK_REC_DIR}/tree.txt 2>/dev/null || rm -f ${LOOK_REC_DIR}/tree.txt; fi`,
+    `node ${LOOK_DIR}/look-record.mjs`,
+  ].join("\n");
+}
+
+interface FinaliserReport {
+  kind: "webm" | "strip";
+  file: string;
+  frames: number;
+  capped?: string;
+  treeDigest?: string;
+}
+
+/** The finaliser's stdout report: the last JSON line it printed, or null. */
+function parseReport(stdout: string): FinaliserReport | { kind: "none"; reason: string } | null {
+  for (const line of stdout.split("\n").reverse()) {
+    if (!line.startsWith("{")) continue;
+    try {
+      const parsed = JSON.parse(line) as { kind?: string; reason?: string; file?: string; frames?: number; capped?: string; treeDigest?: string };
+      if (parsed.kind === "none") return { kind: "none", reason: parsed.reason ?? "the session captured no frames" };
+      if (parsed.kind !== "webm" && parsed.kind !== "strip") continue;
+      if (typeof parsed.file !== "string" || typeof parsed.frames !== "number") continue;
+      return { kind: parsed.kind, file: parsed.file, frames: parsed.frames, ...(parsed.capped !== undefined ? { capped: parsed.capped } : {}), ...(parsed.treeDigest !== undefined ? { treeDigest: parsed.treeDigest } : {}) };
+    } catch {
+      // not the report line
+    }
+  }
+  return null;
+}
+
+/**
+ * Finalise the look session's recording (Q3b): run the in-sandbox finaliser,
+ * then decide — on the HOST, where the secret set lives — whether anything is
+ * stored. The order is the redaction policy (Q3c): the captured page TEXT is
+ * pulled first and checked against the run's exact-value secret set; on a hit
+ * the recording bytes are never even transferred out of the sandbox, the rec
+ * directory is deleted in the sandbox, nothing is stored, and the refusal
+ * names the secret's NAME and never its value. Past the check, over-cap
+ * recordings are DROPPED with the reason recorded — never silently truncated
+ * — and a stored recording is a temporary `recording`-class artifact bound to
+ * the run and the tree it observed, so 7-day retention and every
+ * PR-attachment refusal apply to it unchanged.
+ */
+export async function runLookRecordFinalise(
+  executor: AgentExecutor,
+  artifacts: ArtifactStore | undefined,
+  binding: { runId: string },
+  secrets: readonly KnownSecret[] = [],
+  timeoutMs?: number,
+): Promise<LookRecordOutcome> {
+  await executor.putFile(`${LOOK_DIR}/look-record.mjs`, lookRecordScript());
+  const cleanup = () => executor.exec(`rm -rf ${LOOK_REC_DIR}`, { timeoutMs: 15_000 }).catch(() => {});
+  const run = await executor.exec(lookRecordCommand(), timeoutMs !== undefined ? { timeoutMs } : {});
+  if (run.exitCode !== 0) {
+    await cleanup();
+    return { kind: "failed", reason: run.stderr.trim() !== "" ? run.stderr.trim() : `the finaliser exited ${run.exitCode}` };
+  }
+  const report = parseReport(run.stdout);
+  if (report === null) {
+    await cleanup();
+    return { kind: "failed", reason: "the finaliser printed no report" };
+  }
+  if (report.kind === "none") {
+    await cleanup();
+    return { kind: "none", reason: report.reason };
+  }
+  // Q3c: the DOM text captured during the session is the proxy for what the
+  // pixels show. It is checked on the host and recorded NOWHERE — only the
+  // verdict rides the step result.
+  let text = "";
+  try {
+    text = new TextDecoder().decode(await executor.getFile(`${LOOK_REC_DIR}/text.txt`));
+  } catch {
+    // No text file (a session whose pages never yielded text) is not a
+    // failure; there is simply nothing to match beyond what exists.
+  }
+  const hit = firstSecretIn(text, secrets);
+  if (hit !== undefined) {
+    await cleanup();
+    return { kind: "withheld", reason: withheldRecordingReason(hit) };
+  }
+  let bytes: Uint8Array;
+  try {
+    bytes = await executor.getFile(report.file);
+  } catch (error) {
+    await cleanup();
+    return { kind: "failed", reason: `the assembled recording never came back from the sandbox: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  if (artifacts?.putTemporary === undefined) {
+    await cleanup();
+    return { kind: "dropped", reason: "this worker has no artifact store configured, so the look recording has nowhere honest to live" };
+  }
+  if (bytes.length > LOOK_RECORD_MAX_BYTES) {
+    await cleanup();
+    return { kind: "dropped", reason: `the assembled recording is ${bytes.length} bytes, over the ${LOOK_RECORD_MAX_BYTES} byte cap: dropped rather than truncated` };
+  }
+  try {
+    const artifact = await artifacts.putTemporary(`look-recording.${report.kind === "webm" ? "webm" : "jpg"}`, bytes, RECORDING_DATA_CLASS, { runId: binding.runId, ...(report.treeDigest !== undefined ? { treeDigest: report.treeDigest } : {}) });
+    await cleanup();
+    return { kind: "stored", artifact, digest: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length, frames: report.frames, format: report.kind, ...(report.capped !== undefined ? { capped: report.capped } : {}), ...(report.treeDigest !== undefined ? { treeDigest: report.treeDigest } : {}) };
+  } catch (error) {
+    await cleanup();
+    return { kind: "dropped", reason: `the artifact store refused the recording: ${error instanceof Error ? error.message : String(error)}` };
+  }
 }

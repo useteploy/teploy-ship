@@ -188,8 +188,8 @@ export interface ProofLink {
  * and a person can look at.
  */
 export type FlowOutcome =
-  | { kind: "passed"; script: string; durationMs: number; shots: FlowShot[]; videos?: FlowShot[] }
-  | { kind: "failed"; script: string; exitCode: number; output: string; shots: FlowShot[]; videos?: FlowShot[] }
+  | { kind: "passed"; script: string; durationMs: number; shots: FlowShot[]; videos?: FlowShot[]; videosWithheld?: string }
+  | { kind: "failed"; script: string; exitCode: number; output: string; shots: FlowShot[]; videos?: FlowShot[]; videosWithheld?: string }
   | { kind: "errored"; script: string; reason: string }
   | { kind: "skipped"; reason: string };
 
@@ -329,6 +329,9 @@ export function ladderRungs(facts: LadderFacts): Rung[] {
     rungs.push({ name: "flow", status: "skipped", detail: "the flow step did not run for this run" });
   } else {
     const f = facts.flow;
+    // Q3c: the withheld sentence rides the rung the recording would have, so
+    // the ladder a person reads states the refusal where the video would be.
+    const withheld = f.kind !== "skipped" && f.kind !== "errored" && f.videosWithheld !== undefined ? ` — recordings withheld: ${f.videosWithheld}` : "";
     rungs.push(
       f.kind === "passed"
         ? {
@@ -336,11 +339,11 @@ export function ladderRungs(facts: LadderFacts): Rung[] {
             status: "passed",
             detail: clip(
               `${f.script} passed in ${Math.round(f.durationMs / 1000)}s with ${f.shots.length} screenshot${f.shots.length === 1 ? "" : "s"}` +
-                (f.shots.some((sh) => sh.asset !== undefined) ? " attached to the pull request" : ""),
+                (f.shots.some((sh) => sh.asset !== undefined) ? " attached to the pull request" : "") + withheld,
             ),
           }
         : f.kind === "failed"
-          ? { name: "flow", status: "failed", detail: clip(`${f.script} exited ${f.exitCode}: ${f.output}`) }
+          ? { name: "flow", status: "failed", detail: clip(`${f.script} exited ${f.exitCode}: ${f.output}${withheld}`) }
           : f.kind === "errored"
             ? { name: "flow", status: "failed", detail: clip(`${f.script} could not run: ${f.reason}`) }
             : { name: "flow", status: "skipped", detail: clip(f.reason) },
