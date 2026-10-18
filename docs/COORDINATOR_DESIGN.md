@@ -108,7 +108,13 @@ the suite ladder at the child's own enqueue. The child additionally carries
 `delegateChild: true`, which (a) suppresses the delegate flag at enqueue even
 under `SHIP_DELEGATE=1`, (b) makes the loop REFUSE a ```delegate block from a
 child with a clear message — one level only, v1 — and (c) suppresses `ask`,
-per the read-only rule above.
+per the read-only rule above. A child that cannot proceed without an answer may end
+with ```finish needs-input and the question as the body (DT4): the run
+completes with `output.needsInput`, the parent's transfer has status
+`needs-input`, and the parent's observation says what the child asked and
+that it is not waiting. The child's ```ask stays refused and nothing parks; the
+parent decides whether to answer by delegating again, ask its own operator, or
+proceed.
 
 ## Bounds
 
@@ -122,9 +128,37 @@ per the read-only rule above.
   parent's wait may poll before recording the honest "child did not finish"
   transfer. 0 is honoured — one poll, then give up. Unset or garbage is the
   default; anything above the ceiling clamps to it.
+- Child cost cap (DT3): with `SHIP_MAX_RUN_COST_USD` set, each child records
+  `maxRunCostUSD` = min(per-run cap, parent cap minus the parent's spend so
+  far, priced from its recorded steps inside the spawn step). The child's loop
+  takes min(its worker's cap, that) — narrow only. A parent with nothing left
+  is refused (`budget-insufficient`); a target the share cannot afford is
+  refused by the policy's own budget check. Serial children of a parked parent
+  bound a tree at about parentCap + N x childCap; parallel children or depth 2
+  still need the reservation ledger (C8).
 - Idempotency: an entry keyed (parentRunId, turn) makes a re-run delegate step
   (crash before the step recorded) REPUBLISH its own child rather than spawn a
   second — the step re-derives the same entry and the same derived run id.
+
+## Delegate targets (DT2)
+
+A parent may name WHERE its child runs: ```delegate target=<id>. The id is an
+entry in an allowlist — `SHIP_DELEGATE_TARGETS` (deployment: id -> harness +
+model) intersected with the project's optional `delegateTargets` — never a
+free-form model string. The intersection is materialised into the parent's
+input at enqueue (`delegateTargets`, offered in the prompt), and the spawn
+re-checks it against today's lists, so an operator can only narrow a running
+task. A target is a new destination for the task's data, so the spawn runs the
+routing policy's data-class gate (`checkCandidate` in model-routing.ts, i.e.
+`whyNot`: destination and retention first) whatever `SHIP_MODEL_ROUTING` is:
+picking a child's model is a selection, not a mid-run switch, so it needs no
+tool-call journal and no `fallbackOn` trigger. Fail closed, every refusal named
+(`delegate-targets.ts` lists them): no policy file loaded refuses every target;
+an external harness must run the model the deployment configures for it and
+call its provider at the policy entry's destination host. The admitted child
+records `delegateTarget` (the decision) and `model` (DT1: the native loop
+resolves the adapter per run and prices on it), and a `selection` segment is
+appended to `ship_model_segments`. Without `target=` nothing changes.
 
 ## The park and the data plane
 

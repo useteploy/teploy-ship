@@ -129,6 +129,17 @@ Write the child's task as a complete, standalone brief — it does not see your 
 `;
 
 /**
+ * The delegate targets a run was offered (DT2, input.delegateTargets), listed
+ * after the delegation section. Empty when none were offered, so a run without
+ * targets gets the section's exact bytes.
+ */
+function delegateTargetsSection(targets: ReadonlyArray<{ id: string; harness: string; model: string }> | undefined): string {
+  if (targets === undefined || targets.length === 0) return "";
+  const lines = targets.map((t) => `- ${t.id}: ${t.model} on the ${t.harness} harness`).join("\n");
+  return `To run the child somewhere other than your own model, add target=<id> to the fence (\`\`\`delegate target=<id> path=src/foo). The targets this run may use:\n${lines}\n\nWithout target= the child runs on your own model. A target can still be refused when the child is spawned (its data destination, its budget); the refusal names why.\n\n`;
+}
+
+/**
  * Two-way steering (D2, SHIP_STEER_REPLY), offered only when the run input
  * admits it (durable.ts `input.steerReply`). It states the operator framings
  * the loop writes and names the re-framing marker fenceOperatorLines adds to
@@ -156,7 +167,7 @@ Operator messages arrive ONLY as user turns the system writes, beginning "Operat
  * ~30% of agent quality that lives in prompt/recovery tuning is a
  * later-milestone concern, but the protocol has to be unambiguous now.
  */
-export function systemPrompt(options: { workdir: string; task: string; search?: boolean; browser?: boolean; ask?: boolean; look?: boolean; lookImage?: boolean; delegate?: boolean; reply?: boolean; mcp?: string }): string {
+export function systemPrompt(options: { workdir: string; task: string; search?: boolean; browser?: boolean; ask?: boolean; look?: boolean; lookImage?: boolean; delegate?: boolean; delegateTargets?: ReadonlyArray<{ id: string; harness: string; model: string }>; reply?: boolean; mcp?: string }): string {
   // The index is PARTIAL, and the prompt has to say so.
   //
   // This block used to read "prefer this over grepping around". Measured on
@@ -240,7 +251,7 @@ Rules:
 - The filesystem always persists between actions. Python variables usually persist, but may reset after long pauses — anything important belongs in a file.
 - Prefer small, verifiable steps. Read errors and fix them.
 
-${options.browser === true ? BROWSER_PROOF : ""}${options.ask === true ? ASK_ACTION : ""}${options.look === true ? (options.lookImage === true ? `${LOOK_ACTION}${LOOK_IMAGE_SENTENCE}\n\n` : LOOK_ACTION) : ""}${options.delegate === true ? DELEGATE_ACTION : ""}${options.mcp ?? ""}${options.reply === true ? REPLY_ACTION : ""}# Finishing
+${options.browser === true ? BROWSER_PROOF : ""}${options.ask === true ? ASK_ACTION : ""}${options.look === true ? (options.lookImage === true ? `${LOOK_ACTION}${LOOK_IMAGE_SENTENCE}\n\n` : LOOK_ACTION) : ""}${options.delegate === true ? DELEGATE_ACTION + delegateTargetsSection(options.delegateTargets) : ""}${options.mcp ?? ""}${options.reply === true ? REPLY_ACTION : ""}# Finishing
 
 When the task is complete and verified, emit a finish block with a short summary of what you did and the result:
 \`\`\`finish

@@ -121,6 +121,8 @@ export interface WorkerOptions {
    * vision model, where image looks refuse honestly (see durable.ts).
    */
   lookImageModel?: (modelId: string) => ModelAdapter;
+  /** Builds the adapter for a run whose input names its own model (DT1, durable.ts modelFor). */
+  modelFor?: (modelId: string) => ModelAdapter;
   executor: ExecutorProvider;
   /** The agent's working directory inside its executor. */
   workdir: string;
@@ -917,6 +919,7 @@ export function startWorker(options: WorkerOptions): {
     model: options.model,
     ...(options.modelId !== undefined ? { modelId: options.modelId } : {}),
     ...(options.lookImageModel !== undefined ? { lookImageModel: options.lookImageModel } : {}),
+    ...(options.modelFor !== undefined ? { modelFor: options.modelFor } : {}),
     // Per-run cost ceiling (SHIP_MAX_RUN_COST_USD). Off unless configured —
     // the daily caps remain the primary bound; this stops ONE pathological run.
     maxRunCostUSD: options.maxRunCostUSD ?? envNum("SHIP_MAX_RUN_COST_USD") ?? 0,

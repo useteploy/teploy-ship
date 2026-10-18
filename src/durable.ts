@@ -97,6 +97,7 @@ import {
 import type { HeldItem, InterruptibleResult } from "./steer-reply.js";
 import { formatSearchHits } from "./code-index.js";
 import { frameUntrusted, screenUntrusted } from "./guard.js";
+import type { DelegateTarget, RecordedDelegateTarget } from "./delegate-targets.js";
 import { LOOK_IMAGE_NO_MODEL, LOOK_IMAGE_NO_STORE, LOOK_OPEN_PLAN, LOOK_SEALED, lookImageCap, runLook, runLookImage } from "./look.js";
 import {
   DELEGATE_CHILD_APPROVAL_REFUSED,
@@ -261,6 +262,37 @@ export interface DurableAgentInput {
    * carry — so the loop's one-level refusal is a fact of the recorded log.
    */
   delegateChild?: boolean;
+  /**
+   * The model this run EXECUTES on (DT1), when it is not the worker's own.
+   * Materialised at enqueue only when a caller names one (a delegate target
+   * today), so every other input stays byte-identical. Resolved per run
+   * through `config.modelFor` — the `lookImage` precedent: the input says
+   * WHICH model, only the worker says how to reach it — and the cost ceiling
+   * prices on it. Admits no step; the fingerprint does not read it.
+   */
+  model?: string;
+  /**
+   * The delegate targets this run was OFFERED (DT2): deployment
+   * SHIP_DELEGATE_TARGETS ∩ the project's delegateTargets, materialised at
+   * enqueue only when `delegate` is on and the set is non-empty. The prompt
+   * lists them; the spawn admits only an id that is here AND still allowed.
+   * Admits no step.
+   */
+  delegateTargets?: DelegateTarget[];
+  /**
+   * On a targeted CHILD (DT2): the target it was spawned on and the policy
+   * decision that admitted it (version, file digest, destination). A record,
+   * read by nothing that gates a step.
+   */
+  delegateTarget?: RecordedDelegateTarget;
+  /**
+   * A per-run cost cap the INPUT carries (DT3): a delegated child's
+   * min(per-run cap, what its parent had left), computed inside the parent's
+   * recorded spawn step. It can only NARROW the worker's
+   * SHIP_MAX_RUN_COST_USD (`effectiveRunCap`): a value above it, or a junk
+   * value, changes nothing. Admits no step.
+   */
+  maxRunCostUSD?: number;
   /**
    * The MCP client (D1, SHIP_MCP; docs/MCP_DESIGN.md): the project's declared
    * servers plus the deployment facts the gates read (data class, remote host
@@ -743,6 +775,12 @@ export interface DurableAgentOutput {
   agentSummary?: string;
   /** The critic's advisory notes over the verified tree, when it ran. */
   riskNotes?: string;
+  /**
+   * A delegated child that stopped to ask its parent (DT4): the question.
+   * Present only on such a child's output, so every other recorded output
+   * keeps its exact shape. The parent's transfer reads it (delegate.ts).
+   */
+  needsInput?: string;
 }
 
 /** Model usage summed across a run. `priced`/`costUSD` are the P5-3 honesty fields; see harness.ts. */
@@ -913,6 +951,14 @@ export interface DurableAgentConfig {
    * always matches the recorded id, not whatever the env says today.
    */
   lookImageModel?: (modelId: string) => ModelAdapter;
+  /**
+   * Builds the adapter for a run whose input names its own model
+   * (input.model, DT1). Same factory shape and the same resolution path as
+   * `lookImageModel`. Absent on a worker that cannot build per-run models,
+   * in which case such a run FAILS before a sandbox is allocated rather than
+   * executing on `model` while its receipt names another.
+   */
+  modelFor?: (modelId: string) => ModelAdapter;
   /**
    * Worker wiring for remote (streamable-HTTP) MCP servers: resolver/fetch
    * overrides and the address-rule loosening tests need to reach a loopback
@@ -1227,7 +1273,11 @@ export function durableAgent(
       // on the run where whoever triggered it will actually read it.
       // Resolved before any step: a pure lookup, and a harness this worker does
       // not carry must fail the run before a sandbox is allocated for it.
-      const registry = [nativeAdapter(config), ...(config.harnesses ?? [])];
+      // The run's own model (DT1): everything that calls or prices a model
+      // below reads `runConfig`, which is `config` itself unless the input
+      // names a model.
+      const runConfig = runModelConfig(config, input);
+      const registry = [nativeAdapter(runConfig), ...(config.harnesses ?? [])];
       const adapter = selectAdapter(registry, input.harness);
       // Multi-attempt is a repo-run capability (each extra attempt clones its
       // own checkout); a recorded list on a workspace run is a single attempt.
@@ -1555,7 +1605,9 @@ export function durableAgent(
             : fixPrompt({ task: input.task, branch: checkout.branch, base: checkout.base, context: repoContext })
           : input.task;
 
-      const budget: HarnessBudget = { maxSteps, maxRunCostUSD: config.maxRunCostUSD ?? 0 };
+      // The per-run ceiling, narrowed (never widened) by a cap the run input
+      // recorded (DT3: a delegated child's share of its parent's remainder).
+      const budget: HarnessBudget = { maxSteps, maxRunCostUSD: effectiveRunCap(config.maxRunCostUSD ?? 0, input.maxRunCostUSD) };
       const harnessTask: HarnessTask = {
         prompt: task,
         // So the finish gate can tell a suite this run broke from one it
@@ -1692,6 +1744,7 @@ export function durableAgent(
           usage: result.usage,
           ...(pr !== null ? { pr } : {}),
           ...(scanned !== null ? { findings: scanned.findings } : {}),
+          ...(result.needsInput !== undefined && input.delegateChild === true ? { needsInput: result.needsInput } : {}),
         };
       }
 
@@ -1722,10 +1775,10 @@ export function durableAgent(
         // selects among the attempts that already finished rather than
         // spending the ceiling again on one more. Derived purely from the
         // usage already recorded, so a replay stops at the same attempt.
-        if (i > 0 && budget.maxRunCostUSD > 0 && costUSD(config.modelId ?? "", attemptsSpent(attempts)) >= budget.maxRunCostUSD) {
+        if (i > 0 && budget.maxRunCostUSD > 0 && costUSD(runConfig.modelId ?? "", attemptsSpent(attempts)) >= budget.maxRunCostUSD) {
           await ctx.step(`attempt-${i}-skipped`, () => ({
             reason: `the run's ${budget.maxRunCostUSD.toFixed(2)} cost ceiling was reached after ${attempts.length} attempt${attempts.length === 1 ? "" : "s"}; selecting among the attempts that finished`,
-            spent: costUSD(config.modelId ?? "", attemptsSpent(attempts)),
+            spent: costUSD(runConfig.modelId ?? "", attemptsSpent(attempts)),
           }));
           break;
         }
@@ -1810,7 +1863,7 @@ export function durableAgent(
         const tied = ranked.tied;
         if (tied.length > 1 && candidates.some((c) => tied.includes(c.attempt))) {
           try {
-            const verdict = await pickAttempt(config.model, { task: input.task, candidates: candidates.filter((c) => tied.includes(c.attempt)) });
+            const verdict = await pickAttempt(runConfig.model, { task: input.task, candidates: candidates.filter((c) => tied.includes(c.attempt)) });
             const chosen = parsePick(verdict.text, tied);
             const winner = chosen === null ? tied[0]! : chosen;
             const how =
@@ -2004,7 +2057,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
           // are re-framed like any other untrusted text, so a crafted issue
           // cannot smuggle "Operator steering — ..." into the one section the
           // model reads as its orders. Flag-off bytes are unchanged.
-          content: systemPrompt({ workdir: ws.workdir, task: untrusted(task.prompt, "[task text, not the operator]", true), search: searchable, browser: input.verification?.preview !== undefined, ask: input.ask === true, look, lookImage: lookImage !== undefined, delegate: input.delegate === true, ...(steerReply ? { reply: true } : {}), ...(mcpOffer !== undefined ? { mcp: renderMcpSection(mcpOffer) } : {}) }),
+          content: systemPrompt({ workdir: ws.workdir, task: untrusted(task.prompt, "[task text, not the operator]", true), search: searchable, browser: input.verification?.preview !== undefined, ask: input.ask === true, look, lookImage: lookImage !== undefined, delegate: input.delegate === true, ...(input.delegate === true && input.delegateTargets !== undefined && input.delegateTargets.length > 0 ? { delegateTargets: input.delegateTargets } : {}), ...(steerReply ? { reply: true } : {}), ...(mcpOffer !== undefined ? { mcp: renderMcpSection(mcpOffer) } : {}) }),
         },
       ];
       let anySuccessfulAction = false;
@@ -2324,6 +2377,14 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
         // re-asks, then whatever came back is accepted: a model that cannot
         // emit the array in three attempts will not emit it in six, and the
         // free text is still on the timeline either way.
+        // A delegated child stopping to ASK (DT4): it cannot park on a human
+        // (its ```ask is refused by name), so it finishes with the question
+        // and the parent decides — answer by delegating again, ask its own
+        // human, or proceed. No park, no step: the finish is the deliverable,
+        // and it skips the findings nudge, which asks a different question.
+        if (input.delegateChild === true && action.kind === "finish" && action.needsInput === true && action.message !== "") {
+          return { status: "finished", summary: action.message, turns: turn + 1, usage, incomplete: false, needsInput: action.message };
+        }
         if (scanRun && action.kind === "finish") {
           const parsed = parseFindings(action.message);
           if (!parsed.found && scanFindingsNudges < 2 && turn + 1 < maxSteps) {
@@ -2841,6 +2902,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
                 task: action.task,
                 ...(action.repo !== undefined ? { repoHint: action.repo } : {}),
                 ...(action.path !== undefined ? { pathHint: action.path } : {}),
+                ...(action.target !== undefined ? { target: action.target } : {}),
               });
             } catch (error) {
               return { ok: false, reason: `delegation failed: ${error instanceof Error ? error.message : String(error)}` };
@@ -3181,6 +3243,35 @@ function summaryFields(
     agentSummary: result.summary,
     ...(result.critic !== undefined ? { riskNotes: result.critic.notes } : {}),
   };
+}
+
+/**
+ * The per-run cost ceiling a run executes under (DT3): the worker's configured
+ * one (0 = off), narrowed by a cap the run input recorded. Narrow only — a
+ * recorded cap above the configured one, or a non-positive or non-finite one,
+ * leaves the configured ceiling exactly as it was; with no configured ceiling
+ * a recorded cap is the only bound, which is still narrower than none.
+ */
+export function effectiveRunCap(configured: number, recorded: number | undefined): number {
+  const base = Number.isFinite(configured) && configured > 0 ? configured : 0;
+  if (recorded === undefined || !Number.isFinite(recorded) || recorded <= 0) return base;
+  return base > 0 ? Math.min(base, recorded) : recorded;
+}
+
+/**
+ * The config a run executes under (DT1): `config` itself when the input names
+ * no model — the object identity, so a run without `input.model` takes exactly
+ * the path it always took — otherwise the worker's adapter for that model and
+ * its id for pricing. A run naming a model the worker cannot build fails here,
+ * before any step: executing it on the default model would make its receipt,
+ * its price and its policy check describe a model that never ran.
+ */
+export function runModelConfig(config: DurableAgentConfig, input: Pick<DurableAgentInput, "model">): DurableAgentConfig {
+  if (input.model === undefined || input.model === config.modelId) return config;
+  if (config.modelFor === undefined) {
+    throw new Error(`this run names model ${input.model}, and this worker cannot build per-run models (no modelFor wiring); refusing to run it on ${config.modelId ?? "the worker default"}`);
+  }
+  return { ...config, model: config.modelFor(input.model), modelId: input.model };
 }
 
 /**

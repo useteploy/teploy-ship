@@ -277,6 +277,56 @@ export function selectModel(
   );
 }
 
+export type CandidateCheck =
+  | { ok: true; candidate: Candidate; segment: Segment }
+  | { ok: false; code: SkipCode | "not-in-policy" | "invalid-policy" | "uncertain-side-effects"; why: string };
+
+/**
+ * Judge ONE named model against the task, wherever the policy lists it (DT2:
+ * a delegate target is chosen by id, not by walking a role's order). Every
+ * entry for the model, in every role, must clear `whyNot`: two entries that
+ * disagree about where the data goes or how long it is kept are answered by
+ * the stricter one, never by whichever role happened to be read first. A model
+ * the policy does not list is refused — an undeclared destination is not an
+ * allowed one. Same purity as `selectModel`.
+ */
+export function checkCandidate(
+  policy: RoutingPolicy,
+  model: string,
+  task: RouteTask,
+  options: RouteOptions = {},
+): CandidateCheck {
+  const errors = validatePolicy(policy);
+  if (errors.length > 0) return { ok: false, code: "invalid-policy", why: `invalid policy: ${errors.join("; ")}` };
+  if (task.uncertainSideEffects) {
+    return { ok: false, code: "uncertain-side-effects", why: "an earlier tool call has an uncertain side effect; a new model segment would replay it" };
+  }
+  const env = options.env ?? {};
+  const entries: Array<{ role: string; candidate: Candidate }> = [];
+  for (const [role, candidates] of Object.entries(policy.roles)) {
+    for (const candidate of candidates) if (candidate.model === model) entries.push({ role, candidate });
+  }
+  if (entries.length === 0) return { ok: false, code: "not-in-policy", why: `${model} is not a candidate in policy ${policy.version}` };
+  for (const { candidate } of entries) {
+    const why = whyNot(candidate, task, env);
+    if (why !== undefined) return { ok: false, code: why.code, why: why.why };
+  }
+  const { role, candidate } = entries[0]!;
+  const { usd, basis } = reserve(candidate.model, task, env);
+  const segment: Segment = deepFreeze({
+    policyVersion: policy.version,
+    role,
+    model: candidate.model,
+    effort: candidate.effort,
+    destination: { ...candidate.dataDestination },
+    reason: "named",
+    reservedUSD: usd,
+    pricing: basis,
+    skipped: [],
+  });
+  return { ok: true, candidate, segment };
+}
+
 export interface CurrentAttempt {
   model: string;
   failure: FallbackTrigger;

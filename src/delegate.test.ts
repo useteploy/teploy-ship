@@ -708,3 +708,70 @@ test("a child that never finishes yields an honest timeout transfer, not an infi
     else process.env.SHIP_DELEGATE_WAIT_MS = saved;
   }
 });
+
+// ---------------------------------------------------------------- DT4: needs-input
+
+test("```finish needs-input parses with the marker; a plain finish is unchanged", () => {
+  assert.deepEqual(parseAction("```finish needs-input\nWhich database does prod use?\n```"), { kind: "finish", message: "Which database does prod use?", needsInput: true });
+  assert.deepEqual(parseAction("```finish\nDone.\n```"), { kind: "finish", message: "Done." });
+  assert.deepEqual(parseAction("```finish whatever\nDone.\n```"), { kind: "finish", message: "Done." }, "any other argument is ignored, as before");
+});
+
+test("a child that finished with needs-input projects to a needs-input transfer the parent reads as a question", () => {
+  const events = [{ type: "run-completed", data: { output: { status: "finished", summary: "Which database does prod use?", needsInput: "Which database does prod use?" } } }];
+  const transfer = transferFromEvents("run-del-q", events);
+  assert.deepEqual(transfer, { childRunId: "run-del-q", status: "needs-input", summary: "Which database does prod use?" });
+  const obs = transferObservation(transfer!);
+  assert.match(obs, /^Delegated run run-del-q stopped to ask a question \(needs-input\) — the child asked:\nWhich database does prod use\?/);
+  assert.match(obs, /not waiting for a reply/);
+  // A completed child without the field is a plain completion, as before.
+  assert.equal(transferFromEvents("run-del-c", [{ type: "run-completed", data: { output: { summary: "found it" } } }])?.status, "completed");
+});
+
+test("NEG: a child's ```ask is still refused; finishing with needs-input ends it with the question and records no park", async () => {
+  const { model } = reactiveModel([
+    "```ask\nWhich database does prod use?\n```",
+    (obs) => (obs === DELEGATE_CHILD_ASK_REFUSED && obs.includes("finish needs-input") ? "```finish needs-input\nWhich database does prod use?\n```" : "```bash\necho no-refusal\n```"),
+  ]);
+  const provider = await localProvider(true);
+  const store = new MemoryEventStore();
+  const done = await executeRun({
+    workflow: durableAgent({ model, executor: provider }),
+    runId: "run-kid-needs-input",
+    store,
+    input: { task: "t", mode: "scan", delegateChild: true, ask: true },
+  });
+  assert.equal(done.status, "completed");
+  const output = (done as { output?: { needsInput?: string; summary?: string } }).output;
+  assert.equal(output?.needsInput, "Which database does prod use?");
+  const events = await store.load("run-kid-needs-input");
+  assert.ok(!events.some((e) => e.type === "event-waiting" || e.type === "sleep-started"), "no child park recorded");
+  assert.ok(!events.some((e) => e.type === "step-completed" && /snapshot|restore/.test(e.name ?? "")), "nothing snapshotted for a park");
+  // The parent's projection of that log is the question.
+  assert.equal(transferFromEvents("run-kid-needs-input", events as never)?.status, "needs-input");
+});
+
+test("needs-input is a child-only exit: on any other run the finish is an ordinary finish", async () => {
+  const { model } = reactiveModel(["```finish needs-input\nWhich database?\n```", "```finish needs-input\nWhich database?\n```", "```finish needs-input\nWhich database?\n```"]);
+  const store = new MemoryEventStore();
+  const done = await executeRun({ workflow: durableAgent({ model, executor: await localProvider() }), runId: "run-scan-needs-input", store, input: { task: "t", mode: "scan" } });
+  assert.equal(done.status, "completed");
+  assert.ok(!("needsInput" in ((done as { output?: object }).output ?? {})), "no needsInput on a non-child output");
+});
+
+test("the parent receives a child's question as its next observation and carries on", async () => {
+  const { model } = reactiveModel([
+    "```delegate\nFind which database prod uses.\n```",
+    (obs) => (obs.includes("the child asked:") && obs.includes("Which database?") ? "```bash\necho relayed\n```" : "```bash\necho no-relay\n```"),
+    (obs) => (obs.includes("relayed") ? "```finish\nproceeding\n```" : "```bash\necho wrong\n```"),
+    (obs) => (obs.includes("Before finishing") ? "```bash\necho proof\n```" : "```bash\necho unexpected\n```"),
+    "```finish\nDone.\n```",
+  ]);
+  const fake = fakeControl();
+  fake.finish({ childRunId: "run-del-fake-1", status: "needs-input", summary: "Which database?" });
+  const store = new MemoryEventStore();
+  const done = await executeRun({ workflow: durableAgent({ model, executor: await localProvider(), delegate: fake.control }), runId: "run-parent-q", store, input: { task: "t", delegate: true } });
+  assert.equal(done.status, "completed");
+  const think = (await store.load("run-parent-q")).filter((e) => e.type === "step-completed" && e.name === "turn-1-think");
+  assert.match(JSON.stringify(think[0]?.data), /echo relayed/);
+});

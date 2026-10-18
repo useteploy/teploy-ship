@@ -14,6 +14,7 @@ import type { IntakePolicy } from "./intake.js";
 import { NETWORK_TIER_HELP, normalizeEgressAllow, parseNetworkTier } from "./egress.js";
 import type { NetworkTier } from "./egress.js";
 import { normalizeMcp, type McpProjectConfig } from "./mcp.js";
+import { normalizeDelegateTargetIds } from "./delegate-targets.js";
 
 /**
  * One record per repository: everything Ship needs to know about a repo, in
@@ -136,6 +137,14 @@ export interface Project {
    * where it is materialised into the run input.
    */
   mcp?: McpProjectConfig;
+  /**
+   * Which delegate targets this repo's runs may use (DT2): a subset of the
+   * deployment's SHIP_DELEGATE_TARGETS ids. Absent = every deployment target;
+   * an empty list = none. It can only NARROW the deployment list — an id the
+   * deployment does not define is allowed nothing. Read at enqueue (the offer)
+   * and again at spawn (still allowed?), never widening either.
+   */
+  delegateTargets?: string[];
 }
 
 /** The fields Akiroo owns on a managed project, as it last applied them. */
@@ -287,6 +296,8 @@ export function normalizeProject(input: Project): Project {
   };
   // Throws on a server a run could not act on; undefined clears the field.
   const mcp = normalizeMcp(input.mcp);
+  // Throws on a malformed id; [] is kept (no targets), absent stays absent.
+  const delegateTargets = normalizeDelegateTargetIds(input.delegateTargets);
   return {
     repo,
     ...(url !== undefined ? { url } : {}),
@@ -321,6 +332,7 @@ export function normalizeProject(input: Project): Project {
     ...(num(input.weeklyBudgetUSD) !== undefined ? { weeklyBudgetUSD: num(input.weeklyBudgetUSD) } : {}),
     ...(input.managedBy !== undefined ? { managedBy: input.managedBy } : {}),
     ...(mcp !== undefined ? { mcp } : {}),
+    ...(delegateTargets !== undefined ? { delegateTargets } : {}),
   };
 }
 

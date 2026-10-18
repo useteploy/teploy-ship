@@ -1058,6 +1058,9 @@ async function executePass(
     // Image looks route through the same resolution path (the model id comes
     // from the run input; an input that never admitted one never asks).
     lookImageModel: resolveModel,
+    // A run whose input names its own model (DT1: a delegate target) resolves
+    // it the same way; the id comes from the recorded input.
+    modelFor: resolveModel,
     executor: provider,
     projects: runtime.projects,
     artifacts: runtime.artifacts,
@@ -1488,6 +1491,7 @@ const PROJECT_USAGE =
   "           [--build <cmd>] [--preview-app <app>] [--preview-smoke <cmd>] [--visual on|off] [--observe-window <min>]\n" +
   "           [--authority propose|send|auto_trivial|auto_normal|none] [--never-auto on|off]\n" +
   "           [--mcp <json|file>]  MCP servers + manifests + grants for SHIP_MCP (docs/MCP_DESIGN.md); --mcp \"\" clears\n" +
+  "           [--delegate-targets <id,id>|none]  narrow SHIP_DELEGATE_TARGETS for this repo; \"\" clears (inherit all)\n" +
   "       teploy-ship project list [--json]\n       teploy-ship project remove <repo>";
 
 /**
@@ -1632,6 +1636,14 @@ async function projectCommand(rest: string[]): Promise<void> {
         }
       }
     }
+    // Delegate targets (DT2): a comma list of SHIP_DELEGATE_TARGETS ids this
+    // repo may use, `none` for no targets, "" to clear back to inheriting the
+    // deployment's whole list. normalizeProject refuses a malformed id.
+    let delegateTargets: string[] | null | undefined;
+    if (args.flags["delegate-targets"] !== undefined) {
+      const raw = args.flags["delegate-targets"] === true ? "" : String(args.flags["delegate-targets"]).trim();
+      delegateTargets = raw === "" ? null : raw.toLowerCase() === "none" ? [] : raw.split(",").map((s) => s.trim()).filter((s) => s !== "");
+    }
     const windowRaw = args.flags["observe-window"];
     const observeWindow = windowRaw === undefined ? undefined : Number(windowRaw);
     if (observeWindow !== undefined && (!Number.isFinite(observeWindow) || observeWindow < 0 || !Number.isInteger(observeWindow))) {
@@ -1643,7 +1655,7 @@ async function projectCommand(rest: string[]): Promise<void> {
       const url = str("url") ?? (/^[a-z]+:\/\//i.test(target) || target.startsWith("git@") ? target : undefined);
       const existing = (await runtime.projects.forRepo(target)) ?? { repo: target, autoMerge: false, autoDeploy: false };
       const { sourcePolicy: _p, ...kept } = {...existing,repo:existing.url ?? existing.repo};
-      const { mcp: storedMcp, ...keep } = kept;
+      const { mcp: storedMcp, delegateTargets: storedTargets, ...keep } = kept;
       const build = str("build");
       const previewApp = str("preview-app");
       const previewSmoke = str("preview-smoke");
@@ -1686,6 +1698,7 @@ async function projectCommand(rest: string[]): Promise<void> {
         ...(authority !== undefined ? (authority === "none" ? {} : { authority: authority as Project["authority"] }) : {}),
         ...(neverAuto !== undefined ? (neverAuto ? { neverAuto: true } : {}) : {}),
         ...(mcp === undefined ? (storedMcp !== undefined ? { mcp: storedMcp } : {}) : mcp === null ? {} : { mcp }),
+        ...(delegateTargets === undefined ? (storedTargets !== undefined ? { delegateTargets: storedTargets } : {}) : delegateTargets === null ? {} : { delegateTargets }),
       };
       await runtime.projects.set(next);
     } finally {
@@ -2200,6 +2213,9 @@ async function workerCommand(rest: string[]): Promise<void> {
     // main model, so retries/timeouts/routing-fallback apply; the id always
     // comes from the run input (SHIP_LOOK_IMAGE_MODEL at enqueue).
     lookImageModel: resolveModel,
+    // A run whose input names its own model (DT1: a delegate target) resolves
+    // it the same way; the id comes from the recorded input.
+    modelFor: resolveModel,
     executor: durableProvider(args, config),
     workdir: usingSandbox ? "/work" : ".",
     ...(codeSearch !== undefined ? { codeSearch } : {}),
