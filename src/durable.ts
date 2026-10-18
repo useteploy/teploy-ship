@@ -23,6 +23,7 @@ import { liveOutputExecutor, liveOutputRecorder } from "./live-view.js";
 import type { RuntimeConfigStore } from "./runtime-config.js";
 import { criticFeedback, isApproved, parsePick, pickAttempt, reviewWork } from "./critic.js";
 import type { PickCandidate } from "./critic.js";
+import type { StackOnRecord, StackRebaseRequest } from "./stacked-pr.js";
 import {
   commentOnPr,
   commitAndPush,
@@ -35,6 +36,7 @@ import {
   markPullRequestReady,
   closePullRequest,
   rebaseOntoBase,
+  rebaseStackedOnto,
   requestReviewers,
   parseRepoUrl,
   pullRequestUrl,
@@ -44,6 +46,7 @@ import {
   checkoutRepoAtSha,
   setupRepo,
   setupRepoForPr,
+  setupStackedRepo,
   reuseRepoForPr,
   hasClone,
   resolvePr,
@@ -208,6 +211,26 @@ export interface DurableAgentInput {
    * fingerprint of the equivalent non-fork run. See fork.ts.
    */
   forkOf?: ForkSourceRecord;
+  /**
+   * DS1 (SHIP_STACKED_PRS): this run opens its pull request ON TOP of
+   * `stack.runId`'s open pull request — its branch starts at the base's
+   * recorded head `stack.sha` and its PR opens against `stack.branch` instead
+   * of the default branch (git.ts setupStackedRepo: `checkout.base` IS the
+   * stack branch, so the push count, the PR base, the diff and the merge-time
+   * rebase all describe this run's own commits only). Materialised at enqueue
+   * only when a surface passed `stackOn`; the repo-setup step reads it and the
+   * repo-pr step echoes it at open. Admits NO step, so runs without it replay
+   * byte-identically. See stacked-pr.ts.
+   */
+  stack?: StackOnRecord;
+  /**
+   * DS1 (SHIP_STACKED_PRS): this run is the revision pr-watch woke after the
+   * stack's base pull request squash-merged. Carries the recorded old base
+   * head (commits above it are this stack's own) and the branch to retarget
+   * onto (the default branch). Admits exactly ONE step (`stack-rebase`), so
+   * only the woken revision's fingerprint includes it. See stacked-pr.ts.
+   */
+  stackRebase?: StackRebaseRequest;
   /**
    * Where the task came from (L7), materialised at enqueue. Read by the
    * worker's notification builder, never by the workflow: it gates no step,
@@ -1583,6 +1606,16 @@ export function durableAgent(
               if (fork !== undefined && fork.sha !== undefined) {
                 return forkCheckout(executor, ctx.runId, { ...fork, sha: fork.sha }, ref, token, repoPolicy, input.warm === true);
               }
+              // DS1 (SHIP_STACKED_PRS): a stacked run stands on the base
+              // run's recorded head, on its own new branch, with the base
+              // branch as the checkout's base — the push ahead-count, the PR
+              // base and the published diff all read that field, so the stack
+              // branch there makes each describe this run's own commits only
+              // (git.ts setupStackedRepo).
+              const stack = input.stack;
+              if (stack !== undefined) {
+                return setupStackedRepo(executor, { ref, token, runId: ctx.runId, branch: stack.branch, sha: stack.sha, warm: input.warm === true });
+              }
               const restored = input.threadWarm !== undefined && (await hasClone(executor));
               const co = await checkoutRepo(executor, { ref, token, runId: ctx.runId, warm: restored || input.warm === true });
               return restored ? { ...co, via: "thread-warm" as const } : co;
@@ -1610,6 +1643,69 @@ export function durableAgent(
             }
             return setupRepoForPr(executor, { ref, token, pr: input.pr, requireOpen: input.requireOpenPr === true, ...(headToken !== "" ? { headToken } : {}) });
           });
+        }
+        // DS1 (SHIP_STACKED_PRS): the revision pr-watch wakes when the stack's
+        // base pull request squash-merged (stacked-pr.ts). The base's commits
+        // are not ancestors of the default branch — Ship squash-merges — so a
+        // plain rebase onto the new base would replay them and conflict;
+        // `--onto` the RECORDED old base head replays only this stack's own
+        // commits (git.ts rebaseStackedOnto, after T3 Code's
+        // cascadeRebaseStack and its expected-heads check, MIT). Runs BEFORE
+        // the agent turn, so the agent works and the suite runs over the
+        // rebased tree. A conflict or a failed precheck aborts with the file
+        // list and holds for a person: nothing is force-resolved, nothing is
+        // pushed, and the pull request keeps its base.
+        if (input.stackRebase !== undefined && checkout !== null && input.pr !== undefined) {
+          const stacked = await ctx.step(
+            "stack-rebase",
+            async () => {
+              const ref = assertRepoAllowed(input.repo!, { trust: input.trust ?? "operator", config: repoPolicy });
+              const token = credentialFor(ref, repoPolicy);
+              const outcome = await rebaseStackedOnto(executor, {
+                ref,
+                token,
+                checkout: checkout!,
+                pr: input.pr!,
+                oldBase: input.stackRebase!.oldBaseHeadSha,
+                onto: input.stackRebase!.defaultBranch,
+              });
+              if (outcome.kind === "conflict" || outcome.kind === "failed") {
+                // The park surface is the pull request itself, where the person
+                // deciding already is (the merge-park precedent).
+                const note =
+                  outcome.kind === "conflict"
+                    ? `The stack rebase onto ${input.stackRebase!.defaultBranch} conflicts on: ${outcome.files.join(", ")}.`
+                    : `The stack rebase onto ${input.stackRebase!.defaultBranch} did not run: ${outcome.reason}.`;
+                await commentOnPr(
+                  ref,
+                  token,
+                  input.pr!,
+                  `${note}\nNothing was pushed and this pull request keeps its base. Resolve by hand with:\n` +
+                    `git rebase --onto origin/${input.stackRebase!.defaultBranch} ${input.stackRebase!.oldBaseHeadSha.slice(0, 10)}`,
+                ).catch(() => undefined);
+              }
+              return outcome;
+            },
+            EXTERNAL_EFFECT_RETRY,
+          );
+          if (stacked.kind === "conflict" || stacked.kind === "failed") {
+            // The sandbox has nothing further to give: the branch was put back
+            // and the decision is a person's (the environmentCheckOnly return
+            // two blocks up is the precedent for disposing here).
+            await dispose(config, handle);
+            return {
+              status: "finished",
+              turns: 0,
+              summary:
+                stacked.kind === "conflict"
+                  ? `Held for a person: the stack rebase conflicts on ${stacked.files.join(", ")}. Nothing was pushed and the pull request keeps its base.`
+                  : `Held for a person: the stack rebase did not run: ${stacked.reason}`,
+            };
+          }
+          // From here the branch is this stack's own commits on the default
+          // branch: downstream counts, diffs and prompts must read the new
+          // base. Deterministic on replay — the step's outcome is recorded.
+          if (stacked.kind === "rebased") checkout = { ...checkout, base: input.stackRebase.defaultBranch };
         }
         if (input.preparation !== undefined && checkout !== null) {
           const prepared = await ctx.step("environment-prepare", () => prepareEnvironment(executor, input.preparation!));
@@ -3926,7 +4022,10 @@ async function publishIfRepoRun(
     "repo-pr",
     async () => {
     const existing = await findOpenPullRequest({ ref, token, head: co.branch, owner: ref.owner }).catch(() => null);
-    if (existing !== null) return { url: existing.url, number: existing.number };
+    // DS1: a stacked PR records the base branch and the recorded old base
+    // head it stands on, at open — pr-watch reads this to know which base PR
+    // to watch and the woken revision rebases --onto past that head.
+    if (existing !== null) return { url: existing.url, number: existing.number, ...(input.stack !== undefined ? { stack: input.stack } : {}) };
     const created = await openPullRequest({
       ref,
       token,
@@ -3954,7 +4053,7 @@ async function publishIfRepoRun(
           : "") +
         (push.kind === "pushed" && push.warning !== undefined ? `\n\n${push.warning}` : ""),
     });
-      return { url: created.url, number: created.number };
+      return { url: created.url, number: created.number, ...(input.stack !== undefined ? { stack: input.stack } : {}) };
     },
     EXTERNAL_EFFECT_RETRY,
   );

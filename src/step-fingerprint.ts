@@ -447,6 +447,10 @@ const steersExternally = (i: RecordedInput): boolean =>
 export const WORKFLOW_STEPS: readonly WorkflowStep[] = [
   { key: "step:sandbox", admits: always },
   { key: "step:repo-setup", admits: repoRun },
+  // DS1 (SHIP_STACKED_PRS): the woken stack revision's one mechanical step.
+  // Gated on the input only the launch of pr-watch's stack-rebase task sets,
+  // so every pre-existing run's fingerprint is unchanged.
+  { key: "step:stack-rebase", admits: (i) => prRun(i) && i.stackRebase !== undefined },
   { key: "step:environment-prepare", admits: (i) => repoRun(i) && i.preparation !== undefined },
   { key: "step:environment-check", admits: (i) => repoRun(i) && i.environmentCheck === true },
   { key: "step:repo-context", admits: repoRun },
