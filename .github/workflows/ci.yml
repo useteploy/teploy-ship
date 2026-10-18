@@ -39,6 +39,12 @@ jobs:
           npx tsc --noEmit
           pnpm test
 
+      # O4 (S19): every environment key the code reads needs a row in the
+      # generated flag reference, and a row must not outlive its key. Node
+      # only — no install needed.
+      - name: Flag reference check (O4)
+        run: node scripts/flag-reference.mjs --check
+
       - name: Web production build
         run: |
           cd web
