@@ -1,0 +1,52 @@
+{
+  "issue": {
+    "id": "99291",
+    "self": "https://your-domain.atlassian.net/rest/api/2/issue/99291",
+    "key": "JRA-20002",
+    "fields": {
+      "summary": "I feel the need for speed",
+      "created": "2009-12-16T23:46:10.612-0600",
+      "description": "Make the issue nav load 10x faster",
+      "labels": ["ship", "UI"],
+      "priority": {
+        "self": "https://your-domain.atlassian.net/rest/api/2/priority/3",
+        "iconUrl": "https://your-domain.atlassian.net/images/icons/priorities/minor.svg",
+        "name": "Minor",
+        "id": "3"
+      },
+      "project": {
+        "self": "https://your-domain.atlassian.net/rest/api/2/project/EXA",
+        "id": "10000",
+        "key": "EXA",
+        "name": "Example",
+        "projectTypeKey": "software"
+      },
+      "issuetype": {
+        "self": "https://your-domain.atlassian.net/rest/api/2/issuetype/3",
+        "id": "3",
+        "name": "Task",
+        "subtask": false
+      },
+      "status": {
+        "self": "https://your-domain.atlassian.net/rest/api/2/status/10000",
+        "id": "10000",
+        "name": "To Do"
+      }
+    }
+  },
+  "user": {
+    "self": "https://your-domain.atlassian.net/rest/api/2/user?accountId=99:27935d01-92a7-4687-8272-a9b8d3b2ae2e",
+    "accountId": "99:27935d01-92a7-4687-8272-a9b8d3b2ae2e",
+    "accountType": "atlassian",
+    "avatarUrls": {
+      "16x16": "https://your-domain.atlassian.net/secure/useravatar?size=small&avatarId=10605",
+      "48x48": "https://your-domain.atlassian.net/secure/useravatar?avatarId=10605"
+    },
+    "displayName": "Bryan Rollins [Atlassian]",
+    "active": "true",
+    "timeZone": "Europe/Warsaw"
+  },
+  "timestamp": 1606480436302,
+  "webhookEvent": "jira:issue_created",
+  "issue_event_type_name": "issue_created"
+}
