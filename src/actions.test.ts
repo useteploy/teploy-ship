@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { describeAction, parseAction } from "./actions.js";
-import { transcriptTurn } from "./actions.js";
+import { parseSkillLoads, transcriptTurn } from "./actions.js";
 
 test("parses a bash action", () => {
   assert.deepEqual(parseAction("Let me list files.\n```bash\nls -la\n```"), { kind: "bash", code: "ls -la\n" });
@@ -375,4 +375,27 @@ test("one-line fences NEGATIVE: prose naming a fence with no payload, and other 
   // A block fence still wins in order when both forms appear.
   const both = parseAction("```bash\nls\n```\nthen ```look http://127.0.0.1:8000/```", { look: true, inlineFences: true });
   assert.equal(both.kind, "bash");
+});
+
+test("parseSkillLoads lists every ```skill fence in order, past the first action block too", () => {
+  const text = "Loading the checklist first.\n```skill deploy-checklist\n```\nThen a command.\n```bash\necho hi\n```\nAnd another.\n```skill release-notes\n```";
+  const loads = parseSkillLoads(text, { skill: true });
+  assert.deepEqual(
+    loads.map((l) => ({ index: l.index, kind: l.action.kind, name: l.action.kind === "skill" ? l.action.name : undefined })),
+    [
+      { index: text.indexOf("```skill deploy-checklist"), kind: "skill", name: "deploy-checklist" },
+      { index: text.indexOf("```skill release-notes"), kind: "skill", name: "release-notes" },
+    ],
+    "both fences, in text order, wherever they sit; the bash block between them is not a load",
+  );
+  // A malformed name is the invalid action parseAction would give, so the
+  // loop's rider delivery says what was wrong with it instead of dropping it.
+  const bad = parseSkillLoads("```bash\ntrue\n```\n```skill Not A Name\n```", { skill: true });
+  assert.equal(bad.length, 1);
+  assert.equal(bad[0]!.action.kind, "invalid");
+  assert.match(bad[0]!.action.kind === "invalid" ? bad[0]!.action.message : "", /skill's name on the fence/);
+  // Without the dialect there are no loads at all — a run without input.skills
+  // parses a ```skill fence exactly as before the reader existed.
+  assert.deepEqual(parseSkillLoads(text), []);
+  assert.deepEqual(parseSkillLoads(text, { look: true }), []);
 });

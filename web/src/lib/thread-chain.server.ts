@@ -120,6 +120,13 @@ export interface ThreadRunView {
    * serialises exactly as it did before forks existed.
    */
   forkOf?: { runId: string; sha?: string };
+  /**
+   * DS1 (SHIP_STACKED_PRS): the run this one is stacked on (its pull request
+   * opened against that run's branch), present only on runs whose input
+   * recorded one — absent on every non-stacked run, so the view serialises
+   * exactly as it did before stacks existed.
+   */
+  stackedOn?: { runId: string; pr?: number; branch?: string; sha?: string };
 }
 
 export interface ThreadView {
@@ -338,6 +345,27 @@ export function forkOfInput(events: readonly WorkflowEvent[]): ThreadRunView["fo
   return { runId, ...(typeof sha === "string" && sha !== "" ? { sha } : {}) };
 }
 
+/**
+ * A run's recorded stack lineage (DS1), shape-checked off its input like every
+ * other field this module reads out of a log — the same rule forkOfInput
+ * states for forks. Undefined on a non-stacked run.
+ */
+export function stackedOnInput(events: readonly WorkflowEvent[]): ThreadRunView["stackedOn"] {
+  const started = events.find((e) => e.type === "run-started");
+  const stack = record(record(record(started?.data).input).stack);
+  const runId = stack.runId;
+  if (typeof runId !== "string" || runId === "") return undefined;
+  const pr = Number(stack.pr);
+  const branch = stack.branch;
+  const sha = stack.sha;
+  return {
+    runId,
+    ...(Number.isSafeInteger(pr) && pr > 0 ? { pr } : {}),
+    ...(typeof branch === "string" && branch !== "" ? { branch } : {}),
+    ...(typeof sha === "string" && sha !== "" ? { sha } : {}),
+  };
+}
+
 /** The run-completed summary, bounded like threadHistory bounds it. */
 function summaryOf(events: readonly WorkflowEvent[]): string | null {
   for (let i = events.length - 1; i >= 0; i--) {
@@ -413,11 +441,19 @@ export async function runThread(deps: ThreadDeps, runId: string): Promise<Thread
     if (started === undefined) continue;
     const parent = started.data?.input?.parentRunId;
     const forked = forkOfInput(events);
+    const stacked = stackedOnInput(events);
     // A member either names the anchor (runs since taskRootRunId existed),
     // hangs off a member by parentRunId (legacy chains), or — a fork (DF1) —
     // records forkOf lineage to one. A fork is a new task root, so the anchor
-    // test cannot catch it, but it belongs in the thread it came from.
-    if (started.data?.taskRootRunId === root || (typeof parent === "string" && members.has(parent)) || (forked !== undefined && members.has(forked.runId))) {
+    // test cannot catch it, but it belongs in the thread it came from. So does
+    // a stack (DS1): a stacked run stands alone as a task the same way, and
+    // its lineage names the member it rides.
+    if (
+      started.data?.taskRootRunId === root ||
+      (typeof parent === "string" && members.has(parent)) ||
+      (forked !== undefined && members.has(forked.runId)) ||
+      (stacked !== undefined && members.has(stacked.runId))
+    ) {
       members.add(candidate.runId);
     }
   }
@@ -449,6 +485,7 @@ export async function runThread(deps: ThreadDeps, runId: string): Promise<Thread
     }) as RunMeta;
     const parent = started?.data?.input?.parentRunId;
     const forkOf = forkOfInput(events);
+    const stackedOn = stackedOnInput(events);
     // Pending notes are only readable for a run that could still drain them;
     // a terminal run has none, and skipping the read keeps the scan bounded.
     const terminal = ["completed", "failed", "cancelled"].includes(meta.status);
@@ -467,6 +504,7 @@ export async function runThread(deps: ThreadDeps, runId: string): Promise<Thread
       asks: askHistory(events),
       ...(admitsReplies(events) ? { replies: replyHistory(events) } : {}),
       ...(forkOf !== undefined ? { forkOf } : {}),
+      ...(stackedOn !== undefined ? { stackedOn } : {}),
     });
   }
   return { run: runId, root, runs, truncated };
