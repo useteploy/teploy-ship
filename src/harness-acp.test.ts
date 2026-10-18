@@ -372,6 +372,12 @@ test("negative control: an ACP harness without the flag or the credential is ref
   assert.match(acpEnqueueRefusal("gemini", { SHIP_ACP_HARNESS: "on" })!, /no credential/);
   // Flag on, key held: admitted.
   assert.equal(acpEnqueueRefusal("gemini", { SHIP_ACP_HARNESS: "on", GEMINI_API_KEY: FAKE_KEY }), undefined);
+  // qwen's own credentials: an operator's OpenAI key (carried for codex) is
+  // NOT one — it neither admits a qwen run nor rides into it — and a base
+  // URL alone does not admit a keyless run either.
+  assert.match(acpEnqueueRefusal("qwen", { SHIP_ACP_HARNESS: "on", OPENAI_API_KEY: "sk-openai" })!, /no credential/);
+  assert.match(acpEnqueueRefusal("qwen", { SHIP_ACP_HARNESS: "on", OPENAI_BASE_URL: "https://coding.dashscope.aliyuncs.com/v1" })!, /no credential/);
+  assert.equal(acpEnqueueRefusal("qwen", { SHIP_ACP_HARNESS: "on", DASHSCOPE_API_KEY: "sk-dash" }), undefined);
   // Non-ACP ids are not this gate's business.
   assert.equal(acpEnqueueRefusal("claude-code", {}), undefined);
   assert.throws(() => assertAcpHarnessAdmitted([{ id: "gemini" }, { id: "native" }], {}), /SHIP_ACP_HARNESS off/);
@@ -421,11 +427,24 @@ test("negative control: an ACP harness without the flag or the credential is ref
 test("per-profile egress derivation: hosts only when the key is held, byte-identical otherwise", () => {
   assert.deepEqual(acpProviderEgressAllow([{ id: "gemini" }], { GEMINI_API_KEY: "k" }), ["generativelanguage.googleapis.com:443"]);
   assert.deepEqual(acpProviderEgressAllow([{ id: "gemini" }], {}), []);
-  // GOOGLE_API_KEY alone (Vertex) derives nothing: the hosts are
-  // region-prefixed and belong on the project record, not guessed here.
-  assert.deepEqual(acpProviderEgressAllow([{ id: "gemini" }], { GOOGLE_API_KEY: "k" }), []);
+  // GOOGLE_API_KEY is gemini-cli's documented fallback for the same
+  // Developer-API endpoint, so it derives the same host. A real Vertex
+  // deployment (selected auth, region-prefixed hosts) still belongs on the
+  // project record, not guessed here.
+  assert.deepEqual(acpProviderEgressAllow([{ id: "gemini" }], { GOOGLE_API_KEY: "k" }), ["generativelanguage.googleapis.com:443"]);
   assert.deepEqual(acpProviderEgressAllow([{ id: "grok" }], { XAI_API_KEY: "k" }), ["api.x.ai:443"]);
-  assert.deepEqual(acpProviderEgressAllow([{ id: "qwen" }], { OPENAI_API_KEY: "k" })[0], "dashscope.aliyuncs.com:443");
+  // qwen derives from ITS key — an operator's OpenAI key (carried for codex)
+  // is not a qwen credential and derives nothing for it.
+  assert.deepEqual(acpProviderEgressAllow([{ id: "qwen" }], { OPENAI_API_KEY: "sk-openai" }), []);
+  assert.deepEqual(acpProviderEgressAllow([{ id: "qwen" }], { DASHSCOPE_API_KEY: "sk-dash" })[0], "dashscope.aliyuncs.com:443");
+  // OPENAI_BASE_URL reroutes qwen: its host replaces the Dashscope defaults.
+  assert.deepEqual(
+    acpProviderEgressAllow([{ id: "qwen" }], { DASHSCOPE_API_KEY: "sk-dash", OPENAI_BASE_URL: "https://coding-intl.dashscope.aliyuncs.com/v1" }),
+    ["coding-intl.dashscope.aliyuncs.com:443"],
+  );
+  // An unusable base URL still suppresses the defaults it replaces: the
+  // agent dials the configured value, whatever it is.
+  assert.deepEqual(acpProviderEgressAllow([{ id: "qwen" }], { DASHSCOPE_API_KEY: "k", OPENAI_BASE_URL: "::not a url::" }), []);
   // The merge discipline: explicit entries survive, nothing changes without an ACP ref.
   const explicit = ["example.com:443"];
   assert.equal(withAcpProviderEgress(explicit, [{ id: "native" }], { GEMINI_API_KEY: "k" }), explicit);

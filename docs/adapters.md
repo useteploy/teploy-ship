@@ -145,7 +145,8 @@ Default forwarded variables: claude-code `CLAUDE_CODE_OAUTH_TOKEN`,
 `CODEX_API_KEY`, `OPENAI_API_KEY`, `CODEX_ACCESS_TOKEN`, `AI_GATEWAY_URL`,
 `AI_GATEWAY_KEY` (see the codex section for what the gateway pair does); the
 ACP profiles gemini `GEMINI_API_KEY`, `GOOGLE_API_KEY`; grok `XAI_API_KEY`;
-cursor `CURSOR_API_KEY`; qwen `OPENAI_API_KEY` (see the ACP section). A
+cursor `CURSOR_API_KEY`; qwen `DASHSCOPE_API_KEY`, `OPENAI_BASE_URL` (see the
+ACP section for why qwen never touches `OPENAI_API_KEY`). A
 variable that is unset on the worker is simply not forwarded.
 
 Per-repo evidence config (`teploy-ship evidence set`) is harness-independent
@@ -475,16 +476,24 @@ is a thin profile:
 
 | id | binary + args | credential | provider egress derived | baked pin |
 |---|---|---|---|---|
-| gemini | `gemini --acp` | `GEMINI_API_KEY` (Vertex: `GOOGLE_API_KEY`, hosts on the project record) | `generativelanguage.googleapis.com:443` | `@google/gemini-cli@0.64.0` |
+| gemini | `gemini --acp` | `GEMINI_API_KEY` or `GOOGLE_API_KEY` (the Developer-API fallback key; a real Vertex deployment puts its region-prefixed hosts on the project record) | `generativelanguage.googleapis.com:443` | `@google/gemini-cli@0.64.0` |
 | grok | `grok --permission-mode default agent stdio` | `XAI_API_KEY` | `api.x.ai:443` | `@xai-official/grok@1.0.63` |
 | cursor | `cursor-agent acp` | `CURSOR_API_KEY` | `api2.cursor.sh:443` | registry binary — H9 |
-| qwen | `qwen --acp` | `OPENAI_API_KEY` | `dashscope`/`coding(-intl).dashscope.aliyuncs.com:443` | `@qwen-code/qwen-code@0.25.2` |
+| qwen | `qwen --acp` | `DASHSCOPE_API_KEY` (+ `OPENAI_BASE_URL` to reroute) | `dashscope`/`coding(-intl).dashscope.aliyuncs.com:443`, or the base URL's host when set | `@qwen-code/qwen-code@0.25.2` |
 
 gemini is wired end to end; the others are declared behind the same flag and
 stop at preflight on images that lack their binary. grok launches in its
 **asking** mode (`--permission-mode default`) — never `--always-approve`: an
 agent started in always-approve never asks, and the permission gate this
 harness exists to run would silently stop existing.
+
+qwen deliberately does NOT read `OPENAI_API_KEY`, even though its advertised
+auth method names it: that variable is an operator's OpenAI key, carried on
+the worker for codex, and forwarding it into a qwen exec would hand it to
+another vendor's agent (and its sandbox). qwen gets its own documented
+pair — `DASHSCOPE_API_KEY`, optionally with `OPENAI_BASE_URL` — and the
+enqueue gate refuses a qwen run that has no Dashscope key, however much
+else the worker carries. A base URL alone does not admit a run.
 
 **Permission requests are answered, not bypassed.** This is the material
 difference from the bespoke adapters (which run vendor bypass flags). The

@@ -63,7 +63,10 @@ export const DEFAULT_FORWARDED_ENV: Record<string, string[]> = {
   gemini: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
   grok: ["XAI_API_KEY"],
   cursor: ["CURSOR_API_KEY"],
-  qwen: ["OPENAI_API_KEY"],
+  // qwen's OWN headless pair (Dashscope key + base URL), never
+  // OPENAI_API_KEY: an operator's OpenAI key is carried for codex, and
+  // forwarding it into a qwen exec would hand it to another vendor's agent.
+  qwen: ["DASHSCOPE_API_KEY", "OPENAI_BASE_URL"],
 };
 
 const PROMPT_PATH = ".teploy-agent/harness-prompt.md";
@@ -213,7 +216,7 @@ const PROVIDER_EGRESS: Record<string, ProviderEgressSpec> = {
 };
 
 /** One base-URL value as a daemon egress entry: `host:443`, or `host:port` when the URL names one. */
-function egressEntryForBaseURL(raw: string): string | undefined {
+export function egressEntryForBaseURL(raw: string): string | undefined {
   let url: URL;
   try {
     url = new URL(raw);

@@ -6,6 +6,7 @@ import { PLAN_REVIEW_REFUSAL, refusalFor } from "./harness-capabilities.js";
 import { clipDetail } from "./live.js";
 import type { LiveUpdate } from "./live.js";
 import {
+  egressEntryForBaseURL,
   externalHarnessConfig,
   externalPrompt,
   forwardEnv,
@@ -72,14 +73,26 @@ export interface AcpProfile {
   /** K-class credential env names (forwarded, never recorded by value). */
   envNames: readonly string[];
   /**
+   * Which forwarded env names are CREDENTIALS for the enqueue gate. Absent
+   * means every name in envNames is one. qwen sets it: its documented
+   * headless pair is a key plus OPENAI_BASE_URL, and a base URL alone must
+   * not admit a keyless run.
+   */
+  credentialEnvNames?: readonly string[];
+  /**
    * Vendor env names that relocate the agent's state directory (checked
    * against each vendor's docs/receipt). The adapter also points HOME at
    * the same per-exec directory, which covers every agent that follows it;
    * these cover the ones with an explicit override.
    */
   homeEnv?: readonly string[];
-  /** Which forwarded key admits which provider host (egress derivation). */
-  egress: ReadonlyArray<{ envs: readonly string[]; hosts: readonly string[] }>;
+  /**
+   * Which forwarded key admits which provider host (egress derivation).
+   * `baseEnv` names a forwarded env whose URL VALUE reroutes the provider:
+   * its host replaces this group's defaults (which the agent will not dial),
+   * the same rule the bespoke adapters' PROVIDER_EGRESS bases follow.
+   */
+  egress: ReadonlyArray<{ envs: readonly string[]; hosts: readonly string[]; baseEnv?: string }>;
   /**
    * The authenticate methodId for the profile's env key, when the agent
    * advertises one (gemini "gemini-api-key"). Absent when the agent's only
@@ -113,14 +126,14 @@ export const ACP_PROFILES: Record<string, AcpProfile> = {
     binary: "gemini",
     args: ["--acp"],
     envNames: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
-    // GEMINI_CLI_HOME is gemini-cli's documented root for its user-level
-    // state (it creates .gemini inside it); HOME covers the default.
     homeEnv: ["GEMINI_CLI_HOME"],
     egress: [
-      // Vertex hosts are region-prefixed (<region>-aiplatform.googleapis.com)
-      // and cannot be enumerated here; those deployments put the host on the
-      // project record, the same rule a subscription token follows.
-      { envs: ["GEMINI_API_KEY"], hosts: ["generativelanguage.googleapis.com"] },
+      // GOOGLE_API_KEY is gemini-cli's documented fallback key for the SAME
+      // Developer-API endpoint (GEMINI_API_KEY wins when both are set), so it
+      // derives the same host. A real Vertex deployment — selected auth,
+      // region-prefixed <region>-aiplatform.googleapis.com hosts — cannot be
+      // enumerated here and puts the host on the project record, as ever.
+      { envs: ["GEMINI_API_KEY", "GOOGLE_API_KEY"], hosts: ["generativelanguage.googleapis.com"] },
     ],
     authMethodId: "gemini-api-key",
   },
@@ -129,8 +142,6 @@ export const ACP_PROFILES: Record<string, AcpProfile> = {
     binary: "grok",
     args: ["--permission-mode", "default", "agent", "stdio"],
     envNames: ["XAI_API_KEY"],
-    // GROK_HOME relocates the login state dir (default ~/.grok) — the H0
-    // grok receipt's string evidence (evals/receipts/2026-10-18-acp-grok.txt).
     homeEnv: ["GROK_HOME"],
     egress: [{ envs: ["XAI_API_KEY"], hosts: ["api.x.ai"] }],
   },
@@ -145,11 +156,21 @@ export const ACP_PROFILES: Record<string, AcpProfile> = {
     id: "qwen",
     binary: "qwen",
     args: ["--acp"],
-    envNames: ["OPENAI_API_KEY"],
-    // QWEN_HOME relocates qwen-code's global state dir (default ~/.qwen) —
-    // documented upstream (QwenLM/qwen-code settings.ts).
+    // qwen's OWN documented headless pair — NOT OPENAI_API_KEY, which an
+    // operator carries for codex: forwarding it here would hand an
+    // operator's OpenAI key to a different vendor's agent and its sandbox.
+    envNames: ["DASHSCOPE_API_KEY", "OPENAI_BASE_URL"],
+    credentialEnvNames: ["DASHSCOPE_API_KEY"],
     homeEnv: ["QWEN_HOME"],
-    egress: [{ envs: ["OPENAI_API_KEY"], hosts: ["dashscope.aliyuncs.com", "coding.dashscope.aliyuncs.com", "coding-intl.dashscope.aliyuncs.com"] }],
+    egress: [
+      {
+        envs: ["DASHSCOPE_API_KEY"],
+        hosts: ["dashscope.aliyuncs.com", "coding.dashscope.aliyuncs.com", "coding-intl.dashscope.aliyuncs.com"],
+        // qwen's documented base-URL override: its host replaces the
+        // Dashscope defaults the agent will not dial when it is set.
+        baseEnv: "OPENAI_BASE_URL",
+      },
+    ],
   },
 };
 
@@ -183,10 +204,15 @@ export function acpEnqueueRefusal(id: string, env: NodeJS.ProcessEnv = process.e
   }
   const profile = ACP_PROFILES[id]!;
   const config = externalHarnessConfig(id, env);
-  const held = config.forward.filter((name) => (env[name] ?? "").trim() !== "");
+  // The gate asks for a CREDENTIAL (credentialEnvNames, default envNames):
+  // qwen also forwards OPENAI_BASE_URL, and a base URL alone must not admit
+  // a keyless run — it would die inside the sandbox after the clone, the
+  // expensive thing this gate exists to prevent.
+  const credentials = profile.credentialEnvNames ?? profile.envNames;
+  const held = config.forward.filter((name) => credentials.includes(name) && (env[name] ?? "").trim() !== "");
   if (held.length === 0) {
     return (
-      `harness "${id}" has no credential to run with: none of ${profile.envNames.join(", ")} is set on the worker ` +
+      `harness "${id}" has no credential to run with: none of ${credentials.join(", ")} is set on the worker ` +
       `(a sealed per-project credential store is the H2 follow-up). Set one, or adjust SHIP_HARNESS_ENV, then enqueue again.`
     );
   }
@@ -223,6 +249,16 @@ export function acpProviderEgressAllow(refs: readonly { id: string }[], env: Nod
     const config = externalHarnessConfig(ref.id, env);
     const held = (name: string): boolean => config.forward.includes(name) && (env[name] ?? "").trim() !== "";
     for (const group of profile.egress) {
+      // A base-URL override reroutes the provider: its host replaces this
+      // group's defaults, and even an unusable URL suppresses them — the
+      // agent dials the configured value, not the vendor hosts, so guessing
+      // the defaults beside it would be wrong in the other direction (the
+      // rule withProviderEgress's bases follow, harness-external.ts).
+      if (group.baseEnv !== undefined && held(group.baseEnv)) {
+        const entry = egressEntryForBaseURL(env[group.baseEnv] ?? "");
+        if (entry !== undefined) push(entry);
+        continue;
+      }
       if (!group.envs.some(held)) continue;
       for (const host of group.hosts) {
         const entry = `${host.toLowerCase()}:443`;
