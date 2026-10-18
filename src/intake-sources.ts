@@ -331,6 +331,25 @@ function reviewDetail(payload: ReviewEventPayload, pr: number): string {
 }
 
 /**
+ * The review-round identity the review dedupe key is built from: GitHub's own
+ * review id (stable across every delivery in a batched round), else the PR
+ * head SHA (Forgejo/Gitea send no review id), else the comment id. Exported
+ * because the EV3 built-in event adapter must put the SAME round on its event
+ * for the rule's key template to render the identical dedupe key.
+ */
+export function reviewRound(payload: ReviewEventPayload): string | undefined {
+  const sha = payload.pull_request?.head?.sha ?? "";
+  const round =
+    payload.review?.id ??
+    payload.comment?.pull_request_review_id ??
+    // A sha reaches no shell from here, but it does become a stored key —
+    // refuse anything that is not one.
+    (/^[0-9a-f]{7,64}$/i.test(sha) ? `sha-${sha.slice(0, 40)}` : undefined) ??
+    (payload.comment?.id !== undefined ? `comment-${payload.comment.id}` : undefined);
+  return round === undefined ? undefined : String(round);
+}
+
+/**
  * A `pull_request_review` or `pull_request_review_comment` delivery becomes ONE
  * review task for the whole review round.
  *
@@ -388,14 +407,7 @@ export function reviewTaskFromReviewEvent(
   const requestsChanges = state.includes("changes_requested") || state.includes("rejected");
   if (text === "" && !requestsChanges) return null;
 
-  const sha = pull?.head?.sha ?? "";
-  const round =
-    payload.review?.id ??
-    payload.comment?.pull_request_review_id ??
-    // A sha reaches no shell from here, but it does become a stored key —
-    // refuse anything that is not one.
-    (/^[0-9a-f]{7,64}$/i.test(sha) ? `sha-${sha.slice(0, 40)}` : undefined) ??
-    (payload.comment?.id !== undefined ? `comment-${payload.comment.id}` : undefined);
+  const round = reviewRound(payload);
   if (round === undefined) return null;
 
   const repo = payload.repository?.clone_url;
@@ -628,10 +640,27 @@ export function incidentTaskFromObserveAlert(
  * outage episode instead of one per cooldown.
  */
 export function observeAlertDedupeKey(payload: Pick<ObserveAlertPayload, "alert_id" | "rule_id" | "incident_id">): string | null {
+  const ids = observeAlertIds(payload);
+  if (ids.alertId !== undefined) return `observe:${ids.alertId}`;
+  if (ids.ruleId !== undefined && ids.incidentId !== undefined) return `observe:rule:${ids.ruleId}:${ids.incidentId}`;
+  return null;
+}
+
+/**
+ * The normalized identity parts of observeAlertDedupeKey, exported so the
+ * EV3 built-in event adapter can put the SAME normalized values on the event
+ * the rule's dedupe-key template renders from — any second normalization
+ * would show up as a shadow diff against this key.
+ */
+export function observeAlertIds(
+  payload: Pick<ObserveAlertPayload, "alert_id" | "rule_id" | "incident_id">,
+): { alertId?: string; ruleId?: string; incidentId?: string } {
   const alertId = oneLine(payload.alert_id, 200);
-  if (alertId !== "") return `observe:${alertId}`;
+  if (alertId !== "") return { alertId };
   const ruleId = oneLine(payload.rule_id, 200);
   const incidentId = oneLine(payload.incident_id, 200);
-  if (ruleId !== "" && incidentId !== "") return `observe:rule:${ruleId}:${incidentId}`;
-  return null;
+  return {
+    ...(ruleId !== "" ? { ruleId } : {}),
+    ...(incidentId !== "" ? { incidentId } : {}),
+  };
 }

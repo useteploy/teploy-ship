@@ -56,10 +56,13 @@ export interface SeenEventEntry {
  * exactly like the file delivery log did before Nucleus; the honest fix is
  * a conditional KV write comparing the watermark, noted as a follow-up for
  * the Nucleus store rather than papered over here.
+ *
+ * Exported for event-builtin.ts's shadow counters, which are the same shape
+ * of bounded read-modify-write over one config key.
  */
 const keyLocks = new Map<string, Promise<unknown>>();
 
-async function withKeyLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+export async function withKeyLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const release = keyLocks.get(key) ?? Promise.resolve();
   let settle: () => void = () => {};
   const gate = new Promise<void>((resolve) => (settle = resolve));

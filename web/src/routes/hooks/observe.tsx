@@ -8,6 +8,7 @@ import {
   parseJson,
   proposeFromWebhook,
   readCappedBody,
+  shadowBuiltin,
   verifyObserveSignature,
 } from "../../lib/webhook.server.js";
 
@@ -74,6 +75,7 @@ export async function action({ request }: { request: Request }): Promise<Respons
   // builder: service -> repo is a reverse lookup over the evidence store.
   const repo = await observeRepoFor(payload);
   const input = incidentTaskFromObserveAlert(payload, repo !== undefined ? { repo } : {});
+  await shadowBuiltin("observe", payload, input, repo !== undefined ? { repo } : {});
   if (input === null) return json(200, { ok: true, skipped: "recovery notice, or no alert_id / rule_id+incident_id to dedupe on" });
   return proposeFromWebhook(input);
 }

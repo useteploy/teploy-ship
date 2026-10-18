@@ -88,7 +88,7 @@ import { NucleusCodeIndex } from "./code-index.js";
 import type { CodeSearch } from "./code-index.js";
 import { startWorker } from "./worker.js";
 import { assembleSupportBundle, defaultDocker } from "./support.js";
-import { defaultProbes, formatDoctor, nucleusProbes, renderDoctor, resolveDoctorStore, runDoctor } from "./install-doctor.js";
+import { defaultProbes, formatDoctor, nucleusProbes, readShadowCountersForDoctor, renderDoctor, resolveDoctorStore, runDoctor } from "./install-doctor.js";
 import {
   DEFAULT_SHIP_ROOT,
   SnapshotRefusal,
@@ -2548,6 +2548,9 @@ function doctorProbes(flags: Record<string, unknown>, config: Config): ReturnTyp
     // connectivity and skew stay unknown rather than guessed.
     Object.assign(probes, nucleusProbes(store.url, { dialect: store.kind === "postgres" ? "postgres" : "nucleus" }));
   }
+  // E7 EV3: the built-in shadow's match/diff counters, from wherever this
+  // install keeps its runtime config KV. Read-only; absence is "no history".
+  probes.shadowCounters = () => readShadowCountersForDoctor(store.kind, store.url !== undefined && store.kind !== "file" ? store.url : undefined, stateDir());
   return probes;
 }
 
