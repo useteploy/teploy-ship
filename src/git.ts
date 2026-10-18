@@ -338,6 +338,73 @@ export async function checkoutRepo(
 }
 
 /**
+ * A fork's checkout (DF1, SHIP_FORK): stand on the source run's recorded
+ * pushed commit, on a NEW work branch of this run's own. The sha is a fact
+ * of the fork's input, recorded at enqueue from the source's log; the branch
+ * is only the transport that brings the commit's objects here, tried first
+ * because most forges refuse a bare-sha fetch. The source's branch is read,
+ * never written — this is the difference from a follow-up, which works the
+ * same PR branch (docs/WORKSPACE.md). T3 Code's fork-at-parent-HEAD rule
+ * (apps/server ThreadForkService, MIT) is the reference.
+ */
+export async function checkoutRepoAtSha(
+  executor: AgentExecutor,
+  options: { ref: RepoRef; token: string; runId: string; sha: string; branch?: string; headRepo?: string; headToken?: string; warm?: boolean },
+): Promise<RepoCheckout> {
+  const { ref, token, runId } = options;
+  const sha = assertGitSafe("sha", options.sha);
+  // Warm reuse follows reuseRepo's shape: refresh the remote's refs, drop the
+  // previous run's tree, keep what git ignores. A cold clone starts clean.
+  // The warm path cannot be delegated to reuseRepo — it would cut the branch
+  // from the default branch's tip, silently dropping the fork point.
+  const warmReuse = options.warm === true && (await hasClone(executor));
+  if (warmReuse) {
+    const refresh = gitCredential(ref, token);
+    await git(
+      executor,
+      `git remote set-url origin ${refresh.url} && ` +
+        "{ git fetch --depth 50 --prune origin 2>&1 && git remote set-head origin -a 2>&1; }; rc=$?; " +
+        `git remote set-url origin ${ref.cloneUrl} >/dev/null 2>&1; exit $rc`,
+      300_000,
+      refresh.env,
+    );
+  } else {
+    await cloneCredentialFree(executor, ref, token);
+  }
+  await git(executor, 'git config user.name "Teploy Ship" && git config user.email "ship@teploy.dev"');
+  await git(executor, excludeCommand());
+  const base = warmReuse
+    ? assertGitSafe("branch", (await git(executor, "git symbolic-ref --short refs/remotes/origin/HEAD")).replace(/^origin\//, ""))
+    : await git(executor, "git rev-parse --abbrev-ref HEAD");
+  if (warmReuse) {
+    await git(executor, "git reset --hard");
+    await git(executor, "git clean -fd");
+    // Harness scratch is EXCLUDED from clean, and a previous run's kernel
+    // state in this run's workspace is a correctness problem (reuseRepo).
+    await git(executor, "rm -rf .teploy-agent");
+  }
+  // A fork-PR source's commit lives in the head repository; resolve its
+  // credential exactly as setupRepoForPr does for the branch it names.
+  const source = options.headRepo !== undefined ? parseRepoUrl(options.headRepo) : ref;
+  const sourceToken = options.headRepo !== undefined ? (options.headToken ?? "") : token;
+  const cred = gitCredential(source, sourceToken);
+  const branch = `ship/${runId}`;
+  // Both fetches are best effort: the checkout below is what decides whether
+  // the recorded commit arrived, and it fails naming the sha if it did not
+  // (the branch was deleted on the remote and the forge refuses sha fetches).
+  await git(
+    executor,
+    "{ " +
+      (options.branch !== undefined ? `git fetch --depth 50 ${cred.url} ${options.branch} 2>&1 || true; ` : "") +
+      `git fetch --depth 50 ${cred.url} ${sha} 2>&1 || true; ` +
+      `}; git checkout -B ${branch} ${sha}`,
+    300_000,
+    cred.env,
+  );
+  return { branch, base };
+}
+
+/**
  * Commit whatever the agent left in the tree and push the work branch.
  * Returns null when there is nothing to push (empty diff = no PR). The
  * commit happens harness-side so the agent never needs git etiquette —

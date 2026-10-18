@@ -28,6 +28,7 @@ import {
   rebaseOntoBase,
   resolvePr,
   checkoutRepo,
+  checkoutRepoAtSha,
   hasClone,
   reuseRepo,
   reuseRepoForPr,
@@ -968,4 +969,77 @@ test("D4-c: reuseRepoForPr brings a snapshot-restored PR workspace to the CURREN
   assert.equal((await work.exec("cat node_modules/left-pad/index.js")).stdout.trim(), "dep", "the ignored dependency tree survives");
   assert.match(checkout.headSha ?? "", /^[a-f0-9]{40}$/, "the resolved head is recorded on the step's output");
   assert.equal((await work.exec("git remote get-url origin")).stdout.trim(), ref.cloneUrl, "the remote is credential-free afterwards");
+});
+
+// ---------------------------------------------------------------------------
+// DF1 (SHIP_FORK): the fork's checkout
+
+/** A bare remote whose ship/run-src branch holds one pushed source commit. */
+async function forkFixture(name: string): Promise<{
+  bare: string;
+  ref: ReturnType<typeof parseRepoUrl>;
+  sourceSha: string;
+  work: LocalExecutor;
+  seed: LocalExecutor;
+}> {
+  const { bare, ref, work, seed } = await warmFixture(name);
+  // The source run's work: one commit on its own branch, pushed — the sha a
+  // fork's log would record off the source's repo-push step.
+  await work.exec("echo source-work >> f.txt && git add -A && git commit -qm 'source run change' && git push -q origin ship/run-first");
+  const sourceSha = (await work.exec("git rev-parse HEAD")).stdout.trim();
+  return { bare, ref, sourceSha, work, seed };
+}
+
+test("DF1: a cold fork stands on the recorded pushed commit, on its own branch, and the source branch is untouched", async () => {
+  const { bare, ref, sourceSha } = await forkFixture("git-fork-cold");
+  const srcBefore = (await new LocalExecutor({ root: bare }).exec("cd repo.git && git rev-parse ship/run-first")).stdout.trim();
+
+  const fork = new LocalExecutor({ root: await mkdtemp(join(tmpdir(), "git-fork-run-")) });
+  const checkout = await checkoutRepoAtSha(fork, { ref, token: "", runId: "run-fork9", sha: sourceSha, branch: "ship/run-first" });
+  assert.equal(checkout.branch, "ship/run-fork9", "a NEW branch of the fork run's own");
+  assert.equal(checkout.base, "main");
+  assert.equal((await fork.exec("git rev-parse HEAD")).stdout.trim(), sourceSha, "standing exactly on the recorded commit");
+  assert.match((await fork.exec("cat f.txt")).stdout, /source-work/, "the source's work is the starting tree");
+
+  // The fork's publication pushes its own branch only, and the remote's
+  // source branch did not move: the source PR is untouched by a fork.
+  await fork.exec("echo fork-work > fork.txt && git add -A && git commit -qm 'fork run change'");
+  const pushed = await commitAndPush(fork, { ref, token: "", checkout, message: "fork: the thing" });
+  assert.equal(pushed.kind, "pushed");
+  const check = new LocalExecutor({ root: bare });
+  assert.match((await check.exec("cd repo.git && git branch --list 'ship/*'")).stdout, /ship\/run-fork9/, "the fork's branch exists");
+  assert.equal(
+    (await check.exec("cd repo.git && git rev-parse ship/run-first")).stdout.trim(),
+    srcBefore,
+    "the source branch still points where the source run left it",
+  );
+});
+
+test("DF1: a warm volume forks at the recorded commit and keeps the dependency tree", async () => {
+  const { ref, work, sourceSha } = await forkFixture("git-fork-warm");
+  // The volume holds the previous run's leftovers, like reuseRepo's fixture.
+  await work.exec("echo stale >> f.txt && echo junk > scratch.txt && mkdir -p .teploy-agent && echo x > .teploy-agent/state.json");
+
+  const checkout = await checkoutRepoAtSha(work, { ref, token: "", runId: "run-fork10", sha: sourceSha, warm: true });
+  assert.equal(checkout.branch, "ship/run-fork10");
+  assert.equal(checkout.base, "main");
+  assert.equal((await work.exec("git rev-parse HEAD")).stdout.trim(), sourceSha, "the recorded commit, not the default branch's tip");
+  assert.equal((await work.exec("test -f scratch.txt")).exitCode, 1, "the previous run's tree is dropped");
+  assert.equal((await work.exec("test -d .teploy-agent")).exitCode, 1);
+  assert.equal((await work.exec("test -d node_modules/left-pad")).exitCode, 0, "the ignored dependency tree survives");
+  assert.equal((await work.exec("git status --porcelain")).stdout.trim(), "", "clean tree for the agent");
+});
+
+test("DF1: a recorded commit that cannot be fetched fails naming the sha", async () => {
+  const { ref } = await forkFixture("git-fork-missing");
+  const ghost = "0123456789abcdef0123456789abcdef01234567";
+  const fork = new LocalExecutor({ root: await mkdtemp(join(tmpdir(), "git-fork-ghost-")) });
+  await assert.rejects(
+    checkoutRepoAtSha(fork, { ref, token: "", runId: "run-fork11", sha: ghost }),
+    (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      return message.includes("git step failed") && message.includes(ghost);
+    },
+    "the checkout is the arbiter: its error names the sha nothing fetched",
+  );
 });

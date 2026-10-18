@@ -101,6 +101,8 @@ import { migrate } from "./migrations.js";
 import { stepFingerprint } from "./step-fingerprint.js";
 import { warmCacheEnabled, warmSlugOf } from "./warm.js";
 import { assertRepoAllowed, policyFromEnv } from "./repo-policy.js";
+import { forkEnabled, forkNote, resolveForkSource } from "./fork.js";
+import type { ForkSourceRecord } from "./fork.js";
 import { effectiveRunCap, sandboxOverridesOf, withProjects } from "./durable.js";
 import { costUSD } from "./pricing.js";
 import type { RepoTrust } from "./repo-policy.js";
@@ -1152,6 +1154,17 @@ export async function enqueueRun(
      * (durable.ts effectiveRunCap). Internal to the delegation control.
      */
     maxRunCostUSD?: number;
+    /**
+     * DF1 (SHIP_FORK): fork the named source run. The source must be settled
+     * (or parked at its merge review) and SHIP_FORK must be on — both checked
+     * HERE, at enqueue, so every surface gets the same named refusal and no
+     * worker ever re-derives lineage. The resolution (the source's recorded
+     * pushed sha and the transport facts) is materialised into the input as
+     * `forkOf` and its Recorded line into the task, only when set: a run
+     * without a fork enqueues byte-identically. A fork is a new task root —
+     * pass no parentRunId. See fork.ts.
+     */
+    forkOf?: string;
   },
 ): Promise<EnqueueReport | undefined> {
   const journey = options.journey === undefined ? undefined : parseJourney(options.journey);
@@ -1166,8 +1179,25 @@ export async function enqueueRun(
     return undefined;
   }
   if (options.reviewParent && (options.reviewParent !== options.parentRunId || !runtime.launches)) throw new Error("Review replacement requires a journal and matching parent");
+  if (options.forkOf !== undefined && options.parentRunId !== undefined) throw new Error("A fork is a new task root and records its lineage as forkOf, not parentRunId");
   const taskRoot = options.parentRunId === undefined ? options.runId : await taskRootRunId(runtime.store, options.parentRunId);
   const now = new Date().toISOString();
+  // DF1 (SHIP_FORK): resolve the fork's source ONCE, here. The forkable check
+  // and the recorded-sha read are part of the enqueue, so a refused fork never
+  // exists as a run, every surface gets the same named refusal, and a replay
+  // reads the materialised record rather than a source log that moved on.
+  // Deliberately after the launch-journal recovery above: retrying an already
+  // accepted fork republishes it and must not re-resolve mutable facts.
+  let fork: ForkSourceRecord | undefined;
+  if (options.forkOf !== undefined) {
+    if (!forkEnabled()) throw new Error("fork refused (SHIP_FORK off): run forking is not enabled on this deployment");
+    const resolved = await resolveForkSource(runtime, options.forkOf);
+    if (!resolved.ok) throw new Error(resolved.reason);
+    fork = resolved.record;
+  }
+  // The fork's Recorded line rides the task (fork.ts) ahead of any journey
+  // instruction, so the run's own log says what it inherited and from where.
+  const baseTask = fork === undefined ? options.task : `${options.task}\n\n${forkNote(fork)}`;
   // Materialise the thresholds at ENQUEUE, never leave a bare `true` in the
   // log. durable.ts's contract is that the thresholds are fixed at enqueue,
   // because they decide which turn the run terminates on: a worker replaying
@@ -1513,13 +1543,18 @@ export async function enqueueRun(
   // exact object the log will carry, rather than a reconstruction of it.
   const inputBase = {
         restoreValidation: 1 as const,
-        task: journey ? `${options.task}\n\n${journeyInstruction(journey)}` : options.task,
+        task: journey ? `${baseTask}\n\n${journeyInstruction(journey)}` : baseTask,
         ...(journey ? { journey, userMessage: options.userMessage ?? options.task } : {}),
         ...(options.environmentCheckOnly === true ? { environmentCheckOnly: true } : {}),
         ...(options.environmentCheck === true ? { environmentCheck: true, ...projectReadinessRecord(project, options.environmentInputsDigest, stackDetectEnabled()) } : {}),
         ...(options.userMessage !== undefined ? { userMessage: options.userMessage } : {}),
         ...(options.parentRunId !== undefined ? { parentRunId: options.parentRunId } : {}),
         ...(options.parentRunId !== undefined && options.pr !== undefined ? { requireOpenPr: true } : {}),
+        // DF1 (SHIP_FORK): lineage and the checkout facts, materialised only
+        // when this run was forked. Admits no step — the repo-setup step reads
+        // it to decide where to stand — so runs without it stay byte-identical
+        // and the fingerprint does not move (fork.ts).
+        ...(fork !== undefined ? { forkOf: fork } : {}),
         ...(options.repo !== undefined ? { repo: options.repo, repositoryScopeVersion: 2 as const } : {}),
         // Provenance, recorded whenever the caller stated it — not only on
         // repo runs. A chat message or an issue comment with no repository

@@ -9,7 +9,7 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import { freshForge, requestWorkspace, threadHistory } from "../../lib/workspace.server.js";
 import { submissionIdentity } from "../../lib/submission.server.js";
 import { Conversation, Changes, Verification } from "../../views/workspace.js";
-import { cancelRun, deliverEvent, actorFromPrincipal, verificationFactsFromEvents, enqueueRun, priorRunContext } from "../../lib/ship.server.js";
+import { cancelRun, deliverEvent, actorFromPrincipal, verificationFactsFromEvents, enqueueRun, priorRunContext, forkEnabled } from "../../lib/ship.server.js";
 import { roughDuration } from "../../lib/expect.js";
 
 // PLAN_EVENT comes from the dependency-free plan module: it's used in the
@@ -187,6 +187,56 @@ export async function action({
       await enqueueRun(runtime, {runId:next,requestIdentity:identity.requestIdentity,...(replacingReview ? {reviewParent:runId} : {}),parentRunId:runId,userMessage:message,task,model:meta.model,source:"manual",actor:actorFromPrincipal(me),trust:input?.trust === "operator" ? "operator" : "external",...(input?.repo ? {repo:input.repo}:{}),...(pr ? {pr}:{}),plan:form.get("plan")==="on" && !readOnly,...journeyOptions(journey)});
     } catch (e) {
       return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(e instanceof Error ? e.message : "Could not start follow-up")}`);
+    }
+    return redirectTo(`/runs/${next}`);
+  }
+
+  // DF1 (SHIP_FORK): fork this run — a new task carrying the source's recorded
+  // history, a new branch from its recorded pushed commit, a pull request of
+  // its own. Same authority as a follow-up (approve = editor or above), same
+  // CSRF shape (the layout's same-origin gate plus a scoped requestId), and
+  // the enqueue behind this refuses an in-flight source BY NAME so a stale tab
+  // cannot fork a run that has been resumed.
+  if (intent === "fork") {
+    if (!(await may("approve", me))) return redirectTo(`/runs/${runId}?denied=approve`);
+    if (!forkEnabled()) return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent("Fork is off on this deployment (SHIP_FORK).")}`);
+    const message = String(form.get("message") ?? "").trim();
+    let identity;
+    try {
+      identity = submissionIdentity(me!.user, `fork:${runId}`, form.get("requestId"), { message, journey: form.get("journey") });
+      const accepted = await runtime.launches?.get(identity.runId);
+      if (accepted) {
+        if (accepted.requestHash !== identity.requestIdentity) throw new Error("This request ID already belongs to a different fork");
+        await runtime.launches!.publish(accepted);
+        return redirectTo(`/runs/${identity.runId}`);
+      }
+    } catch (error) {
+      return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(error instanceof Error ? error.message : "Could not recover fork")}`);
+    }
+    if (meta === null) return redirectTo(`/runs/${runId}?messageError=Unknown+run`);
+    if (!message || message.length > 12000) return redirectTo(`/runs/${runId}?messageError=Enter+a+message+of+up+to+12000+characters`);
+    let journey;
+    try { journey = parseJourney(form.get("journey") ?? "change"); }
+    catch { return redirectTo(`/runs/${runId}?messageError=Choose+a+supported+task+type`); }
+    const events = await runtime.store.load(runId);
+    const started = events.find(e => e.type === "run-started");
+    const input = (started?.data as { input?: { repo?: string; trust?: string } })?.input;
+    // The source's recorded history, materialised into the fork's task exactly
+    // as a follow-up's is (D3) — the fork's only memory of the earlier work.
+    const thread = await threadHistory(runtime, runId);
+    const task = `${message}\n\n${priorRunContext(thread.history, {
+      ...(thread.olderOmitted > 0 ? { omittedAncestors: thread.olderOmitted } : {}),
+      ...(thread.olderOmittedCapped ? { omittedAncestorsCapped: true } : {}),
+      ...(thread.crossProjectCutAt !== undefined ? { crossProjectCutAt: thread.crossProjectCutAt } : {}),
+    })}`;
+    const next = identity.runId;
+    try {
+      // No pr, no parentRunId: the fork's PR is its own and its task root is
+      // itself. The plan park applies as for any change task via the project
+      // record, which enqueueRun resolves.
+      await enqueueRun(runtime, { runId: next, requestIdentity: identity.requestIdentity, userMessage: message, task, model: meta.model, source: "manual", actor: actorFromPrincipal(me), trust: input?.trust === "operator" ? "operator" : "external", ...(input?.repo ? { repo: input.repo } : {}), forkOf: runId, ...journeyOptions(journey) });
+    } catch (e) {
+      return redirectTo(`/runs/${runId}?messageError=${encodeURIComponent(e instanceof Error ? e.message : "Could not start fork")}`);
     }
     return redirectTo(`/runs/${next}`);
   }
@@ -509,6 +559,7 @@ export default function RunDetail({ data: initialData }: { data: RunData }) {
       <p class="meta" role="status">{connection}</p>
       <div class="eyebrow"><a href="/runs">All runs</a> / {data.runId}</div>
       {data.parentRunId && <p class="meta">Continues <a href={`/runs/${encodeURIComponent(data.parentRunId)}`}>{data.parentRunId}</a></p>}
+      {data.forkedFrom && <p class="meta">Forked from <a href={`/runs/${encodeURIComponent(data.forkedFrom.runId)}`}>{data.forkedFrom.runId}</a>{data.forkedFrom.sha ? ` at ${data.forkedFrom.sha.slice(0, 12)}` : " — it had pushed nothing, so this fork started from the default branch"}</p>}
       {data.taskRootRunId && data.taskRootRunId !== data.runId && <p class="meta">Original request: <a href={`/runs/${encodeURIComponent(data.taskRootRunId)}`}>{data.taskRootRunId}</a></p>}
       {data.threadView === true && thread !== null && thread.runs.length > 1 && <ThreadStrip thread={thread} runId={data.runId} />}
       {data.messageError && <p class="notice bad" role="alert">{data.messageError}</p>}
@@ -920,6 +971,7 @@ function RunComposer({data}: {data: RunData}) {
             </p>
           )}
           {(!active || reviewing && data.canSteer) && data.meta.status !== 'cancelling' && data.canLaunch && <form method="post" class="message-composer"><input type="hidden" name="requestId" value={followRequestId}/><input type="hidden" name="eventName" value={followEvent}/>{reviewing && <p class="notice">Request changes on this PR before merging. A change request cancels this run’s pending merge decision and starts a linked run; the PR stays open. Read-only investigations leave the merge decision pending.</p>}<label class="field">Continue this work<textarea name="message" rows={3} required maxLength={12000} placeholder="What should Ship change or investigate next?" /></label>{data.hasPr && <label class="field">Start from<select name="target"><option value="pr">Existing pull request (checked before launch)</option><option value="base">Current default branch</option></select></label>}<label class="field">What should happen next?<select name="journey" value={followJourney} onChange={e => setFollowJourney(e.currentTarget.value)}>{JOURNEYS.map(j => <option value={j.id}>{j.label}</option>)}</select></label>{followJourney === "change" && data.requirePlanReview && <p class="notice">This project requires plan approval before code changes. The native harness is required; merge and deployment permissions remain separate.</p>}{followJourney === "change" && !data.requirePlanReview && (data.planSupported ? <label class="check-field"><input type="checkbox" name="plan" checked={followPlan} onInput={e => setFollowPlan(e.currentTarget.checked)} />Review the plan before code changes</label> : <p class="meta">This project uses an external harness, which starts work immediately. For plan review, select the native harness in Project settings before launching.</p>)}<button type="submit" name="intent" value="follow-up">Start follow-up</button><p class="meta">Keeps the conversation history and starts a fresh sandbox. The existing pull request is checked with the forge before launch. Current project approvals and budgets apply.</p></form>}
+           {data.canFork && <form method="post" class="message-composer"><input type="hidden" name="requestId" value={followRequestId}/><label class="field">Fork this work<textarea name="message" rows={2} required maxLength={12000} placeholder="What should the forked run change or investigate? It inherits this run's recorded history." /></label><label class="field">What should happen next?<select name="journey">{JOURNEYS.map(j => <option value={j.id}>{j.label}</option>)}</select></label><button type="submit" name="intent" value="fork">Fork run</button><p class="meta">Starts a new branch at this run's recorded pushed commit — or the default branch when it pushed nothing — and opens a separate pull request. This run's pull request and branch are untouched. A required plan checkpoint still applies.</p></form>}
 
  </>;
 }
@@ -1483,7 +1535,7 @@ function TaskStatePanel({ data }: { data: RunData }) {
 /** A chain entry's hover text: what ran, when, on what — bounded. */
 function threadTitle(run: ThreadRunView): string {
   const line = (run.summary ?? "").split("\n")[0] ?? "";
-  return [utcStamp(run.createdAt), run.model, run.harness, line !== "" ? line.slice(0, 200) : ""].filter((s) => s !== "").join(" · ");
+  return [utcStamp(run.createdAt), run.model, run.harness, run.forkOf !== undefined ? `forked from ${run.forkOf.runId}` : "", line !== "" ? line.slice(0, 200) : ""].filter((s) => s !== "").join(" · ");
 }
 
 /**
@@ -1498,7 +1550,9 @@ function ThreadStrip({ thread, runId }: { thread: ThreadView; runId: string }) {
     <nav class="settings-nav" aria-label="Task thread">
       <span class="meta">Thread</span>
       {thread.runs.map((run, i) => {
-        const label = `#${i + 1} ${run.status}`;
+        // DF1 (SHIP_FORK): a member that joined by forking is labelled so the
+        // strip does not present it as an ordinary follow-up.
+        const label = `#${i + 1} ${run.status}${run.forkOf !== undefined ? " (fork)" : ""}`;
         // The current run is rendered the way the workspace nav renders the
         // active view: a link with class active, so one style rule covers
         // both and the strip never invents its own chrome.

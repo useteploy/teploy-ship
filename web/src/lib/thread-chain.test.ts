@@ -4,6 +4,7 @@ import type { WorkflowEvent } from "@neutron-build/workflow";
 import type { RunMeta, SteerNote } from "teploy-ship/runtime";
 import {
   askHistory,
+  forkOfInput,
   harnessLabel,
   runThread,
   steerHistory,
@@ -206,6 +207,41 @@ test("a single-run task is a one-run chain, not an error", async () => {
   assert.deepEqual(thread!.runs.map((r) => r.runId), ["solo"]);
   assert.equal(thread!.root, "solo");
   assert.equal(thread!.truncated, false);
+});
+
+test("DF1: a fork carries its lineage and joins the forked run's thread; a fork of a stranger does not", async () => {
+  const fix = anchoredChain();
+  const sha = "abcdef0123456789abcdef0123456789abcdef01";
+  fix.logs["f1"] = [
+    started(60, { task: "Fork it elsewhere", forkOf: { runId: "r3", sha, branch: "ship/r3" } }, "f1"),
+    ev("run-completed", 66, undefined, { output: { summary: "Carried the work to a new PR." } }),
+  ];
+  fix.metas.push(meta("f1", { createdAt: at(60), updatedAt: at(66) }));
+  // A fork of a run outside the chain must not be swept in as a member.
+  fix.logs["f9"] = [started(62, { task: "Stranger's fork", forkOf: { runId: "r0" } }, "f9"), ev("run-completed", 63, undefined, { output: {} })];
+  fix.metas.push(meta("f9", { createdAt: at(62), updatedAt: at(63) }));
+
+  const { deps: d } = deps(fix);
+  const thread = await runThread(d, "r1");
+  assert.deepEqual(thread!.runs.map((r) => r.runId), ["r1", "r2", "r3", "f1"], "the fork is a member of the thread it came from");
+  assert.deepEqual(thread!.runs[3]!.forkOf, { runId: "r3", sha }, "its lineage reads off the recorded input");
+  assert.equal(thread!.runs[3]!.parentRunId, null, "a fork is no run's follow-up");
+  assert.equal(thread!.runs.every((r) => r.runId !== "f9"), true, "a fork of an unrelated run stays out");
+
+  // On the fork's own page the chain is the fork alone (it is a new task
+  // root), and the lineage is still what the view reports.
+  const own = await runThread(d, "f1");
+  assert.deepEqual(own!.runs.map((r) => r.runId), ["f1"]);
+  assert.deepEqual(own!.runs[0]!.forkOf, { runId: "r3", sha });
+});
+
+test("DF1: forkOfInput is shape-checked and absent on a non-fork or a malformed record", () => {
+  const sha = "abcdef0123456789abcdef0123456789abcdef01";
+  assert.deepEqual(forkOfInput([started(0, { forkOf: { runId: "r3", sha } })]), { runId: "r3", sha });
+  assert.deepEqual(forkOfInput([started(0, { forkOf: { runId: "r3" } })]), { runId: "r3" }, "no sha key when none was recorded");
+  assert.equal(forkOfInput([started(0, { task: "t" })]), undefined);
+  assert.equal(forkOfInput([started(0, { forkOf: { sha } })]), undefined, "no runId, no lineage");
+  assert.equal(forkOfInput([started(0, { forkOf: "run-r3" })]), undefined, "a bare string is not the record");
 });
 
 test("an unknown run id reads as null (the route 404s)", async () => {

@@ -80,6 +80,14 @@ export class ShipClient {
       ...(eventName ? { eventName } : {}),
     }, 'follow-up');
   }
+  // DF1 (SHIP_FORK): fork a settled run — a new task with the source's recorded
+  // history, a new branch from its pushed commit, and a pull request of its own.
+  // Refused (HTTP error naming the reason) when the flag is off or the source
+  // run is still in flight.
+  fork(runId, { message, journey = 'change', requestId }) {
+    if (!message || !requestId) throw new Error('message and stable requestId are required');
+    return this.#form(this.#runPath(runId), { intent: 'fork', message, journey, requestId }, 'fork run');
+  }
 }
 
 // ---- Event verification (webhook receivers) -------------------------------
