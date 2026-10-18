@@ -113,6 +113,7 @@ export function parkSnapshotSweeper(
   // come from immutable logs, so without this set every cleaned image would
   // be deleted again on the next pass — and after a restart, one 404 each.
   const gone = new Set<string>();
+  const inUseLogged = new Set<string>();
   const tombstone = (image: string): void => {
     if (gone.size >= GONE_CAP) gone.delete(gone.values().next().value!);
     gone.add(image);
@@ -166,6 +167,15 @@ export function parkSnapshotSweeper(
             if (deleteFoundNothing(message)) {
               tombstone(image);
               log(`[snapshot-gc] ${meta.runId}'s snapshot ${image} was already gone`);
+            } else if (/conflict|image is being used|is using its referenced image|in use/i.test(message)) {
+              // A container still runs from it (a parked follow-up booted from
+              // a warm image, say). Not an error: it is deleted on a later pass
+              // once that container is gone. Logged once per image, not every
+              // minute (found live 2026-10-18).
+              if (!inUseLogged.has(image)) {
+                inUseLogged.add(image);
+                log(`[snapshot-gc] ${meta.runId}'s snapshot ${image} is still in use by a container; deferring`);
+              }
             } else {
               log(`[snapshot-gc] ${meta.runId}'s snapshot ${image} could not be deleted: ${message}`);
             }

@@ -6,7 +6,7 @@ import {
   shipAuthored,
 } from "../../lib/ship.server.js";
 
-import { BodyTooLarge, claimDelivery, firstHeader, json, parseJson, proposeFromWebhook, readCappedBody } from "../../lib/webhook.server.js";
+import { BodyTooLarge, claimDelivery, firstHeader, json, parseJson, proposeFromWebhook, readCappedBody, shadowBuiltin } from "../../lib/webhook.server.js";
 import { applyPullRequestEvent, applyPushEvent } from "../../lib/revert.server.js";
 
 export const config = { mode: "app" };
@@ -53,6 +53,7 @@ export async function action({ request }: { request: Request }): Promise<Respons
     const runPayload = parseJson<Parameters<typeof ciFixTaskFromWorkflowRun>[0]>(body);
     if (runPayload === null) return json(400, { title: "malformed JSON body" });
     const input = ciFixTaskFromWorkflowRun(runPayload);
+    await shadowBuiltin("ci", runPayload, input);
     if (input === null) return json(200, { ok: true, skipped: "not a failed run on a ship PR" });
     return proposeFromWebhook(input);
   }
@@ -169,6 +170,7 @@ async function handleReview(body: string, source: "github"): Promise<Response> {
     return json(200, { ok: true, skipped: "PR is not ship-labeled and is not a ship/ branch on this repo" });
   }
   const input = reviewTaskFromReviewEvent(payload, source);
+  await shadowBuiltin("github", payload, input);
   if (input === null) return json(200, { ok: true, skipped: "not an actionable review event" });
   return proposeFromWebhook(input);
 }

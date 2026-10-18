@@ -69,16 +69,26 @@ export interface Condition {
  * the worker derives mode/journey/plan from the kind (intakeJourney,
  * journeys.ts), so a kind outside this set would silently mean "fix mode,
  * no plan park" whatever the rule author intended. "event" is that plain
- * fix-mode task; the others reuse the schedule encodings verbatim.
+ * fix-mode task; the "request-" and "workflow-" spellings reuse the schedule
+ * encodings verbatim. EV3 adds the built-in sources' own kinds (mention,
+ * issue, ci, review, incident, workflow-fix) so each built-in intake can be
+ * expressed as a default rule that reproduces today's ProposeInput exactly —
+ * they were always closed-set members the worker already understands.
  */
 export const EVENT_TASK_KINDS = [
   "event",
   "workflow-scan",
   "workflow-plan",
+  "workflow-fix",
   "request-change",
   "request-investigate",
   "request-plan",
   "request-review",
+  "mention",
+  "issue",
+  "ci",
+  "review",
+  "incident",
 ] as const;
 export type EventTaskKind = (typeof EVENT_TASK_KINDS)[number];
 

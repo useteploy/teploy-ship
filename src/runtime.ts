@@ -310,12 +310,25 @@ export {
   parseRepoToken,
   requesterOf,
   reviewGateSatisfied,
+  reviewRound,
   reviewTaskFromReviewEvent,
   shipAuthored,
   slackTaskFromMention,
   linearTaskFromIssue,
   ciFixTaskFromWorkflowRun,
 } from "./intake-sources.js";
+// E7 EV3 — the built-in sources' shadow over the EV2 rule engine. The web
+// receivers import these from ./runtime (the proposeFromWebhook import block);
+// everything else (tests, doctor, the sweep) imports src/event-builtin.js.
+export {
+  builtinShadowEnabled,
+  builtinTaskSource,
+  readBuiltinShadowCounters,
+  shadowBuiltinIntake,
+  BUILTIN_SHADOW_COUNTER_KEY,
+  type BuiltinShadowCounters,
+  type BuiltinSourceId,
+} from "./event-builtin.js";
 export type { RepoTrust, RepoPolicyConfig, RepoAllowEntry } from "./repo-policy.js";
 export {
   RepoNotAllowedError,

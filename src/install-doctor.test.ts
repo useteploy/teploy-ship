@@ -346,8 +346,10 @@ test("EQUIVALENCE: with no stated kind the report is the pre-X11 shape — no st
   assert.deepEqual(
     r.checks.map((c) => c.id),
     // data-dir-writable arrived with #94 (loud shadow writes) and is always
-    // present; this test pins only that no store-engine check appears.
-    ["node-version", "state-dir-writable", "data-dir-writable", "state-dir-space", "web-port", "env-web-token", "env-model-credential", "store-url", "store-connectivity", "clock"],
+    // present; event-rules-shadow with #EV3 (built-in shadow counters) is a
+    // pass when the flag is off. This test pins only that no store-engine
+    // check appears.
+    ["node-version", "state-dir-writable", "data-dir-writable", "state-dir-space", "web-port", "env-web-token", "env-model-credential", "store-url", "store-connectivity", "clock", "event-rules-shadow"],
   );
   assert.equal(byId(r, "store-url").detail, "NUCLEUS_URL shape valid, host db.internal:5432 (shape only, nothing connected)");
   assert.equal(byId(r, "store-connectivity").detail, "store answered");

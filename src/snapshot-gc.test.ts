@@ -127,3 +127,19 @@ test("an unreadable run log skips that run and never throws; parkSnapshotImages 
   assert.deepEqual(parkSnapshotImages(runLog({ merge: "0@teploy-sbx-snap:m" }, true)), ["0@teploy-sbx-snap:m"]);
   assert.ok(SNAPSHOT_GC_RUNS > 0);
 });
+
+test("an image still used by a container is deferred quietly: logged once, retried, deleted when free (live 2026-10-18)", async () => {
+  let free = false;
+  const h = harness([{ runId: "run-inuse", status: "completed", events: runLog({ merge: "0@teploy-sbx-snap:busy" }, true) }], {
+    fail: () => (free ? undefined : new Error("docker rmi: Error response from daemon: conflict: unable to remove repository reference (must force) - container abc is using its referenced image")),
+  });
+  await h.sweep();
+  await h.sweep();
+  await h.sweep();
+  assert.deepEqual(h.deleted, [], "not deleted while a container uses it");
+  assert.equal(h.lines.filter((l) => l.includes("still in use")).length, 1, "logged once, not every pass");
+  assert.equal(h.lines.filter((l) => l.includes("could not be deleted")).length, 0);
+  free = true;
+  await h.sweep();
+  assert.deepEqual(h.deleted, ["0@teploy-sbx-snap:busy"], "deleted on a later pass once free");
+});
