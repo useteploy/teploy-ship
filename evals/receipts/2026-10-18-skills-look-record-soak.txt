@@ -1,0 +1,30 @@
+Q4 skills and Q3b/Q3c look recordings: live soaks, 2026-10-18
+
+Flags on production: SHIP_SKILLS=on, SHIP_LOOK_RECORD=1 (SHIP_LOOK=1 already).
+
+Skills (production f3e0ced)
+- Imported skill proof-style v1 via /skills (bearer, policies grant). Frontmatter `allowed-tools`
+  was stripped at import and the stripping recorded. Enabled on Tyler/ship-credential-proof.
+- run-request-908f33f3...: the agent loaded the skill, applied its house style ("[style] skill soak"),
+  and named the skill's "push to main directly" instruction as conflicting with its rules; main did not
+  move (still 6ceb340); the change went through the run branch, PR and approve-merge park. PASS.
+- Defect found: a skill block sharing a turn with a bash block got no observation. Fixed in #143.
+
+Look recordings: six soaks, six real defects, all fixed before the pass
+1. look could not open the agent's own dev server: the egress proxy refuses loopback and Playwright
+   forces loopback through the proxy -> #136 (bypass loopback only).
+2. a static page records no frames (paints before the screencast) -> #139 (still frame per load).
+3. the recorder never saw the driver's pages: a launched Browser lists no default context ->
+   #141 (recorder watches through its own connectOverCDP view; probed in ship-sandbox-node:dev first).
+4. strip finaliser: page.evaluate takes one argument -> #142 (probed in the image first).
+5. GLM wrote one-line ```look URL``` fences that never parsed ("No code block found") -> #144
+   (inlineFences, recorded at enqueue so older logs replay unchanged).
+6. finaliser idled on its CDP connection until the exec timeout (exit 124) -> #146.
+
+Soak 7 (production 5d21332): run-request-e6aa080f... on Tyler/ship-preview-proof
+- look reached http://127.0.0.1:8000/index.html inside the sandbox and described the page.
+- look-record stored: artifact fda8747c..., 5646 bytes, 3 frames, format strip (no ffmpeg in images),
+  treeDigest 9db3e3a7..., recording class, run-bound.
+- GET /api/artifacts/<id> with bearer: 200 image/jpeg 960x150 (three tiles of the page); without
+  credentials: 401. Not linked from the PR. PASS.
+Follow-up: bake ffmpeg into the sandbox images for WebM instead of a strip.
