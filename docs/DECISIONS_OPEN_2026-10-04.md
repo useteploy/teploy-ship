@@ -1,10 +1,68 @@
 # Open founder decisions — 2026-10-04
 
 The single list of decisions only the owner can make, with the context each
-one needs. Open Decisions 4–10 are listed in the programme's "End state and
+one needs. Decisions 4–20 are listed (all decided as of 2026-10-17) in the programme's "End state and
 execution backlog" section (E6); everything else open is reached from
 [NEXT_SESSION.md](../NEXT_SESSION.md).
 When a decision is made, record it here and in the programme row it affects.
+
+## Decided 2026-10-17 (owner delegated: "decide what is best, choices for users where there should be")
+
+Principle: Ship is self-hosted by other people, so anything that depends on a
+deployment's risk appetite, vendor terms or hardware is a **setting with a safe
+default**, decided by that deployment's admin. Anything that is a security
+floor is **not** a setting. Owner instance values are listed where they differ.
+
+- **Decision 5 (G1 and S02 spend): no paid API spend.** G1's Ship arm runs on
+  the z.ai coding plan (no marginal cost); the T3 Code arm runs on the owner's
+  existing subscriptions, as daily use does. The S02 B leg stays deferred until
+  a held-out set exists (Q7).
+- **Decision 6 (remote MCP servers and private data): inherit the routing
+  data-class gate.** A remote MCP server receives `private` data only if its
+  declared destination has `retention: "none"` in the routing policy.
+  User choice: per-project MCP server allowlist with declared retention
+  (admin-editable); the gate itself is a floor.
+- **Decision 8 (Windows/macOS/mobile targets): stay deferred.** Linux desktop
+  (C5, headless Sway) comes first; revisit after G1.
+- **Decision 10 (first auto-merge window): teploy-ship, docs and test-only
+  change classes only.** Real traffic, low blast radius, and revert tracking
+  starts. Every other class keeps the merge park. User choice: auto-merge
+  windows are per project and per change class (already a project setting).
+- **Decision 11 (subscription logins on a server): a per-deployment admin
+  setting, default off.** API-key credentials are the default path for every
+  harness. An admin may enable subscription logins per agent after an in-app
+  notice that the vendor's terms are theirs to accept. Cursor's login mints an
+  API key and counts as a key. Owner instance: API keys first; subscription
+  logins only if a vendor's terms clearly allow server use.
+- **Decision 12 (unsigned sources): no auto-launch, not a setting.** Rules on
+  sources without a real signature (Datadog, legacy Sentry, plain-token
+  GitLab) may propose tasks but never launch them unattended. A spoofable
+  source must not spend money or open PRs on its own.
+- **Decision 13 (incident remediation): explicit approval in v1.** EV8 later
+  adds a per-project policy (high confidence, small change, exact attribution)
+  as a user choice, default off; it still plan-parks.
+- **Decision 14 (Observe receivers): retire `/hooks/observe`** once the
+  incident intake path is proven live; one receiver per sender.
+- **Decision 15 (latency target):** follow-up median time to first token
+  <= 20 s and >= 3x faster than a cold start; re-frozen after the D4-a
+  baseline. Internal target, not a setting.
+- **Decision 16 (warm threads): deployment settings with defaults** —
+  `SHIP_WARM_THREAD_TTL_SEC` default 7200, at most 5 thread snapshots per
+  project per host. Admins size them to their disk.
+- **Decision 17 (repository skills): per-project `repoSkills: allow | record
+  | deny`, default `record`** (load and record what was loaded). `deny`
+  refuses harnesses that cannot disable repo skills (claude-code today).
+- **Decision 18 (credential proxy):** credential delivery hardening (H1) now;
+  a credential proxy is designed with the credential store (H2). Not a setting.
+- **Decision 19 (interrupted external runs): end `cancelled`** with their
+  effects recorded.
+- **Decision 20 (Antigravity image): build on demand only.** It is an
+  optional image an admin can pull; not in the default image.
+- **User-facing choices this round adds** (all per project unless noted):
+  harness and model; delegate target allowlist (`SHIP_DELEGATE_TARGETS`
+  deployment-wide, narrowed per project); event rules and their
+  propose/auto policy; recordings on or off; skills enablement; warm-thread
+  TTL and caps (deployment); subscription logins (deployment).
 
 ## Decided 2026-10-16 (owner, relayed in session)
 
