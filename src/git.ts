@@ -134,20 +134,22 @@ export function authenticatedUrl(ref: RepoRef, token: string): string {
 /**
  * How a forge credential reaches a git process.
  *
- * "argv" (default, historical): the token rides in the URL, so it is visible in
- * the command line of the git process for its lifetime and is written to
- * .git/config by clone.
+ * "env" (default since 2026-10-17): the URL stays clean and the credential
+ * travels in that one process's ENVIRONMENT as an origin-scoped
+ * `http.extraHeader` (git >= 2.31 GIT_CONFIG_COUNT). Nothing token-bearing
+ * appears in argv or in any config file. It needs the executor to forward
+ * per-exec `env` (the sandbox daemon passes it via a private --env-file; the
+ * SDK's sandbox executor sends it with patches/@neutron-build__agents.patch
+ * applied) and a recent git in the sandbox image; if either is missing the
+ * failure is an authentication error from the forge, not a silent downgrade.
+ * Proven live on private Forgejo and GitHub repositories
+ * (evals/receipts/2026-10-17-a8-git-credential-env.txt).
  *
- * "env": the URL stays clean and the credential travels in that one process's
- * ENVIRONMENT as an origin-scoped `http.extraHeader` (git >= 2.31
- * GIT_CONFIG_COUNT). Nothing token-bearing appears in argv or in any config
- * file. Off by default: it needs the executor to forward per-exec `env` (the
- * sandbox daemon accepts it on exec and passes it via a private --env-file;
- * the SDK's sandbox executor sends it only with
- * patches/@neutron-build__agents.patch applied) and a recent git in the
- * sandbox image. If either is missing the failure is
- * an authentication error from the forge, not a silent downgrade.
- * Select with SHIP_GIT_CREDENTIAL=env.
+ * "argv" (historical): the token rides in the URL, so it is visible in the
+ * command line of the git process for its lifetime and is written to
+ * .git/config by clone (then scrubbed in the same shell). Opt back in with
+ * SHIP_GIT_CREDENTIAL=argv, e.g. for a custom sandbox image with git < 2.31;
+ * any other value selects env.
  */
 export type GitCredentialMode = "argv" | "env";
 
@@ -452,7 +454,7 @@ export async function setupStackedRepo(
     await git(executor, "git clean -fd");
     // Harness scratch is EXCLUDED from clean, and a previous run's kernel
     // state in this run's workspace is a correctness problem (reuseRepo).
-    await git(executor, "git rm -rf .teploy-agent");
+    await git(executor, "rm -rf .teploy-agent");
   }
   const cred = gitCredential(ref, token);
   const work = `ship/${runId}`;

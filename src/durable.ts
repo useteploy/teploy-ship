@@ -317,6 +317,12 @@ export interface DurableAgentInput {
    */
   lookRecord?: boolean;
   /**
+   * One-line ```look / ```skill fences (actions.ts inlineFences). Materialised
+   * at enqueue for runs that can look or load skills; absent on older logs,
+   * which keep parsing exactly as they did.
+   */
+  inlineFences?: boolean;
+  /**
    * Bounded child work (S20/S22): the ```delegate action — spawn one child
    * run, park until it finishes, merge its result back as an observation.
    * Materialised at enqueue from SHIP_DELEGATE, default off, for the
@@ -2503,7 +2509,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
       }
       // One dialect for both optional surfaces; flag-off runs get exactly
       // { look, delegate }, as before either feature existed.
-      const dialect: ActionDialect = { look, delegate, ...(steerReply ? { reply: true } : {}), ...(mcpInput !== undefined ? { mcp: true } : {}), ...(input.skills !== undefined ? { skill: true } : {}) };
+      const dialect: ActionDialect = { look, delegate, ...(steerReply ? { reply: true } : {}), ...(mcpInput !== undefined ? { mcp: true } : {}), ...(input.skills !== undefined ? { skill: true } : {}), ...(input.inlineFences === true ? { inlineFences: true } : {}) };
       let messages: Message[] = [
         {
           role: "system",

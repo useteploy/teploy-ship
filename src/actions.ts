@@ -44,6 +44,8 @@ export type Action =
   | { kind: "none" }; // no actionable block found — the model must retry
 
 const FENCE = /```([^\n`]*)\n([\s\S]*?)```/g;
+/** A one-line look or skill fence: the payload is the info line. */
+const INLINE_FENCE = /```((?:look|skill)[ \t]+[^\n`]+?)```/g;
 
 /**
  * Validate a model-supplied file path before it reaches the executor.
@@ -431,6 +433,15 @@ export interface ActionDialect {
   mcp?: boolean;
   /** ```skill (Q4-b): parsed only where the run input carries `skills`. */
   skill?: boolean;
+  /**
+   * One-line fences for the actions whose whole payload sits on the info
+   * line: "```look http://host/page```" and "```skill name```". Models write
+   * them that way and the fence regex (which needs a newline) never matched,
+   * so the agent was told "No code block found" three times running (found
+   * live 2026-10-18). Parsed only where the run input carries `inlineFences`,
+   * so an older log replays the turns it recorded.
+   */
+  inlineFences?: boolean;
 }
 
 /** Longest reply kept; a reply is a message to a person, not a report. */
@@ -474,6 +485,17 @@ export function parseAction(text: string, dialect?: ActionDialect): Action {
   return fenced?.action ?? xml?.action ?? { kind: "none" };
 }
 
+function fenceMatches(text: string, dialect?: ActionDialect): Array<{ index: number; info: string; code: string }> {
+  const found = [...text.matchAll(FENCE)].map((m) => ({ index: m.index, info: m[1]!, code: m[2]! }));
+  if (dialect?.inlineFences !== true) return found;
+  for (const m of text.matchAll(INLINE_FENCE)) {
+    // A one-line fence never overlaps a block fence's span; skip any that does.
+    if (found.some((f) => m.index >= f.index && m.index < f.index + 3 + f.info.length + 1 + f.code.length + 3)) continue;
+    found.push({ index: m.index, info: m[1]!, code: "" });
+  }
+  return found.sort((a, b) => a.index - b.index);
+}
+
 /**
  * A ```skill fence's action: the name on the fence, the ```create shape.
  * Whether a skill with that name is OFFERED is the loop's decision (a lookup
@@ -512,8 +534,8 @@ export interface SkillLoad {
 export function parseSkillLoads(text: string, dialect?: ActionDialect): SkillLoad[] {
   if (dialect?.skill !== true) return [];
   const loads: SkillLoad[] = [];
-  for (const match of text.matchAll(FENCE)) {
-    const info = match[1]!.trim();
+  for (const match of fenceMatches(text, dialect)) {
+    const info = match.info.trim();
     const [langRaw, ...argParts] = info.split(/\s+/);
     if ((langRaw ?? "").toLowerCase() !== "skill") continue;
     loads.push({ index: match.index, action: skillActionFrom(argParts.join(" ")) });
@@ -522,10 +544,10 @@ export function parseSkillLoads(text: string, dialect?: ActionDialect): SkillLoa
 }
 
 function parseFencedAction(text: string, dialect?: ActionDialect): { index: number; action: Action } | null {
-  for (const match of text.matchAll(FENCE)) {
+  for (const match of fenceMatches(text, dialect)) {
     const index = match.index;
-    const info = match[1]!.trim();
-    const code = match[2]!;
+    const info = match.info.trim();
+    const code = match.code;
     const [langRaw, ...argParts] = info.split(/\s+/);
     const lang = (langRaw ?? "").toLowerCase();
     const arg = argParts.join(" ");
