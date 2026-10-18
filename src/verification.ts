@@ -23,7 +23,7 @@ import type { TelemetryVerdict } from "./observe.js";
 import { telemetryComment } from "./observe.js";
 import type { TestOutcome } from "./tests.js";
 import { testComment, testScopeNote } from "./tests.js";
-import type { Rung } from "./ladder.js";
+import type { ProofLink, Rung } from "./ladder.js";
 import { testIntegritySection, type TestIntegrityRecord } from "./test-integrity-surface.js";
 
 export const VERIFICATION_START = "<!-- teploy-ship:verification -->";
@@ -56,7 +56,7 @@ export interface Evidence {
    * The screenshots the run attached to this pull request (ladder.ts
    * proofLinks): the visual pair and the flow's shots, in reading order.
    */
-  proof?: Array<{ name: string; url: string }>;
+  proof?: ProofLink[];
   /**
    * S08 surfacing (advisory, behind SHIP_TEST_INTEGRITY_SURFACING=on): the
    * detector's findings over the published diff, rendered by
@@ -111,10 +111,31 @@ export function verificationSection(evidence: Evidence, runId: string): string |
   // The pictures, inline: a reviewer who can see the changed page needs no
   // hash. Names are the script's own file names, so they read in order.
   if (evidence.proof !== undefined && evidence.proof.length > 0) {
-    parts.push(`**Proof**\n\n${evidence.proof.map((p) => p.name.endsWith(".webm") ? `[Watch ${p.name}](${p.url})` : `${p.name}\n\n![${p.name}](${p.url})`).join("\n\n")}`);
+    parts.push(`**Proof**\n\n${evidence.proof.map(proofEntry).join("\n\n")}`);
   }
   if (parts.length === 0) return null;
   return `${VERIFICATION_START}\n## Verification\n\n${parts.join("\n\n---\n\n")}\n${VERIFICATION_END}`;
+}
+
+/**
+ * One proof entry. A recording under the binding rule (it carries a sha256)
+ * is a link to Ship's access-checked route that names its expiry, the
+ * preview revision it recorded, and its hash, so a reviewer who cannot open
+ * it still has something to check; without a link it says why and never
+ * prints a URL. Entries from earlier runs render exactly as they did.
+ */
+function proofEntry(p: ProofLink): string {
+  if (p.sha256 === undefined) {
+    return p.name.endsWith(".webm") ? `[Watch ${p.name}](${p.url})` : `${p.name}\n\n![${p.name}](${p.url})`;
+  }
+  const facts = [
+    ...(p.revision !== undefined ? [`of preview revision \`${p.revision.slice(0, 12)}\``] : []),
+    `sha256 \`${p.sha256}\``,
+  ].join(", ");
+  if (p.url !== undefined && p.expiresAt !== undefined) {
+    return `[Watch ${p.name} (expires ${p.expiresAt.slice(0, 10)}, Ship sign-in required)](${p.url}) (${facts})`;
+  }
+  return `${p.name}: ${p.unlinked ?? "recorded, not linked"} (${facts})`;
 }
 
 /**

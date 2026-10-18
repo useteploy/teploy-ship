@@ -1,7 +1,7 @@
 import { repoKeyOf } from "./repository-scope.js";
 export { repoKeyOf } from "./repository-scope.js";
 import { assertRestoredRepository } from "./workspace-integrity.js";
-import type { ArtifactStore } from "./artifacts.js";
+import { isWebm, RECORDING_DATA_CLASS, SCREENSHOT_RETENTION_MS, type ArtifactStore } from "./artifacts.js";
 import { prepareEnvironment, type EnvironmentPreparation } from "./environment.js";
 import type { RunOrigin } from "./notify.js";
 import { akirooTrailersFrom } from "./akiroo.js";
@@ -2691,7 +2691,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
             // bytes, so a crash between put and record re-runs idempotently.
             const result = await ws.ctx.step(`${p}turn-${turn}-look-image`, () => {
               ws.live?.({ phase: "running", turn, detail: clipDetail(describeAction(action)) });
-              return runLookImage(ws.executor, `t${turn}`, action, config.artifacts!, config.actionTimeoutMs);
+              return runLookImage(ws.executor, `t${turn}`, action, config.artifacts!, config.actionTimeoutMs, { runId: ws.ctx.runId });
             });
             imageLooks += 1;
             // Text first, exactly like a text look: framed after truncation
@@ -4132,28 +4132,52 @@ async function runLadderLegs(
 }
 
 /**
- * Where the ladder's screenshots go: the pull request's assets, when there is
- * a pull request and the forge takes them. The upload runs inside the step
- * that captured the picture, so its URL is recorded once and never re-sent
- * on replay. `dataClass` rides through to the attachment boundary (git.ts
- * uploadPrAsset), which refuses the look-image class — the hard rule that
- * page screenshots never land on a pull request. A tagged upload skips the
- * artifact-store path too: that path's return value is a URL for the PR
- * body, and a link is an attachment for the purposes of the rule.
+ * Where the ladder's screenshots and recordings go. The upload runs inside
+ * the step that captured the bytes, so its URL is recorded once and never
+ * re-sent on replay.
+ *
+ * With an artifact store, the store is the ONLY destination: an untagged
+ * screenshot is kept under its run binding and linked through the
+ * access-checked /api/artifacts route, and a store failure fails the upload
+ * (the step records the hash without a link) — it never falls back to a
+ * forge attachment, which could be neither revoked nor expired. Without
+ * SHIP_PUBLIC_URL there is no absolute address, so there is no link at all
+ * rather than a relative one that is dead on the forge.
+ *
+ * Without a store, an untagged screenshot still goes to the pull request's
+ * assets, the operator's existing behaviour. `dataClass` rides through to
+ * that boundary (git.ts uploadPrAsset), which refuses look-image and
+ * recording — the hard rule that page screenshots and recordings never land
+ * on a pull request. A tagged upload skips the store path too: that path's
+ * return value is a URL for the PR body, and a link is an attachment for the
+ * purposes of the look-image rule. WebM bytes are always tagged recording,
+ * whatever the caller passed.
  */
-function assetSink(ref: RepoRef, token: string, pr: number | undefined, artifacts?: ArtifactStore): AssetSink | undefined {
+export function assetSink(ref: RepoRef, token: string, pr: number | undefined, artifacts?: ArtifactStore, fetchImpl?: typeof fetch): AssetSink | undefined {
   if (pr === undefined && artifacts === undefined) return undefined;
-  return { async upload(name, bytes, dataClass) {
-    if (artifacts && dataClass === undefined) {
-      try {
-        const id = await artifacts.put(name, bytes);
-        const base = (process.env.SHIP_PUBLIC_URL ?? "").replace(/\/$/, "");
+  const publicBase = () => (process.env.SHIP_PUBLIC_URL ?? "").replace(/\/$/, "");
+  return {
+    async upload(name, bytes, dataClass, binding) {
+      const tag = isWebm(bytes) ? RECORDING_DATA_CLASS : dataClass;
+      if (artifacts && tag === undefined) {
+        const base = publicBase();
+        if (base === "") throw new Error("SHIP_PUBLIC_URL is unset, so a stored screenshot has no link a pull request can open");
+        const id = await artifacts.put(name, bytes, undefined, binding);
         return `${base}/api/artifacts/${id}`;
-      } catch { /* fallback to forge attachment if storage is unavailable */ }
-    }
-    if (pr !== undefined) return uploadPrAsset({ ref, token, pr, name, bytes, ...(dataClass !== undefined ? { dataClass } : {}) });
-    throw new Error("Artifact storage unavailable");
-  } };
+      }
+      if (pr !== undefined) return uploadPrAsset({ ref, token, pr, name, bytes, ...(tag !== undefined ? { dataClass: tag } : {}), ...(fetchImpl !== undefined ? { fetchImpl } : {}) });
+      throw new Error("Artifact storage unavailable");
+    },
+    async record(name, bytes, binding) {
+      if (artifacts?.putTemporary === undefined) throw new Error("This install has no artifact store to keep a recording in");
+      // Stated before the write, so the date a pull request prints is never
+      // later than the store's own expiry.
+      const expiresAt = new Date(Date.now() + SCREENSHOT_RETENTION_MS).toISOString();
+      const artifact = await artifacts.putTemporary(name, bytes, RECORDING_DATA_CLASS, binding);
+      const base = publicBase();
+      return { artifact, expiresAt, ...(base !== "" ? { url: `${base}/api/artifacts/${artifact}` } : {}) };
+    },
+  };
 }
 
 /**

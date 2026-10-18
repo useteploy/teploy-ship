@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { VERIFICATION_END, VERIFICATION_START, spliceVerification, verificationSection } from "./verification.js";
 import type { PreviewOutcome } from "./deploy.js";
 import type { TelemetryVerdict } from "./observe.js";
+import type { FlowOutcome } from "./ladder.js";
+import { proofLinks } from "./ladder.js";
 
 const DEPLOYED: PreviewOutcome = { kind: "deployed", url: "https://preview-fix.example.com", image: "api-build-abc1234" };
 const COMPARED: TelemetryVerdict = {
@@ -116,4 +118,26 @@ test("the proof pictures are embedded inline, named, in the order they were atta
   assert.match(section, /preview\n\n!\[preview\]\(http:\/\/f\/p\.png\)/);
   assert.ok(section.indexOf("p.png") < section.indexOf("1.png"), "reading order is attachment order");
   assert.equal(verificationSection({ proof: [] }, "run-9"), null, "an empty proof list says nothing");
+});
+
+test("Q3a replay pin: a flow outcome recorded before the binding renders byte-identically", () => {
+  // The shape every existing run recorded: forge (or store) URLs on shots and
+  // videos, no artifact / expiry / revision / unlinked fields. Replay returns
+  // these recorded results, so the body they render must not move.
+  const recorded: FlowOutcome = {
+    kind: "passed",
+    script: ".ship/flow.mjs",
+    durationMs: 10,
+    shots: [{ name: "01.png", sha256: "1".repeat(64), bytes: 9, asset: "http://forge.example/attachments/1" }, { name: "02.png", sha256: "2".repeat(64), bytes: 9 }],
+    videos: [{ name: "walk.webm", sha256: "3".repeat(64), bytes: 7, asset: "http://forge.example/attachments/2" }, { name: "lost.webm", sha256: "4".repeat(64), bytes: 7 }],
+  };
+  const proof = proofLinks({ flow: recorded });
+  assert.deepEqual(proof, [
+    { name: "01.png", url: "http://forge.example/attachments/1" },
+    { name: "walk.webm", url: "http://forge.example/attachments/2" },
+  ]);
+  assert.equal(
+    verificationSection({ proof }, "run-old"),
+    "<!-- teploy-ship:verification -->\n## Verification\n\n**Proof**\n\n01.png\n\n![01.png](http://forge.example/attachments/1)\n\n[Watch walk.webm](http://forge.example/attachments/2)\n<!-- /teploy-ship:verification -->",
+  );
 });

@@ -19,24 +19,55 @@ export interface Artifact {
    * uploadPrAsset). Absent on every pre-tag artifact.
    */
   dataClass?: string;
+  /**
+   * The run that captured these bytes. The download route asks one question
+   * of it (web run-access mayViewRun); an artifact without it predates the
+   * binding and is served to admins only.
+   */
+  runId?: string;
+  /**
+   * The commit the bytes are evidence OF, when there is one: a flow capture
+   * carries the preview's revision, never the run's later head.
+   */
+  revision?: string;
+}
+/** Who an artifact belongs to (see Artifact.runId / Artifact.revision). */
+export interface ArtifactBinding {
+  runId: string;
+  revision?: string;
 }
 export interface ArtifactStore {
-  put(name: string, bytes: Uint8Array, dataClass?: string): Promise<string>;
+  put(name: string, bytes: Uint8Array, dataClass?: string, binding?: ArtifactBinding): Promise<string>;
   get(id: string): Promise<Artifact | null>;
-  putTemporary?(name: string, bytes: Uint8Array, dataClass?: string): Promise<string>;
+  putTemporary?(name: string, bytes: Uint8Array, dataClass?: string, binding?: ArtifactBinding): Promise<string>;
   pruneExpired?(): Promise<void>;
 }
 /** The data class of a ```look screenshot — page-derived pixels (D4). */
 export const LOOK_IMAGE_DATA_CLASS = "look-image";
-function artifact(name: string, bytes: Uint8Array, dataClass?: string): Artifact {
+/**
+ * The data class of a browser recording (WebM). Linked from a pull request
+ * through the access-checked route, never attached to it (git.ts
+ * uploadPrAsset refuses it like look-image).
+ */
+export const RECORDING_DATA_CLASS = "recording";
+/** WebM's EBML magic: how a recording is recognised whatever its name. */
+export function isWebm(bytes: Uint8Array): boolean {
+  return bytes.length >= 4 && bytes[0] === 26 && bytes[1] === 69 && bytes[2] === 223 && bytes[3] === 163;
+}
+function bindingFields(binding: ArtifactBinding | undefined): Pick<Artifact, "runId" | "revision"> {
+  if (binding === undefined) return {};
+  if (!/^[A-Za-z0-9._:-]{1,128}$/.test(binding.runId)) throw new Error("Artifact binding needs a valid run id");
+  if (binding.revision !== undefined && !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(binding.revision))
+    throw new Error("Artifact binding needs a full commit revision");
+  return { runId: binding.runId, ...(binding.revision !== undefined ? { revision: binding.revision } : {}) };
+}
+function artifact(name: string, bytes: Uint8Array, dataClass?: string, binding?: ArtifactBinding): Artifact {
   if (bytes.length > 4 * 1024 * 1024 || !bytes.length)
     throw new Error("Artifact must be between 1 byte and 4 MiB");
   const png = Buffer.from(bytes.subarray(0, 8)).equals(
     Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
   );
-  const webm = Buffer.from(bytes.subarray(0, 4)).equals(
-    Buffer.from([26, 69, 223, 163]),
-  );
+  const webm = isWebm(bytes);
   // The takeover BROWSER tab falls back to JPEG when a PNG would exceed its cap.
   const jpeg = Buffer.from(bytes.subarray(0, 3)).equals(Buffer.from([255, 216, 255]));
   if (!png && !webm && !jpeg)
@@ -48,29 +79,41 @@ function artifact(name: string, bytes: Uint8Array, dataClass?: string): Artifact
     data: Buffer.from(bytes).toString("base64"),
     bytes: bytes.length,
     ...(dataClass !== undefined ? { dataClass } : {}),
+    ...bindingFields(binding),
   };
 }
 export const SCREENSHOT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 type StoredArtifact = Artifact & { digest?: string; expiresAt?: string };
-function temporary(name: string, bytes: Uint8Array, dataClass?: string): StoredArtifact {
-  const a = artifact(name, bytes, dataClass);
+/** A distinct identity for bytes that must not share a record with identical bytes elsewhere. */
+function distinct(a: Artifact): StoredArtifact {
+  return { ...a, digest: a.id, id: createHash("sha256").update(randomUUID()).update(a.id).digest("hex") };
+}
+function temporary(name: string, bytes: Uint8Array, dataClass?: string, binding?: ArtifactBinding): StoredArtifact {
   // A distinct identity prevents expiry from deleting a permanent artifact
   // with identical pixels, or a newer capture with a different expiry.
-  return { ...a, digest: a.id,
-    id: createHash("sha256").update(randomUUID()).update(a.id).digest("hex"),
+  return { ...distinct(artifact(name, bytes, dataClass, binding)),
     expiresAt: new Date(Date.now() + SCREENSHOT_RETENTION_MS).toISOString() };
+}
+/**
+ * A permanent artifact. Unbound ones stay content-addressed; a bound one gets
+ * its own identity, so the same pixels captured by two runs never collapse
+ * into one record whose run binding the second write overwrote.
+ */
+function permanent(name: string, bytes: Uint8Array, dataClass?: string, binding?: ArtifactBinding): StoredArtifact {
+  const a = artifact(name, bytes, dataClass, binding);
+  return binding === undefined ? a : distinct(a);
 }
 const expired = (a: StoredArtifact) => a.expiresAt !== undefined && Date.parse(a.expiresAt) <= Date.now();
 const validId = (id: string) => /^[a-f0-9]{64}$/.test(id);
 export class FileArtifacts implements ArtifactStore {
   constructor(private dir = join(stateDir(), "artifacts")) {}
-  async put(name: string, bytes: Uint8Array, dataClass?: string): Promise<string> {
-    const a = artifact(name, bytes, dataClass);
+  async put(name: string, bytes: Uint8Array, dataClass?: string, binding?: ArtifactBinding): Promise<string> {
+    const a = permanent(name, bytes, dataClass, binding);
     await writeJsonFile(join(this.dir, a.id + ".json"), a);
     return a.id;
   }
-  async putTemporary(name: string, bytes: Uint8Array, dataClass?: string): Promise<string> {
-    const a = temporary(name, bytes, dataClass);
+  async putTemporary(name: string, bytes: Uint8Array, dataClass?: string, binding?: ArtifactBinding): Promise<string> {
+    const a = temporary(name, bytes, dataClass, binding);
     await writeJsonFile(join(this.dir, a.id + ".json"), a);
     return a.id;
   }
@@ -138,8 +181,8 @@ export class NucleusArtifacts implements ArtifactStore {
       ? r[0].artifact_value
       : null;
   }
-  async put(name: string, bytes: Uint8Array, dataClass?: string): Promise<string> {
-    return this.store(artifact(name, bytes, dataClass));
+  async put(name: string, bytes: Uint8Array, dataClass?: string, binding?: ArtifactBinding): Promise<string> {
+    return this.store(permanent(name, bytes, dataClass, binding));
   }
   private async store(a: StoredArtifact): Promise<string> {
     await this.ensure();
@@ -150,8 +193,8 @@ export class NucleusArtifacts implements ArtifactStore {
     await this.write(a.id, JSON.stringify({ ...a, data: "", chunks }));
     return a.id;
   }
-  async putTemporary(name: string, bytes: Uint8Array, dataClass?: string): Promise<string> {
-    const a = temporary(name, bytes, dataClass);
+  async putTemporary(name: string, bytes: Uint8Array, dataClass?: string, binding?: ArtifactBinding): Promise<string> {
+    const a = temporary(name, bytes, dataClass, binding);
     await this.ensureExpiry();
     // Index first so even a partial chunk write can be collected later.
     await this.db.query("INSERT INTO ship_artifact_expiry (artifact_id, expires_at, chunks) VALUES ($1, $2, $3)",

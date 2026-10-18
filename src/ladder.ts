@@ -157,6 +157,28 @@ export interface FlowShot {
   sha256: string;
   bytes: number;
   asset?: string;
+  /**
+   * Recordings only (absent on every earlier run): the artifact id the
+   * recording is stored under, when it is, and when it expires; the preview
+   * revision it is a recording OF; and, when there is no link to put on the
+   * pull request, the sentence the body says instead.
+   */
+  artifact?: string;
+  expiresAt?: string;
+  revision?: string;
+  unlinked?: string;
+}
+
+/** One entry in the pull request's proof list (ladder.ts proofLinks). */
+export interface ProofLink {
+  name: string;
+  /** Absent only for a recording that was captured but is not linked (`unlinked` says why). */
+  url?: string;
+  /** Recordings only, as on FlowShot. */
+  sha256?: string;
+  expiresAt?: string;
+  revision?: string;
+  unlinked?: string;
 }
 
 /**
@@ -353,14 +375,32 @@ export function ladderRungs(facts: LadderFacts): Rung[] {
  * visual pair first, then the flow's screenshots as the script named them.
  * Pure, so the pull request body and the run page list the same links.
  */
-export function proofLinks(facts: { visual?: VisualOutcome; flow?: FlowOutcome }): Array<{ name: string; url: string }> {
-  const out: Array<{ name: string; url: string }> = [];
+export function proofLinks(facts: { visual?: VisualOutcome; flow?: FlowOutcome }): ProofLink[] {
+  const out: ProofLink[] = [];
   if (facts.visual?.kind === "captured") {
     if (facts.visual.preview.asset !== undefined) out.push({ name: "preview", url: facts.visual.preview.asset });
     if (facts.visual.main.asset !== undefined) out.push({ name: "main", url: facts.visual.main.asset });
   }
   if (facts.flow?.kind === "passed" || facts.flow?.kind === "failed") {
-    for (const s of [...facts.flow.shots, ...(facts.flow.videos ?? [])]) if (s.asset !== undefined) out.push({ name: s.name, url: s.asset });
+    for (const s of facts.flow.shots) if (s.asset !== undefined) out.push({ name: s.name, url: s.asset });
+    for (const v of facts.flow.videos ?? []) {
+      // A recording made under the binding rule carries its expiry or its
+      // reason for having no link; an earlier run's entry carries neither
+      // and keeps its earlier shape (replay renders the same body).
+      const bound = v.expiresAt !== undefined || v.unlinked !== undefined;
+      if (!bound) {
+        if (v.asset !== undefined) out.push({ name: v.name, url: v.asset });
+        continue;
+      }
+      out.push({
+        name: v.name,
+        ...(v.asset !== undefined ? { url: v.asset } : {}),
+        sha256: v.sha256,
+        ...(v.expiresAt !== undefined ? { expiresAt: v.expiresAt } : {}),
+        ...(v.revision !== undefined ? { revision: v.revision } : {}),
+        ...(v.unlinked !== undefined ? { unlinked: v.unlinked } : {}),
+      });
+    }
   }
   return out;
 }

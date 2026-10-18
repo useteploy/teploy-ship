@@ -1,23 +1,29 @@
 // Throw resource responses for compatibility with Neutron dev, which otherwise tries to render them.
 import { shipRuntime } from "../../../lib/store.server.js";
-import { currentUser } from "../../../lib/session.server.js";
+import { currentUser, type Principal } from "../../../lib/session.server.js";
+import { mayViewArtifact } from "../../../lib/run-access.server.js";
 export const config = { mode: "app" };
 export async function loader({
   request,
   params,
+  mayView,
 }: {
   request: Request;
   params: { id: string };
+  /** Tests only: stands in for run-access mayViewRun. */
+  mayView?: (user: Principal, runId: string) => Promise<boolean>;
 }): Promise<Response> {
-  if (!(await currentUser(request)))
-    throw new Response("Unauthorized", { status: 401 });
+  const user = await currentUser(request);
+  if (!user) throw new Response("Unauthorized", { status: 401 });
   const artifact = await (await shipRuntime()).artifacts?.get(params.id);
-  if (!artifact) throw new Response("Artifact not found", { status: 404 });
+  if (!artifact || !(await mayViewArtifact(user, artifact, mayView)))
+    throw new Response("Artifact not found", { status: 404 });
   const bytes = Buffer.from(artifact.data, "base64");
   const headers: Record<string, string> = {
     "content-type": artifact.mime,
     "content-disposition": `inline; filename="${artifact.name}"`,
-    "cache-control": "private, max-age=3600",
+    // Never cached: a demoted or removed user must not keep watching.
+    "cache-control": "private, no-store",
     "x-content-type-options": "nosniff",
     "accept-ranges": "bytes",
   };
