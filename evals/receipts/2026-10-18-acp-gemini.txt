@@ -1,0 +1,92 @@
+ACP initialize receipt — Gemini CLI at @google/gemini-cli@0.64.0
+Date: 2026-10-18 (local). Worktree /tmp/lane-h0 @ evals/h0-acp-contracts
+(base github/main f3e0ced). Slice E7 H0 (programme E7.2 W3). Probe:
+node scripts/acp-initialize-probe.mjs -- <bin> --acp (this repo, no deps,
+no credentials sent; child HOME pointed at a throwaway directory, so no real
+~/.gemini was touched). Nothing was logged in and no model call was made.
+
+================================================================================
+1. INSTALL (how, version, size)
+================================================================================
+- npm package: @google/gemini-cli@0.64.0 (the npm `latest` on 2026-10-18 and
+  the exact pin in the ACP registry entry "gemini", distribution
+  npx @google/gemini-cli@0.64.0 with args ["--acp"]).
+- Installed with `npm install --prefix /tmp/h0-agents/gemini` (local, never
+  global); binary at /tmp/h0-agents/gemini/node_modules/.bin/gemini.
+- Size: npm dist.unpackedSize 98,597,935 bytes (~94 MB); the installed
+  package tree measures 95 MB. Heavy: the package ships a single bundle/
+  dir (large JS chunks plus bundled/ assets), not plain JS deps.
+
+================================================================================
+2. ACP SUPPORT AND LAUNCH FLAG
+================================================================================
+- Speaks ACP: yes. `gemini --version` -> 0.64.0.
+- Exact flag: `--acp` ("Starts the agent in ACP mode", boolean).
+  `--experimental-acp` still exists in --help marked "deprecated, use --acp
+  instead". This settles the design note's uncertainty (--experimental-acp
+  vs --acp) for the pinned 0.64.0: the flag is `--acp`.
+- Launch: newline-delimited JSON-RPC 2.0 over stdio (probe framing below).
+
+================================================================================
+3. INITIALIZE EXCHANGE (verbatim, captured 2026-10-18)
+================================================================================
+Request sent by scripts/acp-initialize-probe.mjs:
+  {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":2,
+   "clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},
+   "terminal":false}}}
+Response (one stdout line, answered in 832 ms; no auth required):
+  {"jsonrpc":"2.0","id":1,"result":{
+    "protocolVersion":1,
+    "authMethods":[
+      {"id":"oauth-personal","name":"Log in with Google","description":"Log in with your Google account"},
+      {"id":"gemini-api-key","name":"Gemini API key","description":"Use an API key with Gemini Developer API","_meta":{"api-key":{"provider":"google"}}},
+      {"id":"vertex-ai","name":"Vertex AI","description":"Use an API key with Vertex AI GenAI API"},
+      {"id":"gateway","name":"AI API Gateway","description":"Use a custom AI API Gateway","_meta":{"gateway":{"protocol":"google","restartRequired":"false"}}}],
+    "agentInfo":{"name":"gemini-cli","title":"Gemini CLI","version":"0.64.0"},
+    "agentCapabilities":{
+      "loadSession":true,
+      "promptCapabilities":{"image":true,"audio":true,"embeddedContext":true},
+      "mcpCapabilities":{"http":true,"sse":true}}}}
+Notes: client offered protocolVersion 2, agent answered 1 (negotiates down).
+No sessionCapabilities key in the response; session listing/resume are not
+advertised at 0.64.0. MCP http/sse advertised.
+
+================================================================================
+4. AUTH
+================================================================================
+- initialize requires no credentials (observed above).
+- Methods advertised: oauth-personal (browser login), gemini-api-key
+  (env key, K-class; GEMINI_API_KEY per docs), vertex-ai, gateway.
+- Auth/state files under ~/.gemini/ (paths verified as string literals in
+  the installed 0.64.0 bundle):
+    ~/.gemini/oauth_creds.json        OAuth token cache (F-class, refreshable)
+    ~/.gemini/google_accounts.json    selected account
+    ~/.gemini/gemini-credentials.json credential cache
+    ~/.gemini/.env                    user env file
+    ~/.gemini/settings.json           settings
+  Not logged in for this receipt; no file was created or read.
+
+================================================================================
+5. EGRESS HOSTS (from the installed 0.64.0 bundle; string-literal evidence,
+   not measured on the wire)
+================================================================================
+- API-key path: generativelanguage.googleapis.com
+- OAuth (Cloud Code) path: cloudcode-pa.googleapis.com, oauth2.googleapis.com,
+  accounts.google.com (login)
+- Vertex / service-account paths: monitoring.googleapis.com,
+  cloudresourcemanager.googleapis.com, iamcredentials.googleapis.com,
+  storage.googleapis.com, www.googleapis.com
+- docs/marketing hosts also present (cloud.google.com, developers.google.com,
+  geminicli.com) and are assumed not to be agent-traffic hosts.
+
+================================================================================
+6. UNCERTAIN / NOT VERIFIED
+================================================================================
+- Which of the section-5 hosts fire in a headless ACP run was not measured
+  (H0's empty-allowlist egress measurement happens in the sandbox lane, not
+  on a laptop).
+- gateway auth forwards to a user-supplied endpoint; host set is therefore
+  profile-declared, not enumerable.
+- Whether `--acp` mode honours GEMINI_API_KEY without any ~/.gemini state at
+  all (clean HOME initialize worked; a full prompt round needs a key and was
+  not run).

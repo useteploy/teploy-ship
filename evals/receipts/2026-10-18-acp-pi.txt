@@ -1,0 +1,97 @@
+RPC receipt — Pi coding agent at @earendil-works/pi-coding-agent@1.3.0
+(NOT ACP; Pi's own LF-delimited JSON RPC)
+Date: 2026-10-18 (local). Worktree /tmp/lane-h0 @ evals/h0-acp-contracts
+(base github/main f3e0ced). Slice E7 H0 (programme E7.2 W3). No credentials
+sent; child HOME pointed at a throwaway directory. Not logged in; no model
+call made. T3 reference: packages/provider-pi (rpc.ts, adapter.ts, driver.ts,
+status.ts; nightly v0.1.1-nightly.20261016.3218).
+
+================================================================================
+1. INSTALL (how, version, size)
+================================================================================
+- npm package: @earendil-works/pi-coding-agent@1.3.0 (npm `latest` on
+  2026-10-18; T3's MINIMUM_PI_VERSION is 0.80.5, so 1.3.0 is far past it).
+- Installed with `npm install --prefix /tmp/h0-agents/pi` (local only);
+  binary at /tmp/h0-agents/pi/node_modules/.bin/pi.
+- Size: npm dist.unpackedSize 23,249,910 bytes; installed package tree
+  25 MB. The lightest of the five agents.
+- `pi --version` -> 1.3.0.
+
+================================================================================
+2. TRANSPORT (no ACP)
+================================================================================
+- Pi does NOT speak ACP (confirmed by package contents: no ACP framing, and
+  T3 drives it through a bespoke RPC). Launch: `pi --mode rpc [--no-session]`
+  (T3 mcpInjection.ts buildPiRpcLaunch). Framing: LF-delimited JSON, one
+  object per line, trailing \r stripped; T3 deliberately avoids readline
+  (U+2028/U+2029 would corrupt frames).
+- Request shape: {"type":"<command>","id":"<id>",...}. Response shape:
+  {"id":"<id>","type":"response","command":"<command>","success":true,
+  "data":{...}} or {"success":false,"error":...}. Events arrive as
+  non-response records on the same stream.
+- Commands T3 uses (adapter.ts): new_session, switch_session (resume),
+  prompt (streamingBehavior "steer" for native mid-turn steering),
+  abort, get_state, get_available_models, confirm (approvals),
+  compact, get_entries.
+- A community ACP adapter exists in the registry (entry "pi-acp",
+  svkozak/pi-acp, MIT, npx pi-acp@0.0.34) — NOT probed, NOT endorsed for
+  Ship; the design note gives Pi a first-class RPC transport in ship-acp.
+
+================================================================================
+3. EXCHANGE CAPTURED (verbatim, 2026-10-18; no initialize exists — RPC is
+request/response from the first line)
+================================================================================
+Sent: {"type":"get_available_models","id":"1"}
+  {"id":"1","type":"response","command":"get_available_models","success":true,"data":{"models":[]}}
+  (empty: no providers configured, no auth present)
+Sent: {"type":"get_state","id":"2"}
+  {"id":"2","type":"response","command":"get_state","success":true,"data":{
+    "model":{"id":"unknown","name":"unknown","api":"unknown","provider":"unknown","baseUrl":"","reasoning":false,"input":[],"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"contextWindow":0,"maxTokens":0},
+    "thinkingLevel":"off","isStreaming":false,"isCompacting":false,
+    "steeringMode":"one-at-a-time","followUpMode":"one-at-a-time",
+    "sessionId":"01a14d59-0e3d-71a7-9f2b-d6909d406f89",
+    "autoCompactionEnabled":true,"messageCount":0,"pendingMessageCount":0}}
+Notes:
+- No credentials needed for state queries; a prompt round needs a provider
+  key (not run).
+- A sessionId exists even under --no-session (get_state reports one);
+  session files live under ~/.pi/agent/sessions/.
+- steeringMode "one-at-a-time" is the native steering knob T3 exploits via
+  prompt streamingBehavior "steer" (adapter.ts): mid-turn steering is real
+  in this transport, matching the design note.
+
+================================================================================
+4. AUTH
+================================================================================
+- Multi-provider API keys (K-class), opencode-style: the provider set is
+  whatever the run configures (env/config), so Ship derives egress per
+  credential the way src/harness-external.ts does for opencode.
+- State directory: ~/.pi/agent (driver.ts comment: "sessions, settings,
+  extensions, auth"). File evidence from the installed 1.3.0 dist
+  (config.js: CONFIG_DIR_NAME ".pi", agent dir ~/.pi/agent, override env
+  PI_CODING_AGENT_DIR):
+    ~/.pi/agent/auth.json     provider credentials (incl. OAuth entries)
+    ~/.pi/agent/oauth.json    OAuth state
+    ~/.pi/agent/mcp-auth.json MCP server credentials
+    ~/.pi/agent/sessions/     session transcripts (resume/steer state)
+  Not logged in; nothing created.
+
+================================================================================
+5. EGRESS HOSTS
+================================================================================
+- Not enumerable from the package: they follow the configured providers
+  (Anthropic/OpenAI/Google/openrouter/... each with their own base URLs,
+  overridable per provider). The profile declares them per credential, the
+  same table shape as opencode's PROVIDER_EGRESS block. Nothing else calls
+  home in the dist (no vendor telemetry host found in a strings pass; the
+  update path goes through npm).
+
+================================================================================
+6. UNCERTAIN / NOT VERIFIED
+================================================================================
+- Whether 1.3.0 changed any RPC command names T3 relies on (T3 nightly
+  targets 0.80.x-era protocol; only get_state/get_available_models were
+  exercised here).
+- Provider host table for Pi 1.3.0 (would be filled from Pi's provider
+  catalog when the H4/H6 profile is written).
+- Whether prompt "steer" behaviour differs from T3's 0.80.x observations.

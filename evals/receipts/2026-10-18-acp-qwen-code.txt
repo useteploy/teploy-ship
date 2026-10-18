@@ -1,0 +1,92 @@
+ACP initialize receipt — Qwen Code at @qwen-code/qwen-code@0.25.2
+(generic ACP-registry agent for slice H0)
+Date: 2026-10-18 (local). Worktree /tmp/lane-h0 @ evals/h0-acp-contracts
+(base github/main f3e0ced). Slice E7 H0 (programme E7.2 W3). Qwen Code is
+this lane's representative "generic ACP registry agent": Apache-2.0, npx
+distribution, pinned by exact version — the shape H9 will bake at image
+build time. Probe: node scripts/acp-initialize-probe.mjs -- qwen --acp
+(no credentials sent; child HOME pointed at a throwaway directory). Not
+logged in; no model call made.
+
+================================================================================
+1. INSTALL (how, version, size)
+================================================================================
+- npm package: @qwen-code/qwen-code@0.25.2, exactly as pinned by the ACP
+  registry entry "qwen-code" (distribution npx @qwen-code/qwen-code@0.25.2
+  with args ["--acp","--experimental-skills"]).
+- Installed with `npm install --prefix /tmp/h0-agents/qwen` (local only);
+  binary at /tmp/h0-agents/qwen/node_modules/.bin/qwen.
+- Size: npm dist.unpackedSize 142,504,046 bytes; installed tree 140 MB
+  (a gemini-cli fork, bundles similarly).
+- Registry metadata (registry v1.0.0, 42 agents, fetched 2026-10-18):
+  id qwen-code, name "Qwen Code", license Apache-2.0,
+  repository github.com/QwenLM/qwen-code.
+
+================================================================================
+2. ACP SUPPORT AND LAUNCH FLAG
+================================================================================
+- Speaks ACP: yes. Flag `--acp` (same flag family as gemini-cli, its
+  upstream); the registry also passes --experimental-skills, which is not
+  needed for initialize and was not used here.
+- Launch: newline-delimited JSON-RPC 2.0 over stdio.
+
+================================================================================
+3. INITIALIZE EXCHANGE (verbatim, captured 2026-10-18)
+================================================================================
+Request: as in the gemini receipt (protocolVersion 2 offered, fs/terminal
+client capabilities off).
+Response (one stdout line, answered in 1369 ms; no auth required):
+  {"jsonrpc":"2.0","id":1,"result":{
+    "protocolVersion":1,
+    "agentInfo":{"name":"qwen-code","title":"Qwen Code","version":"0.25.2"},
+    "authMethods":[
+      {"id":"openai","name":"Use OpenAI API key",
+       "description":"Requires setting the `OPENAI_API_KEY` environment variable",
+       "_meta":{"type":"terminal","args":["--auth-type=openai"]}}],
+    "agentCapabilities":{
+      "loadSession":true,
+      "promptCapabilities":{"image":true,"audio":true,"embeddedContext":true},
+      "sessionCapabilities":{"list":{},"resume":{}},
+      "mcpCapabilities":{"sse":true,"http":true},
+      "_meta":{"imageCapability":{"autoHandlesWrongModel":true,"maxBytes":10380902,"maxImagesPerTurn":4}}}}}
+Notes:
+- Client offered protocolVersion 2; agent answered 1.
+- sessionCapabilities list+resume both advertised (richer than gemini's
+  response at the same pin family).
+- The advertised auth method is an OPENAI_API_KEY env method with _meta
+  type "terminal" — i.e. this build's ACP layer points at an OpenAI-compatible
+  key, not a Qwen OAuth flow. Generic-agent lesson for H2/H3: the method a
+  registry agent advertises can be env-key-shaped but still carry _meta that
+  T3's runtime would refuse as non-agent; Ship's preflight must record the
+  advertised list verbatim and decide on the recorded fact.
+
+================================================================================
+4. AUTH
+================================================================================
+- initialize requires no credentials (observed).
+- K-class: OPENAI_API_KEY env per the advertised method; the CLI also
+  supports Qwen OAuth via an interactive `qwen` login outside ACP (not
+  probed).
+- State directory ~/.qwen/ (string evidence in the installed bundle):
+  ~/.qwen/.env (keys), ~/.qwen/QWEN.md (memory), ~/.qwen/agents/,
+  ~/.qwen/skills/, session dirs. Exact OAuth credential filename under
+  ~/.qwen/ not pinned down (no login performed).
+
+================================================================================
+5. EGRESS HOSTS (installed bundle strings; not wire-measured)
+================================================================================
+- dashscope.aliyuncs.com, coding.dashscope.aliyuncs.com (Qwen coding API)
+- coding-intl.dashscope.aliyuncs.com (international)
+- token-plan.cn-beijing.maas.aliyuncs.com,
+  token-plan.ap-southeast-1.maas.aliyuncs.com (quota/token plan checks)
+- qwen-code-assets.oss-cn-hangzhou.aliyuncs.com (assets/downloads)
+- qwen.ai, qwenlm.github.io (web/docs; assumed non-traffic)
+
+================================================================================
+6. UNCERTAIN / NOT VERIFIED
+================================================================================
+- Whether an OPENAI-compatible base URL (Qwen's dashscope OpenAI-mode) is
+  what the advertised method actually targets at this pin.
+- Which egress hosts fire in a headless ACP run (empty-allowlist sandbox
+  measurement pending).
+- Qwen OAuth credential filename under ~/.qwen/ (no login performed).

@@ -1,0 +1,115 @@
+ACP initialize receipt — Grok Build CLI at @xai-official/grok@1.0.63
+Date: 2026-10-18 (local). Worktree /tmp/lane-h0 @ evals/h0-acp-contracts
+(base github/main f3e0ced). Slice E7 H0 (programme E7.2 W3). Probe:
+node scripts/acp-initialize-probe.mjs -- grok agent stdio (no credentials
+sent; child HOME pointed at a throwaway directory). Not logged in; no model
+call made. T3 reference: packages/provider-grok (nightly
+v0.1.1-nightly.20261016.3218).
+
+================================================================================
+1. INSTALL (how, version, size)
+================================================================================
+- npm package: @xai-official/grok@1.0.63 — the exact pin in the ACP registry
+  entry "grok-build" (distribution npx @xai-official/grok@1.0.63 with args
+  ["agent","stdio"]). Note: npm's `latest` tag pointed at 1.0.62 on
+  2026-10-18 while 1.0.63 was already published; the registry pin (1.0.63)
+  was installed.
+- Installed with `npm install --prefix /tmp/h0-agents/grok` (local only).
+  Package layout: the main package is a 18,242-byte / 5-file stub
+  (bin/grok bootstrap + postinstall); the optional platform package
+  @xai-official/grok-darwin-arm64 carries bin/grok.br (47 MB, brotli), which
+  postinstall decompresses offline into bin/grok-native (168 MB) in the main
+  package. No https URL appears in postinstall.js or grok-bootstrap.js, so
+  the npm install is the only network step. Total @xai-official tree: 215 MB.
+- `grok --version` -> "grok 1.0.63 (c6c4520cedc1)".
+
+================================================================================
+2. ACP SUPPORT AND LAUNCH FLAG
+================================================================================
+- Speaks ACP: yes. Subcommand `grok agent stdio`.
+- Permission-mode flags on the argv (per T3 acpSupport.ts grokAcpSpawnArgs):
+  `--permission-mode default|auto` before `agent`, or `--always-approve`.
+  Ship profiles must use the asking mode (`--permission-mode default`), never
+  --always-approve (the permission gate must stay live).
+- Version note from the binary: "Headless mode requires a grok.com session.
+  Run `grok login` to sign in, or use `grok agent stdio` for API-key
+  access." — i.e. `agent stdio` is the API-key-accessible path.
+
+================================================================================
+3. INITIALIZE EXCHANGE (verbatim, captured 2026-10-18)
+================================================================================
+Request: as in the gemini receipt (protocolVersion 2 offered, fs/terminal
+client capabilities off).
+Response (one stdout line, answered in 592 ms; no auth required). Full JSON
+with long _meta elided here only where marked; the probe output keeps it all:
+  {"jsonrpc":"2.0","id":1,"result":{
+    "protocolVersion":1,
+    "agentCapabilities":{
+      "loadSession":true,
+      "promptCapabilities":{"image":false,"audio":false,"embeddedContext":true},
+      "mcpCapabilities":{"http":true,"sse":true},
+      "sessionCapabilities":{"list":{},"resume":{},"close":{}},
+      "auth":{},
+      "_meta":{"x.ai/fs_notify":true,
+               "x.ai/hooks":{"blockingEvents":["pre_tool_use","stop","subagent_stop"],"decisions":["deny","block"]},
+               "x.ai/capabilities":{"toolOverrides":{"x_keyword_search":true,"x_semantic_search":true,"x_user_search":false,"x_thread_fetch":false}}}},
+    "authMethods":[{"id":"grok.com","name":"Grok","description":"Sign in with Grok"}],
+    "_meta":{"agentVersion":"1.0.63",
+             "currentWorkingDirectory":"...",
+             "modelState":{"currentModelId":"grok-4.6",
+                           "availableModels":[{"modelId":"grok-4.6",...500000 ctx...},
+                                              {"modelId":"grok-4.5",...}]},
+             "availableCommands":[{"name":"compact"...},{"name":"always-approve","input":{"hint":"on|off"}},...deep-research/workflow/goal...],
+             "cancelRewind":true,"sessionRecap":true,"voiceMode":true,
+             "grokShell":true,"x.ai/mcp/sdk":true,"x.ai/pluginDirs":true}}}
+Notes:
+- Client offered protocolVersion 2; agent answered 1.
+- No top-level agentInfo (agentVersion lives in _meta).
+- sessionCapabilities list+resume+close all present; auth {} means logout is
+  supported.
+- IMPORTANT for the credential model: authMethods advertises ONLY the
+  `grok.com` subscription login, even when XAI_API_KEY is set — re-probed
+  with a fake XAI_API_KEY in the env and the list was unchanged. T3 still
+  authenticates API-key runs by choosing method id "xai.api_key" at
+  `authenticate` (acpSupport.ts: XAI_API_KEY selects xai.api_key, else
+  cached_token). So the K-class path is real but is NOT advertised at
+  initialize; a Ship preflight cannot discover it from the wire.
+
+================================================================================
+4. AUTH
+================================================================================
+- initialize requires no credentials (observed).
+- K-class: XAI_API_KEY env -> authenticate {methodId:"xai.api_key"}
+  (T3-verified; not re-verified live here beyond the initialize probe).
+- F-class: subscription login state under GROK_HOME, default ~/.grok
+  (T3 usage.ts:209: environment.GROK_HOME || ~/.grok). Binary string
+  evidence for the file layout inside it:
+    ~/.grok/auth.json         stored login (has_refresh_token/expires_at)
+    ~/.grok/auth.json.lock    cross-process refresh lock ("to keep rotating
+                              tokens ... atomic" in T3's words)
+  plus refresh-rotation machinery in strings: sibling-rotation demotion,
+  permanent-failure credential clearing, devbox re-mint. This is exactly the
+  F-class refresh-race the design note flags; a Ship lease is mandatory.
+  Not logged in; path recorded from strings only.
+
+================================================================================
+5. EGRESS HOSTS (binary strings of grok-native 1.0.63; not wire-measured)
+================================================================================
+- api.x.ai/v1                    API-key completions
+- cli-chat-proxy.grok.com/v1/chat/completions   subscription chat proxy
+- accounts.x.ai (/sign-in)       OAuth login
+- auth.x.ai                      token mint/refresh
+- console.x.ai                   key console (docs links)
+- computer-hub.grok.com          computer-use hub (uncertain when used)
+- code.grok.com                  share web (GROK_CODE_WEB_URL)
+- Optional/managed: GROK_TRACE_UPLOAD_* endpoints, GROK_MANAGED_CONFIG_URL,
+  OTEL_EXPORTER_OTLP_* (all env-gated, absent by default).
+
+================================================================================
+6. UNCERTAIN / NOT VERIFIED
+================================================================================
+- Which egress hosts a headless ACP run actually touches (needs the
+  empty-allowlist sandbox measurement).
+- Exact ~/.grok layout beyond auth.json/auth.json.lock (no login performed).
+- Whether `x.ai.api_key`-style method ids change at other versions (T3 pinned
+  nothing older than its nightly; 1.0.63 is the only version probed).
