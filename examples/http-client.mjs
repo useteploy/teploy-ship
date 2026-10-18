@@ -88,6 +88,15 @@ export class ShipClient {
     if (!message || !requestId) throw new Error('message and stable requestId are required');
     return this.#form(this.#runPath(runId), { intent: 'fork', message, journey, requestId }, 'fork run');
   }
+  // DS1 (SHIP_STACKED_PRS): stack a change on a run's OPEN pull request — the
+  // stacked run's branch starts at the base run's recorded pull request head
+  // and its own pull request opens against the base's branch, not the default
+  // branch. Refused (HTTP error naming the reason) when the flag is off, the
+  // base run opened no pull request of its own, or it pushed nothing.
+  stack(runId, { message, journey = 'change', requestId }) {
+    if (!message || !requestId) throw new Error('message and stable requestId are required');
+    return this.#form(this.#runPath(runId), { intent: 'stack', message, journey, requestId }, 'stack change');
+  }
 }
 
 // ---- Event verification (webhook receivers) -------------------------------
