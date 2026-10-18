@@ -103,6 +103,8 @@ import { warmCacheEnabled, warmSlugOf } from "./warm.js";
 import { assertRepoAllowed, policyFromEnv } from "./repo-policy.js";
 import { forkEnabled, forkNote, resolveForkSource } from "./fork.js";
 import type { ForkSourceRecord } from "./fork.js";
+import { resolveStackBase, stackedPrsEnabled, stackNote } from "./stacked-pr.js";
+import type { StackOnRecord, StackRebaseRequest } from "./stacked-pr.js";
 import { effectiveRunCap, sandboxOverridesOf, withProjects } from "./durable.js";
 import { costUSD } from "./pricing.js";
 import type { RepoTrust } from "./repo-policy.js";
@@ -1165,6 +1167,26 @@ export async function enqueueRun(
      * pass no parentRunId. See fork.ts.
      */
     forkOf?: string;
+    /**
+     * DS1 (SHIP_STACKED_PRS): open this run's pull request ON TOP of the named
+     * base run's open pull request. The base must be a run that OPENED a Ship
+     * pull request and pushed (stacked-pr.ts refuses by name otherwise) and
+     * the flag must be on — both checked HERE, at enqueue, so every surface
+     * gets the same refusal and no worker re-derives the stack. The base's
+     * branch and recorded head are materialised into the input as `stack`,
+     * which admits no step: the repo-setup step reads it to decide where to
+     * stand and against which branch the PR opens. Never with `pr`, `forkOf`
+     * or a scan.
+     */
+    stackOn?: string;
+    /**
+     * DS1 (SHIP_STACKED_PRS): the revision pr-watch wakes when the stack's
+     * base pull request squash-merged, carried from the intake task's `stack`
+     * by the launch. Internal to that path — never a surface option. Admits
+     * exactly one step (`stack-rebase`), so a run without it replays
+     * byte-identically.
+     */
+    stackRebase?: StackRebaseRequest;
   },
 ): Promise<EnqueueReport | undefined> {
   const journey = options.journey === undefined ? undefined : parseJourney(options.journey);
@@ -1195,9 +1217,34 @@ export async function enqueueRun(
     if (!resolved.ok) throw new Error(resolved.reason);
     fork = resolved.record;
   }
+  // DS1 (SHIP_STACKED_PRS): same contract as the fork above — resolve ONCE,
+  // here, so a refused stack never exists as a run and a replay reads the
+  // materialised record rather than a base log that moved on. The mutual
+  // exclusions are structural: a stacked run opens its own PR (never `pr`),
+  // stands on the base's head (never also a fork), and is a change run.
+  let stack: StackOnRecord | undefined;
+  if (options.stackOn !== undefined) {
+    if (!stackedPrsEnabled()) throw new Error("stack refused (SHIP_STACKED_PRS off): stacked pull requests are not enabled on this deployment");
+    if (options.pr !== undefined) throw new Error("stack refused: a stacked run opens its own pull request; pass no pr");
+    if (options.forkOf !== undefined) throw new Error("stack refused: a run stands on either a fork's commit or a stack base, not both");
+    if (options.mode === "scan" || (journey !== undefined && journey !== "change") || options.delegateChild === true) {
+      throw new Error("stack refused: a stacked run is a change run, not a scan or a delegation child");
+    }
+    if (options.repo === undefined) throw new Error("stack refused: a stacked run needs a repository");
+    const resolved = await resolveStackBase(runtime, options.stackOn, options.repo);
+    if (!resolved.ok) throw new Error(resolved.reason);
+    stack = resolved.record;
+  }
+  if (options.stackRebase !== undefined) {
+    const { oldBaseHeadSha, defaultBranch } = options.stackRebase;
+    if (!/^[a-f0-9]{40}$/.test(oldBaseHeadSha)) throw new Error("stackRebase.oldBaseHeadSha must be a full commit sha");
+    if (defaultBranch.trim() === "" || defaultBranch !== defaultBranch.trim()) throw new Error("stackRebase.defaultBranch must name a branch");
+  }
   // The fork's Recorded line rides the task (fork.ts) ahead of any journey
   // instruction, so the run's own log says what it inherited and from where.
-  const baseTask = fork === undefined ? options.task : `${options.task}\n\n${forkNote(fork)}`;
+  // The stack's line (stacked-pr.ts) rides with it for the same reason.
+  const recorded = [fork !== undefined ? forkNote(fork) : "", stack !== undefined ? stackNote(stack) : ""].filter((n) => n !== "");
+  const baseTask = recorded.length === 0 ? options.task : `${options.task}\n\n${recorded.join("\n\n")}`;
   // Materialise the thresholds at ENQUEUE, never leave a bare `true` in the
   // log. durable.ts's contract is that the thresholds are fixed at enqueue,
   // because they decide which turn the run terminates on: a worker replaying
@@ -1555,6 +1602,15 @@ export async function enqueueRun(
         // it to decide where to stand — so runs without it stay byte-identical
         // and the fingerprint does not move (fork.ts).
         ...(fork !== undefined ? { forkOf: fork } : {}),
+        // DS1 (SHIP_STACKED_PRS): the base's branch and recorded head,
+        // materialised only when this run was enqueued with stackOn. Admits no
+        // step — repo-setup reads it for where to stand and repo-pr echoes it
+        // at open — so runs without it stay byte-identical and the fingerprint
+        // does not move (stacked-pr.ts).
+        ...(stack !== undefined ? { stack } : {}),
+        // DS1: the woken revision's two facts. Admits exactly one step
+        // (`stack-rebase`), absent on every run enqueued before this field.
+        ...(options.stackRebase !== undefined ? { stackRebase: options.stackRebase } : {}),
         ...(options.repo !== undefined ? { repo: options.repo, repositoryScopeVersion: 2 as const } : {}),
         // Provenance, recorded whenever the caller stated it — not only on
         // repo runs. A chat message or an issue comment with no repository

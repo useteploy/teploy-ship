@@ -1796,6 +1796,9 @@ export function startWorker(options: WorkerOptions): {
           ...(changeClassRequired(task.source) ? { changeClass: true } : {}),
           ...(task.repo !== undefined ? { repo: task.repo } : {}),
           ...(task.pr !== undefined ? { pr: task.pr } : {}),
+          // DS1 (SHIP_STACKED_PRS): a stack-rebase task carries its recorded
+          // facts into the run's input, where they admit the stack-rebase step.
+          ...(task.stack !== undefined ? { stackRebase: task.stack } : {}),
           // L7: where the task came from, so the outcome can find its way home.
           // The Akiroo footer rides the issue body into the task's detail; the
           // structured ref is recovered from it here, once, at launch.
