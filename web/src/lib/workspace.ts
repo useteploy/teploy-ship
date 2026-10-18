@@ -258,10 +258,15 @@ export function evidence(facts: Record<string, any>, reviewedHead?: string): Evi
       if (href)
         images.push({ name: String(s.name ?? "Browser screenshot"), href });
     }
+  // A recording stored without a public link is still on the run page, by
+  // its artifact id on the same access-checked route.
+  const recordingHref = (s: Record<string, any>) =>
+    safeLink(s.asset) ??
+    (typeof s.artifact === "string" ? safeLink(`/api/artifacts/${s.artifact}`) : undefined);
   const videos: Evidence["videos"] = Array.isArray(flow.videos)
     ? flow.videos.flatMap((v: unknown) => {
         const s = record(v),
-          href = safeLink(s.asset);
+          href = recordingHref(s);
         return href
           ? [{ name: String(s.name ?? "Browser recording"), href }]
           : [];
@@ -269,11 +274,10 @@ export function evidence(facts: Record<string, any>, reviewedHead?: string): Evi
     : [];
   return {
     unattached: [
-      ...(Array.isArray(flow.shots) ? flow.shots : []),
-      ...(Array.isArray(flow.videos) ? flow.videos : []),
-      ...(visual.kind === "captured" ? [visual.main, visual.preview] : []),
+      ...(Array.isArray(flow.shots) ? flow.shots : []).filter((v: unknown) => !safeLink(record(v).asset)),
+      ...(Array.isArray(flow.videos) ? flow.videos : []).filter((v: unknown) => !recordingHref(record(v))),
+      ...(visual.kind === "captured" ? [visual.main, visual.preview] : []).filter((v: unknown) => !safeLink(record(v).asset)),
     ]
-      .filter((v) => !safeLink(record(v).asset))
       .map((v) => String(record(v).name ?? "Visual capture")),
     checks,
     images,

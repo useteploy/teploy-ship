@@ -16,7 +16,7 @@ import { HARNESS_VERSIONS, selectAdapter } from "./harness.js";
 import { STEER_CLOSED_MESSAGE, steerLoopExited, steerRefusal } from "./harness-capabilities.js";
 import { admittedSteps } from "./step-fingerprint.js";
 import {
-  codexGatewayConfigFlags, envFile, STEER_ROUNDS_MAX, externalAdapters, externalHarnessConfig, externalPrompt, opencodeFutureLineRefusal, opencodeSessionId,
+  codexGatewayConfigFlags, forwardEnv, STEER_ROUNDS_MAX, externalAdapters, externalHarnessConfig, externalPrompt, opencodeFutureLineRefusal, opencodeSessionId,
   parseClaudeStream, parseCodexExecStream, parseOpencode2Stream, parseOpencodeStream, shq, versionMajor,
 } from "./harness-external.js";
 
@@ -177,14 +177,33 @@ test("parseOpencode2Stream reads the measured 2.0.26 contract: messageID turns, 
   assert.equal(errored.sessionId, "ses_ec2542a35ffeOd4SukP1pZcV3y", "the session is known even from a failed run");
 });
 
-test("envFile forwards only named, present, well-formed variables and quotes for sh", () => {
-  const { text, names } = envFile(["CLAUDE_CODE_OAUTH_TOKEN", "MISSING", "bad-name", "ANTHROPIC_API_KEY"], {
+test("forwardEnv forwards only named, present, well-formed variables as exec env", () => {
+  const forwarded = forwardEnv(["CLAUDE_CODE_OAUTH_TOKEN", "MISSING", "bad-name", "ANTHROPIC_API_KEY", "OPENCODE_CONFIG_CONTENT"], {
     CLAUDE_CODE_OAUTH_TOKEN: "tok'en",
     ANTHROPIC_API_KEY: "",
+    OPENCODE_CONFIG_CONTENT: '{\n  "a": 1\n}\n',
   });
-  assert.deepEqual(names, ["CLAUDE_CODE_OAUTH_TOKEN"]);
-  assert.equal(text, `CLAUDE_CODE_OAUTH_TOKEN='tok'\\''en'\n`);
+  assert.deepEqual(forwarded.names, ["CLAUDE_CODE_OAUTH_TOKEN", "OPENCODE_CONFIG_CONTENT"]);
+  // A single-line value rides as itself; a multi-line one (the daemon refuses
+  // line breaks in exec env) rides base64 under a carrier name.
+  assert.deepEqual(forwarded.env, {
+    CLAUDE_CODE_OAUTH_TOKEN: "tok'en",
+    SHIP_B64_OPENCODE_CONFIG_CONTENT: Buffer.from('{\n  "a": 1\n}\n').toString("base64"),
+  });
+  assert.match(forwarded.prelude, /unset SHIP_B64_OPENCODE_CONFIG_CONTENT;/);
+  assert.ok(!forwarded.prelude.includes("tok'en"), "values never enter the command line");
+  assert.deepEqual(forwarded.secrets.map((s) => s.name), ["CLAUDE_CODE_OAUTH_TOKEN", "OPENCODE_CONFIG_CONTENT"]);
   assert.equal(shq("a b"), "'a b'");
+});
+
+test("forwardEnv's prelude restores a multi-line value byte-exact inside the shell", async () => {
+  const value = '{\n  "provider": {"x": "y z"}\n}\n\n';
+  const forwarded = forwardEnv(["OPENCODE_CONFIG_CONTENT"], { OPENCODE_CONFIG_CONTENT: value });
+  const work = await mkdtemp(join(tmpdir(), "fwd-env-"));
+  const executor = new LocalExecutor({ root: work });
+  const result = await executor.exec(`${forwarded.prelude}printf %s "$OPENCODE_CONFIG_CONTENT"; printf '|%s' "\${SHIP_B64_OPENCODE_CONFIG_CONTENT-unset}"`, { env: forwarded.env });
+  assert.equal(result.exitCode, 0, result.stderr);
+  assert.equal(result.stdout, `${value}|unset`);
 });
 
 test("externalHarnessConfig reads its env with defaults", () => {
@@ -325,6 +344,143 @@ test("claude-code adapter: an API-key run is priced, carries claude's cost, and 
   assert.equal(out.usage?.priced, true);
   assert.equal(out.usage?.costUSD, 0.0123);
   assert.match(await readFile(join(recordTo, "args"), "utf8"), /--max-budget-usd 2\.00/);
+});
+
+/**
+ * H1 negative-control harness: a fake `claude` that does everything a
+ * careless or prompt-injected agent could do with its credential. It dumps
+ * `env` to stdout and stderr, echoes the bare key and its base64, names the
+ * key in a tool call the live tracker reads, and puts it (and the forge
+ * token) in its final result. It also looks for a credential FILE in the
+ * workspace while it runs and records its own argv. The raw env dump goes to
+ * a file OUTSIDE the workspace — the proof the value really reached the
+ * process, so a clean record means scrubbed, not absent.
+ */
+const LEAK_KEY = "sk-ant-api03-LEAKCANARY-0123456789abcdefABCDEF";
+const LEAK_GIT = "forge-token-CANARY-9876543210";
+
+async function leakyClaude(recordTo: string, gitToken: string): Promise<{ bin: string; work: string }> {
+  const bin = await mkdtemp(join(tmpdir(), "leaky-harness-bin-"));
+  const work = await mkdtemp(join(tmpdir(), "leaky-harness-work-"));
+  const result = JSON.stringify({ ...CLAUDE_RESULT, result: `done; key=KEYHERE git=${gitToken}` }).replace("KEYHERE", "'\"$ANTHROPIC_API_KEY\"'");
+  const tool = JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "curl -H x-api-key:KEYHERE" } }] } }).replace("KEYHERE", "'\"$ANTHROPIC_API_KEY\"'");
+  await fakeBin(
+    bin,
+    "claude",
+    [
+      `if [ "$1" = "--version" ]; then echo "9.9.9 (fake)"; exit 0; fi`,
+      `printf '%s\\n' "$0 $*" > ${shq(join(recordTo, "argv"))}`,
+      `env > ${shq(join(recordTo, "envdump"))}`,
+      `ls -a .teploy-agent > ${shq(join(recordTo, "agentdir"))} 2>&1`,
+      `grep -rlF "$ANTHROPIC_API_KEY" . > ${shq(join(recordTo, "filehits"))} 2>/dev/null || true`,
+      `env`,
+      `echo "$ANTHROPIC_API_KEY"`,
+      `printf %s "$ANTHROPIC_API_KEY" | base64`,
+      `echo '${tool}'`,
+      `env >&2`,
+      `echo "bare $ANTHROPIC_API_KEY" >&2`,
+      `echo '${result}'`,
+    ].join("\n"),
+  );
+  return { bin, work };
+}
+
+test("H1: credentials ride exec env, never a workspace file or argv, and are scrubbed from every record and the live feed", async () => {
+  const recordTo = await mkdtemp(join(tmpdir(), "leaky-harness-rec-"));
+  const { bin, work } = await leakyClaude(recordTo, "no-git-token");
+  const inner = new LocalExecutor({ root: work, env: { PATH: `${bin}:${process.env.PATH ?? ""}` } });
+  const commands: Array<{ command: string; env?: Record<string, string> }> = [];
+  const executor = {
+    exec: (command: string, options: Parameters<typeof inner.exec>[1] = {}) => {
+      commands.push({ command, ...(options.env !== undefined ? { env: options.env } : {}) });
+      return inner.exec(command, options);
+    },
+    putFile: (path: string, data: string | Uint8Array) => inner.putFile(path, data),
+    getFile: (path: string) => inner.getFile(path),
+  } as unknown as LocalExecutor;
+  const provider: ExecutorProvider = {
+    isolated: true,
+    async create() {
+      return { handle: work };
+    },
+    attach() {
+      return executor;
+    },
+    // Streamed in 5-character chunks, so the key is split across chunk
+    // boundaries on the way to the live tracker.
+    async execStream(_handle, command, options, onChunk) {
+      const result = await executor.exec(command, options);
+      for (let i = 0; i < result.stdout.length; i += 5) onChunk("stdout", result.stdout.slice(i, i + 5));
+      for (let i = 0; i < result.stderr.length; i += 5) onChunk("stderr", result.stderr.slice(i, i + 5));
+      return result;
+    },
+  };
+  const liveFeed: unknown[] = [];
+  const env = { ANTHROPIC_API_KEY: LEAK_KEY };
+  const wf = durableAgent({
+    model: neverModel,
+    executor: provider,
+    workdir: ".",
+    harnesses: externalAdapters({ env }),
+    live: { async set(_runId, update) { liveFeed.push(update); } },
+  });
+  const store = new MemoryEventStore();
+  const outcome = await executeRun({ workflow: wf, runId: "run-leak", store, input: { task: "t", harness: { id: "claude-code", version: HARNESS_VERSIONS["claude-code"] } } });
+  assert.equal(outcome.status, "completed", JSON.stringify(outcome));
+
+  // Negative control: the value reached the process and it printed it.
+  assert.ok((await readFile(join(recordTo, "envdump"), "utf8")).includes(`ANTHROPIC_API_KEY=${LEAK_KEY}`), "control: the harness must have seen the key");
+
+  const encoded = Buffer.from(LEAK_KEY).toString("base64");
+  const events = JSON.stringify(await store.load("run-leak"));
+  assert.ok(!events.includes(LEAK_KEY), "no recorded event carries the key");
+  assert.ok(!events.includes(encoded), "no recorded event carries the key's base64");
+  assert.match(events, /\[redacted ANTHROPIC_API_KEY\]/, "the scrub left its marker where the key was");
+  const out = outcome.output as DurableAgentOutput;
+  assert.ok(!(out.agentSummary ?? "").includes(LEAK_KEY));
+  assert.ok(!JSON.stringify(outcome).includes(LEAK_KEY), "nor does the run output");
+  const live = JSON.stringify(liveFeed);
+  assert.ok(liveFeed.length > 1, "the live feed saw the tool call");
+  assert.match(live, /curl -H x-api-key:\[redacted ANTHROPIC_API_KEY\]/, "the tool call reached the live feed, scrubbed");
+  assert.ok(!live.includes(LEAK_KEY), "the live feed never carries the key");
+
+  // Delivery: in the exec's env, not on any command line, not in a file.
+  const harnessExec = commands.find((c) => c.command.includes("claude --print") || c.command.includes("claude -p"));
+  assert.ok(harnessExec !== undefined, JSON.stringify(commands.map((c) => c.command)));
+  assert.equal(harnessExec.env?.ANTHROPIC_API_KEY, LEAK_KEY, "the key travels in the exec env");
+  for (const { command } of commands) assert.ok(!command.includes(LEAK_KEY), `argv carries no secret: ${command}`);
+  assert.ok(!(await readFile(join(recordTo, "argv"), "utf8")).includes(LEAK_KEY), "the vendor's own argv carries no secret");
+  assert.ok(!(await readFile(join(recordTo, "agentdir"), "utf8")).includes("harness.env"), "no credential file during the run");
+  assert.equal(await readFile(join(recordTo, "filehits"), "utf8"), "", "no workspace file held the key during the run");
+  const after = await inner.exec(`grep -rlF ${shq(LEAK_KEY)} . || true; ls -a .teploy-agent 2>/dev/null || true`);
+  assert.ok(!after.stdout.includes("harness.env"), "no credential file after the run");
+  assert.ok(!after.stdout.includes("./"), `no workspace file holds the key after the run: ${after.stdout}`);
+});
+
+test("H1: the run's forge token is scrubbed from harness output like a forwarded key", async () => {
+  const recordTo = await mkdtemp(join(tmpdir(), "leaky-harness-rec-"));
+  const { bin, work } = await leakyClaude(recordTo, LEAK_GIT);
+  const executor = new LocalExecutor({ root: work, env: { PATH: `${bin}:${process.env.PATH ?? ""}` } });
+  const recorded: unknown[] = [];
+  const ctx = {
+    runId: "run-git",
+    async step<T>(name: string, fn: () => Promise<T> | T): Promise<T> {
+      const value = await fn();
+      recorded.push({ name, value });
+      return value;
+    },
+  };
+  const adapter = externalAdapters({ env: { ANTHROPIC_API_KEY: LEAK_KEY } }).find((a) => a.id === "claude-code" && a.version === HARNESS_VERSIONS["claude-code"])!;
+  const result = await adapter.run(
+    { prompt: "t", task: "t", input: { task: "t" } },
+    { ctx: ctx as never, handle: work, executor, workdir: ".", checkout: null, scopeKey: null, stepPrefix: "", secrets: [{ name: "git-token", value: LEAK_GIT }] },
+    { maxSteps: 5, maxRunCostUSD: 0 },
+    () => {},
+  );
+  const text = JSON.stringify({ recorded, result });
+  assert.match(text, /git=\[redacted git-token\]/);
+  assert.ok(!text.includes(LEAK_GIT), "the forge token is not in any recorded step or the result");
+  assert.ok(!text.includes(LEAK_KEY));
 });
 
 test("a missing binary is a recorded error result, not a thrown step", async () => {
@@ -868,7 +1024,7 @@ test("codexGatewayConfigFlags declare the teploy-gateway provider only when AI_G
   const flags = codexGatewayConfigFlags(["CODEX_API_KEY", "AI_GATEWAY_URL", "AI_GATEWAY_KEY"]);
   assert.match(flags, /--config 'model_providers\.teploy-gateway\.name="teploy-gateway"'/);
   // The base_url rides in single quotes inside a double-quoted shell word, so
-  // $AI_GATEWAY_URL expands inside the sandbox after harness.env is sourced —
+  // $AI_GATEWAY_URL expands inside the sandbox from the exec's env —
   // the URL never appears in the command Ship builds.
   assert.match(flags, /--config "model_providers\.teploy-gateway\.base_url='\$AI_GATEWAY_URL'"/);
   assert.match(flags, /--config 'model_providers\.teploy-gateway\.env_key="AI_GATEWAY_KEY"'/);
@@ -956,7 +1112,7 @@ test("codex adapter: a gateway-routed run declares the teploy-gateway provider a
   assert.equal(outcome.status, "completed", JSON.stringify(outcome));
   const args = await readFile(join(recordTo, "args"), "utf8");
   assert.match(args, /model_providers\.teploy-gateway\.name="teploy-gateway"/);
-  // $AI_GATEWAY_URL expands inside the sandbox after harness.env is sourced,
+  // $AI_GATEWAY_URL expands inside the sandbox from the exec's env,
   // so the binary's argv carries the expanded, TOML-quoted URL — while the
   // flags Ship built (unit test above) and the recorded step carry names only.
   assert.match(args, /model_providers\.teploy-gateway\.base_url='http:\/\/ship-gateway:8089\/v1'/);

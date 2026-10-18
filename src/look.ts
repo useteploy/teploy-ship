@@ -19,7 +19,7 @@ import { createHash } from "node:crypto";
 
 import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 
-import { LOOK_IMAGE_DATA_CLASS, type ArtifactStore } from "./artifacts.js";
+import { LOOK_IMAGE_DATA_CLASS, type ArtifactBinding, type ArtifactStore } from "./artifacts.js";
 import type { Action } from "./actions.js";
 
 export type LookAction = Extract<Action, { kind: "look" }>;
@@ -343,7 +343,7 @@ export async function runLook(executor: AgentExecutor, scriptSuffix: string, act
  * observation (exit code, stderr) is the honest failure the agent reads,
  * same as a text look.
  */
-export async function runLookImage(executor: AgentExecutor, scriptSuffix: string, action: LookAction, artifacts: ArtifactStore, timeoutMs?: number): Promise<LookImageResult> {
+export async function runLookImage(executor: AgentExecutor, scriptSuffix: string, action: LookAction, artifacts: ArtifactStore, timeoutMs?: number, binding?: ArtifactBinding): Promise<LookImageResult> {
   const result = await runLook(executor, scriptSuffix, { ...action, image: true }, timeoutMs);
   if (result.exitCode !== 0 || result.truncated) return result;
   let bytes: Uint8Array;
@@ -357,7 +357,7 @@ export async function runLookImage(executor: AgentExecutor, scriptSuffix: string
   const put =
     artifacts.putTemporary !== undefined
       ? artifacts.putTemporary.bind(artifacts)
-      : (name: string, b: Uint8Array, dataClass?: string) => artifacts.put(name, b, dataClass);
-  const artifact = await put(`look-${scriptSuffix}.png`, bytes, LOOK_IMAGE_DATA_CLASS);
+      : (name: string, b: Uint8Array, dataClass?: string, bound?: ArtifactBinding) => artifacts.put(name, b, dataClass, bound);
+  const artifact = await put(`look-${scriptSuffix}.png`, bytes, LOOK_IMAGE_DATA_CLASS, binding);
   return { ...result, image: { artifact, digest: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length } };
 }

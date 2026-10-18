@@ -37,7 +37,7 @@ import {
   WORKING_DIFF_MAX_CHARS,
   uploadPrAsset,
 } from "./git.js";
-import { LOOK_IMAGE_DATA_CLASS } from "./artifacts.js";
+import { LOOK_IMAGE_DATA_CLASS, RECORDING_DATA_CLASS } from "./artifacts.js";
 import { credentialFor } from "./repo-policy.js";
 
 test("assertGitSafe rejects shell-active refs (command-injection defense)", () => {
@@ -788,10 +788,6 @@ test("uploadPrAsset posts multipart to Forgejo's issue assets and returns the do
   assert.ok(form instanceof FormData, "the body is multipart form data");
   const file = form.get("attachment");
   assert.ok(file instanceof Blob && file.size === 4, "the PNG bytes travel as the attachment field");
-  await uploadPrAsset({ ref: forgejo, token: "tok", pr: 7, name: "walkthrough.webm", bytes: new Uint8Array([1, 2]), fetchImpl });
-  const video = (calls[1]?.init.body as FormData).get("attachment");
-  assert.ok(video instanceof Blob);
-  assert.equal(video.type, "video/webm");
 
   await assert.rejects(
     () => uploadPrAsset({ ref: parseRepoUrl("https://github.com/o/r"), token: "t", pr: 1, name: "x.png", bytes: new Uint8Array([1]), fetchImpl }),
@@ -819,6 +815,23 @@ test("the D4 hard rule: a look-image artifact is never attached to a pull reques
   const url = await uploadPrAsset({ ref: forgejo, token: "t", pr: 7, name: "preview.png", bytes: new Uint8Array([137, 80, 78, 71]), fetchImpl });
   assert.match(url, /attachments/);
   assert.equal(calls.length, 1, "only the untagged upload reached the forge");
+});
+
+test("Q3a: a browser recording is never attached to a pull request, by tag, by bytes or by name", async () => {
+  const calls: unknown[] = [];
+  const fetchImpl = (async (url: string | URL | Request) => {
+    calls.push(String(url));
+    return new Response(JSON.stringify({ browser_download_url: "http://forge.example:3000/attachments/uuid-rec" }), { status: 201 });
+  }) as typeof fetch;
+  const forgejo = parseRepoUrl("http://forge.example:3000/Tyler/app");
+  const webm = new Uint8Array([26, 69, 223, 163, 1, 2]);
+  await assert.rejects(
+    () => uploadPrAsset({ ref: forgejo, token: "t", pr: 7, name: "clip.bin", bytes: new Uint8Array([1, 2]), dataClass: RECORDING_DATA_CLASS, fetchImpl }),
+    /recordings are never attached/,
+  );
+  await assert.rejects(() => uploadPrAsset({ ref: forgejo, token: "t", pr: 7, name: "clip.png", bytes: webm, fetchImpl }), /recordings are never attached/);
+  await assert.rejects(() => uploadPrAsset({ ref: forgejo, token: "t", pr: 7, name: "walkthrough.webm", bytes: new Uint8Array([1, 2]), fetchImpl }), /recordings are never attached/);
+  assert.equal(calls.length, 0, "refused before any request");
 });
 
 test("S01: a failed authenticated fetch leaves no token in .git/config and none in the error", async () => {

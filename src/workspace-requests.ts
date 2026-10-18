@@ -183,7 +183,7 @@ async function storeScreenshot(
   try {
     const store = runtime.artifacts;
     const put = store.putTemporary ?? store.put;
-    const id = await put.call(store, `takeover-${runId}-${Date.now()}.${format === "jpeg" ? "jpg" : "png"}`, bytes);
+    const id = await put.call(store, `takeover-${runId}-${Date.now()}.${format === "jpeg" ? "jpg" : "png"}`, bytes, undefined, { runId });
     return { id, bytes: bytes.length };
   } catch (e) {
     throw new Error(

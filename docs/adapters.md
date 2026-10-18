@@ -38,8 +38,14 @@ Two recorded steps, both of which always record a value:
    incompatible line refuses.
 2. `harness-run` — one `exec` in the sandbox: the prompt is written to
    `.teploy-agent/harness-prompt.md` (git-excluded), the forwarded credentials
-   to `.teploy-agent/harness.env` which the command sources and deletes before
-   the binary starts, and the binary's event stream is parsed when it exits.
+   travel in that exec's own env (the sandbox daemon passes them to the
+   command through a private `--env-file`; never a file in the workspace,
+   never argv; a multi-line value rides base64 under `SHIP_B64_<NAME>` and is
+   decoded in the shell), and the binary's event stream is parsed when it
+   exits. Every forwarded value, and the run's forge token, is replaced by
+   `[redacted NAME]` (also in base64 form) in the binary's stdout and stderr
+   before parse, record and the live feed. Values shorter than 8 characters
+   are not scrubbed, since they would match ordinary output.
    The recorded step carries exit code, status, summary, turn count, usage,
    the NAMES of the forwarded variables (never values), a stderr tail and —
    since the contract-2 adapters — the **vendor session id** the run drove
@@ -416,7 +422,7 @@ additionally declares a `teploy-gateway` model provider and selects it:
 --config 'model_provider="teploy-gateway"'
 ```
 
-The URL expands inside the sandbox after `harness.env` is sourced, so the
+The URL expands inside the sandbox from the exec's env, so the
 command Ship builds names the variable, not the deployment; codex reads the
 key itself from `AI_GATEWAY_KEY` (`env_key`). One constraint to know before
 relying on it: codex speaks the **Responses** wire API only — `wire_api =

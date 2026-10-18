@@ -1,7 +1,7 @@
 import { repoKeyOf } from "./repository-scope.js";
 export { repoKeyOf } from "./repository-scope.js";
 import { assertRestoredRepository } from "./workspace-integrity.js";
-import type { ArtifactStore } from "./artifacts.js";
+import { isWebm, RECORDING_DATA_CLASS, SCREENSHOT_RETENTION_MS, type ArtifactStore } from "./artifacts.js";
 import { prepareEnvironment, type EnvironmentPreparation } from "./environment.js";
 import type { RunOrigin } from "./notify.js";
 import { akirooTrailersFrom } from "./akiroo.js";
@@ -76,6 +76,7 @@ import { refusalMessage, warningMessage } from "./publish-policy.js";
 import type { RepoCheckout, RepoRef } from "./git.js";
 import { assertRepoAllowed, credentialFor, policyFromEnv } from "./repo-policy.js";
 import type { RepoPolicyConfig, RepoTrust } from "./repo-policy.js";
+import type { KnownSecret } from "./redact.js";
 import { condenseIfNeeded, defaultCondenseConfig } from "./memory.js";
 import type { CondenseConfig } from "./memory.js";
 import { RecoveryTracker, defaultRecoveryConfig } from "./recovery.js";
@@ -846,7 +847,7 @@ export interface ExecutorProvider {
    * (the sandbox daemon's exec is SSE). Same result as `attach(h).exec`;
    * the chunks feed the live hint. Absent means output arrives at exit.
    */
-  execStream?: (handle: string, command: string, options: { timeoutMs?: number; maxOutputBytes?: number }, onChunk: (stream: "stdout" | "stderr", chunk: string) => void) => Promise<ExecResult>;
+  execStream?: (handle: string, command: string, options: { timeoutMs?: number; maxOutputBytes?: number; env?: Record<string, string> }, onChunk: (stream: "stdout" | "stderr", chunk: string) => void) => Promise<ExecResult>;
   /**
    * The warm repo cache (SB-A), present only on a provider that can talk
    * to a daemon holding one. `warmInfo` reports the run volume's current
@@ -1568,7 +1569,8 @@ export function durableAgent(
       // The loop used to hold handle/executor as `let` locals and reassign them
       // on a snapshot restore; the workspace carries them now so the publish
       // gate reads whichever container the attempt ended in.
-      const primary: HarnessWorkspace = { ctx, handle, executor, workdir, checkout, scopeKey, stepPrefix: "", ...liveWiring(config, ctx.runId, handle, "") };
+      const secrets = checkoutSecrets(input.repo, checkout, repoPolicy);
+      const primary: HarnessWorkspace = { ctx, handle, executor, workdir, checkout, scopeKey, stepPrefix: "", secrets, ...liveWiring(config, ctx.runId, handle, "") };
 
       /**
        * Collect a scan's findings out of the agent's own finish message, as a
@@ -1746,7 +1748,7 @@ export function durableAgent(
             const prepared = await ctx.step(`${p}environment-prepare`, () => prepareEnvironment(attemptExecutor, input.preparation!));
             if (prepared.kind !== "passed") throw new Error("Environment preparation failed for this attempt");
           }
-          ws = { ctx, handle: attemptHandle, executor: attemptExecutor, workdir, checkout: attemptCheckout, scopeKey, stepPrefix: p, ...liveWiring(config, ctx.runId, attemptHandle, p) };
+          ws = { ctx, handle: attemptHandle, executor: attemptExecutor, workdir, checkout: attemptCheckout, scopeKey, stepPrefix: p, secrets, ...liveWiring(config, ctx.runId, attemptHandle, p) };
         }
         const result = await attemptAdapter.run(harnessTask, ws, budget, () => {});
         const diff = await ctx.step(`${p}diff`, async () => {
@@ -2691,7 +2693,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
             // bytes, so a crash between put and record re-runs idempotently.
             const result = await ws.ctx.step(`${p}turn-${turn}-look-image`, () => {
               ws.live?.({ phase: "running", turn, detail: clipDetail(describeAction(action)) });
-              return runLookImage(ws.executor, `t${turn}`, action, config.artifacts!, config.actionTimeoutMs);
+              return runLookImage(ws.executor, `t${turn}`, action, config.artifacts!, config.actionTimeoutMs, { runId: ws.ctx.runId });
             });
             imageLooks += 1;
             // Text first, exactly like a text look: framed after truncation
@@ -4132,28 +4134,52 @@ async function runLadderLegs(
 }
 
 /**
- * Where the ladder's screenshots go: the pull request's assets, when there is
- * a pull request and the forge takes them. The upload runs inside the step
- * that captured the picture, so its URL is recorded once and never re-sent
- * on replay. `dataClass` rides through to the attachment boundary (git.ts
- * uploadPrAsset), which refuses the look-image class — the hard rule that
- * page screenshots never land on a pull request. A tagged upload skips the
- * artifact-store path too: that path's return value is a URL for the PR
- * body, and a link is an attachment for the purposes of the rule.
+ * Where the ladder's screenshots and recordings go. The upload runs inside
+ * the step that captured the bytes, so its URL is recorded once and never
+ * re-sent on replay.
+ *
+ * With an artifact store, the store is the ONLY destination: an untagged
+ * screenshot is kept under its run binding and linked through the
+ * access-checked /api/artifacts route, and a store failure fails the upload
+ * (the step records the hash without a link) — it never falls back to a
+ * forge attachment, which could be neither revoked nor expired. Without
+ * SHIP_PUBLIC_URL there is no absolute address, so there is no link at all
+ * rather than a relative one that is dead on the forge.
+ *
+ * Without a store, an untagged screenshot still goes to the pull request's
+ * assets, the operator's existing behaviour. `dataClass` rides through to
+ * that boundary (git.ts uploadPrAsset), which refuses look-image and
+ * recording — the hard rule that page screenshots and recordings never land
+ * on a pull request. A tagged upload skips the store path too: that path's
+ * return value is a URL for the PR body, and a link is an attachment for the
+ * purposes of the look-image rule. WebM bytes are always tagged recording,
+ * whatever the caller passed.
  */
-function assetSink(ref: RepoRef, token: string, pr: number | undefined, artifacts?: ArtifactStore): AssetSink | undefined {
+export function assetSink(ref: RepoRef, token: string, pr: number | undefined, artifacts?: ArtifactStore, fetchImpl?: typeof fetch): AssetSink | undefined {
   if (pr === undefined && artifacts === undefined) return undefined;
-  return { async upload(name, bytes, dataClass) {
-    if (artifacts && dataClass === undefined) {
-      try {
-        const id = await artifacts.put(name, bytes);
-        const base = (process.env.SHIP_PUBLIC_URL ?? "").replace(/\/$/, "");
+  const publicBase = () => (process.env.SHIP_PUBLIC_URL ?? "").replace(/\/$/, "");
+  return {
+    async upload(name, bytes, dataClass, binding) {
+      const tag = isWebm(bytes) ? RECORDING_DATA_CLASS : dataClass;
+      if (artifacts && tag === undefined) {
+        const base = publicBase();
+        if (base === "") throw new Error("SHIP_PUBLIC_URL is unset, so a stored screenshot has no link a pull request can open");
+        const id = await artifacts.put(name, bytes, undefined, binding);
         return `${base}/api/artifacts/${id}`;
-      } catch { /* fallback to forge attachment if storage is unavailable */ }
-    }
-    if (pr !== undefined) return uploadPrAsset({ ref, token, pr, name, bytes, ...(dataClass !== undefined ? { dataClass } : {}) });
-    throw new Error("Artifact storage unavailable");
-  } };
+      }
+      if (pr !== undefined) return uploadPrAsset({ ref, token, pr, name, bytes, ...(tag !== undefined ? { dataClass: tag } : {}), ...(fetchImpl !== undefined ? { fetchImpl } : {}) });
+      throw new Error("Artifact storage unavailable");
+    },
+    async record(name, bytes, binding) {
+      if (artifacts?.putTemporary === undefined) throw new Error("This install has no artifact store to keep a recording in");
+      // Stated before the write, so the date a pull request prints is never
+      // later than the store's own expiry.
+      const expiresAt = new Date(Date.now() + SCREENSHOT_RETENTION_MS).toISOString();
+      const artifact = await artifacts.putTemporary(name, bytes, RECORDING_DATA_CLASS, binding);
+      const base = publicBase();
+      return { artifact, expiresAt, ...(base !== "" ? { url: `${base}/api/artifacts/${artifact}` } : {}) };
+    },
+  };
 }
 
 /**
@@ -4420,6 +4446,27 @@ function parkCanSnapshot(
   // the only way to keep the workspace. Runs recorded with warmParks know
   // their snapshots carry the volume bytes and park via snapshot/restore.
   return input.warmParks === true || input.warm !== true;
+}
+
+/**
+ * The forge credentials a run's checkout used, for the external adapters'
+ * exact-value scrub (`HarnessWorkspace.secrets`). Recomputed from config and
+ * never recorded; a URL or policy that no longer resolves yields nothing
+ * rather than failing a replay. `token:` is listed too because its base64 is
+ * what the env-mode extraheader carries (gitCredential).
+ */
+function checkoutSecrets(repo: string | undefined, checkout: RepoCheckout | null, repoPolicy: RepoPolicyConfig): KnownSecret[] {
+  const out: KnownSecret[] = [];
+  for (const url of [repo, checkout?.headRepo]) {
+    if (url === undefined) continue;
+    try {
+      const token = credentialFor(parseRepoUrl(url), repoPolicy);
+      if (token !== "") out.push({ name: "git-token", value: token }, { name: "git-token", value: `${token}:` });
+    } catch {
+      // not resolvable now: nothing to add
+    }
+  }
+  return out;
 }
 
 /**
@@ -4703,7 +4750,7 @@ export async function streamSandboxExec(
   base: { baseURL: string; token: string; fetch?: typeof globalThis.fetch },
   handle: string,
   command: string,
-  opts: { timeoutMs?: number; maxOutputBytes?: number; lease?: { owner: string; generation: number } },
+  opts: { timeoutMs?: number; maxOutputBytes?: number; env?: Record<string, string>; lease?: { owner: string; generation: number } },
   onChunk: (stream: "stdout" | "stderr", chunk: string) => void,
 ): Promise<ExecResult> {
   const fetchImpl = base.fetch ?? globalThis.fetch;
@@ -4714,6 +4761,10 @@ export async function streamSandboxExec(
     body: JSON.stringify({
       cmd: command,
       timeoutSec,
+      // The command's own env (credentials for this one process). The
+      // daemon writes it to a private --env-file for `docker exec`, so the
+      // values reach neither the host's process list nor the workspace.
+      ...(opts.env !== undefined ? { env: opts.env } : {}),
       // The lease credential: ignored by a daemon with no lease on this run,
       // required by one that holds it (Package C). Absent is the agent path.
       ...(opts.lease !== undefined ? { owner: opts.lease.owner, generation: opts.lease.generation } : {}),

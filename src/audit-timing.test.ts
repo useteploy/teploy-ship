@@ -89,6 +89,11 @@ const timingWith = (elapsedMs: number | null, over: Partial<RunTiming> = {}): Ru
   waitingOnPeopleMs: elapsedMs === null ? null : 0,
   waitingOnTimersMs: elapsedMs === null ? null : 0,
   activeMs: elapsedMs,
+  ttftMs: elapsedMs === null ? null : 2,
+  ttftWhy: null,
+  ttfeMs: elapsedMs === null ? null : 3,
+  ttfeWhy: null,
+  phases: [],
   waits: [],
   unknown: [],
   ...over,
@@ -145,4 +150,34 @@ test("negative control: runs with no timestamps never contribute a 0 to a median
   assert.equal(only.n, 0);
   assert.equal(only.median, undefined);
   assert.deepEqual(only.raw, []);
+});
+
+// ------------------------------------------------------- D4-a additions
+
+test("D4-a: auditTiming threads the worker claim into the admission split", () => {
+  const events = [
+    ev("run-started", t(0), undefined, { input: { repo: "https://git/o/r" } }),
+    ev("step-completed", t(10), "sandbox"),
+    ev("run-completed", t(30)),
+  ];
+  const without = auditTiming(events);
+  assert.equal(without.phases.find((p) => p.phase === "admission")!.durationMs, 10_000);
+  assert.equal(without.phases.find((p) => p.phase === "sandbox-create")!.durationMs, 10_000);
+
+  const withClaim = auditTiming(events, t(4));
+  assert.equal(withClaim.phases.find((p) => p.phase === "admission")!.durationMs, 4_000);
+  assert.equal(withClaim.phases.find((p) => p.phase === "sandbox-create")!.durationMs, 6_000);
+});
+
+test("D4-a: TTFT and TTFE are aggregated like every other metric — null excluded, never 0", () => {
+  const rows = [
+    { status: "completed", timing: timingWith(1000, { ttftMs: 100, ttfeMs: 900 }) },
+    { status: "completed", timing: timingWith(2000, { ttftMs: 300, ttfeMs: null, ttfeWhy: "no edit: every recorded turn fingerprint reports a clean tree" }) },
+  ];
+  const m = timingSummary(rows).byStatus.completed.metrics;
+  assert.equal(m.ttftMs.n, 2);
+  assert.deepEqual(m.ttftMs.raw, [100, 300]);
+  assert.equal(m.ttfeMs.n, 1, "the no-edit run contributes no value, not a 0");
+  assert.equal(m.ttfeMs.unknown, 1);
+  assert.deepEqual(m.ttfeMs.raw, [900]);
 });

@@ -149,3 +149,19 @@ test("workspace recovery distinguishes recorded validation from assumed retentio
   assert.equal(workspaceRecovery(events.slice(1)).checked,false);
   assert.equal(workspaceRecovery(events.slice(0,2)).restoredAt,undefined);
 });
+
+test("Q3a: a recording kept without a public link plays on the run page by artifact id; one never stored is listed as unattached", () => {
+  const id = "d".repeat(64);
+  const out = evidence({
+    flow: {
+      kind: "passed",
+      shots: [],
+      videos: [
+        { name: "walk.webm", sha256: "e".repeat(64), bytes: 7, artifact: id, expiresAt: "2026-10-24T00:00:00.000Z", unlinked: "recording on the run page" },
+        { name: "lost.webm", sha256: "f".repeat(64), bytes: 7, unlinked: "recorded, not linked" },
+      ],
+    },
+  });
+  assert.deepEqual(out.videos, [{ name: "walk.webm", href: `/api/artifacts/${id}` }]);
+  assert.deepEqual(out.unattached, ["lost.webm"]);
+});

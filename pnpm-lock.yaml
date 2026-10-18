@@ -4,13 +4,18 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  '@neutron-build/agents':
+    hash: d0461e826667cf431a78552af30a746efa3671051a4855b775407a192e631a11
+    path: patches/@neutron-build__agents.patch
+
 importers:
 
   .:
     dependencies:
       '@neutron-build/agents':
         specifier: ^0.1.0
-        version: 0.1.0(@neutron-build/ai@0.1.0)(@neutron-build/workflow@0.1.0(@neutron-build/ai@0.1.0))
+        version: 0.1.0(patch_hash=d0461e826667cf431a78552af30a746efa3671051a4855b775407a192e631a11)(@neutron-build/ai@0.1.0)(@neutron-build/workflow@0.1.0(@neutron-build/ai@0.1.0))
       '@neutron-build/ai':
         specifier: ^0.1.0
         version: 0.1.0
@@ -479,7 +484,7 @@ snapshots:
 
   '@js-sdsl/ordered-map@4.4.2': {}
 
-  '@neutron-build/agents@0.1.0(@neutron-build/ai@0.1.0)(@neutron-build/workflow@0.1.0(@neutron-build/ai@0.1.0))':
+  '@neutron-build/agents@0.1.0(patch_hash=d0461e826667cf431a78552af30a746efa3671051a4855b775407a192e631a11)(@neutron-build/ai@0.1.0)(@neutron-build/workflow@0.1.0(@neutron-build/ai@0.1.0))':
     dependencies:
       '@neutron-build/ai': 0.1.0
     optionalDependencies:

@@ -101,3 +101,99 @@ export function clamp(text: string, max = 20_000): string {
 export function safeForDisplay(text: string, max?: number, env?: NodeJS.ProcessEnv): string {
   return clamp(scrub(text, env), max);
 }
+
+/** A credential Ship itself hands to a process, by the name it travels under. */
+export interface KnownSecret {
+  name: string;
+  value: string;
+}
+
+/**
+ * Values shorter than this are not scrubbed: a short value matches ordinary
+ * output ("true", a port, a word) and rewriting every occurrence would mangle
+ * the record without protecting much. A credential that short is the
+ * operator's problem to rotate, not one this pass can solve.
+ */
+export const EXACT_SCRUB_MIN_LENGTH = 8;
+
+interface ExactForm {
+  needle: string;
+  label: string;
+}
+
+/**
+ * Each secret as the strings to look for: the value itself and its base64
+ * form (an agent that prints an encoded copy has still printed it). Longest
+ * first, so a value that contains another is replaced whole.
+ */
+function exactForms(secrets: readonly KnownSecret[]): ExactForm[] {
+  const forms = new Map<string, string>();
+  for (const { name, value } of secrets) {
+    if (value.length < EXACT_SCRUB_MIN_LENGTH) continue;
+    if (!forms.has(value)) forms.set(value, `[redacted ${name}]`);
+    const encoded = Buffer.from(value, "utf8").toString("base64");
+    if (!forms.has(encoded)) forms.set(encoded, `[redacted ${name} base64]`);
+  }
+  return [...forms].map(([needle, label]) => ({ needle, label })).sort((a, b) => b.needle.length - a.needle.length);
+}
+
+function replaceForms(text: string, forms: readonly ExactForm[]): string {
+  let out = text;
+  for (const { needle, label } of forms) {
+    if (out.includes(needle)) out = out.split(needle).join(label);
+  }
+  return out;
+}
+
+/**
+ * A value cut off at the end of the text (a capped stream, a process killed
+ * mid-print) is still most of a credential: a trailing prefix of at least
+ * EXACT_SCRUB_MIN_LENGTH characters is replaced too.
+ */
+function replaceTrailingPrefix(text: string, forms: readonly ExactForm[]): string {
+  for (const { needle, label } of forms) {
+    for (let k = Math.min(needle.length - 1, text.length); k >= EXACT_SCRUB_MIN_LENGTH; k--) {
+      if (text.endsWith(needle.slice(0, k))) return `${text.slice(0, text.length - k)}${label}`;
+    }
+  }
+  return text;
+}
+
+/**
+ * Replace every exact occurrence of the given secrets (and their base64
+ * forms) in a complete text. Unlike `redactKnownValues` this is not gated on
+ * the variable's NAME: the caller is the one that forwarded the value, so it
+ * knows the value is a credential whatever it is called.
+ */
+export function scrubExact(text: string, secrets: readonly KnownSecret[]): string {
+  const forms = exactForms(secrets);
+  if (forms.length === 0 || text === "") return text;
+  return replaceTrailingPrefix(replaceForms(text, forms), forms);
+}
+
+/**
+ * The same scrub over a stream that arrives in chunks. A chunk boundary can
+ * split a value, so the scrubber holds back the last (longest needle - 1)
+ * characters until the next chunk proves they are not the start of one;
+ * `flush` releases the remainder at the end.
+ */
+export function exactScrubber(secrets: readonly KnownSecret[]): { push(chunk: string): string; flush(): string } {
+  const forms = exactForms(secrets);
+  const keep = forms.length === 0 ? 0 : forms[0]!.needle.length - 1;
+  let buffer = "";
+  return {
+    push(chunk) {
+      if (forms.length === 0) return chunk;
+      buffer = replaceForms(buffer + chunk, forms);
+      if (buffer.length <= keep) return "";
+      const out = buffer.slice(0, buffer.length - keep);
+      buffer = buffer.slice(buffer.length - keep);
+      return out;
+    },
+    flush() {
+      const out = forms.length === 0 ? buffer : replaceTrailingPrefix(replaceForms(buffer, forms), forms);
+      buffer = "";
+      return out;
+    },
+  };
+}

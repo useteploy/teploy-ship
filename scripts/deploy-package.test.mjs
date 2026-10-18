@@ -96,3 +96,19 @@ test("production lockfiles describe the deployed manifests and Docker installs t
   assert.equal((dockerfile.match(/npm ci --omit=dev/g) ?? []).length, 2);
   assert.doesNotMatch(dockerfile, /--no-lockfile|--no-package-lock/);
 });
+
+// Local pnpm applies patchedDependencies; the image installs with npm ci,
+// which does not. Every patch the suites run against must also be applied in
+// the Dockerfile, or production runs code nobody tested.
+test("every pnpm patch is applied in the image after npm ci", () => {
+  const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  const patches = Object.entries(pkg.pnpm?.patchedDependencies ?? {}).map(([name, path]) => [undefined, name, path]);
+  assert.ok(patches.length > 0, "no pnpm.patchedDependencies in package.json");
+  const dockerfile = readFileSync(join(root, "Dockerfile"), "utf8");
+  const shipInstall = dockerfile.indexOf("npm ci --omit=dev");
+  for (const [, name, path] of patches) {
+    const copy = dockerfile.indexOf(`COPY ${path} `);
+    assert.ok(copy > shipInstall, `${path} must be copied into the image after the ship npm ci`);
+    assert.match(dockerfile, new RegExp(`cd node_modules/${name.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")} && git apply `), `${name}: the image must apply ${path}`);
+  }
+});

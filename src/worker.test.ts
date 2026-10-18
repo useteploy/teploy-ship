@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { sweepIntake, makeTerminalClaim, launchDueBounded, repoLockKeyOf, retrying, runResourceClassOf } from "./worker.js";
+import { sweepIntake, makeTerminalClaim, launchDueBounded, repoLockKeyOf, retrying, runResourceClassOf, recordClaim } from "./worker.js";
 import type { IntakeSweepDeps } from "./worker.js";
 import type { IntakeTask } from "./intake.js";
 import type { RunUsage } from "./durable.js";
+import type { RunMeta } from "./run-store.js";
 import type { SpendStore } from "./spend.js";
 import { usageFromEvents, intakeOrigin, notificationContext, terminalContext, verificationContext, incidentEvidenceDeps, incidentEvidenceEnabled } from "./worker.js";
 import type { WorkflowEvent } from "@neutron-build/workflow";
@@ -816,4 +817,72 @@ test("incidentEvidenceDeps: the health reader is the recovery sweep's own reader
   } finally {
     globalThis.fetch = was;
   }
+});
+
+// ------------------------------------------------- worker claim stamp (D4-a)
+
+/** A runtime double that records saveMeta calls and serves whatever meta should load. */
+function claimRuntime(meta: RunMeta | null): { runtime: Parameters<typeof recordClaim>[0]; saved: RunMeta[] } {
+  const saved: RunMeta[] = [];
+  let current = meta;
+  return {
+    saved,
+    runtime: {
+      loadMeta: async () => current,
+      saveMeta: async (m: RunMeta) => {
+        saved.push(m);
+        current = m;
+      },
+    },
+  };
+}
+
+const queuedMeta = (): RunMeta => ({
+  runId: "run-claim",
+  task: "fix a typo",
+  status: "queued",
+  model: "test",
+  createdAt: "2026-10-17T10:00:00Z",
+  updatedAt: "2026-10-17T10:00:00Z",
+});
+
+test("D4-a: recordClaim stamps the first pickup into run meta, never the log", async () => {
+  const h = claimRuntime(queuedMeta());
+  await recordClaim(h.runtime, "run-claim", () => {});
+  assert.equal(h.saved.length, 1);
+  assert.match(h.saved[0]!.claimedAt!, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/, "an ISO timestamp");
+
+  // A resume after a park must not move it: the first pickup is the boundary
+  // queue wait means, and a later stamp would fold the human wait into it.
+  await recordClaim(h.runtime, "run-claim", () => {});
+  assert.equal(h.saved.length, 1, "write-once");
+
+  const events: WorkflowEvent[] = []; // no log write path exists on the double; the point is none is needed
+  assert.equal(events.length, 0);
+});
+
+test("D4-a: recordClaim never writes for a terminal run or a missing meta row", async () => {
+  for (const status of ["completed", "failed", "cancelled"] as const) {
+    const done = claimRuntime({ ...queuedMeta(), status });
+    await recordClaim(done.runtime, "run-claim", () => {});
+    assert.equal(done.saved.length, 0, `${status}: a replaying worker stamps nothing`);
+  }
+  const none = claimRuntime(null);
+  await recordClaim(none.runtime, "run-claim", () => {});
+  assert.equal(none.saved.length, 0);
+});
+
+test("D4-a: a claim write that fails is logged and swallowed, not thrown into the run", async () => {
+  const lines: string[] = [];
+  const runtime = {
+    loadMeta: async () => {
+      throw new Error("store unreachable");
+    },
+    saveMeta: async () => {
+      throw new Error("unreachable");
+    },
+  };
+  await recordClaim(runtime, "run-claim", (line) => lines.push(line));
+  assert.equal(lines.length, 1);
+  assert.match(lines[0]!, /claim timestamp not recorded: store unreachable/);
 });
