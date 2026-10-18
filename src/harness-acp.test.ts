@@ -57,11 +57,11 @@ const workerEnv = (): NodeJS.ProcessEnv => ({
 });
 
 /**
- * A workspace whose PATH carries a `gemini` that is really the mock peer.
- * ACP_MOCK_* knobs ride the executor env the way the sandbox's env would;
- * the peer's transcript lands in its own recording dir, one per rig.
+ * A workspace whose PATH carries the profile's binary as the mock peer. ACP_MOCK_*
+ * knobs ride the executor env the way the sandbox's env would; the peer's
+ * transcript lands in its own recording dir, one per rig.
  */
-async function acpRig(opts: { mockEnv?: Record<string, string> } = {}): Promise<{
+async function acpRig(opts: { binary?: string; mockEnv?: Record<string, string> } = {}): Promise<{
   provider: ExecutorProvider;
   work: string;
   log: string;
@@ -74,8 +74,8 @@ async function acpRig(opts: { mockEnv?: Record<string, string> } = {}): Promise<
   const rec = await mkdtemp(join(tmpdir(), "acp-rec-"));
   const log = join(rec, "peer.jsonl");
   await mkdir(bin, { recursive: true });
-  await writeFile(join(bin, "gemini"), `#!/bin/sh\nexec node ${shq(PEER)} "$@"\n`);
-  await chmod(join(bin, "gemini"), 0o755);
+  await writeFile(join(bin, opts.binary ?? "gemini"), `#!/bin/sh\nexec node ${shq(PEER)} "$@"\n`);
+  await chmod(join(bin, opts.binary ?? "gemini"), 0o755);
   const executor = new LocalExecutor({
     root: work,
     env: {
@@ -91,9 +91,10 @@ const stepsOf = (events: readonly WorkflowEvent[]): string[] => events.filter((e
 const stepResult = <T>(events: readonly WorkflowEvent[], name: string): T =>
   (events.find((e) => e.type === "step-completed" && e.name === name)?.data as { result: T }).result;
 
-async function driveGemini(
+async function driveAcp(
   rig: Awaited<ReturnType<typeof acpRig>>,
   env: NodeJS.ProcessEnv = workerEnv(),
+  id: string = "gemini",
 ): Promise<{ events: WorkflowEvent[]; record: AcpHarnessRunRecord }> {
   const wf = durableAgent({ model: neverModel, executor: rig.provider, workdir: ".", harnesses: acpAdapters({ env }), maxSteps: 7 });
   const store = new MemoryEventStore();
@@ -101,12 +102,14 @@ async function driveGemini(
     workflow: wf,
     runId: "run-acp",
     store,
-    input: { task: "Write the notes file", harness: { id: "gemini", version: HARNESS_VERSIONS.gemini! } },
+    input: { task: "Write the notes file", harness: { id, version: HARNESS_VERSIONS[id]! } },
   });
   assert.equal(outcome.status, "completed", JSON.stringify(outcome));
   const events = await store.load("run-acp");
   return { events, record: stepResult<AcpHarnessRunRecord>(events, "harness-run") };
 }
+
+const driveGemini = (rig: Awaited<ReturnType<typeof acpRig>>, env: NodeJS.ProcessEnv = workerEnv()) => driveAcp(rig, env, "gemini");
 
 // ---------------------------------------------------------------------------
 // The driver's policy, as a unit
@@ -157,6 +160,35 @@ test("the driver's containment policy admits the workspace and nothing else", as
   // A read whose only path-like field is in rawInput is gated too.
   assert.equal(driver.acpPermissionDecision({ workspaceRoot: root, cwd: work, kind: "read", locations: [], rawInput: { target: "/etc/passwd" } }).decision, "deny");
   assert.equal(driver.acpPermissionDecision({ workspaceRoot: root, cwd: work, kind: "read", locations: [], rawInput: {} }).decision, "allow");
+  // The snake_case spellings gemini/qwen tools use are gated like the
+  // camelCase ones: a field the gate has never heard of is a free walk.
+  for (const field of ["file_path", "absolute_path", "dir_path"]) {
+    assert.equal(
+      driver.acpPermissionDecision({ workspaceRoot: root, cwd: work, kind: "read", locations: [], rawInput: { [field]: "/etc/passwd" } }).decision,
+      "deny",
+      `${field} names a path and is gated`,
+    );
+    assert.equal(
+      driver.acpPermissionDecision({ workspaceRoot: root, cwd: work, kind: "read", locations: [], rawInput: { [field]: join(work, "src", "a.ts") } }).decision,
+      "allow",
+      `${field} inside the workspace is allowed`,
+    );
+  }
+  // An ARRAY of paths is gated entry by entry: one outside target among
+  // many in-workspace ones denies the request.
+  assert.equal(
+    driver.acpPermissionDecision({ workspaceRoot: root, cwd: work, kind: "read", locations: [], rawInput: { paths: [join(work, "a"), join(work, "b")] } }).decision,
+    "allow",
+  );
+  assert.equal(
+    driver.acpPermissionDecision({ workspaceRoot: root, cwd: work, kind: "read", locations: [], rawInput: { paths: [join(work, "a"), "/etc/hosts"] } }).decision,
+    "deny",
+    "one outside-workspace entry in paths[] denies the whole request",
+  );
+  assert.match(
+    driver.acpPermissionDecision({ workspaceRoot: root, cwd: work, kind: "move", locations: [{ path: join(work, "a") }], rawInput: { dir_path: "/etc/pwned" } }).reason ?? "",
+    /rawInput dir_path "\S+" is outside the workspace/,
+  );
   // rawInput cannot SUBSTITUTE for locations on a mutation: an edit whose
   // target the driver cannot see as a location is denied, not guessed at.
   assert.equal(driver.acpPermissionDecision({ workspaceRoot: root, cwd: work, kind: "edit", locations: [], rawInput: { filePath: join(work, "x") } }).decision, "deny");
@@ -376,7 +408,7 @@ test("negative control: an ACP harness without the flag or the credential is ref
   // NOT one — it neither admits a qwen run nor rides into it — and a base
   // URL alone does not admit a keyless run either.
   assert.match(acpEnqueueRefusal("qwen", { SHIP_ACP_HARNESS: "on", OPENAI_API_KEY: "sk-openai" })!, /no credential/);
-  assert.match(acpEnqueueRefusal("qwen", { SHIP_ACP_HARNESS: "on", OPENAI_BASE_URL: "https://coding.dashscope.aliyuncs.com/v1" })!, /no credential/);
+  assert.match(acpEnqueueRefusal("qwen", { SHIP_ACP_HARNESS: "on", QWEN_BASE_URL: "https://coding.dashscope.aliyuncs.com/v1" })!, /no credential/);
   assert.equal(acpEnqueueRefusal("qwen", { SHIP_ACP_HARNESS: "on", DASHSCOPE_API_KEY: "sk-dash" }), undefined);
   // Non-ACP ids are not this gate's business.
   assert.equal(acpEnqueueRefusal("claude-code", {}), undefined);
@@ -437,14 +469,21 @@ test("per-profile egress derivation: hosts only when the key is held, byte-ident
   // is not a qwen credential and derives nothing for it.
   assert.deepEqual(acpProviderEgressAllow([{ id: "qwen" }], { OPENAI_API_KEY: "sk-openai" }), []);
   assert.deepEqual(acpProviderEgressAllow([{ id: "qwen" }], { DASHSCOPE_API_KEY: "sk-dash" })[0], "dashscope.aliyuncs.com:443");
-  // OPENAI_BASE_URL reroutes qwen: its host replaces the Dashscope defaults.
+  // A worker OPENAI_BASE_URL (carried for codex/opencode) reroutes nothing
+  // for qwen — the Dashscope defaults stand.
   assert.deepEqual(
-    acpProviderEgressAllow([{ id: "qwen" }], { DASHSCOPE_API_KEY: "sk-dash", OPENAI_BASE_URL: "https://coding-intl.dashscope.aliyuncs.com/v1" }),
+    acpProviderEgressAllow([{ id: "qwen" }], { DASHSCOPE_API_KEY: "k", OPENAI_BASE_URL: "https://operator.example/v1" }),
+    ["dashscope.aliyuncs.com:443", "coding.dashscope.aliyuncs.com:443", "coding-intl.dashscope.aliyuncs.com:443"],
+    "qwen's base-URL override is QWEN_BASE_URL, never the operator's OPENAI_BASE_URL",
+  );
+  // QWEN_BASE_URL reroutes qwen: its host replaces the Dashscope defaults.
+  assert.deepEqual(
+    acpProviderEgressAllow([{ id: "qwen" }], { DASHSCOPE_API_KEY: "sk-dash", QWEN_BASE_URL: "https://coding-intl.dashscope.aliyuncs.com/v1" }),
     ["coding-intl.dashscope.aliyuncs.com:443"],
   );
   // An unusable base URL still suppresses the defaults it replaces: the
   // agent dials the configured value, whatever it is.
-  assert.deepEqual(acpProviderEgressAllow([{ id: "qwen" }], { DASHSCOPE_API_KEY: "k", OPENAI_BASE_URL: "::not a url::" }), []);
+  assert.deepEqual(acpProviderEgressAllow([{ id: "qwen" }], { DASHSCOPE_API_KEY: "k", QWEN_BASE_URL: "::not a url::" }), []);
   // The merge discipline: explicit entries survive, nothing changes without an ACP ref.
   const explicit = ["example.com:443"];
   assert.equal(withAcpProviderEgress(explicit, [{ id: "native" }], { GEMINI_API_KEY: "k" }), explicit);
@@ -492,7 +531,83 @@ test("the profile forward lists match DEFAULT_FORWARDED_ENV, and the ids are dec
       assert.ok(!profile.args.some((a) => a.includes(flag)), `${id} must launch in its asking mode, never ${flag}`);
     }
   }
+  // qwen's worker-side names are its OWN: an operator's OPENAI_API_KEY
+  // (codex) or OPENAI_BASE_URL (opencode/codex) is never on qwen's list.
+  assert.deepEqual(DEFAULT_FORWARDED_ENV.qwen, ["DASHSCOPE_API_KEY", "QWEN_BASE_URL"]);
 });
+
+// ---------------------------------------------------------------------------
+// qwen's exec env: worker-side names in, agent-side names into the sandbox
+// ---------------------------------------------------------------------------
+
+test("qwen's exec env carries OPENAI_API_KEY = the Dashscope value, never the operator's OpenAI values", async () => {
+  const rig = await acpRig({
+    binary: "qwen",
+    mockEnv: { ACP_MOCK_RECORD_ENV: "OPENAI_API_KEY,OPENAI_BASE_URL,DASHSCOPE_API_KEY,QWEN_BASE_URL" },
+  });
+  // A worker carrying BOTH vendors' variables, the way a deployment driving
+  // codex and qwen does: the qwen exec must see only the qwen pair, under
+  // the names qwen-code reads.
+  const { record } = await driveAcp(
+    rig,
+    {
+      DASHSCOPE_API_KEY: "sk-dashscope-fake-0123456789",
+      QWEN_BASE_URL: "https://coding-intl.dashscope.example/v1",
+      OPENAI_API_KEY: "sk-operator-openai-should-never-ride",
+      OPENAI_BASE_URL: "https://operator.example/v1",
+      SHIP_ACP_DRIVER: `node ${shq(DRIVER)}`,
+    },
+    "qwen",
+  );
+  assert.equal(record.status, "finished", record.summary);
+  assert.deepEqual(record.forwarded, ["OPENAI_API_KEY", "OPENAI_BASE_URL"], "the record names what the exec carried, under the agent-side names");
+  const log = await readLog(rig.log);
+  const env = log.find((e) => e.event === "session-new")?.env as Record<string, string | null> | undefined;
+  assert.ok(env !== undefined, "the peer recorded its exec env");
+  assert.equal(env.OPENAI_API_KEY, "sk-dashscope-fake-0123456789", "the Dashscope key rides as OPENAI_API_KEY, what qwen-code reads");
+  assert.equal(env.OPENAI_BASE_URL, "https://coding-intl.dashscope.example/v1", "QWEN_BASE_URL rides as OPENAI_BASE_URL");
+  assert.equal(env.DASHSCOPE_API_KEY, null, "the worker-side name does not ride along");
+  assert.equal(env.QWEN_BASE_URL, null, "the worker-side name does not ride along");
+  // The operator's values appear nowhere in the run's events.
+  assert.ok(!JSON.stringify(log).includes("sk-operator-openai-should-never-ride"));
+  assert.ok(!JSON.stringify(log).includes("https://operator.example/v1"), "a worker OPENAI_BASE_URL does not reach a qwen run");
+});
+
+test("acpForwardEnv renames qwen's pair, closes the exec to the operator's OPENAI_* values, and passes other profiles through", async () => {
+  const { ACP_PROFILES, acpForwardEnv } = await import("./harness-acp.js");
+  const profile = ACP_PROFILES.qwen!;
+  const dash = "sk-dashscope-fake-0123456789";
+  const both = acpForwardEnv(profile, ["DASHSCOPE_API_KEY", "QWEN_BASE_URL"], {
+    DASHSCOPE_API_KEY: dash,
+    QWEN_BASE_URL: "https://coding-intl.dashscope.example/v1",
+    OPENAI_API_KEY: "sk-operator",
+    OPENAI_BASE_URL: "https://operator.example/v1",
+  });
+  assert.equal(both.env.OPENAI_API_KEY, dash);
+  assert.equal(both.env.OPENAI_BASE_URL, "https://coding-intl.dashscope.example/v1");
+  assert.equal(both.env.DASHSCOPE_API_KEY, undefined);
+  assert.equal(both.env.QWEN_BASE_URL, undefined);
+  assert.deepEqual(both.names, ["OPENAI_API_KEY", "OPENAI_BASE_URL"]);
+  // Without the qwen-specific sources, the operator's OPENAI_* values never
+  // ride: the mapped targets are deleted when their source is unset.
+  const none = acpForwardEnv(profile, ["DASHSCOPE_API_KEY", "QWEN_BASE_URL"], {
+    OPENAI_API_KEY: "sk-operator",
+    OPENAI_BASE_URL: "https://operator.example/v1",
+  });
+  assert.deepEqual(none.env, {});
+  assert.deepEqual(none.names, []);
+  // A multi-line value rides the base64 carrier of the AGENT-side name, and
+  // the prelude exports the agent-side name.
+  const multiline = acpForwardEnv(profile, ["DASHSCOPE_API_KEY"], { DASHSCOPE_API_KEY: "line1\nline2" });
+  assert.ok("SHIP_B64_OPENAI_API_KEY" in multiline.env, "the carrier is named for what the sandbox will hold");
+  assert.match(multiline.prelude, /export OPENAI_API_KEY;/);
+  assert.ok(!multiline.prelude.includes("DASHSCOPE"), "the worker-side name appears in neither carrier nor prelude");
+  // Profiles without a map are unchanged.
+  const gem = acpForwardEnv(ACP_PROFILES.gemini!, ["GEMINI_API_KEY"], { GEMINI_API_KEY: "gk-1234567890" });
+  assert.equal(gem.env.GEMINI_API_KEY, "gk-1234567890");
+  assert.deepEqual(gem.names, ["GEMINI_API_KEY"]);
+});
+
 
 // ---------------------------------------------------------------------------
 // Parser and live tracker units
@@ -588,16 +703,38 @@ test("the agent's session store lives in a per-exec home under /tmp and is delet
   for (const dir of [".gemini", ".qwen", ".grok"]) {
     await assert.rejects(() => access(join(rig.work, dir)), /ENOENT/, `${dir} never appears in the workspace`);
   }
-  // The belt: an agent that writes project-level state (qwen searches
-  // ./.qwen/.env, gemini reads ./.gemini/settings.json) cannot get it
-  // committed — the excludes keep it out of `git add -A`.
+  // The vendor excludes are the ACP adapter's belt, NOT the global list's:
+  // repos legitimately commit .gemini/settings.json, and a global exclude
+  // would eat such deliverables from every run, native included.
   const excludes: readonly string[] = WORKSPACE_EXCLUDES;
   for (const exclude of [".gemini/", ".qwen/", ".grok/"]) {
-    assert.ok(excludes.includes(exclude), `${exclude} is workspace-excluded`);
+    assert.ok(!excludes.includes(exclude), `${exclude} is not a global workspace exclude`);
   }
 });
 
-test("a driver that fails before initialize is a recorded error, never a thrown step", async () => {  const bin = await mkdtemp(join(tmpdir(), "acp-dead-"));
+test("the vendor-state excludes ride the ACP run itself, not the global list: .git/info/exclude grows them when an ACP agent runs", async () => {
+  const rig = await acpRig();
+  // A workspace with a repo in it (the sandbox step's end state): whatever
+  // the checkout excluded, the ACP run adds the vendor dirs before the
+  // agent starts, so project-level state cannot reach `git add -A`.
+  const executor = rig.provider.attach("ignored");
+  await executor.exec("git init -q . && git config user.email t@t && git config user.name t", { timeoutMs: 30_000 });
+  const before = await readFile(join(rig.work, ".git", "info", "exclude"), "utf8").catch(() => "");
+  assert.ok(!before.includes(".gemini/"), "nothing else put the vendor excludes there");
+  const { record } = await driveGemini(rig);
+  assert.equal(record.status, "finished");
+  const exclude = await readFile(join(rig.work, ".git", "info", "exclude"), "utf8");
+  for (const dir of [".gemini/", ".qwen/", ".grok/"]) {
+    assert.ok(exclude.includes(dir), `${dir} is excluded on the ACP run`);
+  }
+  // Idempotent on a warm run: the same run again appends nothing new.
+  await driveGemini(rig);
+  const again = await readFile(join(rig.work, ".git", "info", "exclude"), "utf8");
+  assert.equal(again.split(".gemini/\n").length - 1, 1, "the excludes are appended once, not per attempt");
+});
+
+test("a driver that fails before initialize is a recorded error, never a thrown step", async () => {
+  const bin = await mkdtemp(join(tmpdir(), "acp-dead-"));
   await writeFile(join(bin, "gemini"), "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"0.64.0 (dead)\"; exit 0; fi\necho 'no ACP here' >&2\nexit 3\n");
   await chmod(join(bin, "gemini"), 0o755);
   const work = await mkdtemp(join(tmpdir(), "acp-dead-work-"));
@@ -680,6 +817,59 @@ test("the agent's whole process group is killed: a setsid-less background proces
       /ESRCH/,
       "the grandchild died with the agent's process group, not after its own sleep",
     );
+  }
+});
+
+/** Poll for a pid's death (ESRCH): a SIGKILLed orphan can outlive the assertion by a scheduler tick. */
+async function pidGone(pid: number, budgetMs = 5_000): Promise<boolean> {
+  const deadline = Date.now() + budgetMs;
+  for (;;) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ESRCH";
+    }
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, 100));
+  }
+}
+
+test("an agent that exits mid-session leaves no same-group survivor behind", async () => {
+  // The peer backgrounds a long sleep in its own process group and EXITS
+  // without answering the prompt. A kill gated on "the agent is still
+  // running" skips exactly here — agentExited is already true — and the
+  // sleep, holding the exec's credential env, outlives the exec.
+  const rig = await acpRig({ mockEnv: { ACP_MOCK_JOURNEY: "bg-exit" } });
+  const started = Date.now();
+  const { record } = await driveGemini(rig);
+  const elapsed = Date.now() - started;
+  assert.equal(record.status, "error");
+  assert.match(record.summary, /exited before answering/);
+  assert.ok(elapsed < 15_000, `the driver did not wait out the deadline for an agent that already exited (${elapsed}ms)`);
+  const log = await readLog(rig.log);
+  const pid = log.find((e) => e.event === "bg")?.pid;
+  assert.equal(typeof pid, "number", "the peer logged its background grandchild");
+  if (typeof pid === "number") {
+    assert.ok(await pidGone(pid), `the same-group sleep died with the exec even though the agent exited first (pid ${pid} alive)`);
+  }
+});
+
+test("a grandchild that traps SIGTERM does not outlive the driver's exit", async () => {
+  // The peer spawns `trap '' TERM; exec sleep 40` in its group and answers
+  // end_turn normally. SIGTERM does nothing to the grandchild; the driver's
+  // one exit path must SIGKILL the group before process.exit — an unref'd
+  // 3s timer it never waits for reaches nothing.
+  const rig = await acpRig({ mockEnv: { ACP_MOCK_JOURNEY: "bg-trap" } });
+  const started = Date.now();
+  const { record } = await driveGemini(rig);
+  const elapsed = Date.now() - started;
+  assert.equal(record.status, "finished");
+  assert.ok(elapsed < 15_000, `the driver exited promptly (${elapsed}ms)`);
+  const log = await readLog(rig.log);
+  const pid = log.find((e) => e.event === "bg")?.pid;
+  assert.equal(typeof pid, "number", "the peer logged its TERM-proof grandchild");
+  if (typeof pid === "number") {
+    assert.ok(await pidGone(pid), `the TERM-trapping grandchild died with the exec (pid ${pid} alive)`);
   }
 });
 

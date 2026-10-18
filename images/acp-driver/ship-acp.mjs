@@ -18,8 +18,10 @@
 // Permission policy (fail-closed; see docs/adapters.md "ACP harnesses"):
 //   read/search/think  allow when every location — and every path-like
 //                      rawInput field (destination, newPath, path, filePath,
-//                      target) — canonicalises inside the workspace; a
-//                      request naming nothing targets nothing and is allowed
+//                      target, file_path, absolute_path, dir_path, and each
+//                      entry of paths[]) — canonicalises inside the
+//                      workspace; a request naming nothing targets nothing
+//                      and is allowed
 //   edit/delete/move   allow only when EVERY location and path-like rawInput
 //                      field canonicalises, through realpath, inside the
 //                      workspace; no locations -> deny (rawInput cannot
@@ -57,7 +59,7 @@ import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
-export const SHIP_ACP_DRIVER_VERSION = "1.0.0";
+export const SHIP_ACP_DRIVER_VERSION = "1.1.0";
 
 /**
  * The protocol this driver speaks and the only version it accepts in an
@@ -224,11 +226,25 @@ export function resolveAcpPermissionPath(path, cwd) {
 
 /**
  * Path-like fields a tool puts in rawInput when the structured locations do
- * not carry them. A move is the case that matters: the request names its
- * SOURCE as a location and its destination ONLY in rawInput — a policy that
- * reads locations alone would let that destination walk anywhere.
+ * not carry them — camelCase, the snake_case spellings the gemini/qwen
+ * tools use, and the array forms. A move is the case that matters: the
+ * request names its SOURCE as a location and its destination ONLY in
+ * rawInput — a policy that reads locations alone would let that
+ * destination walk anywhere.
  */
-export const ACP_RAW_INPUT_PATH_FIELDS = ["destination", "newPath", "path", "filePath", "target"];
+export const ACP_RAW_INPUT_PATH_FIELDS = [
+  "destination",
+  "newPath",
+  "path",
+  "filePath",
+  "target",
+  "file_path",
+  "absolute_path",
+  "dir_path",
+];
+
+/** rawInput fields that carry a LIST of paths, gated entry by entry. */
+export const ACP_RAW_INPUT_PATH_ARRAY_FIELDS = ["paths"];
 
 /** The path-like rawInput values of a permission request, each with the field it came from. */
 export function acpRawInputPathCandidates(rawInput) {
@@ -237,6 +253,13 @@ export function acpRawInputPathCandidates(rawInput) {
   for (const field of ACP_RAW_INPUT_PATH_FIELDS) {
     const value = rawInput[field];
     if (typeof value === "string" && value.trim() !== "") out.push({ path: value, origin: `rawInput ${field}` });
+  }
+  for (const field of ACP_RAW_INPUT_PATH_ARRAY_FIELDS) {
+    const value = rawInput[field];
+    if (!Array.isArray(value)) continue;
+    for (const entry of value) {
+      if (typeof entry === "string" && entry.trim() !== "") out.push({ path: entry, origin: `rawInput ${field}[]` });
+    }
   }
   return out;
 }
@@ -258,10 +281,11 @@ export const ACP_UNGATED_KINDS = new Set(["execute", "fetch"]);
  * The fail-closed disposition for one permission request, given the canonical
  * workspace root, the tool kind, the location paths as the agent wrote them
  * and the request's rawInput. Path-like rawInput fields (destination,
- * newPath, path, filePath, target — acpRawInputPathCandidates) are gated with
- * the same workspace check as locations, so a tool that names its target only
- * in rawInput cannot walk outside either. Returns allow/deny with a reason
- * the run records verbatim.
+ * newPath, path, filePath, target, file_path, absolute_path, dir_path and
+ * each entry of paths[] — acpRawInputPathCandidates) are gated with the same
+ * workspace check as locations, so a tool that names its target only in
+ * rawInput cannot walk outside either. Returns allow/deny with a reason the
+ * run records verbatim.
  */
 export function acpPermissionDecision({ workspaceRoot, cwd, kind, locations, rawInput }) {
   const paths = Array.isArray(locations) ? locations.map((l) => (typeof l === "string" ? l : l?.path)) : [];
@@ -401,6 +425,15 @@ async function main() {
     // a background process the agent spawned without its own session must
     // not outlive the exec that holds the credential env.
     detached: true,
+    // TODO(H9): this branch must keep the per-exec HOME. The worker pins HOME
+    // — and the vendor home vars — at a fresh 700 directory under /tmp that
+    // the exec's own shell deletes on exit (harness-acp.ts agentHomeCommand);
+    // trading it for the passwd home would put the vendor session store
+    // (tool output, possibly secrets) back into the container, exactly what
+    // the per-exec home exists to prevent. When an image bakes an unprivileged
+    // user, spawn with process.env.HOME and make the worker chown the
+    // directory to that uid. The passwd home is where the BINARY is
+    // installed, not where its state belongs.
     ...(asUser !== undefined ? { uid: asUser.uid, gid: asUser.gid, env: { ...process.env, HOME: asUser.home } } : {}),
   });
 
@@ -466,30 +499,37 @@ async function main() {
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } })}\n`);
   };
 
-  const killChild = () => {
-    if (agentExited || child.pid === undefined) return;
-    // The GROUP is signalled (negative pid), because the agent was spawned
-    // detached as a group leader; a group signal that fails — the group is
-    // already gone, or the platform refuses — falls back to the child alone.
-    let signalledGroup = false;
+  /**
+   * Signal the agent's whole process GROUP (negative pid: the agent was
+   * spawned detached as its group leader, so the group is the agent plus
+   * every background process it spawned without its own session). Never
+   * gated on agentExited: an agent that exits on its own can leave a
+   * same-group background process alive (a `sleep 40 &` it spawned), and
+   * that survivor holds the exec's credential env — ESRCH from the group
+   * kill only means the group is already gone. The child-only fallback is
+   * for a platform that refuses group signals while the agent still lives.
+   */
+  const signalAgentGroup = (signal) => {
+    if (child.pid === undefined) return;
     try {
-      process.kill(-child.pid, "SIGTERM");
-      signalledGroup = true;
+      process.kill(-child.pid, signal);
     } catch {
-      child.kill("SIGTERM");
-    }
-    const force = setTimeout(() => {
       if (agentExited) return;
-      if (signalledGroup) {
-        try {
-          process.kill(-child.pid, "SIGKILL");
-        } catch {
-          // already gone
-        }
-      } else {
-        child.kill("SIGKILL");
+      try {
+        child.kill(signal);
+      } catch {
+        // already gone
       }
-    }, 3_000);
+    }
+  };
+  const killChild = () => {
+    if (child.pid === undefined) return;
+    signalAgentGroup("SIGTERM");
+    // The escalation for a group that traps or ignores SIGTERM. This timer
+    // serves the paths the driver OUTLIVES (the budget backstop); finish()
+    // fires the same kill itself, because an unref'd timer never runs after
+    // process.exit.
+    const force = setTimeout(() => signalAgentGroup("SIGKILL"), 3_000);
     force.unref();
   };
   const exited = new Promise((resolveExit) => child.on("exit", (code, signal) => resolveExit({ code, signal })));
@@ -500,7 +540,9 @@ async function main() {
    * streams and exits explicitly: the exec that carries the credential env
    * must end when the session does, not when the agent's process tree
    * happens to. Everything meant for the record was written before this is
-   * called.
+   * called. The group SIGKILL at the end is the one that always happens: a
+   * grandchild that trapped SIGTERM survives the TERM above, and this
+   * process exits before the unref'd 3s timer ever fires.
    */
   const finish = async (code) => {
     killChild();
@@ -509,6 +551,7 @@ async function main() {
     child.stdin.destroy();
     child.stdout.destroy();
     child.stderr.destroy();
+    signalAgentGroup("SIGKILL");
     process.exit(code);
   };
   child.on("exit", (code, signal) => {

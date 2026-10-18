@@ -16,6 +16,7 @@ import {
   shq,
 } from "./harness-external.js";
 import type { LiveTracker } from "./harness-external.js";
+import { ACP_WORKSPACE_EXCLUDES, excludeCommand } from "./git.js";
 import { egressEntryError } from "./egress.js";
 import { exactScrubber, scrubExact } from "./redact.js";
 import type { KnownSecret } from "./redact.js";
@@ -75,7 +76,7 @@ export interface AcpProfile {
   /**
    * Which forwarded env names are CREDENTIALS for the enqueue gate. Absent
    * means every name in envNames is one. qwen sets it: its documented
-   * headless pair is a key plus OPENAI_BASE_URL, and a base URL alone must
+   * headless pair is a key plus QWEN_BASE_URL, and a base URL alone must
    * not admit a keyless run.
    */
   credentialEnvNames?: readonly string[];
@@ -93,6 +94,18 @@ export interface AcpProfile {
    * the same rule the bespoke adapters' PROVIDER_EGRESS bases follow.
    */
   egress: ReadonlyArray<{ envs: readonly string[]; hosts: readonly string[]; baseEnv?: string }>;
+  /**
+   * Worker-side name -> agent-exec name for env the exec must carry under a
+   * DIFFERENT name than the worker's (acpForwardEnv applies it). qwen-code
+   * 0.25.2 reads OPENAI_API_KEY and OPENAI_BASE_URL for env-only auth —
+   * DASHSCOPE_API_KEY works only through a settings.json
+   * modelProviders.envKey entry, and the per-exec HOME this adapter pins
+   * carries no settings.json — so the profile forwards its OWN worker-side
+   * names and renames them at the boundary: an operator's OPENAI_* values
+   * (carried on the worker for codex/opencode) never ride a qwen exec, and
+   * the qwen values never masquerade as the operator's on the worker side.
+   */
+  envMap?: Readonly<Record<string, string>>;
   /**
    * The authenticate methodId for the profile's env key, when the agent
    * advertises one (gemini "gemini-api-key"). Absent when the agent's only
@@ -156,19 +169,25 @@ export const ACP_PROFILES: Record<string, AcpProfile> = {
     id: "qwen",
     binary: "qwen",
     args: ["--acp"],
-    // qwen's OWN documented headless pair — NOT OPENAI_API_KEY, which an
-    // operator carries for codex: forwarding it here would hand an
-    // operator's OpenAI key to a different vendor's agent and its sandbox.
-    envNames: ["DASHSCOPE_API_KEY", "OPENAI_BASE_URL"],
+    // qwen's OWN worker-side pair — NOT OPENAI_API_KEY/OPENAI_BASE_URL,
+    // which an operator carries for codex/opencode: forwarding those would
+    // hand an operator's OpenAI values to a different vendor's agent and its
+    // sandbox. The exec renames them to what qwen-code actually reads
+    // (envMap below): qwen-code 0.25.2 authenticates env-only through
+    // OPENAI_API_KEY — DASHSCOPE_API_KEY works only via a settings.json
+    // modelProviders.envKey entry, and the per-exec HOME has no settings.
+    envNames: ["DASHSCOPE_API_KEY", "QWEN_BASE_URL"],
     credentialEnvNames: ["DASHSCOPE_API_KEY"],
+    envMap: { DASHSCOPE_API_KEY: "OPENAI_API_KEY", QWEN_BASE_URL: "OPENAI_BASE_URL" },
     homeEnv: ["QWEN_HOME"],
     egress: [
       {
         envs: ["DASHSCOPE_API_KEY"],
         hosts: ["dashscope.aliyuncs.com", "coding.dashscope.aliyuncs.com", "coding-intl.dashscope.aliyuncs.com"],
-        // qwen's documented base-URL override: its host replaces the
-        // Dashscope defaults the agent will not dial when it is set.
-        baseEnv: "OPENAI_BASE_URL",
+        // qwen's documented base-URL override (worker-side name; the exec
+        // carries it as OPENAI_BASE_URL): its host replaces the Dashscope
+        // defaults the agent will not dial when it is set.
+        baseEnv: "QWEN_BASE_URL",
       },
     ],
   },
@@ -205,7 +224,7 @@ export function acpEnqueueRefusal(id: string, env: NodeJS.ProcessEnv = process.e
   const profile = ACP_PROFILES[id]!;
   const config = externalHarnessConfig(id, env);
   // The gate asks for a CREDENTIAL (credentialEnvNames, default envNames):
-  // qwen also forwards OPENAI_BASE_URL, and a base URL alone must not admit
+  // qwen also forwards QWEN_BASE_URL, and a base URL alone must not admit
   // a keyless run — it would die inside the sandbox after the clone, the
   // expensive thing this gate exists to prevent.
   const credentials = profile.credentialEnvNames ?? profile.envNames;
@@ -568,6 +587,34 @@ function agentHomeCommand(home: string, vars: readonly string[], driver: string)
   return `h=${shq(home)}; rm -rf "$h"; mkdir -m 700 "$h" || exit 1; export ${exports}; ${driver}; rc=$?; rm -rf "$h"; exit $rc`;
 }
 
+/**
+ * The env one ACP exec carries, under the names the AGENT reads.
+ *
+ * profile.envMap renames worker-side names to agent-side ones BEFORE
+ * forwardEnv builds the carriers, so a multi-line value rides the base64
+ * carrier of the name the agent sees; and every mapped TARGET is deleted
+ * from the copy when its source is unset — an operator's value of an
+ * agent-side name (an OPENAI_API_KEY carried for codex, an OPENAI_BASE_URL
+ * for opencode) can never ride a qwen exec by accident. The returned names
+ * and secrets are the exec's own (agent-side): secretEnvNames must name
+ * what exists inside the sandbox for the driver to scrub, and the record's
+ * `forwarded` list says what the exec actually carried.
+ */
+export function acpForwardEnv(profile: AcpProfile, forward: readonly string[], env: NodeJS.ProcessEnv) {
+  const envMap = profile.envMap ?? {};
+  if (Object.keys(envMap).length === 0) return forwardEnv([...forward], env);
+  const source: NodeJS.ProcessEnv = { ...env };
+  for (const [from, to] of Object.entries(envMap)) {
+    if (source[from] !== undefined) source[to] = source[from];
+    else delete source[to]; // never the operator's value of the agent-side name
+    delete source[from]; // the worker-side name does not ride along
+  }
+  return forwardEnv(
+    forward.map((name) => envMap[name] ?? name),
+    source,
+  );
+}
+
 export function acpAdapter(id: string, options: AcpHarnessOptions = {}, version: string = HARNESS_VERSIONS[id]!): HarnessAdapter {
   const profile = ACP_PROFILES[id];
   if (profile === undefined) throw new Error(`no ACP profile for harness "${id}"`);
@@ -587,7 +634,7 @@ export function acpAdapter(id: string, options: AcpHarnessOptions = {}, version:
       }
       const record = await ws.ctx.step(`${p}harness-run`, async (): Promise<AcpHarnessRunRecord> => {
         const config = externalHarnessConfig(id, env);
-        const forwarded = forwardEnv(config.forward, env);
+        const forwarded = acpForwardEnv(profile, config.forward, env);
         // The driver and the agent both inherit the forwarded credentials, so
         // either printing them puts them in the output. Every value Ship
         // handed over (plus the run's forge token) is replaced before the
@@ -611,6 +658,14 @@ export function acpAdapter(id: string, options: AcpHarnessOptions = {}, version:
         }
         try {
           await ws.executor.putFile(ACP_PROMPT_PATH, externalPrompt(task.prompt, task.input.mode));
+          // The vendor-state excludes ride the ACP run, not the checkout
+          // (git.ts ACP_WORKSPACE_EXCLUDES): repos legitimately commit
+          // .gemini/settings.json, so the global list must not hide them —
+          // only an ACP agent writes those directories uninvited, and only
+          // its runs exclude them. Best effort: a workspace with no .git has
+          // no commit to keep them out of, and the per-exec home stays the
+          // boundary either way.
+          await ws.executor.exec(excludeCommand(ACP_WORKSPACE_EXCLUDES), { timeoutMs: 30_000 }).catch(() => {});
           const cancelGraceMs = Number(env.SHIP_ACP_CANCEL_GRACE_MS);
           await ws.executor.putFile(
             ACP_SPEC_PATH,

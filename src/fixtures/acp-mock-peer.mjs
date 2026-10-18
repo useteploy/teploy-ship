@@ -30,6 +30,20 @@
 //                               stdio and outlives us; ACP_MOCK_BG_SETSID
 //                               gives it its own session so even a group kill
 //                               cannot reach it (the stdio-hold control)
+//   ACP_MOCK_JOURNEY=bg-exit    spawn the sleep in OUR process group, then
+//                               exit mid-session without answering the
+//                               prompt: the driver's group kill must not be
+//                               skipped just because the agent already exited
+//   ACP_MOCK_JOURNEY=bg-trap    spawn a grandchild that TRAPS SIGTERM in our
+//                               process group, then answer end_turn normally:
+//                               the driver's exit path must SIGKILL the group
+//                               (the TERM-only kill and the unref'd timer
+//                               both leave it alive)
+//   ACP_MOCK_RECORD_ENV=<names> comma list of env names whose values are
+//                               recorded on the session-new log line (tests
+//                               assert what the exec env actually carried —
+//                               values land in the transcript verbatim, so
+//                               point it only at test fixtures)
 //   ACP_MOCK_ECHO               echo env and the base64 of GEMINI_API_KEY in
 //                               an agent message (the H1 scrub control)
 //   ACP_MOCK_SPLIT_LEAK         leak GEMINI_API_KEY split across message
@@ -39,7 +53,8 @@
 // argv[2] === "--version" prints a version line and exits (preflight).
 
 import { spawn } from "node:child_process";
-import { appendFileSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { accessSync, appendFileSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 const VERSION_LINE = process.env.ACP_MOCK_VERSION_LINE ?? "0.64.0 (mock acp peer)";
@@ -185,6 +200,43 @@ const runPrompt = async (promptText) => {
     return { stopReason: "end_turn" };
   }
 
+  if (process.env.ACP_MOCK_JOURNEY === "bg-exit") {
+    // The agent exits MID-SESSION while a same-group background process is
+    // still alive: nothing answers session/prompt, so the driver learns of
+    // the exit through the child's exit event. A kill gated on "the agent is
+    // still running" skips here and the sleep outlives the exec — with the
+    // credential env it inherited.
+    const bg = spawn("sleep", ["40"], { stdio: ["inherit", "inherit", "inherit"] });
+    bg.unref();
+    log({ event: "bg", pid: bg.pid ?? null, setsid: false, trap: false });
+    process.exit(0);
+  }
+
+  if (process.env.ACP_MOCK_JOURNEY === "bg-trap") {
+    // A grandchild that ignores SIGTERM (the shell leaves the disposition
+    // ignored across exec) in OUR process group, then a normal end_turn: the
+    // driver's TERM does nothing to it, and an exit path that only TERMed
+    // the group — or left the SIGKILL to an unref'd timer it never waits
+    // for — ends the exec with it still alive. The ready marker matters:
+    // answering before the shell ran `trap` would race its own startup and
+    // the TERM would kill it like any untrapped process.
+    const ready = join(tmpdir(), `acp-mock-bg-trap-${process.pid}`);
+    const bg = spawn("sh", ["-c", `trap '' TERM; : > '${ready}'; exec sleep 40`], { stdio: ["inherit", "inherit", "inherit"] });
+    bg.unref();
+    for (let i = 0; i < 100; i++) {
+      try {
+        accessSync(ready);
+        break;
+      } catch {
+        await new Promise((resolveSleep) => setTimeout(resolveSleep, 50));
+      }
+    }
+    rmSync(ready, { force: true });
+    log({ event: "bg", pid: bg.pid ?? null, setsid: false, trap: true });
+    update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Backgrounded, TERM-proof." } });
+    return { stopReason: "end_turn" };
+  }
+
   // The declared journey: a read, one permitted write inside the workspace, a
   // final message. The write is the whole point — the diff is the deliverable.
   update({
@@ -248,7 +300,13 @@ const handleRequest = async (message) => {
     } catch {
       // a HOME-less peer still runs
     }
-    log({ event: "session-new", cwd, home: process.env.HOME ?? null });
+    // ACP_MOCK_RECORD_ENV snapshots the exec env onto the transcript so a
+    // test can assert what the agent's environment actually carried.
+    const recorded = {};
+    for (const name of (process.env.ACP_MOCK_RECORD_ENV ?? "").split(",").map((s) => s.trim()).filter((s) => s !== "")) {
+      recorded[name] = process.env[name] ?? null;
+    }
+    log({ event: "session-new", cwd, home: process.env.HOME ?? null, ...(Object.keys(recorded).length > 0 ? { env: recorded } : {}) });
     respond(message.id, { sessionId: SESSION_ID });
     return;
   }
