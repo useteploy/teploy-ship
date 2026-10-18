@@ -185,6 +185,10 @@ test("the session script is the receipt's verified launch: decomposed proxy, hea
   assert.match(source, /server: `\$\{u\.protocol\}\/\/\$\{u\.host\}`/);
   assert.match(source, /username: decodeURIComponent\(u\.username\)/);
   assert.match(source, /password: decodeURIComponent\(u\.password\)/);
+  // Loopback bypasses the proxy (the agent's own dev server), and Playwright's
+  // forced <-loopback> rule is disabled so the bypass actually applies.
+  assert.match(source, /bypass: "localhost,127\.0\.0\.1,\[::1\]"/);
+  assert.match(source, /PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK = "1"/);
   assert.match(source, /--disable-background-networking/);
   assert.match(source, /--headless=new/);
   assert.match(source, /--remote-debugging-port=9222/);

@@ -173,7 +173,9 @@ export function renderLook(action: { find?: string | null; ref?: string | null }
  * usable). Chromium on Linux reads the proxy env vars but STRIPS the URL
  * userinfo, so the per-run credential must arrive as an explicit
  * proxy:{server,username,password} — an env-only launch dies at the daemon's
- * 407 with a silent empty response (receipt §4, measured live). The open tier
+ * 407 with a silent empty response (receipt §4, measured live). Loopback
+ * bypasses the proxy so `look` can see a dev server the agent started in its
+ * own container; nothing beyond the container's loopback is reachable that way. The open tier
  * injects no proxy env, and `proxy` stays undefined there on purpose.
  *
  * Exported only so the test suite can pin the launch contract — the receipt's
@@ -190,7 +192,14 @@ if (raw) {
     server: \`\${u.protocol}//\${u.host}\`,    // NO userinfo
     username: decodeURIComponent(u.username),// "run"
     password: decodeURIComponent(u.password),// per-run credential
+    // The agent's own dev server runs on this container's loopback; the
+    // egress proxy refuses every local address, so loopback must not go
+    // through it (found live 2026-10-18: look could not see :8000).
+    bypass: "localhost,127.0.0.1,[::1]",
   };
+  // Playwright otherwise appends <-loopback>, forcing loopback THROUGH the
+  // proxy and overriding the bypass above.
+  process.env.PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK = "1";
 }
 const browser = await chromium.launch({
   executablePath: process.env.CHROMIUM_BIN ?? "/usr/bin/chromium",
