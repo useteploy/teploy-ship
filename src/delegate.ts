@@ -158,7 +158,7 @@ export function childTaskPrompt(input: { parentRunId: string; turn: number; task
     .filter((s) => s !== undefined)
     .join(", ");
   return [
-    `[Delegated task, claimed by run ${input.parentRunId} at its turn ${input.turn}] This is a self-contained piece of a larger task. Work in the ${scope}. You are a READ-ONLY researcher: this run cannot edit files, push, or open a pull request, and it cannot ask a human anything — the delegating run cannot see your conversation and applies any change itself. Your finish message is the ENTIRE report it receives, so end it with a short summary of what you found (answers, findings, and any proposed change as exact patch text or precise instructions), what you verified, and anything you could not finish.`,
+    `[Delegated task, claimed by run ${input.parentRunId} at its turn ${input.turn}] This is a self-contained piece of a larger task. Work in the ${scope}. You are a READ-ONLY researcher: this run cannot edit files, push, or open a pull request, and it cannot ask a human anything — the delegating run cannot see your conversation and applies any change itself. Your finish message is the ENTIRE report it receives, so end it with a short summary of what you found (answers, findings, and any proposed change as exact patch text or precise instructions), what you verified, and anything you could not finish. If you truly cannot proceed without an answer only the delegating run can give, finish with \`\`\`finish needs-input and the question as the body; that ends this run and hands the question back.`,
     "",
     input.task,
   ].join("\n");
@@ -167,7 +167,8 @@ export function childTaskPrompt(input: { parentRunId: string; turn: number; task
 /** A child's terminal result, read off its own log — the CONTEXT TRANSFER. */
 export interface DelegateTransfer {
   childRunId: string;
-  status: "completed" | "failed" | "cancelled" | "timeout";
+  /** `needs-input`: the child completed by asking its parent a question (DT4); `summary` is the question. */
+  status: "completed" | "failed" | "cancelled" | "timeout" | "needs-input";
   /**
    * The child's own final account (run-completed output.summary / the failure
    * line), clamped. For a `timeout` transfer it is OUR honest statement that
@@ -195,7 +196,11 @@ export function transferFromEvents(childRunId: string, events: readonly EventLik
   const clamp = (text: string): string =>
     text.length > TRANSFER_SUMMARY_MAX ? `${text.slice(0, TRANSFER_SUMMARY_MAX)}\n…(clamped)` : text;
   if (terminal.type === "run-completed") {
-    const output = (terminal.data as { output?: { summary?: unknown; pr?: unknown } } | undefined)?.output;
+    const output = (terminal.data as { output?: { summary?: unknown; pr?: unknown; needsInput?: unknown } } | undefined)?.output;
+    // A child that stopped to ask (DT4): the question is the transfer.
+    if (typeof output?.needsInput === "string" && output.needsInput.trim() !== "") {
+      return { childRunId, status: "needs-input", summary: clamp(output.needsInput) };
+    }
     const summary = typeof output?.summary === "string" && output.summary.trim() !== "" ? output.summary : "(the child finished without a summary)";
     const pr = typeof output?.pr === "string" && output.pr !== "" ? output.pr : undefined;
     return { childRunId, status: "completed", summary: clamp(summary), ...(pr !== undefined ? { pr } : {}) };
@@ -229,6 +234,14 @@ export function delegateTimeoutTransfer(childRunId: string, waitMs: number): Del
  * model can tell a completed child's report from a failed one at a glance.
  */
 export function transferObservation(transfer: DelegateTransfer): string {
+  if (transfer.status === "needs-input") {
+    // DT4, the relay half of T3's DelegatedTaskQuestionReactor minus the
+    // live answer: the child is finished, the question is the parent's now.
+    return (
+      `Delegated run ${transfer.childRunId} stopped to ask a question (needs-input) — the child asked:\n${scrub(transfer.summary)}\n` +
+      "The child has finished and is not waiting for a reply. Decide: answer it yourself and delegate again with the answer in the brief, ask your own operator if this run can, or proceed without it and say what you assumed."
+    );
+  }
   const head = `Delegated run ${transfer.childRunId} ${transfer.status === "timeout" ? "timed out" : transfer.status}:`;
   const pr = transfer.pr !== undefined ? `\nPull request: ${transfer.pr}` : "";
   const advice =
@@ -310,7 +323,7 @@ export const DELEGATE_CHILD_REFUSED =
  * input, so replay refuses identically.
  */
 export const DELEGATE_CHILD_ASK_REFUSED =
-  "Asking is not available on a delegated child run: no human is watching its questions, and the parent waiting on you must not depend on one. Decide for yourself, prefer the reversible option, and state what you assumed in your finish message — the parent reads that report.";
+  "Asking is not available on a delegated child run: no human is watching its questions, and the parent waiting on you must not depend on one. Decide for yourself, prefer the reversible option, and state what you assumed in your finish message — the parent reads that report. If you genuinely cannot continue without an answer, finish with ```finish needs-input and the question as the body: this run ends and the delegating run receives the question.";
 
 /**
  * An approval-required action on a delegated child, denied automatically with

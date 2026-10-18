@@ -108,7 +108,13 @@ the suite ladder at the child's own enqueue. The child additionally carries
 `delegateChild: true`, which (a) suppresses the delegate flag at enqueue even
 under `SHIP_DELEGATE=1`, (b) makes the loop REFUSE a ```delegate block from a
 child with a clear message — one level only, v1 — and (c) suppresses `ask`,
-per the read-only rule above.
+per the read-only rule above. A child that cannot proceed without an answer may end
+with ```finish needs-input and the question as the body (DT4): the run
+completes with `output.needsInput`, the parent's transfer has status
+`needs-input`, and the parent's observation says what the child asked and
+that it is not waiting. The child's ```ask stays refused and nothing parks; the
+parent decides whether to answer by delegating again, ask its own operator, or
+proceed.
 
 ## Bounds
 

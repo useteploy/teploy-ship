@@ -774,6 +774,12 @@ export interface DurableAgentOutput {
   agentSummary?: string;
   /** The critic's advisory notes over the verified tree, when it ran. */
   riskNotes?: string;
+  /**
+   * A delegated child that stopped to ask its parent (DT4): the question.
+   * Present only on such a child's output, so every other recorded output
+   * keeps its exact shape. The parent's transfer reads it (delegate.ts).
+   */
+  needsInput?: string;
 }
 
 /** Model usage summed across a run. `priced`/`costUSD` are the P5-3 honesty fields; see harness.ts. */
@@ -1736,6 +1742,7 @@ export function durableAgent(
           usage: result.usage,
           ...(pr !== null ? { pr } : {}),
           ...(scanned !== null ? { findings: scanned.findings } : {}),
+          ...(result.needsInput !== undefined && input.delegateChild === true ? { needsInput: result.needsInput } : {}),
         };
       }
 
@@ -2368,6 +2375,14 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
         // re-asks, then whatever came back is accepted: a model that cannot
         // emit the array in three attempts will not emit it in six, and the
         // free text is still on the timeline either way.
+        // A delegated child stopping to ASK (DT4): it cannot park on a human
+        // (its ```ask is refused by name), so it finishes with the question
+        // and the parent decides — answer by delegating again, ask its own
+        // human, or proceed. No park, no step: the finish is the deliverable,
+        // and it skips the findings nudge, which asks a different question.
+        if (input.delegateChild === true && action.kind === "finish" && action.needsInput === true && action.message !== "") {
+          return { status: "finished", summary: action.message, turns: turn + 1, usage, incomplete: false, needsInput: action.message };
+        }
         if (scanRun && action.kind === "finish") {
           const parsed = parseFindings(action.message);
           if (!parsed.found && scanFindingsNudges < 2 && turn + 1 < maxSteps) {

@@ -128,6 +128,8 @@ export interface HarnessResult {
   fixExhausted?: { attempts: number; exitCode: number };
   /** The critic's advisory verdict (input.criticAdvisory), for the PR body and the run output. */
   critic?: { approved: boolean; notes: string };
+  /** A delegated child finished to ask its parent this question (DT4, ```finish needs-input). */
+  needsInput?: string;
 }
 
 /**

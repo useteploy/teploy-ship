@@ -37,7 +37,7 @@ export type Action =
   | { kind: "look"; url?: string; ref?: string; find?: string; depth?: number; image?: boolean } // browser perception (S12): the run's page as an a11y-tree text with refs; image=on adds a PNG screenshot (gated slice)
   | { kind: "delegate"; task: string; repo?: string; path?: string; target?: string } // bounded child work (S20/S22): spawn one child run, park, merge its result back as an observation
   | { kind: "mcp"; tool: string; args: Record<string, unknown> } // a declared MCP tool (D1, input.mcp): mcp.<server>.<tool> + JSON arguments
-  | { kind: "finish"; message: string }
+  | { kind: "finish"; message: string; needsInput?: true } // needsInput: ```finish needs-input — honoured only on a delegated child (DT4)
   | { kind: "ask"; question: string } // a question for the operator; the run parks on the answer (durable, input.ask)
   | { kind: "invalid"; message: string } // recognized but malformed — feed the error back
   | { kind: "none" }; // no actionable block found — the model must retry
@@ -478,7 +478,10 @@ function parseFencedAction(text: string, dialect?: ActionDialect): { index: numb
     const arg = argParts.join(" ");
 
     if (lang === "finish") {
-      return { index, action: { kind: "finish", message: code.trim() } };
+      // `needs-input` on the fence (DT4): a delegated child stopping to ask
+      // its parent. Parsed everywhere, read only by the child path; any other
+      // argument is ignored, as it always was.
+      return { index, action: { kind: "finish", message: code.trim(), ...(arg.trim().toLowerCase() === "needs-input" ? { needsInput: true as const } : {}) } };
     }
     if (lang === "ask") {
       const question = code.trim();
