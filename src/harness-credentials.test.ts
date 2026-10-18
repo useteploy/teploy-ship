@@ -6,6 +6,7 @@ import { test } from "node:test";
 
 import type { ModelAdapter } from "@neutron-build/ai";
 import { LocalExecutor } from "@neutron-build/agents";
+import type { AgentExecutor } from "@neutron-build/agents";
 import { MemoryEventStore, executeRun } from "@neutron-build/workflow";
 
 import { durableAgent } from "./durable.js";
@@ -535,6 +536,46 @@ test("gate: S3 — cloud apis, underivable provider defaults, local MCP, share a
     assert.equal(out.code, "harness-config-destination-unreadable", what);
     assert.match(out.reason ?? "", why, what);
   }
+});
+
+test("gate: S5 — npm provider packages, legacy autoshare and unreadable instruction URLs refuse; share disabled passes; instruction hosts are judged", async () => {
+  const policy = await policyFile([
+    { host: "api.openai.com", class: "hosted", retention: "none" },
+    { host: "docs.example.com", class: "hosted", retention: "none" },
+  ]);
+  const admit = (blob: string, destinations = "api.openai.com") =>
+    admitHarnessCredentials({
+      refs: [{ id: "opencode" }],
+      project: null,
+      store: undefined,
+      env: { SHIP_HARNESS_CRED: "on", OPENAI_API_KEY: "sk-oai", OPENCODE_CONFIG_CONTENT: blob, SHIP_MODEL_ROUTING_POLICY: policy, SHIP_MODEL_ROUTING_DESTINATIONS: destinations },
+    });
+  const refused: Array<[string, string, RegExp]> = [
+    ["an npm provider package", JSON.stringify({ provider: { openai: { npm: "@ai-sdk/openai-compatible", options: { baseURL: "https://api.openai.com/v1" } } } }), /npm provider package/],
+    ["legacy autoshare", JSON.stringify({ provider: {}, autoshare: true }), /autoshare/],
+    ["share manual", JSON.stringify({ provider: {}, share: "manual" }), /share/],
+    ["share auto", JSON.stringify({ provider: {}, share: "auto" }), /share/],
+    ["a non-http instructions URL", JSON.stringify({ provider: {}, instructions: ["ftp://files.example.com/rules.md"] }), /instructions URL/],
+    ["a non-array instructions entry", JSON.stringify({ provider: {}, instructions: "https://docs.example.com/x.md" }), /instructions/],
+  ];
+  for (const [what, blob, why] of refused) {
+    const out = await admit(blob);
+    assert.equal(out.ok, false, what);
+    assert.equal(out.code, "harness-config-destination-unreadable", what);
+    assert.match(out.reason ?? "", why, what);
+  }
+  // share "disabled" and autoshare false are the explicit off: they pass.
+  const disabled = await admit(JSON.stringify({ provider: {}, share: "disabled", autoshare: false, instructions: ["AGENTS.md", "docs/*.md"] }));
+  assert.equal(disabled.ok, true, disabled.ok === false ? disabled.reason : "");
+  // A remote instructions URL is a destination: undeclared => refused by the
+  // policy, declared => derived and recorded.
+  const blob = JSON.stringify({ provider: {}, instructions: ["https://docs.example.com/rules.md"] });
+  const undeclared = await admit(blob);
+  assert.equal(undeclared.ok, false);
+  assert.match(undeclared.reason ?? "", /docs\.example\.com/);
+  const declared = await admit(blob, "api.openai.com,docs.example.com");
+  assert.equal(declared.ok, true, declared.ok === false ? declared.reason : "");
+  assert.ok((declared.ok ? declared.destinations.opencode : []).includes("docs.example.com"));
 });
 
 test("gate: S3 — known provider defaults and remote MCP urls are derived and judged", async () => {
@@ -1371,7 +1412,94 @@ test("publish: NEGATIVE CONTROL — a workspace carrying a forwarded credential 
   assert.ok(!JSON.stringify(events).includes("sk-ant-PUBLISH-LEAK-9876"), "the value is never in the log");
   // The branch never left the sandbox: the bare repo has only the seed commit.
   const branches = await seeder.exec(`git --git-dir ${shq(join(bare, "owner/repo.git"))} for-each-ref --format='%(refname)' refs/heads`);
-  assert.ok(!branches.stdout.includes("teploy/"), "no run branch was pushed");
+  assert.ok(!branches.stdout.includes("refs/heads/ship/"), "no run branch was pushed");
+});
+
+/** The push-refusal fixture: a bare origin with one seed commit and a workspace whose fake claude dumps its env. */
+async function pushFixture(): Promise<{ bare: string; seeder: LocalExecutor; work: string; executor: LocalExecutor }> {
+  const bare = await mkdtemp(join(tmpdir(), "h2-push-bare-"));
+  const seed = await mkdtemp(join(tmpdir(), "h2-push-seed-"));
+  const seeder = new LocalExecutor({ root: seed });
+  await seeder.exec(`git init -q -b main . && git config user.email t@t && git config user.name t && printf 'hello\\n' > f.txt && git add -A && git commit -qm seed && git clone -q --bare . ${bare}/owner/repo.git`);
+  const { bin, work } = await workspaceLeakingClaude();
+  return { bare, seeder, work, executor: new LocalExecutor({ root: work, env: { PATH: `${bin}:${process.env.PATH ?? ""}` } }) };
+}
+
+test("publish: S1 — a scan that cannot run holds the push with its own words (retried), never a rotate-the-credential refusal", async () => {
+  const { bare, seeder, work, executor } = await pushFixture();
+  let scans = 0;
+  // The scan's exec times out (an overloaded sandbox); everything else runs.
+  const flaky: AgentExecutor = {
+    exec: async (command, options) => {
+      if (command.includes("SHIP_NEEDLES_B64")) {
+        scans++;
+        return { exitCode: -1, stdout: "", stderr: "", timedOut: true, truncated: false };
+      }
+      return await executor.exec(command, options);
+    },
+    putFile: (p, c) => executor.putFile(p, c),
+    getFile: (p) => executor.getFile(p),
+    destroy: async () => {},
+  };
+  const provider: ExecutorProvider = { isolated: true, async create() { return { handle: work }; }, attach: () => flaky };
+  const wf = durableAgent({
+    model: neverModel,
+    executor: provider,
+    workdir: ".",
+    harnesses: externalAdapters({ env: { ANTHROPIC_AUTH_TOKEN: "sk-ant-SCANHELD-9876" } }),
+  });
+  const store = new MemoryEventStore();
+  await executeRun({
+    workflow: wf,
+    runId: "run-h2-held",
+    store,
+    input: { task: "t", repo: `file://${bare}/owner/repo.git`, harness: { id: "claude-code", version: HARNESS_VERSIONS["claude-code"]! } },
+  });
+  const events = await store.load("run-h2-held");
+  const log = JSON.stringify(events);
+  assert.ok(!events.some((e) => e.type === "step-completed" && e.name === "repo-push"), "the push step never completed");
+  assert.match(log, /the credential scan could not run: timed out after \d+s; the push was held/);
+  assert.ok(!/rotate the credential/.test(log), "a scan that judged nothing never tells anyone to rotate");
+  assert.ok(scans >= 2, `the step was retried (EXTERNAL_EFFECT_RETRY): ${scans} scan(s)`);
+  assert.ok(!log.includes("sk-ant-SCANHELD-9876"), "the value is never in the log");
+  const branches = await seeder.exec(`git --git-dir ${shq(join(bare, "owner/repo.git"))} for-each-ref --format='%(refname)' refs/heads`);
+  assert.ok(!branches.stdout.includes("refs/heads/ship/"), "nothing was pushed");
+});
+
+test("publish: SHIP_CREDENTIAL_SCAN=warn records the would-be refusal on the push step and pushes; =off pushes without scanning", async () => {
+  const prior = process.env.SHIP_CREDENTIAL_SCAN;
+  try {
+    for (const mode of ["warn", "off"] as const) {
+      process.env.SHIP_CREDENTIAL_SCAN = mode;
+      const { bare, seeder, work, executor } = await pushFixture();
+      const provider: ExecutorProvider = { isolated: true, async create() { return { handle: work }; }, attach: () => executor };
+      const wf = durableAgent({
+        model: neverModel,
+        executor: provider,
+        workdir: ".",
+        harnesses: externalAdapters({ env: { ANTHROPIC_AUTH_TOKEN: "sk-ant-KILLSWITCH-9876" } }),
+      });
+      const store = new MemoryEventStore();
+      await executeRun({
+        workflow: wf,
+        runId: `run-h2-${mode}`,
+        store,
+        input: { task: "t", repo: `file://${bare}/owner/repo.git`, harness: { id: "claude-code", version: HARNESS_VERSIONS["claude-code"]! } },
+      });
+      const events = await store.load(`run-h2-${mode}`);
+      const push = events.find((e) => e.type === "step-completed" && e.name === "repo-push");
+      const result = (push?.data as { result?: { kind?: string; credentialScanWarning?: string } } | undefined)?.result;
+      assert.equal(result?.kind, "pushed", `${mode}: the push proceeded: ${JSON.stringify(result)}`);
+      if (mode === "warn") assert.match(result?.credentialScanWarning ?? "", /credential-material-in-workspace.*ANTHROPIC_AUTH_TOKEN/, "warn records the would-be refusal");
+      else assert.equal(result?.credentialScanWarning, undefined, "off never scanned");
+      assert.ok(!JSON.stringify(events).includes("sk-ant-KILLSWITCH-9876"), `${mode}: the value is never in the log`);
+      const branches = await seeder.exec(`git --git-dir ${shq(join(bare, "owner/repo.git"))} for-each-ref --format='%(refname)' refs/heads`);
+      assert.ok(branches.stdout.includes(`refs/heads/ship/run-h2-${mode}`), `${mode}: the run branch was pushed`);
+    }
+  } finally {
+    if (prior === undefined) delete process.env.SHIP_CREDENTIAL_SCAN;
+    else process.env.SHIP_CREDENTIAL_SCAN = prior;
+  }
 });
 
 test("thread snapshot: NEGATIVE CONTROL — a workspace carrying a forwarded credential value is not snapshotted", async () => {

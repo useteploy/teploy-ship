@@ -324,6 +324,11 @@ export function opencodeConfigDestinations(raw: string): OpencodeConfigDestinati
     for (const [id, value] of Object.entries(providers as Record<string, unknown>)) {
       if (value === null || typeof value !== "object" || Array.isArray(value)) return refuse("unreadable", `has a ${id} provider entry that is not a JSON object`);
       const entry = value as Record<string, unknown>;
+      // A provider package is code opencode installs and runs inside the
+      // harness; whatever it dials, no derivation reads.
+      if (entry.npm !== undefined) {
+        return refuse("unreadable", `has a ${id} provider that names an npm provider package, code that runs inside the harness and can dial anywhere`);
+      }
       const api = typeof entry.api === "string" ? entry.api.trim().toLowerCase() : "";
       if (OPENCODE_CLOUD_APIS.has(api)) {
         return refuse("unreadable", `has a ${id} provider whose api is "${api}", a cloud-provider switch whose hosts depend on the account and region and cannot be derived`);
@@ -374,8 +379,32 @@ export function opencodeConfigDestinations(raw: string): OpencodeConfigDestinati
       push(host);
     }
   }
-  if (record.share !== undefined && record.share !== false) {
+  // Only an explicit off passes: `"disabled"` (the current schema) or
+  // `false`. Every other value — `"manual"`, `"auto"`, anything unknown —
+  // leaves a path that publishes the session to opencode's cloud service.
+  if (record.share !== undefined && record.share !== false && record.share !== "disabled") {
     return refuse("unreadable", "enables opencode share, which publishes the session to opencode's cloud service");
+  }
+  // The legacy spelling of the same switch, still read by older builds.
+  if (record.autoshare !== undefined && record.autoshare !== false) {
+    return refuse("unreadable", "enables opencode autoshare, which publishes the session to opencode's cloud service");
+  }
+  // Instruction entries are local paths or globs — or remote URLs opencode
+  // fetches at start-up, which are destinations like any other: derived and
+  // judged, and anything unreadable is a refusal.
+  const instructions = record.instructions;
+  if (instructions !== undefined) {
+    if (!Array.isArray(instructions)) return refuse("unreadable", "has an instructions entry that is not an array");
+    for (const item of instructions) {
+      if (typeof item !== "string") return refuse("unreadable", "has an instructions entry that is not a string");
+      const trimmed = item.trim();
+      if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) continue;
+      const host = /^https?:\/\//i.test(trimmed) ? hostOf(trimmed) : undefined;
+      if (host === undefined) {
+        return refuse("unreadable", `has an instructions URL (${JSON.stringify(trimmed.slice(0, 60))}) that is not an http(s) URL a host can be read from`);
+      }
+      push(host);
+    }
   }
   const plugin = record.plugin;
   if (plugin !== undefined && (plugin === null || typeof plugin !== "object" || Array.isArray(plugin) ? true : Object.keys(plugin).length > 0)) {

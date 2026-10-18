@@ -258,10 +258,12 @@ by name before any run exists:
   also covers what nothing else can read: an `OPENCODE_CONFIG_CONTENT` blob
   is judged in full — provider `baseURL`s, the provider `api` field,
   providers with a key but no baseURL (known provider ids derive their
-  default host), remote MCP `url`s — and anything in it that cannot be
-  derived exactly is refused: not JSON (`harness-config-unparseable`), a
-  run-time `{env:}`/`{file:}` substitution, a bedrock/vertex api, an unknown
-  provider default, a local MCP server, `share`, or `plugin`
+  default host), remote MCP `url`s, remote `instructions` URLs — and
+  anything in it that cannot be derived exactly is refused: not JSON
+  (`harness-config-unparseable`), a run-time `{env:}`/`{file:}`
+  substitution, a bedrock/vertex api, an npm provider package, an unknown
+  provider default, a local MCP server, `share` other than `"disabled"`,
+  legacy `autoshare`, or `plugin`
   (`harness-config-destination-unreadable`) — never guessed at. A
   `SHIP_HARNESS_ENV` addition is permitted only on an explicit allowlist of
   destination-free knobs; proxy overrides, config-file pointers and

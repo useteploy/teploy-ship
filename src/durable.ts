@@ -76,9 +76,11 @@ import { surfacedTestIntegrity } from "./test-integrity-surface.js";
 import { shortHash, warmClient, warmSlugOf, type WarmState } from "./warm.js";
 import {
   sandboxOverridesDigest,
+  credentialScanMode,
+  snapshotCredentialGate,
   snapshotScanRoots,
   workspaceCredentialReason,
-  workspaceSecretValueReason,
+  workspaceSecretValueScan,
   type ThreadWarmRef,
   type ThreadWarmStore,
 } from "./thread-warm.js";
@@ -96,6 +98,7 @@ import { assertRepoAllowed, credentialFor, policyFromEnv } from "./repo-policy.j
 import type { RepoPolicyConfig, RepoTrust } from "./repo-policy.js";
 import type { ForkSourceRecord } from "./fork.js";
 import type { KnownSecret } from "./redact.js";
+import { scrubExact } from "./redact.js";
 import { condenseIfNeeded, defaultCondenseConfig } from "./memory.js";
 import type { CondenseConfig } from "./memory.js";
 import { RecoveryTracker, defaultRecoveryConfig } from "./recovery.js";
@@ -2154,11 +2157,16 @@ export function durableAgent(
             // the vendor session stores of the harnesses this run's input
             // names, and /tmp — so an agent that ran `env > x` cannot hand
             // its key to the thread's next turn.
-            const leaked = await workspaceSecretValueReason(primary.executor, primary.secrets, "thread snapshot", {
-              roots: snapshotScanRoots([...(input.harness !== undefined ? [input.harness.id] : []), ...(input.harnessAttempts ?? []).map((a) => a.id)]),
-            });
-            if (leaked !== null) {
-              return { skipped: `no snapshot: ${leaked}` };
+            // SHIP_CREDENTIAL_SCAN=warn records the would-be refusal on this
+            // step and snapshots anyway; =off skips the scan.
+            const gate = await snapshotCredentialGate(
+              primary.executor,
+              primary.secrets,
+              "thread snapshot",
+              snapshotScanRoots([...(input.harness !== undefined ? [input.harness.id] : []), ...(input.harnessAttempts ?? []).map((a) => a.id)]),
+            );
+            if ("refuse" in gate) {
+              return { skipped: `no snapshot: ${gate.refuse}` };
             }
             let head = "";
             try {
@@ -2177,7 +2185,12 @@ export function durableAgent(
               overridesDigest: sandboxOverridesDigest(sandboxOverridesOf(input)),
               createdAt: new Date().toISOString(),
             });
-            return { image, head, ...(evicted.length > 0 ? { evicted: evicted.length } : {}) };
+            return {
+              image,
+              head,
+              ...(evicted.length > 0 ? { evicted: evicted.length } : {}),
+              ...(gate.warning !== undefined ? { credentialScanWarning: gate.warning } : {}),
+            };
            } catch (error) {
             // Found live 2026-10-18: a run that parked at approve-merge had its
             // original sandbox snapshotted and destroyed by the merge park, so
@@ -3984,18 +3997,37 @@ async function publishIfRepoRun(
     "repo-push",
     async () => {
     // The push scan covers exactly what would leave the sandbox: every
-    // commit since the base plus the working tree (thread-warm.ts
-    // workspaceSecretValueReason) — not the whole tree, so gitignored bytes
+    // commit since the base plus the staged tree (thread-warm.ts
+    // pushScanCommand) — not the whole tree, so gitignored bytes
     // never refuse a publish, and an add-commit-remove history still does.
-    const leaked = await workspaceSecretValueReason(executor, harnessSecrets, "push", {
-      ...(typeof checkout?.base === "string" ? { base: checkout.base } : {}),
-    });
-    if (leaked !== null) {
-      return {
-        kind: "refused" as const,
-        message: `Ship refused to push this run's diff: ${leaked}. The work is still in this run's log. Remove the file and rotate the credential, then run the task again.`,
-      };
+    //
+    // Only a FINDING is a refusal that says "rotate". A scan that could not
+    // run judged nothing: it throws (EXTERNAL_EFFECT_RETRY retries the step)
+    // with its own words, and nothing is pushed. A missing origin/<base> is
+    // left to commitAndPush, whose own `origin/<base>` read fails the same
+    // way and reports it on the existing error path — still before any push.
+    // SHIP_CREDENTIAL_SCAN=warn records the would-be refusal on this step
+    // and pushes anyway; =off skips the scan.
+    const scanMode = credentialScanMode();
+    let credentialScanWarning: string | undefined;
+    if (scanMode !== "off") {
+      const scan = await workspaceSecretValueScan(executor, harnessSecrets, "push", {
+        ...(typeof checkout?.base === "string" ? { base: checkout.base } : {}),
+      });
+      const blocking = scan.kind === "material" || (scan.kind === "failed" && !scan.noBase);
+      if (blocking && scanMode === "warn") {
+        credentialScanWarning = scan.reason;
+        console.warn(`SHIP_CREDENTIAL_SCAN=warn: run ${ctx.runId} pushed despite: ${scan.reason}`);
+      } else if (scan.kind === "material") {
+        return {
+          kind: "refused" as const,
+          message: `Ship refused to push this run's diff: ${scan.reason}. The work is still in this run's log. Remove the file and rotate the credential, then run the task again.`,
+        };
+      } else if (scan.kind === "failed" && !scan.noBase) {
+        throw new Error(`the credential scan could not run: ${scan.why}; the push was held`);
+      }
     }
+    const warned = credentialScanWarning !== undefined ? { credentialScanWarning } : {};
     const result = await commitAndPush(executor, {
       ref,
       token,
@@ -4005,17 +4037,21 @@ async function publishIfRepoRun(
       ...(trailers.length > 0 ? { trailers } : {}),
     });
     return result.kind === "refused"
-      ? { kind: "refused" as const, message: refusalMessage(result.screen) }
+      ? { kind: "refused" as const, message: refusalMessage(result.screen), ...warned }
       : result.kind === "pushed"
         ? {
             kind: "pushed" as const,
             sha: result.sha,
-            diff: await publishedDiff(executor, co.base),
+            // Scrubbed of the run's forwarded values before it is recorded: a
+            // push the operator let through under SHIP_CREDENTIAL_SCAN=warn
+            // (or =off) must not copy the value into this log as well.
+            diff: await publishedDiff(executor, co.base).then((d) => (d === undefined ? d : scrubExact(d, harnessSecrets ?? []))),
             // An unusual-looking diff is published, but as a draft that says
             // what looked unusual — the reviewer decides, not the limit.
             ...(result.screen !== undefined ? { warning: warningMessage(result.screen) } : {}),
+            ...warned,
           }
-        : { kind: "empty" as const };
+        : { kind: "empty" as const, ...warned };
     },
     EXTERNAL_EFFECT_RETRY,
   );
@@ -4360,11 +4396,17 @@ async function mergeBoundaryGate(
       // outlives the container. A refusal skips the image (the park still
       // asks its question; the approval falls back to a fresh checkout, the
       // same degradation a provider that cannot snapshot takes).
+      // SHIP_CREDENTIAL_SCAN=warn logs the would-be refusal and takes the
+      // image anyway. The step still records the bare image ref: the park
+      // sweeper and the liveness probe read exactly that shape.
       parkImage = await ctx.step("merge-snapshot", async () => {
-        const leaked = await workspaceSecretValueReason(exec, harnessSecrets, "merge park snapshot", {
-          roots: snapshotScanRoots([...(input.harness !== undefined ? [input.harness.id] : []), ...(input.harnessAttempts ?? []).map((a) => a.id)]),
-        });
-        if (leaked !== null) return { skipped: `no image: ${leaked}` };
+        const gate = await snapshotCredentialGate(
+          exec,
+          harnessSecrets,
+          "merge park snapshot",
+          snapshotScanRoots([...(input.harness !== undefined ? [input.harness.id] : []), ...(input.harnessAttempts ?? []).map((a) => a.id)]),
+        );
+        if ("refuse" in gate) return { skipped: `no image: ${gate.refuse}` };
         return await config.executor.snapshot!(h);
       });
       const image = typeof parkImage === "string" ? parkImage : undefined;

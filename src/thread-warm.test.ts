@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, symlink, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -21,6 +22,10 @@ import {
   warmThreadTtlSec,
   workspaceCredentialReason,
   workspaceSecretValueReason,
+  workspaceSecretValueScan,
+  snapshotScanCommand,
+  credentialScanMode,
+  snapshotCredentialGate,
   type ThreadWarmRecord,
 } from "./thread-warm.js";
 import { MemoryRuntimeConfig } from "./runtime-config.js";
@@ -129,11 +134,11 @@ test("workspaceSecretValueReason: exact values and base64 forms refuse by name; 
   assert.equal(await workspaceSecretValueReason(ex, [key], "thread snapshot"), null);
 });
 
-test("snapshotScanRoots: the vendor stores of the harnesses the input names, plus /tmp", () => {
-  assert.deepEqual(snapshotScanRoots([]), ["/tmp"]);
-  assert.deepEqual(snapshotScanRoots(["native"]), ["/tmp"], "the native loop keeps no vendor store");
-  assert.deepEqual(snapshotScanRoots(["claude-code"]), ["/tmp", "$HOME/.claude"]);
-  assert.deepEqual(snapshotScanRoots(["codex", "opencode"]), ["/tmp", "$HOME/.codex", "$HOME/.config/opencode", "$HOME/.local/share/opencode"]);
+test("snapshotScanRoots: the vendor stores of the harnesses the input names, plus /tmp and /var/tmp", () => {
+  assert.deepEqual(snapshotScanRoots([]), ["/tmp", "/var/tmp"]);
+  assert.deepEqual(snapshotScanRoots(["native"]), ["/tmp", "/var/tmp"], "the native loop keeps no vendor store");
+  assert.deepEqual(snapshotScanRoots(["claude-code"]), ["/tmp", "/var/tmp", "$HOME/.claude"]);
+  assert.deepEqual(snapshotScanRoots(["codex", "opencode"]), ["/tmp", "/var/tmp", "$HOME/.codex", "$HOME/.config/opencode", "$HOME/.local/share/opencode"]);
 });
 
 test("the push scan judges what would leave: history since base, the working diff, untracked files — not gitignored bytes", async () => {
@@ -160,7 +165,7 @@ test("the push scan judges what would leave: history since base, the working dif
 
   // Add-commit-remove: the tree is clean, the HISTORY carries the value — the
   // exact shape a whole-tree scan cannot see.
-  await ex.exec("git checkout -q -- .");
+  await ex.exec("git reset -q --hard HEAD");
   await ex.exec('sh -c \'printf "%s\\n" "$V" > gone.txt && git add -A && git commit -qm add && git rm -q gone.txt && git commit -qm rm\'', { env: { V: key.value } });
   const history = await workspaceSecretValueReason(ex, [key], "push", { base: "main" });
   assert.match(history ?? "", /OPENAI_API_KEY/, "a committed-then-removed value still refuses the push");
@@ -237,6 +242,235 @@ test("the snapshot scan reaches the extra roots (vendor stores, /tmp) when the i
   await ex.exec(`printf 'ANTHROPIC_API_KEY=%s\\n' "$V" > ${shq(join(outside, "session.jsonl"))}`, { env: { V: key.value } });
   assert.equal(await workspaceSecretValueReason(ex, [key], "thread snapshot"), null, "the workspace alone is clean");
   assert.match((await workspaceSecretValueReason(ex, [key], "thread snapshot", { roots: [outside] })) ?? "", /ANTHROPIC_API_KEY/);
+});
+
+// ------------------------------------------------ scan shell, executed for real
+
+/** The literal the scan's shell walks to pick a temp base; tests swap it for a private dir. */
+const SCAN_TMP_LOOP = "for t in /var/tmp /tmp;";
+
+/**
+ * A LocalExecutor that runs the REAL scan command in /bin/sh, with the scan's
+ * temp base (/var/tmp, /tmp) moved to a private dir so a test can list what
+ * the scan left behind, plus env overrides layered over the scan's own env.
+ */
+function scanExec(root: string, base: string, extra: { env?: Record<string, string>; timeoutMs?: number } = {}): AgentExecutor {
+  const ex = new LocalExecutor({ root });
+  return {
+    exec: async (command, options = {}) => {
+      if (command.includes("ship-scan.") && !command.includes(SCAN_TMP_LOOP)) throw new Error("scan temp loop not found: the test would be vacuous");
+      return await ex.exec(command.split(SCAN_TMP_LOOP).join(`for t in ${shq(base)};`), {
+        ...options,
+        env: { ...(options.env ?? {}), ...(extra.env ?? {}) },
+        ...(extra.timeoutMs !== undefined ? { timeoutMs: extra.timeoutMs } : {}),
+      });
+    },
+    putFile: async () => {},
+    getFile: async () => new Uint8Array(),
+    destroy: async () => {},
+  };
+}
+
+/** A PATH dir whose `git` fails (or sleeps on) `git log` and delegates everything else to the real git. */
+async function fakeGit(mode: "fail-log" | "sleep-log"): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "tw-fakegit-"));
+  const real = (await new LocalExecutor({ root: dir }).exec("command -v git")).stdout.trim();
+  const body = mode === "fail-log" ? "echo boom >&2; exit 128" : "sleep 3";
+  await writeFile(join(dir, "git"), `#!/bin/sh\nif [ "$1" = log ]; then ${body}; fi\nexec ${shq(real)} "$@"\n`, { mode: 0o755 });
+  return dir;
+}
+
+/** A clone shape with origin/main established (setupRepoForPr's contract). */
+async function pushRepo(prefix: string): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), prefix));
+  await new LocalExecutor({ root }).exec(
+    "git init -q -b main . && git config user.email t@t && git config user.name t && printf 'base\\n' > b.txt && git add -A && git commit -qm base && git update-ref refs/remotes/origin/main HEAD",
+  );
+  return root;
+}
+
+test("B1: every scan exit path removes its decoded needle file", async () => {
+  const key = { name: "ANTHROPIC_API_KEY", value: "sk-ant-NEEDLEFILE-0123456789" };
+  const base = await mkdtemp(join(tmpdir(), "tw-scan-tmp-"));
+  const root = await pushRepo("tw-exitpaths-");
+  const left = async (label: string): Promise<void> => assert.deepEqual(await readdir(base), [], `${label}: no needle file left`);
+
+  assert.equal((await workspaceSecretValueScan(scanExec(root, base), [key], "push", { base: "main" })).kind, "clean");
+  await left("clean push");
+
+  await writeFile(join(root, "dump.txt"), `${key.value}\n`);
+  assert.equal((await workspaceSecretValueScan(scanExec(root, base), [key], "push", { base: "main" })).kind, "material");
+  await left("material push");
+  await new LocalExecutor({ root }).exec("git reset -q --hard HEAD && rm -f dump.txt");
+
+  const noBase = await workspaceSecretValueScan(scanExec(root, base), [key], "push", { base: "nosuchbranch" });
+  assert.equal(noBase.kind === "failed" && noBase.noBase, true, "exit 8 is the no-base failure");
+  await left("exit 8 (no base)");
+
+  const cases: Array<[string, Record<string, string>, RegExp]> = [
+    ["exit 9 (needles empty)", { SHIP_NEEDLES_B64: "" }, /scan-needles-empty/],
+    ["exit 10 (needles corrupt)", { SHIP_NEEDLES_B64: Buffer.from("some-other-needle-line\n").toString("base64") }, /scan-needles-corrupt/],
+    ["exit 3 (needles undecodable)", { SHIP_NEEDLES_B64: "!!!" }, /scan-needles-undecodable/],
+  ];
+  for (const [label, env, why] of cases) {
+    const out = await workspaceSecretValueScan(scanExec(root, base, { env }), [key], "push", { base: "main" });
+    assert.equal(out.kind, "failed", label);
+    assert.match(out.kind === "failed" ? out.reason : "", why, label);
+    await left(label);
+  }
+
+  // S2 as well: a producer that fails is a scan error, not an empty stream.
+  const failing = await fakeGit("fail-log");
+  const producer = await workspaceSecretValueScan(scanExec(root, base, { env: { PATH: `${failing}:${process.env.PATH ?? ""}` } }), [key], "push", { base: "main" });
+  assert.equal(producer.kind, "failed");
+  assert.match(producer.kind === "failed" ? producer.reason : "", /exit 6: scan-producer-failed: git log/);
+  await left("exit 6 (producer failed)");
+
+  const locked = await mkdtemp(join(tmpdir(), "tw-locked-"));
+  await chmod(locked, 0o000);
+  try {
+    const out = await workspaceSecretValueScan(scanExec(root, base), [key], "thread snapshot", { roots: [locked] });
+    assert.match(out.kind === "failed" ? out.reason : "", /scan-root-unreadable/);
+    await left("exit 7 (root unreadable)");
+  } finally {
+    await chmod(locked, 0o755);
+  }
+
+  await writeFile(join(root, "dump.txt"), `${key.value}\n`);
+  assert.equal((await workspaceSecretValueScan(scanExec(root, base), [key], "thread snapshot")).kind, "material");
+  await left("material snapshot");
+});
+
+test("B1: TERM runs the cleanup; a SIGKILLed scan's leftover is swept by the next scan, never frozen or matched", async () => {
+  const key = { name: "ANTHROPIC_API_KEY", value: "sk-ant-KILLSWEEP-0123456789" };
+  const base = await mkdtemp(join(tmpdir(), "tw-scan-tmp-"));
+  const root = await pushRepo("tw-signals-");
+  const sleepy = await fakeGit("sleep-log");
+  const path = `${sleepy}:${process.env.PATH ?? ""}`;
+
+  // TERM mid-scan (git log sleeping): the trap removes the dir.
+  let captured = "";
+  let capturedEnv: Record<string, string> = {};
+  const capture: AgentExecutor = {
+    exec: async (command, options = {}) => {
+      captured = command.split(SCAN_TMP_LOOP).join(`for t in ${shq(base)};`);
+      capturedEnv = { ...(options.env ?? {}) };
+      return { exitCode: 0, stdout: "", stderr: "", timedOut: false, truncated: false };
+    },
+    putFile: async () => {},
+    getFile: async () => new Uint8Array(),
+    destroy: async () => {},
+  };
+  await workspaceSecretValueScan(capture, [key], "push", { base: "main" });
+  const child = spawn("/bin/sh", ["-c", captured], { cwd: root, env: { ...process.env, ...capturedEnv, PATH: path }, stdio: "ignore" });
+  const closed = new Promise<void>((resolve) => child.on("close", () => resolve()));
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  assert.equal((await readdir(base)).length, 1, "the scan dir exists while the scan runs");
+  child.kill("SIGTERM");
+  await closed;
+  assert.deepEqual(await readdir(base), [], "TERM removed the needle file");
+
+  // SIGKILL (an executor timeout) cannot be trapped: the dir is left ...
+  const killed = await workspaceSecretValueScan(scanExec(root, base, { env: { PATH: path }, timeoutMs: 700 }), [key], "push", { base: "main" });
+  assert.match(killed.kind === "failed" ? killed.reason : "", /timed out/);
+  assert.equal((await readdir(base)).length, 1, "a SIGKILLed scan leaves its dir (the scenario under test)");
+  // ... and the next scan sweeps it before scanning: with the temp base as a
+  // snapshot root, the leftover needles are neither matched nor frozen.
+  const next = await workspaceSecretValueScan(scanExec(root, base), [key], "thread snapshot", { roots: [base] });
+  assert.equal(next.kind, "clean", JSON.stringify(next));
+  assert.deepEqual(await readdir(base), [], "swept");
+});
+
+test("B2: a vendor store under the container's own $HOME is scanned; unreadable or homeless is a scan error", async () => {
+  const key = { name: "ANTHROPIC_API_KEY", value: "sk-ant-HOMESTORE-0123456789" };
+  const base = await mkdtemp(join(tmpdir(), "tw-scan-tmp-"));
+  const root = await mkdtemp(join(tmpdir(), "tw-home-ws-"));
+  const home = join(await mkdtemp(join(tmpdir(), "tw-home-")), "a home with spaces");
+  await mkdir(join(home, ".claude", "projects"), { recursive: true });
+  const env = { HOME: home };
+  assert.equal((await workspaceSecretValueScan(scanExec(root, base, { env }), [key], "thread snapshot", { roots: ["$HOME/.claude"] })).kind, "clean");
+  await writeFile(join(home, ".claude", "projects", "session.jsonl"), `{"env":"ANTHROPIC_API_KEY=${key.value}"}\n`);
+  const hit = await workspaceSecretValueScan(scanExec(root, base, { env }), [key], "thread snapshot", { roots: ["$HOME/.claude"] });
+  assert.equal(hit.kind, "material", "the store under the exec's own HOME refuses the snapshot");
+  assert.match(hit.kind === "material" ? hit.reason : "", /ANTHROPIC_API_KEY/);
+
+  await chmod(join(home, ".claude"), 0o000);
+  try {
+    const locked = await workspaceSecretValueScan(scanExec(root, base, { env }), [key], "thread snapshot", { roots: ["$HOME/.claude"] });
+    assert.match(locked.kind === "failed" ? locked.reason : "", /scan-root-unreadable/, "an existing-but-unreadable store is a scan error");
+  } finally {
+    await chmod(join(home, ".claude"), 0o755);
+  }
+  const homeless = await workspaceSecretValueScan(scanExec(root, base, { env: { HOME: "" } }), [key], "thread snapshot", { roots: ["$HOME/.claude"] });
+  assert.match(homeless.kind === "failed" ? homeless.reason : "", /scan-no-home/);
+  // Only a plain suffix may ride after the unquoted "$HOME".
+  assert.throws(() => snapshotScanCommand(["$HOME/$(id)"]), /invalid scan root suffix/);
+});
+
+test("S4: the snapshot scan reads regular files only — a FIFO cannot hang it, links below the root are not followed — and an unreadable subtree fails it", async () => {
+  const key = { name: "OPENAI_API_KEY", value: "sk-oai-FIFOSCAN-0123456789" };
+  const base = await mkdtemp(join(tmpdir(), "tw-scan-tmp-"));
+  const root = await mkdtemp(join(tmpdir(), "tw-fifo-ws-"));
+  const outside = await mkdtemp(join(tmpdir(), "tw-fifo-out-"));
+  await writeFile(join(outside, "elsewhere.txt"), `${key.value}\n`);
+  await new LocalExecutor({ root }).exec(`mkfifo pipe && ln -s ${shq(join(outside, "elsewhere.txt"))} link`);
+  const deadline = new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 20_000).unref());
+  const out = await Promise.race([workspaceSecretValueScan(scanExec(root, base), [key], "thread snapshot"), deadline]);
+  assert.notEqual(out, "hung", "a FIFO in the tree must not hang the scan");
+  assert.equal(out !== "hung" && out.kind, "clean", "the FIFO is skipped and the symlink is not followed");
+  assert.ok(!snapshotScanCommand([]).includes("--exclude"), "no GNU-only grep flags (BusyBox images run this)");
+
+  await mkdir(join(root, "sub"));
+  await chmod(join(root, "sub"), 0o000);
+  try {
+    const failed = await workspaceSecretValueScan(scanExec(root, base), [key], "thread snapshot");
+    assert.match(failed.kind === "failed" ? failed.reason : "", /scan-walk-failed/, "an unreadable subtree is a scan error, not a clean tree");
+  } finally {
+    await chmod(join(root, "sub"), 0o755);
+  }
+});
+
+test("S3: the push scan judges the staged tree — links ship as links, FIFOs are not read, filenames are in scope", async () => {
+  const key = { name: "OPENAI_API_KEY", value: "sk-oai-STAGEDSCAN-0123456789" };
+  const base = await mkdtemp(join(tmpdir(), "tw-scan-tmp-"));
+  const root = await pushRepo("tw-staged-");
+  const outside = await mkdtemp(join(tmpdir(), "tw-staged-out-"));
+  await writeFile(join(outside, "elsewhere.txt"), `${key.value}\n`);
+  const ex = new LocalExecutor({ root });
+  await ex.exec(`mkfifo pipe && ln -s ${shq(join(outside, "elsewhere.txt"))} link`);
+  const deadline = new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 20_000).unref());
+  const out = await Promise.race([workspaceSecretValueScan(scanExec(root, base), [key], "push", { base: "main" }), deadline]);
+  assert.notEqual(out, "hung", "an untracked FIFO must not hang the push scan");
+  assert.equal(out !== "hung" && out.kind, "clean", "a symlink ships as its target PATH, so the bytes behind it are not what ships");
+  // A filename is part of what ships: the diff header carries it.
+  await ex.exec("rm -f pipe link && git reset -q --hard HEAD");
+  await writeFile(join(root, `${key.value}.txt`), "innocent\n");
+  const named = await workspaceSecretValueScan(scanExec(root, base), [key], "push", { base: "main" });
+  assert.equal(named.kind, "material", "a value in a filename refuses the push");
+});
+
+test("SHIP_CREDENTIAL_SCAN: on by default and for junk; warn proceeds with the finding recorded; off skips the scan", async () => {
+  assert.equal(credentialScanMode({}), "on");
+  assert.equal(credentialScanMode({ SHIP_CREDENTIAL_SCAN: "of" }), "on", "a typo never switches the gate off");
+  assert.equal(credentialScanMode({ SHIP_CREDENTIAL_SCAN: " WARN " }), "warn");
+  assert.equal(credentialScanMode({ SHIP_CREDENTIAL_SCAN: "off" }), "off");
+  const key = { name: "ANTHROPIC_API_KEY", value: "sk-ant-KILLSWITCH-0123456789" };
+  const base = await mkdtemp(join(tmpdir(), "tw-scan-tmp-"));
+  const root = await mkdtemp(join(tmpdir(), "tw-switch-"));
+  await writeFile(join(root, "dump.txt"), `${key.value}\n`);
+  const ex = scanExec(root, base);
+  const logged: string[] = [];
+  const on = await snapshotCredentialGate(ex, [key], "thread snapshot", [], (l) => logged.push(l), "on");
+  assert.match("refuse" in on ? on.refuse : "", /credential-material-in-workspace/);
+  const warn = await snapshotCredentialGate(ex, [key], "thread snapshot", [], (l) => logged.push(l), "warn");
+  assert.ok(!("refuse" in warn), "warn proceeds");
+  assert.match("warning" in warn ? (warn.warning ?? "") : "", /credential-material-in-workspace/, "the would-be refusal is returned for the step to record");
+  assert.equal(logged.length, 1);
+  assert.ok(!logged[0]!.includes(key.value));
+  let calls = 0;
+  const counting: AgentExecutor = { ...ex, exec: async (c, o) => { calls++; return await ex.exec(c, o); } };
+  assert.deepEqual(await snapshotCredentialGate(counting, [key], "thread snapshot", [], () => {}, "off"), {});
+  assert.equal(calls, 0, "off never runs the scan");
 });
 
 test("the store replaces a thread's prior image and evicts oldest-first per project per host", async () => {
