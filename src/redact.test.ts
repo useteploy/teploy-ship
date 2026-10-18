@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { EXACT_SCRUB_MIN_LENGTH, clamp, exactScrubber, redact, redactKnownValues, safeForDisplay, scrub, scrubExact } from "./redact.js";
+import { EXACT_SCRUB_MIN_LENGTH, clamp, exactScrubber, firstSecretIn, redact, redactKnownValues, safeForDisplay, scrub, scrubExact, withheldRecordingReason } from "./redact.js";
 
 test("TS-061: credentials embedded in URLs are stripped", () => {
   assert.equal(
@@ -85,6 +85,29 @@ test("scrubExact leaves values shorter than the minimum alone (documented limit)
   const out = scrubExact("port 1234567 is open", [{ name: "SHORT", value: "1234567" }]);
   assert.equal(out, "port 1234567 is open", "a 7-character value is not scrubbed: it would mangle ordinary output");
   assert.equal(scrubExact("x 12345678 y", [{ name: "EIGHT", value: "12345678" }]), "x [redacted EIGHT] y");
+});
+
+test("firstSecretIn names the secret that appears, never the value — the recording withhold check (Q3c)", () => {
+  const value = "ghp_live-tokentofind123456";
+  const secrets = [
+    { name: "OTHER", value: "unrelated-value-999" },
+    { name: "git-token", value },
+  ];
+  // The value and its base64 both count; what comes back is the NAME.
+  assert.equal(firstSecretIn(`Settings page\n personal token ${value}`, secrets), "git-token");
+  assert.equal(firstSecretIn(Buffer.from(value).toString("base64"), secrets), "git-token");
+  // No hit, empty text, no secrets: undefined, and the reason builder works.
+  assert.equal(firstSecretIn("a clean page", secrets), undefined);
+  assert.equal(firstSecretIn("", secrets), undefined);
+  assert.equal(firstSecretIn(`token ${value}`, []), undefined);
+  // The minimum-length rule is the scrub's, stated in the withheld sentence's terms.
+  assert.equal(firstSecretIn("port 1234567", [{ name: "SHORT", value: "1234567" }]), undefined);
+  // The withheld sentence names the secret and the fate of the bytes — the
+  // value itself appears nowhere in it.
+  const reason = withheldRecordingReason("git-token");
+  assert.match(reason, /configured secret value \(git-token\)/);
+  assert.match(reason, /nothing was stored/);
+  assert.ok(!reason.includes(value));
 });
 
 test("exactScrubber catches a value split across chunk boundaries", () => {

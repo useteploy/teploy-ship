@@ -15,6 +15,8 @@ import { NETWORK_TIER_HELP, normalizeEgressAllow, parseNetworkTier } from "./egr
 import type { NetworkTier } from "./egress.js";
 import { normalizeMcp, type McpProjectConfig } from "./mcp.js";
 import { normalizeDelegateTargetIds } from "./delegate-targets.js";
+import { normalizeRepoSkills, normalizeSkillPins } from "./skills.js";
+import type { RepoSkillsMode, SkillPin } from "./skills.js";
 
 /**
  * One record per repository: everything Ship needs to know about a repo, in
@@ -145,6 +147,25 @@ export interface Project {
    * and again at spawn (still allowed?), never widening either.
    */
   delegateTargets?: string[];
+  /**
+   * Registry skills this repo's runs are offered (Q4-a, SHIP_SKILLS): each
+   * pinned BY NAME AND VERSION, never "latest" — a floating pin would let a
+   * registry edit change what a pinned project runs with. Validated at save
+   * (skills.ts normalizeSkillPins); resolved to full version records and
+   * materialised into the run input at enqueue, so the log carries the
+   * bodies the run actually saw. Nothing inside a skill is ever parsed for
+   * a permission (the S24 rule, tool-manifest.ts).
+   */
+  skills?: SkillPin[];
+  /**
+   * Decision 17: what this repo's runs may do with skills committed IN the
+   * repository (`.claude/skills`, `.ship/skills`) — `allow` (load them),
+   * `record` (load and record what was loaded) or `deny` (refuse harnesses
+   * that cannot disable repo skills). Absent = `record`, the default. The
+   * harness-side enforcement is Q4-c; recording it here makes the policy a
+   * fact of the project rather than of whichever harness ran.
+   */
+  repoSkills?: RepoSkillsMode;
 }
 
 /** The fields Akiroo owns on a managed project, as it last applied them. */
@@ -298,6 +319,11 @@ export function normalizeProject(input: Project): Project {
   const mcp = normalizeMcp(input.mcp);
   // Throws on a malformed id; [] is kept (no targets), absent stays absent.
   const delegateTargets = normalizeDelegateTargetIds(input.delegateTargets);
+  // Throws on a pin enqueue could not resolve the shape of (skills.ts);
+  // undefined clears. Same rule as mcp: a typo refuses the SAVE rather than
+  // surfacing on a paid run.
+  const skills = normalizeSkillPins(input.skills);
+  const repoSkills = normalizeRepoSkills(input.repoSkills);
   return {
     repo,
     ...(url !== undefined ? { url } : {}),
@@ -333,6 +359,8 @@ export function normalizeProject(input: Project): Project {
     ...(input.managedBy !== undefined ? { managedBy: input.managedBy } : {}),
     ...(mcp !== undefined ? { mcp } : {}),
     ...(delegateTargets !== undefined ? { delegateTargets } : {}),
+    ...(skills !== undefined ? { skills } : {}),
+    ...(repoSkills !== undefined ? { repoSkills } : {}),
   };
 }
 

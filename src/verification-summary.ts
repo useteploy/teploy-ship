@@ -64,6 +64,12 @@ export interface VerificationFacts {
   telemetry?: { kind: "compared"; worse: boolean } | { kind: "disabled" | "insufficient" | "unavailable"; reason: string };
   rollback?: { kind: string; scope?: "preview"; reason?: string; reasons?: string[]; output?: string };
   merge?: MergeFact;
+  /**
+   * EV6 (SHIP_INCIDENT_FIX): the reproducing-test gate's outcome on an
+   * authorised remediation — structural (repro-test.ts's ReproTestStep
+   * satisfies it) so this renderer never imports the module that runs it.
+   */
+  repro?: { verdict: string; testFiles: string[]; baseExit?: number; headExit?: number; reason?: string; command?: string };
 }
 
 /**
@@ -233,6 +239,17 @@ export function verificationSummary(facts: VerificationFacts): string {
   else if (ow?.kind === "insufficient" || ow?.kind === "unavailable" || ow?.kind === "disabled") not.push(`no observe window (${ow.reason})`);
 
   if (facts.rollback?.kind === "rolled-back") not.push(facts.rollback.scope === "preview" ? "the preview regressed and was removed; production was not rolled back" : "the service got worse and was rolled back");
+
+  const rp = facts.repro;
+  if (rp?.verdict === "reproduced") {
+    const n = rp.testFiles.length;
+    verified.push(
+      `the reproducing-test gate passed: ${n === 1 ? rp.testFiles[0]! : `${n} test files`} fail${n === 1 ? "s" : ""} on the base revision and pass${n === 1 ? "es" : ""} with the change`,
+    );
+  } else if (rp !== undefined) {
+    not.push(`the reproducing-test gate held (${rp.verdict}${rp.reason !== undefined ? `: ${rp.reason}` : ""}) — the pull request stays a draft until a person decides it`);
+  }
+
   const mg = facts.merge;
   if (mg?.kind === "merged") {
     did.push(mg.via === "auto" ? "merged it under the repo's auto-merge authority" : "merged it on the approved merge decision");
@@ -465,6 +482,18 @@ export function verificationFactsFromEvents(events: WorkflowEvent[]): Verificati
       facts.critic = { approved: isApproved(r.text), notes: r.text };
     } else if (s.name === "change-class" && r !== undefined && typeof r.class === "string") {
       facts.changeClass = { class: r.class, files: Array.isArray(r.files) ? r.files.length : 0 };
+    } else if (s.name === "repro-test" && r !== undefined && typeof r.verdict === "string") {
+      // EV6: defensive by design — the digest (incidents.ts) and this
+      // extractor both read the recorded step, and neither may trust its
+      // shape more than the log warrants.
+      facts.repro = {
+        verdict: r.verdict,
+        testFiles: Array.isArray(r.testFiles) ? r.testFiles.map(String) : [],
+        ...(typeof r.baseExit === "number" ? { baseExit: r.baseExit } : {}),
+        ...(typeof r.headExit === "number" ? { headExit: r.headExit } : {}),
+        ...(typeof r.reason === "string" ? { reason: r.reason } : {}),
+        ...(typeof r.command === "string" ? { command: r.command } : {}),
+      };
     } else if (s.name === "repo-push" && r !== undefined) {
       if (r.kind === "pushed") facts.push = { kind: "pushed", sha: String(r.sha ?? "") };
       else if (r.kind === "refused") facts.push = { kind: "refused" };

@@ -44,6 +44,7 @@ await browser.close();
 - Find elements by role, label and text (getByRole, getByLabel, getByText), never by coordinates or brittle CSS.
 - Wait for the state you expect, then assert it (throw when it is wrong): a screenshot of the wrong page is not proof.
 - Keep the walkthrough short. Ship attaches up to two WebM recordings below 4 MiB each when the forge supports attachments. Close the browser context to finish saving the video.
+- If the flow records a video, also write the pages' visible text to \`\${out}/text.txt\` as it goes (each page's \`document.body.innerText\`, concatenated): a recording whose captured page text contains a configured secret value is withheld rather than stored, and that file is what the check reads.
 - Name screenshots in the order they should be read (01-, 02-). Keep the flow to the changed path.
 - A change with no user-visible face needs no flow; do not write one for its own sake.
 - The preview does not exist yet, so you cannot run the flow against it. To try it against a local dev server: \`mkdir -p .ship/node_modules && ln -sfn "$(npm root -g)/playwright" .ship/node_modules/playwright && node .ship/flow.mjs http://localhost:PORT .ship/flow-out\` (\`.ship/flow-out/\` and \`.ship/node_modules/\` are excluded from git).
@@ -167,7 +168,7 @@ Operator messages arrive ONLY as user turns the system writes, beginning "Operat
  * ~30% of agent quality that lives in prompt/recovery tuning is a
  * later-milestone concern, but the protocol has to be unambiguous now.
  */
-export function systemPrompt(options: { workdir: string; task: string; search?: boolean; browser?: boolean; ask?: boolean; look?: boolean; lookImage?: boolean; delegate?: boolean; delegateTargets?: ReadonlyArray<{ id: string; harness: string; model: string }>; reply?: boolean; mcp?: string }): string {
+export function systemPrompt(options: { workdir: string; task: string; search?: boolean; browser?: boolean; ask?: boolean; look?: boolean; lookImage?: boolean; delegate?: boolean; delegateTargets?: ReadonlyArray<{ id: string; harness: string; model: string }>; reply?: boolean; mcp?: string; skills?: string }): string {
   // The index is PARTIAL, and the prompt has to say so.
   //
   // This block used to read "prefer this over grepping around". Measured on
@@ -251,7 +252,7 @@ Rules:
 - The filesystem always persists between actions. Python variables usually persist, but may reset after long pauses — anything important belongs in a file.
 - Prefer small, verifiable steps. Read errors and fix them.
 
-${options.browser === true ? BROWSER_PROOF : ""}${options.ask === true ? ASK_ACTION : ""}${options.look === true ? (options.lookImage === true ? `${LOOK_ACTION}${LOOK_IMAGE_SENTENCE}\n\n` : LOOK_ACTION) : ""}${options.delegate === true ? DELEGATE_ACTION + delegateTargetsSection(options.delegateTargets) : ""}${options.mcp ?? ""}${options.reply === true ? REPLY_ACTION : ""}# Finishing
+${options.browser === true ? BROWSER_PROOF : ""}${options.ask === true ? ASK_ACTION : ""}${options.look === true ? (options.lookImage === true ? `${LOOK_ACTION}${LOOK_IMAGE_SENTENCE}\n\n` : LOOK_ACTION) : ""}${options.delegate === true ? DELEGATE_ACTION + delegateTargetsSection(options.delegateTargets) : ""}${options.mcp ?? ""}${options.skills ?? ""}${options.reply === true ? REPLY_ACTION : ""}# Finishing
 
 When the task is complete and verified, emit a finish block with a short summary of what you did and the result:
 \`\`\`finish

@@ -4948,29 +4948,36 @@ function imageParts(messages: Message[]): Array<Extract<UserContentPart, { type:
 
 /** An in-memory artifact store: put/get, records ids, and can be emptied to simulate expiry. */
 function memoryArtifacts(): { store: ArtifactStore; ids: () => string[]; empty: () => void } {
-  const byId = new Map<string, { id: string; name: string; mime: "image/png"; data: string; bytes: number; dataClass?: string }>();
+  const byId = new Map<string, Record<string, unknown>>();
   const order: string[] = [];
+  const record = (name: string, bytes: Uint8Array, dataClass?: string, binding?: { runId: string; revision?: string; treeDigest?: string }): string => {
+    const id = createHash("sha256").update(bytes).digest("hex");
+    byId.set(id, {
+      id,
+      name,
+      mime: "image/png",
+      data: Buffer.from(bytes).toString("base64"),
+      bytes: bytes.length,
+      ...(dataClass !== undefined ? { dataClass } : {}),
+      ...(binding !== undefined ? { runId: binding.runId, ...(binding.revision !== undefined ? { revision: binding.revision } : {}), ...(binding.treeDigest !== undefined ? { treeDigest: binding.treeDigest } : {}) } : {}),
+    });
+    order.push(id);
+    return id;
+  };
   return {
     ids: () => order,
     empty: () => {
       byId.clear();
     },
     store: {
-      async put(name, bytes, dataClass) {
-        const artifact = {
-          id: createHash("sha256").update(bytes).digest("hex"),
-          name,
-          mime: "image/png" as const,
-          data: Buffer.from(bytes).toString("base64"),
-          bytes: bytes.length,
-          ...(dataClass !== undefined ? { dataClass } : {}),
-        };
-        byId.set(artifact.id, artifact);
-        order.push(artifact.id);
-        return artifact.id;
+      async put(name, bytes, dataClass, binding) {
+        return record(name, bytes, dataClass, binding);
+      },
+      async putTemporary(name, bytes, dataClass, binding) {
+        return record(name, bytes, dataClass, binding);
       },
       async get(id) {
-        return byId.get(id) ?? null;
+        return (byId.get(id) as unknown as Awaited<ReturnType<ArtifactStore["get"]>>) ?? null;
       },
     },
   };
@@ -5206,6 +5213,150 @@ test("a replayed image look rebuilds the ImagePart from the store, or degrades t
   assert.equal(degraded.status, "completed", "the degraded replay still completes — text + pointer, documented");
 });
 
+// --- look recording (Q3b): one finaliser step, run-page context, replay-safe ---
+
+/** A JPEG-shaped strip, so the fake store and the assertions read honestly. */
+const LOOK_JPEG = new Uint8Array([255, 216, 255, 224, 4, 3, 2, 1]);
+
+/**
+ * A look-run provider whose session ALSO recorded: exec answers the turn
+ * driver, the finaliser's node run (with the report a real finaliser would
+ * print), and the rec-dir cleanup; getFile answers the captured page text and
+ * the assembled recording. Only the browser half is faked, like every look
+ * provider above.
+ */
+function lookRecordProvider(snapshot: string, report: string, options: { text?: string; recording?: Uint8Array } = {}): { provider: ExecutorProvider; commands: string[] } {
+  const commands: string[] = [];
+  const executor: AgentExecutor = {
+    async exec(cmd) {
+      commands.push(cmd);
+      if (/^node \.teploy-agent\/look-t\d+\.mjs$/m.test(cmd)) {
+        return { exitCode: 0, stdout: snapshot, stderr: "", timedOut: false, truncated: false };
+      }
+      if (/^node \.teploy-agent\/look-record\.mjs$/m.test(cmd)) {
+        return { exitCode: 0, stdout: report, stderr: "", timedOut: false, truncated: false };
+      }
+      if (cmd === "rm -rf .teploy-agent/rec") return { exitCode: 0, stdout: "", stderr: "", timedOut: false, truncated: false };
+      return { exitCode: 42, stdout: "", stderr: `not a look command: ${cmd}`, timedOut: false, truncated: false };
+    },
+    putFile: async () => {},
+    getFile: async (path) => {
+      if (path === ".teploy-agent/rec/text.txt") return new TextEncoder().encode(options.text ?? "");
+      if (path.endsWith(".jpg") || path.endsWith(".webm")) return options.recording ?? LOOK_JPEG;
+      throw new Error(`unused: ${path}`);
+    },
+    destroy: async () => {},
+  };
+  return {
+    commands,
+    provider: {
+      async create() {
+        return { handle: "look-record-fake" };
+      },
+      attach() {
+        return executor;
+      },
+    },
+  };
+}
+
+test("a recording look run records exactly one look-record step; the artifact is run-page context, never PR proof (Q3b)", async () => {
+  const snapshot = '[page] https://example.com — Example\n- heading "Hello" [ref=e1]';
+  const tree = "c".repeat(40);
+  const report = JSON.stringify({ kind: "strip", file: ".teploy-agent/rec/look-record.jpg", frames: 3, treeDigest: tree });
+  const { provider, commands } = lookRecordProvider(snapshot, report);
+  const { model } = reactiveModel(["```look url=https://example.com\n```", "```finish\nsaw the page\n```"]);
+  const artifacts = memoryArtifacts();
+  const store = new MemoryEventStore();
+  const outcome = await executeRun({
+    workflow: durableAgent({ model, executor: provider, artifacts: artifacts.store }),
+    runId: "run-look-record",
+    store,
+    input: { task: "look", look: true, lookRecord: true },
+  });
+  assert.equal(outcome.status, "completed", "a recording that lands is never a run failure");
+  const events = await store.load("run-look-record");
+  const recorded = events.filter((e) => e.type === "step-completed" && e.name === "look-record");
+  assert.equal(recorded.length, 1, "exactly one look-record step, after the loop");
+  const result = (recorded[0]?.data as { result?: { kind?: string; artifact?: string; format?: string; treeDigest?: string } }).result;
+  assert.equal(result?.kind, "stored");
+  assert.equal(result?.format, "strip", "no ffmpeg in the image: the step says it is a strip");
+  const kept = await artifacts.store.get(result!.artifact!);
+  assert.equal(kept?.dataClass, "recording");
+  assert.equal(kept?.runId, "run-look-record");
+  assert.equal(kept?.revision, undefined, "a look recording claims no revision — it ran before the commit");
+  assert.equal(kept?.treeDigest, tree, "it is bound to the tree it observed");
+  assert.ok(commands.some((c) => /^node \.teploy-agent\/look-record\.mjs$/m.test(c)), "the finaliser ran once in the sandbox");
+  // Run-page only: the ladder a PR body is built from never sees it — no
+  // rung, no proof link, no artifact id outside the look-record step itself.
+  assert.ok(!JSON.stringify(ladderRungsFromEvents(events)).includes(result!.artifact!), "no ladder rung quotes the recording");
+  const names = events.filter((e) => e.type === "step-completed").map((e) => e.name);
+  assert.equal(names.filter((n) => n === "look-record").length, 1);
+
+  // And the flag-off run records NO step at all (the fence's rule, at the
+  // engine): same look, no lookRecord in the input, no finaliser run.
+  const plain = lookRecordProvider(snapshot, report);
+  const plainStore = new MemoryEventStore();
+  await executeRun({
+    workflow: durableAgent({ model: reactiveModel(["```look url=https://example.com\n```", "```finish\nsaw the page\n```"]).model, executor: plain.provider }),
+    runId: "run-look-record-off",
+    store: plainStore,
+    input: { task: "look", look: true },
+  });
+  const offEvents = await plainStore.load("run-look-record-off");
+  assert.equal(offEvents.filter((e) => e.type === "step-completed" && e.name === "look-record").length, 0, "flag off: no look-record step exists");
+  assert.ok(plain.commands.every((c) => !/^node \.teploy-agent\/look-record\.mjs$/m.test(c)), "the finaliser never ran");
+});
+
+test("a replayed look-record step returns the recorded artifact id without exec (Q3b)", async () => {
+  const snapshot = '[page] https://example.com — Example\n- heading "Hello" [ref=e1]';
+  const report = JSON.stringify({ kind: "strip", file: ".teploy-agent/rec/look-record.jpg", frames: 3 });
+  const { provider } = lookRecordProvider(snapshot, report);
+  const { model } = reactiveModel(["```look url=https://example.com\n```", "```finish\nsaw the page\n```"]);
+  const artifacts = memoryArtifacts();
+  const store = new MemoryEventStore();
+  await executeRun({
+    workflow: durableAgent({ model, executor: provider, artifacts: artifacts.store }),
+    runId: "run-look-record-replay",
+    store,
+    input: { task: "look", look: true, lookRecord: true },
+  });
+  const events = await store.load("run-look-record-replay");
+  const artifact = ((events.find((e) => e.type === "step-completed" && e.name === "look-record")?.data as { result?: { artifact?: string } }).result ?? {}).artifact;
+  assert.ok(artifact !== undefined, "the first pass stored a recording");
+
+  // Replay with an executor that must never be used: the recorded step result
+  // is the whole answer.
+  const stripped = new MemoryEventStore();
+  for (const event of events) {
+    if (event.type === "run-completed") continue;
+    await stripped.append("run-look-record-replay", event);
+  }
+  const refuse = (): never => {
+    throw new Error("the replay must reuse the recorded look-record result");
+  };
+  const refusing: ExecutorProvider = {
+    async create() {
+      return { handle: "refused" };
+    },
+    attach() {
+      return { exec: refuse, putFile: refuse, getFile: refuse, destroy: async () => {} };
+    },
+  };
+  const { model: deadModel } = reactiveModel([]);
+  (deadModel as { doGenerate: unknown }).doGenerate = refuse;
+  const replayed = await executeRun({
+    workflow: durableAgent({ model: deadModel, executor: refusing, artifacts: artifacts.store }),
+    runId: "run-look-record-replay",
+    store: stripped,
+    input: { task: "look", look: true, lookRecord: true },
+  });
+  assert.equal(replayed.status, "completed");
+  const replayedArtifact = ((await stripped.load("run-look-record-replay")).find((e) => e.type === "step-completed" && e.name === "look-record")?.data as { result?: { artifact?: string } }).result?.artifact;
+  assert.equal(replayedArtifact, artifact, "the recorded artifact id, returned without exec");
+  assert.ok(await artifacts.store.get(artifact) !== null, "and the bytes are still in the store");
+});
+
 test("the prompt mentions image mode only when the input admits it (durable equivalence)", async () => {
   const snapshot = '[page] https://example.com — Example\n- heading "Hello" [ref=e1]';
   const withImage = capturingModel(["```finish\nprompt seen\n```"]);
@@ -5239,6 +5390,322 @@ test("the prompt mentions image mode only when the input admits it (durable equi
   });
   const barePrompt = String(neither.calls[0]?.[0]?.content);
   assert.ok(!barePrompt.includes("```look"), "look off: no look vocabulary at all");
+});
+
+// --- EV6 (SHIP_INCIDENT_FIX): the reproducing-test gate on a remediation ---
+
+/**
+ * A mergeFixture-shaped forge whose seed is the caller's: every repro-gate
+ * scenario needs a different starting tree (a buggy module, a suite command
+ * or none). The fetch stub is mergeFixture's — a pull request that exists
+ * and a merge that answers.
+ */
+async function reproFixture(
+  name: string,
+  seed: string,
+): Promise<{
+  repo: string;
+  calls: { url: string; method: string; body: unknown }[];
+  merges: () => { url: string; method: string; body: unknown }[];
+  provider: ExecutorProvider;
+  restore: () => void;
+}> {
+  const bareDir = await mkdtemp(join(tmpdir(), `durable-${name}-bare-`));
+  const seedDir = await mkdtemp(join(tmpdir(), `durable-${name}-seed-`));
+  const seeder = new LocalExecutor({ root: seedDir });
+  await seeder.exec(
+    `git init -q -b main . && git config user.email t@t && git config user.name t && ${seed} && git add -A && git commit -qm seed && git clone -q --bare . ${bareDir}/owner/repo.git`,
+  );
+  const work = await mkdtemp(join(tmpdir(), `durable-${name}-work-`));
+  const calls: { url: string; method: string; body: unknown }[] = [];
+  const pr = { state: "open" as const, merged: false };
+  const orig = globalThis.fetch;
+  (globalThis as unknown as { fetch: unknown }).fetch = (url: unknown, init?: { method?: string; body?: string }) => {
+    const href = String(url);
+    calls.push({ url: href, method: init?.method ?? "GET", body: typeof init?.body === "string" ? (JSON.parse(init.body) as unknown) : undefined });
+    if (href.endsWith("/merge")) {
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ sha: "merged1234" }), text: () => Promise.resolve("") });
+    }
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          number: 1,
+          html_url: "http://example/owner/repo/pulls/1",
+          body: "",
+          title: "",
+          state: pr.state,
+          merged: pr.merged,
+        }),
+      text: () => Promise.resolve(""),
+    });
+  };
+  return {
+    repo: `file://${bareDir}/owner/repo.git`,
+    calls,
+    merges: () => calls.filter((c) => c.url.endsWith("/merge")),
+    provider: {
+      async create() {
+        return { handle: work };
+      },
+      attach(handle: string) {
+        return new LocalExecutor({ root: handle });
+      },
+    },
+    restore: () => {
+      globalThis.fetch = orig;
+    },
+  };
+}
+
+/** A seed whose bump() is wrong by one: the incident, as a repo. */
+const REPRO_SEED = `printf 'function bump(n){return n;}\\nmodule.exports={bump};\\n' > bump.js`;
+
+/** The agent turn that fixes the module AND writes the test that reproduces it. */
+const REPRO_FIX_WITH_TEST =
+  "```bash\n" +
+  "cat > bump.test.js <<'EOF'\n" +
+  'const assert = require("node:assert");\n' +
+  'const { bump } = require("./bump.js");\n' +
+  "assert.equal(bump(1), 2);\n" +
+  "EOF\n" +
+  "printf 'function bump(n){return n+1;}\\nmodule.exports={bump};\\n' > bump.js\n" +
+  "```";
+
+test("EV6: a remediation whose test fails on base and passes on head parks at approve-merge as reproduced, and the approval merges it", async () => {
+  const fixture = await reproFixture("ev6-ok", REPRO_SEED);
+  try {
+    const { model } = reactiveModel([
+      REPRO_FIX_WITH_TEST,
+      "```finish\nfixed the off-by-one and added the test that reproduces it\n```",
+      ...PROBES,
+    ]);
+    const store = new MemoryEventStore();
+    const input = {
+      task: "remediate the incident",
+      repo: fixture.repo,
+      requireReproTest: true,
+      changeClass: true,
+      mergeGate: true,
+      tests: true,
+      testCommand: "node bump.test.js",
+    };
+    const parked = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-ev6-ok",
+      store,
+      input,
+    });
+    assert.equal(parked.status, "waiting", "the boundary asks, as every gated change does");
+    assert.equal(parked.eventName, MERGE_EVENT);
+
+    const events = await store.load("run-ev6-ok");
+    const repro = stepResult(events, "repro-test");
+    assert.equal(repro?.verdict, "reproduced");
+    assert.equal(repro?.baseExit, 1, "the test fails on the base revision — the reproduction");
+    assert.equal(repro?.headExit, 0, "and passes with the change");
+    assert.deepEqual(repro?.testFiles, ["bump.test.js"]);
+    const park = stepResult(events, "merge-park");
+    assert.match(String(park?.summary), /Reproducing-test gate: reproduced/, "the park shows the outcome");
+    assert.equal((park?.repro as { verdict?: string } | undefined)?.verdict, "reproduced", "and carries it as a field of its own");
+    const created = fixture.calls.find((c) => c.method === "POST" && c.url.endsWith("/pulls"));
+    assert.match(String((created!.body as { body?: string }).body), /reproducing-test gate passed/);
+
+    await deliverEvent(store, "run-ev6-ok", MERGE_EVENT, { approved: true });
+    const done = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-ev6-ok",
+      store,
+      input,
+    });
+    assert.equal(done.status, "completed");
+    assert.equal(stepResult(await store.load("run-ev6-ok"), "merge-decision")?.kind, "merged", "reproduced clears the gate");
+    assert.equal(fixture.merges().length, 1);
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("EV6 NEG: a remediation that changes no test is held — the approval cannot silently clear it", async () => {
+  const fixture = await reproFixture("ev6-nochange", REPRO_SEED);
+  try {
+    const { model } = reactiveModel([
+      "```bash\nprintf 'function bump(n){return n+1;}\\nmodule.exports={bump};\\n' > bump.js\n```",
+      "```finish\nfixed the off-by-one\n```",
+      ...PROBES,
+    ]);
+    const store = new MemoryEventStore();
+    const input = {
+      task: "remediate the incident",
+      repo: fixture.repo,
+      requireReproTest: true,
+      changeClass: true,
+      mergeGate: true,
+      tests: true,
+      testCommand: "node --version",
+    };
+    const parked = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-ev6-nochange",
+      store,
+      input,
+    });
+    assert.equal(parked.eventName, MERGE_EVENT);
+    const events = await store.load("run-ev6-nochange");
+    const repro = stepResult(events, "repro-test");
+    assert.equal(repro?.verdict, "no-test-change");
+    assert.deepEqual(repro?.testFiles, []);
+    assert.match(String(stepResult(events, "merge-park")?.summary), /no-test-change/);
+
+    await deliverEvent(store, "run-ev6-nochange", MERGE_EVENT, { approved: true });
+    const done = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-ev6-nochange",
+      store,
+      input,
+    });
+    assert.equal(done.status, "completed");
+    const decision = stepResult(await store.load("run-ev6-nochange"), "merge-decision");
+    assert.equal(decision?.kind, "blocked", "an approval does not clear a held gate");
+    assert.match(String((decision as { reasons?: string[] })?.reasons?.[0]), /no-test-change/);
+    assert.equal(fixture.merges().length, 0, "nothing merged it");
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("EV6 NEG: a test that passes on the base revision is held as does-not-reproduce", async () => {
+  const fixture = await reproFixture("ev6-base-pass", REPRO_SEED);
+  try {
+    // The "test" asserts the buggy behaviour, so it is green with or without
+    // the fix — the shape of a remediation that wrote a test to match its
+    // output rather than the incident.
+    const { model } = reactiveModel([
+      "```bash\n" +
+        "cat > bump.test.js <<'EOF'\n" +
+        'const assert = require("node:assert");\n' +
+        'const { bump } = require("./bump.js");\n' +
+        "assert.equal(bump(1), 1);\n" +
+        "EOF\n" +
+        "printf 'function bump(n){return n+1;}\\nmodule.exports={bump};\\n' > bump.js\n" +
+        "```",
+      "```finish\ntidied the module\n```",
+      ...PROBES,
+    ]);
+    const store = new MemoryEventStore();
+    // No `tests` flag: the suite leg would nudge over the head failure this
+    // scenario produces, and the repro verdict is the thing under test.
+    const input = {
+      task: "remediate the incident",
+      repo: fixture.repo,
+      requireReproTest: true,
+      changeClass: true,
+      mergeGate: true,
+      testCommand: "node bump.test.js",
+    };
+    const parked = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-ev6-base-pass",
+      store,
+      input,
+    });
+    assert.equal(parked.eventName, MERGE_EVENT);
+    const events = await store.load("run-ev6-base-pass");
+    const repro = stepResult(events, "repro-test");
+    assert.equal(repro?.verdict, "does-not-reproduce");
+    assert.equal(repro?.baseExit, 0, "green on base: nothing here demonstrates the incident");
+
+    await deliverEvent(store, "run-ev6-base-pass", MERGE_EVENT, { approved: true });
+    await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-ev6-base-pass",
+      store,
+      input,
+    });
+    const decision = stepResult(await store.load("run-ev6-base-pass"), "merge-decision");
+    assert.equal(decision?.kind, "blocked");
+    assert.match(String((decision as { reasons?: string[] })?.reasons?.[0]), /does-not-reproduce/);
+    assert.equal(fixture.merges().length, 0);
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("EV6 NEG: a repo with no test command is held as unavailable", async () => {
+  const fixture = await reproFixture("ev6-nocmd", REPRO_SEED);
+  try {
+    const { model } = reactiveModel([
+      REPRO_FIX_WITH_TEST,
+      "```finish\nfixed the off-by-one and added a test\n```",
+      ...PROBES,
+    ]);
+    const store = new MemoryEventStore();
+    // No testCommand in the input, nothing detectable in the tree (a bare
+    // module, no package.json/Makefile/go.mod), and no worker default.
+    const input = {
+      task: "remediate the incident",
+      repo: fixture.repo,
+      requireReproTest: true,
+      changeClass: true,
+      mergeGate: true,
+    };
+    const parked = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-ev6-nocmd",
+      store,
+      input,
+    });
+    assert.equal(parked.eventName, MERGE_EVENT);
+    const events = await store.load("run-ev6-nocmd");
+    const repro = stepResult(events, "repro-test");
+    assert.equal(repro?.verdict, "unavailable");
+    assert.match(String(repro?.reason), /no test command/i);
+
+    await deliverEvent(store, "run-ev6-nocmd", MERGE_EVENT, { approved: true });
+    await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-ev6-nocmd",
+      store,
+      input,
+    });
+    const decision = stepResult(await store.load("run-ev6-nocmd"), "merge-decision");
+    assert.equal(decision?.kind, "blocked");
+    assert.match(String((decision as { reasons?: string[] })?.reasons?.[0]), /unavailable/);
+    assert.equal(fixture.merges().length, 0);
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("EV6: a run without the input field records no repro-test step — pre-flag logs replay unchanged", async () => {
+  const fixture = await reproFixture("ev6-off", REPRO_SEED);
+  try {
+    const { model } = reactiveModel([
+      REPRO_FIX_WITH_TEST,
+      "```finish\nfixed it\n```",
+      ...PROBES,
+    ]);
+    const store = new MemoryEventStore();
+    const done = await executeRun({
+      workflow: durableAgent({ model, executor: fixture.provider, workdir: "." }),
+      runId: "run-ev6-off",
+      store,
+      input: {
+        task: "plain change",
+        repo: fixture.repo,
+        changeClass: true,
+        mergeGate: true,
+        tests: true,
+        testCommand: "node bump.test.js",
+      },
+    });
+    assert.equal(done.eventName, MERGE_EVENT, "the ordinary boundary park, nothing more");
+    const names = (await store.load("run-ev6-off")).filter((e) => e.type === "step-completed").map((e) => e.name ?? "");
+    assert.equal(names.includes("repro-test"), false, "no field on the input, no step in the log");
+  } finally {
+    fixture.restore();
+  }
 });
 
 // --- D4-c: warm threads — snapshot at end of turn, boot from it, cold fallback ---
@@ -5438,6 +5905,36 @@ test("D4-c negative: a credential file planted in the workspace means NO snapsho
   assert.equal(rig.images.size, 0, "no image was taken");
   assert.equal((await threadWarmStore(cfg).get("run-root")), null, "and no record exists");
   assert.ok(rig.destroyed.length >= 1, "the container was disposed as on any other run end");
+});
+
+test("D4-c negative: a snapshot that throws (the merge park reaped the sandbox) skips and never fails the run", async () => {
+  const fixture = await threadFixture("reaped");
+  const rig = await threadWarmProvider();
+  // The live failure, 2026-10-18: the original sandbox was gone by the time
+  // the step ran, and the daemon answered "run not found".
+  rig.provider.snapshot = async () => {
+    throw new Error("run not found");
+  };
+  const store = new MemoryEventStore();
+  await fixture.seedRoot(store);
+  const cfg = new MemoryRuntimeConfig();
+  const wf = durableAgent({
+    model: reactiveModel(["```finish\nnothing to change\n\nFINDINGS_JSON\n[]\n```"]).model,
+    executor: rig.provider,
+    workdir: ".",
+    threadWarm: threadWarmStore(cfg),
+    loadEvents: (runId) => store.load(runId),
+  });
+  const done = await executeRun({
+    workflow: wf,
+    runId: "run-reaped",
+    store,
+    input: { task: "look around", repo: fixture.repo, mode: "scan", warm: true, warmParks: true, warmThread: true, parentRunId: "run-root" },
+  });
+  assert.equal(done.status, "completed", "a failed snapshot is a skipped optimisation, not a failed run");
+  const snap = stepOutput(await store.load("run-reaped"), "thread-snapshot") as { result?: { skipped?: string } } | undefined;
+  assert.match(snap?.result?.skipped ?? "", /run not found/, "the skip names why");
+  assert.equal((await threadWarmStore(cfg).get("run-root")), null, "and no record points at an image that was never taken");
 });
 
 test("D4-c negative: a snapshot on a removed host (or an image GC deleted) gives a cold run that completes", async () => {

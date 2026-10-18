@@ -86,6 +86,7 @@ import { canonicalRepositoryURL } from "./repository-reference.js";
 import { resourceClassOf, type ResourceClass } from "./resource-class.js";
 import { mergeFact, verificationSummary, type VerificationFacts } from "./verification-summary.js";
 import { preExisting, runTests, testComment, testTargetFromInput, testsFailedNudge, type TestOutcome, type TestTarget } from "./tests.js";
+import { reproHoldReason, reproParkNote, runReproTestGate, type ReproTestStep } from "./repro-test.js";
 import { detectFromWorkspace } from "./test-detect.js";
 import { refusalMessage, warningMessage } from "./publish-policy.js";
 import type { RepoCheckout, RepoRef } from "./git.js";
@@ -114,7 +115,7 @@ import type { HeldItem, InterruptibleResult } from "./steer-reply.js";
 import { formatSearchHits } from "./code-index.js";
 import { frameUntrusted, screenUntrusted } from "./guard.js";
 import type { DelegateTarget, RecordedDelegateTarget } from "./delegate-targets.js";
-import { LOOK_IMAGE_NO_MODEL, LOOK_IMAGE_NO_STORE, LOOK_OPEN_PLAN, LOOK_SEALED, lookImageCap, runLook, runLookImage } from "./look.js";
+import { LOOK_IMAGE_NO_MODEL, LOOK_IMAGE_NO_STORE, LOOK_OPEN_PLAN, LOOK_SEALED, lookImageCap, runLook, runLookImage, runLookRecordFinalise } from "./look.js";
 import {
   DELEGATE_CHILD_APPROVAL_REFUSED,
   DELEGATE_CHILD_ASK_REFUSED,
@@ -129,6 +130,8 @@ import {
 import type { DelegateControl, DelegateSpawnOutcome, DelegateTransfer } from "./delegate.js";
 import { callMcpTool, listMcpTools, mcpObservation, offerTools, prepareMcpCall, renderMcpSection } from "./mcp.js";
 import type { McpHttpDeps, McpOffer, McpRunInput } from "./mcp.js";
+import { renderSkillsSection, skillObservation } from "./skills.js";
+import type { SkillRunInput } from "./skills.js";
 import { recordToolFindings } from "./tool-manifest-shadow.js";
 import { networkForTrust, parseNetworkTier, wireNetwork } from "./egress.js";
 import type { NetworkTier } from "./egress.js";
@@ -298,6 +301,19 @@ export interface DurableAgentInput {
    */
   lookImage?: { model: string; max: number };
   /**
+   * Look-session recording (Q3b): the ```look session's CDP screencast,
+   * assembled once into a run-page recording after the agent loop ends and
+   * before the push (look.ts runLookRecordFinalise). Materialised at enqueue
+   * from SHIP_LOOK_RECORD, default off and only when `look` itself is on,
+   * because it admits the `look-record` step — the standing replay reason.
+   * The recording is CONTEXT, never proof: `look` runs on the unpushed tree,
+   * so its artifact carries the tree digest and no revision, is never linked
+   * from the pull request (the `recording` data class), and is withheld
+   * entirely when the captured page text contains a configured secret value
+   * (Q3c).
+   */
+  lookRecord?: boolean;
+  /**
    * Bounded child work (S20/S22): the ```delegate action — spawn one child
    * run, park until it finishes, merge its result back as an observation.
    * Materialised at enqueue from SHIP_DELEGATE, default off, for the
@@ -359,6 +375,18 @@ export interface DurableAgentInput {
    * action does not parse and the prompt does not mention it.
    */
   mcp?: McpRunInput;
+  /**
+   * Skills (Q4-a/Q4-b, SHIP_SKILLS): the registry versions this project
+   * pinned, materialised at enqueue as {name, version, digest, description,
+   * body} — a SNAPSHOT, so editing the registry never changes a run that is
+   * in flight or replaying. Present only when the flag was on AND the
+   * project pinned at least one skill; absent is byte-identical to a
+   * pre-skills run: the ```skill action does not parse, the prompt carries
+   * no index, and no step exists — the body returns inside the existing
+   * turn as a pure function of this field, so no WORKFLOW_STEPS gate admits
+   * anything and the fingerprint does not move.
+   */
+  skills?: SkillRunInput[];
   /**
    * Codebase indexing: repo runs refresh the Nucleus code index after
    * clone (a recorded step) and the agent gets the ```search action.
@@ -617,6 +645,20 @@ export interface DurableAgentInput {
    * runs' sequence unchanged.
    */
   mergeGate?: boolean;
+  /**
+   * EV6 (SHIP_INCIDENT_FIX): this run is an AUTHORISED incident remediation
+   * (incidents.ts authorizeRemediation), gated on a reproducing test — the
+   * change must carry a test that fails on the base revision and passes on
+   * head. Materialised at enqueue ONLY under the flag (runtime.ts reads it;
+   * incidents.ts never touches env), and it implies `changeClass` and
+   * `mergeGate`: the outcome holds at the merge boundary, and a run without
+   * the boundary park has nowhere to hold.
+   *
+   * Admits the `repro-test` step (repro-test.ts), so a run without the field
+   * — every log written before the flag, and every remediation enqueued with
+   * it off — replays byte-identically and its fingerprint is untouched.
+   */
+  requireReproTest?: boolean;
   /**
    * Auto-rollback OBSERVATION (P1-4 / L4): after `preview-deploy` and
    * `telemetry-check`, judge the measured before/after and record a `rollback`
@@ -2006,6 +2048,7 @@ export function durableAgent(
         // snapshot is an optimisation for a run that has already delivered.
         if (input.warmThread === true && (input.parentRunId !== undefined || input.pr !== undefined || pr !== null)) {
           await ctx.step("thread-snapshot", async () => {
+           try {
             if (config.executor.snapshot === undefined || config.executor.createFrom === undefined) {
               return { skipped: "this worker's provider cannot snapshot" };
             }
@@ -2049,6 +2092,13 @@ export function durableAgent(
               createdAt: new Date().toISOString(),
             });
             return { image, head, ...(evicted.length > 0 ? { evicted: evicted.length } : {}) };
+           } catch (error) {
+            // Found live 2026-10-18: a run that parked at approve-merge had its
+            // original sandbox snapshotted and destroyed by the merge park, so
+            // the exec above threw "run not found" and failed a run that had
+            // already merged. The snapshot is an optimisation; it skips.
+            return { skipped: `no snapshot: ${error instanceof Error ? error.message : String(error)}` };
+           }
           });
         }
         await dispose(config, primary.handle);
@@ -2356,6 +2406,8 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
         lookImage !== undefined && config.lookImageModel !== undefined ? config.lookImageModel(lookImage.model) : undefined;
       /** Image looks executed this run, for the input.lookImage.max cap. */
       let imageLooks = 0;
+      /** Q3b: the session records only when the input admitted it (look.ts lookSessionScript). */
+      const lookRecord = input.look === true && input.lookRecord === true;
       onEvent({ kind: "started", harness: NATIVE_HARNESS_ID });
       // D1: the MCP client. Present only on runs whose input carries `mcp`
       // (SHIP_MCP at enqueue, servers declared); absent leaves the dialect,
@@ -2369,7 +2421,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
       }
       // One dialect for both optional surfaces; flag-off runs get exactly
       // { look, delegate }, as before either feature existed.
-      const dialect: ActionDialect = { look, delegate, ...(steerReply ? { reply: true } : {}), ...(mcpInput !== undefined ? { mcp: true } : {}) };
+      const dialect: ActionDialect = { look, delegate, ...(steerReply ? { reply: true } : {}), ...(mcpInput !== undefined ? { mcp: true } : {}), ...(input.skills !== undefined ? { skill: true } : {}) };
       let messages: Message[] = [
         {
           role: "system",
@@ -2378,7 +2430,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
           // are re-framed like any other untrusted text, so a crafted issue
           // cannot smuggle "Operator steering — ..." into the one section the
           // model reads as its orders. Flag-off bytes are unchanged.
-          content: systemPrompt({ workdir: ws.workdir, task: untrusted(task.prompt, "[task text, not the operator]", true), search: searchable, browser: input.verification?.preview !== undefined, ask: input.ask === true, look, lookImage: lookImage !== undefined, delegate: input.delegate === true, ...(input.delegate === true && input.delegateTargets !== undefined && input.delegateTargets.length > 0 ? { delegateTargets: input.delegateTargets } : {}), ...(steerReply ? { reply: true } : {}), ...(mcpOffer !== undefined ? { mcp: renderMcpSection(mcpOffer) } : {}) }),
+          content: systemPrompt({ workdir: ws.workdir, task: untrusted(task.prompt, "[task text, not the operator]", true), search: searchable, browser: input.verification?.preview !== undefined, ask: input.ask === true, look, lookImage: lookImage !== undefined, delegate: input.delegate === true, ...(input.delegate === true && input.delegateTargets !== undefined && input.delegateTargets.length > 0 ? { delegateTargets: input.delegateTargets } : {}), ...(steerReply ? { reply: true } : {}), ...(mcpOffer !== undefined ? { mcp: renderMcpSection(mcpOffer) } : {}), ...(input.skills !== undefined ? { skills: renderSkillsSection(input.skills) } : {}) }),
         },
       ];
       let anySuccessfulAction = false;
@@ -3075,7 +3127,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
             // bytes, so a crash between put and record re-runs idempotently.
             const result = await ws.ctx.step(`${p}turn-${turn}-look-image`, () => {
               ws.live?.({ phase: "running", turn, detail: clipDetail(describeAction(action)) });
-              return runLookImage(ws.executor, `t${turn}`, action, config.artifacts!, config.actionTimeoutMs, { runId: ws.ctx.runId });
+              return runLookImage(ws.executor, `t${turn}`, action, config.artifacts!, config.actionTimeoutMs, { runId: ws.ctx.runId }, lookRecord);
             });
             imageLooks += 1;
             // Text first, exactly like a text look: framed after truncation
@@ -3114,7 +3166,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
           // command.
           const result = await ws.ctx.step(`${p}turn-${turn}-look`, () => {
             ws.live?.({ phase: "running", turn, detail: clipDetail(describeAction(action)) });
-            return runLook(ws.executor, `t${turn}`, action, config.actionTimeoutMs);
+            return runLook(ws.executor, `t${turn}`, action, config.actionTimeoutMs, lookRecord);
           });
           // INJECTION FENCE. Unlike a command's output — which the agent chose
           // to produce — a page's content is a channel written by whoever owns
@@ -3125,6 +3177,26 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
           // defanged. Framed AFTER truncation so the pair can never be cut
           // apart by an oversized snapshot.
           messages.push({ role: "user", content: frameUntrusted(truncate(untrusted(formatObservation(result)), maxObs)) });
+          continue;
+        }
+
+        // A skill load (Q4-b, input.skills). Read-only like ```search, and
+        // alone among the gated actions it records NO step: the observation
+        // is a pure function of the recorded input (skillObservation reads
+        // input.skills and the action, nothing else), so replay re-derives
+        // it without I/O and the step sequence is identical to a run
+        // without skills — which is why no WORKFLOW_STEPS gate admits one
+        // and the fingerprint does not move. Accounting like the other
+        // read-only actions: clears no finish gate, touches no last-command
+        // verdict, not fed to recovery. The body arrives framed as
+        // untrusted data inside the observation (skills.ts), and nothing
+        // about a skill can widen an action, an egress entry or a
+        // credential: those surfaces never read this field.
+        if (action.kind === "skill") {
+          // The loop's `untrusted` wrapper (fenceOperatorLines) applies on
+          // steerReply runs so a skill body imitating an operator message is
+          // re-framed exactly like a command output that tries the same.
+          messages.push({ role: "user", content: untrusted(skillObservation(action.name, input.skills, maxObs), "[skill text, not the operator]") });
           continue;
         }
 
@@ -3659,10 +3731,26 @@ async function publishIfRepoRun(
   /** Filled in as the gate goes; rendered into the PR lead and the run output. */
   facts: VerificationFacts = {},
 ): Promise<string | null> {
-  // A SCAN PUBLISHES NOTHING (L2 / D3). First line of the function, before any
-  // step, so no call site can forget it — this one guard covers the
+  // Q3b (SHIP_LOOK_RECORD): finalise the look session's screencast BEFORE the
+  // push — one recorded step, admitted by input.lookRecord alone, covering
+  // every path that reaches this gate, including a non-repo run that owns a
+  // look session but publishes nothing. The session's frames and captured
+  // page text live in the sandbox this run's executor owns, so this is the
+  // last moment they exist at all; the outcome — stored, withheld (Q3c),
+  // dropped over cap, or none — is run-page context only and never reaches a
+  // pull request. The secret set is the run's exact-value set
+  // (checkoutSecrets: the forge tokens), recomputed here rather than recorded,
+  // the same rule the external adapters' scrub follows — and the same set the
+  // flow recording's withhold check below runs on.
+  const secrets = checkoutSecrets(input.repo, checkout, policy);
+  if (input.look === true && input.lookRecord === true) {
+    await ctx.step("look-record", () => runLookRecordFinalise(executor, config.artifacts, { runId: ctx.runId }, secrets, config.actionTimeoutMs));
+  }
+  // A SCAN PUBLISHES NOTHING (L2 / D3). Before anything that publishes, so no
+  // call site can forget it — this one guard covers the
   // single-attempt path, the multi-attempt path and `rescuePublish`, and covers
-  // any call site added later.
+  // any call site added later. (The look-record step above is not a publish:
+  // a scan's input can never admit it, `look` being suppressed at enqueue.)
   //
   // This is the whole fix. The MVP asked the model in prose not to change
   // files; on 2026-08-26 five of seven nightly scans pushed code anyway (an
@@ -3687,6 +3775,19 @@ async function publishIfRepoRun(
   // and plan a change came from are readable off the forge and off `git log`
   // long after this run's page is gone.
   const trailers = akirooTrailersFrom(input.task);
+
+  // EV6 (SHIP_INCIDENT_FIX): the reproducing-test gate, first leg of the
+  // publish path on an authorised remediation (repro-test.ts). Before
+  // anything leaves the sandbox, the change must carry a test that fails on
+  // the base revision and passes on head; anything else still publishes but
+  // holds at the merge boundary, and an approval cannot silently clear the
+  // hold (the blocked reasons name the outcome). Recorded BEFORE the build
+  // and suite legs so its outcome is on the record whatever they say.
+  const repro =
+    input.requireReproTest === true
+      ? await ctx.step("repro-test", () => runReproTestGate(executor, config, input))
+      : undefined;
+  if (repro !== undefined) facts.repro = repro;
 
   // 0. Run the suite BEFORE the push, so "tests passed" describes the code that
   // is about to become the pull request rather than an earlier state of it.
@@ -3828,7 +3929,7 @@ async function publishIfRepoRun(
     // nothing was pushed.
     const followUpPreview = push.kind === "pushed" ? await previewIfAsked(ctx, config, input, co.branch, push.sha) : undefined;
     if (followUpPreview !== undefined && input.supersedePreviews === true) await supersedeOlderPreviews(ctx, config, input, followUpPreview);
-    const legs = await runLadderLegs(ctx, executor, config, input, followUpPreview, co.branch, { baseline, build, tests }, assetSink(ref, token, input.pr, config.artifacts));
+    const legs = await runLadderLegs(ctx, executor, config, input, followUpPreview, co.branch, { baseline, build, tests }, assetSink(ref, token, input.pr, config.artifacts), secrets);
     const followUpProof = proofLinks(legs);
     // S08 surfacing: the detector over the diff this follow-up just published,
     // rendered into the same Verification section as the rest of the evidence.
@@ -3926,7 +4027,7 @@ async function publishIfRepoRun(
   // against main, the observe window after it — then the rung list, recorded
   // as its own step so the webhook and the run page read ONE list instead of
   // each re-deriving it from six steps and disagreeing.
-  const legs = await runLadderLegs(ctx, executor, config, input, preview, co.branch, { baseline, build, tests }, assetSink(ref, token, pr.number, config.artifacts));
+  const legs = await runLadderLegs(ctx, executor, config, input, preview, co.branch, { baseline, build, tests }, assetSink(ref, token, pr.number, config.artifacts), secrets);
   if (legs.smoke !== undefined) facts.smoke = legs.smoke;
   if (legs.visual !== undefined) facts.visual = legs.visual;
   if (legs.flow !== undefined) facts.flow = legs.flow;
@@ -3971,6 +4072,7 @@ async function publishIfRepoRun(
       ...(tests !== undefined ? { tests } : {}),
       draft: asDraft,
       ...(regression !== undefined ? { regression } : {}),
+      ...(repro !== undefined ? { repro } : {}),
     },
     { executor, checkout: co, config },
     legs.rungs,
@@ -3986,6 +4088,7 @@ async function publishIfRepoRun(
       files: changedList,
       ...(tests !== undefined ? { tests } : {}),
       ...(regression !== undefined ? { regression } : {}),
+      ...(repro !== undefined ? { repro } : {}),
     });
     // The boundary decision supersedes whatever the auto-merge gate said about
     // the same pull request, and a rebase's re-run suite — when it happened —
@@ -4039,7 +4142,7 @@ async function mergeBoundaryGate(
   config: DurableAgentConfig,
   input: DurableAgentInput,
   target: { ref: RepoRef; token: string; checkout: RepoCheckout; pr: { url: string; number: number }; handle?: string },
-  facts: { verdict: ChangeVerdict; files: ChangedFile[]; tests?: TestOutcome; regression?: { worse: boolean; reasons: string[] } },
+  facts: { verdict: ChangeVerdict; files: ChangedFile[]; tests?: TestOutcome; regression?: { worse: boolean; reasons: string[] }; repro?: ReproTestStep },
 ): Promise<{ decision: MergeDecisionStep | undefined; tests?: TestOutcome }> {
   const { ref, token, checkout, pr } = target;
   let exec = executor;
@@ -4063,7 +4166,8 @@ async function mergeBoundaryGate(
       class: facts.verdict.class,
       reasons: facts.verdict.reasons,
       pr: pr.url,
-      summary: mergeParkSummary(facts.verdict, facts.files, pr.url, conflict),
+      summary: mergeParkSummary(facts.verdict, facts.files, pr.url, conflict, facts.repro !== undefined ? reproParkNote(facts.repro) : undefined),
+      ...(facts.repro !== undefined ? { repro: { verdict: facts.repro.verdict, testFiles: facts.repro.testFiles } } : {}),
       ...(conflict !== undefined ? { conflict } : {}),
     }));
     let parkImage: string | undefined;
@@ -4116,6 +4220,13 @@ ${reason}`).catch(() => undefined);
     const blocked: string[] = [];
     if (tests !== undefined && tests.kind !== "passed" && tests.kind !== "disabled") blocked.push(`the suite did not pass after the rebase (${tests.kind})`);
     if (facts.regression?.worse === true) blocked.push(`the service got worse after this change: ${facts.regression.reasons.join("; ")}`);
+    // EV6: a remediation the reproducing-test gate did not clear. The park
+    // above already showed the outcome; an approval that reaches here is
+    // recorded but cannot mark the pull request ready — the hold clears by a
+    // person acting on the forge, in the forge's own audit trail, never
+    // silently from a single click here.
+    const reproHold = facts.repro !== undefined ? reproHoldReason(facts.repro) : undefined;
+    if (reproHold !== undefined) blocked.push(reproHold);
     final = await ctx.step(
       "merge-decision",
       async (): Promise<MergeDecisionStep> => {
@@ -4293,6 +4404,10 @@ type AutoMergeStep =
  * timeline as `held`.
  */
 function mergesUnattended(input: DurableAgentInput, cls: ChangeVerdict["class"]): boolean {
+  // A repro-gated remediation (EV6) never merges unattended, whatever the
+  // repo's auto authority says: the merge question is a person's, and the
+  // reproducing-test outcome is exactly the evidence they are asked to read.
+  if (input.requireReproTest === true) return false;
   if (input.autoMerge !== true) return false;
   if (input.authority === undefined) return cls === "trivial";
   if (input.authority === "auto_normal") return cls === "trivial" || cls === "normal";
@@ -4311,6 +4426,7 @@ async function autoMergeIfAllowed(
     tests?: TestOutcome;
     draft: boolean;
     regression?: { worse: boolean; reasons: string[] };
+    repro?: ReproTestStep;
   },
   target?: { executor: AgentExecutor; checkout: RepoCheckout; config: DurableAgentConfig },
   /** The recorded rung list (`ladder` step), when the run declared a ladder. */
@@ -4336,6 +4452,11 @@ async function autoMergeIfAllowed(
     }
     if (facts.draft) held.push("the pull request opened as a draft, so a person is expected to read it");
     if (facts.regression?.worse === true) held.push(`the service got worse after this change: ${facts.regression.reasons.join("; ")}`);
+    // EV6: the reproducing-test gate holds the auto path too — a hand-crafted
+    // input could carry requireReproTest with auto authority, and a
+    // non-reproduced remediation never merges unattended.
+    const reproAutoHold = facts.repro !== undefined ? reproHoldReason(facts.repro) : undefined;
+    if (reproAutoHold !== undefined) held.push(reproAutoHold);
   } else {
     // LADDER gate (C4 / D3): recorded rungs only. The rung list comes from
     // the `ladder` step; its absence on an authority-carrying input means
@@ -4525,11 +4646,13 @@ async function runLadderLegs(
   branch: string,
   suite: { baseline?: TestOutcome; build?: TestOutcome; tests?: TestOutcome },
   sink: AssetSink | undefined,
+  /** The run's exact-value secret set (Q3c), for the flow recording's withhold check. */
+  secrets: readonly KnownSecret[] = [],
 ): Promise<{ smoke?: SmokeOutcome; visual?: VisualOutcome; flow?: FlowOutcome; observe?: ObserveOutcome; rungs?: Rung[] }> {
   if (input.verification === undefined) return {};
   const smoke = await smokeIfDeclared(ctx, executor, input, preview);
   const visual = await visualIfDeclared(ctx, executor, input, preview, sink);
-  const flow = await flowIfPresent(ctx, executor, input, preview, sink);
+  const flow = await flowIfPresent(ctx, executor, input, preview, sink, secrets);
   const observe = await observeIfDeclared(ctx, config, input, preview, branch);
   const rungs = await recordLadder(ctx, input, {
     ...suite,

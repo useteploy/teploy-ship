@@ -115,6 +115,10 @@ import { askEnv, readDeploymentAsks } from "./deployment-asks.js";
 import { installPolicyShadowFromEnv } from "./policy-shadow.js";
 import { shadowObserve } from "./shadow-hook.js";
 import { materialiseMcp } from "./mcp.js";
+import { FileSkillStore, NucleusSkillStore, materialiseSkills } from "./skills.js";
+import type { SkillStore } from "./skills.js";
+export type { RepoSkillsMode, SkillPin, SkillRunInput, SkillSource, SkillStore, SkillVersion } from "./skills.js";
+export { FileSkillStore, NucleusSkillStore, importSkill, normalizeRepoSkills, normalizeSkillPins, skillsEnabled } from "./skills.js";
 import type { RunMeta } from "./run-store.js";
 
 export type { RunMeta } from "./run-store.js";
@@ -413,6 +417,15 @@ export interface ShipRuntime {
   policies: PolicyStore;
   /** One record per repo: allowlist, sandbox image, evidence, policy. See projects.ts. */
   projects: ProjectStore;
+  /**
+   * The skills registry (Q4-a): immutable, content-addressed versions an
+   * operator imported, read at ENQUEUE to resolve the versions a project
+   * pinned (materialiseSkills). Optional like `launches` so a legacy
+   * injected adapter still satisfies the interface; both built-in runtimes
+   * carry one. A project with pins and no registry is an enqueue-time
+   * refusal, never a silent skills-off run. See skills.ts.
+   */
+  skills?: SkillStore;
   /** Public request boards and their notes (L6). See bulletin.ts. */
   bulletin: BulletinStore;
   /** Per-repo evidence config — a view of `projects`, legacy rows read through. See projects.ts. */
@@ -500,6 +513,7 @@ export function fileRuntime(): ShipRuntime {
     unpricedRuns: new FileUnpricedRunStore(),
     policies: new FilePolicyStore(),
     projects,
+    skills: new FileSkillStore(),
     evidence: new ProjectEvidenceStore(projects, new FileEvidenceStore()),
     config: new FileRuntimeConfig(),
     artifacts: new FileArtifacts(),
@@ -628,6 +642,7 @@ export async function nucleusRuntime(
     unpricedRuns: new NucleusUnpricedRunStore(db),
     policies: new NucleusPolicyStore(db),
     projects,
+    skills: new NucleusSkillStore(db),
     evidence: new ProjectEvidenceStore(projects, new NucleusEvidenceStore(db)),
     config: new NucleusRuntimeConfig(db),
     artifacts: new NucleusArtifacts(db),
@@ -957,6 +972,16 @@ export interface EnqueueReport {
   threadWarm?: { used: boolean; reason?: string };
 }
 
+/**
+ * EV6 (SHIP_INCIDENT_FIX): appended to a repro-gated remediation's task at
+ * enqueue and frozen into the recorded input. The gate holds the pull
+ * request unless the change carries a reproducing test, so the agent has to
+ * know that is the deliverable — without this the gate would hold nearly
+ * every remediation and teach an operator to ignore it.
+ */
+const REPRO_REMEDIATION_TASK_NOTE =
+  "\n\nThis remediation is gated on a reproducing test: include a test that FAILS on the revision you started from and PASSES with your change. Ship runs this check itself (the repro-test gate), and the pull request is held at the merge boundary until it passes.";
+
 export async function enqueueRun(
   runtime: ShipRuntime,
   options: {
@@ -1051,6 +1076,23 @@ export async function enqueueRun(
      * never set then. See DurableAgentInput.mergeGate in durable.ts.
      */
     mergeGate?: boolean;
+    /**
+     * EV6 (SHIP_INCIDENT_FIX): this enqueue is an AUTHORISED incident
+     * remediation (incidents.ts authorizeRemediation — explicit human
+     * approval only in v1, per Decision 13), gated on a reproducing test.
+     * The option is present on every remediation enqueue; THIS module reads
+     * the flag, because incidents.ts must not touch env (its header). Under
+     * SHIP_INCIDENT_FIX=on the run's recorded input carries
+     * `requireReproTest` and the repro-test step gates its publish; with the
+     * flag off the option is dropped and the run enqueues byte-identically
+     * to pre-EV6 — no field, no step.
+     *
+     * Implies the change-class and merge gates (the outcome holds at the
+     * merge boundary, and a run without one has nowhere to hold), so an
+     * explicit changeClass/mergeGate false alongside it is refused rather
+     * than silently overridden.
+     */
+    requireReproTest?: boolean;
     /**
      * Merge a `trivial` change without a human (L5). Absent falls back to the
      * repo's project record; there is no env default, because "which repos may
@@ -1344,6 +1386,13 @@ export async function enqueueRun(
           })(),
         }
       : undefined;
+  // Look-session recording (Q3b): SHIP_LOOK_RECORD, default off, and only
+  // when `look` itself is on — a run that was never offered the action has no
+  // session to record. Materialised for the standing replay reason: it admits
+  // the `look-record` step, and a replay must know from its log alone whether
+  // the session was recorded. Unset keeps the input byte-identical to a
+  // pre-Q3b run's.
+  const lookRecord = look === true && envFlag("SHIP_LOOK_RECORD") ? true : undefined;
   // Per-repo evidence, resolved HERE so every enqueue surface (CLI, dashboard,
   // webhook, intake sweep) gets the same treatment without each knowing about
   // the store. Materialised into the recorded input below, never re-read at
@@ -1366,6 +1415,13 @@ export async function enqueueRun(
   // input like every step-adding flag — and the record is editable, so the
   // log must carry the servers the run was offered. Off for scans, like look.
   const mcp = scan ? undefined : materialiseMcp(project?.mcp);
+  // Skills (Q4-a, SHIP_SKILLS): the registry versions this project pinned,
+  // resolved HERE — the registry is editable, and the run input has to carry
+  // the bodies the log was written under, never a live lookup (the same
+  // reason evidence and the ladder are copied at enqueue). Suppressed on
+  // scans, like look/mcp/delegate. Absent on every run that does not admit
+  // them, so those inputs stay byte-identical to pre-skills ones.
+  const skills = scan ? undefined : await materialiseSkills(project?.skills, runtime.skills);
   // Delegate targets (DT2): what this run may name with ```delegate target=,
   // materialised beside `delegate` and only when it is on — the deployment's
   // SHIP_DELEGATE_TARGETS narrowed by the project's list. Recorded so the
@@ -1449,6 +1505,22 @@ export async function enqueueRun(
   // comment above), off for scans, and SHIP_MERGE_GATE=0 restores the old
   // mid-run routing without disturbing anything else about the run.
   const mergeGate = scan ? undefined : (options.mergeGate ?? (changeClass === true && !envFlagOff("SHIP_MERGE_GATE") ? true : undefined));
+  // EV6 (SHIP_INCIDENT_FIX): the reproducing-test gate on an authorised
+  // remediation, materialised HERE like every step-adding flag — it admits
+  // the `repro-test` step (repro-test.ts), so a run whose log predates the
+  // flag must not find a step it does not contain. The option comes from
+  // authorizeRemediation's enqueue (incidents.ts); only "on" counts, the
+  // same strict spelling EV5's worker-side read uses, so a bare "1" cannot
+  // turn a gate that holds remediations on by accident.
+  const requireReproTest =
+    !scan && options.requireReproTest === true && (process.env.SHIP_INCIDENT_FIX ?? "").trim().toLowerCase() === "on"
+      ? true
+      : undefined;
+  if (requireReproTest === true && (options.changeClass === false || options.mergeGate === false)) {
+    throw new Error(
+      "A remediation gated on a reproducing test parks at the merge boundary; it cannot be enqueued with the change-class or merge gate disabled",
+    );
+  }
   // AUTO-MERGE (L5 / D5). Per repo, off unless the project record says on, and
   // additionally requires the change-class gate: `trivial` is the entire
   // authority for merging without a human (see change-class.ts), and with the
@@ -1586,11 +1658,15 @@ export async function enqueueRun(
     scan ? project?.sandboxEgressAllow : withPreviewEgress(project?.sandboxEgressAllow, project?.verification),
     [harness, ...attempts],
   );
+  // EV6: the gate only passes when the agent writes the reproducing test, so
+  // the task must SAY so — appended here, frozen into the recorded input's
+  // task text, which is what a replay reads.
+  const reproTask = requireReproTest === true ? `${baseTask}${REPRO_REMEDIATION_TASK_NOTE}` : baseTask;
   // Hoisted out of the append below so the upgrade fence can fingerprint the
   // exact object the log will carry, rather than a reconstruction of it.
   const inputBase = {
         restoreValidation: 1 as const,
-        task: journey ? `${baseTask}\n\n${journeyInstruction(journey)}` : baseTask,
+        task: journey ? `${reproTask}\n\n${journeyInstruction(journey)}` : reproTask,
         ...(journey ? { journey, userMessage: options.userMessage ?? options.task } : {}),
         ...(options.environmentCheckOnly === true ? { environmentCheckOnly: true } : {}),
         ...(options.environmentCheck === true ? { environmentCheck: true, ...projectReadinessRecord(project, options.environmentInputsDigest, stackDetectEnabled()) } : {}),
@@ -1645,8 +1721,12 @@ export async function enqueueRun(
         ...(testsFeedback === true ? { testsFeedback: true } : {}),
         ...(fixRetries !== undefined ? { fixRetries } : {}),
         ...(criticAdvisory === true ? { criticAdvisory: true } : {}),
-        ...(changeClass === true ? { changeClass: true } : {}),
-        ...(mergeGate === true ? { mergeGate: true } : {}),
+        ...(changeClass === true || requireReproTest === true ? { changeClass: true } : {}),
+        // EV6: a repro-gated remediation always carries the boundary park
+        // (the `||` above and below), whatever the deployment's gate
+        // defaults — the outcome has to hold somewhere.
+        ...(mergeGate === true || requireReproTest === true ? { mergeGate: true } : {}),
+        ...(requireReproTest === true ? { requireReproTest: true } : {}),
         ...(autoMerge === true ? { autoMerge: true } : {}),
         ...(rollback === true ? { rollback: true } : {}),
         ...(autoDeploy === true ? { autoDeploy: true } : {}),
@@ -1716,6 +1796,10 @@ export async function enqueueRun(
         // run that does not admit it — including look-off runs, whose inputs
         // stay byte-identical to pre-image ones.
         ...(lookImage !== undefined ? { lookImage } : {}),
+        // ...and the session recording (SHIP_LOOK_RECORD above), absent on
+        // every run that does not admit it, so those inputs stay
+        // byte-identical to pre-Q3b ones.
+        ...(lookRecord === true ? { lookRecord: true } : {}),
         // ```delegate (S20/S22), from SHIP_DELEGATE above: default off, so a
         // run that does not set it enqueues exactly as it did before the
         // action existed — and the child marker, recorded only on spawned
@@ -1736,6 +1820,9 @@ export async function enqueueRun(
         // absent on every run that does not admit it, so those inputs stay
         // byte-identical to pre-MCP ones.
         ...(mcp !== undefined ? { mcp } : {}),
+        // Skills (Q4-a), from SHIP_SKILLS + the project's pins above: same
+        // rule — absent on every run that does not admit them.
+        ...(skills !== undefined ? { skills } : {}),
         index: true,
         guard: true,
         // The warm repo cache (SB-A). Repo runs that are not PR runs, on

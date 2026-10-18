@@ -15,17 +15,22 @@ import {
   LOOK_OPEN_PLAN,
   LOOK_SEALED,
   LOOK_SESSION,
+  LOOK_REC_DIR,
+  LOOK_RECORD_MAX_BYTES,
   describeNeedle,
   findMatches,
   lookCommand,
   lookImageCap,
+  lookRecordCommand,
   lookShotPath,
   lookStaleRef,
   renderLook,
   runLook,
   runLookImage,
+  runLookRecordFinalise,
 } from "./look.js";
 import type { LookAction } from "./look.js";
+import { RECORDING_DATA_CLASS } from "./artifacts.js";
 
 /**
  * The fake driver (deterministic, no network): an executor that answers the
@@ -340,24 +345,37 @@ test("the image refusals name the env var, the cap, and the fix — never a sile
 });
 
 /** A minimal in-memory ArtifactStore: put/get plus a record of what landed. */
-function memoryArtifacts(): { store: ArtifactStore; ids: () => string[] } {
+function memoryArtifacts(): { store: ArtifactStore; ids: () => string[]; temporary: () => string[] } {
   const byId = new Map<string, Artifact>();
   const order: string[] = [];
+  const temps: string[] = [];
+  const record = (name: string, bytes: Uint8Array, dataClass?: string, binding?: { runId: string; revision?: string; treeDigest?: string }, expires?: string): Artifact => {
+    const artifact: Artifact = {
+      id: createHash("sha256").update(bytes).digest("hex"),
+      name,
+      mime: "image/png",
+      data: Buffer.from(bytes).toString("base64"),
+      bytes: bytes.length,
+      ...(dataClass !== undefined ? { dataClass } : {}),
+      ...(binding !== undefined ? { runId: binding.runId, ...(binding.revision !== undefined ? { revision: binding.revision } : {}), ...(binding.treeDigest !== undefined ? { treeDigest: binding.treeDigest } : {}) } : {}),
+    };
+    byId.set(artifact.id, artifact);
+    return artifact;
+  };
   return {
     ids: () => order,
+    temporary: () => temps,
     store: {
-      async put(name, bytes, dataClass) {
-        const artifact: Artifact = {
-          id: createHash("sha256").update(bytes).digest("hex"),
-          name,
-          mime: "image/png",
-          data: Buffer.from(bytes).toString("base64"),
-          bytes: bytes.length,
-          ...(dataClass !== undefined ? { dataClass } : {}),
-        };
-        byId.set(artifact.id, artifact);
-        order.push(artifact.id);
-        return artifact.id;
+      async put(name, bytes, dataClass, binding) {
+        const a = record(name, bytes, dataClass, binding);
+        order.push(a.id);
+        return a.id;
+      },
+      async putTemporary(name, bytes, dataClass, binding) {
+        const a = record(name, bytes, dataClass, binding);
+        order.push(a.id);
+        temps.push(a.id);
+        return a.id;
       },
       async get(id) {
         return byId.get(id) ?? null;
@@ -365,3 +383,168 @@ function memoryArtifacts(): { store: ArtifactStore; ids: () => string[] } {
     },
   };
 }
+
+// --- look recording (Q3b): the session's screencast, finalised once ----------
+
+/** A JPEG with the right magic: passes the artifact store's allowlist like a strip. */
+const FAKE_JPEG = new Uint8Array([255, 216, 255, 224, 1, 2, 3, 4, 5]);
+/** WebM's EBML magic, for the ffmpeg path's report. */
+const FAKE_WEBM = new Uint8Array([26, 69, 223, 163, 1, 2, 3, 4]);
+/** A sha1-shaped tree digest, as `git write-tree` prints one. */
+const TREE = "a".repeat(40);
+
+test("flag off: the session the driver spawns is LOOK_SESSION verbatim; flag on: the recorder rides after it", async () => {
+  const off = fakeLookDriver();
+  await runLook(off.executor, "t0", { kind: "look", url: "https://example.com/docs" });
+  assert.equal(off.files.get(".teploy-agent/look-session.mjs"), LOOK_SESSION, "byte-identical session script when the input did not admit recording");
+
+  const on = fakeLookDriver();
+  await runLook(on.executor, "t0", { kind: "look", url: "https://example.com/docs" }, undefined, true);
+  const script = on.files.get(".teploy-agent/look-session.mjs")!;
+  assert.ok(script.startsWith(LOOK_SESSION), "the launch contract is unchanged — the recorder is appended, never spliced in");
+  assert.match(script, /Page\.startScreencast/);
+  assert.match(script, /format: "jpeg", quality: 60, maxWidth: 960, maxHeight: 600, everyNthFrame: 2/, "the design's capture parameters, verbatim");
+  assert.match(script, /rec: cap reached/, "the frame/byte caps stop loudly");
+  assert.ok(script.includes(`"${LOOK_REC_DIR}"`), "frames and the captured page text land under the rec dir");
+  assert.match(script, /text\.txt/, "the DOM text is captured beside the frames — the Q3c proxy");
+});
+
+test("lookRecordCommand: the look prelude, an honest none without a session, the ffmpeg probe, the throwaway-index tree digest, then the finaliser", () => {
+  const cmd = lookRecordCommand();
+  assert.match(cmd, /node \.teploy-agent\/look-record\.mjs$/);
+  assert.match(cmd, /ln -sfn "\$pw" \.teploy-agent\/node_modules\/playwright/);
+  assert.match(cmd, /echo '\{"kind":"none","reason":"no look session ran, so nothing was captured"\}'; exit 0/);
+  assert.match(cmd, /if command -v ffmpeg[^\n]*; then : > \.teploy-agent\/rec\/ffmpeg; fi/, "ffmpeg is probed, never assumed");
+  assert.match(cmd, /GIT_INDEX_FILE="\$PWD\/\.teploy-agent\/rec\/index"/, "the tree digest uses a throwaway index, never the real one");
+  assert.match(cmd, /git write-tree/);
+});
+
+/**
+ * The fake finaliser host. Only the browser half — ffmpeg, the canvas strip —
+ * is faked: putFile records, exec answers the finaliser's node run with the
+ * report it would print, getFile answers the captured text and the assembled
+ * recording, and everything else is refused loudly (a look run must run
+ * nothing but its own scripts).
+ */
+function fakeFinaliser(
+  report: { kind: "strip" | "webm" | "none"; frames?: number; capped?: string; treeDigest?: string },
+  options: { text?: string; bytes?: Uint8Array; exit?: number } = {},
+): { executor: AgentExecutor; commands: string[]; pulled: string[] } {
+  const commands: string[] = [];
+  const pulled: string[] = [];
+  const bytes = options.bytes ?? FAKE_JPEG;
+  const executor: AgentExecutor = {
+    async exec(cmd) {
+      commands.push(cmd);
+      if (/^node \.teploy-agent\/look-record\.mjs$/m.test(cmd)) {
+        if (options.exit !== undefined) return { exitCode: options.exit, stdout: "", stderr: "look-record: the browser session did not answer CDP", timedOut: false, truncated: false };
+        const out =
+          report.kind === "none"
+            ? { kind: "none", reason: "no look session ran, so nothing was captured" }
+            : {
+                kind: report.kind,
+                file: `${LOOK_REC_DIR}/look-record.${report.kind === "webm" ? "webm" : "jpg"}`,
+                frames: report.frames ?? 5,
+                ...(report.capped !== undefined ? { capped: report.capped } : {}),
+                ...(report.treeDigest !== undefined ? { treeDigest: report.treeDigest } : {}),
+              };
+        return { exitCode: 0, stdout: JSON.stringify(out), stderr: "", timedOut: false, truncated: false };
+      }
+      if (cmd === `rm -rf ${LOOK_REC_DIR}`) return { exitCode: 0, stdout: "", stderr: "", timedOut: false, truncated: false };
+      return { exitCode: 9, stdout: "", stderr: `fake finaliser refuses to run: ${cmd}`, timedOut: false, truncated: false };
+    },
+    putFile: async (path, data) => {
+      void path;
+      void data;
+    },
+    getFile: async (path) => {
+      pulled.push(path);
+      if (path === `${LOOK_REC_DIR}/text.txt`) return new TextEncoder().encode(options.text ?? "");
+      if (path.endsWith(".webm") || path.endsWith(".jpg")) return bytes;
+      throw new Error(`unused: ${path}`);
+    },
+    destroy: async () => {},
+  };
+  return { executor, commands, pulled };
+}
+
+test("the finaliser stores a strip as a temporary recording bound to the run and the tree it observed", async () => {
+  const fake = fakeFinaliser({ kind: "strip", frames: 7, capped: "rec: cap reached (frame)", treeDigest: TREE });
+  const { store, temporary } = memoryArtifacts();
+  const outcome = await runLookRecordFinalise(fake.executor, store, { runId: "run-look-record" }, [{ name: "git-token", value: "token-never-on-page-999" }]);
+  assert.equal(outcome.kind, "stored");
+  if (outcome.kind === "stored") {
+    assert.equal(outcome.format, "strip", "no ffmpeg in the image: the result says it is a strip, never passing one off as video");
+    assert.equal(outcome.frames, 7);
+    assert.equal(outcome.capped, "rec: cap reached (frame)", "the cap is stated on the run page, not hidden");
+    assert.equal(outcome.treeDigest, TREE, "the working tree it observed");
+    assert.equal(outcome.digest, createHash("sha256").update(FAKE_JPEG).digest("hex"));
+    const kept = (await Promise.all(temporary().map((id) => store.get(id)))).find((a) => a?.id === outcome.artifact);
+    assert.ok(kept !== undefined && kept !== null, "the recording went through putTemporary — the 7-day screenshot retention");
+    assert.equal(kept.dataClass, RECORDING_DATA_CLASS);
+    assert.equal(kept.runId, "run-look-record");
+    assert.equal(kept.revision, undefined, "a look recording claims no revision: it ran before the commit");
+    assert.equal(kept.treeDigest, TREE);
+  }
+  assert.ok(fake.commands.includes(`rm -rf ${LOOK_REC_DIR}`), "the rec dir is deleted in the sandbox once finalised");
+});
+
+test("the finaliser stores a webm report the same way, under the recording data class", async () => {
+  const fake = fakeFinaliser({ kind: "webm", frames: 30 }, { bytes: FAKE_WEBM });
+  const { store, temporary } = memoryArtifacts();
+  const outcome = await runLookRecordFinalise(fake.executor, store, { runId: "run-look-record" }, []);
+  assert.equal(outcome.kind, "stored");
+  if (outcome.kind === "stored") assert.equal(outcome.format, "webm");
+  assert.equal(temporary().length, 1);
+  assert.equal((await store.get(temporary()[0]!))?.dataClass, RECORDING_DATA_CLASS);
+});
+
+test("Q3c: a page that rendered a configured secret withholds the recording — nothing stored, the refusal names the secret, never the value", async () => {
+  const secret = "ghp_secret-on-screen-987654321";
+  const fake = fakeFinaliser({ kind: "strip", frames: 4 }, { text: `Account\n personal token ${secret}\n bye` });
+  const { store, ids } = memoryArtifacts();
+  const outcome = await runLookRecordFinalise(fake.executor, store, { runId: "run-look-record" }, [{ name: "git-token", value: secret }]);
+  assert.equal(outcome.kind, "withheld");
+  if (outcome.kind === "withheld") {
+    assert.match(outcome.reason, /configured secret value \(git-token\)/);
+    assert.ok(!outcome.reason.includes(secret), "the refusal names WHICH secret, never the value");
+  }
+  assert.deepEqual(ids(), [], "nothing was stored");
+  assert.ok(!JSON.stringify(outcome).includes(secret), "the step result carries no trace of the value");
+  assert.ok(!fake.pulled.some((p) => p.endsWith(".jpg") || p.endsWith(".webm")), "the recording bytes were never even transferred out of the sandbox");
+  assert.ok(fake.commands.includes(`rm -rf ${LOOK_REC_DIR}`), "the captured bytes are deleted in the sandbox");
+});
+
+test("a page without the secret records normally — the check is a gate, not a default refusal", async () => {
+  const fake = fakeFinaliser({ kind: "strip", frames: 4 }, { text: "a clean page" });
+  const { store, ids } = memoryArtifacts();
+  const outcome = await runLookRecordFinalise(fake.executor, store, { runId: "run-look-record" }, [{ name: "git-token", value: "ghp_secret-on-screen-987654321" }]);
+  assert.equal(outcome.kind, "stored");
+  assert.equal(ids().length, 1);
+});
+
+test("an over-cap recording is dropped with the reason recorded, never silently truncated", async () => {
+  const big = new Uint8Array(LOOK_RECORD_MAX_BYTES + 1);
+  big.set([255, 216, 255, 224], 0);
+  const fake = fakeFinaliser({ kind: "strip", frames: 600 }, { bytes: big });
+  const { store, ids } = memoryArtifacts();
+  const outcome = await runLookRecordFinalise(fake.executor, store, { runId: "run-look-record" }, []);
+  assert.equal(outcome.kind, "dropped");
+  if (outcome.kind === "dropped") assert.match(outcome.reason, new RegExp(`over the ${LOOK_RECORD_MAX_BYTES} byte cap: dropped rather than truncated`));
+  assert.deepEqual(ids(), [], "over-cap bytes never reach the store");
+});
+
+test("no session, a dead finaliser, and a worker with no store are honest recorded outcomes, never run failures", async () => {
+  const none = fakeFinaliser({ kind: "none" });
+  assert.equal((await runLookRecordFinalise(none.executor, memoryArtifacts().store, { runId: "r" })).kind, "none");
+
+  const dead = fakeFinaliser({ kind: "strip" }, { exit: 1 });
+  const failed = await runLookRecordFinalise(dead.executor, memoryArtifacts().store, { runId: "r" });
+  assert.equal(failed.kind, "failed");
+  if (failed.kind === "failed") assert.match(failed.reason, /CDP/);
+
+  const homeless = fakeFinaliser({ kind: "strip", frames: 3 });
+  const dropped = await runLookRecordFinalise(homeless.executor, undefined, { runId: "r" });
+  assert.equal(dropped.kind, "dropped");
+  if (dropped.kind === "dropped") assert.match(dropped.reason, /no artifact store/);
+});
