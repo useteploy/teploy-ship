@@ -152,7 +152,7 @@ export function authenticatedUrl(ref: RepoRef, token: string): string {
 export type GitCredentialMode = "argv" | "env";
 
 export function gitCredentialMode(env: NodeJS.ProcessEnv = process.env): GitCredentialMode {
-  return env.SHIP_GIT_CREDENTIAL === "env" ? "env" : "argv";
+  return env.SHIP_GIT_CREDENTIAL === "argv" ? "argv" : "env";
 }
 
 export interface GitCredential {

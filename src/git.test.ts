@@ -862,8 +862,16 @@ test("S01: authenticated clone and fetch scrub the remote in the same shell invo
     },
   } as unknown as AgentExecutor;
   const ref = { kind: "forgejo" as const, base: "http://h", owner: "o", repo: "r", cloneUrl: "http://h/o/r.git" };
-  await setupRepo(executor, { ref, token: "TOK", runId: "run-x" });
-  await reuseRepo(executor, { ref, token: "TOK", runId: "run-y" });
+  // The argv mode is the one that puts a credential in .git/config to scrub.
+  const was = process.env.SHIP_GIT_CREDENTIAL;
+  process.env.SHIP_GIT_CREDENTIAL = "argv";
+  try {
+    await setupRepo(executor, { ref, token: "TOK", runId: "run-x" });
+    await reuseRepo(executor, { ref, token: "TOK", runId: "run-y" });
+  } finally {
+    if (was === undefined) delete process.env.SHIP_GIT_CREDENTIAL;
+    else process.env.SHIP_GIT_CREDENTIAL = was;
+  }
 
   const withToken = seen.filter(c => c.includes("TOK@"));
   assert.equal(withToken.length, 2, "only the clone and the fetch carry the credential");
@@ -887,9 +895,10 @@ test("S01: env credential mode keeps the token out of argv and the URL, argv mod
   assert.equal(viaEnv.env?.GIT_TERMINAL_PROMPT, "0");
 
   assert.deepEqual(gitCredential(ref, "", "env"), { url: ref.cloneUrl }, "no token, no credential plumbing");
-  assert.equal(gitCredentialMode({}), "argv", "default is unchanged");
+  assert.equal(gitCredentialMode({}), "env", "env is the default since the A8 live proof");
   assert.equal(gitCredentialMode({ SHIP_GIT_CREDENTIAL: "env" }), "env");
-  assert.equal(gitCredentialMode({ SHIP_GIT_CREDENTIAL: "anything-else" }), "argv");
+  assert.equal(gitCredentialMode({ SHIP_GIT_CREDENTIAL: "argv" }), "argv", "argv is an explicit opt-out");
+  assert.equal(gitCredentialMode({ SHIP_GIT_CREDENTIAL: "anything-else" }), "env", "an unknown value never selects the weaker mode");
 });
 
 test("S01: a real git clone in env mode sends the credential as a header and never puts it in argv or config", async () => {
