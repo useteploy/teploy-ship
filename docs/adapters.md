@@ -9,6 +9,8 @@ SHIP_HARNESS=native        # default — Ship's own CodeAct loop (src/durable.ts
 SHIP_HARNESS=claude-code   # `claude -p`, headless, in the sandbox
 SHIP_HARNESS=opencode      # `opencode run`, headless, in the sandbox
 SHIP_HARNESS=codex         # `codex exec --json`, one-shot, in the sandbox
+SHIP_HARNESS=gemini        # ACP agents (E7 H3) — gemini, grok, cursor, qwen —
+                           # one generic adapter, gated on SHIP_ACP_HARNESS=on
 ```
 
 What stays Ship's whichever harness runs: intake and policies, approvals,
@@ -141,8 +143,12 @@ Default forwarded variables: claude-code `CLAUDE_CODE_OAUTH_TOKEN`,
 `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `ZHIPU_API_KEY`
 (z.ai, per models.dev), `GOOGLE_GENERATIVE_AI_API_KEY`, `OPENCODE_CONFIG_CONTENT`; codex
 `CODEX_API_KEY`, `OPENAI_API_KEY`, `CODEX_ACCESS_TOKEN`, `AI_GATEWAY_URL`,
-`AI_GATEWAY_KEY` (see the codex section for what the gateway pair does). A
-variable that is unset on the worker is simply not forwarded.
+`AI_GATEWAY_KEY` (see the codex section for what the gateway pair does); the
+ACP profiles gemini `GEMINI_API_KEY`, `GOOGLE_API_KEY`; grok `XAI_API_KEY`;
+cursor `CURSOR_API_KEY`; qwen `DASHSCOPE_API_KEY`, `QWEN_BASE_URL` (see the
+ACP section for how the pair is renamed into the exec — and why qwen never
+touches the operator's `OPENAI_*` values). A variable that is unset on the
+worker is simply not forwarded.
 
 Per-repo evidence config (`teploy-ship evidence set`) is harness-independent
 by design; the harness is chosen per deployment through the environment, not
@@ -170,10 +176,11 @@ receive (`externalHarnessConfig`):
 
 - **A forwarded base URL wins**: the host of `ANTHROPIC_BASE_URL` (claude-code,
   and opencode when `SHIP_HARNESS_ENV` forwards it), `OPENAI_BASE_URL`
-  (opencode, codex), and `AI_GATEWAY_URL` (codex's teploy-gateway route) —
-  host only, port 443, or the URL's own port when it names one (a portless
-  entry admits only 80 and 443, so `host:8443` is the only spelling that
-  opens 8443).
+  (opencode, codex), `AI_GATEWAY_URL` (codex's teploy-gateway route) and
+  `QWEN_BASE_URL` (qwen's ACP profile — never the operator's
+  `OPENAI_BASE_URL`) — host only, port 443, or the URL's own port when it
+  names one (a portless entry admits only 80 and 443, so `host:8443` is the
+  only spelling that opens 8443).
 - **Else the vendor default for a forwarded key**: `api.anthropic.com:443` for
   claude-code under `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`;
   `api.openai.com:443` for codex under `CODEX_API_KEY`/`OPENAI_API_KEY`; for
@@ -448,6 +455,115 @@ break — the hook is already there. The event encoding the tests replay was
 taken from the tagged source, not a live run; see
 `evals/receipts/2026-10-16-codex-exec-json-contract.txt` for what was
 verified and what still needs a live credential.
+
+## ACP harnesses (E7 H3)
+
+`SHIP_ACP_HARNESS=on` admits four more ids — `gemini`, `grok`, `cursor`,
+`qwen` — all driven by ONE adapter (`src/harness-acp.ts`) over the Agent
+Client Protocol. The flag gates **enqueue** only: a worker whose flag is off
+still carries the adapters, so runs recorded under an on-flag worker replay
+everywhere. Off by default.
+
+The protocol constraint that shapes everything here: Ship's exec has no
+stdin, and ACP is bidirectional JSON-RPC over stdio. So the whole session —
+initialize, `session/new`, the prompt, streaming updates, permission
+requests, cancellation — runs inside ONE exec via an in-sandbox driver,
+`ship-acp` (baked into every image at `/usr/local/bin/ship-acp`, source at
+`images/acp-driver/ship-acp.mjs`). The driver spawns the agent, answers
+permission requests itself, and prints Ship's own JSONL on stdout; the
+adapter parses that into the same run record shape the bespoke adapters
+produce. What a bespoke adapter re-derives per vendor — session ids,
+permission handling, event shapes — the protocol standardises, so each agent
+is a thin profile:
+
+| id | binary + args | credential | provider egress derived | baked pin |
+|---|---|---|---|---|
+| gemini | `gemini --acp` | `GEMINI_API_KEY` or `GOOGLE_API_KEY` (the Developer-API fallback key; a real Vertex deployment puts its region-prefixed hosts on the project record) | `generativelanguage.googleapis.com:443` | `@google/gemini-cli@0.64.0` |
+| grok | `grok --permission-mode default agent stdio` | `XAI_API_KEY` | `api.x.ai:443` | `@xai-official/grok@1.0.63` |
+| cursor | `cursor-agent acp` | `CURSOR_API_KEY` | `api2.cursor.sh:443` | registry binary — H9 |
+| qwen | `qwen --acp` | `DASHSCOPE_API_KEY` (+ `QWEN_BASE_URL` to reroute) | `dashscope`/`coding(-intl).dashscope.aliyuncs.com:443`, or the base URL's host when set | `@qwen-code/qwen-code@0.25.2` |
+
+gemini is wired end to end; the others are declared behind the same flag and
+stop at preflight on images that lack their binary. grok launches in its
+**asking** mode (`--permission-mode default`) — never `--always-approve`: an
+agent started in always-approve never asks, and the permission gate this
+harness exists to run would silently stop existing.
+
+qwen deliberately does NOT read the operator's `OPENAI_API_KEY` or
+`OPENAI_BASE_URL`, even though qwen-code itself authenticates through those
+names: they are the operator's OpenAI values, carried on the worker for
+codex and opencode, and forwarding them into a qwen exec would hand them to
+another vendor's agent (and its sandbox). qwen gets its OWN worker-side
+pair — `DASHSCOPE_API_KEY`, optionally with `QWEN_BASE_URL` — and the
+adapter renames the pair into the exec as `OPENAI_API_KEY`/
+`OPENAI_BASE_URL`, the names qwen-code 0.25.2 actually reads for env-only
+auth (`DASHSCOPE_API_KEY` works only through a settings.json
+modelProviders.envKey entry, and the per-exec HOME carries no settings). The
+enqueue gate refuses a qwen run that has no Dashscope key, however much
+else the worker carries, and a base URL alone does not admit a run.
+
+**Permission requests are answered, not bypassed.** This is the material
+difference from the bespoke adapters (which run vendor bypass flags). The
+driver answers every `session/request_permission` from a fail-closed policy
+ported from T3 Code's clientPolicy. File-tool requests are workspace-gated;
+shell execution is unrestricted inside the sandbox container — gVisor and
+the egress allowlist are the boundary, the same authority decision every
+external harness makes:
+
+| request | decision |
+|---|---|
+| read / search / think, every location — and every path-like rawInput field (`destination`, `newPath`, `path`, `filePath`, `target`, `file_path`, `absolute_path`, `dir_path`, each entry of `paths[]`) — canonicalises inside the workspace | **allow** (allow_once); no locations and no path-like rawInput = allow (nothing outside is named) |
+| edit / delete / move, every location and path-like rawInput field inside the workspace after a symlink-safe realpath walk (missing files resolve through their deepest existing ancestor) | **allow** (allow_once) |
+| edit / delete / move with no locations, an unresolvable path, a broken symlink, or any location/rawInput path outside | **deny** (reject_once) |
+| execute | **allow** — shell execution is unrestricted inside the sandbox container; gVisor and the egress allowlist are the boundary |
+| fetch | **allow** — the egress allowlist decides |
+| anything else | **deny** |
+
+rawInput is gated because tools do not always fill the structured locations:
+a move names its source as a location and its destination only in
+`rawInput.destination`, and a policy that read locations alone would let
+that destination walk anywhere. rawInput cannot substitute for locations on
+a mutation, though — an edit whose target the driver cannot see as a
+location is denied, not guessed at.
+
+**allow_always is never selected** — it can outlive the session (Grok saves
+it for the whole project). An allow that only exists as an allow_always
+option becomes a deny. Every decision is a recorded `permission` claim on
+the run step, with the reason; like all harness output, claims are not
+evidence — the publish gate diffs the tree itself.
+
+**Capability record.** The `initialize` result — protocol version negotiated
+(every H0-measured agent negotiated 1, which is all the driver speaks),
+advertised auth methods, `loadSession` — is recorded on the `harness-run`
+step as `capabilities`, and the enqueue-time identity record carries the
+profile facts. Steering derives from that recorded fact in H5; until then
+steering notes for ACP runs are refused at the gate.
+
+**Credentials** ride exec env and are scrubbed on both sides of the boundary
+(H1): the driver scrubs the values (and base64 forms) from everything it
+prints inside the sandbox; the adapter scrubs them again before parse,
+record and live view. A profile with no credential set is refused at
+enqueue, before any run exists. Enqueue also derives the profile's provider
+hosts onto the run's egress allowlist exactly as the bespoke adapters do.
+
+**The agent's state is per-exec.** The adapter pins the agent's `HOME` (and
+the vendor home vars) at a fresh 700 directory under `/tmp`, created and
+deleted by the exec's own shell — the vendor session store (tool output,
+possibly secrets) rests neither in the container nor in a park snapshot of
+it. The one belt beyond it is the workspace exclude list: an ACP run appends
+`.gemini/`, `.qwen/` and `.grok/` to `.git/info/exclude` before the driver
+starts, so project-level state an agent writes into the worktree cannot
+reach `git add -A`. Those excludes are deliberately NOT part of the global
+`WORKSPACE_EXCLUDES` every checkout applies: repos legitimately commit
+`.gemini/settings.json` and its peers, and hiding them from every run would
+eat such deliverables — native runs included.
+
+**Not yet:** steering (H5, `session/load` at process boundaries plus the
+interrupt control file), the read-only plan phase (H8), cursor's registry
+binary and qwen's declared-journey verification (H9), Pi (RPC, not ACP; H6).
+The agent runs as the exec user today: the images define no unprivileged
+user yet, and H9's images are where `spec.agentUser` gets a real user to
+drop to.
 
 ## Cost honesty under a subscription (P5-3)
 

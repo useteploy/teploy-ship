@@ -40,9 +40,22 @@ export const WORKSPACE_EXCLUDES = [
   ".ship/browser-profile/",
 ] as const;
 
+/**
+ * Vendor state excludes for ACP runs ONLY (harness-acp.ts appends them to
+ * .git/info/exclude before the driver starts). Deliberately NOT part of
+ * WORKSPACE_EXCLUDES: repos legitimately commit .gemini/settings.json and
+ * its peers, and a global exclude would silently drop such deliverables
+ * from `git add -A` on every run — native and bespoke harnesses included.
+ * The per-exec HOME (harness-acp.ts agentHomeCommand) is what keeps vendor
+ * stores out of the workspace; this list is the belt for the project-level
+ * state an ACP agent writes into the worktree itself (qwen searches
+ * ./.qwen/.env, gemini reads ./.gemini/settings.json).
+ */
+export const ACP_WORKSPACE_EXCLUDES = [".gemini/", ".qwen/", ".grok/"] as const;
+
 /** Shell that appends each exclude once, idempotent on a warm clone. */
-export function excludeCommand(): string {
-  return WORKSPACE_EXCLUDES.map((e) => `grep -qxF '${e}' .git/info/exclude 2>/dev/null || echo "${e}" >> .git/info/exclude`).join(" && ");
+export function excludeCommand(excludes: readonly string[] = WORKSPACE_EXCLUDES): string {
+  return excludes.map((e) => `grep -qxF '${e}' .git/info/exclude 2>/dev/null || echo "${e}" >> .git/info/exclude`).join(" && ");
 }
 
 export interface RepoRef {

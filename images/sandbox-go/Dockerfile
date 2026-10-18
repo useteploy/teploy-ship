@@ -13,7 +13,12 @@
 # The ARG defaults below duplicate images/versions.json so that a plain
 # `docker build` still works and so a reader sees the pin without opening
 # another file. build.sh asserts the two agree and refuses to build otherwise,
-# so the duplication cannot rot.
+# so the duplication cannot rot. One caveat since the ACP driver landed: the
+# build CONTEXT is the images/ directory (every image COPYies
+# acp-driver/ship-acp.mjs, which a stack-subdir context cannot reach), so a
+# hand build is `docker build -f images/sandbox-go/Dockerfile images/` — not
+# `docker build images/sandbox-go`, which stopped working the day the driver
+# was added. Prefer images/build.sh.
 
 ARG NODE_BASE=node:22-trixie@sha256:2082d2bf902c8835655c6bcfee3594c00ea900498a9f6e2b96d3352536f9e8d8
 ARG GO_BASE=golang:1.25.14-trixie@sha256:2c4c60ef415fbfa5e90300722293bef36c5e63fae17570ce18f580af933dbd73
@@ -96,5 +101,13 @@ RUN set -eux; \
 ARG HARNESS_LABEL=""
 LABEL io.teploy.ship.stack="go" \
       io.teploy.ship.harnesses="${HARNESS_LABEL}"
+
+# ship-acp, the in-sandbox ACP driver (E7 H3, src/harness-acp.ts): one
+# dependency-free node script baked verbatim from images/acp-driver/. It is
+# here regardless of which harnesses were declared — the ACP adapters are
+# registered on every worker, and the driver is what turns their one
+# stdin-less exec into a whole ACP session.
+COPY acp-driver/ship-acp.mjs /usr/local/bin/ship-acp
+RUN chmod 0755 /usr/local/bin/ship-acp && ship-acp --version
 
 WORKDIR /work

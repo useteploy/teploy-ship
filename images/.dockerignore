@@ -1,0 +1,8 @@
+# The build context for every sandbox image is THIS directory (images/), and
+# the Dockerfiles COPY exactly one file out of it: the ACP driver. This is an
+# allowlist — everything is ignored unless named below — so a stray file
+# dropped beside the Dockerfiles can never ride into an image's build context,
+# and context uploads stay small and byte-stable.
+*
+!acp-driver
+!acp-driver/ship-acp.mjs
