@@ -37,6 +37,8 @@ interface FakePr {
   ref: string;
   mergeable: boolean | null;
   statuses: { context: string; state: string }[];
+  /** The PR's base branch (DS1 stacked tests); default "main". */
+  base?: string;
 }
 
 const prs = new Map<number, FakePr>();
@@ -62,7 +64,7 @@ before(async () => {
         merged: p.merged,
         title: "Ship change",
         head: { sha: p.head, ref: p.ref },
-        base: { ref: "main" },
+        base: { ref: p.base ?? "main" },
         mergeable: p.mergeable,
       });
     }
@@ -82,9 +84,9 @@ after(() => new Promise<void>((r) => server.close(() => r())));
 
 const sha = (c: string) => c.repeat(40);
 
-function runEvents(repo: string, opts: { openedPr?: number; inputPr?: number; openedAt?: string }): WorkflowEvent[] {
+function runEvents(repo: string, opts: { openedPr?: number; inputPr?: number; openedAt?: string; stack?: { runId: string; pr: number; branch: string; sha: string } }): WorkflowEvent[] {
   const events: WorkflowEvent[] = [
-    { type: "run-started", data: { input: { repo, ...(opts.inputPr !== undefined ? { pr: opts.inputPr } : {}) } } } as unknown as WorkflowEvent,
+    { type: "run-started", data: { input: { repo, ...(opts.inputPr !== undefined ? { pr: opts.inputPr } : {}), ...(opts.stack !== undefined ? { stack: opts.stack } : {}) } } } as unknown as WorkflowEvent,
   ];
   if (opts.openedPr !== undefined) {
     events.push({
@@ -554,5 +556,100 @@ test("a backlog deeper than the page bound is resumed next sweep, never marked s
   assert.equal((await h.config.list()).some((k) => k.key === "SHIP_PR_WATCH_DISCOVERY_RESUME"), false, "the resume marker is spent");
   assert.equal((await h.config.list()).filter((k) => k.key.startsWith(PR_WATCH_KEY_PREFIX)).length, bound + 5);
   assert.equal((await sweepPrWatch(h.deps)).discovered, 0);
+  await h.cleanup();
+});
+
+// ------------------------------------------------------------- DS1 stack ----
+
+const STACK = { runId: "r-base", pr: 3, branch: "ship/r-base", sha: sha("e") };
+
+/** The stacked PR #7 fixture: open, based on ship/r-base; base PR #3 beside it. */
+function stackedFixture(base: FakePr): void {
+  reset();
+  prs.set(7, { state: "open", merged: false, head: sha("c"), ref: "ship/r-stack", mergeable: true, statuses: [], base: STACK.branch });
+  prs.set(3, base);
+}
+
+test("DS1: discovery adopts a stacked run's watch with its stack record", async () => {
+  stackedFixture({ state: "open", merged: false, head: sha("b"), ref: "ship/r-base", mergeable: true, statuses: [] });
+  const h = await harness([{ runId: "r-stack", events: runEvents(`${base}/acme/app.git`, { openedPr: 7, stack: STACK }) }]);
+  const r = await sweepPrWatch(h.deps);
+  assert.equal(r.discovered, 1);
+  const row = await h.config.get(prWatchKey(`${base}/acme/app.git`, 7));
+  assert.deepEqual((JSON.parse(row!) as { stack?: unknown }).stack, STACK);
+  assert.equal(r.checked, 1);
+  assert.equal(r.proposed.length, 0, "an open base proposes nothing");
+  await h.cleanup();
+});
+
+test("DS1: base merged -> ONE stack-rebase task with the recorded facts; a duplicate sweep proposes nothing more", async () => {
+  // Base PR #3 squash-merged into main (its base ref is the target).
+  stackedFixture({ state: "closed", merged: true, head: sha("b"), ref: "ship/r-base", mergeable: true, statuses: [] });
+  const h = await harness([{ runId: "r-stack", events: runEvents(`${base}/acme/app.git`, { openedPr: 7, stack: STACK }) }]);
+
+  const first = await sweepPrWatch(h.deps);
+  assert.equal(first.proposed.length, 1);
+  assert.equal(first.proposed[0]!.reason, "stack-rebase");
+  assert.equal(first.proposed[0]!.created, true);
+  assert.ok(requests.includes(`/api/v1/repos/acme/app/pulls/${3}`), "the base PR was read");
+
+  const tasks = await h.intake.list();
+  assert.equal(tasks.length, 1);
+  assert.equal(tasks[0]!.kind, "stack-rebase");
+  assert.equal(tasks[0]!.pr, 7);
+  assert.equal(tasks[0]!.repo, h.repo);
+  assert.deepEqual(tasks[0]!.stack, { oldBaseHeadSha: STACK.sha, defaultBranch: "main" }, "the recorded old base head and the default branch");
+  assert.match(tasks[0]!.title ?? "", /base PR #3 merged/);
+  assert.match(tasks[0]!.detail ?? "", /rebase --onto/);
+
+  // The ordinary conflict rule stays quiet for this head (the retarget and the
+  // rebase are the woken task's, and a second sweep must not double-propose).
+  prs.get(7)!.mergeable = false;
+  h.advance(61);
+  const second = await sweepPrWatch(h.deps);
+  assert.equal(second.proposed.length, 0, "duplicate sweep: the key is handled");
+  assert.equal((await h.intake.list()).length, 1, "still exactly one task");
+  await h.cleanup();
+});
+
+test("DS1 negative: base closed unmerged -> nothing proposed, the stack is abandoned", async () => {
+  stackedFixture({ state: "closed", merged: false, head: sha("b"), ref: "ship/r-base", mergeable: true, statuses: [] });
+  const h = await harness([{ runId: "r-stack", events: runEvents(`${base}/acme/app.git`, { openedPr: 7, stack: STACK }) }]);
+  const r = await sweepPrWatch(h.deps);
+  assert.equal(r.proposed.length, 0);
+  assert.deepEqual(r.unwatched, [{ repo: h.repo, pr: 7, why: "stack base abandoned: base PR #3 was closed unmerged" }]);
+  assert.equal((await h.intake.list()).length, 0);
+  assert.equal(await h.config.get(prWatchKey(h.repo, 7)), undefined, "the watch is gone");
+  await h.cleanup();
+});
+
+test("DS1: once the PR is retargeted off the stack branch, the rule stays quiet for good", async () => {
+  // Base merged AND the woken revision already retargeted PR #7 to main.
+  stackedFixture({ state: "closed", merged: true, head: sha("b"), ref: "ship/r-base", mergeable: true, statuses: [] });
+  const h = await harness([{ runId: "r-stack", events: runEvents(`${base}/acme/app.git`, { openedPr: 7, stack: STACK }) }]);
+  await sweepPrWatch(h.deps);
+  prs.get(7)!.base = "main";
+  h.advance(61);
+  const second = await sweepPrWatch(h.deps);
+  assert.equal(second.proposed.length, 0, "no second task after the retarget");
+  assert.equal((await h.intake.list()).length, 1);
+  assert.equal(second.unwatched.length, 0, "the stacked PR itself is still watched");
+  await h.cleanup();
+});
+
+test("DS1: a base read failure backs off and proposes nothing", async () => {
+  stackedFixture({ state: "open", merged: false, head: sha("b"), ref: "ship/r-base", mergeable: true, statuses: [] });
+  const h = await harness([{ runId: "r-stack", events: runEvents(`${base}/acme/app.git`, { openedPr: 7, stack: STACK }) }]);
+  // First sweep adopts the watch; then break the base PR's answer.
+  await sweepPrWatch(h.deps);
+  prs.delete(3);
+  h.advance(61);
+  const r = await sweepPrWatch(h.deps);
+  assert.equal(r.proposed.length, 0);
+  assert.equal(r.errors.length, 1);
+  assert.match(r.errors[0]!, /stack base read failed/);
+  const row = JSON.parse((await h.config.get(prWatchKey(h.repo, 7)))!) as { failures: number; stack?: unknown };
+  assert.equal(row.failures, 1, "the failure backs the watch off");
+  assert.deepEqual(row.stack, STACK, "and keeps the stack record");
   await h.cleanup();
 });

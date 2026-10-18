@@ -54,6 +54,7 @@ import type { RunMeta } from "./run-store.js";
 import type { RuntimeConfigStore } from "./runtime-config.js";
 import type { WorkflowEvent } from "@neutron-build/workflow";
 import { withProjects } from "./durable.js";
+import type { StackOnRecord } from "./stacked-pr.js";
 
 export const PR_WATCH_KEY_PREFIX = "SHIP_PR_WATCH_PR_";
 export const PR_WATCH_CURSOR_KEY = "SHIP_PR_WATCH_CURSOR";
@@ -117,6 +118,13 @@ export interface PrWatch {
   lastHead?: string;
   /** Dedupe keys this watch already proposed (bounded, newest last). */
   handled: string[];
+  /**
+   * DS1 (SHIP_STACKED_PRS): set when the watched PR was opened STACKED — the
+   * opening run's recorded `input.stack` (its base run, the base PR this
+   * watch also reads, the base branch, and the recorded old base head the
+   * woken revision rebases `--onto` past). Absent on every ordinary watch.
+   */
+  stack?: StackOnRecord;
 }
 
 export function prWatchKey(repo: string, pr: number): string {
@@ -144,7 +152,7 @@ export interface PrWatchResult {
   enabled: boolean;
   discovered: number;
   checked: number;
-  proposed: { repo: string; pr: number; reason: "conflict" | "check"; taskId: string; created: boolean }[];
+  proposed: { repo: string; pr: number; reason: "conflict" | "check" | "stack-rebase"; taskId: string; created: boolean }[];
   unwatched: { repo: string; pr: number; why: string }[];
   errors: string[];
 }
@@ -339,7 +347,7 @@ async function discover(deps: PrWatchDeps, now: Date, maxAgeDays: number, first:
         watched = true;
       }
       if (watched) continue;
-      const watch: PrWatch = { repo: opened.repo, pr: opened.pr, runId: meta.runId, addedAt: now.toISOString(), nextAt: now.toISOString(), failures: 0, handled: [] };
+      const watch: PrWatch = { repo: opened.repo, pr: opened.pr, runId: meta.runId, addedAt: now.toISOString(), nextAt: now.toISOString(), failures: 0, handled: [], ...(opened.stack !== undefined ? { stack: opened.stack } : {}) };
       await deps.config.set(key, JSON.stringify(watch), "pr-watch");
       added += 1;
     }
@@ -368,20 +376,33 @@ async function discover(deps: PrWatchDeps, now: Date, maxAgeDays: number, first:
  * The PR a run OPENED: a recorded `repo-pr` step on a repo run. Reviews/revisions of existing PRs open none.
  * `at` is that step's own append time when the event carries one — the exact
  * moment the PR was opened, which discovery's age bound prefers over any run
- * meta stamp.
+ * meta stamp. `stack` (DS1) is the run's recorded `input.stack`, verbatim, so
+ * a stacked PR's watch knows its base without a second store read.
  */
-export function openedPr(events: WorkflowEvent[]): { repo: string; pr: number; at?: string } | null {
-  const input = (events.find((e) => e.type === "run-started")?.data as { input?: { repo?: unknown } } | undefined)?.input;
+export function openedPr(events: WorkflowEvent[]): { repo: string; pr: number; at?: string; stack?: StackOnRecord } | null {
+  const started = events.find((e) => e.type === "run-started")?.data as { input?: { repo?: unknown; stack?: unknown } } | undefined;
+  const input = started?.input;
   if (typeof input?.repo !== "string" || input.repo === "") return null;
+  const stack = parseStackRecord(input.stack);
   for (const e of events) {
     if (e.type !== "step-completed" || e.name !== "repo-pr") continue;
     const r = (e.data as { result?: { number?: unknown; url?: unknown } } | undefined)?.result;
     const n = Number(r?.number);
     if (Number.isSafeInteger(n) && n > 0) {
-      return { repo: input.repo, pr: n, ...(typeof e.at === "string" && e.at !== "" ? { at: e.at } : {}) };
+      return { repo: input.repo, pr: n, ...(stack !== undefined ? { stack } : {}), ...(typeof e.at === "string" && e.at !== "" ? { at: e.at } : {}) };
     }
   }
   return null;
+}
+
+/** A tolerant read of a recorded stack record (stacked-pr.ts StackOnRecord), wherever it was stored. */
+function parseStackRecord(value: unknown): StackOnRecord | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const r = value as Record<string, unknown>;
+  if (typeof r.runId !== "string" || r.runId === "") return undefined;
+  if (!Number.isSafeInteger(r.pr) || (r.pr as number) <= 0) return undefined;
+  if (typeof r.branch !== "string" || r.branch === "" || typeof r.sha !== "string" || r.sha === "") return undefined;
+  return { runId: r.runId, pr: r.pr as number, branch: r.branch, sha: r.sha };
 }
 
 const FAILING = new Set(["failure", "failed", "error", "timed_out", "action_required"]);
@@ -424,6 +445,62 @@ async function checkOne(
 
   const next: PrWatch = { ...watch, failures: 0, lastCheckedAt: now().toISOString(), lastHead: state.head, nextAt: new Date(now().getTime() + interval * 1000).toISOString() };
   const fullName = `${ref.owner}/${ref.repo}`;
+  // DS1 (SHIP_STACKED_PRS): a watched PR opened stacked rides a base pull
+  // request. While the PR still TARGETS the stack branch (state.base — once
+  // the woken revision retargets it, this rule goes quiet for good), the base
+  // PR is read too. The base merging is the one event needing a new KIND of
+  // revision: a plain conflict task would merge the base's commits back in,
+  // but Ship squash-merges, so they must be dropped with a rebase `--onto`
+  // the recorded old base head. The sweep stays read-only apart from the ONE
+  // proposal — the retarget, the rebase and the leased push run inside the
+  // woken task's recorded `stack-rebase` step, so the PR's base and its
+  // branch move together (never a retarget onto an unrebased head showing the
+  // base's commits). A base closed unmerged abandons the stack: nothing is
+  // proposed and the watch ends.
+  if (watch.stack !== undefined && state.base === watch.stack.branch) {
+    let baseState: ForgeState;
+    try {
+      baseState = await readForgeState(ref, token, watch.stack.pr, fetchImpl);
+    } catch (e) {
+      // Same backoff as the main read above: a failing forge must not turn
+      // this extra read into a hot loop.
+      const failures = watch.failures + 1;
+      const wait = Math.min(PR_WATCH_MAX_BACKOFF_SEC, interval * 2 ** Math.min(failures, 10));
+      await save(deps, key, { ...watch, failures, lastCheckedAt: now().toISOString(), nextAt: new Date(now().getTime() + wait * 1000).toISOString() });
+      throw new Error(`stack base read failed (retry in ${wait}s): ${message(e)}`);
+    }
+    if (baseState.state === "closed") {
+      return unwatch(`stack base abandoned: base PR #${watch.stack.pr} was closed unmerged`);
+    }
+    if (baseState.state === "merged") {
+      // One task per stacked head + base merge sha; the ordinary conflict and
+      // CI keys for this head ride along as handled so the retarget and the
+      // rebase do not double-propose under the other rules.
+      const stackKey = `pr-watch:${fullName}#${watch.pr}:${state.head}:stack-rebase:${baseState.head}`;
+      if (!next.handled.includes(stackKey)) {
+        const proposal: ProposeInput & { reason: "stack-rebase" } = {
+          reason: "stack-rebase",
+          source: "pr-watch",
+          kind: "stack-rebase",
+          repo: watch.repo,
+          pr: watch.pr,
+          title: `Stacked PR #${watch.pr}: base PR #${watch.stack.pr} merged — rebase onto ${baseState.base}`,
+          detail:
+            `The base pull request #${watch.stack.pr} this change was stacked on was squash-merged into ${baseState.base}. ` +
+            `The run's first step rebases the branch with git rebase --onto origin/${baseState.base} ${watch.stack.sha} so only this ` +
+            `pull request's own commits remain, retargets it to ${baseState.base} and pushes with lease. ` +
+            `Then run the repository's tests over the rebased code and fix anything the rebase upset. ` +
+            `If the rebase conflicts, nothing is pushed and the run holds with the conflicted files for a person.`,
+          dedupeKey: stackKey,
+          stack: { oldBaseHeadSha: watch.stack.sha, defaultBranch: baseState.base },
+        };
+        const { reason: _reason, ...input } = proposal;
+        const { created, task } = await deps.intake.propose(input);
+        next.handled = [...next.handled, stackKey, `pr-watch:${fullName}#${watch.pr}:${state.head}:conflict`, `ci:${fullName}#${watch.pr}:${state.head}`].slice(-HANDLED_KEEP);
+        result.proposed.push({ repo: watch.repo, pr: watch.pr, reason: "stack-rebase", taskId: task.taskId, created });
+      }
+    }
+  }
   let proposal: (ProposeInput & { reason: "conflict" | "check" }) | null = null;
   // `mergeable_state` is computed asynchronously (GitHub answers "unknown"
   // while it works) and is often transient ("blocked"/"unstable" mean a
@@ -537,6 +614,7 @@ function parseWatch(raw: string | undefined): PrWatch | null {
       ...(typeof w.lastCheckedAt === "string" ? { lastCheckedAt: w.lastCheckedAt } : {}),
       ...(typeof w.lastHead === "string" ? { lastHead: w.lastHead } : {}),
       handled: Array.isArray(w.handled) ? w.handled.filter((h): h is string => typeof h === "string") : [],
+      ...(parseStackRecord(w.stack) !== undefined ? { stack: parseStackRecord(w.stack)! } : {}),
     };
   } catch {
     return null;

@@ -5,6 +5,7 @@ import { randomUUID, createHash } from "node:crypto";
 import type { NucleusPgwire } from "./nucleus-pgwire.js";
 import { stateDir } from "./run-store.js";
 import { readJsonFile, writeJsonFile, withFileLock } from "./file-store.js";
+import type { StackRebaseRequest } from "./stacked-pr.js";
 
 /**
  * Per-source intake policy. Auto is OFF unless a source is explicitly
@@ -31,6 +32,13 @@ export interface IntakeTask {
   repo?: string;
   /** Review follow-up: the PR this task addresses. */
   pr?: number;
+  /**
+   * DS1 (SHIP_STACKED_PRS): the stack-rebase facts a `stack-rebase` task
+   * carries (the recorded old base head and the branch to retarget onto).
+   * The launch materialises them into the run's input; every other kind
+   * leaves the field absent.
+   */
+  stack?: StackRebaseRequest;
   title: string;
   detail?: string;
   /** Same key = same task; re-proposals return the existing one. */
@@ -53,6 +61,8 @@ export interface ProposeInput {
   kind: string;
   repo?: string;
   pr?: number;
+  /** DS1: a `stack-rebase` task's recorded facts (see IntakeTask.stack). */
+  stack?: StackRebaseRequest;
   title: string;
   detail?: string;
   dedupeKey: string;
@@ -118,6 +128,7 @@ function newTask(input: ProposeInput): IntakeTask {
     kind: input.kind,
     ...(input.repo !== undefined ? { repo: input.repo } : {}),
     ...(input.pr !== undefined ? { pr: input.pr } : {}),
+    ...(input.stack !== undefined ? { stack: input.stack } : {}),
     title: input.title,
     ...(input.detail !== undefined ? { detail: input.detail } : {}),
     dedupeKey: normalizeDedupeKey(input.dedupeKey),
@@ -230,6 +241,9 @@ export class NucleusIntakeStore implements IntakeStore {
       // Additive storage: never ALTER/rewrite the populated legacy table.
       await this.#db.query(`CREATE TABLE IF NOT EXISTS ship_tasks (task_id TEXT, ${columns})`);
       await this.#db.query(`CREATE TABLE IF NOT EXISTS ship_tasks_v2 (task_id TEXT PRIMARY KEY, generation TEXT, ${columns})`);
+      // DS1: the stack-rebase facts, additive on the CURRENT table only (the
+      // legacy table predates the field and never sees such a task).
+      await this.#db.query(`ALTER TABLE ship_tasks_v2 ADD COLUMN IF NOT EXISTS stack TEXT`);
     })().catch((error: unknown) => { this.#ready = null; throw error; });
     return this.#ready;
   }
@@ -259,6 +273,19 @@ export class NucleusIntakeStore implements IntakeStore {
     if (row.detail !== null && row.detail !== undefined) task.detail = String(row.detail);
     if (row.run_id !== null && row.run_id !== undefined) task.runId = String(row.run_id);
     if (row.requested_by !== null && row.requested_by !== undefined) task.requestedBy = String(row.requested_by);
+    // DS1: the stack-rebase facts, stored JSON-encoded on ship_tasks_v2 (the
+    // legacy table's NULL reads as absent).
+    if (row.stack !== null && row.stack !== undefined) {
+      try {
+        const stack = JSON.parse(String(row.stack)) as Partial<StackRebaseRequest>;
+        if (typeof stack.oldBaseHeadSha === "string" && typeof stack.defaultBranch === "string") {
+          task.stack = { oldBaseHeadSha: stack.oldBaseHeadSha, defaultBranch: stack.defaultBranch };
+        }
+      } catch {
+        // A stack cell that is not the shape we wrote is read as absent; the
+        // launch refuses a stack-rebase task without its facts.
+      }
+    }
     return task;
   }
 
@@ -280,8 +307,8 @@ export class NucleusIntakeStore implements IntakeStore {
     const task = { ...newTask(input), taskId };
     try {
       await this.#db.query(
-        `INSERT INTO ship_tasks_v2 (task_id, source, kind, repo, pr, title, detail, dedupe_key, state, run_id, requested_by, created_at, updated_at, generation)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+        `INSERT INTO ship_tasks_v2 (task_id, source, kind, repo, pr, title, detail, dedupe_key, state, run_id, requested_by, created_at, updated_at, generation, stack)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
         [
           task.taskId,
           task.source,
@@ -297,6 +324,7 @@ export class NucleusIntakeStore implements IntakeStore {
           task.createdAt,
           task.updatedAt,
           String(generation),
+          task.stack !== undefined ? JSON.stringify(task.stack) : null,
         ],
       );
     } catch (error) {

@@ -155,3 +155,34 @@ test("intake: the owner/repo segment of a forge key is case-insensitive", async 
   assert.equal(normalizeDedupeKey("linear:Abc-123"), "linear:Abc-123");
   assert.equal(normalizeDedupeKey("akiroo:room-scan:9"), "akiroo:room-scan:9");
 });
+
+test("DS1: a stack-rebase task's recorded facts survive the store round-trip", async () => {
+  const stack = { oldBaseHeadSha: "1234567890123456789012345678901234567890", defaultBranch: "main" };
+
+  // File store: the whole task is JSON, so the field rides verbatim.
+  const file = new FileIntakeStore(await mkdtemp(join(tmpdir(), "intake-stack-")));
+  const proposed = await file.propose({ source: "pr-watch", kind: "stack-rebase", repo: "http://x/o/r.git", pr: 7, title: "rebase", dedupeKey: "pr-watch:o/r#7:abc:stack-rebase:def", stack });
+  assert.deepEqual(proposed.task.stack, stack);
+  assert.deepEqual((await file.get(proposed.task.taskId))!.stack, stack);
+
+  // Nucleus: the column round-trips as JSON, and a malformed cell reads as
+  // absent rather than poisoning the task.
+  const columns = ["task_id","source","kind","repo","pr","title","detail","dedupe_key","state","run_id","requested_by","created_at","updated_at","generation","stack"];
+  const rows = new Map<string, Record<string, unknown>>();
+  const db = {
+    query: async (sql: string, params: unknown[] = []) => {
+      if (sql.startsWith("CREATE") || sql.startsWith("ALTER")) return [];
+      if (sql.startsWith("INSERT")) {
+        rows.set(String(params[0]), Object.fromEntries(columns.map((c, i) => [c, params[i]])));
+        return [];
+      }
+      if (sql.includes("FROM ship_tasks_v2")) return [...rows.values()].filter((r) => sql.includes("task_id =") ? r.task_id === params[0] : r.dedupe_key === params[0]);
+      return [];
+    },
+  } as unknown as NucleusPgwire;
+  const store = new NucleusIntakeStore(db);
+  const fromPg = await store.propose({ source: "pr-watch", kind: "stack-rebase", repo: "http://x/o/r.git", pr: 7, title: "rebase", dedupeKey: "pr-watch:o/r#7:abc2:stack-rebase:def", stack });
+  assert.deepEqual(fromPg.task.stack, stack, "written as JSON, parsed back to the same shape");
+  rows.get(fromPg.task.taskId)!.stack = "not json";
+  assert.equal((await store.get(fromPg.task.taskId))!.stack, undefined, "a malformed cell reads as absent");
+});

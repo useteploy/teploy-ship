@@ -280,7 +280,17 @@ const GATE_CASES: Array<{ what: string; input: RecordedInput; admits: string[]; 
       "step:merge-decision",
       "step:tests",
     ],
-    denies: ["step:auto-merge"],
+    denies: ["step:auto-merge", "step:merge-hygiene"],
+  },
+  {
+    // D4-c2: the park image's hygiene verdict rides the merge gate AND thread
+    // warmth together — a merge-gated run without warmThread (every log
+    // written before D4-c2) keeps its exact sequence, and the end-of-run
+    // thread-snapshot admits on warmThread alone as before.
+    what: "a warm-thread run at the merge boundary (D4-c2)",
+    input: { task: "t", repo: "r", changeClass: true, mergeGate: true, warmThread: true },
+    admits: ["step:merge-park", "step:merge-snapshot", "step:merge-hygiene", "step:thread-snapshot"],
+    denies: [],
   },
   {
     what: "a plan-preview run with steering, the critic and the edit hold",
@@ -467,6 +477,27 @@ test("the reproducing-test gate (EV6) moves only the fingerprints of runs that c
   const on = { task: "t", repo: "r", requireReproTest: true } as RecordedInput;
   assert.notEqual(stepFingerprint(on), fingerprintOf(beforeTable, on), "a repro-gated remediation sees the new step");
   assert.equal(admittedSteps({ task: "t", repo: "r" }).includes("step:repro-test"), false, "and nothing else does");
+});
+
+test("the park hygiene record (D4-c2) moves only merge-gated warm-thread fingerprints", () => {
+  // The negative control the slice row names: with thread warmth off (or a
+  // merge-gated run without it — every log written before D4-c2), inputs and
+  // fingerprints are byte-identical. The row is admitted by mergeGate AND
+  // warmThread together, so each flag alone leaves the fingerprint alone.
+  const beforeTable = WORKFLOW_STEPS.filter((s) => s.key !== "step:merge-hygiene");
+  for (const input of [
+    { task: "t", repo: "r", changeClass: true, mergeGate: true },
+    { task: "t", repo: "r", warmThread: true },
+    { task: "t", repo: "r", mode: "scan", warmThread: true },
+    { task: "t", repo: "r", pr: 7, warmThread: true },
+  ] as RecordedInput[]) {
+    assert.equal(fingerprintOf(beforeTable, input), stepFingerprint(input), `flag-off input ${JSON.stringify(input)} is untouched`);
+  }
+  const on = { task: "t", repo: "r", changeClass: true, mergeGate: true, warmThread: true } as RecordedInput;
+  assert.notEqual(stepFingerprint(on), fingerprintOf(beforeTable, on), "a warm merge-gated run records the park hygiene step");
+  assert.equal(admittedSteps(on).includes("step:merge-hygiene"), true, "the two flags together admit it");
+  assert.equal(admittedSteps({ task: "t", repo: "r", mergeGate: true }).includes("step:merge-hygiene"), false, "mergeGate alone does not");
+  assert.equal(admittedSteps({ task: "t", repo: "r", warmThread: true }).includes("step:merge-hygiene"), false, "warmThread alone does not");
 });
 
 test("the look-session recording (Q3b) moves only the fingerprints of runs that carry lookRecord", () => {
