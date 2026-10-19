@@ -112,10 +112,10 @@ const DECLARATIONS: Record<string, HarnessDeclaration> = {
       planning: { status: "supported", reason: "plan park with snapshot (durable.ts:1777-1790)" },
       steering: { status: "supported", reason: "notes drained at the top of every turn when input.steer (durable.ts:1831-1843)" },
       tools: { status: "supported", reason: "Ship's own tools, run through the recorded step sequence" },
-      browser: { status: "partial", reason: "```look a11y observation when input.look (SHIP_LOOK, default off); pixel screenshots on an image look when input.lookImage (SHIP_LOOK_IMAGE_MODEL) — refused without it; a run-page screencast recording of the look session when input.lookRecord (SHIP_LOOK_RECORD), withheld when the captured page text carries a configured secret; the agent-authored browser flow only when verification.preview is configured (durable.ts, ladder-steps.ts)" },
+      browser: { status: "partial", reason: "```look a11y observation when input.look (SHIP_LOOK, on unless explicitly off); pixel screenshots on an image look when input.lookImage (SHIP_LOOK_IMAGE_MODEL) — refused without it; a run-page screencast recording of the look session when input.lookRecord (SHIP_LOOK_RECORD), withheld when the captured page text carries a configured secret; the agent-authored browser flow only when verification.preview is configured (durable.ts, ladder-steps.ts)" },
       interruption: {
         status: "partial",
-        reason: "bounded by steps, budget and stuck detection (harness.ts HarnessBudget); with input.steerReply (SHIP_STEER_REPLY=on) an operator interrupt stops an action before it starts and cancels a running python kernel cell — a running bash command cannot be cancelled (no abort in the executor contract) and runs to completion (steer-reply.ts)",
+        reason: "bounded by steps, budget and stuck detection (harness.ts HarnessBudget); with input.steerReply (SHIP_STEER_REPLY) an operator interrupt stops an action before it starts and cancels a running python kernel cell — a running bash command cannot be cancelled (no abort in the executor contract) and runs to completion (steer-reply.ts)",
       },
       approvals: { status: "supported", reason: "parks on approval, snapshots and restores when the executor can (durable.ts:703-717, 2249-2255)" },
       recovery: { status: "supported", reason: "stuck/settled detector via input.recovery (durable.ts:2300-2325)" },

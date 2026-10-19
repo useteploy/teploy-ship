@@ -9,9 +9,9 @@ import type { HeldKind, SteerStore } from "./steer.js";
  * the design (checkpoints, safe points, replay) is docs/STEERING_DESIGN.md.
  */
 
-/** `on` only — the grammar SHIP_THREAD_VIEW uses; `1`/`true` leave it off. */
+/** On unless explicitly turned off (`0`/`false`/`no`/`off`); unset means on. */
 export function steerReplyEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return (env.SHIP_STEER_REPLY ?? "").trim().toLowerCase() === "on";
+  return !/^(0|false|no|off)$/i.test((env.SHIP_STEER_REPLY ?? "").trim());
 }
 
 /** One held operator message, as the `turn-N-held` / `turn-N-finish-held` steps record it. */

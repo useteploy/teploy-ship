@@ -8,8 +8,8 @@
  * an external CI that reports commit statuses rather than workflow runs, and a
  * PR that went into conflict because its BASE moved produced nothing at all.
  *
- * This is the bounded polling half. Behind SHIP_PR_WATCH=on (anything else is
- * off, and off is a strict no-op: no store reads, no forge calls):
+ * This is the bounded polling half. Behind SHIP_PR_WATCH (on unless
+ * explicitly off, and off is a strict no-op: no store reads, no forge calls):
  *
  *  - Discovery reads run metas past a cursor, newest first, PAGING below the
  *    newest window (bounded pages per sweep) so a burst of runs between
@@ -84,9 +84,9 @@ export const PR_WATCH_MAX_AGE_DAYS_MIN = 1;
 export const PR_WATCH_MAX_AGE_DAYS_MAX = 90;
 const HANDLED_KEEP = 20;
 
-/** Only the exact value `on` enables the watch. */
+/** On unless explicitly turned off (`0`/`false`/`no`/`off`); anything else, including unset, watches. */
 export function prWatchEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env.SHIP_PR_WATCH === "on";
+  return !/^(0|false|no|off)$/i.test((env.SHIP_PR_WATCH ?? "").trim());
 }
 
 export function prWatchIntervalSec(env: NodeJS.ProcessEnv = process.env): number {

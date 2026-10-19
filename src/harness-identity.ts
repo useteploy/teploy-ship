@@ -20,8 +20,8 @@ import { externalHarnessConfig } from "./harness-external.js";
  * a key added there would be a stored-shape change. The engine reads `workflow`
  * and `input` only, so a sibling key is inert to replay.
  *
- * Off by default (SHIP_HARNESS_RECORD=on): off writes nothing, so the event is
- * byte-identical to one written before this existed.
+ * On unless explicitly off (SHIP_HARNESS_RECORD=0/false/no/off): off writes
+ * nothing, so the event is byte-identical to one written before this existed.
  *
  * What is NOT recorded here: the binary revision the sandbox ACTUALLY ran. That
  * is only knowable inside the sandbox, and the `harness-preflight` step already
@@ -32,9 +32,9 @@ import { externalHarnessConfig } from "./harness-external.js";
 
 export const HARNESS_RECORD_FLAG = "SHIP_HARNESS_RECORD";
 
-/** On only for an explicit "on" (or 1/true). Anything else, including unset, is off. */
+/** On unless explicitly turned off (`0`/`false`/`no`/`off`); unset means on. */
 export function harnessRecordEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return /^(on|1|true)$/i.test((env[HARNESS_RECORD_FLAG] ?? "").trim());
+  return !/^(0|false|no|off)$/i.test((env[HARNESS_RECORD_FLAG] ?? "").trim());
 }
 
 export interface HarnessIdentity {

@@ -1,7 +1,7 @@
 /**
  * The run page's plan-grounding block (S07, advisory). A read-time
  * projection of the `grounding` field the `plan-think` step recorded when the
- * run was made with SHIP_PLAN_GROUNDING=on. No step is added and nothing is
+ * run was made with SHIP_PLAN_GROUNDING admitting it. No step is added and nothing is
  * recomputed: a run made without the flag has no field and projects to
  * undefined, so its page is unchanged.
  *

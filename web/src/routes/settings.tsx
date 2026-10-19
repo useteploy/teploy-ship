@@ -75,6 +75,11 @@ function flagOn(name: string): boolean {
   return ["1", "true", "yes"].includes((process.env[name] ?? "").trim().toLowerCase());
 }
 
+/** Default-on flags: on unless an explicit off value — the worker's own reading. */
+function flagDefaultsOn(name: string): boolean {
+  return !["0", "false", "no", "off"].includes((process.env[name] ?? "").trim().toLowerCase());
+}
+
 function value(name: string, fallback = "not set"): Row {
   const v = process.env[name];
   return { label: name, value: v !== undefined && v !== "" ? v : fallback, ok: v !== undefined && v !== "" };
@@ -286,9 +291,9 @@ export async function loader({ request }: { request: Request }): Promise<Setting
       {
         title: "Evidence on the pull request",
         rows: [
-          { label: "tests", value: flagOn("SHIP_TESTS") ? "enabled" : "disabled", ok: flagOn("SHIP_TESTS"), hint: "SHIP_TESTS — the suite runs after the agent stops, before the push" },
+          { label: "tests", value: flagDefaultsOn("SHIP_TESTS") ? "enabled" : "disabled", ok: flagDefaultsOn("SHIP_TESTS"), hint: "SHIP_TESTS — the suite runs after the agent stops, before the push; on by default, 0/false/no/off disables" },
           value("SHIP_TEST_COMMAND", "not set (worker default)"),
-          { label: "telemetry", value: flagOn("SHIP_TELEMETRY") ? "enabled" : "disabled", ok: flagOn("SHIP_TELEMETRY"), hint: "SHIP_TELEMETRY — error rate and latency either side of the change" },
+          { label: "telemetry", value: flagDefaultsOn("SHIP_TELEMETRY") ? "enabled" : "disabled", ok: flagDefaultsOn("SHIP_TELEMETRY"), hint: "SHIP_TELEMETRY — error rate and latency either side of the change; on by default, 0/false/no/off disables" },
           value("OBSERVE_SERVICE", "not set"),
           { ...value("OBSERVE_REPO", "not set — telemetry leg is off"), hint: "the repo the service belongs to; required, so metrics never land on an unrelated PR" },
           secret("OBSERVE_READ_TOKEN"),

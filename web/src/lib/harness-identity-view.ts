@@ -1,7 +1,7 @@
 /**
  * The run page's "who ran this" block (S13). A read-time projection of the
  * `harnessIdentity` sibling the run-started event carries when the run was
- * enqueued with SHIP_HARNESS_RECORD=on, joined with what the sandbox reported
+ * enqueued with SHIP_HARNESS_RECORD admitting it, joined with what the sandbox reported
  * for the binary it actually ran (the `harness-preflight` step, recorded with
  * or without the flag). A run made without the flag has no identity and
  * projects to undefined, so its page is unchanged.

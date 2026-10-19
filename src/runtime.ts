@@ -961,8 +961,8 @@ function envFlag(name: string, env: NodeJS.ProcessEnv = process.env): boolean {
  * different answers.
  */
 function envFlagOff(name: string, env: NodeJS.ProcessEnv = process.env): boolean {
-  const raw = (env[name] ?? "").toLowerCase();
-  return raw === "0" || raw === "false" || raw === "no";
+  const raw = (env[name] ?? "").trim().toLowerCase();
+  return raw === "0" || raw === "false" || raw === "no" || raw === "off";
 }
 
 /**
@@ -1383,20 +1383,21 @@ export async function enqueueRun(
   // ...and OFF for a scan: the hold exists to catch a finish that changed
   // nothing, which is precisely what a correct scan does.
   const requireEdit = scan ? undefined : (options.requireEdit ?? (envFlagOff("SHIP_REQUIRE_EDIT") ? false : true));
-  // Browser perception (S12): the ```look action, default OFF behind
-  // SHIP_LOOK. Materialised HERE like every step-adding flag — it admits a
-  // `turn-N-look` step, and a replay must know from its log alone whether
-  // the action was offered. Off for scans, which read a repository rather
-  // than a web page.
-  const look = scan ? undefined : (envFlag("SHIP_LOOK") ? true : undefined);
-  // Bounded child work (S20/S22): the ```delegate action, default OFF behind
-  // SHIP_DELEGATE. Materialised HERE like every step-adding flag — the
-  // delegate branch records `turn-N-delegate-*` steps and parks on sleeps, so
-  // a replay must know from its log alone whether the action was offered.
-  // Suppressed on scans (a scan holds no publish authority to hand down) and
-  // on delegation CHILDREN: one level is the whole v1 bound, and the child's
-  // refusal has to be a fact of its recorded input, not a worker's env.
-  const delegate = scan || options.delegateChild === true ? undefined : (envFlag("SHIP_DELEGATE") ? true : undefined);
+  // Browser perception (S12): the ```look action, ON by default behind
+  // SHIP_LOOK (`0`/`false`/`no`/`off` turn it off). Materialised HERE like
+  // every step-adding flag — it admits a `turn-N-look` step, and a replay
+  // must know from its log alone whether the action was offered. Off for
+  // scans, which read a repository rather than a web page.
+  const look = scan ? undefined : (!envFlagOff("SHIP_LOOK") ? true : undefined);
+  // Bounded child work (S20/S22): the ```delegate action, ON by default behind
+  // SHIP_DELEGATE (explicit off values turn it off). Materialised HERE like
+  // every step-adding flag — the delegate branch records `turn-N-delegate-*`
+  // steps and parks on sleeps, so a replay must know from its log alone
+  // whether the action was offered. Suppressed on scans (a scan holds no
+  // publish authority to hand down) and on delegation CHILDREN: one level is
+  // the whole v1 bound, and the child's refusal has to be a fact of its
+  // recorded input, not a worker's env.
+  const delegate = scan || options.delegateChild === true ? undefined : (!envFlagOff("SHIP_DELEGATE") ? true : undefined);
   // Image mode for ```look (S12 gated slice), materialised beside `look` and
   // only when `look` itself is on: SHIP_LOOK_IMAGE_MODEL names the
   // vision-capable model image looks route to (the 2026-10-15 owner call:
@@ -1417,13 +1418,13 @@ export async function enqueueRun(
           })(),
         }
       : undefined;
-  // Look-session recording (Q3b): SHIP_LOOK_RECORD, default off, and only
+  // Look-session recording (Q3b): SHIP_LOOK_RECORD, on by default but only
   // when `look` itself is on — a run that was never offered the action has no
   // session to record. Materialised for the standing replay reason: it admits
   // the `look-record` step, and a replay must know from its log alone whether
-  // the session was recorded. Unset keeps the input byte-identical to a
-  // pre-Q3b run's.
-  const lookRecord = look === true && envFlag("SHIP_LOOK_RECORD") ? true : undefined;
+  // the session was recorded. An explicit off value keeps the input
+  // byte-identical to a pre-Q3b run's.
+  const lookRecord = look === true && !envFlagOff("SHIP_LOOK_RECORD") ? true : undefined;
   // Per-repo evidence, resolved HERE so every enqueue surface (CLI, dashboard,
   // webhook, intake sweep) gets the same treatment without each knowing about
   // the store. Materialised into the recorded input below, never re-read at
@@ -1472,14 +1473,18 @@ export async function enqueueRun(
   // this only records that the run asked. A project that declares a preview
   // rung (C4) asks by that declaration.
   const preview = scan ? undefined : (options.preview ?? (envFlag("SHIP_PREVIEW", asks) || project?.verification?.preview !== undefined ? true : undefined));
-  // Read the affected service's telemetry around the change. Same opt-in shape.
-  const telemetry = scan ? undefined : (options.telemetry ?? (evidence?.observeService !== undefined || envFlag("SHIP_TELEMETRY", asks) ? true : undefined));
+  // Read the affected service's telemetry around the change. Deployment ask
+  // (inert without OBSERVE_* config), so on by default with an env off-switch.
+  const telemetry = scan ? undefined : (options.telemetry ?? (evidence?.observeService !== undefined || !envFlagOff("SHIP_TELEMETRY", asks) ? true : undefined));
   const globalObserveRepo=process.env.OBSERVE_REPO?.trim();
   if(telemetry===true&&evidence?.observeService===undefined&&options.repo&&globalObserveRepo&&!canonicalRepositoryURL(globalObserveRepo)&&repoSlug(globalObserveRepo)===repoSlug(options.repo)) {
     throw new Error("The Observe repository mapping needs a full credential-free clone URL. Set OBSERVE_REPO or configure Observe on this project before starting work.");
   }
-  // Run the project's suite after the agent stops. Same opt-in shape.
-  const tests = scan ? undefined : (options.tests ?? (evidence?.testCommand !== undefined || envFlag("SHIP_TESTS", asks) ? true : undefined));
+  // Run the project's suite after the agent stops. Deployment ask, on by
+  // default with an env off-switch; per-project verification stays the
+  // authority. An explicit project command still forces the ask on, whatever
+  // the env says.
+  const tests = scan ? undefined : (options.tests ?? (evidence?.testCommand !== undefined || !envFlagOff("SHIP_TESTS", asks) ? true : undefined));
   // On by default wherever the suite itself is on, with an env off-switch —
   // the same shape as requireEdit above. Without a baseline, "Tests: FAILED"
   // cannot separate a regression from inherited breakage, and without the
@@ -1527,11 +1532,10 @@ export async function enqueueRun(
             source: "project" as const,
           }
         : undefined;
-  // The change-class gate is OPT-IN, unlike testsFeedback above, because it can
-  // PARK a run — and a park with nobody to answer it is a hang. It is turned on
-  // per deployment once someone is watching the inbox, which is exactly the
-  // condition L5 and L6 also depend on.
-  const changeClass = scan ? undefined : (options.changeClass ?? (options.repo !== undefined && envFlag("SHIP_CHANGE_CLASS") ? true : undefined));
+  // The change-class gate is ON by default with an env off-switch. It can
+  // PARK a run — a park with nobody to answer it is a hang — so the switch
+  // exists for a deployment whose inbox nobody watches.
+  const changeClass = scan ? undefined : (options.changeClass ?? (options.repo !== undefined && !envFlagOff("SHIP_CHANGE_CLASS") ? true : undefined));
   // The boundary park (C1). On wherever the class gate is (see the option
   // comment above), off for scans, and SHIP_MERGE_GATE=0 restores the old
   // mid-run routing without disturbing anything else about the run.
@@ -1867,9 +1871,9 @@ export async function enqueueRun(
         // is never offered, and the loop's belt refuses a stray block BY NAME
         // (DELEGATE_CHILD_ASK_REFUSED) for hand-crafted and pre-fix inputs.
         ...(options.delegateChild === true ? {} : { ask: true }),
-        // ```look (S12), from SHIP_LOOK above: default off, so the runs that
-        // do not set it enqueue exactly as they did before the action
-        // existed.
+        // ```look (S12), from SHIP_LOOK above: an explicit off value keeps
+        // the runs that do not want it enqueueing exactly as they did
+        // before the action existed.
         ...(look === true ? { look: true } : {}),
         // ...and its image mode (SHIP_LOOK_IMAGE_MODEL above), absent on any
         // run that does not admit it — including look-off runs, whose inputs
@@ -1880,10 +1884,10 @@ export async function enqueueRun(
         // byte-identical to pre-Q3b ones.
         ...(lookRecord === true ? { lookRecord: true } : {}),
         ...(look === true || skills !== undefined ? { inlineFences: true } : {}),
-        // ```delegate (S20/S22), from SHIP_DELEGATE above: default off, so a
-        // run that does not set it enqueues exactly as it did before the
-        // action existed — and the child marker, recorded only on spawned
-        // children, whose own inputs never admit delegation.
+        // ```delegate (S20/S22), from SHIP_DELEGATE above: an explicit off
+        // value keeps a run that does not want it enqueueing exactly as it
+        // did before the action existed — and the child marker, recorded
+        // only on spawned children, whose own inputs never admit delegation.
         ...(delegate === true ? { delegate: true } : {}),
         ...(options.delegateChild === true ? { delegateChild: true } : {}),
         ...(delegateTargets !== undefined ? { delegateTargets } : {}),
@@ -1891,9 +1895,9 @@ export async function enqueueRun(
         ...(options.maxRunCostUSD !== undefined ? { maxRunCostUSD: options.maxRunCostUSD } : {}),
         // The run's own model (DT1), absent unless the caller named one.
         ...(options.runModel !== undefined ? { model: options.runModel } : {}),
-        // Two-way steering (D2), from SHIP_STEER_REPLY=on (only `on`; the
-        // SHIP_THREAD_VIEW grammar): default off, so a run that does not set
-        // it enqueues exactly as before. Materialised for the standing
+        // Two-way steering (D2), from SHIP_STEER_REPLY above (on unless
+        // explicitly off): an off value keeps a run that does not want it
+        // enqueueing exactly as before. Materialised for the standing
         // reason — it admits the turn-N-held / turn-N-finish-held steps.
         ...(steerReplyEnabled() ? { steerReply: true } : {}),
         // The MCP client (D1), from SHIP_MCP + the project record above:
@@ -1914,10 +1918,10 @@ export async function enqueueRun(
         // (teploy-sandbox 2a89f72, 2026-09-22): an older daemon's commit
         // skips the warm volume, so a warm park snapshot would restore an
         // EMPTY workspace and the run would continue from it. Capability is
-        // an operator assertion (SHIP_WARM_PARKS=1 after the daemon is
-        // upgraded — see docs/UPGRADING.md), recorded HERE so a replay
-        // under a mixed fleet stays exactly what its log says.
-        ...(warmRun ? { warm: true, ...(envFlag("SHIP_WARM_PARKS") ? { warmParks: true } : {}) } : {}),
+        // an operator assertion (on by default; an explicit off value is the
+        // old-daemon escape hatch — see docs/UPGRADING.md), recorded HERE so
+        // a replay under a mixed fleet stays exactly what its log says.
+        ...(warmRun ? { warm: true, ...(!envFlagOff("SHIP_WARM_PARKS") ? { warmParks: true } : {}) } : {}),
         harness,
         ...(attempts.length >= 2 ? { harnessAttempts: attempts } : {}),
         // H2: the sealed-credential references this run delivers — never

@@ -93,7 +93,7 @@ export function askEnv(published: DeploymentAsks, env: NodeJS.ProcessEnv = proce
 export function enqueueTestsLine(report: { tests: boolean; testCommand?: string; testCommandSource?: "project" | "detected" }): string {
   if (!report.tests) {
     return (
-      "tests:  NOT asked — the pull request will carry no suite result. Nothing set SHIP_TESTS in this shell, and the " +
+      "tests:  NOT asked — the pull request will carry no suite result. SHIP_TESTS carries an explicit off value in this shell, and the " +
       "store holds no ask published by a worker. Pass --tests, or set a test command on the project."
     );
   }

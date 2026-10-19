@@ -12,6 +12,12 @@ export function envAsked(name: string): boolean {
   return raw === "1" || raw === "true" || raw === "yes";
 }
 
+/** An explicit off value, same words envFlagOff accepts in runtime.ts. */
+export function envAskedOff(name: string): boolean {
+  const raw = (process.env[name] ?? "").trim().toLowerCase();
+  return raw === "0" || raw === "false" || raw === "no" || raw === "off";
+}
+
 /**
  * Put the run's evidence in the pull request body, the way the worker does.
  *

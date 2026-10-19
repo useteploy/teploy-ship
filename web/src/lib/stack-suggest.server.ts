@@ -4,9 +4,10 @@ import { suggestionView } from "./stack-suggest.js";
 import type { SuggestionView } from "./stack-suggest.js";
 
 /**
- * Setup-page suggestions. Off unless SHIP_STACK_DETECT is on, and then only
- * when the operator asks (`?detect=1`): a detection shallow-clones the repo
- * into a temp directory, which is not something a page view should do on its
+ * Setup-page suggestions. On unless SHIP_STACK_DETECT is explicitly off, and
+ * then only when the operator asks (`?detect=1`): a detection shallow-clones
+ * the repo into a temp directory, which is not something a page view should
+ * do on its
  * own. Results are memoised for a few minutes and at most one detection per
  * repository runs at a time, so repeated clicks cannot fan out into clones.
  *

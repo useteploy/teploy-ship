@@ -21,8 +21,9 @@
  * resolves the anchor, listMeta supplies the bounded recent-run window the
  * descendants are found in, and steer.pending is the only steer read.
  *
- * Flag: SHIP_THREAD_VIEW=on. Default off; the API answers 503 and the run
- * page mounts nothing, so flag-off output is byte-for-byte what it was.
+ * Flag: SHIP_THREAD_VIEW, on unless explicitly off. When off the API answers
+ * 503 and the run page mounts nothing, so flag-off output is byte-for-byte
+ * what it was.
  */
 import { isAskEvent } from "teploy-ship/ask";
 import { parseAction, parseReply } from "../../../dist/actions.js";
@@ -36,7 +37,7 @@ import type { WorkflowEvent } from "@neutron-build/workflow";
  * self-typed: web's ProcessEnv declares no keys, so a Pick<> would demand an
  * ambient augmentation this package does not carry. */
 export function threadViewEnabled(env: { SHIP_THREAD_VIEW?: string } = process.env): boolean {
-  return (env.SHIP_THREAD_VIEW ?? "").trim().toLowerCase() === "on";
+  return !/^(0|false|no|off)$/i.test((env.SHIP_THREAD_VIEW ?? "").trim());
 }
 
 /**
