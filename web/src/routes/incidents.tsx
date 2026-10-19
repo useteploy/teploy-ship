@@ -334,14 +334,14 @@ function Recovery({ incident }: { incident: IncidentRecord }) {
       {(r.streak.length > 0 || (r.evidence?.length ?? 0) > 0) && (
         <details class="disclosure" style="margin:4px 0">
           <summary>Healthy reads ({r.streak.length > 0 ? "current streak" : "recovery evidence"})</summary>
-          <table class="runs" style="margin:0">
+          <div class="table-wrap" style="margin:0"><table class="runs" style="margin:0">
             <thead><tr><th>At</th><th>{r.metric}</th></tr></thead>
             <tbody>
               {(r.streak.length > 0 ? r.streak : r.evidence!).map((read, i) => (
                 <tr key={i}><td>{when(read.at)}</td><td>{read.value}{read.absent ? " (service absent — nothing served)" : ""}</td></tr>
               ))}
             </tbody>
-          </table>
+          </table></div>
         </details>
       )}
     </div>
@@ -462,14 +462,14 @@ export default function Incidents({ data }: { data: IncidentsData }) {
                 Needs attribution: {incident.attributionRefusal.reason}. A wrong repo would produce a confident diagnosis of the wrong code, so this is held for a human.
               </p>
               {incident.attributionRefusal.candidates.length > 0 && (
-                <table class="runs" style="margin:0 0 6px">
+                <div class="table-wrap" style="margin:0"><table class="runs" style="margin:0 0 6px">
                   <thead><tr><th>Repo</th><th>Observe service</th></tr></thead>
                   <tbody>
                     {incident.attributionRefusal.candidates.map((c) => (
                       <tr key={c.repo}><td><code>{c.repo}</code></td><td><code>{c.observeService}</code></td></tr>
                     ))}
                   </tbody>
-                </table>
+                </table></div>
               )}
             </div>
           ) : null}

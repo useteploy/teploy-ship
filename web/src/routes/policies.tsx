@@ -194,7 +194,7 @@ export default function Policies({ data, actionData }: { data: PoliciesData; act
         A grant names the roles and, optionally, individual users allowed to act. Anyone not named is refused,
         whatever their role. Users are the stable ids from Settings (or <code>issuer#sub</code> for SSO).
       </p>
-      <div class="table-wrap"><table class="runs">
+      <div class="table-wrap"><table class="runs stack">
         <thead>
           <tr><th>action</th><th>roles</th><th>named users</th><th><span class="sr-only">actions</span></th></tr>
         </thead>
@@ -211,7 +211,7 @@ export default function Policies({ data, actionData }: { data: PoliciesData; act
                   <b>{a}</b>
                   <div class="meta">{ACTION_HELP[a]}</div>
                 </td>
-                <td>
+                <td data-label="Roles">
                   {ROLES.map((r) => (
                     <label key={r} class="meta" style="display:inline-flex;align-items:center;gap:4px;margin-right:10px">
                       <input type="checkbox" name="roles" value={r} form={`authority-${a}`} checked={grant.roles.includes(r)} />
@@ -219,7 +219,7 @@ export default function Policies({ data, actionData }: { data: PoliciesData; act
                     </label>
                   ))}
                 </td>
-                <td>
+                <td data-label="Named users">
                   <input
                     type="text"
                     name="users"
@@ -273,7 +273,7 @@ export default function Policies({ data, actionData }: { data: PoliciesData; act
         to runs enqueued after the rule is saved; the request is a recorded step on the run, and a request the forge
         refuses is recorded as such — the pull request still opens.
       </p>
-      <div class="table-wrap"><table class="runs">
+      <div class="table-wrap"><table class="runs stack">
         <thead>
           <tr><th>repository</th><th>users</th><th>teams</th><th><span class="sr-only">actions</span></th></tr>
         </thead>
@@ -290,8 +290,8 @@ export default function Policies({ data, actionData }: { data: PoliciesData; act
                 </form>
                 <code>{r.repo}</code>
               </td>
-              <td><input type="text" name="users" form={`reviewers-${r.repo}`} aria-label={`Reviewer users for ${r.repo}`} value={r.users.join(", ")} placeholder="none" style={`${field};width:100%;min-width:140px`} /></td>
-              <td><input type="text" name="teams" form={`reviewers-${r.repo}`} aria-label={`Reviewer teams for ${r.repo}`} value={r.teams.join(", ")} placeholder="none" style={`${field};width:100%;min-width:120px`} /></td>
+              <td data-label="Users"><input type="text" name="users" form={`reviewers-${r.repo}`} aria-label={`Reviewer users for ${r.repo}`} value={r.users.join(", ")} placeholder="none" style={`${field};width:100%;min-width:140px`} /></td>
+              <td data-label="Teams"><input type="text" name="teams" form={`reviewers-${r.repo}`} aria-label={`Reviewer teams for ${r.repo}`} value={r.teams.join(", ")} placeholder="none" style={`${field};width:100%;min-width:120px`} /></td>
               <td style="text-align:right;white-space:nowrap">
                 <button class="approve sm" type="submit" form={`reviewers-${r.repo}`} disabled={!data.canEdit}>Save</button>{" "}
                 <form method="post" style="display:inline">
@@ -309,8 +309,8 @@ export default function Policies({ data, actionData }: { data: PoliciesData; act
               </form>
               <input type="text" name="repo" form="reviewers-new" aria-label="Repository" placeholder="owner/name or clone URL" required style={`${field};width:100%;min-width:180px`} />
             </td>
-            <td><input type="text" name="users" form="reviewers-new" aria-label="Reviewer users" placeholder="alice, bob" style={`${field};width:100%;min-width:140px`} /></td>
-            <td><input type="text" name="teams" form="reviewers-new" aria-label="Reviewer teams" placeholder="core" style={`${field};width:100%;min-width:120px`} /></td>
+            <td data-label="Users"><input type="text" name="users" form="reviewers-new" aria-label="Reviewer users" placeholder="alice, bob" style={`${field};width:100%;min-width:140px`} /></td>
+            <td data-label="Teams"><input type="text" name="teams" form="reviewers-new" aria-label="Reviewer teams" placeholder="core" style={`${field};width:100%;min-width:120px`} /></td>
             <td style="text-align:right"><button class="approve sm" type="submit" form="reviewers-new" disabled={!data.canEdit}>Add</button></td>
           </tr>
         </tbody>
