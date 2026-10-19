@@ -1,0 +1,156 @@
+RECEIPT — browser-act: acting on the ```look session via the baked ship-browser helper
+2026-10-19 · branch feat/browser-act · local colima VM · production untouched
+
+==============================================================================
+0. QUESTION
+==============================================================================
+
+The ```look slice launched a persistent headless Chromium inside the run's
+sandbox (--remote-debugging-port=9222, src/look.ts LOOK_SESSION) and every
+later look connectOverCDPs to it — but nothing told the AGENT about that
+session: LOOK_HELP and the prompt never mentioned the CDP endpoint, so
+agent-written Playwright launched a separate browser and ```look never saw
+what the agent did. In practice the agent could observe but not act on what
+it observed.
+
+Does the fix work live — a tiny dependency-free helper baked into the
+sandbox images (/usr/local/lib/ship-browser.mjs, page() + byRef(ref)) that
+joins THE look session, so fill/click by snapshot ref changes the page the
+next ```look observes? And does the session come back when it dies?
+
+VERDICT UP FRONT: YES — all assertions passed live, on the image the product
+boots (built by images/build.sh from THIS tree, helper baked and import-
+probed at build time), inside a sealed --network none container. The same
+core assertions are committed as the opt-in test src/look-live.test.ts
+("browser-act live", SHIP_LOOK_LIVE=1); this receipt is the manual pass,
+including the cold-start revival.
+
+==============================================================================
+1. ENVIRONMENT
+==============================================================================
+- Host: Tyler's Mac (darwin/arm64). Docker = colima VM (aarch64), client
+  Context colima. Image built fresh for this proof:
+  `images/build.sh --harness none node` → ship-sandbox-node:dev, from the
+  feat/browser-act tree (base/pins unchanged; the two new lines COPY
+  images/browser-helper/ship-browser.mjs to /usr/local/lib/ship-browser.mjs
+  and RUN an import probe — which passed at build step 17/18).
+- Container: --network none (loopback only; the proof needs no egress and
+  none was given — also the honest demonstration that the helper inherits
+  bash's authority and nothing more), --shm-size 512m, --cpus 1
+  --memory 1024m, sleep infinity.
+- Harness: node script importing the BUILT dist/look.js, calling runLook()
+  with a docker-exec executor — the exact script bytes src/look.ts
+  generates, not a re-typed copy. The helper half runs
+  `node --input-type=module -e 'import { page, byRef } from
+  "/usr/local/lib/ship-browser.mjs"; …'` — the one-liner the prompt now
+  teaches, verbatim.
+- Page under test: /work/form.html (name + email textboxes, Sign up
+  button; the submit handler preventDefaults and rewrites the DOM, so
+  "submitted" is observable state), served by `python3 -m http.server
+  8777` INSIDE the container.
+
+==============================================================================
+2. HOW REFS RESOLVE (the contract this proof pins)
+==============================================================================
+byRef("e6") resolves EXACTLY the way the ```look driver resolves ref= looks
+(src/look.ts lookDriverScript): render an ai snapshot on the connection
+first — the aria-ref engine resolves against the last snapshot rendered
+there, and an unchanged page re-mints identical refs (deterministic
+traversal) — then `page.locator("aria-ref=" + ref)`, the same engine, the
+same (f\d+)?e\d+ grammar, iframe refs included. A ref that is not on the
+current page throws look's own error shape before any action runs.
+
+==============================================================================
+3. TRANSCRIPT (abridged to the load-bearing bytes; full sequence reproducible
+   via the committed opt-in test)
+==============================================================================
+
+$ docker run -d --name browser-act-proof --shm-size 512m --network none \
+    --cpus 1 --memory 1024m ship-sandbox-node:dev sleep infinity
+
+$ ls -l /usr/local/lib/ship-browser.mjs && node -e \
+    'import("/usr/local/lib/ship-browser.mjs").then((m) => console.log(
+     "exports page:", typeof m.page, "byRef:", typeof m.byRef, "CDP:", m.CDP))'
+-rw-r--r-- 1 root root 7165 Oct 19 03:48 /usr/local/lib/ship-browser.mjs
+exports page: function byRef: function CDP: http://127.0.0.1:9222
+
+$ ```look http://127.0.0.1:8777/form.html      [the real driver; exit 0]
+[page] http://127.0.0.1:8777/form.html — Join
+- main [ref=e2]:
+  - heading "Join the list" [level=1] [ref=e3]
+  - generic [ref=e4]:
+    - generic [ref=e5]:
+      - text: Your name
+      - textbox "Your name" [ref=e6]
+    - generic [ref=e7]:
+      - text: Email
+      - textbox "Email" [ref=e8]
+    - button "Sign up" [ref=e9]
+
+$ ```bash                                       [the agent's action; exit 0]
+node --input-type=module -e 'import { page, byRef } from "/usr/local/lib/ship-browser.mjs";
+await (await byRef("e6")).fill("Ada Lovelace");
+await (await byRef("e9")).click();
+process.exit(0);'
+
+$ ```look                                       [bare; exit 0 — SAME session]
+[page] http://127.0.0.1:8777/form.html — Join
+- main [ref=e2]:
+  - heading "Thanks, Ada Lovelace!" [level=1] [ref=e3]
+  - paragraph [ref=e4]: Check your inbox.
+
+The fill and the click landed on the session look observes: the second
+snapshot shows the submitted page, refs re-minted for the new DOM.
+
+$ ```bash  (a stale ref)                        [exit 1]
+node --input-type=module -e 'import { byRef } from "/usr/local/lib/ship-browser.mjs";
+await byRef("e9999");
+process.exit(0);'
+Error: Ref e9999 not found in the current page snapshot. Run ```look again
+and use refs from that snapshot.
+    at byRef (file:///usr/local/lib/ship-browser.mjs:151:11)
+
+$ kill the session (its node wrapper + chromium: 5 pids SIGKILLed)
+$ probe: fetch("http://127.0.0.1:9222/json/version") → cdp down
+
+$ ```bash  (cold start)                         [exit 0]
+node --input-type=module -e 'import { page } from "/usr/local/lib/ship-browser.mjs";
+const p = await page();
+await p.goto("http://127.0.0.1:8777/form.html", { waitUntil: "load" });
+console.log("revived; title:", await p.title());
+process.exit(0);'
+revived; title: Join
+
+page() found the endpoint down and spawned look.ts's own
+.teploy-agent/look-session.mjs (detached, logged to
+/tmp/ship-look-session.log) — the same launch the look driver performs, so
+the one copy of the session's launch stays in look.ts — then connected and
+opened the page.
+
+$ ```look                                       [bare; exit 0]
+[page] http://127.0.0.1:8777/form.html — Join
+- main [ref=e2]: … "Join the list" … textbox "Your name" [ref=e6] …
+
+A later ```look joins the session the helper revived: one session, shared
+both directions.
+
+==============================================================================
+4. NOTES
+==============================================================================
+- AUTHORITY (the 1c question, answered live): the proof container is
+  --network none — the helper started chromium, filled a form and served
+  everything over loopback, and nothing could have reached the network:
+  the helper inherits exactly bash's authority. The egress tier is
+  enforced at the sandbox layer for every process; LOOK_SEALED and
+  LOOK_OPEN_PLAN gate the ```look verb. On the open tier, agent code could
+  always have launched its own chromium (one is baked in the image) — the
+  helper grants no new reach, it only makes the actions land on the
+  session look observes.
+- Sandbox images must be rebuilt on the sandbox hosts after merge
+  (images/build.sh) for the helper to exist in production; until then the
+  prompt's example fails with module-not-found on old images.
+- Unit-side: the repo host has no playwright, and the helper still imports
+  there (playwright is imported lazily inside page()) — pinned by
+  src/look.test.ts, which also pins ref-grammar/endpoint parity with
+  look.ts, the shared spawn pieces, the Dockerfile bakes and the build
+  context allowlist.

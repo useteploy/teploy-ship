@@ -150,7 +150,8 @@ export const LOOK_HELP =
   "```look observes the run's browser page as text (the accessibility tree, with [ref=eN] labels you can reuse):\n" +
   "```look https://example.com/docs\n" +
   "Narrow it instead of re-reading a big page — ```look find=Sign ?up (text or /regex/flags), ```look ref=e12 depth=3 (a subtree from your last snapshot).\n" +
-  "```look image=on additionally captures a PNG screenshot of the page alongside the text (offered only when the run admits image looks).";
+  "```look image=on additionally captures a PNG screenshot of the page alongside the text (offered only when the run admits image looks).\n" +
+  'To act on what you saw, drive the SAME session from a ```bash block with the baked helper — import { page, byRef } from "/usr/local/lib/ship-browser.mjs", where page() is the session\'s page and byRef("e12") a Playwright locator for that ref — then ```look again to observe the result.';
 
 /**
  * Parse a ```look fence argument into the action. Parameters are `url=` (or a

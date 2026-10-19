@@ -110,6 +110,111 @@ test("look live (OPT-IN): the real driver drives the sandbox image's chromium an
   }
 });
 
+test("browser-act live (OPT-IN): the baked helper fills and submits a form by ref on the session look observes", async (t) => {
+  if (process.env.SHIP_LOOK_LIVE !== "1") {
+    t.skip("opt-in only: SHIP_LOOK_LIVE=1, docker, and the ship-sandbox-node image — the committed receipt documents a manual pass");
+    return;
+  }
+  if (spawnSync("bash", ["-c", "command -v docker"]).status !== 0) {
+    t.skip("no docker on this machine");
+    return;
+  }
+  if (docker(["images", "-q", IMAGE]).stdout?.toString().trim() === "") {
+    t.skip(`image ${IMAGE} not present (images/build.sh node)`);
+    return;
+  }
+
+  const name = `s12-browser-act-${process.pid}`;
+  docker(["rm", "-f", name]);
+  const started = docker(["run", "-d", "--name", name, "--shm-size", "512m", "--network", "none", "--cpus", "1", "--memory", "1024m", IMAGE, "sleep", "infinity"]);
+  assert.equal(started.status, 0, started.stderr?.toString());
+
+  const executor: AgentExecutor = {
+    async exec(cmd) {
+      const r = docker(["exec", name, "sh", "-c", cmd]);
+      return { exitCode: r.status ?? 1, stdout: r.stdout?.toString() ?? "", stderr: r.stderr?.toString() ?? "", timedOut: false, truncated: false };
+    },
+    async putFile(path, data) {
+      const r = docker(["exec", "-i", name, "sh", "-c", `mkdir -p "$(dirname ${path})" && cat > ${path}`], { input: typeof data === "string" ? data : new TextDecoder().decode(data) });
+      assert.equal(r.status, 0, `putFile ${path}: ${r.stderr?.toString()}`);
+    },
+    async getFile() {
+      throw new Error("unused");
+    },
+    async destroy() {},
+  };
+
+  try {
+    // The form's submit handler stays ON the page (preventDefault): the
+    // sealed container has no network, so "submitted" is DOM state the next
+    // look must observe — which is the whole claim of the helper.
+    await executor.putFile(
+      "form.html",
+      '<!doctype html><html><head><title>Join</title></head><body><main><h1>Join the list</h1>\n' +
+        '<form id="f"><label>Your name<input type="text" name="name"></label>\n' +
+        '<label>Email<input type="text" name="email"></label>\n' +
+        '<button type="submit">Sign up</button></form></main>\n' +
+        "<script>document.getElementById(\"f\").addEventListener(\"submit\", (e) => { e.preventDefault(); const n = new FormData(e.target).get(\"name\"); document.body.innerHTML = \"<main><h1>Thanks, \" + String(n).replace(/[<>&]/g, \"\") + \"!</h1><p>Check your inbox.</p></main>\"; });</script>\n" +
+        "</body></html>",
+    );
+    docker(["exec", "-d", name, "sh", "-c", "cd /work && python3 -m http.server 8777 >/tmp/http.log 2>&1"]);
+
+    // 1. Observe with the real look driver — the refs are its, not invented.
+    const first = await runLook(executor, "act0", { kind: "look", url: "http://127.0.0.1:8777/form.html" });
+    assert.equal(first.exitCode, 0, first.stderr);
+    assert.match(first.stdout, /\[page\] http:\/\/127\.0\.0\.1:8777\/form\.html — Join/);
+    const nameRef = /textbox "Your name" \[ref=(e\d+)\]/.exec(first.stdout)?.[1];
+    const buttonRef = /button "Sign up" \[ref=(e\d+)\]/.exec(first.stdout)?.[1];
+    assert.ok(nameRef !== undefined && buttonRef !== undefined, `the snapshot carries refs (name ${nameRef}, button ${buttonRef})`);
+
+    // 2. Act with the baked helper, by ref, exactly as the prompt teaches.
+    const act = await executor.exec(
+      `node --input-type=module -e 'import { page, byRef } from "/usr/local/lib/ship-browser.mjs";
+await (await byRef("${nameRef}")).fill("Ada Lovelace");
+await (await byRef("${buttonRef}")).click();
+process.exit(0);'`,
+    );
+    assert.equal(act.exitCode, 0, act.stderr);
+
+    // 3. Re-observe: the SAME session, now showing what the helper did.
+    const second = await runLook(executor, "act1", { kind: "look" });
+    assert.equal(second.exitCode, 0, second.stderr);
+    assert.match(second.stdout, /heading "Thanks, Ada Lovelace!"/, "the page changed — look sees the helper's actions");
+    assert.match(second.stdout, /Check your inbox/);
+
+    // 4. Stale refs fail loudly through the helper too, look's own shape.
+    const stale = await executor.exec(
+      `node --input-type=module -e 'import { byRef } from "/usr/local/lib/ship-browser.mjs";
+await byRef("e9999");
+process.exit(0);'`,
+    );
+    assert.notEqual(stale.exitCode, 0);
+    assert.match(stale.stderr, /Ref e9999 not found in (the )?current page snapshot/);
+
+    // 5. Cold start: kill the session (its node wrapper and chromium), then
+    // page() must bring it back from look.ts's own session script — the one
+    // copy of the launch — and a later look must observe THAT session.
+    const killed = await executor.exec(
+      'node -e \'const fs=require("fs");for(const d of fs.readdirSync("/proc")){if(!/^[0-9]+$/.test(d))continue;if(+d===process.pid||+d===process.ppid)continue;try{const c=fs.readFileSync("/proc/"+d+"/cmdline","utf8");if(c.includes("remote-debugging-port")||c.includes("look-session.mjs")){process.kill(+d,"SIGKILL");console.log("killed pid",d)}}catch{}}\'',
+    );
+    assert.match(killed.stdout, /killed pid/, "the session processes were found and killed");
+    const revive = await executor.exec(
+      `node --input-type=module -e 'import { page } from "/usr/local/lib/ship-browser.mjs";
+const p = await page();
+await p.goto("http://127.0.0.1:8777/form.html", { waitUntil: "load" });
+console.log(await p.title());
+process.exit(0);'`,
+    );
+    assert.equal(revive.exitCode, 0, revive.stderr);
+    assert.match(revive.stdout, /Join/, "the helper restarted the session from look's script");
+    const third = await runLook(executor, "act2", { kind: "look" });
+    assert.equal(third.exitCode, 0, third.stderr);
+    assert.match(third.stdout, /Join the list/, "a later look joins the session the helper revived");
+  } finally {
+    docker(["rm", "-f", name]);
+  }
+});
+
 test("look live (OPT-IN): an image look screenshots the real chromium page and the artifact round-trips", async (t) => {
   if (process.env.SHIP_LOOK_LIVE !== "1") {
     t.skip("opt-in only: SHIP_LOOK_LIVE=1, docker, and the ship-sandbox-node image — the committed receipt documents a manual pass");
