@@ -161,6 +161,35 @@ export function hostHold(load: HostLoad, limits: HostLimits, launchExtraMB = 0):
   return null;
 }
 
+/** Where the sandboxes run relative to the worker: colocation.ts sandboxLocality's kind. */
+export type SandboxLocalityKind = "none" | "local" | "remote" | "mixed";
+
+/**
+ * The limits the admission gate should apply, given where the sandboxes run.
+ *
+ * The teploy-sandbox daemon exposes no load endpoint — its /health answers
+ * {status, version} only (see SandboxHost below), and placement
+ * (sandbox-pool.ts) counts its own live handles rather than asking the daemon
+ * — so a remote pool's load cannot be read, only this host's. Judging remote
+ * sandboxes on the WORKER's load held every launch for ~80 minutes on
+ * 2026-10-18 while the sandbox hosts sat idle: the worker shares its box with
+ * the forge and CI, and that load says nothing about the machines runs
+ * execute on. When EVERY sandbox is remote, the load term therefore stands
+ * down. Memory and disk still gate on the worker host — the worker process
+ * itself, Nucleus and the event log run there — and `gateLocalLoad`
+ * (SHIP_GATE_ON_LOCAL_LOAD) restores the old behaviour for an operator who
+ * wants it back.
+ *
+ * A local or mixed pool keeps the load gate: placement does not know host
+ * load, so a mixed pool can still land a run on the loaded local box. When
+ * the daemon grows a load endpoint, this is the seam where the gate should
+ * start judging the sandbox hosts themselves.
+ */
+export function loadGateLimits(limits: HostLimits, sandbox: SandboxLocalityKind, gateLocalLoad = false): HostLimits {
+  if (sandbox !== "remote" || gateLocalLoad) return limits;
+  return { ...limits, maxLoadPerCpu: 0 };
+}
+
 /**
  * The stack's base footprint (web + worker + Nucleus + gateway + ollama),
  * measured idle at ~1.3 GB on deploy-test and rounded up (docs/capacity.md).

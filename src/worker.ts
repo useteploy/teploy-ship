@@ -62,10 +62,11 @@ import {
   describeCapacity,
   hostHold,
   hostLoad,
+  loadGateLimits,
   sandboxHostFromEnv,
   sandboxLimitsFor,
 } from "./host-load.js";
-import type { Capacity, HostHold, HostLimits, HostLoad } from "./host-load.js";
+import type { Capacity, HostHold, HostLimits, HostLoad, SandboxLocalityKind } from "./host-load.js";
 import { classAwareMemoryMB, classMemoryDeltaMB, resourceClassOf, type ResourceClass } from "./resource-class.js";
 import { autoAllowedNow, formatWindow, windowFor } from "./governance.js";
 import type { Windows } from "./governance.js";
@@ -92,6 +93,7 @@ import {
   colocationOverridden,
   colocationRefusal,
   detectForgeColocation,
+  sandboxLocality,
   type SandboxProbe,
 } from "./colocation.js";
 import {
@@ -1448,6 +1450,29 @@ export function startWorker(options: WorkerOptions): {
       ? `[worker] sandbox limits sized from SHIP_SANDBOX_HOST_*: ${sandboxHost.totalMemMB ?? lastLoad.totalMemMB} MB, ${sandboxHost.cpus ?? lastLoad.cpus} cpu`
       : `[worker] sandbox limits sized from this host (${lastLoad.totalMemMB} MB, ${lastLoad.cpus} cpu); set SHIP_SANDBOX_HOST_MEMORY_MB if the daemon runs elsewhere`,
   );
+  // SHIP_GATE_ON_LOCAL_LOAD: keep holding launches on THIS host's load even
+  // when every sandbox is remote — the behaviour before remote sandboxes were
+  // told apart from local ones.
+  const gateLocalLoad = ["1", "true", "yes"].includes((process.env.SHIP_GATE_ON_LOCAL_LOAD ?? "").trim().toLowerCase());
+  // Where the sandboxes run relative to this box (colocation.ts), for the
+  // admission gate below. Resolved once, best-effort, at startup: until it
+  // lands — or when it cannot — the gate behaves exactly as before.
+  let sandboxKind: SandboxLocalityKind = "none";
+  const sandboxUrls = parseSandboxUrls(process.env.SHIP_SANDBOX_URL);
+  if (sandboxUrls.length > 0) {
+    void sandboxLocality(sandboxUrls, {})
+      .then((where) => {
+        sandboxKind = where.kind;
+        if (where.kind === "remote" && !gateLocalLoad) {
+          log(`[worker] all ${where.hosts.length} sandbox host(s) are remote: this host's load no longer holds launches`);
+        }
+      })
+      .catch(() => {});
+  }
+  // The limits the gate judges by (host-load.ts:loadGateLimits): a fully
+  // remote pool drops the worker host's load term — the daemon exposes
+  // nothing to judge the sandbox hosts by, and this box's load is not theirs.
+  const gateLimits = (): HostLimits => loadGateLimits(hostLimits, sandboxKind, gateLocalLoad);
   let held: HostHold | null = null;
   let heldLoggedAt = 0;
   // The ceiling, derived from the box (host-load.ts capacityPlan) and re-derived
@@ -1467,7 +1492,7 @@ export function startWorker(options: WorkerOptions): {
    */
   const resense = (): void => {
     lastLoad = hostLoad();
-    held = hostHold(lastLoad, hostLimits);
+    held = hostHold(lastLoad, gateLimits());
     const next = capacityPlan(lastLoad, {
       limits: hostLimits,
       activeRuns: inflight.size,
@@ -1485,7 +1510,7 @@ export function startWorker(options: WorkerOptions): {
   };
   const hostOk = (): boolean => {
     lastLoad = hostLoad();
-    held = hostHold(lastLoad, hostLimits);
+    held = hostHold(lastLoad, gateLimits());
     if (held !== null && Date.now() - heldLoggedAt > 60_000) {
       heldLoggedAt = Date.now();
       const disk =
@@ -1592,7 +1617,7 @@ export function startWorker(options: WorkerOptions): {
         // held behind it.
         const classExtraMB = classMemoryDeltaMB(runResourceClassOf(events));
         if (classExtraMB > 0) {
-          const classHold = hostHold(lastLoad, hostLimits, classExtraMB);
+          const classHold = hostHold(lastLoad, gateLimits(), classExtraMB);
           if (classHold !== null) {
             if (!classHoldLogged.has(runId)) {
               classHoldLogged.add(runId);
