@@ -206,13 +206,19 @@ async function runWorkerOnce(fake: Fake): Promise<void> {
   await worker.stop();
 }
 
-/** Keep SHIP_SELFWATCH_INTERVAL_S out of a worker test's way, and put it back. */
+/** Keep SHIP_SELFWATCH_INTERVAL_S and the (default-on) live view out of a
+ * worker test's way, and put them back. Live view off is a strict no-op, so
+ * the stub config never sees its writes. */
 function withoutSelfwatch(t: { after: (fn: () => void) => void }): void {
   const previous = process.env.SHIP_SELFWATCH_INTERVAL_S;
+  const previousLive = process.env.SHIP_LIVE_VIEW;
   process.env.SHIP_SELFWATCH_INTERVAL_S = "0";
+  process.env.SHIP_LIVE_VIEW = "off";
   t.after(() => {
     if (previous === undefined) delete process.env.SHIP_SELFWATCH_INTERVAL_S;
     else process.env.SHIP_SELFWATCH_INTERVAL_S = previous;
+    if (previousLive === undefined) delete process.env.SHIP_LIVE_VIEW;
+    else process.env.SHIP_LIVE_VIEW = previousLive;
   });
 }
 

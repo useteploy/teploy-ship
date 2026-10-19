@@ -80,10 +80,11 @@ test("an auto board without a repository is refused at save time", () => {
 });
 
 test("auto is refused while the L3 change-class gate is off — the whole dependency of L6", () => {
-  assert.equal(changeClassGateEnabled({} as NodeJS.ProcessEnv), false);
+  assert.equal(changeClassGateEnabled({ SHIP_CHANGE_CLASS: "0" } as NodeJS.ProcessEnv), false);
+  assert.equal(changeClassGateEnabled({} as NodeJS.ProcessEnv), true, "unset means on");
   assert.equal(changeClassGateEnabled({ SHIP_CHANGE_CLASS: "true" } as NodeJS.ProcessEnv), true);
   assert.throws(
-    () => assertBoardSendable({ board: board({ shipPolicy: "auto" }), project: project(), env: {} as NodeJS.ProcessEnv }),
+    () => assertBoardSendable({ board: board({ shipPolicy: "auto" }), project: project(), env: { SHIP_CHANGE_CLASS: "off" } as NodeJS.ProcessEnv }),
     (e: unknown) => e instanceof BulletinPolicyError && /SHIP_CHANGE_CLASS/.test((e as Error).message),
   );
 });
@@ -315,7 +316,7 @@ test("the gate being turned off after the board was saved stops the sweep too", 
   const store = new MemoryStore();
   await store.setBoard(board({ shipPolicy: "auto", autoMinVotes: 0 }));
   await store.addPost(post());
-  const { deps, proposed } = sweepDeps(store, { env: {} as NodeJS.ProcessEnv });
+  const { deps, proposed } = sweepDeps(store, { env: { SHIP_CHANGE_CLASS: "off" } as NodeJS.ProcessEnv });
   assert.equal((await sweepBulletin(deps)).sent, 0);
   assert.equal(proposed.length, 0);
 });

@@ -76,7 +76,7 @@ every key with that prefix, built at runtime.
 // its presence also pins the default (below).
 const HELPERS = new Map([
   ['envFlag', '1/true/yes'],
-  ['envFlagOff', '0/false/no (flag defaults on)'],
+  ['envFlagOff', '0/false/no/off (flag defaults on)'],
   ['envCount', 'non-negative integer'],
   ['envNum', 'number'],
   ['envInt', 'number'],
@@ -257,9 +257,12 @@ export function scanText(text, file) {
 
   // Helper call sites. Known names carry their grammar; local helpers whose
   // body reads env[<argument>] are found first so arbitrary names (web's
-  // value()/secret()/env()) count too.
+  // value()/secret()/env()) count too. The arrow form allows a return type
+  // between the parameter list and `=>` (`const num = (name: string):
+  // number | undefined => {`), which is how host-load.ts reads the sandbox
+  // host facts.
   const helperIds = new Set(HELPERS.keys());
-  for (const m of text.matchAll(/(?:function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)[^{]*\{|(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*\(([^)]*)\)\s*=>)/g)) {
+  for (const m of text.matchAll(/(?:function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)[^{]*\{|(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*\(([^)]*)\)(?::[^=\n]+)?=>)/g)) {
     const id = m[1] ?? m[3];
     const params = (m[2] ?? m[4] ?? '').split(',').map(s => s.trim().split(':')[0].split('=')[0].trim()).filter(Boolean);
     const body = text.slice(m.index, m.index + 600);

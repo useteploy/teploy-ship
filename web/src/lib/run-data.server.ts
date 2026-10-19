@@ -111,7 +111,7 @@ export interface RunData {
    * Advisory plan grounding (S07): whether the files, symbols and commands
    * the plan names exist in the committed tree, read off the `plan-think`
    * step's additive `grounding` field. Absent unless the run was made with
-   * SHIP_PLAN_GROUNDING=on; never an input to the decision.
+   * SHIP_PLAN_GROUNDING; never an input to the decision.
    */
   planGrounding?: PlanGroundingView;
   /**
@@ -197,15 +197,15 @@ export interface RunData {
   /** ?takeover=pending — a takeover operation was requested; the worker answers within a sweep. */
   takeoverPending: boolean;
   /**
-   * SHIP_THREAD_VIEW=on only: the run page may fetch the thread strip.
-   * Absent (flag off, the default) the page renders exactly as before —
+   * SHIP_THREAD_VIEW only (on unless explicitly off): the run page may fetch
+   * the thread strip. Absent (flag off) the page renders exactly as before —
    * the key is additive and nothing else reads it.
    */
   threadView?: true;
   /**
-   * SHIP_LIVE_VIEW=on: the page polls /api/runs/<id>/live for the terminal
-   * tail and running diff while the run is active. Absent (the default) the
-   * page renders exactly as before.
+   * SHIP_LIVE_VIEW (on unless explicitly off): the page polls
+   * /api/runs/<id>/live for the terminal tail and running diff while the run
+   * is active. Absent (flag off) the page renders exactly as before.
    */
   liveView?: true;
   /** ?tab= — the workspace panel tab the holder had open (console/editor/browser/changes/handback). */

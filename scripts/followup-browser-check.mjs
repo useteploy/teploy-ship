@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 const {chromium}=await import(process.env.PLAYWRIGHT_MODULE||'playwright');
 if(process.env.SHIP_ISOLATED_CHECK!=='1')throw new Error('Isolated UI required');
-const base=process.env.SHIP_URL,token=process.env.SHIP_WEB_TOKEN,parent=process.env.SHIP_TEST_RUN;
+const base=process.env.SHIP_URL,token=process.env.SHIP_WEB_TOKEN,parent=process.argv[2];
 assert.ok(base&&token&&parent);
 const browser=await chromium.launch();
 try {

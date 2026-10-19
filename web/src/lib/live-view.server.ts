@@ -33,7 +33,7 @@ export async function liveViewResponse(request: Request, runId: string, deps: De
   const principal = await deps.principal(request);
   if (principal === null) return json(401, { error: "unauthorized" });
   if (!roleAllows(principal.role, requiredRole("GET", `/runs/${runId}`))) return json(403, { error: "forbidden" });
-  if (!deps.enabled()) return json(503, { error: "live view is not enabled — set SHIP_LIVE_VIEW=on" });
+  if (!deps.enabled()) return json(503, { error: "live view is not enabled — clear SHIP_LIVE_VIEW or set it on" });
   if (!/^[a-zA-Z0-9_-]{1,100}$/.test(runId)) return json(404, { error: "run not found" });
   const runtime = await deps.runtime();
   const meta = await runtime.loadMeta(runId);

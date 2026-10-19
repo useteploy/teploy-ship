@@ -29,14 +29,13 @@
  *    only parsed, never run.
  *
  * Observe-only: nothing here writes a run, a step or a record. Gate callers
- * with `planGroundingEnabled` (SHIP_PLAN_GROUNDING, default off).
+ * with `planGroundingEnabled` (SHIP_PLAN_GROUNDING, on unless explicitly off).
  */
 import type { AgentExecutor } from "@neutron-build/agents";
 
-/** Gate for every caller. Default OFF. */
+/** Gate for every caller. On unless explicitly turned off. */
 export function planGroundingEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  const raw = (env.SHIP_PLAN_GROUNDING ?? "").trim().toLowerCase();
-  return raw === "on" || raw === "1" || raw === "true";
+  return !/^(0|false|no|off)$/i.test((env.SHIP_PLAN_GROUNDING ?? "").trim());
 }
 
 export type RefKind = "file" | "symbol" | "command";

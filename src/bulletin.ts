@@ -214,8 +214,7 @@ export function normalizeBoard(input: Partial<BulletinBoard> & { slug: string })
  * in a file this lane does not own.
  */
 export function changeClassGateEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  const raw = (env.SHIP_CHANGE_CLASS ?? "").trim().toLowerCase();
-  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+  return !/^(0|false|no|off)$/i.test((env.SHIP_CHANGE_CLASS ?? "").trim());
 }
 
 /**
@@ -255,7 +254,7 @@ export function assertBoardSendable(options: {
   }
   if (!changeClassGateEnabled(options.env ?? process.env)) {
     throw new BulletinPolicyError(
-      "the change-class gate is off: set SHIP_CHANGE_CLASS=1 before a public board may send to Ship. " +
+      "the change-class gate is off: clear SHIP_CHANGE_CLASS (or set it on) before a public board may send to Ship. " +
         "Without it a public note could produce an unattended change of any size (L3).",
     );
   }

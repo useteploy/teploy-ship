@@ -30,10 +30,9 @@ import type { WorkflowEvent } from "@neutron-build/workflow";
 import { MERGE_EVENT } from "./plan.js";
 import { verificationFactsFromEvents } from "./verification-summary.js";
 
-/** The deployment switch. Default off, like every feature that spends money. */
+/** The deployment switch. On unless explicitly turned off (`0`/`false`/`no`/`off`). */
 export function forkEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  const raw = (env.SHIP_FORK ?? "").trim().toLowerCase();
-  return raw === "on" || raw === "1" || raw === "true" || raw === "yes";
+  return !/^(0|false|no|off)$/i.test((env.SHIP_FORK ?? "").trim());
 }
 
 /**

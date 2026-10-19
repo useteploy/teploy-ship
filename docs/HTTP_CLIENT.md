@@ -43,12 +43,12 @@ not terminal. Continue polling until the executor settles. `followUp(id, ... )`
 starts linked work; pass a persisted requestId and choose `target: 'pr'` only when
 you intend to continue an existing PR. Include the reviewed eventName when the
 current review requires it. Follow-ups retain normal policy and verification.
-`fork(id, ...)` (behind `SHIP_FORK=on`) starts a NEW task from a settled run:
+`fork(id, ...)` (behind `SHIP_FORK`, on unless explicitly turned off) starts a NEW task from a settled run:
 the same recorded history, a new branch from that run's pushed commit, and a
 pull request of its own — the source run's PR is untouched. An in-flight
 source, or a deployment with the flag off, is refused with the reason in the
 error.
-`stack(id, ...)` (behind `SHIP_STACKED_PRS=on`) stacks a change on a run's
+`stack(id, ...)` (behind `SHIP_STACKED_PRS`, on unless explicitly turned off) stacks a change on a run's
 OPEN pull request: the new run's branch starts at that run's recorded pull
 request head and its own pull request opens against the run's branch, so its
 diff carries only the stacked change's commits. A run that opened no pull

@@ -146,7 +146,7 @@ const statusOf = (grounding: unknown, name: string): string | undefined => {
   return refs?.find((r) => r.name === name)?.status;
 };
 
-test("default off: the park's recorded plan step is byte-identical with the flag unset and explicitly off", async () => {
+test("off value: the park's recorded plan step is byte-identical with the flag unset (the default) and explicitly off", async () => {
   const run = async (flag: string | undefined) => {
     const w = await repoWorkspace(TREE);
     try {
@@ -162,11 +162,13 @@ test("default off: the park's recorded plan step is byte-identical with the flag
       await w.done();
     }
   };
-  const unset = await run(undefined);
+  const onByDefault = await run(undefined);
   const off = await run("off");
-  assert.equal("grounding" in unset.result, false);
-  assert.equal(JSON.stringify(unset.result), JSON.stringify(off.result), "unset and explicit off record the same bytes");
-  assert.equal(JSON.stringify(unset.result), JSON.stringify({ text: PLAN, usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } }), "the pre-wiring {text, usage} shape, unchanged");
+  assert.ok("grounding" in onByDefault.result, "unset means on");
+  assert.equal("grounding" in off.result, false);
+  const { grounding: _g, ...onRest } = onByDefault.result as Record<string, unknown>;
+  assert.equal(JSON.stringify(onRest), JSON.stringify(off.result), "the grounding field is the only difference");
+  assert.equal(JSON.stringify(off.result), JSON.stringify({ text: PLAN, usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } }), "the pre-wiring {text, usage} shape, unchanged");
 });
 
 test("flag on: the real park path grounds the plan against the workspace's committed tree, adds no step, and never re-runs on replay", async () => {
@@ -199,7 +201,7 @@ test("flag on: the real park path grounds the plan against the workspace's commi
       // Same script with the flag off: identical step sequence (no new step).
       const offW = await repoWorkspace(TREE);
       try {
-        const offNames = await withFlag(undefined, async () => {
+        const offNames = await withFlag("off", async () => {
           const { model: m } = reactiveModel([PLAN, ...WORK_TURNS]);
           const s = new MemoryEventStore();
           const p = await executeRun({ workflow: durableAgent({ model: m, executor: offW.provider }), runId: "park-seq", store: s, input: { task: "t", plan: true } });

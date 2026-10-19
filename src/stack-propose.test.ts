@@ -277,10 +277,12 @@ test("rendering cites every proposal and states that nothing ran", async () => {
   assert.match(text, /readiness digest: [0-9a-f]{64}/);
 });
 
-test("stackDetectEnabled: off by default, on only for explicit values", () => {
-  assert.equal(stackDetectEnabled({}), false);
+test("stackDetectEnabled: on unless explicitly off (unset means on)", () => {
+  assert.equal(stackDetectEnabled({}), true);
   assert.equal(stackDetectEnabled({ SHIP_STACK_DETECT: "off" }), false);
-  assert.equal(stackDetectEnabled({ SHIP_STACK_DETECT: "" }), false);
+  assert.equal(stackDetectEnabled({ SHIP_STACK_DETECT: "0" }), false);
+  assert.equal(stackDetectEnabled({ SHIP_STACK_DETECT: "false" }), false);
+  assert.equal(stackDetectEnabled({ SHIP_STACK_DETECT: "" }), true);
   assert.equal(stackDetectEnabled({ SHIP_STACK_DETECT: "on" }), true);
   assert.equal(stackDetectEnabled({ SHIP_STACK_DETECT: "ON" }), true);
 });
@@ -311,7 +313,7 @@ const DIGEST = "ab".repeat(32);
 const enqueueOpts = (runId: string, extra: object = {}) => ({ runId, task: "Verify project environment: x", model: "m", repo: "https://git.example.com/owner/repo", mode: "scan" as const, environmentCheck: true, environmentCheckOnly: true, ...extra });
 
 test("flag off: the recorded input is byte-identical whether or not a digest is supplied", async () => {
-  await withFlag(undefined, async () => {
+  await withFlag("off", async () => {
     const a = captureRuntime();
     const b = captureRuntime();
     await enqueueRun(a.runtime, enqueueOpts("run-a"));
@@ -326,7 +328,7 @@ test("flag on: the digest is recorded next to environmentConfigId, which is unch
   await withFlag("on", async () => {
     const off = captureRuntime();
     const on = captureRuntime();
-    await withFlag(undefined, () => enqueueRun(off.runtime, enqueueOpts("run-b")));
+    await withFlag("off", () => enqueueRun(off.runtime, enqueueOpts("run-b")));
     await enqueueRun(on.runtime, enqueueOpts("run-b", { environmentInputsDigest: DIGEST }));
     assert.equal(on.inputs[0]!.environmentInputsDigest, DIGEST);
     assert.equal(on.inputs[0]!.environmentConfigId, off.inputs[0]!.environmentConfigId);

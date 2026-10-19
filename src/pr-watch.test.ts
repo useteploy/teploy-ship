@@ -148,11 +148,15 @@ function reset(): void {
   requests = [];
 }
 
-test("flag parser: only `on` enables", () => {
-  assert.equal(prWatchEnabled({}), false);
-  assert.equal(prWatchEnabled({ SHIP_PR_WATCH: "1" }), false);
-  assert.equal(prWatchEnabled({ SHIP_PR_WATCH: "true" }), false);
+test("flag parser: on unless explicitly off (unset means on)", () => {
+  assert.equal(prWatchEnabled({}), true);
+  assert.equal(prWatchEnabled({ SHIP_PR_WATCH: "1" }), true);
+  assert.equal(prWatchEnabled({ SHIP_PR_WATCH: "true" }), true);
   assert.equal(prWatchEnabled({ SHIP_PR_WATCH: "on" }), true);
+  assert.equal(prWatchEnabled({ SHIP_PR_WATCH: "off" }), false);
+  assert.equal(prWatchEnabled({ SHIP_PR_WATCH: "0" }), false);
+  assert.equal(prWatchEnabled({ SHIP_PR_WATCH: "false" }), false);
+  assert.equal(prWatchEnabled({ SHIP_PR_WATCH: "no" }), false);
 });
 
 test("max-age parser: default 14, clamped to [1, 90]", () => {
@@ -174,7 +178,7 @@ test("flag off: no store reads, no forge calls, nothing proposed", async () => {
   let reads = 0;
   const counting: PrWatchDeps = {
     ...h.deps,
-    env: {},
+    env: { SHIP_PR_WATCH: "off" },
     listMeta: async () => {
       reads++;
       return [];

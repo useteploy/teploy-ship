@@ -36,8 +36,8 @@
  *                    so SHIP_INTEGRATION_CHECK and the declaration decide
  *                    whether it applies, exactly as coordinationComplete does).
  *
- * Flag: SHIP_MISSION_VIEW=on. Default off; the page renders nothing extra and
- * this module is not called.
+ * Flag: SHIP_MISSION_VIEW, on unless explicitly off; when off the page
+ * renders nothing extra and this module is not called.
  */
 import type { WorkflowEvent } from "@neutron-build/workflow";
 import { integrationGate } from "./coordination.js";
@@ -55,7 +55,7 @@ import type { AcceptanceState } from "./task-record.js";
 import type { ShipRuntime } from "./runtime.js";
 
 export function missionViewEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return (env.SHIP_MISSION_VIEW ?? "").trim().toLowerCase() === "on";
+  return !/^(0|false|no|off)$/i.test((env.SHIP_MISSION_VIEW ?? "").trim());
 }
 
 /** What the task record and delivery record say about one child's latest run. */

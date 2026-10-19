@@ -40,7 +40,7 @@ import { auditTiming } from "./audit-timing.js";
 import type { NumberRange } from "./args.js";
 import { commitAndPush, fixPrompt, openPullRequest, recordBaseSha, setupRepo } from "./git.js";
 import { runTests, testTargetFromEnv } from "./tests.js";
-import { attachEvidence, envAsked } from "./fix-evidence.js";
+import { attachEvidence, envAsked, envAskedOff } from "./fix-evidence.js";
 import type { Evidence } from "./verification.js";
 import type { RepoRef } from "./git.js";
 import { assertRepoAllowed, credentialFor, policyFromEnv } from "./repo-policy.js";
@@ -888,7 +888,7 @@ async function fixCommand(rest: string[]): Promise<void> {
   // reviewer reading "tests passed" wants it to mean the code in the pull
   // request, not the code as it was two steps earlier.
   const evidence: Evidence = {};
-  const testTarget = args.flags.tests === true || envAsked("SHIP_TESTS") ? testTargetFromEnv() : undefined;
+  const testTarget = args.flags.tests === true || !envAskedOff("SHIP_TESTS") ? testTargetFromEnv() : undefined;
   if (testTarget !== undefined) {
     process.stderr.write(dim(`running ${testTarget.command}…\n`));
     evidence.tests = await runTests(executor, testTarget);
@@ -1568,7 +1568,7 @@ async function projectCommand(rest: string[]): Promise<void> {
   if (sub === "detect") {
     // S05/S06 import dry-run. Read-only, proposal-only; gated so that with the
     // flag off this subcommand does not exist to the operator.
-    if (!stackDetectEnabled()) fail("project detect is disabled; set SHIP_STACK_DETECT=on to enable the import dry-run");
+    if (!stackDetectEnabled()) fail("project detect is disabled; clear SHIP_STACK_DETECT (or set it on) to enable the import dry-run");
     if (target === undefined || target === "") fail("a repo is required: teploy-ship project detect <clone-url|path> [--json]");
     const policy: RepoPolicyConfig = {
       ...policyFromEnv(),

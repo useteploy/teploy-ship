@@ -875,6 +875,11 @@ test("durable runs condense long histories in a recorded step and replay without
 });
 
 test("plan-preview runs park on the plan and only execute after approval", async () => {
+  // Grounding (default on) probes the tree read-only inside plan-think; these
+  // park mechanics want zero executor work before approval.
+  const savedGrounding = process.env.SHIP_PLAN_GROUNDING;
+  process.env.SHIP_PLAN_GROUNDING = "off";
+  try {
   const { model, callCount } = reactiveModel([
     "1. Write done.txt\n2. Verify it exists", // the plan (plain text)
     "```bash\necho ok > done.txt\n```",
@@ -898,6 +903,10 @@ test("plan-preview runs park on the plan and only execute after approval", async
   const done = await executeRun({ workflow: wf, runId: "run-plan", store });
   assert.equal(done.status, "completed");
   assert.equal((done.output as { agentSummary: string }).agentSummary, "planned and done");
+  } finally {
+    if (savedGrounding === undefined) delete process.env.SHIP_PLAN_GROUNDING;
+    else process.env.SHIP_PLAN_GROUNDING = savedGrounding;
+  }
 });
 
 test("a plan park on a REPO run publishes nothing — the C5 rescue is for failures, not parks", async () => {
@@ -928,6 +937,11 @@ test("a plan park on a REPO run publishes nothing — the C5 rescue is for failu
 });
 
 test("an edited plan replaces the agent's own; a denied plan ends the run untouched", async () => {
+  // Grounding (default on) probes the tree read-only inside plan-think; the
+  // denial leg asserts zero executor work.
+  const savedGrounding = process.env.SHIP_PLAN_GROUNDING;
+  process.env.SHIP_PLAN_GROUNDING = "off";
+  try {
   // edited: the agent must see the operator's version, flagged as edited
   const edited = reactiveModel([
     "1. Do it my way",
@@ -960,6 +974,10 @@ test("an edited plan replaces the agent's own; a denied plan ends the run untouc
   assert.match(output.summary, /Plan rejected.*wrong direction/);
   assert.equal(output.turns, 0);
   assert.equal(local.execCount(), 0, "a denied plan never executes anything");
+  } finally {
+    if (savedGrounding === undefined) delete process.env.SHIP_PLAN_GROUNDING;
+    else process.env.SHIP_PLAN_GROUNDING = savedGrounding;
+  }
 });
 
 test("steer notes drain into the next turn as a recorded step and never re-drain on replay", async () => {
@@ -4766,6 +4784,11 @@ test("look refuses on the OPEN tier without plan review (D3), with no step and n
 });
 
 test("look proceeds on the open tier once the run's plan park approved it", async () => {
+  // Grounding (default on) probes the tree read-only inside plan-think, which
+  // this provider's driver counter would otherwise see.
+  const savedGrounding = process.env.SHIP_PLAN_GROUNDING;
+  process.env.SHIP_PLAN_GROUNDING = "off";
+  try {
   const snapshot = '[page] https://example.com — Example\n- link "Docs" [ref=e3]';
   const { provider, lookCommands } = lookProvider(snapshot);
   const { model } = reactiveModel([
@@ -4788,6 +4811,10 @@ test("look proceeds on the open tier once the run's plan park approved it", asyn
   const steps = (await store.load("run-look-open-plan")).filter((e) => e.type === "step-completed");
   assert.ok(steps.some((s) => s.name === "turn-0-look"), "the approved-plan run looks for real");
   assert.equal(lookCommands().length, 1, "exactly one driver run");
+  } finally {
+    if (savedGrounding === undefined) delete process.env.SHIP_PLAN_GROUNDING;
+    else process.env.SHIP_PLAN_GROUNDING = savedGrounding;
+  }
 });
 
 test("look proceeds on an explicit allowlist tier exactly as on the unset default", async () => {

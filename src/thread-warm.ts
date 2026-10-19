@@ -106,17 +106,18 @@ function readIndex(raw: string | undefined): string[] {
  * Is the warm-thread feature armed? `SHIP_WARM_THREAD` alone is not enough:
  * a snapshot of a warm run is only self-contained when the daemon bakes the
  * warm volume's bytes into the image (teploy-sandbox 2a89f72), which Ship
- * asserts with the existing `SHIP_WARM_PARKS=1` capability flag. Reusing it
+ * asserts with the existing `SHIP_WARM_PARKS` capability flag. Reusing it
  * keeps one operator assertion for "the daemon snapshots volumes" rather
- * than two that could drift.
+ * than two that could drift. Both default on; either one's explicit off
+ * value disarms the feature.
  */
 export function warmThreadEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return flagOn(env.SHIP_WARM_THREAD) && flagOn(env.SHIP_WARM_PARKS);
+  return !flagOff(env.SHIP_WARM_THREAD) && !flagOff(env.SHIP_WARM_PARKS);
 }
 
-function flagOn(raw: string | undefined): boolean {
-  const v = raw?.trim().toLowerCase();
-  return v === "1" || v === "true" || v === "yes" || v === "on";
+/** Explicitly off: `0`/`false`/`no`/`off`. Anything else — including unset — leaves the default on. */
+function flagOff(raw: string | undefined): boolean {
+  return /^(0|false|no|off)$/i.test((raw ?? "").trim());
 }
 
 export function warmThreadTtlSec(env: NodeJS.ProcessEnv = process.env): number {

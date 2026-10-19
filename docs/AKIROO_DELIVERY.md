@@ -61,4 +61,4 @@ publish an empty Akiroo configuration over a populated Ship project.
 Use the ordinary build/test and replay-preflight gates plus a store backup.
 `scripts/probe-akiroo-receipts.mjs`, after `pnpm build`, exercises receipt restart,
 failed-action containment and notification retries against a disposable Nucleus
-selected by `SHIP_TEST_NUCLEUS_URL` (loopback only). It invokes no model or forge.
+whose URL is passed as the first argument (loopback only). It invokes no model or forge.

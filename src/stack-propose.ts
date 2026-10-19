@@ -13,7 +13,7 @@ import { recipeDigest } from "./environment-recipe.js";
  *    reading operations below, never a command taken from the repository;
  *  - nothing here writes a project, a recipe or a run. A person (or operator)
  *    copies a proposal into project settings themselves;
- *  - `SHIP_STACK_DETECT` (default off) gates every caller, see
+ *  - `SHIP_STACK_DETECT` (on unless explicitly off) gates every caller, see
  *    `stackDetectEnabled`.
  *
  * Reads are bounded and untrusted-input aware: the listing prunes
@@ -23,10 +23,9 @@ import { recipeDigest } from "./environment-recipe.js";
  * rather than parsed.
  */
 
-/** Gate for the import dry-run, the CLI command and the setup-page suggestions. */
+/** Gate for the import dry-run, the CLI command and the setup-page suggestions. On unless explicitly off. */
 export function stackDetectEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  const raw = (env.SHIP_STACK_DETECT ?? "").trim().toLowerCase();
-  return raw === "on" || raw === "1" || raw === "true";
+  return !/^(0|false|no|off)$/i.test((env.SHIP_STACK_DETECT ?? "").trim());
 }
 
 const MAX_FILES = 5000;

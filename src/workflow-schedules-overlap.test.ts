@@ -67,11 +67,13 @@ async function setup(overlap: string | undefined, runs: FakeRun[]) {
 
 const running: FakeRun = { runId: "r1", status: "running", dedupeKey: "workflow:daily:20260609" };
 const ON = { SHIP_SCHEDULE_OVERLAP: "on" } as NodeJS.ProcessEnv;
+const OFF = { SHIP_SCHEDULE_OVERLAP: "off" } as NodeJS.ProcessEnv;
 const log = (_line: string) => {};
 
-test("flag parsing: off unless explicitly on", () => {
-  assert.equal(scheduleOverlapEnabled({}), false);
+test("flag parsing: on unless explicitly off (unset means on)", () => {
+  assert.equal(scheduleOverlapEnabled({}), true);
   assert.equal(scheduleOverlapEnabled({ SHIP_SCHEDULE_OVERLAP: "off" }), false);
+  assert.equal(scheduleOverlapEnabled({ SHIP_SCHEDULE_OVERLAP: "0" }), false);
   assert.equal(scheduleOverlapEnabled({ SHIP_SCHEDULE_OVERLAP: "ON" }), true);
 });
 
@@ -101,9 +103,9 @@ test("flag on, allow (and no policy): still fires while a run is live", async ()
   }
 });
 
-test("flag off (default): skip policy is ignored exactly as before, and no run logs are loaded", async () => {
+test("flag off: skip policy is ignored exactly as before, and no run logs are loaded", async () => {
   const s = await setup("skip", [running]);
-  await sweepSchedulesForWorker(s.runtime, log, {}, NOW);
+  await sweepSchedulesForWorker(s.runtime, log, OFF, NOW);
   assert.equal((await s.intake.list()).length, 1);
   assert.deepEqual(s.loads, []);
 });

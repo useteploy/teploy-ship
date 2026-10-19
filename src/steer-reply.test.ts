@@ -1,4 +1,4 @@
-// D2 two-way steering (SHIP_STEER_REPLY): default-off equivalence, the real
+// D2 two-way steering (SHIP_STEER_REPLY): off-value equivalence, the real
 // durable loop with a scripted model and a real FileSteerStore, and the
 // negative controls. Design: docs/STEERING_DESIGN.md.
 import assert from "node:assert/strict";
@@ -132,9 +132,9 @@ test("parseReply: only a reply BEFORE the action counts, empty is none, long is 
   assert.ok(long.length < REPLY_MAX + 40 && long.endsWith("(reply clamped)"));
 });
 
-test("off: SHIP_STEER_REPLY accepts only `on`, and enqueue materialises the field only then", async () => {
-  assert.equal(steerReplyEnabled({}), false);
-  for (const v of ["1", "true", "yes", "off", ""]) assert.equal(steerReplyEnabled({ SHIP_STEER_REPLY: v }), false, v);
+test("off: an explicit off value, and enqueue materialises the field only then", async () => {
+  assert.equal(steerReplyEnabled({}), true);
+  for (const v of ["off", "0", "false", "no"]) assert.equal(steerReplyEnabled({ SHIP_STEER_REPLY: v }), false, v);
   assert.equal(steerReplyEnabled({ SHIP_STEER_REPLY: " ON " }), true);
 
   const saved = { state: process.env.TEPLOY_SHIP_STATE, flag: process.env.SHIP_STEER_REPLY };
@@ -144,11 +144,11 @@ test("off: SHIP_STEER_REPLY accepts only `on`, and enqueue materialises the fiel
     const inputOf = async (id: string) =>
       ((await runtime.store.load(id)).find((e) => e.type === "run-started")?.data as { input: Record<string, unknown> }).input;
     delete process.env.SHIP_STEER_REPLY;
+    await enqueueRun(runtime, { runId: "run-def", task: "t", model: "m" });
+    assert.equal((await inputOf("run-def")).steerReply, true, "unset: the default is on");
+    process.env.SHIP_STEER_REPLY = "off";
     await enqueueRun(runtime, { runId: "run-off", task: "t", model: "m" });
     assert.ok(!JSON.stringify(await inputOf("run-off")).includes("steerReply"), "flag off: no input field at all");
-    process.env.SHIP_STEER_REPLY = "1";
-    await enqueueRun(runtime, { runId: "run-one", task: "t", model: "m" });
-    assert.equal((await inputOf("run-one")).steerReply, undefined, "`1` is not the grammar");
     process.env.SHIP_STEER_REPLY = "on";
     await enqueueRun(runtime, { runId: "run-on", task: "t", model: "m" });
     assert.equal((await inputOf("run-on")).steerReply, true);

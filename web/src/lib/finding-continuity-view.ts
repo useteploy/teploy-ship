@@ -1,7 +1,7 @@
 /**
  * The run page's finding-continuity block (S09, advisory). A read-time
  * projection of the `continuity` field the `scan-findings` step recorded when
- * the run was made with SHIP_FINDING_CONTINUITY=on. No step is added and
+ * the run was made with SHIP_FINDING_CONTINUITY admitting it. No step is added and
  * nothing is recomputed: a run made without the flag has no field and projects
  * to undefined, so its page is unchanged.
  *

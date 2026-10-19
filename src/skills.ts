@@ -8,7 +8,7 @@ import type { NucleusPgwire } from "./nucleus-pgwire.js";
 import { stateDir } from "./run-store.js";
 
 /**
- * Q4-a/b: the skills registry (SHIP_SKILLS, default off).
+ * Q4-a/b: the skills registry (SHIP_SKILLS, on unless explicitly off).
  *
  * A skill is TEXT an operator imported so this project's runs start with the
  * team's own checklists and conventions. Claude Code's SKILL.md format
@@ -450,8 +450,7 @@ export function normalizeRepoSkills(value: unknown): RepoSkillsMode | undefined 
 // ----------------------------------------------------------- materialise
 
 export function skillsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  const v = (env.SHIP_SKILLS ?? "").trim().toLowerCase();
-  return v === "on" || v === "1" || v === "true";
+  return !/^(0|false|no|off)$/i.test((env.SHIP_SKILLS ?? "").trim());
 }
 
 /**

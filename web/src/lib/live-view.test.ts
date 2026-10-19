@@ -59,7 +59,7 @@ test("live endpoint: flag off is a 503 with the reason, unknown or malformed run
   const off = deps({ principal: { user: "a", role: "admin" }, enabled: false });
   const r = await liveViewResponse(req, "run-1", off.deps);
   assert.equal(r.status, 503);
-  assert.match(await r.text(), /SHIP_LIVE_VIEW=on/);
+  assert.match(await r.text(), /SHIP_LIVE_VIEW/);
   const missing = deps({ principal: { user: "a", role: "admin" }, status: null });
   assert.equal((await liveViewResponse(req, "run-1", missing.deps)).status, 404);
   assert.equal((await liveViewResponse(req, "../x", missing.deps)).status, 404);

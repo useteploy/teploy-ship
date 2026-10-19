@@ -1,13 +1,14 @@
 /** Read-only browser acceptance checks against a running Ship deployment.
- * SHIP_URL, SHIP_WEB_TOKEN, SHIP_TEST_RUN are required. Install playwright or
+ * SHIP_URL, SHIP_WEB_TOKEN are required, plus the run id as the first
+ * argument. Install playwright or
  * set PLAYWRIGHT_MODULE to its module path. No runs are launched or approved.
  */
 import assert from 'node:assert/strict';
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const base = process.env.SHIP_URL;
 const token = process.env.SHIP_WEB_TOKEN;
-const run = process.env.SHIP_TEST_RUN;
-assert.ok(base && token && run, 'Set SHIP_URL, SHIP_WEB_TOKEN and SHIP_TEST_RUN');
+const run = process.argv[2];
+assert.ok(base && token && run, 'Set SHIP_URL and SHIP_WEB_TOKEN, and pass the run id as the first argument');
 const browser = await chromium.launch();
 try {
   const page = await browser.newPage({extraHTTPHeaders: {authorization: `Bearer ${token}`}});

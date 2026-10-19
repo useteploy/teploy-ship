@@ -43,12 +43,16 @@ async function row<T>(config: MemoryRuntimeConfig, key: string): Promise<T | nul
   return raw ? (JSON.parse(raw) as T) : null;
 }
 
-test("live view flag: only `on` enables it", () => {
-  assert.equal(liveViewEnabled({}), false);
-  assert.equal(liveViewEnabled({ SHIP_LIVE_VIEW: "1" }), false);
-  assert.equal(liveViewEnabled({ SHIP_LIVE_VIEW: "true" }), false);
+test("live view flag: on unless explicitly off (unset means on)", () => {
+  assert.equal(liveViewEnabled({}), true);
+  assert.equal(liveViewEnabled({ SHIP_LIVE_VIEW: "1" }), true);
+  assert.equal(liveViewEnabled({ SHIP_LIVE_VIEW: "true" }), true);
   assert.equal(liveViewEnabled({ SHIP_LIVE_VIEW: "on" }), true);
   assert.equal(liveViewEnabled({ SHIP_LIVE_VIEW: " ON " }), true);
+  assert.equal(liveViewEnabled({ SHIP_LIVE_VIEW: "off" }), false);
+  assert.equal(liveViewEnabled({ SHIP_LIVE_VIEW: "0" }), false);
+  assert.equal(liveViewEnabled({ SHIP_LIVE_VIEW: "false" }), false);
+  assert.equal(liveViewEnabled({ SHIP_LIVE_VIEW: "no" }), false);
 });
 
 test("latency budget: worker flush plus page poll stays inside the 5 s acceptance bound with headroom for the store", () => {

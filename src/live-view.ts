@@ -97,7 +97,7 @@ const SENSITIVE_EXCLUDE_PATHSPECS = SENSITIVE_BASENAME_PATTERNS.map((p) => `':(e
 export const SENSITIVE_FILE_NOTICE = "omitted (sensitive filename)";
 
 export function liveViewEnabled(env: { SHIP_LIVE_VIEW?: string } = process.env): boolean {
-  return (env.SHIP_LIVE_VIEW ?? "").trim().toLowerCase() === "on";
+  return !/^(0|false|no|off)$/i.test((env.SHIP_LIVE_VIEW ?? "").trim());
 }
 
 export const liveOutputKey = (runId: string): string => LIVE_OUTPUT_PREFIX + runId;

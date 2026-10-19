@@ -40,9 +40,9 @@ import type { ParsedFindings, ScanFinding } from "./findings.js";
 
 export const FINDING_CONTINUITY_FLAG = "SHIP_FINDING_CONTINUITY";
 
-/** On only for an explicit "on" (or 1/true). Anything else, including unset, is off. */
+/** On unless explicitly turned off (`0`/`false`/`no`/`off`); unset means on. */
 export function findingContinuityEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return /^(on|1|true)$/i.test((env[FINDING_CONTINUITY_FLAG] ?? "").trim());
+  return !/^(0|false|no|off)$/i.test((env[FINDING_CONTINUITY_FLAG] ?? "").trim());
 }
 
 type LoggedEvent = { type: string; name?: string; at?: string; data?: unknown };

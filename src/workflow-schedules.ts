@@ -97,10 +97,9 @@ export interface SweepOptions {
   log?: (line: string) => void;
 }
 
-/** SHIP_SCHEDULE_OVERLAP=on makes the worker enforce the overlap policy. Off by default. */
+/** SHIP_SCHEDULE_OVERLAP=off (or 0/false/no) turns the overlap policy off; unset means on. */
 export function scheduleOverlapEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  const v = env.SHIP_SCHEDULE_OVERLAP?.trim().toLowerCase();
-  return v === "on" || v === "1" || v === "true";
+  return !/^(0|false|no|off)$/i.test((env.SHIP_SCHEDULE_OVERLAP ?? "").trim());
 }
 
 /** Runs inspected per sweep; same bound the digest sweep uses. */

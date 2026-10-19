@@ -21,14 +21,15 @@ export const config = { mode: "app" };
  * authority grant beyond being signed in, because every authenticated role
  * can already read each run page the chain links to.
  *
- * Flag: SHIP_THREAD_VIEW=on (default off — 503 with the reason, the
- * incident-intake pattern, rather than a 404 that says nothing about why).
+ * Flag: SHIP_THREAD_VIEW (on unless explicitly off — 503 with the reason,
+ * the incident-intake pattern, rather than a 404 that says nothing about
+ * why).
  */
 export async function loader({ request, params }: LoaderArgs): Promise<Response> {
   const principal = await currentUser(request);
   if (principal === null) return json(401, { error: "unauthorized — send Authorization: Bearer <SHIP_WEB_TOKEN>" });
   if (!threadViewEnabled()) {
-    return json(503, { error: "thread view is not enabled — set SHIP_THREAD_VIEW=on" });
+    return json(503, { error: "thread view is not enabled — clear SHIP_THREAD_VIEW or set it on" });
   }
   const runId = (params as { id?: string }).id ?? "";
   if (runId === "") return json(400, { error: "run id is required" });

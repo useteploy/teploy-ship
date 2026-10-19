@@ -2709,7 +2709,8 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
         messages.push({ role: "user", content: PLAN_REQUEST });
         const planStep = await ws.ctx.step(`${p}plan-think`, async () => {
           const generated = await generateText({ model: config.model, messages });
-          // S07 plan grounding (advisory, SHIP_PLAN_GROUNDING, default off):
+          // S07 plan grounding (advisory, SHIP_PLAN_GROUNDING, on unless
+          // explicitly off):
           // computed INSIDE this step and attached as an additive `grounding`
           // field on its result — never a new step, so the recorded sequence is
           // a function of the input whatever the executing worker's env says,

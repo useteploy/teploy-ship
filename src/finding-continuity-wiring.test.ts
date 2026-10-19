@@ -226,7 +226,7 @@ test("flag on adds no step: the step sequence equals the flag-off sequence", asy
 });
 
 test("flag off: recorded output is byte-identical to the pre-S09 shape, even when the model sends the new fields", async () => {
-  await withFlag(undefined, async () => {
+  await withFlag("off", async () => {
     const h = await harness();
     await h.remote.commit({ "src/auth.js": AUTH_V1 });
     const summary = finish([{ ...SQLI, line: 2 }, { ...EVAL, line: 5 }]);
@@ -265,10 +265,11 @@ test("scanPrompt: byte-identical without the flag, asks for the fields with it",
   assert.match(scanPrompt({ ...base, revisionFields: true }), /`snippet`/);
 });
 
-test("findingContinuityEnabled is on only for an explicit on", () => {
-  assert.equal(findingContinuityEnabled({}), false);
+test("findingContinuityEnabled is on unless explicitly off", () => {
+  assert.equal(findingContinuityEnabled({}), true);
   assert.equal(findingContinuityEnabled({ [FINDING_CONTINUITY_FLAG]: "off" }), false);
-  assert.equal(findingContinuityEnabled({ [FINDING_CONTINUITY_FLAG]: "" }), false);
+  assert.equal(findingContinuityEnabled({ [FINDING_CONTINUITY_FLAG]: "0" }), false);
+  assert.equal(findingContinuityEnabled({ [FINDING_CONTINUITY_FLAG]: "" }), true);
   assert.equal(findingContinuityEnabled({ [FINDING_CONTINUITY_FLAG]: "on" }), true);
 });
 

@@ -200,15 +200,16 @@ suite itself, after the agent stops and before the push**, and puts the result
 in the pull request body. The agent's own account of its testing is not used —
 models get that wrong, which is why the check exists.
 
-`teploy.example.yml` and `install.sh` already set `SHIP_TESTS=1`; the first
+`teploy.example.yml` and `install.sh` already set `SHIP_TESTS=1` (the ask is
+also on by default since 2026-10-18, so an unset `SHIP_TESTS` asks too); the first
 run above carries a Verification section when the repo's suite can run where
 the run executes. Without a sandbox daemon that is the worker container, which
 has node, npm and git and nothing else: a JavaScript suite runs, a Go or Python
 suite reports "not run" (never "failed") until the sandbox daemon and its
-images are in (`docs/DEPLOY.md` — the sandbox daemon). To turn it on by hand:
+images are in (`docs/DEPLOY.md` — the sandbox daemon). To turn the ask off by hand:
 
 ```sh
-teploy secret set SHIP_TESTS=1
+teploy secret set SHIP_TESTS=0
 teploy deploy
 ```
 
@@ -295,7 +296,8 @@ you passed. This is the guard working, not a bug.
 **The pull request has no Verification section.** A worker wired for none of the
 evidence legs adds nothing to the body rather than printing "not tested, not
 deployed, not measured" — that would train you to skip the section that
-sometimes carries the real thing. Check `SHIP_TESTS=1`, and that the repo has a
+sometimes carries the real thing. Check `SHIP_TESTS` carries no explicit off
+value, and that the repo has a
 command: detection needs one of `package.json` `scripts.test`, a Makefile
 `test:` target, `go.mod`, `Cargo.toml` or pytest config at the root, otherwise
 set one on the Projects page.

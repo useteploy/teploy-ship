@@ -205,7 +205,7 @@ function post(id: string, fields: Record<string, string>): Request {
 }
 async function start(runId: string, flag: boolean): Promise<void> {
   if (flag) process.env.SHIP_STEER_REPLY = "on";
-  else delete process.env.SHIP_STEER_REPLY;
+  else process.env.SHIP_STEER_REPLY = "off";
   try {
     await enqueueRun(await shipRuntime(), { runId, repo: "https://github.com/team/repo", task: "Fix it", model: "test", source: "manual", trust: "operator" });
   } finally {
