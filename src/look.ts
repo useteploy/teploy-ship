@@ -14,6 +14,17 @@
 // allowlist, sha256, retention) tagged with the look-image data class, and
 // the durable step records the digest so replay can rebuild the ImagePart
 // from the store without re-screenshotting.
+//
+// ACTING on what a look observed is agent code by design (the tool-vocab
+// addendum §3: one observation verb, no click/type companions). The sandbox
+// images bake images/browser-helper/ship-browser.mjs to
+// /usr/local/lib/ship-browser.mjs, whose page()/byRef() join THIS session
+// (LOOK_CDP_PORT below) — so the code an agent writes in a ```bash block
+// drives the same browser the next look observes, instead of a second one
+// look cannot see. The helper grants no authority bash lacks: the egress
+// boundary for ANY process in the sandbox is the sandbox's own network tier
+// (LOOK_SEALED / LOOK_OPEN_PLAN gate the verb; agent code, the helper
+// included, was always able to run under whatever tier the container has).
 
 import { createHash } from "node:crypto";
 

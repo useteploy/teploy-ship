@@ -110,6 +110,18 @@ LABEL io.teploy.ship.stack="go" \
 COPY acp-driver/ship-acp.mjs /usr/local/bin/ship-acp
 RUN chmod 0755 /usr/local/bin/ship-acp && ship-acp --version
 
+# ship-browser, the acting half of the ```look session (S12, src/look.ts):
+# a tiny dependency-free module baked verbatim from images/browser-helper/
+# that agent code imports (by absolute path) to drive the SAME browser
+# session ```look observes — page() joins the session, byRef() turns a
+# snapshot's [ref=eN] into a Playwright locator. It sits in /usr/local/lib
+# so its own bare playwright import resolves against the global install
+# above, with no node_modules symlink. The import probe proves the baked
+# copy parses and exports page/byRef — and that importing it needs no
+# browser and no network.
+COPY browser-helper/ship-browser.mjs /usr/local/lib/ship-browser.mjs
+RUN node -e 'import("/usr/local/lib/ship-browser.mjs").then((m) => { if (typeof m.page !== "function" || typeof m.byRef !== "function") throw new Error("ship-browser.mjs lost its exports"); })'
+
 # --- harness browser MCP server (SHIP_HARNESS_BROWSER) -----------------------
 # A deliberately ISOLATED block (a separate lane is reworking the browser
 # section above): the browser MCP server external harnesses get when
