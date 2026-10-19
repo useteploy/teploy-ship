@@ -48,7 +48,8 @@ Make the foo parser accept RFC 3339 durations. Add tests.
   does not admit the action parses a ```delegate block as `none` — flag-off
   is byte-identical to a pre-feature run, the same equivalence `look` pins.
 - Offered in the system prompt only when `input.delegate === true`
-  (`SHIP_DELEGATE` — accepts `1`/`true`/`yes`, not `on` — materialised at enqueue, default off, suppressed on
+  (`SHIP_DELEGATE` — on unless explicitly turned off since 2026-10-18 —
+  materialised at enqueue, suppressed on
   scans — a scan holds no publish authority to hand down).
 - `repo=` and `path=` are scope HINTS, not authority: `repo=` is accepted only
   when it names exactly the parent's own repository (a workspace run cannot

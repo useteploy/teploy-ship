@@ -3,8 +3,8 @@
 Before D2, steering was one-way: an operator note was drained at the top of
 each turn (`turn-N-steer`, `src/durable.ts`) and injected as "Operator
 steering — adjust course accordingly: …". D2 adds three things on the
-**native** loop, behind `SHIP_STEER_REPLY=on` (only `on`; default off;
-materialised as `input.steerReply` at enqueue): the agent can reply, each
+**native** loop, behind `SHIP_STEER_REPLY` (on unless explicitly turned off
+since 2026-10-18; materialised as `input.steerReply` at enqueue): the agent can reply, each
 operator message carries a mode, and an operator can interrupt the action in
 flight. claude-code and opencode still refuse steering
 (`src/harness-capabilities.ts`); nothing here changes that.
