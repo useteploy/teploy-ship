@@ -9,6 +9,7 @@ import {
   diskPathCandidates,
   hostHold,
   hostLoad,
+  loadGateLimits,
   sandboxHostFromEnv,
   sandboxLimitsFor,
 } from "./host-load.js";
@@ -205,6 +206,35 @@ test("hostHold: the memory floor is class-aware for the run being admitted", () 
   assert.equal(hostHold(load({ freeMemMB: 600 + 512 }), LIMITS, 512), null, "exactly at the raised floor still launches");
   // Disk still outranks memory, and the raised floor cannot mask a full disk.
   assert.equal(hostHold(load({ freeMemMB: 100, disk: { freeMB: 900, usedPct: 99, inodeUsedPct: 41 } }), LIMITS, 512), "disk");
+});
+
+test("loadGateLimits: only a fully remote sandbox pool takes the worker host's load out of the gate", () => {
+  // none (no sandbox — the worker IS the executor), local and mixed pools all
+  // keep it: a mixed pool can still land a run on the loaded local box, and
+  // placement does not know host load.
+  for (const kind of ["none", "local", "mixed"] as const) {
+    assert.deepEqual(loadGateLimits(LIMITS, kind), LIMITS, `${kind}: the limits are unchanged`);
+  }
+  const remote = loadGateLimits(LIMITS, "remote");
+  assert.equal(remote.maxLoadPerCpu, 0, "0 is hostHold's load-check-off");
+  assert.equal(remote.minFreeMB, LIMITS.minFreeMB, "the memory floor still gates on the worker host");
+  assert.equal(remote.minFreeDiskMB, LIMITS.minFreeDiskMB);
+  assert.equal(remote.maxInodeUsedPct, LIMITS.maxInodeUsedPct);
+  assert.deepEqual(loadGateLimits(LIMITS, "remote", true), LIMITS, "SHIP_GATE_ON_LOCAL_LOAD restores the old behaviour");
+});
+
+test("a remote pool stops holding launches on worker-host load; memory and disk still hold", () => {
+  // The 2026-10-18 shape: the worker's box loaded (forge, CI), the sandbox
+  // hosts idle — and every launch waited ~80 minutes on load-per-cpu.
+  const loadedWorker = load({ load1: 40, freeMemMB: 2500 });
+  assert.equal(hostHold(loadedWorker, LIMITS), "load", "the gate as it was holds");
+  assert.equal(hostHold(loadedWorker, loadGateLimits(LIMITS, "remote")), null, "remote sandboxes launch anyway");
+  // The worker process itself, Nucleus and the log still run on this host.
+  assert.equal(hostHold(load({ load1: 40, freeMemMB: 400 }), loadGateLimits(LIMITS, "remote")), "memory");
+  assert.equal(
+    hostHold(load({ load1: 40, disk: { freeMB: 900, usedPct: 99, inodeUsedPct: 41 } }), loadGateLimits(LIMITS, "remote")),
+    "disk",
+  );
 });
 
 test("capacityPlan never returns 0 — a 0 ceiling wedges the worker; holding is hostHold's job", () => {

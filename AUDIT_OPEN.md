@@ -1,5 +1,50 @@
 # Open audit items
 
+## 2026-10-18 — leaked sandbox containers: runs that ended without releasing their workspace
+
+Found live on compute-1 (100.107.192.39) 2026-10-18: 14 running
+`teploy-sbx-*` containers, 44 minutes to 24 hours old, none owned by a
+live run. Every handle IS recorded — the `sandbox`/`*-restore` step
+results in `ship_stream` carry it as `0@<UPPERCASE-ULID>`; the container
+name lowercases it, which is why a naive `fields LIKE` search finds
+nothing. Ownership mapped via the metas: 11 were `waiting` at
+`approve-merge` (soak parks — containers alive by design, daemon TTL the
+bound), two `failed` (run-9688fcc9 at `repo-push`, run-request-90748c88),
+one `cancelled` while parked at `turn-8-ask` (run-request-aafce8ff). The leaks, all Ship-side:
+
+- **setup and publish throws** — `dispose` sat only on the normal return
+  paths and the one catch around `adapter.run` (durable.ts); a failed
+  `environment-prepare` rethrown from the setup catch, a `repo-push`
+  StepError, the multi-attempt loop's unprotected body, or a restore
+  interrupted by a cancellation all left the container allocated until
+  the daemon's TTL reaper noticed (`SHIP_SANDBOX_TTL_SEC` is sized at the
+  daemon maximum in production, so "up to a day").
+- **terminal without a final pass** — `cancelRun` on a parked run (and
+  the run-budget failure in `executeRun`) settle the next pass via the
+  terminal short-circuit BEFORE the workflow body runs, so no code of
+  ours executes at all: the parked container is never destroyed.
+
+Fixed (branch `fix/sandbox-leak`): the workflow body is wrapped so every
+non-suspension, non-nondeterminism exit settles by destroying every
+handle the run's log names (`workspaceHandles`), quiet and best-effort;
+and a defensive reconciler (`src/sandbox-reap.ts`, `SHIP_SANDBOX_REAP`,
+default `log`) lists the daemon's runs (`GET /v1/runs`, now exposed
+through the provider and pool) and destroys what no non-terminal run's
+log owns, past a `SHIP_SANDBOX_TTL_SEC` grace, never touching parked
+runs' containers or any snapshot (snapshot-gc owns images). Pinned in
+`src/durable.test.ts` (setup failure, mid-pass cancellation, park keeps
+its sandbox), `src/sandbox-pool.test.ts` (list fan-out, fail-closed) and
+`src/sandbox-reap.test.ts` (ownership, modes, fail-closed, 404-quiet).
+Owed: watch one production day of `[sandbox-reap]` log-mode lines, then
+set `SHIP_SANDBOX_REAP=on`. Same inspection, preview side: 11
+`ship-preview-proof-preview-p-*` containers 18–29 h old are the teploy
+CLI's platform previews (`teploy preview deploy --ttl 24h`,
+`/deployments/ship-preview-proof/previews/*.json`); the expired ones
+(ffd43af1, 104a385b, 61124497, cec131e8 by expires_at) survive because
+the teploy platform's own TTL reaper is not running on that host — not a
+Ship defect (Ship destroys on PR close/supersede via `destroyPreview`);
+reported to the teploy side by the orchestrator.
+
 ## 2026-10-17 — plan grounding saw nothing on plain-prose plans (GLM-5.3)
 
 Found live on production 2026-10-17 (A5 soak): with

@@ -6472,3 +6472,101 @@ test("DS1 negative: a conflicting stack rebase aborts, parks with the file list,
     globalThis.fetch = orig;
   }
 });
+
+test("a failed setup still releases the sandbox — the settle wrapper (found live 2026-10-18)", async () => {
+  // The shape of the live leak: a run whose environment-prepare step fails
+  // rethrows from the setup catch, which disposed nothing (only the
+  // environmentCheckOnly path did), and no later pass ever ran to clean up —
+  // run-9688fcc9 failed on repo-push the same way, from outside the one
+  // catch that disposed. The wrapper settles every non-park exit.
+  const bareDir = await mkdtemp(join(tmpdir(), "durable-settle-bare-"));
+  const seedDir = await mkdtemp(join(tmpdir(), "durable-settle-seed-"));
+  const seeder = new LocalExecutor({ root: seedDir });
+  await seeder.exec(`git init -q -b main . && git config user.email t@t && git config user.name t && touch f && git add -A && git commit -qm seed && git clone -q --bare . ${bareDir}/owner/repo.git`);
+
+  const destroyed: string[] = [];
+  const work = await mkdtemp(join(tmpdir(), "durable-settle-work-"));
+  const provider: ExecutorProvider = {
+    async create() {
+      return { handle: work };
+    },
+    attach(handle: string) {
+      return new LocalExecutor({ root: handle });
+    },
+    async destroy(handle: string) {
+      destroyed.push(handle);
+    },
+  };
+  const { model } = reactiveModel(["```finish\nnever reached\n```"]);
+  const store = new MemoryEventStore();
+  const wf = durableAgent({ model, executor: provider, loadEvents: (id) => store.load(id) });
+
+  const outcome = await executeRun({
+    workflow: wf,
+    runId: "run-settle",
+    store,
+    input: { task: "prepare then fix", repo: `file://${bareDir}/owner/repo.git`, preparation: { command: "exit 7", timeoutMs: 5000 } },
+  });
+
+  assert.equal(outcome.status, "failed");
+  assert.match(String(outcome.error?.detail ?? ""), /Environment preparation failed/);
+  assert.ok(destroyed.includes(work), "the sandbox is released even though the run failed before the agent loop");
+});
+
+test("a run cancelled mid-pass releases its sandbox too (the settle wrapper's cancellation path)", async () => {
+  const work = await mkdtemp(join(tmpdir(), "durable-cancel-work-"));
+  const destroyed: string[] = [];
+  const provider: ExecutorProvider = {
+    async create() {
+      return { handle: work };
+    },
+    attach(handle: string) {
+      return new LocalExecutor({ root: handle });
+    },
+    async destroy(handle: string) {
+      destroyed.push(handle);
+    },
+  };
+  const store = new MemoryEventStore();
+  // The model cancels the run as a side effect of its first turn; the next
+  // step boundary (the exec) throws the Cancellation that unwinds the pass.
+  const model: ModelAdapter = {
+    provider: "scripted",
+    modelId: "s1",
+    async doGenerate(): Promise<AdapterGenerateResult> {
+      await cancelRun(store, "run-cancel", "cancelled mid-pass");
+      return { content: [{ type: "text", text: "```bash\ntrue\n```" }], finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, raw: null };
+    },
+    async *doStream() {
+      throw new Error("unused");
+    },
+  };
+  const wf = durableAgent({ model, executor: provider, loadEvents: (id) => store.load(id) });
+
+  const outcome = await executeRun({ workflow: wf, runId: "run-cancel", store, input: { task: "x" } });
+  assert.equal(outcome.status, "cancelled");
+  assert.ok(destroyed.includes(work), "no sandbox outlives the cancelled run");
+});
+
+test("a parked run keeps its sandbox: the settle wrapper does not fire on a suspension", async () => {
+  const work = await mkdtemp(join(tmpdir(), "durable-park-work-"));
+  const destroyed: string[] = [];
+  const provider: ExecutorProvider = {
+    async create() {
+      return { handle: work };
+    },
+    attach(handle: string) {
+      return new LocalExecutor({ root: handle });
+    },
+    async destroy(handle: string) {
+      destroyed.push(handle);
+    },
+  };
+  const { model } = reactiveModel(["1. Do the thing\n2. Finish"]);
+  const store = new MemoryEventStore();
+  const wf = durableAgent({ model, executor: provider, loadEvents: (id) => store.load(id) });
+
+  const parked = await executeRun({ workflow: wf, runId: "run-park-keep", store, input: { task: "t", plan: true } });
+  assert.equal(parked.status, "waiting");
+  assert.deepEqual(destroyed, [], "the parked workspace is the run's to resume from");
+});
