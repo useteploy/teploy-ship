@@ -1,0 +1,31 @@
+# What never enters the Docker build context.
+#
+# The builder stage compiles dist/ and web/dist/ from the source in the
+# context (2026-10-18: four production deploys shipped a dist built hours
+# earlier while the image label carried the new git revision). Keeping the
+# host's own build outputs OUT of the context is half of that fix: a stale
+# local dist/ can neither be COPYed nor sit in the context pretending to be
+# current, and `COPY dist/ …` fails loudly instead of shipping old code.
+#
+# Keep this aligned with .teployignore (what `teploy deploy` syncs) —
+# scripts/check-image-sources.mjs fails CI when the two drift apart.
+.git
+.github
+.forgejo
+_internal
+docs
+evals
+examples
+images
+reference
+swebench
+node_modules
+web/node_modules
+dist
+web/dist
+deploy/vendor
+*.log
+ship-secrets.env
+*.secrets.env
+teploy.yml
+teploy.install.yml

@@ -12,11 +12,13 @@ test('fresh install stages the minimal config and all Docker inputs without oper
   try {
     const source = join(temp, 'source'), stage = join(temp, 'stage');
     mkdirSync(source); mkdirSync(stage);
-    const files = ['Dockerfile', '.teployignore', 'teploy.example.yml'];
+    const files = ['Dockerfile', '.teployignore', '.dockerignore', 'teploy.example.yml'];
     for (const file of files) writeFileSync(join(source, file), readFileSync(join(root, file)));
-    const artifacts = ['dist/cli.js', 'deploy/package.ship.json', 'deploy/package-lock.ship.json',
-      'deploy/package.web.json', 'deploy/package-lock.web.json', 'web/dist/index.html',
-      'web/src/routes/index.tsx', 'web/index.html', 'web/tsconfig.json', 'web/vite.config.ts', 'web/neutron.config.ts',
+    const artifacts = ['src/cli.ts', 'src/worker.ts', 'package.json', 'pnpm-lock.yaml', 'tsconfig.json',
+      'deploy/package.ship.json', 'deploy/package-lock.ship.json',
+      'deploy/package.web.json', 'deploy/package-lock.web.json', 'web/src/routes/index.tsx',
+      'web/public/favicon.svg', 'web/package.json', 'web/pnpm-lock.yaml',
+      'web/index.html', 'web/tsconfig.json', 'web/vite.config.ts', 'web/neutron.config.ts',
       'patches/@neutron-build__agents.patch'];
     for (const file of artifacts) {
       mkdirSync(join(source, file, '..'), { recursive: true });

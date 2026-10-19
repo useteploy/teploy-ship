@@ -57,12 +57,12 @@ ingress: host
 port: 7460
 platform: linux/amd64
 
-# No image: teploy syncs this directory (see .teployignore) and builds
-# from the root Dockerfile ON the server. Prerequisites, run locally
-# first: `pnpm run build`, `cd web && pnpm run build`, and the SDK
-# tarball pack from deploy/build-image.sh (the @neutron-build packages
-# are ahead of their npm releases, so the image installs them from
-# deploy/vendor/ tarballs).
+# No image: teploy syncs the SOURCE of this directory (see .teployignore)
+# and builds from the root Dockerfile ON the server, whose builder stage
+# compiles dist/ and web/dist/ from the synced source and lockfiles. A local
+# build is not part of the deploy path — 2026-10-18: four production deploys
+# shipped a dist/ built hours earlier under the new revision's label, which
+# is the failure mode compiling in the image removes.
 
 processes:
   # 2026-10-14: store moved Nucleus -> PostgreSQL (see docs/MIGRATE_STORE.md;
