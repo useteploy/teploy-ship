@@ -1514,7 +1514,7 @@ function DeliveryCard({ data }: { data: RunData }) {
       <span class={`status ${d.state === "confirmed" ? "completed" : d.state === "proposed" ? "waiting" : d.state === "approved" || d.state === "executing" || d.state === "unknown" ? "held" : "failed"}`}>{d.state}</span>
       <span class="meta">merged change</span>
     </div>
-    <table style="margin-top:10px">
+    <div class="table-wrap" style="margin:0"><table style="margin-top:10px">
       <tbody>
         {d.repo && <tr><td class="meta">repository</td><td><code>{d.repo}</code></td></tr>}
         {d.mergedSha && <tr><td class="meta">merged SHA</td><td><code>{d.mergedSha.slice(0, 12)}</code></td></tr>}
@@ -1526,7 +1526,7 @@ function DeliveryCard({ data }: { data: RunData }) {
         {d.health && <tr><td class="meta">health</td><td><span>{d.health}</span>{d.healthReason ? <span class="meta"> — {d.healthReason}</span> : null}</td></tr>}
         {d.rollback && <tr><td class="meta">rollback</td><td><code>{d.rollback.state}</code> by {d.rollback.actor}{d.rollback.evidence ? <span class="meta"> — {d.rollback.evidence}</span> : null}</td></tr>}
       </tbody>
-    </table>
+    </table></div>
     {d.reason && <p class="meta" style="margin-top:8px">{d.reason}</p>}
     {d.escalation && <p class="notice bad" role="alert">{d.escalation}</p>}
     {data.deliveryError && <p class="notice bad" role="alert">{data.deliveryError}</p>}

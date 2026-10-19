@@ -78,7 +78,7 @@ export default function Recovery({ data }: { data: Awaited<ReturnType<typeof loa
     {data.abandoned.length > 0 && (
       <section style="margin-top:24px">
         <h2>Abandoned launches (audit)</h2>
-        <table>
+        <div class="table-wrap" style="margin:0"><table>
           <tbody>
             {data.abandoned.map(d => <tr key={d.runId}>
               <td><code>{d.runId}</code></td>
@@ -87,7 +87,7 @@ export default function Recovery({ data }: { data: Awaited<ReturnType<typeof loa
               <td>{d.reason}</td>
             </tr>)}
           </tbody>
-        </table>
+        </table></div>
         <p class="meta">Abandoned records are retained, never deleted. Re-doing the work means a new request through normal intake.</p>
       </section>
     )}

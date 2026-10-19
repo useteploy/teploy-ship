@@ -419,7 +419,7 @@ function ManagedPanel({ p, drift }: { p: Project; drift: ManagedDrift[] }) {
           <p class="meta" style="margin:0 0 6px;color:var(--red)">
             Operator overrides — these fields differ from what Akiroo last applied. The next project row from Akiroo overwrites them.
           </p>
-          <table class="runs">
+          <div class="table-wrap" style="margin:0"><table class="runs">
             <thead>
               <tr><th>field</th><th>here (operator)</th><th>Akiroo last applied</th></tr>
             </thead>
@@ -432,7 +432,7 @@ function ManagedPanel({ p, drift }: { p: Project; drift: ManagedDrift[] }) {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </table></div>
         </>
       )}
     </div>

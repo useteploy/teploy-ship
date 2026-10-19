@@ -190,7 +190,7 @@ export default function Fleet({ data }: { data: FleetData | SpendData }) {
             <span class="status waiting">stalled</span>
             <span style="font-weight:600">{data.stalled.length} run{data.stalled.length === 1 ? "" : "s"} without progress for 30m+</span>
           </div>
-          <table style="margin-top:10px">
+          <div class="table-wrap" style="margin:0"><table style="margin-top:10px">
             <tbody>
               {data.stalled.map((s) => (
                 <tr key={s.runId}>
@@ -200,7 +200,7 @@ export default function Fleet({ data }: { data: FleetData | SpendData }) {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </table></div>
           <p class="meta" style="margin-top:8px">
             Detected from event logs, not status columns: a run here is either executing very slowly or not at all.
             Cancelling is an operator decision — open the run first.
