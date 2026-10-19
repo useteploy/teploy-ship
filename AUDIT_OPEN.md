@@ -562,6 +562,12 @@ Items an operator or reviewer should know:
   deploy-recovery reference, report totals) did **not** reproduce in CI on
   any wave-3 PR; they appeared only in agent sandboxes. Parallel agents sharing
   the fixed grading port 8901 is the leading suspect, unproven.
+  (Proven 2026-10-18 on the fix/grader-flake branch: concurrent loaded runs
+  failed 6/6 — during the grader's forced-503 probe another process's healthy
+  server held 8901, the probe deploy's own server could not bind, and its curl
+  read the other server's 200, so deploy.sh exited 0 and the correct reference
+  was rejected. The fixture and all deploy-recovery variants now boot `PORT=0`
+  and curl the port the server announces.)
 
 ## 2026-10-04 — grader sensitivity and UI audit (S02, S10)
 

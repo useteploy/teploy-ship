@@ -23,7 +23,8 @@ Private detail: `../_internal/SHIP_SESSION_STATE_2026-10-17-design.md` (append-o
 - **Gotchas:** the worker-container CLI writes to a file store, use the web API (`examples/http-client.mjs`,
   POST /projects to connect a project); the routing policy's review-role glm-5.3 entry has no `tools`
   capability so a glm-5.3 delegate target is refused (flash works); `scripts/grader-sensitivity.test.mjs`
-  flakes when lanes run suites in parallel (fixed port 8901 in frozen eval fixtures).
+  is parallel-safe since the deploy-recovery fixture and variants moved to ephemeral ports (was: fixed
+  port 8901 collided across concurrent suites).
 - **Owner:** dismiss the stale PR-watch proposals; a Gemini API key when H4 is ready.
 
 ## Where things stand (2026-10-16, end of the perception programme)
@@ -85,7 +86,7 @@ is A2; the wave-2 code lanes are L3, X2, X3/X4 (S15/S17), X5, and the rest of S0
 ## Working rules that paid off
 
 - One branch and PR per slice; merge only on green CI, pinned to the checked head; resolve conflicts by merging main in, never rewriting history (the S19 lane's triple conflict was resolved this way).
-- Parallel agents in isolated worktrees: own scratch dir each, skip `scripts/grader-sensitivity.test.mjs` locally (fixed port 8901); CI runs it. Give each lane the full spec in its prompt — truncated reports are cosmetic, verify by PR contents + CI.
+- Parallel agents in isolated worktrees: own scratch dir each; `scripts/grader-sensitivity.test.mjs` may be run locally by parallel lanes (deploy-recovery boots ephemeral ports since the 8901 flake fix). Give each lane the full spec in its prompt — truncated reports are cosmetic, verify by PR contents + CI.
 - Every wiring change: default-off equivalence test, a real-path test with the flag on, a negative control per rule.
 - Quote interpolated paths in command templates (PR #56).
 - Never redeploy from a stripped teploy.yml — deploy from the repo that owns the full one (the gateway incident, recorded in AUDIT_OPEN).
