@@ -212,6 +212,20 @@ export class SandboxPool implements ExecutorProvider {
         writeFileAs: (handle, cred, path, bytes) => route(handle, "to lease").writeFileAs(parsePoolHandle(handle).handle, cred, path, bytes),
       };
     }
+
+    // The reconciler's list (sandbox-reap.ts), same all-or-nothing rule. A
+    // host that refuses its list fails the whole call on purpose: the sweep
+    // must keep everything rather than reap around a host it cannot see.
+    if (this.#everyHostLists()) {
+      this.list = async () => {
+        const out: Array<{ handle: string; createdAt?: string; leaseHeld?: boolean }> = [];
+        for (let index = 0; index < this.#hosts.length; index++) {
+          const listed = await this.#hosts[index]!.provider.list!();
+          out.push(...listed.map((run) => ({ ...run, handle: poolHandle(index, run.handle) })));
+        }
+        return out;
+      };
+    }
   }
 
   /** What the Fleet page and the log want to know. */
@@ -404,6 +418,13 @@ export class SandboxPool implements ExecutorProvider {
   createFrom?: (image: string, overrides?: SandboxOverrides) => Promise<{ handle: string }>;
   /** Delete a snapshot image (D4-c), host-aware like the restore. */
   deleteSnapshot?: (image: string) => Promise<void>;
+  /**
+   * The reconciler's view (sandbox-reap.ts): every run the daemons hold,
+   * pool-tagged. All-or-nothing like snapshot: a pool that cannot be listed
+   * whole must not be reaped from partially — and any host refusing the list
+   * fails the call so the sweep keeps everything that pass.
+   */
+  list?: () => Promise<Array<{ handle: string; createdAt?: string; leaseHeld?: boolean }>>;
   /** Lease operations (Package C), present when every host can lease. */
   lease?: import("./durable.js").ExecutorProvider["lease"];
 
@@ -413,5 +434,9 @@ export class SandboxPool implements ExecutorProvider {
 
   #everyHostLeases(): boolean {
     return this.#hosts.every((h) => h.provider.lease !== undefined);
+  }
+
+  #everyHostLists(): boolean {
+    return this.#hosts.every((h) => h.provider.list !== undefined);
   }
 }

@@ -331,3 +331,37 @@ test("a refused create releases its reserved slot", async () => {
   await pool.create();
   assert.deepEqual(pool.state().map((s) => s.live), [0, 1], "the refusing host keeps no phantom reservation");
 });
+
+test("list fans out over every host with pool tags, and one refusing host fails the whole call", async () => {
+  const listing = (runs: Array<{ handle: string; createdAt?: string; leaseHeld?: boolean }>): ExecutorProvider => ({
+    isolated: true,
+    async create() {
+      return { handle: "unused" };
+    },
+    attach(handle: string) {
+      return { handle } as unknown as AgentExecutor;
+    },
+    list: async () => runs,
+  });
+  const a = listing([{ handle: "run-a1", createdAt: "2026-10-18T00:00:00.000Z" }, { handle: "run-a2", createdAt: "2026-10-18T01:00:00.000Z", leaseHeld: true }]);
+  const b = listing([{ handle: "run-b1" }]);
+
+  const pool = new SandboxPool({ hosts: [{ url: "http://a", provider: a }, { url: "http://b", provider: b }] });
+  assert.ok(pool.list !== undefined, "every host can list, so the pool can");
+  assert.deepEqual(await pool.list(), [
+    { handle: "0@run-a1", createdAt: "2026-10-18T00:00:00.000Z" },
+    { handle: "0@run-a2", createdAt: "2026-10-18T01:00:00.000Z", leaseHeld: true },
+    { handle: "1@run-b1" },
+  ], "daemon ids come back pool-tagged, the routing shape destroy expects");
+
+  // One host refusing the list fails the call: the sweep keeps everything
+  // rather than reap around a host it cannot see.
+  const failing: ExecutorProvider = { ...b, list: async () => { throw new Error("daemon down"); } };
+  const halfBlind = new SandboxPool({ hosts: [{ url: "http://a", provider: a }, { url: "http://b", provider: failing }] });
+  await assert.rejects(() => halfBlind.list!(), /daemon down/);
+
+  // A pool with even one list-less host has no list at all (all-or-nothing,
+  // the snapshot rule).
+  const listless = new SandboxPool({ hosts: [{ url: "http://a", provider: a }, { url: "http://b", provider: { ...b, list: undefined } }] });
+  assert.equal(listless.list, undefined);
+});
