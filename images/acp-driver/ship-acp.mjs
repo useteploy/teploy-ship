@@ -59,7 +59,7 @@ import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
-export const SHIP_ACP_DRIVER_VERSION = "1.1.0";
+export const SHIP_ACP_DRIVER_VERSION = "1.2.0";
 
 /**
  * The protocol this driver speaks and the only version it accepts in an
@@ -411,6 +411,30 @@ async function main() {
   }
   const maxSteps = Number.isInteger(spec.maxSteps) && spec.maxSteps > 0 ? spec.maxSteps : null;
   const cancelGraceMs = Number.isFinite(spec.cancelGraceMs) && spec.cancelGraceMs > 0 ? spec.cancelGraceMs : ACP_CANCEL_GRACE_MS;
+  // SHIP_HARNESS_BROWSER: the browser MCP servers the worker's spec names —
+  // passed through to session/new's mcpServers (protocol v1). Validated
+  // shallowly (name/command strings, args/env arrays of the right shapes)
+  // because the entries are Ship's own (harness-browser.ts), never operator
+  // text; a malformed entry is dropped, not guessed at. The agent spawns the
+  // server itself; it attaches over CDP to the run's Chromium session.
+  const mcpServers = (Array.isArray(spec.mcpServers) ? spec.mcpServers : [])
+    .filter(
+      (s) =>
+        s !== null &&
+        typeof s === "object" &&
+        typeof s.name === "string" &&
+        s.name.trim() !== "" &&
+        typeof s.command === "string" &&
+        s.command.trim() !== "",
+    )
+    .map((s) => ({
+      name: s.name,
+      command: s.command,
+      args: Array.isArray(s.args) ? s.args.filter((a) => typeof a === "string") : [],
+      env: Array.isArray(s.env)
+        ? s.env.filter((e) => e !== null && typeof e === "object" && typeof e.name === "string" && typeof e.value === "string")
+        : [],
+    }));
   // The exec request's own timeout is the hard boundary; the driver keeps a
   // backstop just inside it so the run records a driver error instead of a
   // killed process, whenever the agent stalls before answering.
@@ -733,12 +757,13 @@ async function main() {
     );
 
     const createSession = async () => {
+      const params = { cwd: workspaceRoot, ...(mcpServers.length > 0 ? { mcpServers } : {}) };
       try {
-        return await request("session/new", { cwd: workspaceRoot });
+        return await request("session/new", params);
       } catch (error) {
         if (error.acpError?.code !== -32000) throw error;
         await authenticateAfterRequired(spec.authMethodId, init.authMethods, error);
-        return await request("session/new", { cwd: workspaceRoot });
+        return await request("session/new", params);
       }
     };
     const created = await createSession();

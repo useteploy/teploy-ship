@@ -88,7 +88,11 @@ function acpDeclaration(id: string): HarnessDeclaration {
         reason:
           "vendor tools inside the sandbox, not Ship's tool layer; file-tool requests are workspace-gated — the ship-acp driver answers every permission request fail-closed (locations and path-like rawInput fields alike, symlink-safe, never allow-always) and records each decision; shell execution is unrestricted inside the sandbox container, where gVisor and the egress allowlist are the boundary",
       },
-      browser: { status: "refused", reason: "no browser wiring in the adapter (harness-acp.ts)" },
+      browser: {
+        status: "partial",
+        reason:
+          "a browser only under SHIP_HARNESS_BROWSER=on: session/new carries the baked Playwright MCP server over ACP's own mcpServers (harness-acp.ts, ship-acp driver >= 1.2), attached with --cdp-endpoint to the same per-run Chromium session the native ```look path drives; sealed tiers and the open tier without plan review are refused exactly like look (harness-browser.ts); support still depends on the individual agent honouring mcpServers; flag off (the default) there is no browser",
+      },
       interruption: {
         status: "partial",
         reason: "the exec timeout and the driver's tool-call budget (session/cancel past maxSteps); an operator interrupt needs H5's control file",
@@ -134,7 +138,11 @@ const DECLARATIONS: Record<string, HarnessDeclaration> = {
           "session resume (D7): the run records claude's session_id and pending notes are delivered into it as `--resume` execs at process boundaries (harness-external.ts harness-steer/harness-resume)",
       },
       tools: { status: "partial", reason: `vendor tools inside the sandbox, not Ship's tool layer; ${EXTERNAL_BYPASS}` },
-      browser: { status: "refused", reason: "no browser wiring in the adapter (harness-external.ts)" },
+      browser: {
+        status: "partial",
+        reason:
+          "a browser only under SHIP_HARNESS_BROWSER=on: the adapter wires the baked Playwright MCP server into claude's own --mcp-config and starts the same per-run Chromium session the native ```look path drives (--cdp-endpoint, harness-browser.ts); sealed tiers and the open tier without plan review are refused exactly like look (LOOK_SEALED/LOOK_OPEN_PLAN), and --bare (SHIP_CLAUDE_BARE=1) skips MCP entirely; flag off (the default) there is no browser",
+      },
       interruption: {
         status: "partial",
         reason: "only the exec timeout (harness-external.ts:66,481,502, default 30 min) and --max-turns/--max-budget-usd (:406-410)",
@@ -159,7 +167,11 @@ const DECLARATIONS: Record<string, HarnessDeclaration> = {
           "v2 line only (D6): the run drives a caller-chosen `--session` and pending notes are resumed into it at process boundaries (harness-external.ts harness-steer/harness-resume); the 1.x line records no session — a note on such a run is consumed with a recorded delivery refusal, never silently dropped",
       },
       tools: { status: "partial", reason: `vendor tools inside the sandbox, not Ship's tool layer; ${EXTERNAL_BYPASS}` },
-      browser: { status: "refused", reason: "no browser wiring in the adapter (harness-external.ts)" },
+      browser: {
+        status: "partial",
+        reason:
+          "a browser only under SHIP_HARNESS_BROWSER=on: the adapter merges the baked Playwright MCP server into the config blob it delivers (OPENCODE_CONFIG_CONTENT's mcp section, harness-browser.ts) and starts the same per-run Chromium session the native ```look path drives (--cdp-endpoint); sealed tiers and the open tier without plan review are refused exactly like look (LOOK_SEALED/LOOK_OPEN_PLAN); flag off (the default) there is no browser",
+      },
       interruption: { status: "partial", reason: "only the exec timeout (harness-external.ts:66,481,502, default 30 min); no turn or budget flag is passed" },
       approvals: { status: "refused", reason: `no park; ${EXTERNAL_BYPASS}` },
       recovery: { status: "refused", reason: "no stuck detection or settle for external runs" },
@@ -185,7 +197,11 @@ const DECLARATIONS: Record<string, HarnessDeclaration> = {
         reason:
           "vendor tools inside the sandbox, not Ship's tool layer; --dangerously-bypass-approvals-and-sandbox (harness-external.ts SPECS.codex), the vendor's flag for externally-sandboxed environments",
       },
-      browser: { status: "refused", reason: "no browser wiring in the adapter (harness-external.ts)" },
+      browser: {
+        status: "partial",
+        reason:
+          "a browser only under SHIP_HARNESS_BROWSER=on: the adapter passes the baked Playwright MCP server as --config mcp_servers.browser.* TOML overrides and starts the same per-run Chromium session the native ```look path drives (--cdp-endpoint, harness-browser.ts); sealed tiers and the open tier without plan review are refused exactly like look (LOOK_SEALED/LOOK_OPEN_PLAN); flag off (the default) there is no browser",
+      },
       interruption: {
         status: "partial",
         reason: "only the exec timeout (harness-external.ts externalHarnessConfig, default 30 min); codex exec has no turn- or dollar-cap flag to pass",
@@ -270,7 +286,8 @@ const REFUSALS: Record<HarnessOperation, string> = {
   "approval-park":
     "This harness cannot pause for an approval; it runs with permissions bypassed inside the sandbox. Use the native harness for runs that need approvals.",
   recovery: "This harness has no stuck detection or recovery. Use the native harness, or cancel the run and start a follow-up.",
-  browser: "This harness has no browser access in Ship. Use the native harness with a preview configured.",
+  browser:
+    "This harness has no browser access in this deployment: the external-harness browser needs SHIP_HARNESS_BROWSER=on on the worker and an image that bakes @playwright/mcp. Use the native harness, or ask the operator to turn the flag on.",
   interrupt: "This harness cannot be interrupted mid-run; it stops only at its time or turn limit. Cancel the run to discard it.",
   "use-tools": "This harness does not use Ship's tool layer.",
   investigate: "This harness cannot run investigations.",

@@ -138,6 +138,7 @@ version its log did not record.
 | `SHIP_HARNESS_TIMEOUT_MS` | Per-exec deadline for each vendor process. Default 1800000. A steered attempt runs at most `1 + STEER_ROUNDS_MAX` execs (main + resume rounds), each bounded by this. |
 | `SHIP_CLAUDE_BARE` | `1` adds `--bare` to claude: API-key auth only, no host context (hooks, CLAUDE.md, MCP). |
 | `SHIP_HARNESS_CRED` | `on` enables the sealed per-project credential store and the enqueue gates (see the sealed-credentials section below). Only the exact spelling `on` counts; anything else, including unset, is off, and off is byte-identical to the pre-H2 behaviour. |
+| `SHIP_HARNESS_BROWSER` | `on` gives every external harness a browser: the adapter wires the baked Playwright MCP server (`@playwright/mcp`, pinned in `images/versions.json`) into the harness's own MCP config and starts the same per-run Chromium session the native `look` path drives. Off (the default) changes nothing anywhere. See "A browser for external harnesses" below. |
 
 Default forwarded variables: claude-code `CLAUDE_CODE_OAUTH_TOKEN`,
 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`; opencode
@@ -325,6 +326,75 @@ that ran `env > x` must not publish or snapshot a key. Tuning values (a base
 URL, the opencode config blob) are not scanned: their exact bytes can be
 legitimate repository content.
 
+## A browser for external harnesses (`SHIP_HARNESS_BROWSER`)
+
+Off by default. On, every external harness gets a browser through a standard
+browser MCP server running INSIDE the run's sandbox:
+`@playwright/mcp` (pinned in `images/versions.json` as `browserMcp`,
+mirrored in `src/harness-browser.ts` as `BROWSER_MCP_PACKAGE`; baked into the
+node and go sandbox images by `images/build.sh` — never installed at run
+time). The server never launches a browser of its own: it attaches with
+`--cdp-endpoint http://127.0.0.1:9222` to the SAME persistent headless
+Chromium the native `look` path drives — the adapter writes look's own
+session script (`lookSessionScript(false)`, src/look.ts) and starts it
+detached inside the sandbox before the vendor exec, so native and external
+runs behave alike: one Chromium per run sandbox, on the same CDP port, proxy
+env decomposed the same way on the allowlist tier, dying with the container.
+A `look` run and a wired harness run never coexist (one harness per run), but
+either path finds the same session contract.
+
+Per-harness wiring, applied only when the flag is on and the gates below
+pass:
+
+| harness | mechanism |
+|---|---|
+| claude-code | `--mcp-config .teploy-agent/claude-mcp.json`, a `{"mcpServers":{"browser":…}}` file the adapter writes beside the prompt. `--bare` (`SHIP_CLAUDE_BARE=1`) skips host context including MCP, so a bare run ignores it — the browser wiring is not silently dropped, claude is. |
+| opencode | the server is merged into the config blob the adapter delivers: `OPENCODE_CONFIG_CONTENT`'s `mcp` section gains a `browser` local-command server (compact JSON, no line breaks). An operator blob that is not a JSON object cannot be extended, so the browser is refused with a note in the prompt — the run itself proceeds as it would have. The merge happens BEFORE the credential/destination checks, so those judge exactly the bytes the harness reads; the injected entry names no destination (loopback CDP only) and `opencodeConfigDestinations` admits exactly its strict shape — any other local command server keeps refusing as before. |
+| codex | `--config mcp_servers.browser.command/args` TOML overrides, the same dotted-path surface the teploy-gateway flags use. |
+| ACP agents | `session/new` carries `mcpServers` (stdio shape, the ACP v1 schema), so the AGENT spawns the server itself; the ship-acp driver (≥ 1.2) passes it through. Support depends on the individual agent honouring `mcpServers` — gemini is the profile wired end to end. |
+
+The server's tools (navigate, snapshot, click, …) are the vendor's own MCP
+tools, offered by the harness the way it offers its file tools: they are
+vendor tools inside the sandbox, not Ship's tool layer, and nothing they
+return is treated as evidence. Tool output flows through the harness's own
+output and Ship's existing exact-value scrub of the forwarded credentials
+(the MCP server adds no secret material — it is launched with no forwarded
+env beyond the exec's own).
+
+**Safety gates mirror `look` exactly** (src/harness-browser.ts
+`harnessBrowserWiring`, the same `sandboxOverridesOf` funnel the look gate
+reads, so the external-task downgrade applies):
+
+- **Sealed tier** (`network: none`): no browser. There is no egress a
+  browser could observe — the `LOOK_SEALED` rule — and the prompt tells the
+  agent so in those words.
+- **Open tier without plan review**: no browser — `LOOK_OPEN_PLAN`'s rule,
+  unrestricted egress needs a run whose plan an operator reviewed
+  (`input.plan`). Since external harnesses refuse plan-review runs outright,
+  an external browser effectively requires the allowlist tier (the default)
+  or an open run enqueued with plan review.
+- **Allowlist tier** (the default): wired. The sandbox egress allowlist is
+  the browser's boundary, exactly as it is for `look` — a page's host has to
+  be on the run's allowlist or the navigation dies with the daemon's refusal.
+
+A refused wiring runs the harness WITHOUT the browser and appends the reason
+to the prompt; a failed session start (no node, no playwright, no baked
+`playwright-mcp` in the image) is a recorded refusal on the `harness-run`
+step naming what to rebuild — the operator asked for a browser, and a silent
+downgrade would read as "the browser is flaky".
+
+The capability table declares `browser` **partial** for every external id,
+with the flag and gates in the reason: partial, not supported, because the
+default is off and the sealed/open gates refuse like look's.
+
+**Verified live** (2026-10-19): image build, the real session start from the
+repo's own `ensureRunBrowserSession`, and one navigate + snapshot + click
+against a static page over the MCP stdio protocol —
+`evals/receipts/2026-10-19-harness-browser-mcp.txt`. The per-harness config
+shapes (claude's `--mcp-config`, codex's TOML overrides, opencode's merged
+blob, ACP `mcpServers`) are pinned by unit and adapter tests; what still
+needs a live credential is one real steered vendor run per harness.
+
 ## claude-code
 
 Invocation (`src/harness-external.ts`):
@@ -333,8 +403,12 @@ Invocation (`src/harness-external.ts`):
 IS_SANDBOX=1 claude -p "$(cat .teploy-agent/harness-prompt.md)" \
   --output-format stream-json --verbose \
   --permission-mode bypassPermissions --max-turns <SHIP_MAX_STEPS> \
-  [--bare] [--model <SHIP_HARNESS_MODEL>] [--max-budget-usd <SHIP_MAX_RUN_COST_USD>]
+  [--bare] [--model <SHIP_HARNESS_MODEL>] [--max-budget-usd <SHIP_MAX_RUN_COST_USD>] \
+  [--mcp-config .teploy-agent/claude-mcp.json]
 ```
+
+The last flag rides only under `SHIP_HARNESS_BROWSER=on` with the tier gates
+passed — see "A browser for external harnesses" above.
 
 - `-p` / `--print` is non-interactive mode; `--output-format stream-json`
   emits one JSON object per line and the last is `{"type":"result",...}`
@@ -427,6 +501,11 @@ guess; the message names the pin and the receipt.
 - Provider credentials are the provider's own environment variables
   (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...) or an `OPENCODE_CONFIG_CONTENT`
   JSON. https://opencode.ai/docs/config/
+- Under `SHIP_HARNESS_BROWSER=on` the adapter merges the browser MCP server
+  into the config blob it delivers (`mcp.browser`, a local command server) —
+  before the credential/destination checks, so they judge the merged bytes;
+  the injected entry names no destination and every other local server in a
+  blob still refuses the enqueue gate under `SHIP_HARNESS_CRED` as before.
 
 fylun-code is an opencode overlay (a plugin), so it is driven through this
 same adapter; nothing in it changes the headless contract.
@@ -463,6 +542,7 @@ OpenAI's Codex CLI, pinned at `@openai/codex@0.163.0`
 ```
 codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox \
   [--model <SHIP_HARNESS_MODEL>] [--config <gateway provider, when AI_GATEWAY_URL is forwarded>] \
+  [--config mcp_servers.browser.* — under SHIP_HARNESS_BROWSER=on, see the browser section] \
   - < .teploy-agent/harness-prompt.md
 ```
 
@@ -672,6 +752,13 @@ binary and qwen's declared-journey verification (H9), Pi (RPC, not ACP; H6).
 The agent runs as the exec user today: the images define no unprivileged
 user yet, and H9's images are where `spec.agentUser` gets a real user to
 drop to.
+
+**Browser.** Under `SHIP_HARNESS_BROWSER=on` the driver sends the baked
+browser MCP server in `session/new`'s `mcpServers` (stdio shape, driver ≥
+1.2) and the adapter starts the shared Chromium session first — see
+"A browser for external harnesses" above. Support depends on the individual
+agent honouring `mcpServers`; gemini is the profile wired end to end, and
+the others get the same bytes.
 
 ## Cost honesty under a subscription (P5-3)
 

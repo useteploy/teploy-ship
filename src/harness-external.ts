@@ -2,6 +2,17 @@ import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 
 import { HARNESS_ALIAS_VERSIONS, HARNESS_PACKAGES, HARNESS_VERSIONS } from "./harness.js";
 import { PLAN_REVIEW_REFUSAL, refusalFor } from "./harness-capabilities.js";
+import {
+  CLAUDE_MCP_CONFIG_PATH,
+  type HarnessBrowserWiring,
+  claudeMcpConfig,
+  codexMcpConfigFlags,
+  ensureRunBrowserSession,
+  harnessBrowserPromptNote,
+  harnessBrowserWiring,
+  isHarnessBrowserMcpServer,
+  opencodeConfigWithBrowser,
+} from "./harness-browser.js";
 import type { HarnessCredentialRef, HarnessCredentialResolution } from "./harness-credentials.js";
 import { HARNESS_CRED_FLAG, harnessCredEnabled, harnessDestinationCheck, resolveCredentialOverlay } from "./harness-credentials.js";
 import type { SteerStore } from "./steer.js";
@@ -383,7 +394,12 @@ export function opencodeConfigDestinations(raw: string): OpencodeConfigDestinati
       const type = typeof server.type === "string" ? server.type.trim().toLowerCase() : "";
       const url = readString(server, "url");
       // Remote servers are derived and gated; anything else is a command
-      // Ship cannot judge.
+      // Ship cannot judge. The ONE exception is the local browser server
+      // Ship itself injects under SHIP_HARNESS_BROWSER (harness-browser.ts):
+      // it attaches to the run's own loopback CDP endpoint, so it names no
+      // data destination at all — anything else that is not a remote server
+      // with a readable url keeps refusing exactly as before.
+      if (type === "local" && isHarnessBrowserMcpServer(name, server)) continue;
       const host = type === "remote" && url !== undefined ? hostOf(url) : undefined;
       if (host === undefined) {
         return refuse("unreadable", `has a ${name} MCP server that is not a remote server with a readable url (a local command server's egress no derivation can judge)`);
@@ -1310,6 +1326,13 @@ interface ExecOpts {
   maxRunCostUSD: number;
   priced: boolean;
   forwarded: string[];
+  /**
+   * SHIP_HARNESS_BROWSER=on and the tier gates passed (harness-browser.ts):
+   * wire the baked browser MCP server into THIS invocation — the --mcp-config
+   * file for claude, the mcp_servers TOML overrides for codex (opencode rides
+   * the merged OPENCODE_CONFIG_CONTENT, not a flag).
+   */
+  browser?: true;
 }
 
 /**
@@ -1405,12 +1428,13 @@ interface CommandSpec {
 const claudeLine: LineSpec = {
   // claude refuses bypassPermissions as root unless it is told it is in a
   // sandbox; the sandbox image runs as root and IS a sandbox.
-  command: ({ config, maxSteps, maxRunCostUSD, priced }) =>
+  command: ({ config, maxSteps, maxRunCostUSD, priced, browser }) =>
     `IS_SANDBOX=1 claude -p "$(cat ${shq(PROMPT_PATH)})" --output-format stream-json --verbose ` +
     `--permission-mode bypassPermissions --max-turns ${maxSteps}` +
     (config.claudeBare ? " --bare" : "") +
     (config.model !== undefined ? ` --model ${shq(config.model)}` : "") +
-    (priced && maxRunCostUSD > 0 ? ` --max-budget-usd ${maxRunCostUSD.toFixed(2)}` : ""),
+    (priced && maxRunCostUSD > 0 ? ` --max-budget-usd ${maxRunCostUSD.toFixed(2)}` : "") +
+    (browser === true ? ` --mcp-config ${shq(CLAUDE_MCP_CONFIG_PATH)}` : ""),
   parse: (exec, priced) => {
     const parsed = parseClaudeStream(exec.stdout, priced);
     if (!parsed.sawResult && exec.exitCode !== 0) {
@@ -1422,12 +1446,13 @@ const claudeLine: LineSpec = {
   // recorded session — the same session-resume steering T3's Claude adapter
   // does through the Agent SDK (apps/server/src/orchestration-v2/Adapters/
   // ClaudeAdapterV2.ts: resume + a user message), on the CLI Ship drives.
-  steerResume: ({ config, maxSteps, maxRunCostUSD, priced, session, notePath }) =>
+  steerResume: ({ config, maxSteps, maxRunCostUSD, priced, session, notePath, browser }) =>
     `IS_SANDBOX=1 claude -p "$(cat ${shq(notePath)})" --output-format stream-json --verbose ` +
     `--permission-mode bypassPermissions --max-turns ${maxSteps} --resume ${shq(session)}` +
     (config.claudeBare ? " --bare" : "") +
     (config.model !== undefined ? ` --model ${shq(config.model)}` : "") +
-    (priced && maxRunCostUSD > 0 ? ` --max-budget-usd ${maxRunCostUSD.toFixed(2)}` : ""),
+    (priced && maxRunCostUSD > 0 ? ` --max-budget-usd ${maxRunCostUSD.toFixed(2)}` : "") +
+    (browser === true ? ` --mcp-config ${shq(CLAUDE_MCP_CONFIG_PATH)}` : ""),
 };
 
 function opencodeParse(using: (stdout: string) => ReturnType<typeof parseOpencodeStream> | ReturnType<typeof parseOpencode2Stream>) {
@@ -1499,10 +1524,11 @@ const codexLine: LineSpec = {
   // boundary (default-deny egress, disposable FS), and codex's nested
   // Landlock sandbox would be a second sandbox inside it, one that also
   // denies network egress under workspace-write.
-  command: ({ config, forwarded }) =>
+  command: ({ config, forwarded, browser }) =>
     `codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox` +
     (config.model !== undefined ? ` --model ${shq(config.model)}` : "") +
     codexGatewayConfigFlags(forwarded) +
+    (browser === true ? codexMcpConfigFlags() : "") +
     ` - < ${shq(PROMPT_PATH)}`,
   parse: (exec) => {
     const parsed = parseCodexExecStream(exec.stdout);
@@ -1604,8 +1630,25 @@ export function externalAdapter(
       // attempt's profile is not this one's to receive by name-collision.
       const credentials = await resolveCredentialOverlay(task.input.harnessCredentials, options.credentials, id);
       const credentialFailure = credentials.failure;
-      const runEnv: NodeJS.ProcessEnv =
+      let runEnv: NodeJS.ProcessEnv =
         credentialFailure === undefined && Object.keys(credentials.overlay).length > 0 ? { ...env, ...credentials.overlay } : env;
+      // SHIP_HARNESS_BROWSER (harness-browser.ts): decide this attempt's
+      // browser wiring from the worker's flag and the recorded input — the
+      // same tier/plan gates the native look action reads — and, for opencode
+      // only, merge the server into the config blob this exec will deliver.
+      // The merge runs BEFORE the armed secret set and the destination
+      // re-check below, so both judge exactly the bytes the harness reads;
+      // a blob the merge cannot read downgrades to a refused wiring (a note
+      // in the prompt, never a silently missing server), and the injected
+      // local entry derives no destination at all (opencodeConfigWithBrowser
+      // / isHarnessBrowserMcpServer).
+      const browserGate = harnessBrowserWiring(task.input, env);
+      let browser: HarnessBrowserWiring = browserGate;
+      if (browserGate.kind === "wired" && id === "opencode") {
+        const merged = opencodeConfigWithBrowser(runEnv.OPENCODE_CONFIG_CONTENT);
+        if ("refusal" in merged) browser = { kind: "refused", reason: merged.refusal };
+        else runEnv = { ...runEnv, OPENCODE_CONFIG_CONTENT: merged.content };
+      }
       // H2 hardening: arm the workspace's live secret set OUTSIDE every
       // recorded step. The step body below used to be the only place the
       // delivered values reached it, and a replayed or resumed run replays
@@ -1664,6 +1707,31 @@ export function externalAdapter(
             stderrTail: "",
           };
         }
+        // The wired browser's session has to be up before the vendor exec:
+        // the MCP server the harness spawns attaches to the run's own
+        // Chromium over CDP (the same session look drives), and a harness
+        // that finds no endpoint would only log a dead tool. A failed start
+        // is a recorded refusal — the operator asked for a browser, and a
+        // silent downgrade would read as "the browser is flaky".
+        if (browser.kind === "wired") {
+          const session = await ensureRunBrowserSession(ws.executor);
+          if (!session.ok) {
+            return {
+              exitCode: -1,
+              timedOut: false,
+              status: "error",
+              summary: `the browser was requested (SHIP_HARNESS_BROWSER=on) but ${session.reason} Nothing ran.`,
+              turns: 0,
+              usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, priced: false },
+              forwarded: [],
+              stderrTail: "",
+            };
+          }
+          // claude's config file is (re)written per exec: the finally below
+          // deletes it after EVERY exec, and a steering resume exec carries
+          // --mcp-config too — it must find the file there.
+          if (id === "claude-code") await ws.executor.putFile(CLAUDE_MCP_CONFIG_PATH, claudeMcpConfig());
+        }
         const config = externalHarnessConfig(id, runEnv);
         const forwarded = forwardEnv(config.forward, runEnv);
         const priced = spec.priced(forwarded.names);
@@ -1678,7 +1746,7 @@ export function externalAdapter(
           await writeFiles();
           const command =
             forwarded.prelude +
-            commandFor({ config, maxSteps: budget.maxSteps, maxRunCostUSD: budget.maxRunCostUSD, priced, forwarded: forwarded.names, ...(sessionFor !== undefined ? { session: sessionFor } : {}) });
+            commandFor({ config, maxSteps: budget.maxSteps, maxRunCostUSD: budget.maxRunCostUSD, priced, forwarded: forwarded.names, ...(browser.kind === "wired" ? { browser: true as const } : {}), ...(sessionFor !== undefined ? { session: sessionFor } : {}) });
           const execOptions = {
             timeoutMs: config.timeoutMs,
             maxOutputBytes: 16 * 1_048_576,
@@ -1736,7 +1804,7 @@ export function externalAdapter(
             stderrTail: "",
           };
         } finally {
-          await ws.executor.exec(`rm -f ${shq(PROMPT_PATH)} ${shq(STEER_PATH)}`, { timeoutMs: 30_000 }).catch(() => {});
+          await ws.executor.exec(`rm -f ${shq(PROMPT_PATH)} ${shq(STEER_PATH)} ${shq(CLAUDE_MCP_CONFIG_PATH)}`, { timeoutMs: 30_000 }).catch(() => {});
         }
       };
       const record = await ws.ctx.step(`${p}harness-run`, async (): Promise<HarnessRunRecord> => {
@@ -1760,7 +1828,7 @@ export function externalAdapter(
         const run = await execRecord(
           (opts) => line.command(opts),
           async () => {
-            await ws.executor.putFile(PROMPT_PATH, externalPrompt(task.prompt, task.input.mode));
+            await ws.executor.putFile(PROMPT_PATH, externalPrompt(task.prompt, task.input.mode) + harnessBrowserPromptNote(browser));
           },
           `${spec.binary} starting`,
         );

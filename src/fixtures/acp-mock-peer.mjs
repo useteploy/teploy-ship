@@ -306,7 +306,12 @@ const handleRequest = async (message) => {
     for (const name of (process.env.ACP_MOCK_RECORD_ENV ?? "").split(",").map((s) => s.trim()).filter((s) => s !== "")) {
       recorded[name] = process.env[name] ?? null;
     }
-    log({ event: "session-new", cwd, home: process.env.HOME ?? null, ...(Object.keys(recorded).length > 0 ? { env: recorded } : {}) });
+    // session/new mcpServers (SHIP_HARNESS_BROWSER): names the client asked
+    // us to spawn, so a test can pin what the driver passed through.
+    const mcpServers = Array.isArray(message.params?.mcpServers)
+      ? message.params.mcpServers.map((s) => (s !== null && typeof s === "object" ? { name: s.name ?? null, command: s.command ?? null } : null))
+      : null;
+    log({ event: "session-new", cwd, mcpServers, home: process.env.HOME ?? null, ...(Object.keys(recorded).length > 0 ? { env: recorded } : {}) });
     respond(message.id, { sessionId: SESSION_ID });
     return;
   }
