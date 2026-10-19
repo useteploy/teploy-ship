@@ -4,7 +4,8 @@
 #   ./install.sh --host 203.0.113.10 --user root mybox
 #
 # In order: provisions the server (teploy setup), collects secrets — generating
-# the ones it can, asking for the two it cannot — builds Ship and deploys.
+# the ones it can, asking for the two it cannot — and deploys Ship, whose image
+# compiles from this checkout on the server (no local Node/pnpm build).
 # Sandbox images are built only when a daemon is installed. See QUICKSTART
 # for measured timings; the latest minimal path still needs a clean timed pass.
 #
@@ -316,15 +317,13 @@ if [ "${skip_images}" -eq 0 ]; then
 fi
 
 # --------------------------------------------------------------------------
-# Build and deploy.
+# Deploy.
 # --------------------------------------------------------------------------
-say "building ship"
-for tool in pnpm node git; do
-  command -v "${tool}" >/dev/null 2>&1 || die "${tool} is not on PATH (needed to build the deploy artefacts)"
-done
-pnpm install --silent
-pnpm run build
-(cd web && pnpm install --silent && pnpm run build)
+# No local build: teploy syncs the SOURCE of this checkout (see
+# .teployignore) and the image's builder stage compiles dist/ and web/dist/
+# on the server, so what ships is tied to the code being deployed rather
+# than to whatever was last built on this laptop (2026-10-18 incident).
+say "deploying ship"
 
 # The destination overlay is applied to the minimal example in a private
 # staging directory, never to the maintainer's production teploy.yml.

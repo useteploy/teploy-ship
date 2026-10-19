@@ -199,8 +199,8 @@ version-skew policy**: there is no skew to manage, and you should not deploy
 them as separate apps in order to create some.
 
 ```sh
-# from a checkout of the release you want
-pnpm run build && (cd web && pnpm run build)
+# from a checkout of the release you want — nothing to build first:
+# the image compiles dist/ and web/dist/ from this checkout on the server
 teploy-ship preflight || exit 1      # §3a — refuses when a run in flight would be held
 teploy deploy
 ```

@@ -2,8 +2,14 @@
 # Build the teploy-ship container image.
 #
 # Usage:
-#   deploy/build-image.sh [image-tag]        # needs docker + pnpm
+#   deploy/build-image.sh [image-tag]        # needs docker
 #   deploy/build-image.sh --push [version]   # also pushes to GHCR (needs docker login)
+#
+# There is deliberately no local build step: the Dockerfile's builder stage
+# compiles dist/ and web/dist/ from the source in the build context (the
+# 2026-10-18 stale-dist fix), and .dockerignore keeps any host-built dist/
+# out of that context, so the tag below always labels code compiled from
+# this checkout.
 #
 # --push tags the image as the given version AND as `stable`, then pushes
 # both to ghcr.io/useteploy/teploy-ship. The `stable` tag is what the
@@ -28,11 +34,7 @@ if [ -n "${VERSION}" ]; then
   TAG="teploy-ship:${VERSION}"
 fi
 
-echo "==> building ship + web"
-pnpm run build
-(cd web && pnpm run build)
-
-echo "==> docker build ${TAG}"
+echo "==> docker build ${TAG} (compiles dist/ and web/dist/ in the builder stage)"
 docker build -t "${TAG}" .
 
 if [ "${PUSH}" -eq 1 ]; then
