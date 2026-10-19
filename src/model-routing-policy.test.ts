@@ -138,6 +138,33 @@ test("classifyFailure: a status the provider gave beats a misleading message", (
   assert.equal(classifyFailure(err("token refresh timed out", 401)), "auth");
 });
 
+// The 2026-10-19 SWE-bench finding, restated as classification: z.ai's
+// Anthropic-compatible endpoint reports `[1302][Rate limit reached for
+// requests][<id>]`, and @neutron-build/ai's AIError carries the HTTP status
+// as `problem.status` — which neither classifier used to read.
+const aiError = (message: string, status: number) => {
+  const error = new Error(message);
+  return Object.assign(error, { problem: { status } });
+};
+
+test("classifyFailure: the z.ai 1302 message classifies as a rate limit, however it arrives", () => {
+  // Bare message (no status anywhere) — the words carry it.
+  assert.equal(classifyFailure(new Error("[1302][Rate limit reached for requests][req-abc123]")), "rate-limit");
+  // AIError shape: the status lives on problem.status, not status.
+  assert.equal(classifyFailure(aiError("[1302][Rate limit reached for requests][req-abc123]", 429)), "rate-limit");
+  // The code alone, if a compat layer ever strips the words.
+  assert.equal(classifyFailure(err("request rejected: 1302", 400)), "rate-limit");
+  // A normalised 400 (compat layers do this) still refines to the message.
+  assert.equal(classifyFailure(aiError("Too many requests, slow down", 400)), "rate-limit");
+  // Overload text behind a 4xx is congestion, not "unknown".
+  assert.equal(classifyFailure(aiError("The server is temporarily overloaded", 400)), "overloaded");
+});
+
+test("classifyFailure: a 4xx that names nothing transient is still unknown", () => {
+  assert.equal(classifyFailure(aiError("model not found", 400)), "unknown");
+  assert.equal(classifyFailure(err("bad request shape", 422)), "unknown");
+});
+
 test("triggerFor: auth, context-length and unknown can never lead to a switch", () => {
   assert.equal(triggerFor("rate-limit"), "rate-limit");
   assert.equal(triggerFor("overloaded"), "outage");

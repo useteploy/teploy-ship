@@ -143,9 +143,9 @@ export type FailureClass =
   | "unknown";
 
 const statusOf = (error: unknown): number | undefined => {
-  const e = error as { status?: unknown; statusCode?: unknown } | null;
-  const s = e?.status ?? e?.statusCode;
-  return typeof s === "number" ? s : undefined;
+  const e = error as { status?: unknown; statusCode?: unknown; problem?: { status?: unknown } } | null;
+  const raw = e?.status ?? e?.statusCode ?? e?.problem?.status;
+  return typeof raw === "number" ? raw : undefined;
 };
 
 const MESSAGE_RULES: ReadonlyArray<[FailureClass, RegExp]> = [
@@ -153,7 +153,11 @@ const MESSAGE_RULES: ReadonlyArray<[FailureClass, RegExp]> = [
   ["context-length", /context length|context_length|context window|too many tokens|maximum context|prompt is too long/],
   ["content-filter", /content[_ -]?(filter|policy|management)|safety|refus|blocked by|violat.*policy/],
   ["auth", /invalid[_ ]api[_ ]key|unauthori[sz]ed|forbidden|authentication|permission denied|incorrect api key/],
-  ["rate-limit", /rate.?limit|too many requests|quota exceeded|\b429\b/],
+  // 1302 is z.ai's own code for "Rate limit reached for requests" and rides
+  // the message body of the Anthropic-shaped error (2026-10-19 SWE-bench
+  // finding), sometimes behind a status the provider normalised away from
+  // 429 — so the words AND the code both have to classify.
+  ["rate-limit", /rate.?limit|too many requests|quota exceeded|\b429\b|\b1302\b/],
   ["overloaded", /overload|capacity|\b529\b|\b503\b|service unavailable|temporarily/],
   ["network", /timeout|timed out|econnreset|econnrefused|etimedout|enotfound|eai_again|socket hang up|network|fetch failed|\b50[24]\b/],
 ];
@@ -161,7 +165,7 @@ const MESSAGE_RULES: ReadonlyArray<[FailureClass, RegExp]> = [
 /**
  * What kind of failure is this? Status code wins when present (it is the
  * provider's own statement); message text is the fallback and also refines a
- * 400. Anything unrecognised is `unknown`, which maps to no trigger: an error
+ * 4xx. Anything unrecognised is `unknown`, which maps to no trigger: an error
  * nobody understands is not grounds to send data elsewhere.
  *
  * 5xx other than 503/529 are `network` ("the transport or the server fell
@@ -179,7 +183,11 @@ export function classifyFailure(error: unknown): FailureClass {
     if (status === 413) return "context-length";
     if (status >= 500 && status <= 599) return "network";
     if (status >= 400 && status <= 499) {
-      for (const [cls, re] of MESSAGE_RULES) if ((cls === "context-length" || cls === "content-filter") && re.test(message)) return cls;
+      for (const [cls, re] of MESSAGE_RULES) {
+        if ((cls === "context-length" || cls === "content-filter" || cls === "rate-limit" || cls === "overloaded") && re.test(message)) {
+          return cls;
+        }
+      }
       return "unknown";
     }
   }

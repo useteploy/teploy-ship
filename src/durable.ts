@@ -105,6 +105,8 @@ import { condenseIfNeeded, defaultCondenseConfig } from "./memory.js";
 import type { CondenseConfig } from "./memory.js";
 import { RecoveryTracker, defaultRecoveryConfig } from "./recovery.js";
 import type { RecoveryConfig } from "./recovery.js";
+import { DEFAULT_RATE_LIMIT_PARK, markingRateLimits, withRateLimitPark } from "./rate-limit-park.js";
+import type { RateLimitParkInput } from "./rate-limit-park.js";
 import { loadRepoContext, runNote } from "./repo-memory.js";
 import type { ProjectStore } from "./projects.js";
 import type { RepoMemoryStore } from "./repo-memory.js";
@@ -500,6 +502,23 @@ export interface DurableAgentInput {
    *   live nondeterminism bug; input-level tuning is fixed at enqueue.
    */
   recovery?: boolean | RecoveryTuning;
+  /**
+   * Durable park-and-retry for provider rate limits (see rate-limit-park.ts).
+   *
+   * Like `recovery`'s thresholds, THE CEILING RIDES HERE and not in config,
+   * because it decides WHICH PARK a run gives up on: a worker that resolved
+   * it from its own env could fail a replaying run one park earlier than the
+   * log was written to, and that is live nondeterminism, not tuning. Enqueue
+   * materialises it from SHIP_RATE_LIMIT_MAX_WAIT_MIN (default 60m);
+   * `false` (SHIP_RATE_LIMIT_PARK=0) is the explicit fail-fast opt-out.
+   *
+   * ABSENT means the default ceiling — which is what every log written before
+   * this field carries, and none of those can hold a park: a rate-limited
+   * think step failed the run outright, so the parks, sleeps and markers this
+   * tuning governs only ever exist on paths that used to terminate. No step
+   * name changes and the fingerprint does not move.
+   */
+  rateLimitPark?: RateLimitParkInput;
   /**
    * Deliberate termination (default off): when the tree already holds a change
    * and successful commands stop changing it, the agent is verifying rather
@@ -1256,6 +1275,13 @@ export interface DurableAgentConfig {
    * listed here. Selection is by the run INPUT, never by this list.
    */
   harnesses?: HarnessAdapter[];
+  /**
+   * Where this worker's durable loop narrates provider rate-limit parks (one
+   * line per wait — rate-limit-park.ts). Absent is silence: the park itself
+   * is recorded in the event log and the run status says `sleeping` whether
+   * or not this is wired.
+   */
+  log?: (line: string) => void;
   /**
    * Where the run's live "now" hint is written (live.ts). Absent is fine:
    * the hint is advisory, written from inside executing steps only, and
@@ -2572,6 +2598,25 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
         if (interrupts.length > 0) out.push({ role: "user", content: boundaryInterruptMessage(interrupts) });
         return out;
       };
+      // Provider rate-limit park (rate-limit-park.ts; 2026-10-19 SWE-bench
+      // finding: 34/100 runs died to `[1302][Rate limit reached for
+      // requests]`, 13 on turn 0). The ceiling is a fact of the RECORDED
+      // INPUT — absent means the default, `false` means fail fast — so a
+      // replay parks exactly as many times as its log records. Every
+      // think-shaped model call goes through this (turn, plan, condense):
+      // a shared-key rate limit hits whichever call is in flight, and the
+      // run has already paid for every turn before it. The `.step(` calls
+      // themselves stay HERE, at their literal names, so the fingerprint's
+      // static extraction sees the same sequence it always did.
+      const parkTuning: RateLimitParkInput = input.rateLimitPark === false ? false : (input.rateLimitPark ?? DEFAULT_RATE_LIMIT_PARK);
+      const parkNotice = (stepName: string) => (n: { attempt: number; delayMs: number; waitedMs: number; maxTotalWaitMs: number; class: string; message: string }) => {
+        config.log?.(
+          `[durable] ${stepName}: provider ${n.class === "overloaded" ? "reporting overload" : "rate-limited the run"} ` +
+            `(${clipDetail(n.message, 120)}), parking ${Math.round(n.delayMs / 1000)}s — wait ${n.attempt}, ` +
+            `${Math.round(n.waitedMs / 60_000)}m of the ${Math.round(n.maxTotalWaitMs / 60_000)}m ceiling used`,
+        );
+        ws.live?.({ phase: "rate-limited", detail: `waiting ${Math.round(n.delayMs / 1000)}s on the provider rate limit` });
+      };
       // ...and image looks only on runs whose input admits THOSE: the model
       // id is part of the recorded contract (which model saw the pixels),
       // so the adapter is resolved from the input, never the live env.
@@ -2707,7 +2752,13 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
       // so a plan reviewed days later still has its workspace.
       if (input.plan === true) {
         messages.push({ role: "user", content: PLAN_REQUEST });
-        const planStep = await ws.ctx.step(`${p}plan-think`, async () => {
+        const planStep = await withRateLimitPark(ws.ctx, {
+          stepName: `${p}plan-think`,
+          park: parkTuning,
+          onPark: parkNotice(`${p}plan-think`),
+          run: () =>
+            ws.ctx.step(`${p}plan-think`, () =>
+              markingRateLimits(async () => {
           const generated = await generateText({ model: config.model, messages });
           // S07 plan grounding (advisory, SHIP_PLAN_GROUNDING, on unless
           // explicitly off):
@@ -2727,6 +2778,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
             }
           }
           return { text: generated.text, usage: generated.usage, ...(grounding !== undefined ? { grounding } : {}) };
+              })),
         });
         addUsage(planStep.usage);
 
@@ -2822,7 +2874,13 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
           messages = await condenseIfNeeded(
             messages,
             async (transcript) => {
-              const summaryStep = await ws.ctx.step(`${p}turn-${turn}-condense`, async () => {
+              const summaryStep = await withRateLimitPark(ws.ctx, {
+                stepName: `${p}turn-${turn}-condense`,
+                park: parkTuning,
+                onPark: parkNotice(`${p}turn-${turn}-condense`),
+                run: () =>
+                  ws.ctx.step(`${p}turn-${turn}-condense`, () =>
+                    markingRateLimits(async () => {
                 const generated = await generateText({
                   model: config.model,
                   system:
@@ -2837,6 +2895,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
                 // what the step records, and a replay returns those bytes
                 // without fencing them a second time.
                 return { text: untrusted(generated.text, "[recap, not the operator]"), usage: generated.usage };
+                    })),
               });
               addUsage(summaryStep.usage);
               return summaryStep.text;
@@ -2869,12 +2928,19 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
         // look model is cheaper, so the cost ceiling over-estimates and
         // stops early rather than late, which is the safe direction.
         const turnModel = lookImageAdapter !== undefined && historyCarriesImage(messages) ? lookImageAdapter : config.model;
-        const generatedStep = await ws.ctx.step(`${p}turn-${turn}-think`, async () => {
+        const generatedStep = await withRateLimitPark(ws.ctx, {
+          stepName: `${p}turn-${turn}-think`,
+          park: parkTuning,
+          onPark: parkNotice(`${p}turn-${turn}-think`),
+          run: () =>
+            ws.ctx.step(`${p}turn-${turn}-think`, () =>
+              markingRateLimits(async () => {
           // Inside the step, so a replay (which returns the recorded result
           // without running this body) never writes a stale "thinking".
           ws.live?.({ phase: "thinking", turn });
           const generated = await generateText({ model: turnModel, messages, maxOutputTokens: config.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS });
           return { text: generated.text, usage: generated.usage };
+              })),
         });
         const step = typeof generatedStep === "string" ? { text: generatedStep, usage: undefined } : generatedStep;
         const thought = step.text;

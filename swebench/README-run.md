@@ -152,12 +152,24 @@ never be misattributed after the fact. The durable rows add `arm`, the verbatim
 `durableInput`, `outcome` (the raw RunOutcome status), `turns`, and counts read
 off the event log: `thinks`, `execs`, `searches`, `criticDiffs`, `criticRuns`,
 `condenses`, `steers`, `fingerprints`, `treeChecks`, `failedSteps`, `parked`,
-and `indexNote` (the `repo-index` step's own account of itself).
+`rateLimitParks`, and `indexNote` (the `repo-index` step's own account of
+itself).
 
 **Read `execs` and `thinks` first.** A durable row with zero execs means the
 provider never attached and the arm measured nothing — the durable equivalent of
 the `searches: 0` trap. **`parked` must be false**: a parked run has no operator
 to approve it, so the harness aborts if the first instance parks.
+
+**`rateLimitParks` is the 2026-10-19 number.** 34 of 100 Verified runs on that
+sweep ended `status=error` with
+`Step "turn-N-think" failed: [1302][Rate limit reached for requests][<id>]`
+(z.ai's Anthropic-compatible coding-plan endpoint, 13 at turn 0) — provider
+rate limiting, not model quality, cost about a third of the score. Since then
+the harness wraps its model with the product's `withRetry` + per-call timeout,
+and the durable loop PARKS a rate-limited think and wakes itself (the wake loop
+in `runDurable` stands in for the worker's scheduler), bounded by
+`SHIP_RATE_LIMIT_MAX_WAIT_MIN`. `rateLimitParks` counts how often that park
+carried a run the old code would have lost.
 
 Two fields are **not comparable across arms**: `snapshots` (durable's
 fingerprint, critic-diff and index reads all go through the wrapped executor,

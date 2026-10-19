@@ -24,7 +24,7 @@ const { anthropic, createAnthropic } = await import(join(here, "..", "node_modul
 // same reason every configuration constant is echoed at startup further down.
 // runAgent is NOT imported here any more: driveLoop owns both arms, so the
 // choice of loop is made in a module a test can import.
-const { DIST_REQUIREMENTS, assertNoExistingLog, driveLoop, durableArmFromEnv, provenance, teeStore } = await import(
+const { DIST_REQUIREMENTS, assertNoExistingLog, driveLoop, durableArmFromEnv, provenance, teeStore, wrapHarnessModel } = await import(
   join(here, "durable-run.mjs")
 );
 
@@ -149,13 +149,21 @@ function buildModel(id) {
     CRITIC ? "critic on" : "critic off",
     CODE_INDEX ? "index on" : "index off",
     DURABLE ? `durable loop (${DURABLE_ARM} arm)` : "live loop",
+    "retry+timeout (product policy)",
   ].join(", ");
+  // wrapHarnessModel (durable-run.mjs) applies the product's own transport
+  // policy — withRetry over transient provider failures, then the per-call
+  // timeout — so a sweep measures what a production run executes. Until
+  // 2026-10-19 this was a bare createAnthropic with NO retry at all, which is
+  // how one rate-limited key turned 34 of 100 instances into errors: the
+  // product's four in-call retries never ran, and the durable arm's
+  // park-and-retry did not exist.
   if (url && key) {
     console.error(`  (routing through ${url} — ${notes})`);
-    return createAnthropic({ baseURL: url, apiKey: key })(id, opts);
+    return wrapHarnessModel(createAnthropic({ baseURL: url, apiKey: key })(id, opts), { log: (line) => console.error(`  ${line}`) });
   }
   console.error(`  (direct anthropic — ${notes})`);
-  return anthropic(id, opts);
+  return wrapHarnessModel(anthropic(id, opts), { log: (line) => console.error(`  ${line}`) });
 }
 const { containerExecutor } = await import(join(here, "container-executor.mjs"));
 const { withDiffSnapshots } = await import(join(here, "executor-snapshot.mjs"));
@@ -628,7 +636,7 @@ ${inst.problem_statement}`;
       console.error(
         `  loop=${diag.loop} status=${diag.status} steps=${diag.steps} durationMs=${diag.durationMs} patchLen=${diag.patchLen}` +
           ` everEdited=${diag.everEdited} snapshots=${diag.snapshots}` +
-          (DURABLE ? ` execs=${diag.execs} searches=${diag.searches} criticRuns=${diag.criticRuns} parked=${diag.parked}` : "") +
+          (DURABLE ? ` execs=${diag.execs} searches=${diag.searches} criticRuns=${diag.criticRuns} parked=${diag.parked} parks=${diag.rateLimitParks}` : "") +
           (CODE_INDEX && !DURABLE ? ` searches=${diag.searches}` : ""),
       );
       appendFileSync(RUNLOG_PATH, JSON.stringify(diag) + "\n");

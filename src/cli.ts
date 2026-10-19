@@ -59,6 +59,7 @@ import { refusalMessage } from "./publish-policy.js";
 import { defaultApprovalPolicy, resolveApprovalPolicy } from "./approval.js";
 import { secretEnvNames } from "./guard.js";
 import { durableAgent, durableRecoveryInput, repoKeyOf, sandboxProvider } from "./durable.js";
+import { rateLimitParkInput } from "./rate-limit-park.js";
 import { isAskEvent } from "./ask.js";
 import { SandboxPool, parseSandboxUrls } from "./sandbox-pool.js";
 import {
@@ -1056,6 +1057,8 @@ async function executePass(
   const provider = durableProvider(args, config);
   const wf = durableAgent({
     model: resolveModel(modelId),
+    // Rate-limit parks narrate to the operator's terminal (rate-limit-park.ts).
+    log: (line) => process.stderr.write(`${dim(line)}\n`),
     // Image looks route through the same resolution path (the model id comes
     // from the run input; an input that never admitted one never asks).
     lookImageModel: resolveModel,
@@ -1092,6 +1095,10 @@ async function executePass(
     ...(opts?.plan === true ? { plan: true } : {}),
     ...(opts?.critic === true ? { critic: true } : {}),
     ...durableRecoveryInput(opts),
+    // Same materialisation enqueueRun does (runtime.ts): the rate-limit park
+    // ceiling is a fact of the run input, so a resumed CLI run replays the
+    // parks its log records whatever this shell's env says later.
+    ...rateLimitParkInput(),
   });
   if (outcome === null) return null; // another executor holds the lease
   const previous = await runtime.loadMeta(runId);
@@ -1125,6 +1132,16 @@ function reportOutcome(runId: string, outcome: RunOutcome | null): void {
       break;
     case "cancelled":
       process.stderr.write(`${yellow("cancelled")}${outcome.error?.detail !== undefined ? ` — ${outcome.error.detail}` : ""}\n`);
+      break;
+    case "sleeping":
+    case "retrying":
+      // A provider rate-limit park (rate-limit-park.ts). The process exits
+      // here; resume re-runs the pass when the wake comes due —
+      // `teploy-ship runs` watches it, and a resident worker drives the wake
+      // itself.
+      process.stderr.write(
+        `${yellow(outcome.status)} — waiting out a provider rate limit${outcome.wakeAt !== undefined ? ` until ${outcome.wakeAt}` : ""}.\n  watch: ${bold(`teploy-ship runs`)}\n`,
+      );
       break;
     case "failed":
       process.stderr.write(`${red("failed")} — ${outcome.error?.detail ?? ""}\n`);

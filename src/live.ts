@@ -36,7 +36,9 @@ export type LivePhase =
   /** The agent has asked the operator something and is parked on the answer. */
   | "asking"
   /** A delegated child run holds the turn (S20/S22): the parent parks on its result. */
-  | "delegating";
+  | "delegating"
+  /** The provider rate-limited the run; it is parked on a bounded backoff (rate-limit-park.ts). */
+  | "rate-limited";
 
 export interface LiveState {
   runId: string;
@@ -81,7 +83,7 @@ export function clipDetail(text: string, max = 160): string {
   return line.length > max ? `${line.slice(0, max - 3)}...` : line;
 }
 
-const PHASES: ReadonlySet<string> = new Set(["thinking", "running", "harness", "verifying", "asking", "delegating"]);
+const PHASES: ReadonlySet<string> = new Set(["thinking", "running", "harness", "verifying", "asking", "delegating", "rate-limited"]);
 
 function readState(runId: string, raw: Record<string, unknown>): LiveState | null {
   const phase = String(raw.phase ?? "");

@@ -31,6 +31,20 @@ export const defaultRetryPolicy: RetryPolicy = {
 };
 
 /**
+ * An error's HTTP status, wherever the adapter put it. @neutron-build/ai's
+ * AIError carries it as `problem.status` (not `status`), and the 2026-10-19
+ * SWE-bench run showed why that matters: z.ai's Anthropic-compatible endpoint
+ * reports `[1302][Rate limit reached for requests]` with HTTP 429, so reading
+ * only `status`/`statusCode` demoted a plain rate limit to a message-regex
+ * guess. Unknown shapes stay undefined, which is the message path.
+ */
+export function errorStatusOf(error: unknown): number | undefined {
+  const e = error as { status?: unknown; statusCode?: unknown; problem?: { status?: unknown } } | null;
+  const raw = e?.status ?? e?.statusCode ?? e?.problem?.status;
+  return typeof raw === "number" ? raw : undefined;
+}
+
+/**
  * Is this worth trying again?
  *
  * Retrying a permanent error wastes the budget and delays the real failure, so
@@ -39,8 +53,7 @@ export const defaultRetryPolicy: RetryPolicy = {
  * fail identically, and condensation is what addresses it.
  */
 export function isRetryable(error: unknown): boolean {
-  const status = (error as { status?: number; statusCode?: number } | null)?.status ??
-    (error as { statusCode?: number } | null)?.statusCode;
+  const status = errorStatusOf(error);
   if (typeof status === "number") {
     if (status === 429) return true;
     if (status >= 500 && status <= 599) return true;
@@ -49,9 +62,55 @@ export function isRetryable(error: unknown): boolean {
   const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
   if (/context length|context_length|too many tokens|maximum context/.test(message)) return false;
   if (/invalid[_ ]api[_ ]key|unauthorized|forbidden|not found/.test(message)) return false;
-  return /rate.?limit|429|overload|timeout|timed out|econnreset|econnrefused|etimedout|socket hang up|network|temporarily|503|502|504/.test(
+  // 1302 is z.ai's rate-limit code and arrives in the message body of the
+  // Anthropic-shaped error: "[1302][Rate limit reached for requests][<id>]".
+  return /rate.?limit|429|1302|overload|timeout|timed out|econnreset|econnrefused|etimedout|socket hang up|network|temporarily|503|502|504/.test(
     message,
   );
+}
+
+/**
+ * A provider Retry-After, in ms, when the error exposes one — as a number
+ * (`retryAfterMs`), a string (`retryAfter`, seconds per HTTP or an
+ * HTTP-date), or a headers-like record. The current @neutron-build/ai
+ * adapters do NOT surface response headers on their errors, so today this is
+ * usually undefined and the fixed backoff stands; the lookup exists so the
+ * day an adapter (or a gateway) does expose it, the wait respects the
+ * provider's own number instead of guessing — and the durable park
+ * (rate-limit-park.ts) reads the same field to lengthen a park.
+ */
+export function retryDelayMsFromError(error: unknown): number | undefined {
+  const e = error as { retryAfterMs?: unknown; retryAfter?: unknown; headers?: unknown } | null | undefined;
+  if (e === null || e === undefined || typeof e !== "object") return undefined;
+  if (typeof e.retryAfterMs === "number" && Number.isFinite(e.retryAfterMs) && e.retryAfterMs >= 0) {
+    return e.retryAfterMs;
+  }
+  const fromRaw = (raw: unknown, ms: boolean): number | undefined => {
+    if (typeof raw !== "string" || raw.trim() === "") return undefined;
+    const trimmed = raw.trim();
+    if (/^\d+(\.\d+)?$/.test(trimmed)) {
+      const value = Number(trimmed) * (ms ? 1 : 1000);
+      return Number.isFinite(value) && value >= 0 ? value : undefined;
+    }
+    const at = Date.parse(trimmed); // HTTP-date form
+    return Number.isNaN(at) ? undefined : Math.max(0, at - Date.now());
+  };
+  const headers = e.headers;
+  if (typeof (headers as { get?: unknown } | null | undefined)?.get === "function") {
+    const got = (headers as { get: (name: string) => unknown }).get("retry-after");
+    if (got !== null && got !== undefined) return fromRaw(String(got), false);
+  }
+  if (typeof headers === "object" && headers !== null) {
+    const h = headers as Record<string, unknown>;
+    const ms = h["retry-after-ms"];
+    if (ms !== undefined) {
+      const value = fromRaw(String(ms), true);
+      if (value !== undefined) return value;
+    }
+    const seconds = h["retry-after"] ?? h["Retry-After"];
+    if (seconds !== undefined && seconds !== null) return fromRaw(String(seconds), false);
+  }
+  return fromRaw(e.retryAfter, false);
 }
 
 export function backoffFor(attempt: number, policy: RetryPolicy): number {
@@ -81,9 +140,16 @@ export function withRetry(
       } catch (error) {
         lastError = error;
         if (n === policy.attempts || !isRetryable(error)) break;
-        const delay = backoffFor(n, policy);
+        // Honour the provider's own Retry-After when the error carries one
+        // (retryDelayMsFromError): waiting less than asked just burns an
+        // attempt. Capped at maxDelayMs — a longer pause belongs to the
+        // DURABLE park (rate-limit-park.ts), not to a worker slot held
+        // in-call.
+        const retryAfter = retryDelayMsFromError(error);
+        const delay = retryAfter !== undefined ? Math.min(Math.max(backoffFor(n, policy), retryAfter), policy.maxDelayMs) : backoffFor(n, policy);
         log(
-          `[model] ${what} failed (attempt ${n}/${policy.attempts}), retrying in ${delay}ms: ` +
+          `[model] ${what} failed (attempt ${n}/${policy.attempts}), retrying in ${delay}ms` +
+            `${retryAfter !== undefined && retryAfter > delay ? " (provider Retry-After capped by the policy ceiling)" : ""}: ` +
             `${error instanceof Error ? error.message : String(error)}`,
         );
         await sleep(delay);
