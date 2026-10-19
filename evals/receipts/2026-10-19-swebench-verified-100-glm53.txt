@@ -21,15 +21,30 @@ Reports: ~/swebench-score/teploy-agent-durable+glm-5.3.verified-{a,b}.json
 (resolved_ids; the harness's total_instances field records the 500-row
 dataset, not the evaluated subset).
 
-Reading
-- When the loop submits a patch it is almost always right (89% resolve);
-  the losses concentrate in NO-PATCH outcomes (36/100), which include runs
-  ending in the runlog's "stuck" terminal status (e.g. the first shard-a
-  record: stuck at 38 steps, ~10 min) as well as give-ups. Raising the
-  submission rate — un-sticking or persuading — is worth more than patch
-  quality on this stack.
-- Single run, no retries, n=100 sample: treat 57% as +/- roughly 10 points
-  (95% CI ~47-66) before quoting it anywhere external.
+Reading (corrected 2026-10-19 after reading every run's event log)
+- Outcome by runlog status:
+      status     runs  patched  resolved
+      finished    18      18       17
+      max-steps   18      18       15
+      stuck       30      25       23
+      error       34       3        2
+  "stuck" is NOT the loss: stuck runs that had edited resolve 23/25.
+- ALL 34 error runs failed on the same thing: the provider's rate limit,
+  `Step "turn-N-think" failed: [1302][Rate limit reached for requests]`
+  (13 of them at turn 0, before doing anything). Two shards, the critic and
+  concurrent opencode lanes shared one z.ai coding-plan key. The harness's
+  buildModel used a bare createAnthropic with no retry wrapper, and the
+  product's own retry (4 attempts, <=20s backoff) would also have given up.
+- So 57/100 is a FLOOR set by infrastructure, not model quality. Excluding
+  rate-limited runs, the loop resolved 55/66 = 83%. That 83% is NOT a
+  publishable number either (the 34 errored instances are not a random
+  subset: django/matplotlib-heavy) — the honest number needs the 34 re-run.
+- Follow-ups: (1) durable park-and-retry on provider rate limits so a
+  rate limit never fails a run (also a production bug), and the harness
+  wrapping the product's retry; (2) re-run the 34 errored instances on the
+  fixed build without sharing the key, score, and publish the combined
+  figure; (3) only then look at max-steps (18 runs hit the 40-step cap).
+- Single run, n=100 sample: any final figure carries roughly +/-10 points
+  of 95% confidence before quoting externally.
 
-Not done here: per-repo breakdown, cost accounting, and a full-500 run are
-deliberately left for a follow-up if the number is needed publicly.
+Not done here: per-repo breakdown, cost accounting, and a full-500 run.
