@@ -9,7 +9,7 @@ import { generateText } from "@neutron-build/ai";
 import type { ImagePart, Message, ModelAdapter, UserContentPart } from "@neutron-build/ai";
 import { SandboxExecutor } from "@neutron-build/agents";
 import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
-import { isSuspension, workflow } from "@neutron-build/workflow";
+import { isSuspension, NondeterminismError, workflow } from "@neutron-build/workflow";
 import type { WorkflowContext, WorkflowDefinition, WorkflowEvent } from "@neutron-build/workflow";
 
 import { DEFAULT_MAX_OUTPUT_TOKENS, executeAction, workspaceFingerprint } from "./agent.js";
@@ -57,6 +57,7 @@ import {
   publishedDiff,
 } from "./git.js";
 import { deployPreview, resolvePreviewTarget, destroyPreview, type PreviewOutcome, type PreviewTarget } from "./deploy.js";
+import { workspaceHandles } from "./sandbox-reap.js";
 import { supersedePreviews, type PreviewLineage, type SupersedeOutcome } from "./preview-supersede.js";
 import {
   effectiveAuthority,
@@ -1049,6 +1050,13 @@ export interface ExecutorProvider {
    */
   destroy?: (handle: string) => Promise<void>;
   /**
+   * The daemon's live runs, when the provider can ask for them (the
+   * sandbox daemon's `GET /v1/runs`). Handles are the same ids `create`
+   * returns; `createdAt` and `leaseHeld` are what the reconciler
+   * (sandbox-reap.ts) needs to decide what no live run owns.
+   */
+  list?: () => Promise<Array<{ handle: string; createdAt?: string; leaseHeld?: boolean }>>;
+  /**
    * A streamed exec, when the provider can deliver output as it happens
    * (the sandbox daemon's exec is SSE). Same result as `attach(h).exec`;
    * the chunks feed the live hint. Absent means output arrives at exit.
@@ -1473,9 +1481,10 @@ export function durableAgent(
     ...(config.githubToken !== undefined ? { githubToken: config.githubToken } : {}),
   };
 
-  return workflow<DurableAgentInput, DurableAgentOutput>(
-    config.name ?? "coding-agent",
-    async (ctx: WorkflowContext, input: DurableAgentInput): Promise<DurableAgentOutput> => {
+  // The workflow body, named so the settle wrapper below can hold it. A bare
+  // const, not an inner workflow: everything it closes over (workdir,
+  // maxSteps, basePolicy) is decided above, unchanged.
+  const agentBody = async (ctx: WorkflowContext, input: DurableAgentInput): Promise<DurableAgentOutput> => {
       if(input.environmentCheckOnly === true && (!input.repo || input.environmentCheck !== true || input.mode !== "scan"))throw new Error("A setup-only check requires a repository and read-only environment verification");
       // Untrusted work needs isolation, and the check belongs HERE rather than
       // at process start: a worker that refuses to boot is a worker whose
@@ -2435,9 +2444,62 @@ export function durableAgent(
         ...(pr !== null ? { pr } : {}),
         ...(scanned !== null ? { findings: scanned.findings } : {}),
       };
+    };
+  // THE SETTLE WRAPPER (found live 2026-10-18: 14 leaked teploy-sbx containers
+  // on one host). `dispose` sat only on the normal exit paths and the one
+  // catch around `adapter.run`, so every OTHER throw between the `sandbox`
+  // step and the return — a failed setup or publish step, the multi-attempt
+  // loop, a restore interrupted by a cancellation — left the run's container
+  // allocated until the daemon's TTL reaper noticed, up to
+  // SHIP_SANDBOX_TTL_SEC later. Settling on every non-park exit closes all of
+  // those at one seam: destroy every handle the log names, best-effort and
+  // quiet (a superseded handle's 404 is the common case, not an error).
+  //
+  // NOT a suspension and NOT nondeterminism: a park (approval, ask, plan,
+  // merge, delegate, retry sleep) keeps its container alive by design, and a
+  // NondeterminismError leaves the run re-executable once the code is fixed —
+  // its workspace must survive that. A cancellation settles: the run is
+  // over. Runs that went terminal without a final pass (cancelled while
+  // parked, the total-budget failure) never reach this wrapper at all; the
+  // sandbox-reap reconciler is the backstop for those.
+  return workflow<DurableAgentInput, DurableAgentOutput>(
+    config.name ?? "coding-agent",
+    async (ctx: WorkflowContext, input: DurableAgentInput): Promise<DurableAgentOutput> => {
+      try {
+        const output = await agentBody(ctx, input);
+        await settleWorkspaces(config, ctx.runId);
+        return output;
+      } catch (error) {
+        await settleWorkspaces(config, ctx.runId, error);
+        throw error;
+      }
     },
     config.runTimeout !== undefined ? { timeout: config.runTimeout } : {},
   );
+}
+
+/**
+ * Best-effort workspace release on a run's exit from a pass. Never throws —
+ * it runs in the wrapper's finally position, where a second error would mask
+ * the original one — and stays quiet by design: the handles a normal return
+ * already disposed answer 404, and that is the expected case, not something
+ * an operator needs on the log (dispose itself still narrates its own
+ * failures on the paths that own them).
+ */
+async function settleWorkspaces(config: DurableAgentConfig, runId: string, cause?: unknown): Promise<void> {
+  if (config.executor.destroy === undefined || config.loadEvents === undefined) return;
+  if (cause !== undefined && (isSuspension(cause) || cause instanceof NondeterminismError)) return;
+  let events: readonly { type: string; name?: string; data?: unknown }[];
+  try {
+    events = await config.loadEvents(runId);
+  } catch {
+    return;
+  }
+  for (const handle of workspaceHandles(events)) {
+    await config.executor.destroy(handle).catch(() => {
+      // quiet by design — see the comment above
+    });
+  }
 }
 
 
@@ -5468,6 +5530,34 @@ export function sandboxProvider(options: {
     },
     async destroy(handle: string) {
       await SandboxExecutor.attach(handle, base).destroy();
+    },
+    async list(): Promise<Array<{ handle: string; createdAt?: string; leaseHeld?: boolean }>> {
+      const doFetch = base.fetch ?? globalThis.fetch;
+      const response = await doFetch(`${base.baseURL.replace(/\/+$/, "")}/v1/runs`, {
+        headers: { authorization: `Bearer ${base.token}` },
+      });
+      if (!response.ok) {
+        let detail = `Sandbox list failed with status ${response.status}.`;
+        try {
+          const problem = (await response.json()) as { detail?: unknown };
+          if (typeof problem.detail === "string") detail = problem.detail;
+        } catch {
+          // non-JSON body
+        }
+        throw new Error(detail);
+      }
+      const parsed = (await response.json()) as { runs?: Array<{ id?: unknown; createdAt?: unknown; lease?: { expiresAt?: unknown } | null }> };
+      const out: Array<{ handle: string; createdAt?: string; leaseHeld?: boolean }> = [];
+      for (const run of parsed.runs ?? []) {
+        if (typeof run.id !== "string" || run.id === "") continue;
+        const expiresAt = typeof run.lease?.expiresAt === "string" ? Date.parse(run.lease.expiresAt) : NaN;
+        out.push({
+          handle: run.id,
+          ...(typeof run.createdAt === "string" ? { createdAt: run.createdAt } : {}),
+          ...(Number.isFinite(expiresAt) ? { leaseHeld: expiresAt > Date.now() } : {}),
+        });
+      }
+      return out;
     },
   };
 }

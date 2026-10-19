@@ -33,6 +33,7 @@ import { changeClassRequired, sweepBulletin } from "./bulletin.js";
 import { parseSandboxUrls } from "./sandbox-pool.js";
 import { sweepThreadWarm, threadWarmStore, warmThreadEnabled } from "./thread-warm.js";
 import { parkSnapshotSweeper } from "./snapshot-gc.js";
+import { resolveSandboxReapMode, sandboxReaper } from "./sandbox-reap.js";
 import { attributionsFrom } from "./attributed-spend.js";
 import {
   deliveryFromEvents,
@@ -1729,6 +1730,29 @@ export function startWorker(options: WorkerOptions): {
     : undefined;
   parkSnapshotTimer?.unref?.();
 
+  // Sandbox reconciler (sandbox-reap.ts): the daemon's live runs that no
+  // non-terminal run owns — the runs that went terminal without a final
+  // pass (cancelled while parked, the total-budget failure) and the workers
+  // that died mid-run. Same minute cadence and never-throws posture as the
+  // snapshot sweeper. Destructive only under SHIP_SANDBOX_REAP=on; the
+  // default `log` mode names candidates so it can be watched before it
+  // deletes anything. Absent on a provider that cannot list or destroy.
+  const sandboxReap = executor.list !== undefined && executor.destroy !== undefined
+    ? sandboxReaper(
+        {
+          list: () => executor.list!(),
+          listMeta: (listOptions) => options.runtime.listMeta(listOptions),
+          loadEvents: (runId) => options.runtime.store.load(runId),
+          destroy: (handle) => executor.destroy!(handle),
+        },
+        { mode: resolveSandboxReapMode(process.env.SHIP_SANDBOX_REAP), log },
+      )
+    : undefined;
+  const sandboxReapTimer = sandboxReap !== undefined
+    ? setInterval(() => { void sandboxReap.sweep().catch((error) => log(`[sandbox-reap] sweep failed: ${error instanceof Error ? error.message : String(error)}`)); }, 60_000)
+    : undefined;
+  sandboxReapTimer?.unref?.();
+
   // The policy store is dashboard-authoritative; seed it from the env defaults
   // once (first run) so an operator who never opens the UI keeps the same
   // behavior, then let store edits win on every subsequent sweep.
@@ -2383,6 +2407,7 @@ export function startWorker(options: WorkerOptions): {
       if (selfwatchTimer !== undefined) clearInterval(selfwatchTimer);
       if (threadWarmTimer !== undefined) clearInterval(threadWarmTimer);
       if (parkSnapshotTimer !== undefined) clearInterval(parkSnapshotTimer);
+      if (sandboxReapTimer !== undefined) clearInterval(sandboxReapTimer);
       clearInterval(driveTimer);
       // The wait the rewritten shutdown dropped: a sweep that was mid-pass
       // when the timers cleared. The chain never rejects (every leg catches),
