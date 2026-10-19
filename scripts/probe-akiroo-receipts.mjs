@@ -7,9 +7,9 @@ import { NucleusDeliveryLog } from "../dist/deliveries.js";
 import { NucleusOutbox, flushOutbox } from "../dist/outbox.js";
 import { sweepAkiroo } from "../dist/akiroo.js";
 
-const url = process.env.SHIP_TEST_NUCLEUS_URL;
+const url = process.argv[2];
 if (!url || !["localhost", "127.0.0.1", "[::1]"].includes(new URL(url).hostname)) {
-  throw new Error("Set SHIP_TEST_NUCLEUS_URL to an isolated loopback test database");
+  throw new Error("Pass the URL of an isolated loopback test database as the first argument");
 }
 const db = new NucleusPgwire(url, "akiroo-receipt-probe");
 try {

@@ -234,8 +234,9 @@ are rejected instead of silently skipping it. External scan prompts request
 findings and verification results, with no edited-tree deliverable.
 
 A repeatable read-only production browser check is available as
-`scripts/workspace-browser-check.mjs`. Provide `SHIP_URL`, `SHIP_WEB_TOKEN` and
-`SHIP_TEST_RUN`, with Playwright installed (or `PLAYWRIGHT_MODULE` pointing to
+`scripts/workspace-browser-check.mjs`. Provide `SHIP_URL` and `SHIP_WEB_TOKEN`
+and pass the run id as the first argument, with Playwright installed (or
+`PLAYWRIGHT_MODULE` pointing to
 its entry module). It checks eighteen desktop/tablet/mobile pages, hydration,
 live JSON and unsent-draft retention without launching or approving runs.
 

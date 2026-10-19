@@ -6,8 +6,9 @@ import {MemoryEventStore,executeRun} from '@neutron-build/workflow';
 import {durableAgent,sandboxProvider} from '../dist/durable.js';
 import {policyFromEnv} from '../dist/repo-policy.js';
 import {safeForDisplay} from '../dist/redact.js';
-if(process.env.SHIP_ISOLATED_CHECK!=='1'||!process.env.SHIP_CHECK_REPO||!process.env.SHIP_CHECK_COMMAND)throw new Error('Explicit isolated fixture required');
-const repo=process.env.SHIP_CHECK_REPO;
+const argv=process.argv.slice(2),arg=n=>{const i=argv.indexOf(`--${n}`);return i===-1?undefined:argv[i+1]};
+if(process.env.SHIP_ISOLATED_CHECK!=='1'||!arg('repo')||!arg('command'))throw new Error('Explicit isolated fixture required: --repo <clone-url> --command <cmd> [--expected <status>]');
+const repo=arg('repo');
 let modelCalls=0,destroyed=0;
 const handles=[];
 const model={provider:'disabled',modelId:'no-model',async doGenerate(){modelCalls++;throw new Error('Model must not be called')},async *doStream(){modelCalls++;throw new Error('Model must not be called')}};
@@ -19,7 +20,7 @@ const store=new MemoryEventStore(),runId=`setup-proof-${randomUUID()}`;
 try{
  const result=await executeRun({runId,store,workflow:durableAgent({model,executor:provider,workdir:'/work',repoPolicy:policyFromEnv({...process.env,SHIP_REPO_ALLOWLIST:repo})}),input:{
   task:'Isolated deterministic setup proof',repo,trust:'operator',mode:'scan',environmentCheck:true,environmentCheckOnly:true,
-  preparation:{command:'python3 --version',timeoutMs:30000},testCommand:process.env.SHIP_CHECK_COMMAND,testTimeoutMs:120000,
+  preparation:{command:'python3 --version',timeoutMs:30000},testCommand:arg('command'),testTimeoutMs:120000,
   sandboxEgressAllow:[new URL(repo).host],
  }});
  const events=await store.load(runId),steps=events.filter(e=>e.type==='step-completed').map(e=>e.name);
@@ -28,6 +29,6 @@ try{
  assert.equal(destroyed,handles.length,'sandbox release completed');
  assert.ok(steps.every(s=>['sandbox','repo-setup','environment-prepare','environment-check'].includes(s)));
  console.log(JSON.stringify({status:result.status,modelCalls,sandboxes:handles.length,destroyed,steps,check:check?.data}));
- assert.equal(result.status,process.env.SHIP_CHECK_EXPECTED||'completed');
+ assert.equal(result.status,arg('expected')||'completed');
 }catch(error){console.error(safeForDisplay(error instanceof Error?error.message:String(error)));process.exitCode=1}
 finally{for(const h of handles)await destroy(h).catch(()=>{})}
