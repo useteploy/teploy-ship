@@ -110,4 +110,16 @@ LABEL io.teploy.ship.stack="go" \
 COPY acp-driver/ship-acp.mjs /usr/local/bin/ship-acp
 RUN chmod 0755 /usr/local/bin/ship-acp && ship-acp --version
 
+# --- harness browser MCP server (SHIP_HARNESS_BROWSER) -----------------------
+# A deliberately ISOLATED block (a separate lane is reworking the browser
+# section above): the browser MCP server external harnesses get when
+# SHIP_HARNESS_BROWSER=on (src/harness-browser.ts). @playwright/mcp, pinned in
+# images/versions.json, installed WITHOUT a browser download — it attaches
+# with --cdp-endpoint to the same per-run Chromium session the image's
+# playwright already drives. No second Chromium, ever.
+ARG PLAYWRIGHT_MCP_VERSION=0.0.83
+RUN PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" \
+    && npm cache clean --force \
+    && playwright-mcp --version
+
 WORKDIR /work

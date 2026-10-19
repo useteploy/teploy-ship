@@ -45,6 +45,21 @@
     "is what a .ship/flow.mjs proof script and the visual rung both use."
   ],
   "playwright": "1.63.0",
+  "$comment_browser_mcp": [
+    "The browser MCP server for EXTERNAL harnesses (SHIP_HARNESS_BROWSER,",
+    "src/harness-browser.ts): @playwright/mcp, attached with --cdp-endpoint to",
+    "the run's own Chromium session — it never launches a browser of its own,",
+    "so it is installed with PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 and rides the",
+    "system Chromium the image already bakes. BROWSER_MCP_PACKAGE in",
+    "src/harness-browser.ts mirrors this pin; a test fails when they drift.",
+    "Flags verified against 0.0.83's own --help (evals/receipts/",
+    "2026-10-19-harness-browser-mcp.txt)."
+  ],
+  "browserMcp": {
+    "npm": "@playwright/mcp",
+    "version": "0.0.83",
+    "binary": "playwright-mcp"
+  },
   "harnesses": {
     "$comment": [
       "The vendor coding agents an external harness adapter drives",

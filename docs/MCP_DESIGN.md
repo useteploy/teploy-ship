@@ -155,7 +155,14 @@ usual). Both steps are gated on `input.mcp` in `WORKFLOW_STEPS`.
 ## Not in this slice
 
 Approval parks for `approval: always`/`on-write` tools; OAuth flows; MCP
-resources, prompts and sampling; long-lived stdio sessions; external harness
-(claude-code/opencode) MCP pass-through; a dashboard editor for the `mcp`
-field; per-exec env forwarding in the sandbox daemon (needed only if stdio
-secrets are ever allowed).
+resources, prompts and sampling; long-lived stdio sessions; a dashboard
+editor for the `mcp` field; per-exec env forwarding in the sandbox daemon
+(needed only if stdio secrets are ever allowed).
+
+One pass-through exists since 2026-10-19, deliberately narrow and separate
+from this client: `SHIP_HARNESS_BROWSER=on` wires ONE Ship-baked browser MCP
+server into the external harnesses' own MCP configs (claude `--mcp-config`,
+opencode's config blob, codex `--config` overrides, ACP `session/new`
+mcpServers), so the vendor agent — not this loop — is the MCP client. See
+docs/adapters.md "A browser for external harnesses". General project-record
+MCP pass-through to external harnesses remains out of scope here.

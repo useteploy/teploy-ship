@@ -1,0 +1,87 @@
+=== SHIP_HARNESS_BROWSER live proof — 2026-10-19T04:06:23Z ===
+repo: teploy-ship, branch feat/harness-browser-mcp
+image: ship-sandbox-node:browser-proof == sha256:32e739727503b1c838c87d24e196e0f6cf798f0dd9edce06552f280db4f844fd
+built by: images/build.sh --harness none node  (=> ship-sandbox-node:dev, then docker-tagged
+          :browser-proof after a concurrent lane's build overwrote :dev on this daemon
+          mid-proof; @playwright/mcp is pinned 0.0.83 in images/versions.json)
+goal: prove the sandbox image runs the browser MCP server against the same per-run
+      Chromium session the native look path drives, driven over the MCP stdio protocol
+
+--- the baked browser MCP layer (docker history) ---
+|6 HARNESS_BINARIES= HARNESS_LABEL= HARNESS_SPECS= PLAYWRIGHT_MCP_VERSION=0.0.83 PLAYWRIGHT_VERSION=1.63.0 PNPM_VERSION=10.26.1 /bin/sh -c PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}"     && npm cache clean --force     && playwright-mcp --version
+
+--- $ docker run --rm -v $PROOF:/proof -w /work ship-sandbox-node:browser-proof node /proof/run-proof.mjs ---
+proof: node v22.23.2, chromium at /usr/bin/chromium, PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+proof: static page served on http://127.0.0.1:8077/
+proof: exec'ing the adapter's browserSessionShell() ...
+proof: CDP endpoint is up (shell exited 0)
+session-1: initialized -> Playwright 1.64.0-alpha-1790635538000 (protocol 2025-06-18)
+session-1: tools/call browser_navigate -> ok (360 chars)
+session-1: tools/call browser_snapshot -> ok (323 chars)
+--- session-1 navigate result ---
+### Ran Playwright code
+```js
+await page.goto('http://127.0.0.1:8077/');
+```
+### Page
+- Page URL: http://127.0.0.1:8077/
+- Page Title: harness-browser proof page
+- Console: 1 errors, 0 warnings
+### Snapshot
+- [Snapshot](.playwright-mcp/page-2026-10-19T04-06-26-080Z.yml)
+### Events
+- New console entries: .playwright-mcp/console-2026-10-19T04-06-25-845Z.log#L1
+--- session-1 snapshot (head) ---
+### Page
+- Page URL: http://127.0.0.1:8077/
+- Page Title: harness-browser proof page
+- Console: 1 errors, 0 warnings
+### Snapshot
+```yaml
+- generic [active] [ref=e1]:
+  - heading "unclicked" [level=1] [ref=e2]
+  - button "Click me" [ref=e3]
+  - paragraph [ref=e4]: static proof page for the SHIP_HARNESS_BROWSER receipt
+```
+proof: button ref is e3
+session-2: initialized -> Playwright 1.64.0-alpha-1790635538000 (protocol 2025-06-18)
+session-2: tools/call browser_snapshot -> ok (413 chars)
+session-2: tools/call browser_click -> ok (289 chars)
+--- session-2 snapshot (head, refs re-minted in this connection) ---
+### Page
+- Page URL: http://127.0.0.1:8077/
+- Page Title: harness-browser proof page
+- Console: 1 errors, 0 warnings
+### Snapshot
+```yaml
+- generic [active] [ref=e1]:
+  - heading "unclicked" [level=1] [ref=e2]
+  - button "Click me" [ref=e3]
+  - paragraph [ref=e4]: static proof page for the SHIP_HARNESS_BROWSER receipt
+--- session-2 click result (head) ---
+### Ran Playwright code
+```js
+await page.getByRole('button', { name: 'Click me' }).click();
+```
+### Page
+- Page URL: http://127.0.0.1:8077/
+- Page Title: harness-browser proof page
+- Console: 1 errors, 0 warnings
+### Snapshot
+- [Snapshot](.playwright-mcp/page-2026-10-19T04-06-27-215Z.yml)
+session-3: initialized -> Playwright 1.64.0-alpha-1790635538000 (protocol 2025-06-18)
+session-3: tools/call browser_snapshot -> ok (411 chars)
+--- session-3 snapshot (head) ---
+### Page
+- Page URL: http://127.0.0.1:8077/
+- Page Title: harness-browser proof page
+- Console: 1 errors, 0 warnings
+### Snapshot
+```yaml
+- generic [ref=e1]:
+  - heading "clicked" [level=1] [ref=e2]
+  - button "Click me" [active] [ref=e3]
+  - paragraph [ref=e4]: static proof page for the SHIP_HARNESS_BROWSER receipt
+proof: OK — navigate + snapshot + click over CDP against the shared session, across three server processes
+
+exit: 0

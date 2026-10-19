@@ -17,6 +17,7 @@ import {
 } from "./harness-external.js";
 import type { LiveTracker } from "./harness-external.js";
 import { ACP_WORKSPACE_EXCLUDES, excludeCommand } from "./git.js";
+import { acpBrowserMcpServers, ensureRunBrowserSession, harnessBrowserPromptNote, harnessBrowserWiring } from "./harness-browser.js";
 import { egressEntryError } from "./egress.js";
 import { exactScrubber, scrubExact } from "./redact.js";
 import type { KnownSecret } from "./redact.js";
@@ -656,8 +657,31 @@ export function acpAdapter(id: string, options: AcpHarnessOptions = {}, version:
             stderrTail: "",
           };
         }
+        // SHIP_HARNESS_BROWSER (harness-browser.ts): the same tier/plan gates
+        // the native look action reads. Wired, the shared Chromium session
+        // must be up before the driver exec — the AGENT spawns the MCP server
+        // from session/new's mcpServers, and that server attaches over CDP —
+        // and the spec carries the server for the driver to send. Refused,
+        // the prompt says so: an agent that goes looking for browser tools
+        // that were never configured burns its turns discovering it.
+        const browser = harnessBrowserWiring(task.input, env);
+        if (browser.kind === "wired") {
+          const session = await ensureRunBrowserSession(ws.executor);
+          if (!session.ok) {
+            return {
+              exitCode: -1,
+              timedOut: false,
+              status: "error",
+              summary: `the browser was requested (SHIP_HARNESS_BROWSER=on) but ${session.reason} No external agent was started.`,
+              turns: 0,
+              usage: baseUsage,
+              forwarded: forwarded.names,
+              stderrTail: "",
+            };
+          }
+        }
         try {
-          await ws.executor.putFile(ACP_PROMPT_PATH, externalPrompt(task.prompt, task.input.mode));
+          await ws.executor.putFile(ACP_PROMPT_PATH, externalPrompt(task.prompt, task.input.mode) + harnessBrowserPromptNote(browser));
           // The vendor-state excludes ride the ACP run, not the checkout
           // (git.ts ACP_WORKSPACE_EXCLUDES): repos legitimately commit
           // .gemini/settings.json, so the global list must not hide them —
@@ -681,6 +705,9 @@ export function acpAdapter(id: string, options: AcpHarnessOptions = {}, version:
               ...(Number.isFinite(cancelGraceMs) && cancelGraceMs > 0 ? { cancelGraceMs } : {}),
               secretEnvNames: forwarded.names,
               ...(profile.authMethodId !== undefined ? { authMethodId: profile.authMethodId } : {}),
+              // The browser MCP server for session/new (SHIP_HARNESS_BROWSER,
+              // wired above): stdio shape, every required field present.
+              ...(browser.kind === "wired" ? { mcpServers: acpBrowserMcpServers() } : {}),
             }),
           );
           const execOptions = {
