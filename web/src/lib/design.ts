@@ -84,6 +84,10 @@ table.runs td { padding-top: 10px; padding-bottom: 10px; }
 .run-toolbar input { min-width: 230px; }
 .run-title { display: block; overflow-wrap: anywhere; }
 .run-id { display: block; font-size: 11px; color: var(--dim); margin-top: 5px; }
+/* Where the task lands, when the run's meta carries one (older runs do not).
+   Muted like the run id and truncating, because a repo line must never push
+   the card wider than the table or the phone it is on. */
+.run-repo { display: block; font-size: 11px; color: var(--dim); margin-top: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .run-task { min-width: 250px; max-width: 560px; }
 .run-updated { white-space: nowrap; }
 
@@ -228,7 +232,7 @@ table.runs td { padding-top: 10px; padding-bottom: 10px; }
   .run-list .run-model { grid-area: model; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .run-list .run-title { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
   .run-list .run-title::after { content: ""; position: absolute; inset: 0; border-radius: 8px; }
-  .run-list .run-id { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .run-list .run-id, .run-list .run-repo { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 }
 
 /* Phones. */

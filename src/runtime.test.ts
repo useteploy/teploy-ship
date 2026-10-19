@@ -12,6 +12,7 @@ import { PLAN_EVENT, durableAgent } from "./durable.js";
 import type { ExecutorProvider } from "./durable.js";
 import { enqueueRun } from "./runtime.js";
 import type { ShipRuntime } from "./runtime.js";
+import type { RunMeta } from "./run-store.js";
 
 /**
  * D4-b — the plan floor, pinned end to end through the RUNTIME, not the loop.
@@ -163,6 +164,46 @@ test("D4-b: a scan never parks — the same trivial wording on the same project 
     !events.some((e) => e.type === "step-completed" && e.name === "plan-think"),
     "and no plan-think step is recorded",
   );
+});
+
+/**
+ * RunMeta.repo (shown on run cards): recorded at enqueue, next to source and
+ * actor, as the owner/name slug — never the reference verbatim, because a
+ * clone URL can carry credentials in its userinfo and repoSlug keeps only the
+ * last two path segments. Absent, not empty, for a workspace-only run.
+ */
+test("enqueue records the run's repository on meta as the owner/name slug, never the reference", async () => {
+  const fixture = await repoFixture("meta-repo");
+  const saved: RunMeta[] = [];
+  const runtime = {
+    ...stubRuntime(new MemoryEventStore()),
+    saveMeta: async (m: RunMeta) => {
+      saved.push(m);
+    },
+  } as unknown as ShipRuntime;
+
+  await enqueueRun(runtime, {
+    runId: "run-meta-repo", task: "fix a typo", model: "test", repo: fixture.repo,
+    journey: "change", source: "manual", trust: "operator",
+  });
+  assert.equal(saved[0]?.repo, "owner/repo", "the file:// fixture's owner/repo path reduces to the slug");
+
+  saved.length = 0;
+  await enqueueRun(runtime, {
+    runId: "run-meta-cred", task: "fix a typo", model: "test",
+    // A credentialed clone URL: the slug is the only shape that can be stored.
+    repo: "https://x-access-token:secret-token@github.com/useteploy/teploy-ship.git",
+    journey: "change", source: "manual", trust: "operator",
+  });
+  assert.equal(saved[0]?.repo, "useteploy/teploy-ship");
+  assert.ok(!JSON.stringify(saved[0]).includes("secret-token"), "no part of the reference — credentials included — reaches meta");
+
+  saved.length = 0;
+  await enqueueRun(runtime, {
+    runId: "run-meta-workspace", task: "plain workspace task", model: "test",
+    journey: "change", source: "manual", trust: "operator",
+  });
+  assert.ok(!("repo" in (saved[0] ?? {})), "a run with no repository records no repo, which every surface renders as nothing");
 });
 
 // --- D4-c: thread warmth materialised at enqueue, and never inherited authority ---

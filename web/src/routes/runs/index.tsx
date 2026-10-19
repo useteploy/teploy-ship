@@ -78,7 +78,7 @@ export default function RunsList({ data }: { data: RunsData | ReviewsData }) {
           <tbody>
             {data.runs.map((run) => (
               <tr key={run.runId}>
-                <td class="run-task"><a class="run-title" href={`/runs/${run.runId}`} title={run.task.length > 140 ? run.task : undefined}>{short(run.task, 140)}</a><span class="run-id" title={run.runId}>{run.runId}</span></td>
+                <td class="run-task"><a class="run-title" href={`/runs/${run.runId}`} title={run.task.length > 140 ? run.task : undefined}>{short(run.task, 140)}</a><span class="run-id" title={run.runId}>{run.runId}</span>{run.repo !== undefined && <span class="run-repo" title={run.repo}>{run.repo}</span>}</td>
                 <td class="run-status"><span class={`status ${run.status}`}>{run.status}</span></td>
                 <td class="meta run-model">{run.model}{run.ranOn !== undefined ? ` · ${run.ranOn}` : ""}</td>
                 <td class="meta run-updated"><time dateTime={run.updatedAt} title={run.updatedAt}>{run.updatedAt.slice(0, 16).replace("T", " ")} UTC</time></td>

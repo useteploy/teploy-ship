@@ -315,9 +315,19 @@ header.top .nav-toggle { display: none; }
 .nav-toggle-bars { display: inline-block; width: 14px; height: 2px; background: currentColor;
   box-shadow: 0 -5px 0 currentColor, 0 5px 0 currentColor; }
 header.top.nav-open .nav-toggle { border-color: var(--dim); }
-@media (max-width: 720px), (pointer: coarse) {
-  header.top .brand { display: inline-flex; align-items: center; min-height: 44px; }
-  header.top .switcher-static, details.switcher > summary { min-height: 44px; }
+/* Header touch targets, keyed on INPUT CAPABILITY rather than width: a touch
+   device wider than 720px (a tablet in landscape) matches no max-width
+   breakpoint, and (any-pointer: coarse) also covers a touchscreen whose
+   primary pointer is fine (a touch laptop). The Menu button is sized inside
+   its own 920px block; these are the two identity controls that render
+   smaller than 44px on their own. min-width as well as min-height: "Teploy"
+   and "Ship" are short enough to sit under 44px wide, and a hit area is 44x44.
+   The avatar keeps its width — only its height was under target. */
+@media (max-width: 720px), (pointer: coarse), (any-pointer: coarse) {
+  header.top .brand { display: inline-flex; align-items: center; min-height: 44px; min-width: 44px; }
+  header.top .switcher-static { min-height: 44px; min-width: 44px; }
+  details.switcher > summary { min-height: 44px; }
+  details.switcher:not(.avatar) > summary { min-width: 44px; }
   details.switcher .switcher-item { display: flex; align-items: center; min-height: 44px; }
 }
 @media (max-width: 720px) {

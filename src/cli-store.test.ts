@@ -141,11 +141,15 @@ test("durable park -> approve -> resume works across store instances (separate C
 test("RunMetaStore saves, lists newest-first, and tracks the parked event", async () => {
   const dir = await mkdtemp(join(tmpdir(), "ship-meta-"));
   const meta = new RunMetaStore(dir);
-  await meta.save({ runId: "a", task: "t1", status: "waiting", eventName: "turn-1-approval", model: "m", createdAt: "2026-01-01", updatedAt: "2026-01-01" });
+  await meta.save({ runId: "a", task: "t1", status: "waiting", eventName: "turn-1-approval", model: "m", repo: "owner/one", createdAt: "2026-01-01", updatedAt: "2026-01-01" });
   await meta.save({ runId: "b", task: "t2", status: "completed", model: "m", createdAt: "2026-01-02", updatedAt: "2026-01-02" });
 
   const loaded = await meta.load("a");
   assert.equal(loaded?.eventName, "turn-1-approval");
+  // The repo round-trips through the file store, and a run without one (every
+  // run enqueued before the field existed) reads back with no repo at all.
+  assert.equal(loaded?.repo, "owner/one");
+  assert.equal((await meta.load("b"))?.repo, undefined);
   const all = await meta.list();
   assert.deepEqual(all.map((m) => m.runId), ["b", "a"]);
   assert.equal(await meta.load("ghost"), null);

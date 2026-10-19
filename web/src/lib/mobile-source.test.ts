@@ -28,9 +28,33 @@ test("the nav collapses behind a Menu button below desktop", () => {
   assert.match(layout, /viewport-fit=cover/);
 });
 
+/** The header's identity controls must reach a 44x44 touch target on ANY
+ *  touch device — including one wider than every width breakpoint, which is
+ *  why the query keys on input capability and never on width alone. */
+test("header brand and product chip are 44x44 touch targets on coarse pointers", () => {
+  const layout = readFileSync(join(root, "routes/_layout.tsx"), "utf8");
+  const query = /@media \(max-width: 720px\), \(pointer: coarse\), \(any-pointer: coarse\) \{([\s\S]*?)\n\}/.exec(layout);
+  assert.ok(query !== null, "the header touch block must key on pointer capability, not width alone");
+  const block = query[1]!;
+  assert.match(block, /header\.top \.brand \{[^}]*min-height: 44px[^}]*min-width: 44px/);
+  assert.match(block, /header\.top \.switcher-static \{[^}]*min-height: 44px[^}]*min-width: 44px/);
+});
+
 test("the runs list renders as cards below desktop", () => {
   assert.match(readFileSync(join(root, "routes/runs/index.tsx"), "utf8"), /<table class="runs run-list">/);
   assert.match(DESIGN_CSS, /@media \(max-width: 920px\) \{\s*table\.run-list thead/);
+});
+
+/** RunMeta.repo reaches every surface that renders a run row; absent repo
+ *  renders nothing (the guard is the conditional, not the string). */
+test("run rows show the run's repository when meta carries one", () => {
+  const runs = readFileSync(join(root, "routes/runs/index.tsx"), "utf8");
+  assert.match(runs, /run\.repo !== undefined && <span class="run-repo"/);
+  const inbox = readFileSync(join(root, "routes/index.tsx"), "utf8");
+  assert.match(inbox, /r\.repo !== undefined && <span class="meta">\{r\.repo\}<\/span>/);
+  const attention = readFileSync(join(root, "routes/attention.tsx"), "utf8");
+  assert.match(attention, /r\.repo !== undefined && <span class="run-repo"/);
+  assert.match(DESIGN_CSS, /\.run-repo \{[^}]*text-overflow: ellipsis/, "the repo line truncates rather than pushing a card wide");
 });
 
 test("every table sits in a scroll container or stacks on a phone", () => {

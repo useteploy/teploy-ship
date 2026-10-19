@@ -260,6 +260,7 @@ export default function Inbox({ data }: { data: InboxData }) {
             <div class="row-actions">
               <span class={`status ${r.status}`}>waiting</span>
               <a href={`/runs/${r.runId}`}>{r.runId}</a>
+              {r.repo !== undefined && <span class="meta">{r.repo}</span>}
               <span class="spacer" style="flex:1" />
               <form method="post" class="row-actions">
                 <input type="hidden" name="runId" value={r.runId} />
