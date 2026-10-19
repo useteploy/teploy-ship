@@ -1,6 +1,7 @@
 // Build a reproducible SWE-bench instance list for run-inference.mjs.
 //
 //   node make-sample.mjs [count] [out.json]        # default: 50 -> instances-lite-50.json
+//   SWEBENCH_DATASET=verified node make-sample.mjs 100   # -> instances-verified-100.json
 //
 // Why a sample rather than all 300: n=50 answers the only question that
 // actually gates a decision — is Ship in the same league as the field
@@ -15,11 +16,14 @@
 import { writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
-const DATASET = "princeton-nlp/SWE-bench_Lite";
+// Lite by default; SWEBENCH_DATASET=verified draws from SWE-bench Verified (500
+// human-validated instances), the set current leaderboards report against.
+const VERIFIED = process.env.SWEBENCH_DATASET === "verified";
+const DATASET = VERIFIED ? "princeton-nlp/SWE-bench_Verified" : "princeton-nlp/SWE-bench_Lite";
 const ROWS_URL = `https://datasets-server.huggingface.co/rows?dataset=${encodeURIComponent(DATASET)}&config=default&split=test`;
 
 const count = Number(process.argv[2] ?? 50);
-const outPath = process.argv[3] ?? fileURLToPath(new URL(`./instances-lite-${count}.json`, import.meta.url));
+const outPath = process.argv[3] ?? fileURLToPath(new URL(`./instances-${VERIFIED ? "verified" : "lite"}-${count}.json`, import.meta.url));
 
 /**
  * The official evaluation image for an instance.
