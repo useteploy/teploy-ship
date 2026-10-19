@@ -15,6 +15,12 @@ jobs:
       - name: Flag reference check (O4)
         run: node scripts/flag-reference.mjs --check
 
+      # 2026-10-18 guard: the image must compile dist/ and web/dist/ from the
+      # source in its build context; a Dockerfile or ignore-file change that
+      # goes back to copying host build outputs fails here.
+      - name: Image compiles from source
+        run: node scripts/check-image-sources.mjs
+
       - name: Install pnpm
         run: npm install -g pnpm@10
 

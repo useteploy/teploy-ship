@@ -70,13 +70,13 @@ teploy setup 203.0.113.10 --name mybox                    # installs Docker + Ca
 
 ```sh
 git clone <your-ship-remote> teploy-ship && cd teploy-ship
-pnpm install && pnpm run build
-(cd web && pnpm install && pnpm run build)
 ```
 
-**Both builds are required.** The image copies `dist/` and `web/dist/` rather
-than building from source on the server, so a missing `web/dist` fails the
-deploy rather than degrading it.
+**No local build is needed — and none is used.** `teploy deploy` syncs the
+source and the image compiles `dist/` and `web/dist/` on the server, from
+that source, so a build that predates the deploy cannot ship under the new
+revision's label (four did, on 2026-10-18). `pnpm install` (root and `web/`)
+is only for developing Ship itself.
 
 Then make the config yours — **from `teploy.example.yml`, not the repo's own
 `teploy.yml`**, which is the maintainer's production shape (gateway, sandbox

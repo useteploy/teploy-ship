@@ -66,7 +66,7 @@ export default function RunsList({ data }: { data: RunsData | ReviewsData }) {
         <div class="empty"><h3>{data.total ? "No matching runs" : "Your first task starts here"}</h3><p>{data.total ? <a href="/runs">Clear filters to see all runs</a> : <a href="/#new-task">Describe a task in your inbox →</a>}</p></div>
       ) : (
         <div class="table-wrap">
-        <table class="runs">
+        <table class="runs run-list">
           <thead>
             <tr>
               <th>Task</th>
@@ -78,9 +78,9 @@ export default function RunsList({ data }: { data: RunsData | ReviewsData }) {
           <tbody>
             {data.runs.map((run) => (
               <tr key={run.runId}>
-                <td class="run-task"><a class="run-title" href={`/runs/${run.runId}`}>{short(run.task, 140)}</a><span class="run-id">{run.runId}</span></td>
-                <td><span class={`status ${run.status}`}>{run.status}</span></td>
-                <td class="meta">{run.model}{run.ranOn !== undefined ? ` · ${run.ranOn}` : ""}</td>
+                <td class="run-task"><a class="run-title" href={`/runs/${run.runId}`} title={run.task.length > 140 ? run.task : undefined}>{short(run.task, 140)}</a><span class="run-id" title={run.runId}>{run.runId}</span></td>
+                <td class="run-status"><span class={`status ${run.status}`}>{run.status}</span></td>
+                <td class="meta run-model">{run.model}{run.ranOn !== undefined ? ` · ${run.ranOn}` : ""}</td>
                 <td class="meta run-updated"><time dateTime={run.updatedAt} title={run.updatedAt}>{run.updatedAt.slice(0, 16).replace("T", " ")} UTC</time></td>
               </tr>
             ))}

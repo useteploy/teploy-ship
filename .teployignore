@@ -1,23 +1,25 @@
 # What `teploy deploy` skips when syncing this directory to the server
-# for the remote image build. The Dockerfile needs only: dist/, web/dist/,
-# web/src/ (+ web config files), and deploy/ (vendor tarballs + runtime
-# package.jsons).
+# for the remote image build. The Dockerfile's builder stage compiles
+# dist/ and web/dist/ ON the server, from the source synced here —
+# src/, web/src/ (+ web config files), lockfiles, patches/ and deploy/
+# runtime manifests are what the build needs.
 #
-# teploy-cli L14 (2026-09-24): the sync now honors .gitignore and never
-# sends teploy config, overlays or env files. dist/ and web/dist/ are
-# gitignored build outputs the Dockerfile COPYs, so they are allowlisted
-# explicitly here (`!` lines). Excludes below still win over these, which
-# is what keeps the source maps out.
-!/dist/
-!/web/dist/
+# 2026-10-18, the incident that changed this file: the Dockerfile used to
+# COPY a locally pre-built dist/ and web/dist/, and the sync shipped only
+# those (source was excluded below), so nothing tied the image's code to
+# the revision it was labelled with. Four deploys in a row shipped hours-
+# old code. Source now travels instead of build output; dist/ never does.
+#
+# teploy-cli L14 (2026-09-24): the sync also honors .gitignore and never
+# sends teploy config, overlays or env files. Build outputs (dist/,
+# web/dist/, node_modules/) are gitignored and stay home; the builder
+# stage in the Dockerfile re-creates them from this source.
 .git
 node_modules
 reference
 evals
 swebench
 _internal
-/src
-/web/dist/**/*.map
 # install.sh's secret bundle. It holds REAL values; the server already has
 # them, age-encrypted, and a plaintext copy has no business riding along in a
 # build context.

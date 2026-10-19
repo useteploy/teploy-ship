@@ -82,7 +82,7 @@ table.runs td { padding-top: 10px; padding-bottom: 10px; }
 .form-section summary { cursor: pointer; font-size: 13px; margin-bottom: 14px; }
 .run-toolbar { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; justify-content: space-between; margin: 16px 0; }
 .run-toolbar input { min-width: 230px; }
-.run-title { display: block; }
+.run-title { display: block; overflow-wrap: anywhere; }
 .run-id { display: block; font-size: 11px; color: var(--dim); margin-top: 5px; }
 .run-task { min-width: 250px; max-width: 560px; }
 .run-updated { white-space: nowrap; }
@@ -159,7 +159,9 @@ table.runs td { padding-top: 10px; padding-bottom: 10px; }
   .settings-cards, .project-form, .form-grid { grid-template-columns: 1fr; }
   .team-form { grid-template-columns: 1fr 1fr; }
   .config-row { grid-template-columns: 1fr; gap: 6px; padding: 12px 0; }
-  .run-toolbar input { width: 100%; min-width: 0; }
+  .run-toolbar, .run-toolbar form { width: 100%; }
+  .run-toolbar form { flex-wrap: nowrap; }
+  .run-toolbar input { flex: 1 1 auto; width: auto; min-width: 0; }
 }
 
 .task-choices { border: 0; padding: 0; margin: 20px 0; display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
@@ -187,4 +189,60 @@ table.runs td { padding-top: 10px; padding-bottom: 10px; }
 @media(max-width:600px) { .task-choices { grid-template-columns: 1fr; } .conversation-scroll { max-height: 52vh; } }
 .project-cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr)); gap:16px; }
 .project-cards h2 { font-size:15px; overflow-wrap:anywhere; }
+
+
+/* Touch sizing, on phones and on any coarse pointer (a tablet at 768 is
+   touched too). Controls reach a 44px target and form text is 16px so iOS
+   Safari does not zoom on focus (!important because several forms set
+   font:inherit inline). A mouse-driven desktop is untouched. */
+@media (max-width: 720px), (pointer: coarse) {
+  input:not([type=checkbox]):not([type=radio]):not([type=hidden]), select, textarea { font-size: 16px !important; }
+  input:not([type=checkbox]):not([type=radio]):not([type=hidden]), select, button, .button { min-height: 44px; }
+  input[type=checkbox], input[type=radio] { width: 20px; height: 20px; flex: 0 0 auto; }
+  label:has(> input[type=checkbox]), label:has(> input[type=radio]), .check-field { min-height: 44px; }
+  label.meta:has(> input[type=checkbox]) { display: inline-flex !important; align-items: center; }
+  .chips a, .settings-nav a { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; padding: 0 14px; border-radius: 22px; }
+  .eyebrow > a, .task-status > a, .summary-card { display: inline-flex; align-items: center; min-height: 44px; }
+  .summary-card strong { margin-right: 6px; }
+  .row-actions:has(> .field) { align-items: flex-end; }
+  .row-actions > .field { flex: 1 1 12rem; }
+  details:not(.switcher) > summary { min-height: 44px; padding-top: 12px; padding-bottom: 12px; }
+  .timeline summary { align-items: center; }
+  .row-actions > a, .row-actions > button, .decide button, .evidence-actions > * { min-height: 44px; display: inline-flex; align-items: center; }
+  .decide > *, .decide form { flex: 1 1 auto; }
+  .decide button { width: 100%; justify-content: center; }
+}
+
+/* Below desktop the runs table becomes one card per run (the title link
+   covers the card): at tablet width the table pushed its status and time
+   columns out of view. */
+@media (max-width: 920px) {
+  table.run-list thead { position: absolute; left: 0; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  table.run-list, table.run-list tbody { display: block; }
+  table.run-list tr { position: relative; display: grid; grid-template-columns: auto minmax(0,1fr); grid-template-areas: "task task" "status updated" "model model";
+    gap: 8px 10px; align-items: center; padding: 12px 14px; margin: 0 0 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
+  table.run-list td { display: block; padding: 0; border: 0; min-width: 0; max-width: none; }
+  .run-list .run-task { grid-area: task; }
+  .run-list .run-status { grid-area: status; }
+  .run-list .run-updated { grid-area: updated; justify-self: end; }
+  .run-list .run-model { grid-area: model; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .run-list .run-title { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+  .run-list .run-title::after { content: ""; position: absolute; inset: 0; border-radius: 8px; }
+  .run-list .run-id { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}
+
+/* Phones. */
+@media (max-width: 720px) {
+  /* Form tables (one form per row) stack instead of scrolling sideways; each
+     cell names its column. */
+  table.stack thead { position: absolute; left: 0; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  table.stack, table.stack tbody, table.stack tr, table.stack td { display: block; }
+  table.stack tr { padding: 8px 0; border-bottom: 1px solid var(--border); }
+  table.stack td { border: 0; padding: 4px 0 !important; text-align: left !important; white-space: normal !important; }
+  table.stack td[data-label]::before { content: attr(data-label); display: block; color: var(--dim); font-size: 12px; margin-bottom: 4px; }
+  table.stack input { min-width: 0 !important; }
+
+  .diff-code, .workspace-file, .timeline pre, .code-block pre { -webkit-overflow-scrolling: touch; }
+  .diff-code { max-height: 60vh; }
+}
 `;

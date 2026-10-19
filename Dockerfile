@@ -29,9 +29,64 @@ RUN set -eux; \
     CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${TEPLOY_VERSION_LABEL}" -o /out/teploy ./cmd/teploy; \
     /out/teploy version --json | grep -q '"preview-exposure"'
 
-# Pinned by digest, not by tag. `node:22-slim` moves, so two builds of the same
-# commit produced different images and "what CI tested" was only loosely
-# related to "what production runs". Refresh deliberately:
+# ---------------------------------------------------------------------------
+# Builder: compile dist/ and web/dist/ from the source in this build context.
+#
+# 2026-10-18 incident: the runtime stage used to COPY a locally pre-built
+# dist/ and web/dist/, and nothing tied those outputs to the source beside
+# them. Four production deploys in a row shipped a dist built hours earlier
+# while the image label carried the new git revision, so merged features were
+# silently absent and post-deploy smoke tests passed against old code. A
+# builder stage makes the correspondence structural: the only dist/ that can
+# reach the runtime stage is the one compiled here, from these files, by the
+# same commands CI runs (`pnpm run build`, then the web build). A stale
+# dist/ on the host cannot enter the image even accidentally — .dockerignore
+# keeps it out of the context entirely.
+#
+# Same pinned digest as the runtime stage, for the same reason.
+FROM node:22-slim@sha256:f32b81066cde10a75dbac96646099533316d94bac4150c55da1636e1f0ffdc46 AS builder
+
+# pnpm pinned through corepack, exactly like images/sandbox-node: an exact
+# version means the lockfile resolves the same way in the image as on a
+# developer's machine. pnpm (not npm) because the patches in
+# pnpm.patchedDependencies and the lockfile's patch hash are pnpm concepts;
+# npm would silently install the unpatched SDK the suites never tested.
+ARG PNPM_VERSION=10.26.1
+RUN corepack enable && corepack prepare "pnpm@${PNPM_VERSION}" --activate && pnpm -v
+
+WORKDIR /app
+
+# Manifests and patches first, so the two dependency installs cache on their
+# own layers and a source edit does not re-resolve anything.
+COPY package.json pnpm-lock.yaml ./
+COPY patches/ patches/
+RUN pnpm install --frozen-lockfile
+COPY web/package.json web/pnpm-lock.yaml web/
+# web depends on the root package through `link:..`, so its install must come
+# after the root one; the link is what makes the web build resolve
+# teploy-ship's exports (the root dist/ built below).
+RUN pnpm --dir web install --frozen-lockfile
+
+# The CLI: same command CI runs, `tsc` against the copied src/ and tsconfig.
+COPY tsconfig.json ./
+COPY src/ src/
+RUN pnpm run build \
+  && test -f dist/cli.js \
+  && test -f dist/worker.js
+
+# The web app: `neutron-ts build` per web/package.json (which also drops
+# dist/index.html — the runtime stage ships web/index.html from source for the
+# preview server). Needs no env: neutron.config.ts reads host/port at run
+# time, not build time. Depends on the root dist/ through the link above.
+COPY web/index.html web/tsconfig.json web/vite.config.ts web/neutron.config.ts web/
+COPY web/public/ web/public/
+COPY web/src/ web/src/
+RUN cd web && pnpm run build && test -d dist/assets
+
+# ---------------------------------------------------------------------------
+# Runtime. Pinned by digest, not by tag. `node:22-slim` moves, so two builds
+# of the same commit produced different images and "what CI tested" was only
+# loosely related to "what production runs". Refresh deliberately:
 #   docker pull node:22-slim && docker images --digests node
 FROM node:22-slim@sha256:f32b81066cde10a75dbac96646099533316d94bac4150c55da1636e1f0ffdc46
 
@@ -80,7 +135,9 @@ WORKDIR /app
 # Keep both deployment manifests aligned with the versions tested locally.
 COPY deploy/package.ship.json package.json
 COPY deploy/package-lock.ship.json package-lock.json
-COPY dist/ dist/
+# Compiled by the builder stage above from the src/ in this same build
+# context — never from a dist/ built on the host before `teploy deploy`.
+COPY --from=builder /app/dist/ dist/
 RUN npm ci --omit=dev --no-audit --no-fund
 # The patches pnpm applies locally (package.json pnpm.patchedDependencies).
 # npm ci does not read them, so without this step the image would run the
@@ -93,7 +150,8 @@ RUN cd node_modules/@neutron-build/agents && git apply /tmp/agents.patch && rm /
 # web app runtime (the web command spawns `pnpm exec neutron-ts preview` here)
 COPY deploy/package.web.json web/package.json
 COPY deploy/package-lock.web.json web/package-lock.json
-COPY web/dist/ web/dist/
+# Built by the builder stage from web/src/ in this build context.
+COPY --from=builder /app/web/dist/ web/dist/
 # the app-mode preview server SSRs route modules from SOURCE at runtime
 COPY web/src/ web/src/
 COPY web/index.html web/tsconfig.json web/vite.config.ts web/neutron.config.ts web/

@@ -146,12 +146,15 @@ to it (deduped) rather than replacing it.
 ### The manual path
 
 Prereqs on your machine: the `teploy` CLI pointed at your server
-(`servers.yml`), Node 22, pnpm, and Docker. The deployment image installs its
-Neutron SDK dependencies from the public npm registry.
+(`servers.yml`). Node, pnpm and a local build are no longer deploy
+prerequisites: `teploy deploy` syncs the source (per `.teployignore`) and
+the image's builder stage compiles `dist/` and `web/dist` on the server
+from the lockfile, so the image cannot carry a build output that predates
+its source. The runtime image still installs its Neutron SDK dependencies
+from the public npm registry.
 
 ```sh
-# build what the image copies in
-pnpm run build && (cd web && pnpm run build)
+# nothing to build first — the image compiles from this checkout
 
 # secrets (once; injected into web + worker on every deploy)
 teploy secret set SHIP_WEB_TOKEN=<dashboard login/bearer>

@@ -100,12 +100,16 @@ jobs:
       - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
         with:
           node-version: 22
-      - run: npm install -g pnpm@10
-      - name: Build the artifacts the image copies
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm run build
-          cd web && pnpm install --frozen-lockfile && pnpm run build
+      # 2026-10-18 guard: the image must compile dist/ and web/dist/ from the
+      # source in its build context, and no host build output may reach that
+      # context. Would have failed the PR that let a stale dist/ ship under a
+      # new revision label.
+      - name: Image compiles from source
+        run: node scripts/check-image-sources.mjs
+      # No pnpm install / build step on purpose: the Dockerfile's builder
+      # stage compiles everything from this checkout, and .dockerignore keeps
+      # any host-built dist/ out of the context — the exact property whose
+      # absence shipped old code on 2026-10-18.
       - uses: docker/setup-buildx-action@c47758b77c9736f4b2ef4073d4d51994fabfe349 # v3.7.1
       - uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6.9.0
         with:
