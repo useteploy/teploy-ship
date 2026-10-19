@@ -42,6 +42,8 @@ export interface AttentionRow {
   nextAction: string;
   /** Where to make it. */
   href: string;
+  /** Repository the row's run works on (owner/name slug), when meta has one. */
+  repo?: string;
   /** When the blocking state landed / began, for the age column. */
   at?: string;
   /** Waiting longer than 72h — age is now itself the blocker. */
@@ -144,6 +146,7 @@ export async function attentionRows(
       detail: `${blocker} (for ${age})`,
       nextAction,
       href: `/runs/${m.runId}`,
+      ...(m.repo !== undefined ? { repo: m.repo } : {}),
       at: m.updatedAt,
       aging: now - Date.parse(m.updatedAt) > 72 * HOUR_MS,
     });
@@ -166,6 +169,7 @@ export async function attentionRows(
       detail: `failed ${ageBrief(m.updatedAt, now)} ago: ${reason}`,
       nextAction: "Read the run's evidence, then retry or drop the task",
       href: `/runs/${m.runId}`,
+      ...(m.repo !== undefined ? { repo: m.repo } : {}),
       at: m.updatedAt,
     });
   }

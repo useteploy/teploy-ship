@@ -96,10 +96,10 @@ const digestEntry = (scheduleId: string, runId: string, outcome: string, msAgo: 
 test("attention collects only what needs a human, each row linking to its page", async () => {
   const d = deps({
     metas: [
-      meta("run-ask", { status: "waiting", eventName: "turn-2-ask", updatedAt: iso(2 * HOUR) }),
+      meta("run-ask", { status: "waiting", eventName: "turn-2-ask", updatedAt: iso(2 * HOUR), repo: "team/repo" }),
       meta("run-merge", { status: "waiting", eventName: "approve-merge", updatedAt: iso(4 * DAY) }),
       meta("run-upgrade", { status: "waiting", eventName: "ship-upgrade-hold", updatedAt: iso(1 * HOUR) }),
-      meta("run-fail", { status: "failed", updatedAt: iso(3 * HOUR) }),
+      meta("run-fail", { status: "failed", updatedAt: iso(3 * HOUR), repo: "team/repo" }),
       meta("run-fail-old", { status: "failed", updatedAt: iso(3 * DAY) }),
       meta("run-done", { status: "completed", updatedAt: iso(1 * HOUR) }),
     ],
@@ -146,6 +146,13 @@ test("attention collects only what needs a human, each row linking to its page",
   assert.match(fail.detail, /failed 3h ago: model refused/);
   assert.equal(byId.has("failure:run-fail-old"), false);
   assert.equal(byId.has("failure:run-done"), false);
+
+  // A run's repo (RunMeta.repo, recorded at enqueue) travels with the rows
+  // that come from meta; an absent one stays absent, never blank text.
+  assert.equal(ask.repo, "team/repo");
+  assert.equal(fail.repo, "team/repo");
+  assert.equal(byId.get("decision:run-upgrade")!.repo, undefined);
+  assert.equal(byId.get("delivery:d-held")!.repo, undefined);
 
   // (c) held/failed deliveries link to the run's verification view.
   const held = byId.get("delivery:d-held")!;

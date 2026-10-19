@@ -144,7 +144,7 @@ test("001 rebuilds ship_docs aside when the source column is missing", async () 
     columns: { ship_docs: ["collection", "run_id", "workflow", "status", "wake_at", "event_name", "task", "model", "workspace", "created_at", "updated_at"] },
   });
   const applied = await migrate(db);
-  assert.deepEqual(applied, ["001-ship-docs-source-ranon", "004-ship-docs-actor", "009-ship-docs-claimed-at"]);
+  assert.deepEqual(applied, ["001-ship-docs-source-ranon", "004-ship-docs-actor", "009-ship-docs-claimed-at", "010-ship-docs-repo"]);
   const joined = db.sql.join("\n");
   assert.match(joined, /ALTER TABLE ship_docs RENAME TO ship_docs_001/);
   assert.match(joined, /CREATE TABLE ship_docs \(.*source TEXT.*ran_on TEXT/s);
@@ -163,7 +163,7 @@ test("001 is a no-op on a fresh install and on an already-migrated store", async
     // "Already migrated" means through the LATEST migration touching this
     // table, not through 001 — a store carrying source/ran_on but not
     // actor/actor_kind is mid-chain and 004 is correctly still pending.
-    columns: { ship_docs: ["source", "ran_on", "actor", "actor_kind", "claimed_at"] },
+    columns: { ship_docs: ["source", "ran_on", "actor", "actor_kind", "claimed_at", "repo"] },
   });
   assert.deepEqual(await migrate(current), []);
   assert.doesNotMatch(current.sql.join("\n"), /RENAME TO/);
@@ -174,7 +174,7 @@ test("migrate runs each migration at most once", async () => {
     existingTables: new Set(["ship_docs"]),
     columns: { ship_docs: ["collection"] },
   });
-  assert.deepEqual(await migrate(db), ["001-ship-docs-source-ranon", "004-ship-docs-actor", "009-ship-docs-claimed-at"]);
+  assert.deepEqual(await migrate(db), ["001-ship-docs-source-ranon", "004-ship-docs-actor", "009-ship-docs-claimed-at", "010-ship-docs-repo"]);
   assert.deepEqual(await migrate(db), [], "second call must be a no-op");
 });
 
@@ -183,12 +183,35 @@ test("009 rebuilds ship_docs aside when claimed_at is missing, and copies every 
     existingTables: new Set(["ship_docs"]),
     columns: { ship_docs: ["collection", "run_id", "workflow", "status", "wake_at", "event_name", "task", "model", "workspace", "source", "ran_on", "actor", "actor_kind", "created_at", "updated_at"] },
   });
-  assert.deepEqual(await migrate(db), ["009-ship-docs-claimed-at"]);
+  // A pre-009 table predates `repo` too, so the chain correctly runs through
+  // 010 as well: each rebuild brings the table to that migration's shape and
+  // the next one probes the column it owns.
+  assert.deepEqual(await migrate(db), ["009-ship-docs-claimed-at", "010-ship-docs-repo"]);
   const joined = db.sql.join("\n");
   assert.match(joined, /ALTER TABLE ship_docs RENAME TO ship_docs_009/);
   assert.match(joined, /CREATE TABLE ship_docs \(.*claimed_at TEXT/s);
   assert.match(joined, /INSERT INTO ship_docs \(collection, run_id, workflow, status, wake_at, event_name, task, model, workspace, source, ran_on, actor, actor_kind, created_at, updated_at\) SELECT collection, run_id, workflow, status, wake_at, event_name, task, model, workspace, source, ran_on, actor, actor_kind, created_at, updated_at FROM ship_docs_009/);
   // Non-destructive, same rule as every ship_docs migration before it.
+  assert.doesNotMatch(joined, /DROP TABLE|TRUNCATE/i);
+});
+
+/**
+ * 010's rebuild, on its own: a table that is current through 009 and missing
+ * only `repo`. The copy list is the whole point — a column forgotten there
+ * would silently drop data for every deployment that sits exactly on this
+ * leg of the chain, which is why the INSERT is asserted column-for-column.
+ */
+test("010 rebuilds ship_docs aside when repo is missing, and copies every prior column", async () => {
+  const db = fakeDb({
+    existingTables: new Set(["ship_docs"]),
+    columns: { ship_docs: ["collection", "run_id", "workflow", "status", "wake_at", "event_name", "task", "model", "workspace", "source", "ran_on", "claimed_at", "actor", "actor_kind", "created_at", "updated_at"] },
+  });
+  assert.deepEqual(await migrate(db), ["010-ship-docs-repo"]);
+  const joined = db.sql.join("\n");
+  assert.match(joined, /UPDATE ship_docs SET repo = repo WHERE 1 = 0/, "the shape probe must be write-shaped");
+  assert.match(joined, /ALTER TABLE ship_docs RENAME TO ship_docs_010/);
+  assert.match(joined, /CREATE TABLE ship_docs \(.*repo TEXT/s);
+  assert.match(joined, /INSERT INTO ship_docs \(collection, run_id, workflow, status, wake_at, event_name, task, model, workspace, source, ran_on, claimed_at, actor, actor_kind, created_at, updated_at\) SELECT collection, run_id, workflow, status, wake_at, event_name, task, model, workspace, source, ran_on, claimed_at, actor, actor_kind, created_at, updated_at FROM ship_docs_010/);
   assert.doesNotMatch(joined, /DROP TABLE|TRUNCATE/i);
 });
 

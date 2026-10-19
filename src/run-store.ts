@@ -125,6 +125,17 @@ export interface RunMeta {
   actor?: string;
   /** How that identity was established: user | cli | intake | unknown. */
   actorKind?: string;
+  /**
+   * Repository this run works on, as the owner/name slug a human recognises
+   * (repoSlug in repository-reference.ts). Recorded at enqueue, next to
+   * `source`/`actor`, so the runs list can show WHERE a task lands without
+   * reading each run's event log. The slug is stored — never the reference
+   * itself — because a clone URL can carry credentials in its userinfo and a
+   * slug cannot: repoSlug keeps only the last two path segments. Absent on
+   * runs enqueued before the field existed, on workspace-only runs, and on
+   * any repo reference it cannot reduce to owner/name.
+   */
+  repo?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -153,6 +164,7 @@ export const RUN_META_FIELDS = [
   "claimedAt",
   "actor",
   "actorKind",
+  "repo",
   "createdAt",
   "updatedAt",
 ] as const satisfies readonly (keyof RunMeta)[];

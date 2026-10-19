@@ -1983,6 +1983,13 @@ export async function enqueueRun(
       ...(harnessRecordEnabled() ? { harnessIdentity: harnessIdentity({ harness, attempts, shipModel: options.runModel ?? options.model }) } : {}),
     },
   };
+  // WHERE the task lands, for the runs list — which reads meta, never the
+  // event log the repo otherwise lives in. The slug (repoSlug), never the
+  // reference verbatim: a clone URL can carry credentials in its userinfo and
+  // the slug keeps only owner/name, so nothing secret can ride along. Null
+  // (field absent, old runs read as no repo) for workspace-only runs and for
+  // references that are not owner/name-shaped.
+  const runRepo = options.repo !== undefined ? repoSlug(options.repo) : null;
   const meta: RunMeta = {
     runId: options.runId,
     task: options.userMessage ?? options.task,
@@ -1998,6 +2005,7 @@ export async function enqueueRun(
     ...(options.actor !== undefined
       ? { actor: options.actor.id, actorKind: options.actor.kind }
       : {}),
+    ...(runRepo !== null ? { repo: runRepo } : {}),
     createdAt: now,
     updatedAt: now,
   };

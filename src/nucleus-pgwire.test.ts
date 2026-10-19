@@ -478,6 +478,58 @@ test("listMeta offset pages below the newest window without changing the ranking
   assert.match(ranked[0]!, /LIMIT 4$/);
 });
 
+/**
+ * RunMeta.repo's round trip through the Nucleus store, both directions of the
+ * hand-written column map (migration 010's column). The write side matters
+ * because column() THROWS on an unmapped key and the insert side would
+ * silently skip it; the read side because rowToDoc only returns mapped keys.
+ */
+test("saveMeta writes the repo column and a stored repo reads back through listMeta", async () => {
+  // Write: through the real runtime's saveMeta, against a pool that reports
+  // the row updated (the fast path — no KV guard, no insert).
+  const updates: Array<{ sql: string; params: unknown[] }> = [];
+  const writePool: PoolLike = {
+    async query(sql, params = []) {
+      const text = sql.replace(/\s+/g, " ").trim();
+      if (/^CREATE TABLE/i.test(text)) return { rows: [], rowCount: 0 };
+      if (/^SELECT id FROM ship_migrations/i.test(text)) {
+        return { rows: MIGRATIONS.map((m) => ({ id: m.id })), rowCount: MIGRATIONS.length };
+      }
+      if (/^UPDATE ship_docs/i.test(text)) {
+        updates.push({ sql: text, params });
+        return { rows: [], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+    async connect() { throw new Error("unreachable: the update path needs no client"); },
+    on() { return undefined; },
+    async end() {},
+  };
+  const writer = await nucleusRuntime("", "test", { db: new NucleusPgwire("", "test", { pool: writePool }), log: () => {} });
+  await writer.saveMeta({
+    runId: "r-repo", task: "t", model: "m", status: "queued",
+    repo: "useteploy/teploy-ship", createdAt: AT("00:01"), updatedAt: AT("00:01"),
+  });
+  const [update] = updates;
+  assert.ok(update !== undefined, "saveMeta must reach the ship_docs update");
+  assert.match(update.sql, /repo = \$\d+/, "the repo column is written, not dropped by the column map");
+  assert.ok(update.params.includes("useteploy/teploy-ship"));
+
+  // Read: a row stored with the column comes back carrying the field, and a
+  // row without it (every pre-010 run) reads back with no repo at all.
+  const { pool } = shipDocsPool({
+    metas: [
+      { collection: "ship_meta", run_id: "r-new", task: "t", status: "queued", model: "m", repo: "useteploy/teploy-ship", created_at: AT("00:02"), updated_at: AT("00:02") },
+      { collection: "ship_meta", run_id: "r-old", task: "t", status: "completed", model: "m", created_at: AT("00:01"), updated_at: AT("00:01") },
+    ],
+    runs: [],
+  });
+  const reader = await nucleusRuntime("", "test", { db: new NucleusPgwire("", "test", { pool }), log: () => {} });
+  const metas = await reader.listMeta();
+  assert.equal(metas.find((m) => m.runId === "r-new")?.repo, "useteploy/teploy-ship");
+  assert.equal(metas.find((m) => m.runId === "r-old")?.repo, undefined, "an old run has no repo, never a null or empty one");
+});
+
 test("transaction pins statements and commit to one connection; errors roll back without retry", async () => {
   const statements:string[]=[];
   const releases:boolean[]=[];

@@ -454,6 +454,55 @@ const docsClaimedAt: Migration = {
   },
 };
 
+/**
+ * 010 — ship_docs gained `repo`: the owner/name slug of the repository a run
+ * works on, recorded at enqueue so the runs list can show it without reading
+ * each run's event log (run-store.ts RunMeta.repo). Run META, never an event —
+ * same placement rule as claimed_at in 009: replay is untouched, and old rows
+ * simply read back with no repo, which every surface renders as nothing.
+ *
+ * Same shape and same reason as 001/004/009: column() THROWS on an unmapped
+ * key, so on an existing deployment the first enqueue carrying a repo would
+ * fail the whole saveMeta — a total outage of run creation. A missing repo is
+ * a blank line on a run card; a missing column is no runs at all.
+ */
+const docsRepoColumn: Migration = {
+  id: "010-ship-docs-repo",
+  description: "add repo to ship_docs (rename-aside + copy)",
+  async needed(db) {
+    if (!(await tableExists(db, "ship_docs"))) return false; // fresh install: the DDL already has it
+    return !(await hasColumns(db, "ship_docs", ["repo"]));
+  },
+  async run(db) {
+    const aside = "ship_docs_010";
+    const cols =
+      "collection, run_id, workflow, status, wake_at, event_name, task, model, workspace, source, ran_on, claimed_at, actor, actor_kind, created_at, updated_at";
+    await db.query(`ALTER TABLE ship_docs RENAME TO ${aside}`);
+    await db.query(
+      `CREATE TABLE ship_docs (
+        collection TEXT,
+        run_id TEXT,
+        workflow TEXT,
+        status TEXT,
+        wake_at TEXT,
+        event_name TEXT,
+        task TEXT,
+        model TEXT,
+        workspace TEXT,
+        source TEXT,
+        ran_on TEXT,
+        claimed_at TEXT,
+        actor TEXT,
+        actor_kind TEXT,
+        repo TEXT,
+        created_at TEXT,
+        updated_at TEXT
+      )`,
+    );
+    await db.query(`INSERT INTO ship_docs (${cols}) SELECT ${cols} FROM ${aside}`);
+  },
+};
+
 export const MIGRATIONS: Migration[] = [
   docsSourceColumn,
   steerConsumedTurn,
@@ -464,6 +513,7 @@ export const MIGRATIONS: Migration[] = [
   connectRequestsTable,
   taskRequirementsTable,
   docsClaimedAt,
+  docsRepoColumn,
 ];
 
 /**

@@ -600,6 +600,7 @@ export class NucleusPgwire {
           claimed_at TEXT,
           actor TEXT,
           actor_kind TEXT,
+          repo TEXT,
           created_at TEXT,
           updated_at TEXT
         )`,
@@ -671,6 +672,7 @@ const COLUMNS: Record<string, string> = {
   claimedAt: "claimed_at",
   actor: "actor",
   actorKind: "actor_kind",
+  repo: "repo",
   createdAt: "created_at",
   updatedAt: "updated_at",
 };

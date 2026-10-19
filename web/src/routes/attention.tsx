@@ -69,6 +69,7 @@ export default function Attention({ data }: { data: Data }) {
                 <tr key={r.id}>
                   <td>
                     <a href={r.href}>{r.title}</a>
+                    {r.repo !== undefined && <span class="run-repo" title={r.repo}>{r.repo}</span>}
                   </td>
                   <td>
                     <span class={`status ${kindClass(r.kind)}`}>{r.kind}</span>
