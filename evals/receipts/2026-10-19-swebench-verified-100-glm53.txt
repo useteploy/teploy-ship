@@ -1,0 +1,35 @@
+SWE-bench Verified — ship durable loop + GLM-5.3, 100-instance sample (2026-10-19)
+
+Setup
+- Inference: ~/ship-eval/swebench durable-run on compute-2 (100.85.188.104),
+  arm "product", loop "durable", model zai glm-5.3, two shards (a, b) of 50
+  instances each from princeton-nlp/SWE-bench_Verified. Shard definitions are
+  the instance_id lists in preds-verified-{a,b}.json; per-run records in
+  preds-verified-{a,b}.runlog.jsonl (status, steps, durationMs).
+- Scoring: swebench==4.1.0 harness, --cache_level env --max_workers 2, on
+  compute-2 (~/swebench-score, run ids verified-a / verified-b). Shard A
+  scored 2026-10-16/19; shard B scored 2026-10-19 14:05-15:35 PDT (started
+  by the coordinator after the session handoff; A's had been the only one run).
+
+Results
+                tasks  patch submitted  resolved  rate      resolved/patched
+  shard a          50        26            24       48.0%       24/26 = 92.3%
+  shard b          50        38            33       66.0%       33/38 = 86.8%
+  combined        100        64            57       57.0%      57/64 = 89.1%
+
+Reports: ~/swebench-score/teploy-agent-durable+glm-5.3.verified-{a,b}.json
+(resolved_ids; the harness's total_instances field records the 500-row
+dataset, not the evaluated subset).
+
+Reading
+- When the loop submits a patch it is almost always right (89% resolve);
+  the losses concentrate in NO-PATCH outcomes (36/100), which include runs
+  ending in the runlog's "stuck" terminal status (e.g. the first shard-a
+  record: stuck at 38 steps, ~10 min) as well as give-ups. Raising the
+  submission rate — un-sticking or persuading — is worth more than patch
+  quality on this stack.
+- Single run, no retries, n=100 sample: treat 57% as +/- roughly 10 points
+  (95% CI ~47-66) before quoting it anywhere external.
+
+Not done here: per-repo breakdown, cost accounting, and a full-500 run are
+deliberately left for a follow-up if the number is needed publicly.
