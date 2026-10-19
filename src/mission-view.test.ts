@@ -55,10 +55,11 @@ const bothMerged = (clientCheck?: CoordinationChild["clientCheck"], extra: Parti
     { state: "merged", attempts: 1, runId: "r-client", anchorSha: C, mergedSha: C, ...(clientCheck !== undefined ? { clientCheck } : {}), ...extra },
   );
 
-test("default flag: off unless exactly SHIP_MISSION_VIEW=on", () => {
-  assert.equal(missionViewEnabled({}), false);
+test("default flag: on unless explicitly off", () => {
+  assert.equal(missionViewEnabled({}), true);
   assert.equal(missionViewEnabled({ SHIP_MISSION_VIEW: "off" }), false);
-  assert.equal(missionViewEnabled({ SHIP_MISSION_VIEW: "1" }), false);
+  assert.equal(missionViewEnabled({ SHIP_MISSION_VIEW: "0" }), false);
+  assert.equal(missionViewEnabled({ SHIP_MISSION_VIEW: "1" }), true);
   assert.equal(missionViewEnabled({ SHIP_MISSION_VIEW: " ON " }), true);
 });
 

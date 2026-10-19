@@ -99,16 +99,16 @@ test("F9: an explicit SHIP_TESTS=0 in the enqueueing shell still opts out", asyn
   });
 });
 
-test("F9: nothing published and nothing in the shell stays exactly as before (no ask)", async () => {
+test("F9: nothing published and nothing in the shell means the DEFAULT ask (on since 2026-10-18)", async () => {
   await withEnv(QUIET, async () => {
     const { runtime, inputs } = captureRuntime(new MemoryRuntimeConfig());
     const report = await enqueueRun(runtime, { runId: "run-f9c", task: "t", model: "m", repo: "tyler/a" });
-    assert.equal(inputs[0]!.tests, undefined);
-    assert.deepEqual(report, { tests: false });
+    assert.equal(inputs[0]!.tests, true, "unset asks for the suite: the deployment ask defaults on");
+    assert.deepEqual(report, { tests: true });
     // A runtime with no config store at all (older capture mocks) behaves the same.
     const bare = captureRuntime(undefined);
     await enqueueRun(bare.runtime, { runId: "run-f9d", task: "t", model: "m", repo: "tyler/a" });
-    assert.equal(bare.inputs[0]!.tests, undefined);
+    assert.equal(bare.inputs[0]!.tests, true);
   });
 });
 

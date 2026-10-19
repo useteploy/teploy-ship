@@ -46,10 +46,10 @@ const record = (over: Partial<ThreadWarmRecord> = {}): ThreadWarmRecord => ({
 });
 
 test("warmThreadEnabled needs SHIP_WARM_THREAD AND the SHIP_WARM_PARKS capability", () => {
-  assert.equal(warmThreadEnabled({ SHIP_WARM_THREAD: "1" } as NodeJS.ProcessEnv), false, "the capability flag is load-bearing");
-  assert.equal(warmThreadEnabled({ SHIP_WARM_PARKS: "1" } as NodeJS.ProcessEnv), false, "the feature flag alone is nothing");
+  assert.equal(warmThreadEnabled({ SHIP_WARM_THREAD: "off" } as NodeJS.ProcessEnv), false, "the feature's off value disarms it");
+  assert.equal(warmThreadEnabled({ SHIP_WARM_PARKS: "off" } as NodeJS.ProcessEnv), false, "the capability's off value disarms it");
   assert.equal(warmThreadEnabled({ SHIP_WARM_THREAD: "1", SHIP_WARM_PARKS: "1" } as NodeJS.ProcessEnv), true);
-  assert.equal(warmThreadEnabled({} as NodeJS.ProcessEnv), false, "off is the default");
+  assert.equal(warmThreadEnabled({} as NodeJS.ProcessEnv), true, "both default on");
 });
 
 test("the TTL defaults to Decision 16's 7200s and only a positive number overrides it", () => {

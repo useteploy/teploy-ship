@@ -112,12 +112,13 @@ test("enqueueRun materialises per-repo evidence into the recorded input, and the
   assert.equal(ts.testCommand, "pnpm test", "the second repo carries ITS command, not the worker's");
   assert.equal(ts.testTimeoutMs, 120000);
   assert.equal(ts.observeService, undefined, "no service configured for this repo");
-  assert.equal(ts.telemetry, undefined, "so no telemetry ask");
+  assert.equal(ts.telemetry, true, "the telemetry ask defaults on (2026-10-18); without a service it is inert");
 
   const unconfigured = inputs[2]!;
-  assert.equal(unconfigured.tests, undefined);
+  assert.equal(unconfigured.tests, true, "the tests ask defaults on even for an unconfigured repo");
   assert.equal(unconfigured.testCommand, undefined);
-  assert.equal(unconfigured.telemetry, undefined);
+  assert.equal(unconfigured.telemetry, true, "so does the telemetry ask");
+  assert.equal(unconfigured.observeService, undefined);
 });
 
 test("enqueueRun: an explicit opt-out beats the evidence config", async () => {
@@ -161,7 +162,7 @@ test("enqueueRun materialises the iterate-until-green bound and the advisory cri
   // The critic advises wherever a suite is recorded; without one the old
   // bounded retry stands, and SHIP_CRITIC_ADVISORY=0 restores the veto.
   await enqueueRun(runtime, { runId: "run-c1", task: "t", model: "m", repo: "tyler/a", critic: true });
-  await enqueueRun(runtime, { runId: "run-c2", task: "t", model: "m", critic: true });
+  await enqueueRun(runtime, { runId: "run-c2", task: "t", model: "m", critic: true, tests: false });
   process.env.SHIP_CRITIC_ADVISORY = "0";
   await enqueueRun(runtime, { runId: "run-c3", task: "t", model: "m", repo: "tyler/a", critic: true });
   delete process.env.SHIP_CRITIC_ADVISORY;

@@ -463,7 +463,7 @@ test("enqueue materialises SHIP_DELEGATE and suppresses it for scans and childre
     restore();
   }
   // Flag OFF: no input field at all — the equivalence the upgrade fence reads.
-  const { runtime: off, restore: restoreOff } = await fileRuntimeIn({});
+  const { runtime: off, restore: restoreOff } = await fileRuntimeIn({ SHIP_DELEGATE: "off" });
   try {
     await enqueueRun(off, { runId: "run-off", task: "t", model: "m" });
     const started = (await off.store.load("run-off")).find((e) => e.type === "run-started");

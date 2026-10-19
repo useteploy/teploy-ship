@@ -24,13 +24,16 @@ function started(minute: number, input: Record<string, unknown>, taskRootRunId?:
   return ev("run-started", minute, undefined, { workflow: "coding-agent", input, ...(taskRootRunId !== undefined ? { taskRootRunId } : {}) });
 }
 
-test("the flag is on only for SHIP_THREAD_VIEW=on", () => {
+test("the flag is on unless explicitly off (unset means on)", () => {
   assert.equal(threadViewEnabled({ SHIP_THREAD_VIEW: "on" }), true);
   assert.equal(threadViewEnabled({ SHIP_THREAD_VIEW: "ON" }), true);
   assert.equal(threadViewEnabled({ SHIP_THREAD_VIEW: " on " }), true);
   assert.equal(threadViewEnabled({ SHIP_THREAD_VIEW: "off" }), false);
-  assert.equal(threadViewEnabled({ SHIP_THREAD_VIEW: "" }), false);
-  assert.equal(threadViewEnabled({}), false);
+  assert.equal(threadViewEnabled({ SHIP_THREAD_VIEW: "0" }), false);
+  assert.equal(threadViewEnabled({ SHIP_THREAD_VIEW: "false" }), false);
+  assert.equal(threadViewEnabled({ SHIP_THREAD_VIEW: "no" }), false);
+  assert.equal(threadViewEnabled({ SHIP_THREAD_VIEW: "" }), true);
+  assert.equal(threadViewEnabled({}), true);
 });
 
 test("steerHistory pairs drained turn steps with pending notes and keeps their states distinct", () => {

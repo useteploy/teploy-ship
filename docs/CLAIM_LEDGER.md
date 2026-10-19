@@ -339,7 +339,7 @@ With SHIP_THREAD_VIEW=on, the run page and API show a follow-up chain as one rea
 | class | path | test | revision |
 | --- | --- | --- | --- |
 | implementation | `web/src/lib/thread-chain.server.ts` |  | not recorded |
-| automated | `web/src/lib/thread-view.test.ts` | flag off (the default): the API says it is disabled, and the run page payload is unchanged | 477529a602c0 |
+| automated | `web/src/lib/thread-view.test.ts` | flag off (the explicit off value): the API says it is disabled, and the run page payload is unchanged | 477529a602c0 |
 | automated | `web/src/lib/thread-chain.test.ts` | the thread contract: chain ordered by follow-up, per-run steer notes and ask parks | 477529a602c0 |
 | automated | `web/src/lib/thread-chain.test.ts` | negative control: a run whose parent chain leaves the family is not a member | 477529a602c0 |
 

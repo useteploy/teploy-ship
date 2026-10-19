@@ -113,7 +113,7 @@ test("the stack action refuses a base without an open pull request of its own an
 test("flag off: the route itself refuses, whatever the page would have offered", async () => {
   await seedBase("run-sbase3", "completed");
   const saved = process.env.SHIP_STACKED_PRS;
-  delete process.env.SHIP_STACKED_PRS;
+  process.env.SHIP_STACKED_PRS = "off";
   try {
     const location = await locationOf(action({ request: post("run-sbase3", stackForm()), params: { id: "run-sbase3" } }));
     assert.match(decodeURIComponent(location), /messageError=[^]*SHIP_STACKED_PRS/);

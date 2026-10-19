@@ -168,11 +168,24 @@ test("SEAM: the benchmark input does not drift from what the product enqueues", 
       Object.keys(durableInput({ task: "t", arm: "product", settle: true, critic: true, index: true, workspaceKey: "k" })),
     );
     // Keys the benchmark deliberately does not carry, each with its reason.
+    // The 2026-10-18 flag flips made several of these default-on in the
+    // product's enqueue; the benchmark keeps its input byte-stable by running
+    // with them explicitly off, so their keys stay absent here.
     const exceptions = new Map([
       ["repo", "a SWE-bench container cannot be a repo run — /testbed is pip-installed editable, so an agent editing a clone elsewhere is graded against the untouched original"],
       ["trust", "only meaningful with `repo`"],
       ["pr", "only meaningful with `repo`"],
       ["plan", "the plan preview PARKS the run, and a sweep has no operator"],
+      ["telemetry", "no Observe service exists for the graded container; the default-on ask is a deployment ask, and the benchmark opts out"],
+      ["tests", "the graded container's suite is the harness's own scoring, not a run input; the default-on ask is a deployment ask, and the benchmark opts out"],
+      ["testsFeedback", "follows `tests`, which the benchmark opts out of"],
+      ["fixRetries", "follows `testsFeedback`, which the benchmark opts out of"],
+      ["criticAdvisory", "follows `tests`, which the benchmark opts out of"],
+      ["look", "the graded container ships no browser; the benchmark opts out of the default-on action"],
+      ["lookRecord", "follows `look`, which the benchmark opts out of"],
+      ["inlineFences", "follows `look`, which the benchmark opts out of"],
+      ["delegate", "a delegated child would spend outside the graded container; the benchmark opts out of the default-on action"],
+      ["steerReply", "no operator steers a sweep run; the benchmark opts out of the default-on action"],
     ]);
     const missing = productKeys.filter((k) => !harnessKeys.has(k) && !exceptions.has(k));
     assert.deepEqual(missing, [], `the product enqueues these and the benchmark does not: ${missing.join(", ")}`);

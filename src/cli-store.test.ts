@@ -310,7 +310,7 @@ test("enqueueRun bakes look image mode into the run INPUT — SHIP_LOOK_IMAGE_MO
   assert.equal("lookImage" in noModel, false, "SHIP_LOOK alone does not admit image looks");
 
   // Look off: no look vocabulary at all in the input, model set or not.
-  const lookOff = await inputOf({ SHIP_LOOK_IMAGE_MODEL: "glm-5.3-flash" });
+  const lookOff = await inputOf({ SHIP_LOOK: "off", SHIP_LOOK_IMAGE_MODEL: "glm-5.3-flash" });
   assert.equal("look" in lookOff, false);
   assert.equal("lookImage" in lookOff, false, "image mode cannot precede the action itself");
 });
@@ -341,10 +341,13 @@ test("enqueueRun bakes the look recording flag into the run INPUT — SHIP_LOOK_
   const on = await inputOf({ SHIP_LOOK: "1", SHIP_LOOK_RECORD: "1" });
   assert.equal(on.lookRecord, true, "the flag rides the input when set");
 
-  const off = await inputOf({ SHIP_LOOK: "1" });
-  assert.equal("lookRecord" in off, false, "unset: absent, so the input is byte-identical to a pre-Q3b run's");
+  const unset = await inputOf({ SHIP_LOOK: "1" });
+  assert.equal(unset.lookRecord, true, "unset means on (the default flipped 2026-10-18)");
 
-  const lookAway = await inputOf({ SHIP_LOOK_RECORD: "1" });
+  const off = await inputOf({ SHIP_LOOK: "1", SHIP_LOOK_RECORD: "off" });
+  assert.equal("lookRecord" in off, false, "an explicit off value leaves the input byte-identical to a pre-Q3b run's");
+
+  const lookAway = await inputOf({ SHIP_LOOK: "off", SHIP_LOOK_RECORD: "1" });
   assert.equal("lookRecord" in lookAway, false, "recording cannot precede the action itself");
   assert.equal("look" in lookAway, false);
 });

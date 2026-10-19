@@ -46,10 +46,12 @@ function byName(r: GroundingReport, name: string) {
   return x;
 }
 
-test("flag: off by default, on only for explicit values", () => {
-  assert.equal(planGroundingEnabled({}), false);
+test("flag: on unless explicitly off (unset means on)", () => {
+  assert.equal(planGroundingEnabled({}), true);
   assert.equal(planGroundingEnabled({ SHIP_PLAN_GROUNDING: "off" }), false);
-  assert.equal(planGroundingEnabled({ SHIP_PLAN_GROUNDING: "" }), false);
+  assert.equal(planGroundingEnabled({ SHIP_PLAN_GROUNDING: "0" }), false);
+  assert.equal(planGroundingEnabled({ SHIP_PLAN_GROUNDING: "no" }), false);
+  assert.equal(planGroundingEnabled({ SHIP_PLAN_GROUNDING: "" }), true);
   assert.equal(planGroundingEnabled({ SHIP_PLAN_GROUNDING: "on" }), true);
   assert.equal(planGroundingEnabled({ SHIP_PLAN_GROUNDING: "1" }), true);
 });

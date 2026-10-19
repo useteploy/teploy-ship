@@ -276,7 +276,7 @@ test("Q4-a negative controls at enqueue: pinned in two projects, absent in a thi
   });
 
   // Flag off: byte-identical inputs, identical fingerprint.
-  await withEnv({ ...quiet, SHIP_SKILLS: undefined }, async () => {
+  await withEnv({ ...quiet, SHIP_SKILLS: "off" }, async () => {
     const off = captureRuntime(projectA, registry);
     await enqueueRun(off.runtime, { runId: "sk-off", task: "t", model: "m", repo: "https://forge.example/tyler/a" });
     assert.equal("skills" in off.inputs[0]!, false, "flag off: the input is byte-identical to a pre-skills one");
@@ -287,7 +287,8 @@ test("materialiseSkills: no flag or no pins means no field; an unresolvable pin 
   const registry = new InMemorySkillStore();
   await seeded(registry, GOOD);
   assert.equal(await materialiseSkills(undefined, registry, { SHIP_SKILLS: "on" }), undefined);
-  assert.equal(await materialiseSkills([{ name: "deploy-checklist", version: 1 }], registry, {}), undefined, "flag off");
+  assert.equal(await materialiseSkills(undefined, registry, {}), undefined, "no pins means no field even with the flag's default on");
+  assert.equal(await materialiseSkills([{ name: "deploy-checklist", version: 1 }], registry, { SHIP_SKILLS: "off" }), undefined, "flag off");
   const resolved = await materialiseSkills([{ name: "deploy-checklist", version: 1 }], registry, { SHIP_SKILLS: "on" });
   assert.deepEqual(Object.keys(resolved![0]!), ["name", "version", "digest", "description", "body"], "the run input carries exactly the five readable fields — no provenance, no env, no credential surface");
   await assert.rejects(

@@ -211,16 +211,29 @@ test("D4-c: a follow-up with a valid record boots thread-warm; flag OFF gives by
     parentRunId: "run-parent",
   };
 
-  // Flags OFF: the recorded input carries NEITHER new key, so it is
-  // byte-identical to a pre-D4-c run's, and its fingerprint is exactly what
-  // the table WITHOUT the new row would compute — the feature adds nothing.
-  const reportOff = await enqueueRun(runtime, options);
-  const inputOff = recordedInput(await store.load("run-follow-off"));
-  assert.ok(!("warmThread" in inputOff) && !("threadWarm" in inputOff), "flag off: neither key exists");
+  // Flags OFF (explicit off values; unset means on since 2026-10-18): the
+  // recorded input carries NEITHER new key, so it is byte-identical to a
+  // pre-D4-c run's, and its fingerprint is exactly what the table WITHOUT
+  // the new row would compute — the feature adds nothing.
+  const savedOff = { feature: process.env.SHIP_WARM_THREAD, parks: process.env.SHIP_WARM_PARKS };
+  process.env.SHIP_WARM_THREAD = "off";
+  process.env.SHIP_WARM_PARKS = "off";
+  let reportOff: Awaited<ReturnType<typeof enqueueRun>>;
+  let inputOff: ReturnType<typeof recordedInput>;
+  try {
+    reportOff = await enqueueRun(runtime, options);
+    inputOff = recordedInput(await store.load("run-follow-off"));
+  } finally {
+    if (savedOff.feature === undefined) delete process.env.SHIP_WARM_THREAD;
+    else process.env.SHIP_WARM_THREAD = savedOff.feature;
+    if (savedOff.parks === undefined) delete process.env.SHIP_WARM_PARKS;
+    else process.env.SHIP_WARM_PARKS = savedOff.parks;
+  }
+  assert.ok(!("warmThread" in inputOff!) && !("threadWarm" in inputOff!), "flag off: neither key exists");
   assert.equal((reportOff as { threadWarm?: unknown }).threadWarm, undefined, "and the report says nothing either");
   assert.equal(
-    stepFingerprint(inputOff as Parameters<typeof stepFingerprint>[0]),
-    fingerprintOf(WORKFLOW_STEPS.filter((s) => s.key !== "step:thread-snapshot"), inputOff as Parameters<typeof stepFingerprint>[0]),
+    stepFingerprint(inputOff! as Parameters<typeof stepFingerprint>[0]),
+    fingerprintOf(WORKFLOW_STEPS.filter((s) => s.key !== "step:thread-snapshot"), inputOff! as Parameters<typeof stepFingerprint>[0]),
     "flag off: the fingerprint is the pre-feature fingerprint",
   );
 

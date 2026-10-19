@@ -43,9 +43,9 @@ function baseLog(overrides: { input?: Record<string, unknown>; withoutPr?: boole
   return events;
 }
 
-test("the flag is on for SHIP_STACKED_PRS=on (and the truthy spellings), off otherwise", () => {
-  for (const on of ["on", "ON", " on ", "1", "true", "yes"]) assert.equal(stackedPrsEnabled({ SHIP_STACKED_PRS: on }), true, on);
-  for (const off of ["off", "", "0", "nope", undefined]) assert.equal(stackedPrsEnabled({ ...(off !== undefined ? { SHIP_STACKED_PRS: off } : {}) }), false, String(off));
+test("the flag is on unless explicitly off (unset means on)", () => {
+  for (const on of ["on", "ON", " on ", "1", "true", "yes", "", "nope", undefined]) assert.equal(stackedPrsEnabled({ ...(on !== undefined ? { SHIP_STACKED_PRS: on } : {}) }), true, String(on));
+  for (const off of ["off", "OFF", " 0 ", "0", "false", "no"]) assert.equal(stackedPrsEnabled({ SHIP_STACKED_PRS: off }), false, off);
 });
 
 test("resolveStackBase reads the base PR, branch and pushed sha off the base run's log", async () => {
@@ -128,7 +128,7 @@ test("enqueueRun materialises stack and the Recorded line; the run opens on the 
 });
 
 test("flag off: the enqueue itself refuses a stack and leaves nothing behind", async () => {
-  await withStackEnv(undefined, async () => {
+  await withStackEnv("off", async () => {
     const { runtime, inputs } = captureStackEnqueue(baseLog());
     await assert.rejects(
       enqueueRun(runtime, { runId: "run-stack2", stackOn: "run-base", task: "t", model: "m", repo: REPO }),

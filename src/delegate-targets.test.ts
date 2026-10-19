@@ -418,6 +418,12 @@ test("enqueue offers deployment ∩ project targets only when delegation is on",
   process.env.SHIP_DELEGATE_TARGETS = "glm=native:zai/glm-5.3,cc=claude-code:glm-5.3";
   try {
     const runtime = fileRuntime();
+    await enqueueRun(runtime, { runId: "run-def", task: "t", model: "m" });
+    assert.deepEqual((await inputOf(runtime, "run-def")).delegateTargets, [
+      { id: "glm", harness: "native", model: "zai/glm-5.3" },
+      { id: "cc", harness: "claude-code", model: "glm-5.3" },
+    ], "unset means on: the flag's default flipped 2026-10-18");
+    process.env.SHIP_DELEGATE = "off";
     await enqueueRun(runtime, { runId: "run-off", task: "t", model: "m" });
     assert.ok(!("delegateTargets" in (await inputOf(runtime, "run-off"))), "SHIP_DELEGATE off: no offer");
     process.env.SHIP_DELEGATE = "1";

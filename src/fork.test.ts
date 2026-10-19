@@ -36,9 +36,9 @@ async function withForkEnv<T>(value: string | undefined, body: () => Promise<T>)
   }
 }
 
-test("the flag is on for SHIP_FORK=on (and the truthy spellings), off otherwise", () => {
-  for (const on of ["on", "ON", " on ", "1", "true", "yes"]) assert.equal(forkEnabled({ SHIP_FORK: on }), true, on);
-  for (const off of ["off", "", "0", "nope", undefined]) assert.equal(forkEnabled({ ...(off !== undefined ? { SHIP_FORK: off } : {}) }), false, String(off));
+test("the flag is on unless explicitly off (unset means on)", () => {
+  for (const on of ["on", "ON", " on ", "1", "true", "yes", "", "nope", undefined]) assert.equal(forkEnabled({ ...(on !== undefined ? { SHIP_FORK: on } : {}) }), true, String(on));
+  for (const off of ["off", "OFF", " 0 ", "0", "false", "no"]) assert.equal(forkEnabled({ SHIP_FORK: off }), false, off);
 });
 
 test("the forkable set: settled runs and the merge park, nothing in flight", () => {
@@ -219,7 +219,7 @@ test("forking an in-flight run is refused by name and enqueues nothing", async (
 });
 
 test("flag off: the enqueue itself refuses a fork", async () => {
-  await withForkEnv(undefined, async () => {
+  await withForkEnv("off", async () => {
     const { runtime, inputs } = captureForkEnqueue({ status: "completed", events: SOURCE_LOG });
     await assert.rejects(
       enqueueRun(runtime, { runId: "run-fork5", forkOf: "run-src1", task: "t", model: "m" }),

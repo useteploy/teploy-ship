@@ -96,7 +96,7 @@ test("the fork action refuses an in-flight source by name and enqueues nothing",
 test("flag off: the route itself refuses, whatever the page would have offered", async () => {
   await seedSource("run-fsrc3", "completed");
   const saved = process.env.SHIP_FORK;
-  delete process.env.SHIP_FORK;
+  process.env.SHIP_FORK = "off";
   try {
     const location = await locationOf(action({ request: post("run-fsrc3", forkForm()), params: { id: "run-fsrc3" } }));
     assert.match(decodeURIComponent(location), /messageError=[^]*SHIP_FORK/);

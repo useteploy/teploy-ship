@@ -38,12 +38,12 @@ test("project detect: flag off is refused, prints no proposal, and touches nothi
   const dir = await repo();
   try {
     const before = await readdir(dir, { recursive: true });
-    const r = await invoke(["project", "detect", dir], {});
+    const r = await invoke(["project", "detect", dir], { SHIP_STACK_DETECT: "off" });
     assert.notEqual(r.code, 0);
-    assert.match(r.stderr, /SHIP_STACK_DETECT=on/);
+    assert.match(r.stderr, /SHIP_STACK_DETECT/);
     assert.equal(r.stdout, "");
-    const off = await invoke(["project", "detect", dir], { SHIP_STACK_DETECT: "off" });
-    assert.notEqual(off.code, 0);
+    const zero = await invoke(["project", "detect", dir], { SHIP_STACK_DETECT: "0" });
+    assert.notEqual(zero.code, 0);
     assert.deepEqual(await readdir(dir, { recursive: true }), before);
   } finally {
     await rm(dir, { recursive: true, force: true });

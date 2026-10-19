@@ -301,8 +301,10 @@ test("D5: autoMerge reaches the run input only for a repo that asked for it, wit
   await projects.set({ repo: "tyler/off", url: "https://git.example.com/tyler/off", autoMerge: false, autoDeploy: false });
   const { runtime, inputs } = captureEnqueue(projects);
 
-  // Without the change-class gate there is no `trivial` verdict to merge on,
-  // so the flag would be a silent no-op — it is not recorded at all.
+  // Without the change-class gate (explicitly off) there is no `trivial`
+  // verdict to merge on, so the flag would be a silent no-op — it is not
+  // recorded at all.
+  process.env.SHIP_CHANGE_CLASS = "off";
   await enqueueRun(runtime, { runId: "r1", task: "t", model: "m", repo: "https://git.example.com/tyler/on" });
   assert.equal(inputs[0]!.autoMerge, undefined, "no class gate, no merge authority");
 

@@ -47,15 +47,20 @@ test("unauthenticated reads are refused before anything else", async () => {
   assert.equal(res.status, 401);
 });
 
-test("flag off (the default): the API says it is disabled, and the run page payload is unchanged", async () => {
-  await launch("tv-root");
-  const res = await threadRoute.loader(loaderArgsFrom(get, "tv-root"));
-  assert.equal(res.status, 503);
-  assert.match(String((await res.json()).error), /SHIP_THREAD_VIEW/);
-  // Equivalence: flag off, the run page loader carries no thread key at all —
-  // the page renders exactly what it rendered before this view existed.
-  const off = await runRoute.loader(({ request: new Request("http://localhost/runs/tv-root"), params: { id: "tv-root" }, context: undefined }) as unknown as Parameters<typeof runRoute.loader>[0]);
-  assert.equal("threadView" in off, false);
+test("flag off (the explicit off value): the API says it is disabled, and the run page payload is unchanged", async () => {
+  process.env.SHIP_THREAD_VIEW = "off";
+  try {
+    await launch("tv-root");
+    const res = await threadRoute.loader(loaderArgsFrom(get, "tv-root"));
+    assert.equal(res.status, 503);
+    assert.match(String((await res.json()).error), /SHIP_THREAD_VIEW/);
+    // Equivalence: flag off, the run page loader carries no thread key at all —
+    // the page renders exactly what it rendered before this view existed.
+    const off = await runRoute.loader(({ request: new Request("http://localhost/runs/tv-root"), params: { id: "tv-root" }, context: undefined }) as unknown as Parameters<typeof runRoute.loader>[0]);
+    assert.equal("threadView" in off, false);
+  } finally {
+    delete process.env.SHIP_THREAD_VIEW;
+  }
 });
 
 test("flag on: the API returns the whole chain for any member, root first", async () => {
@@ -107,7 +112,7 @@ test("flag on: an unknown run id is a 404, not an empty chain", async () => {
 test("flag on: the run page payload gains exactly one key — nothing else moves", async () => {
   process.env.SHIP_THREAD_VIEW = "on";
   const on = await runRoute.loader({ params: { id: "tv-a" }, request: new Request("http://localhost/runs/tv-a") });
-  delete process.env.SHIP_THREAD_VIEW;
+  process.env.SHIP_THREAD_VIEW = "off";
   const off = await runRoute.loader({ params: { id: "tv-a" }, request: new Request("http://localhost/runs/tv-a") });
   assert.equal(on.threadView, true);
   assert.equal("threadView" in off, false);

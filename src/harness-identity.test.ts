@@ -54,10 +54,10 @@ async function enqueue(env: Record<string, string | undefined>, runId = "run-id"
   });
 }
 
-test("the flag is on only for an explicit on/1/true", () => {
-  assert.equal(harnessRecordEnabled({}), false);
-  for (const v of ["", "0", "off", "no", "yes", "enabled"]) assert.equal(harnessRecordEnabled({ [HARNESS_RECORD_FLAG]: v }), false, v);
-  for (const v of ["on", "ON", "1", "true", " on "]) assert.equal(harnessRecordEnabled({ [HARNESS_RECORD_FLAG]: v }), true, v);
+test("the flag is on unless explicitly off (unset means on)", () => {
+  assert.equal(harnessRecordEnabled({}), true);
+  for (const v of ["", "yes", "enabled", "1", "true", "on", " ON "]) assert.equal(harnessRecordEnabled({ [HARNESS_RECORD_FLAG]: v }), true, v);
+  for (const v of ["0", "off", "OFF", "no", "false", " false "]) assert.equal(harnessRecordEnabled({ [HARNESS_RECORD_FLAG]: v }), false, v);
 });
 
 test("identity: native records Ship's model and no vendor revision", () => {
@@ -93,15 +93,15 @@ test("identity: multi-attempt runs record every harness they may execute under",
   assert.deepEqual(id.attempts?.map((a) => a.id), ["claude-code", "opencode"]);
 });
 
-test("enqueue, flag off: the recorded run-started event carries no identity (default behaviour unchanged)", async () => {
-  const off = await enqueue({ [HARNESS_RECORD_FLAG]: undefined });
+test("enqueue, flag off: the recorded run-started event carries no identity (the off value is the default behaviour's escape hatch)", async () => {
+  const off = await enqueue({ [HARNESS_RECORD_FLAG]: "off" });
   assert.ok(!("harnessIdentity" in off.data));
   assert.deepEqual(Object.keys(off.data).sort(), ["input", "stepFingerprint", "taskRootRunId", "workflow"]);
-  for (const v of ["off", "0", ""]) assert.equal(JSON.stringify(await enqueue({ [HARNESS_RECORD_FLAG]: v })), JSON.stringify(off), `flag=${v}`);
+  for (const v of ["0", "no", "false"]) assert.equal(JSON.stringify(await enqueue({ [HARNESS_RECORD_FLAG]: v })), JSON.stringify(off), `flag=${v}`);
 });
 
 test("enqueue, flag on: identity is added beside the input and nothing else in the event changes", async () => {
-  const off = await enqueue({ [HARNESS_RECORD_FLAG]: undefined, SHIP_HARNESS: "claude-code", SHIP_HARNESS_MODEL: "sonnet" });
+  const off = await enqueue({ [HARNESS_RECORD_FLAG]: "off", SHIP_HARNESS: "claude-code", SHIP_HARNESS_MODEL: "sonnet" });
   const on = await enqueue({ [HARNESS_RECORD_FLAG]: "on", SHIP_HARNESS: "claude-code", SHIP_HARNESS_MODEL: "sonnet" });
   const { harnessIdentity: recorded, ...rest } = on.data as { harnessIdentity: ReturnType<typeof harnessIdentity> } & Record<string, unknown>;
   // Byte-identical once the one additive key is set aside: same input, same
