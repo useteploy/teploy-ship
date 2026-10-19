@@ -128,8 +128,9 @@ build() {
   if [ "${stack}" = rust ]; then set -- "$@" --build-arg "RUST_BASE=${rust_base}"; fi
   # The build context is the images/ directory, not the stack's own subdir:
   # every image COPYies images/acp-driver/ship-acp.mjs (the in-sandbox ACP
-  # driver, E7 H3) beside its Dockerfile, and a context cannot reach above
-  # itself. -f keeps each stack's own Dockerfile.
+  # driver, E7 H3) and images/browser-helper/ship-browser.mjs (the acting
+  # half of the ```look session, S12) beside its Dockerfile, and a context
+  # cannot reach above itself. -f keeps each stack's own Dockerfile.
   set -- "$@" \
     --build-arg "HARNESS_SPECS=${specs}" \
     --build-arg "HARNESS_BINARIES=${binaries}" \

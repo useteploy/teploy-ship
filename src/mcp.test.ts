@@ -209,7 +209,13 @@ test("default off: prompt bytes, parser, steps and fingerprint are the pre-MCP o
   // moved with that intentional change; the MCP-off half of the claim is
   // unchanged — the prompt still contains no MCP bytes — and delegate.test.ts
   // pins the new delegate wording itself.
-  const goldenPromptSha256 = "9092e20561720af4e5c5c59f3932dacdba77ca2acbda1dd2d4c736fe8756a750";
+  //
+  // A second deliberate re-pin: feat/browser-act (2026-10-19) taught acting
+  // on the look session in the LOOK-ON section (the baked ship-browser
+  // helper and its byRef example). These opts turn look on, so the golden
+  // moved again; look.test.ts pins the new look wording itself, and a
+  // look-off prompt still contains none of these bytes.
+  const goldenPromptSha256 = "26d45ef81b7b12328753a8d576e2fa8369c08cf34e7b278b4efc3042fd40b337";
   const goldenNoMcpFingerprint = "s1:075d716632c232b7";
   assert.equal(createHash("sha256").update(systemPrompt(opts)).digest("hex"), goldenPromptSha256, "flag-off system prompt is byte-identical to main's");
   assert.equal(stepFingerprint({ task: "t", look: true }), goldenNoMcpFingerprint, "a no-mcp input's step fingerprint is main's");

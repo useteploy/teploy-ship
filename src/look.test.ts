@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import type { AgentExecutor, ExecResult } from "@neutron-build/agents";
 
 import { LOOK_HELP } from "./actions.js";
+import { systemPrompt } from "./prompt.js";
 import { FileArtifacts, LOOK_IMAGE_DATA_CLASS, type Artifact, type ArtifactStore } from "./artifacts.js";
 import {
   LOOK_IMAGE_NO_MODEL,
@@ -264,6 +266,90 @@ test("the open-tier refusal names the D3 rule: plan review, operator decision, n
   assert.match(LOOK_OPEN_PLAN, /Nothing you do inside the run changes that/);
   assert.match(LOOK_OPEN_PLAN, /allowlist/);
 });
+
+// --- acting on the same session (feat/browser-act): the baked helper -------
+// The helper is images/browser-helper/ship-browser.mjs, baked to
+// /usr/local/lib/ship-browser.mjs by both playwright-carrying sandbox images.
+
+/** The helper as the images bake it, imported by URL so the repo copy is the one under test. */
+const HELPER_URL = new URL("../images/browser-helper/ship-browser.mjs", import.meta.url);
+
+test("the help and the prompt teach acting on the same session via the baked helper", () => {
+  assert.ok(LOOK_HELP.includes("/usr/local/lib/ship-browser.mjs"), "the parse help names the helper by its baked path");
+  assert.ok(LOOK_HELP.includes("byRef"), "the parse help names byRef");
+  assert.ok(LOOK_HELP.includes("```look again"), "acting is taught as a loop: act, then re-observe");
+  const on = systemPrompt({ workdir: "/work", task: "t", look: true });
+  assert.ok(on.includes('"/usr/local/lib/ship-browser.mjs"'), "the prompt's example imports the baked path");
+  assert.match(on, /node --input-type=module -e 'import \{ page, byRef \}/, "a copy-pasteable one-liner, not prose alone");
+  assert.match(on, /await \(await byRef\("e5"\)\)\.fill\(/, "the example acts by ref");
+  assert.ok(on.includes("process.exit(0)"), "the example ends the process — the CDP socket holds node open");
+  // Flag-off runs never hear about it: the helper is part of the look offer.
+  assert.ok(!systemPrompt({ workdir: "/work", task: "t" }).includes("ship-browser"), "no look, no helper bytes in the prompt");
+});
+
+test("ship-browser.mjs pure parts: ref grammar, endpoint parity with the session look owns, loud staleness", async () => {
+  // Importable on the repo host (no playwright there) because playwright is
+  // imported lazily inside page() — pinned here since the whole point of the
+  // module is that it is dependency-free to import and only needs the image.
+  const helper = (await import(HELPER_URL.href)) as {
+    CDP: string;
+    SESSION_SCRIPT: string;
+    REF: RegExp;
+    staleRef: (ref: string) => string;
+    page: () => Promise<unknown>;
+    byRef: (ref: string) => Promise<unknown>;
+  };
+  // It joins THE look session: the endpoint look's own session listens on.
+  assert.equal(helper.CDP, "http://127.0.0.1:9222");
+  assert.match(LOOK_SESSION, /--remote-debugging-port=9222/, "look.ts's session listens exactly there");
+  assert.equal(helper.SESSION_SCRIPT, ".teploy-agent/look-session.mjs", "it spawns look.ts's script, never a launch of its own");
+  // The same ref grammar as the look fence (LOOK_REF): eN and fNeN, nothing else.
+  for (const good of ["e1", "e12", "f1e6", "f12e3"]) assert.equal(helper.REF.test(good), true, good);
+  for (const bad of ["e", "12", "x12", "e12x", "f1", "f1e", "F1E2"]) assert.equal(helper.REF.test(bad), false, bad);
+  // Staleness fails loudly with look's own shape, no fuzzy matching.
+  assert.match(helper.staleRef("e12"), /^Ref e12 not found in (the )?current page snapshot\./);
+  assert.match(helper.staleRef("f2e3"), /```look/);
+  assert.equal(typeof helper.page, "function");
+  assert.equal(typeof helper.byRef, "function");
+});
+
+test("the helper resolves refs and joins the session exactly the way the look driver does", async () => {
+  const source = await readFile(fileURLToPath(HELPER_URL), "utf8");
+  assert.match(source, /connectOverCDP\(CDP\)/, "it connects over CDP rather than launching a browser");
+  assert.ok(!source.includes("await browser.close"), "closing the connection would tear down the run's look session");
+  assert.match(source, /"aria-ref=" \+ ref/, "byRef resolves through the same aria-ref engine call");
+  assert.match(source, /ariaSnapshot\(\{ mode: "ai" \}\)/, "it mints the connection's refs first, like the driver");
+  // Parity with the driver look.ts actually writes: run one and compare the
+  // pieces that must be shared — the session script path, its log, and the
+  // ref engine — so the two halves cannot drift apart silently.
+  const fake = fakeLookDriver();
+  await runLook(fake.executor, "t0", { kind: "look", url: "https://example.com/docs" });
+  const driver = fake.files.get(".teploy-agent/look-t0.mjs") ?? "";
+  assert.ok(driver !== "", "the driver script was written");
+  for (const shared of [".teploy-agent/look-session.mjs", "/tmp/ship-look-session.log", "http://127.0.0.1:9222"]) {
+    assert.ok(source.includes(shared), `the helper carries ${shared}`);
+    assert.ok(driver.includes(shared), `the driver carries ${shared}`);
+  }
+});
+
+test("both playwright-carrying sandbox images bake the helper, and the build context lets it through", async () => {
+  const copy = "COPY browser-helper/ship-browser.mjs /usr/local/lib/ship-browser.mjs";
+  for (const stack of ["sandbox-node", "sandbox-go"]) {
+    const dockerfile = await readFile(fileURLToPath(new URL(`../images/${stack}/Dockerfile`, import.meta.url)), "utf8");
+    assert.ok(dockerfile.includes(copy), `${stack} bakes the helper at the path the prompt teaches`);
+    assert.ok(
+      dockerfile.includes(`node -e 'import("/usr/local/lib/ship-browser.mjs").then((m) =>`),
+      `${stack} proves the baked copy imports and exports page/byRef`,
+    );
+  }
+  // The rust image bakes no playwright, so it bakes no browser helper either.
+  const rust = await readFile(fileURLToPath(new URL("../images/sandbox-rust/Dockerfile", import.meta.url)), "utf8");
+  assert.ok(!rust.includes("ship-browser"), "no playwright, no helper");
+  // The images/ context is an allowlist; the helper must be named through it.
+  const dockerignore = await readFile(fileURLToPath(new URL("../images/.dockerignore", import.meta.url)), "utf8");
+  assert.ok(dockerignore.includes("!browser-helper/ship-browser.mjs"), "the allowlist lets the helper into the context");
+});
+
 
 test("findMatches and renderLook: the shared observation helpers are self-contained", () => {
   // Self-containment is what lets look.ts embed them into the driver script;
