@@ -297,24 +297,32 @@ select option { background: var(--panel); color: var(--text); }
 .notice { margin: 12px 0; }
 /* Tables scroll inside themselves on a narrow screen; the page never does. */
 .table-wrap { overflow-x: auto; }
-@media (min-width: 721px) and (max-width: 920px) {
-  /* Nine nav links + brand + avatar stopped fitting one row when Incidents
-     and Coordination landed (caught by the 18-view re-check at 768). Same
-     treatment the mobile rule below uses: the nav takes its own row and
-     scrolls inside itself — the page never overflows, no link is hidden at
-     desktop widths. */
+header.top .nav-toggle { display: none; }
+@media (max-width: 920px) {
+  /* Below desktop the nine-link nav no longer fits one row. It collapses
+     behind a Menu button (toggled by NAV_PROGRESS below) and opens as a
+     full-width list of 44px rows under the header. */
   header.top { flex-wrap: wrap; }
-  header.top nav.nav { order: 3; flex-basis: 100%; overflow-x: auto; gap: 2px;
-    scrollbar-width: none; }
-  header.top nav.nav::-webkit-scrollbar { display: none; }
+  header.top .spacer { order: 1; }
+  header.top .nav-toggle { order: 2; display: inline-flex; align-items: center; gap: 8px;
+    min-height: 44px; padding: 0 12px; font-size: 13px; }
+  header.top details.avatar { order: 3; }
+  header.top nav.nav { order: 4; flex-basis: 100%; display: none; flex-direction: column; gap: 2px;
+    padding: 4px 0 6px; max-height: calc(100vh - 70px); overflow-y: auto; }
+  header.top.nav-open nav.nav { display: flex; }
+  header.top nav.nav a { display: flex; align-items: center; min-height: 44px; padding: 0 12px; font-size: 14px; }
+}
+.nav-toggle-bars { display: inline-block; width: 14px; height: 2px; background: currentColor;
+  box-shadow: 0 -5px 0 currentColor, 0 5px 0 currentColor; }
+header.top.nav-open .nav-toggle { border-color: var(--dim); }
+@media (max-width: 720px), (pointer: coarse) {
+  header.top .brand { display: inline-flex; align-items: center; min-height: 44px; }
+  header.top .switcher-static, details.switcher > summary { min-height: 44px; }
+  details.switcher .switcher-item { display: flex; align-items: center; min-height: 44px; }
 }
 @media (max-width: 720px) {
-  header.top { gap: 12px; padding: 8px 12px; flex-wrap: wrap; }
-  header.top nav.nav { order: 3; flex-basis: 100%; overflow-x: auto; gap: 2px;
-    scrollbar-width: none; }
-  header.top nav.nav::-webkit-scrollbar { display: none; }
-  header.top nav.nav a { white-space: nowrap; padding: 4px 8px; }
-  main { padding: 14px 12px 40px; }
+  header.top { gap: 10px; padding: 6px max(12px, env(safe-area-inset-right)) 6px max(12px, env(safe-area-inset-left)); }
+  main { padding: 14px max(12px, env(safe-area-inset-right)) calc(40px + env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); }
   form.newrun input[type=text] { flex-basis: 100%; }
   .timeline summary { flex-wrap: wrap; }
   .turn-action { flex-basis: 100%; white-space: normal; }
@@ -356,7 +364,22 @@ const NAV_PROGRESS = `(function(){
   // The layout is server-rendered once and survives client-side route changes,
   // so the active link has to be re-marked here — the server's value goes stale
   // the moment the router swaps a page without re-rendering the header.
+  function setMenu(open){
+    var h=document.querySelector('header.top'), b=document.querySelector('header.top .nav-toggle');
+    if(h) h.classList.toggle('nav-open',open);
+    if(b) b.setAttribute('aria-expanded',open?'true':'false');
+  }
+  // Delegated so it survives hydration replacing the button node.
+  document.addEventListener('click',function(e){
+    var b=e.target && e.target.closest ? e.target.closest('.nav-toggle') : null;
+    if(b){ setMenu(!document.querySelector('header.top.nav-open')); return; }
+    if(document.querySelector('header.top.nav-open') && !(e.target.closest && e.target.closest('header.top'))) setMenu(false);
+  });
+  document.addEventListener('keydown',function(e){
+    if(e.key==='Escape' && document.querySelector('header.top.nav-open')){ setMenu(false); var b=document.querySelector('header.top .nav-toggle'); if(b) b.focus(); }
+  });
   function syncActive(){
+    setMenu(false);
     var links=document.querySelectorAll('header.top nav.nav a');
     var path=location.pathname, best=null, i, j;
     for(i=0;i<links.length;i++){
@@ -452,7 +475,9 @@ window.__shipLive = function (routeId) {
 /** Tab icon. Emitted as a raw head fragment — the node adapter serves /assets/
  *  but not publicDir files at the dist root, so the icon rides the bundle. */
 export function head() {
-  return `<link rel="icon" type="image/svg+xml" href="${faviconUrl}" />`;
+  // Repeats the framework's viewport tag with viewport-fit=cover (the last one
+  // wins) so env(safe-area-inset-*) resolves on notched phones.
+  return `<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />\n<link rel="icon" type="image/svg+xml" href="${faviconUrl}" />`;
 }
 
 export default function Layout({ children, data }: { children: ComponentChildren; data?: { nav: NavData; signedIn?: boolean; path?: string; user?: string } }) {
@@ -488,11 +513,14 @@ export default function Layout({ children, data }: { children: ComponentChildren
         )}
         </div>
         {signedIn && (
-          <nav class="nav" aria-label="Main navigation">
+          <nav class="nav" id="main-nav" aria-label="Main navigation">
             {NAV_LINKS.map((l) => (
               <a href={l.href} data-match={l.match.join(",")} aria-current={l.href === current ? "page" : undefined} class={l.href === current ? "active" : undefined}>{l.label}</a>
             ))}
           </nav>
+        )}
+        {signedIn && (
+          <button type="button" class="nav-toggle" aria-expanded="false" aria-controls="main-nav"><span class="nav-toggle-bars" aria-hidden="true" />Menu</button>
         )}
         <span class="spacer" />
         {signedIn && (
