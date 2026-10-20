@@ -32,13 +32,26 @@
  *      under in-flight parked runs is the same deploy-fence no-no as editing
  *      defaultRecoveryConfig.
  *
+ * The ceiling is per-RUN — "total time spent parked, across every park of
+ * every think step", as the docs have always said — and the accumulator that
+ * enforces it (the LEDGER below) is itself replay-deterministic: it is never
+ * persisted and never read from a clock. Every pass re-derives it by walking
+ * the same recorded events in the same order — each park iteration reads back
+ * a recorded marker (whose retryAfterMs rides the log) and consumes one
+ * recorded sleep, adding exactly the delayMs the writing pass added — the
+ * same re-derivation durable.ts already relies on for anySuccessfulAction,
+ * finishNudged and every other piece of loop state. A wall-clock total would
+ * differ between the recording worker and a replaying worker and fail the
+ * run at a different park; this cannot.
+ *
  * The extra events only ever appear on a path that previously ended the run
  * outright (a think step throwing past its retries), so no in-flight log
  * replays differently and no step NAME changes — the fingerprint is untouched.
  */
+import { Suspension } from "@neutron-build/workflow";
 import type { WorkflowContext } from "@neutron-build/workflow";
 
-import { classifyFailure } from "./model-routing-policy.js";
+import { classifyFailure, isQuotaExhaustion } from "./model-routing-policy.js";
 import type { FailureClass } from "./model-routing-policy.js";
 import { retryDelayMsFromError } from "./provider.js";
 
@@ -68,7 +81,36 @@ export type RateLimitParkInput = RateLimitParkTuning | false;
 
 export const DEFAULT_RATE_LIMIT_PARK: RateLimitParkTuning = { maxTotalWaitMs: DEFAULT_RATE_LIMIT_MAX_WAIT_MS };
 
-/** The wait before park `attempt` (1-based), honouring a provider Retry-After when it asks for longer. */
+/**
+ * The RUN-level park accumulator: how long this run has already committed
+ * to park sleeps, and how many parks it took to get there.
+ *
+ * ONE per run — created once per execution pass where durable.ts builds the
+ * native adapter (see `nativeAdapter`), OUTSIDE the per-attempt and
+ * per-step invocations, so every think-shaped call site (plan, condense,
+ * turn-think — and every independent attempt) draws on the same budget.
+ * The PR's first review found the ceiling was being enforced per withRateLimitPark
+ * CALL — per think step — so each step got a fresh 60 minutes and a run could
+ * park multiples of the documented ceiling; the docs, the failure message and
+ * the flag reference all say per-run TOTAL, and now the arithmetic does too.
+ *
+ * Replay-deterministic by construction (see the module header): never
+ * persisted, never read from a clock — each pass re-derives both fields by
+ * walking the recorded markers and consumed sleeps in log order.
+ */
+export interface RateLimitParkLedger {
+  /** Total ms of park sleeps the run has committed to so far — the number the ceiling is measured against. */
+  waitedMs: number;
+  /** How many parks the run has taken (the 1-based schedule index of the next park is `parks + 1`). */
+  parks: number;
+}
+
+/** A fresh run-level ledger. One per run execution, shared by every think-shaped step. */
+export function newParkLedger(): RateLimitParkLedger {
+  return { waitedMs: 0, parks: 0 };
+}
+
+/** The wait before the run's park number `attempt` (1-based, across every think step), honouring a provider Retry-After when it asks for longer. */
 export function parkDelayMs(attempt: number, retryAfterMs?: number): number {
   const scheduled = Math.min(RATE_LIMIT_PARK_FIRST_MS * 2 ** Math.max(0, attempt - 1), RATE_LIMIT_PARK_MAX_DELAY_MS);
   return Math.min(Math.max(scheduled, retryAfterMs ?? 0), RATE_LIMIT_PARK_MAX_DELAY_MS);
@@ -118,6 +160,12 @@ const PARKABLE: ReadonlySet<FailureClass> = new Set(["rate-limit", "overloaded"]
 export function rateLimitMarkerOf(error: unknown): RateLimitParked | null {
   const cls = classifyFailure(error);
   if (!PARKABLE.has(cls)) return null;
+  // Quota/billing exhaustion is congestion-SHAPED but is not congestion: a
+  // quota that resets on a billing cycle is not something a 60-minute park
+  // can outlast, and parking it only hides the real failure until the
+  // ceiling. Fail fast — routing may still switch models on it; that is
+  // triggerFor's call, not the park's.
+  if (isQuotaExhaustion(error)) return null;
   const retryAfterMs = retryDelayMsFromError(error);
   return {
     parked: "rate-limit",
@@ -146,10 +194,10 @@ export function rateLimitCeilingMessage(stepName: string, waitedMs: number, maxT
 
 /** What `onPark` is told, once per wait. */
 export interface RateLimitParkNotice {
-  /** 1-based: the first park, then the second, ... */
+  /** 1-based: the run's Nth park, wherever it landed (the schedule continues across steps). */
   attempt: number;
   delayMs: number;
-  /** The wait including this park — the number the ceiling is measured against. */
+  /** The RUN's total wait including this park — the number the run-level ceiling is measured against. */
   waitedMs: number;
   maxTotalWaitMs: number;
   class: FailureClass;
@@ -195,6 +243,14 @@ export async function withRateLimitPark<T>(
   options: {
     stepName: string;
     park: RateLimitParkInput;
+    /**
+     * The RUN's ledger — ONE object shared by every think-shaped call site
+     * of the run (durable.ts creates it beside the adapter). Required so a
+     * future call site cannot silently fall back to a per-step budget: the
+     * ceiling is documented per-run, and a forgotten ledger is exactly the
+     * bug the first review found, reintroduced.
+     */
+    ledger: RateLimitParkLedger;
     /** The recorded step, body wrapped in `markingRateLimits`. */
     run: () => Promise<T | RateLimitParked>;
     onPark?: (notice: RateLimitParkNotice) => void;
@@ -211,18 +267,31 @@ export async function withRateLimitPark<T>(
     return result as T;
   }
   const { maxTotalWaitMs } = options.park;
-  let waitedMs = 0;
-  let attempt = 0;
+  const ledger = options.ledger;
   for (;;) {
     const result = await options.run();
     if (!isRateLimitParked(result)) return result as T;
-    attempt += 1;
+    const attempt = ledger.parks + 1;
     const delayMs = parkDelayMs(attempt, result.retryAfterMs);
-    if (waitedMs + delayMs > maxTotalWaitMs) {
-      throw new Error(rateLimitCeilingMessage(stepName, waitedMs, maxTotalWaitMs, result.message));
+    if (ledger.waitedMs + delayMs > maxTotalWaitMs) {
+      throw new Error(rateLimitCeilingMessage(stepName, ledger.waitedMs, maxTotalWaitMs, result.message));
     }
-    waitedMs += delayMs;
-    options.onPark?.({ attempt, delayMs, waitedMs, maxTotalWaitMs, class: result.class, message: result.message });
-    await ctx.sleep(delayMs);
+    ledger.parks = attempt;
+    ledger.waitedMs += delayMs;
+    // Narrate only the park at the LIVE FRONTIER. A recorded, completed
+    // sleep is consumed by `ctx.sleep` RETURNING (the pass is replaying);
+    // the pass that writes a new `sleep-started` is the one the Suspension
+    // escapes from — that is the one and only pass where the operator is
+    // watching a park happen. Without this, every replay pass re-narrated
+    // every earlier park (log lines and live "rate-limited" phases firing
+    // for waits that ended long ago).
+    try {
+      await ctx.sleep(delayMs);
+    } catch (error) {
+      if (error instanceof Suspension && error.reason === "sleeping") {
+        options.onPark?.({ attempt, delayMs, waitedMs: ledger.waitedMs, maxTotalWaitMs, class: result.class, message: result.message });
+      }
+      throw error;
+    }
   }
 }

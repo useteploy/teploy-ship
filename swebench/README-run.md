@@ -169,7 +169,10 @@ the harness wraps its model with the product's `withRetry` + per-call timeout,
 and the durable loop PARKS a rate-limited think and wakes itself (the wake loop
 in `runDurable` stands in for the worker's scheduler), bounded by
 `SHIP_RATE_LIMIT_MAX_WAIT_MIN`. `rateLimitParks` counts how often that park
-carried a run the old code would have lost.
+carried a run the old code would have lost. Sweeps from before and after
+2026-10-19 therefore measured different transport policies — before it, a rate
+limit was an instance-ending error on a bare adapter — so resolution rates
+across that boundary are not comparable.
 
 Two fields are **not comparable across arms**: `snapshots` (durable's
 fingerprint, critic-diff and index reads all go through the wrapped executor,

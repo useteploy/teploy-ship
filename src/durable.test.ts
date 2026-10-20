@@ -6658,6 +6658,7 @@ test("a rate-limited think parks, wakes, retries and the run still finishes", as
   // adds no events, and never touches the provider again.
   const before = events.length;
   const callsBefore = calls();
+  const logsBefore = logs.length;
   const replay = await executeRun({ workflow: wf, runId: "run-ratelimit", store });
   assert.equal(replay.status, "completed");
   assert.deepEqual(
@@ -6666,6 +6667,9 @@ test("a rate-limited think parks, wakes, retries and the run still finishes", as
     "replay added no events — the parks and markers replay as recorded",
   );
   assert.equal(calls(), callsBefore, "replay never re-invoked the model");
+  // 2026-10-19 review: a replayed park is CONSUMED, not happened — it must
+  // not re-narrate its log line or re-fire the live "rate-limited" phase.
+  assert.equal(logs.length, logsBefore, "a full replay narrates none of its recorded parks");
 });
 
 test("exceeding the rate-limit wait ceiling fails the run with a message that names it", async () => {
@@ -6731,4 +6735,115 @@ test("cancelling while parked on a rate limit settles the run without another mo
   // wrapper never runs (durable.ts), the sandbox-reap reconciler is the
   // backstop — so this test asserts the SPEND stop, not the reaper.
   assert.deepEqual(destroyed, []);
+});
+
+test("the rate-limit wait ceiling is per-RUN: parks on two different steps share it", async () => {
+  // The PR's first review, as an end-to-end pin: `waitedMs` used to reset
+  // inside every withRateLimitPark call — once per think step — so a run
+  // under a 90s ceiling parked 60s on turn-0-think AND 60s on turn-1-think
+  // (120s total, 133% of the documented ceiling) and kept going. The ledger
+  // is run-level now: the second step's park is refused by the total.
+  let calls = 0;
+  const model: ModelAdapter = {
+    provider: "scripted",
+    modelId: "s1",
+    async doGenerate(): Promise<AdapterGenerateResult> {
+      calls += 1;
+      if (calls === 1 || calls === 3) throw Object.assign(new Error("[1302][Rate limit reached for requests][req-8f3a1c]"), { problem: { status: 429 } });
+      // calls === 2: turn-0's wake succeeds and executes its action.
+      const text = "```bash\necho hi\n```";
+      return { content: [{ type: "text", text }], finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, raw: null };
+    },
+    async *doStream() {
+      throw new Error("unused");
+    },
+  };
+  const { provider } = await localProvider();
+  const wf = durableAgent({ model, executor: provider });
+  const store = new MemoryEventStore();
+
+  // turn-0-think parks (60s of the 90s ceiling)...
+  const input = { task: "t", rateLimitPark: { maxTotalWaitMs: 90_000 } };
+  const parked = await executeRun({ workflow: wf, runId: "run-ratelimit-run-cap", store, input });
+  assert.equal(parked.status, "sleeping");
+  // ...wakes, gets through, executes; then turn-1-think is rate-limited
+  // again — and the RUN's remaining budget (30s) cannot fit its park.
+  await completeSleep(store, "run-ratelimit-run-cap");
+  const failed = await executeRun({ workflow: wf, runId: "run-ratelimit-run-cap", store });
+  assert.equal(failed.status, "failed", "the second step's park is refused by the run-level ceiling, not a fresh per-step one");
+  assert.match(failed.error?.detail ?? "", /turn-1-think/);
+  assert.match(failed.error?.detail ?? "", /rate-limit wait ceiling/);
+  assert.match(failed.error?.detail ?? "", /1302.*Rate limit reached for requests/s);
+  assert.equal(calls, 3, "turn-0 failed once then succeeded; turn-1's refusal happened before any further retry");
+  const events = await store.load("run-ratelimit-run-cap");
+  assert.equal(events.filter((e) => e.type === "sleep-started").length, 1, "only the first step ever slept");
+});
+
+test("a PRE-PR log (rate-limited think FAILED the run) replays failed under park-on code", async () => {
+  // The reviewer's missing test. Before the park existed, a rate-limited
+  // think step threw past its retries and the engine recorded a
+  // step-FAILED `turn-0-think` plus a terminal run-failed — the exact
+  // shape of the 34/100 sweep logs. This code can no longer WRITE that
+  // log (markingRateLimits converts the live error into a marker result),
+  // so the log is manufactured the way the old code wrote it: run the
+  // fail-fast opt-out (identical step outcomes up to the marker), then
+  // rewrite that marker into the step-failed event the old engine
+  // recorded and strip the post-PR input field.
+  const { model, calls } = rateLimitedModel(1, []);
+  const { provider } = await localProvider();
+  const wf = durableAgent({ model, executor: provider });
+  const store = new MemoryEventStore();
+  const runId = "run-pre-pr-log";
+
+  const first = await executeRun({ workflow: wf, runId, store, input: { task: "t", rateLimitPark: false } });
+  assert.equal(first.status, "failed", "the opt-out still fails fast");
+  const originalDetail = first.error?.detail ?? "";
+
+  // Reshape into PRE-PR: the marker step result becomes the step-failed
+  // event the old code recorded...
+  const events = await store.load(runId);
+  const marker = events.find(
+    (e) => e.type === "step-completed" && e.name === "turn-0-think" && (e.data as { result?: { parked?: string } }).result?.parked === "rate-limit",
+  );
+  assert.ok(marker !== undefined, "no marker step found — the test's manufacture step is blind, fix the fixture");
+  const providerMessage = (marker.data as { result: { message: string } }).result.message;
+  (marker as { type: string }).type = "step-failed";
+  (marker as { data: unknown }).data = { error: { message: providerMessage }, attempt: 1 };
+  // ...the terminal failure carries the StepError detail the old run-failed did...
+  const runFailed = events.find((e) => e.type === "run-failed");
+  assert.ok(runFailed !== undefined);
+  (runFailed.data as { error: { message: string } }).error.message = `Step "turn-0-think" failed: ${providerMessage}`;
+  // ...and the input carries no park field at all, as no pre-PR input could.
+  const started = events.find((e) => e.type === "run-started")!;
+  delete (started.data as { input: { rateLimitPark?: unknown } }).input.rateLimitPark;
+
+  // Terminal replay under park-ON code (absent field = default ceiling):
+  // stays failed, spends nothing, adds nothing.
+  const replay = await executeRun({ workflow: wf, runId, store });
+  assert.equal(replay.status, "failed", "a terminal pre-PR log short-circuits — the park never gets a say");
+  assert.equal(replay.error?.detail ?? "", `Step "turn-0-think" failed: ${providerMessage}`);
+  assert.deepEqual(await store.load(runId), events, "byte-identical: replay appended no events");
+  assert.equal(calls(), 1, "the provider was never re-invoked");
+
+  // The crash window the terminal short-circuit cannot cover: the same log
+  // MINUS its terminal run-failed (a worker death between the step failing
+  // and the terminal append). Re-execution must re-derive the SAME failure:
+  // the recorded step-failed replays as a thrown StepError — the park
+  // wrapper does not catch, does not reclassify, does not sleep — and the
+  // run fails again with the identical detail and zero model calls.
+  const terminalIndex = events.findIndex((e) => e.type === "run-failed");
+  events.splice(terminalIndex, 1);
+  const again = await executeRun({ workflow: wf, runId, store });
+  assert.equal(again.status, "failed", "a re-executed pre-PR log re-fails; a rate-limit StepError is not parkable");
+  assert.equal(again.error?.detail ?? "", `Step "turn-0-think" failed: ${providerMessage}`);
+  assert.equal(calls(), 1, "the recorded failure replayed as a throw — the model body never ran");
+  const after = await store.load(runId);
+  assert.deepEqual(after.slice(0, events.length), events, "the log's prefix is untouched");
+  assert.equal(after.length, events.length + 1, "exactly one new event: the re-derived run-failed");
+  assert.equal(after.filter((e) => e.type === "sleep-started").length, 0, "no park was ever recorded");
+  assert.equal(
+    after.filter((e) => e.type === "step-completed" && (e.data as { result?: { parked?: string } }).result?.parked === "rate-limit").length,
+    0,
+    "the thrown StepError was never reclassified into a marker",
+  );
 });

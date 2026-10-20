@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { FALLBACK_TRIGGERS } from "./model-routing.js";
-import { classifyFailure, loadRoutingPolicy, parsePolicy, routingMode, triggerFor } from "./model-routing-policy.js";
+import { classifyFailure, isQuotaExhaustion, loadRoutingPolicy, parsePolicy, routingMode, triggerFor } from "./model-routing-policy.js";
 import type { FailureClass } from "./model-routing-policy.js";
 
 const candidate = (model: string, extra: Record<string, unknown> = {}) => ({
@@ -152,12 +152,35 @@ test("classifyFailure: the z.ai 1302 message classifies as a rate limit, however
   assert.equal(classifyFailure(new Error("[1302][Rate limit reached for requests][req-abc123]")), "rate-limit");
   // AIError shape: the status lives on problem.status, not status.
   assert.equal(classifyFailure(aiError("[1302][Rate limit reached for requests][req-abc123]", 429)), "rate-limit");
-  // The code alone, if a compat layer ever strips the words.
-  assert.equal(classifyFailure(err("request rejected: 1302", 400)), "rate-limit");
+  // The code alone, if a compat layer ever strips the words — but only in
+  // the provider's own bracketed form `[1302]`, which is the only shape
+  // z.ai writes it in (2026-10-19 review: a bare `1302` is just four
+  // digits, and they turn up inside request ids).
+  assert.equal(classifyFailure(err("request rejected: [1302]", 400)), "rate-limit");
+  assert.equal(classifyFailure(new Error("provider returned [1302] with no words")), "rate-limit");
+  // ...and a bare, unbracketed 1302 inside a status-less message — a
+  // request id here — classifies nothing. It used to.
+  assert.equal(classifyFailure(new Error("no such row for request id req-8f3a1c-1302 in shard 7")), "unknown");
+  assert.equal(classifyFailure(err("request rejected: 1302", 400)), "unknown", "unbracketed behind a 4xx too — format, not presence");
   // A normalised 400 (compat layers do this) still refines to the message.
   assert.equal(classifyFailure(aiError("Too many requests, slow down", 400)), "rate-limit");
   // Overload text behind a 4xx is congestion, not "unknown".
   assert.equal(classifyFailure(aiError("The server is temporarily overloaded", 400)), "overloaded");
+});
+
+test("isQuotaExhaustion: congestion-shaped, but nothing a park can outlast (2026-10-19 review)", () => {
+  // Each of these classifies rate-limit and must STILL refuse to park —
+  // pinned against rateLimitMarkerOf in rate-limit-park.test.ts; here the
+  // predicate itself.
+  assert.equal(isQuotaExhaustion(err("You exceeded your current quota, please check your plan and billing details", 429)), true);
+  assert.equal(isQuotaExhaustion(Object.assign(new Error("Insufficient_quota for this plan"), { problem: { status: 429 } })), true);
+  assert.equal(isQuotaExhaustion(err("quota exceeded", 402)), true, "402 is payment-required by definition");
+  assert.equal(isQuotaExhaustion(new Error("Your billing balance is negative; add funds to resume")), true, "status-less billing text");
+  // Genuine congestion is never quota.
+  assert.equal(isQuotaExhaustion(err("Rate limit reached for requests", 429)), false);
+  assert.equal(isQuotaExhaustion(new Error("[1302][Rate limit reached for requests][req-abc123]")), false);
+  assert.equal(isQuotaExhaustion(err("The server is overloaded", 529)), false);
+  assert.equal(isQuotaExhaustion(undefined), false);
 });
 
 test("classifyFailure: a 4xx that names nothing transient is still unknown", () => {

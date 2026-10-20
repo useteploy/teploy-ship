@@ -20,6 +20,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -548,12 +549,29 @@ test("the harness consumes DIST_REQUIREMENTS rather than restating it", async ()
   // DURABLE symbol — that is the original intent, kept by the subsets below.
   assert.deepEqual(
     need(flags(false, true, true)),
-    ["withRetry", "stepWithRateLimitPark"],
+    ["withRetry", "withRateLimitPark"],
     "model wiring is required on both arms; no durable symbol blocks the live arm",
   );
-  assert.deepEqual(need(flags(true, false, false)), ["durableAgent", "withRetry", "stepWithRateLimitPark"]);
-  assert.deepEqual(need(flags(true, true, false)), ["durableAgent", "workspaceKey", "withRetry", "stepWithRateLimitPark"]);
-  assert.deepEqual(need(flags(true, false, true)), ["durableAgent", "workspaceKey", "withRetry", "stepWithRateLimitPark"]);
+  assert.deepEqual(need(flags(true, false, false)), ["durableAgent", "withRetry", "withRateLimitPark"]);
+  assert.deepEqual(need(flags(true, true, false)), ["durableAgent", "workspaceKey", "withRetry", "withRateLimitPark"]);
+  assert.deepEqual(need(flags(true, false, true)), ["durableAgent", "workspaceKey", "withRetry", "withRateLimitPark"]);
+});
+
+test("every DIST_REQUIREMENTS symbol exists in the BUILT dist file", () => {
+  // The 2026-10-19 review's blocker, restated as a test: the list demanded
+  // `stepWithRateLimitPark` while the export is `withRateLimitPark`, so the
+  // stale-dist guard (run-inference.mjs) exited 2 on EVERY sweep while every
+  // test here stayed green — the list was never checked against the artifact
+  // it polices. Reading the built file closes that: a rename on either side
+  // now fails here first. (Runs after `pnpm run build`, which the repo's
+  // test script does before the swebench suite.)
+  for (const r of DIST_REQUIREMENTS) {
+    const built = readFileSync(join(here, "..", "dist", r.file), "utf8");
+    assert.ok(
+      built.includes(r.symbol),
+      `dist/${r.file} has no "${r.symbol}" — DIST_REQUIREMENTS names a symbol the build does not export; run-inference.mjs would exit 2 on every sweep`,
+    );
+  }
 });
 
 test("the harness's inline wiring still routes through the tested seams", async () => {

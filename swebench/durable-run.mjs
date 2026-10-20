@@ -115,7 +115,7 @@ export const DIST_REQUIREMENTS = [
   // Likewise the rate-limit park: the durable arm's wake loop (below) depends
   // on dist/rate-limit-park.js exporting these, and the input stamp the
   // product's enqueueRun writes.
-  { file: "rate-limit-park.js", symbol: "stepWithRateLimitPark", env: "(model wiring, always)", when: () => true },
+  { file: "rate-limit-park.js", symbol: "withRateLimitPark", env: "(model wiring, always)", when: () => true },
 ];
 
 /**

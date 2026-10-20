@@ -105,7 +105,7 @@ import { condenseIfNeeded, defaultCondenseConfig } from "./memory.js";
 import type { CondenseConfig } from "./memory.js";
 import { RecoveryTracker, defaultRecoveryConfig } from "./recovery.js";
 import type { RecoveryConfig } from "./recovery.js";
-import { DEFAULT_RATE_LIMIT_PARK, markingRateLimits, withRateLimitPark } from "./rate-limit-park.js";
+import { DEFAULT_RATE_LIMIT_PARK, markingRateLimits, newParkLedger, withRateLimitPark } from "./rate-limit-park.js";
 import type { RateLimitParkInput } from "./rate-limit-park.js";
 import { loadRepoContext, runNote } from "./repo-memory.js";
 import type { ProjectStore } from "./projects.js";
@@ -2546,6 +2546,17 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
   // because a clean tree publishes nothing either way.
   const HOLD_GRACE_TURNS = 8;
   const maxObs = config.maxObservationChars ?? 8000;
+  // The RUN-level rate-limit park ledger, created HERE — once per execution
+  // pass (the registry that selects this adapter is built inside the
+  // workflow's run), and OUTSIDE the `run` body below, which the
+  // multi-attempt loop invokes once per attempt. Every think-shaped step of
+  // the run — plan, condense, turn-think, in every attempt — draws on this
+  // one budget, which is what the documented per-run ceiling
+  // (SHIP_RATE_LIMIT_MAX_WAIT_MIN) has always meant; the PR's first review
+  // caught each step handing itself a fresh one. Never persisted: each pass
+  // re-derives it from the recorded markers and consumed sleeps
+  // (rate-limit-park.ts, DETERMINISM) — never from a clock.
+  const parkLedger = newParkLedger();
   return {
     id: NATIVE_HARNESS_ID,
     version: HARNESS_VERSIONS[NATIVE_HARNESS_ID]!,
@@ -2605,14 +2616,17 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
       // replay parks exactly as many times as its log records. Every
       // think-shaped model call goes through this (turn, plan, condense):
       // a shared-key rate limit hits whichever call is in flight, and the
-      // run has already paid for every turn before it. The `.step(` calls
+      // run has already paid for every turn before it. They all share the
+      // adapter's run-level LEDGER (parkLedger, nativeAdapter above), so the
+      // ceiling the input stamps is spent once per RUN, not once per step —
+      // the mistake the PR's first review caught. The `.step(` calls
       // themselves stay HERE, at their literal names, so the fingerprint's
       // static extraction sees the same sequence it always did.
       const parkTuning: RateLimitParkInput = input.rateLimitPark === false ? false : (input.rateLimitPark ?? DEFAULT_RATE_LIMIT_PARK);
       const parkNotice = (stepName: string) => (n: { attempt: number; delayMs: number; waitedMs: number; maxTotalWaitMs: number; class: string; message: string }) => {
         config.log?.(
           `[durable] ${stepName}: provider ${n.class === "overloaded" ? "reporting overload" : "rate-limited the run"} ` +
-            `(${clipDetail(n.message, 120)}), parking ${Math.round(n.delayMs / 1000)}s — wait ${n.attempt}, ` +
+            `(${clipDetail(n.message, 120)}), parking ${Math.round(n.delayMs / 1000)}s — park ${n.attempt} of this run, ` +
             `${Math.round(n.waitedMs / 60_000)}m of the ${Math.round(n.maxTotalWaitMs / 60_000)}m ceiling used`,
         );
         ws.live?.({ phase: "rate-limited", detail: `waiting ${Math.round(n.delayMs / 1000)}s on the provider rate limit` });
@@ -2755,6 +2769,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
         const planStep = await withRateLimitPark(ws.ctx, {
           stepName: `${p}plan-think`,
           park: parkTuning,
+          ledger: parkLedger,
           onPark: parkNotice(`${p}plan-think`),
           run: () =>
             ws.ctx.step(`${p}plan-think`, () =>
@@ -2877,6 +2892,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
               const summaryStep = await withRateLimitPark(ws.ctx, {
                 stepName: `${p}turn-${turn}-condense`,
                 park: parkTuning,
+                ledger: parkLedger,
                 onPark: parkNotice(`${p}turn-${turn}-condense`),
                 run: () =>
                   ws.ctx.step(`${p}turn-${turn}-condense`, () =>
@@ -2931,6 +2947,7 @@ export function nativeAdapter(config: DurableAgentConfig): HarnessAdapter {
         const generatedStep = await withRateLimitPark(ws.ctx, {
           stepName: `${p}turn-${turn}-think`,
           park: parkTuning,
+          ledger: parkLedger,
           onPark: parkNotice(`${p}turn-${turn}-think`),
           run: () =>
             ws.ctx.step(`${p}turn-${turn}-think`, () =>
