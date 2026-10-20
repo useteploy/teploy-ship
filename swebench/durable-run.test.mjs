@@ -20,6 +20,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -43,6 +44,7 @@ import {
   statusOf,
   summarizeRun,
   teeStore,
+  wrapHarnessModel,
 } from "./durable-run.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -541,10 +543,35 @@ test("the harness consumes DIST_REQUIREMENTS rather than restating it", async ()
   }
   const flags = (durable, critic, index) => ({ durable, critic, index });
   const need = (f) => DIST_REQUIREMENTS.filter((r) => r.when(f)).map((r) => r.symbol);
-  assert.deepEqual(need(flags(false, true, true)), [], "the live arm must not be blocked by a durable symbol");
-  assert.deepEqual(need(flags(true, false, false)), ["durableAgent"]);
-  assert.deepEqual(need(flags(true, true, false)), ["durableAgent", "workspaceKey"]);
-  assert.deepEqual(need(flags(true, false, true)), ["durableAgent", "workspaceKey"]);
+  // The model-wiring rows (withRetry, the rate-limit park) are ARM-
+  // INDEPENDENT: buildModel wraps the adapter for the live arm too, so a
+  // stale dist must block either arm. What the live arm must never need is a
+  // DURABLE symbol — that is the original intent, kept by the subsets below.
+  assert.deepEqual(
+    need(flags(false, true, true)),
+    ["withRetry", "withRateLimitPark"],
+    "model wiring is required on both arms; no durable symbol blocks the live arm",
+  );
+  assert.deepEqual(need(flags(true, false, false)), ["durableAgent", "withRetry", "withRateLimitPark"]);
+  assert.deepEqual(need(flags(true, true, false)), ["durableAgent", "workspaceKey", "withRetry", "withRateLimitPark"]);
+  assert.deepEqual(need(flags(true, false, true)), ["durableAgent", "workspaceKey", "withRetry", "withRateLimitPark"]);
+});
+
+test("every DIST_REQUIREMENTS symbol exists in the BUILT dist file", () => {
+  // The 2026-10-19 review's blocker, restated as a test: the list demanded
+  // `stepWithRateLimitPark` while the export is `withRateLimitPark`, so the
+  // stale-dist guard (run-inference.mjs) exited 2 on EVERY sweep while every
+  // test here stayed green — the list was never checked against the artifact
+  // it polices. Reading the built file closes that: a rename on either side
+  // now fails here first. (Runs after `pnpm run build`, which the repo's
+  // test script does before the swebench suite.)
+  for (const r of DIST_REQUIREMENTS) {
+    const built = readFileSync(join(here, "..", "dist", r.file), "utf8");
+    assert.ok(
+      built.includes(r.symbol),
+      `dist/${r.file} has no "${r.symbol}" — DIST_REQUIREMENTS names a symbol the build does not export; run-inference.mjs would exit 2 on every sweep`,
+    );
+  }
 });
 
 test("the harness's inline wiring still routes through the tested seams", async () => {
@@ -557,4 +584,140 @@ test("the harness's inline wiring still routes through the tested seams", async 
   assert.ok(/model_name_or_path: PROVENANCE\.modelName/.test(src), "predictions must be named by provenance(), not a literal");
   assert.ok(/loop: PROVENANCE\.loop/.test(src), "every runlog row must record which loop ran");
   assert.ok(/assertNoExistingLog\(DURABLE_EVENTS_DIR/.test(src), "the replay guard must run before a durable instance");
+  // The 2026-10-19 finding: buildModel used to hand driveLoop a BARE adapter,
+  // so the eval measured a loop with none of the product's transport policy
+  // (34/100 instances died to a rate limit the product would have retried).
+  assert.ok(/wrapHarnessModel\(/.test(src), "buildModel must wrap its adapter with the product's retry + call timeout");
+});
+
+// ------------------------------------------------- rate limits (2026-10-19)
+
+/** The z.ai error the sweep actually saw, in @neutron-build/ai's AIError shape. */
+function zaiRateLimit() {
+  return Object.assign(new Error("[1302][Rate limit reached for requests][req-8f3a1c]"), { problem: { status: 429 } });
+}
+
+test("wrapHarnessModel gives the eval the product's transport policy", async () => {
+  // Before 2026-10-19 the harness's buildModel handed driveLoop a BARE
+  // createAnthropic adapter — no retry, no call timeout — so a single 429
+  // failed an instance the product itself would have retried four times.
+  // This is the seam that keeps that from coming back. (Retry-After
+  // honouring inside withRetry is pinned by src/provider.test.ts, which can
+  // inject a sleep; here the seam is that the wrap EXISTS and retries.)
+  let calls = 0;
+  const flaky = {
+    provider: "scripted",
+    modelId: "m",
+    async doGenerate() {
+      calls += 1;
+      if (calls <= 2) throw zaiRateLimit();
+      return { content: [{ type: "text", text: "```finish\nok\n```" }], finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, raw: null };
+    },
+    async *doStream() {
+      throw new Error("unused");
+    },
+  };
+  const wrapped = wrapHarnessModel(flaky, {
+    policy: { attempts: 4, baseDelayMs: 1, maxDelayMs: 2 },
+    timeoutMs: 60_000,
+    log: () => {},
+  });
+  const result = await wrapped.doGenerate({ messages: [] });
+  assert.equal(result.content[0].text, "```finish\nok\n```");
+  assert.equal(calls, 3, "the 1302 rate limit was retried, not fatal");
+  // Identity survives the wrap — pricing and provenance read it.
+  assert.equal(wrapped.modelId, "m");
+  assert.equal(wrapped.provider, "scripted");
+});
+
+test("the durable arm wakes a rate-limit park itself and the run finishes", async () => {
+  // A benchmark has no scheduler: runDurable's wake loop is what stands in
+  // for the worker's completeSleep-and-re-execute, without which a park would
+  // end the instance — the 34/100-error sweep restated as a harness bug.
+  let calls = 0;
+  let finish = 0;
+  const model = {
+    provider: "scripted",
+    modelId: "s1",
+    async doGenerate() {
+      calls += 1;
+      if (calls === 1) throw zaiRateLimit();
+      finish += 1;
+      const text = finish === 1 ? "```bash\necho proof\n```" : "```finish\ndone\n```";
+      return { content: [{ type: "text", text }], finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, raw: null };
+    },
+    async *doStream() {
+      throw new Error("unused");
+    },
+  };
+  const waits = [];
+  const lines = [];
+  const run = await runDurable({
+    model,
+    executor: await workspace(),
+    task: "t",
+    workdir: ".",
+    maxSteps: 6,
+    actionTimeoutMs: 30000,
+    input: durableInput({ task: "t", arm: "parity" }),
+    runId: "wake",
+    store: new MemoryEventStore(),
+    sleep: async (ms) => {
+      waits.push(ms);
+    },
+    log: (line) => lines.push(line),
+  });
+  assert.equal(run.status, "finished", "the park must carry the run to completion, not end it");
+  assert.deepEqual(waits, [60_000], "one wake wait of the first backoff step");
+  assert.equal(run.counts.rateLimitParks, 1, "the runlog counts the park");
+  assert.ok(lines.some((l) => l.includes("rate-limited")), "the park narrates once per wait");
+  assert.equal(run.counts.thinks >= 1, true);
+});
+
+test("the wake loop is bounded: a park past the sweep's bound is an honest error row", async () => {
+  const model = {
+    provider: "scripted",
+    modelId: "s1",
+    async doGenerate() {
+      throw zaiRateLimit();
+    },
+    async *doStream() {
+      throw new Error("unused");
+    },
+  };
+  const run = await runDurable({
+    model,
+    executor: await workspace(),
+    task: "t",
+    workdir: ".",
+    maxSteps: 4,
+    actionTimeoutMs: 30000,
+    input: durableInput({ task: "t", arm: "parity" }),
+    runId: "bound",
+    store: new MemoryEventStore(),
+    sleep: async () => {},
+    maxParkMs: 1_000,
+  });
+  assert.equal(run.status, "error", "a rate limit beyond the sweep's bound is an error, never a hang");
+  assert.match(run.error ?? "", /rate limit.*bound/s);
+});
+
+test("summarizeRun counts rate-limit parks off the recorded markers", () => {
+  const counts = summarizeRun([
+    { type: "run-started" },
+    { type: "step-completed", name: "turn-0-think", data: { result: { parked: "rate-limit", class: "rate-limit", message: "[1302]..." } } },
+    { type: "sleep-started", data: { until: "2026-10-19T10:00:01Z" } },
+    { type: "step-completed", name: "turn-0-think", data: { result: { text: "ok", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } } } },
+  ]);
+  assert.equal(counts.rateLimitParks, 1);
+  // A normal think never counts as a park.
+  assert.equal(summarizeRun([{ type: "step-completed", name: "turn-0-think", data: { result: { text: "ok" } } }]).rateLimitParks, 0);
+});
+
+test("the benchmark input carries the product's rate-limit park stamp", () => {
+  // Seam 3 checks key parity against enqueueRun; this pins the VALUE shape —
+  // materialised tuning, never a bare true (the recovery contract).
+  const input = durableInput({ task: "t", arm: "parity" });
+  assert.ok(input.rateLimitPark && input.rateLimitPark !== true, "the ceiling must be materialised in the input");
+  assert.equal(typeof input.rateLimitPark.maxTotalWaitMs, "number");
 });

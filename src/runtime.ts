@@ -25,6 +25,7 @@ import {
 import type { EventStore, RunOutcome, WorkflowDefinition, WorkflowEvent } from "@neutron-build/workflow";
 
 import { defaultRecoveryConfig } from "./recovery.js";
+import { rateLimitParkInput } from "./rate-limit-park.js";
 import { FileIntakeStore, NucleusIntakeStore } from "./intake.js";
 import type { IntakeStore } from "./intake.js";
 import { FileSpendStore, NucleusSpendStore, FileUnpricedRunStore, NucleusUnpricedRunStore, defaultDailyBudgetUSD, estimatedRunCostUSD, utcDay as spendDay } from "./spend.js";
@@ -1792,6 +1793,12 @@ export async function enqueueRun(
         // run earlier than it would have ended, so it stays opt-in until it is
         // measured on the product path.
         ...(recovery !== undefined ? { recovery } : {}),
+        // Provider rate-limit park ceiling (rate-limit-park.ts), materialised
+        // on EVERY enqueue like the recovery thresholds: it decides which park
+        // a run gives up on, so it must be a fact of the log, never of the
+        // executing worker's env. SHIP_RATE_LIMIT_PARK=0 records the explicit
+        // fail-fast opt-out instead.
+        ...rateLimitParkInput(),
         ...(settle === true ? { settle: true } : {}),
         ...(requireEdit === true ? { requireEdit: true } : {}),
         ...(preview === true ? { preview: true } : {}),

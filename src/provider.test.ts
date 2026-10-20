@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import type { AdapterGenerateResult, ModelAdapter } from "@neutron-build/ai";
 
-import { DEFAULT_MODEL_TIMEOUT_MS, backoffFor, defaultRetryPolicy, isRetryable, modelTimeoutFromEnv, withCallTimeout, withRetry } from "./provider.js";
+import { DEFAULT_MODEL_TIMEOUT_MS, backoffFor, defaultRetryPolicy, isRetryable, modelTimeoutFromEnv, retryDelayMsFromError, withCallTimeout, withRetry } from "./provider.js";
 
 function flaky(failures: number, error: unknown): { model: ModelAdapter; calls: () => number } {
   let calls = 0;
@@ -55,6 +55,41 @@ test("classification: transient vs permanent", () => {
   // the answer to that one.
   assert.equal(isRetryable(new Error("maximum context length exceeded")), false);
   assert.equal(isRetryable(new Error("unauthorized")), false);
+});
+
+test("the 2026-10-19 finding: z.ai's 1302 rate limit is retryable however it arrives", async () => {
+  // The message the sweep actually saw — 34/100 runs died to it because the
+  // SWE-bench harness had no retry wrapper at all (see swebench/durable-run.mjs
+  // wrapHarnessModel) and the words classify only via the message regex.
+  const zai = new Error("[1302][Rate limit reached for requests][req-8f3a1c]");
+  assert.equal(isRetryable(zai), true);
+  // @neutron-build/ai's AIError carries the HTTP status on `problem.status` —
+  // unread before, which demoted a plain 429 to a message-regex guess.
+  assert.equal(isRetryable(Object.assign(new Error("Too many requests"), { problem: { status: 429 } })), true);
+  assert.equal(isRetryable(Object.assign(new Error("whatever"), { problem: { status: 503 } })), true);
+  // A problem status that is NOT transient still decides, as status should.
+  assert.equal(isRetryable(Object.assign(new Error("whatever"), { problem: { status: 401 } })), false);
+});
+
+test("withRetry honours a provider Retry-After over the fixed backoff", async () => {
+  const sleeps: number[] = [];
+  // Retry-After: 2 (seconds, HTTP form) on an otherwise rate-limited error.
+  const { model, calls } = flaky(1, Object.assign(new Error("rate limited"), { status: 429, headers: { "retry-after": "2" } }));
+  const roomy = { attempts: 3, baseDelayMs: 1, maxDelayMs: 60_000 };
+  const wrapped = withRetry(model, roomy, { sleep: async (ms) => { sleeps.push(ms); } });
+  await wrapped.doGenerate({ messages: [] } as never);
+  assert.equal(calls(), 2, "one failure, then success");
+  assert.deepEqual(sleeps, [2000], "the provider's own number wins over the 1ms backoff");
+  // ...but never beyond the policy ceiling: a long pause belongs to the
+  // durable park, not to an in-call worker slot.
+  const capped: number[] = [];
+  const slow = flaky(1, Object.assign(new Error("rate limited"), { status: 429, retryAfterMs: 60_000 }));
+  await withRetry(slow.model, fast, { sleep: async (ms) => { capped.push(ms); } }).doGenerate({ messages: [] } as never);
+  assert.deepEqual(capped, [fast.maxDelayMs], "Retry-After is capped at maxDelayMs in-call");
+  // An HTTP-date form parses to a remaining-ms value.
+  const datey = retryDelayMsFromError(Object.assign(new Error("rate limited"), { status: 429, retryAfter: new Date(Date.now() + 30_000).toUTCString() }));
+  assert.ok(datey !== undefined && datey > 25_000 && datey <= 30_000, `HTTP-date Retry-After parsed to ~30s, got ${String(datey)}`);
+  assert.equal(retryDelayMsFromError(new Error("no headers at all")), undefined, "no field, no wait — the backoff stands");
 });
 
 test("backoff grows and is capped", () => {

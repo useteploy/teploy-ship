@@ -54,8 +54,36 @@ const { durableRecoveryInput } = await import(join(here, "..", "dist", "durable.
 const { harnessRef } = await import(join(here, "..", "dist", "harness.js"));
 const { usageFromEvents } = await import(join(here, "..", "dist", "worker.js"));
 const { executeRun } = await import(join(here, "..", "node_modules", "@neutron-build", "workflow", "dist", "index.js"));
+// The wake loop needs the scheduler's own primitive: completeSleep appends the
+// sleep-completed event a parked run's next pass consumes.
+const { completeSleep } = await import(join(here, "..", "node_modules", "@neutron-build", "workflow", "dist", "index.js"));
+// The product's transport policy (provider.ts), so the harness measures the
+// same retry + per-call timeout a production run gets. Imported from ../dist
+// like everything else: a sweep must fail loudly when run against a stale
+// build (see DIST_REQUIREMENTS), not silently measure a barer loop.
+const { defaultRetryPolicy, modelTimeoutFromEnv, withCallTimeout, withRetry } = await import(join(here, "..", "dist", "provider.js"));
+// The rate-limit park's input stamp + wake bound, shared with enqueueRun.
+const { rateLimitParkFromEnv, rateLimitParkInput } = await import(join(here, "..", "dist", "rate-limit-park.js"));
 
 export { autoApprove, defaultApprovalPolicy, durableAgent, executeRun, runAgent };
+
+/**
+ * Wrap a bare adapter with exactly the transport policy the product's
+ * resolveModelBase applies (cli.ts): withRetry over transient provider
+ * failures, then the per-call timeout. Exported for run-inference.mjs's
+ * buildModel and pinned by a test — before this, the eval called the provider
+ * with NO retry at all, so the 2026-10-19 sweep measured a barer loop than
+ * any production run has ever executed (34/100 instances died to
+ * `[1302][Rate limit reached for requests]`; see rate-limit-park.ts).
+ */
+export function wrapHarnessModel(adapter, { policy = defaultRetryPolicy, timeoutMs = modelTimeoutFromEnv(), log } = {}) {
+  return withCallTimeout(
+    withRetry(adapter, policy, {
+      ...(log !== undefined ? { log } : {}),
+    }),
+    timeoutMs,
+  );
+}
 
 /**
  * The stale-dist guard's symbol table for the durable knobs.
@@ -80,6 +108,14 @@ export const DIST_REQUIREMENTS = [
     env: "SHIP_DURABLE + SHIP_CRITIC/SHIP_CODE_INDEX",
     when: ({ durable, critic, index }) => durable && (critic || index),
   },
+  // ALWAYS on, both arms: the model wiring above is the product's transport
+  // policy, and a stale dist/ would drop it silently — exactly the
+  // wrong-number-that-looks-real failure this guard exists for.
+  { file: "provider.js", symbol: "withRetry", env: "(model wiring, always)", when: () => true },
+  // Likewise the rate-limit park: the durable arm's wake loop (below) depends
+  // on dist/rate-limit-park.js exporting these, and the input stamp the
+  // product's enqueueRun writes.
+  { file: "rate-limit-park.js", symbol: "withRateLimitPark", env: "(model wiring, always)", when: () => true },
 ];
 
 /**
@@ -136,6 +172,10 @@ export function durableInput({ task, arm, settle = false, critic = false, index 
   return {
     task,
     ...(recoveryOn ? { recovery: { ...defaultRecoveryConfig } } : {}),
+    // The rate-limit park ceiling, stamped exactly as enqueueRun stamps it
+    // (runtime.ts calls the same helper) — the benchmark measures the
+    // product's park, and seam 3 checks the two inputs cannot drift.
+    ...rateLimitParkInput(),
     ...(settleBits.settle === true ? { settle: true } : {}),
     // Both arms now. Parity needs it because the live loop holds a finish over
     // an unchanged tree unconditionally, so leaving it off would make the
@@ -204,6 +244,16 @@ export function summarizeRun(events) {
     treeChecks: named(TURN_STEP("finish-tree")),
     failedSteps: events.filter((e) => e.type === "step-failed").length,
     parked: events.some((e) => e.type === "event-waiting"),
+    // Provider rate-limit parks (rate-limit-park.ts): each is a recorded
+    // think-step result shaped { parked: "rate-limit", ... } followed by a
+    // sleep. The 2026-10-19 sweep's 34 error instances parked zero times
+    // because the park did not exist — this is the number that says the
+    // park carried a run the old code would have lost.
+    rateLimitParks: events.filter((e) => {
+      if (e.type !== "step-completed") return false;
+      const result = e.data?.result;
+      return typeof result === "object" && result !== null && result.parked === "rate-limit";
+    }).length,
     ...(indexStep !== undefined ? { indexNote: String(indexStep.data?.result ?? "") } : {}),
   };
 }
@@ -273,6 +323,12 @@ export async function runDurable({
   runId,
   store,
   codeSearch,
+  // Wake-loop deps, injectable so a test drives a park without waiting a
+  // real minute or an unbounded sweep.
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  now = () => Date.now(),
+  maxParkMs = rateLimitParkFromEnv().maxTotalWaitMs,
+  log = () => {},
 }) {
   const wf = durableAgent({
     model,
@@ -282,8 +338,49 @@ export async function runDurable({
     maxSteps,
     actionTimeoutMs,
     ...(codeSearch !== undefined ? { codeSearch } : {}),
+    log: (line) => log(`  ${line}`),
   });
-  const outcome = await executeRun({ workflow: wf, runId, store, input });
+  let outcome = await executeRun({ workflow: wf, runId, store, input });
+  // THE WAKE LOOP. A benchmark has no scheduler: the product's worker wakes
+  // sleeping runs at their wakeAt (completeSleep + re-execute, worker.ts), so
+  // without the same loop here a provider rate-limit park (rate-limit-park.ts)
+  // would surface once as "sleeping" and the sweep would record a run that
+  // never finished — the 2026-10-19 finding (34/100 instances dead to
+  // `[1302][Rate limit reached for requests]`) restated as a harness bug.
+  // Bounded by the same ceiling the product stamps into the run input
+  // (SHIP_RATE_LIMIT_MAX_WAIT_MIN): a provider that never lets the run
+  // through yields an honest error row, never a hung sweep.
+  let parkedMs = 0;
+  let passes = 0;
+  while (
+    (outcome.status === "sleeping" || outcome.status === "retrying") &&
+    typeof outcome.wakeAt === "string" &&
+    passes < 1000
+  ) {
+    passes += 1;
+    const until = Date.parse(outcome.wakeAt);
+    const waitMs = Number.isNaN(until) ? 0 : Math.max(0, until - now());
+    if (parkedMs + waitMs > maxParkMs) {
+      log(`  RATE-LIMIT WAIT beyond this sweep's ${Math.round(maxParkMs / 60000)}m bound — recording an error row`);
+      outcome = {
+        status: "failed",
+        error: {
+          detail:
+            `the run was still parked on a provider rate limit when the sweep's wake bound ` +
+            `(${Math.round(maxParkMs / 60000)}m, SHIP_RATE_LIMIT_MAX_WAIT_MIN) was crossed`,
+        },
+      };
+      break;
+    }
+    log(`  parked on a provider rate limit — waiting ${Math.round(waitMs / 1000)}s (wakes ${outcome.wakeAt})`);
+    await sleep(waitMs);
+    parkedMs += waitMs;
+    // The scheduler's own primitive: a sleeping run has a pending sleep to
+    // complete before its next pass can consume it. A "retrying" outcome has
+    // none (replay consumes recorded failed attempts directly).
+    if (outcome.status === "sleeping") await completeSleep(store, runId);
+    outcome = await executeRun({ workflow: wf, runId, store });
+  }
   const events = await store.load(runId);
   const output = outcome.output ?? {};
   // Usage from the OUTPUT when the run completed, reconstructed from the log

@@ -422,6 +422,8 @@ function nowLine(live: { phase: string; turn?: number; detail?: string }): strin
       return `${turn} · waiting for your answer`;
     case "verifying":
       return `verifying · ${detail}`;
+    case "rate-limited":
+      return `${turn} · waiting on the provider's rate limit${detail !== "" ? ` · ${detail}` : ""}`.trim();
     default:
       return `${live.phase} ${detail}`.trim();
   }

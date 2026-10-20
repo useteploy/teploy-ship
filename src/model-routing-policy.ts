@@ -143,9 +143,9 @@ export type FailureClass =
   | "unknown";
 
 const statusOf = (error: unknown): number | undefined => {
-  const e = error as { status?: unknown; statusCode?: unknown } | null;
-  const s = e?.status ?? e?.statusCode;
-  return typeof s === "number" ? s : undefined;
+  const e = error as { status?: unknown; statusCode?: unknown; problem?: { status?: unknown } } | null;
+  const raw = e?.status ?? e?.statusCode ?? e?.problem?.status;
+  return typeof raw === "number" ? raw : undefined;
 };
 
 const MESSAGE_RULES: ReadonlyArray<[FailureClass, RegExp]> = [
@@ -153,7 +153,15 @@ const MESSAGE_RULES: ReadonlyArray<[FailureClass, RegExp]> = [
   ["context-length", /context length|context_length|context window|too many tokens|maximum context|prompt is too long/],
   ["content-filter", /content[_ -]?(filter|policy|management)|safety|refus|blocked by|violat.*policy/],
   ["auth", /invalid[_ ]api[_ ]key|unauthori[sz]ed|forbidden|authentication|permission denied|incorrect api key/],
-  ["rate-limit", /rate.?limit|too many requests|quota exceeded|\b429\b/],
+  // 1302 is z.ai's own code for "Rate limit reached for requests" and rides
+  // the message body of the Anthropic-shaped error (2026-10-19 SWE-bench
+  // finding), sometimes behind a status the provider normalised away from
+  // 429 — so the words AND the code both have to classify. The code is
+  // matched only in the provider's own bracketed form (`[1302][Rate limit
+  // reached …]`): a bare `1302` is just four digits, and they turn up
+  // inside request ids ("no row for req-8f3a1c-1302") where they must not
+  // classify anything.
+  ["rate-limit", /rate.?limit|too many requests|quota exceeded|\b429\b|\[1302\]/],
   ["overloaded", /overload|capacity|\b529\b|\b503\b|service unavailable|temporarily/],
   ["network", /timeout|timed out|econnreset|econnrefused|etimedout|enotfound|eai_again|socket hang up|network|fetch failed|\b50[24]\b/],
 ];
@@ -161,7 +169,7 @@ const MESSAGE_RULES: ReadonlyArray<[FailureClass, RegExp]> = [
 /**
  * What kind of failure is this? Status code wins when present (it is the
  * provider's own statement); message text is the fallback and also refines a
- * 400. Anything unrecognised is `unknown`, which maps to no trigger: an error
+ * 4xx. Anything unrecognised is `unknown`, which maps to no trigger: an error
  * nobody understands is not grounds to send data elsewhere.
  *
  * 5xx other than 503/529 are `network` ("the transport or the server fell
@@ -179,12 +187,39 @@ export function classifyFailure(error: unknown): FailureClass {
     if (status === 413) return "context-length";
     if (status >= 500 && status <= 599) return "network";
     if (status >= 400 && status <= 499) {
-      for (const [cls, re] of MESSAGE_RULES) if ((cls === "context-length" || cls === "content-filter") && re.test(message)) return cls;
+      for (const [cls, re] of MESSAGE_RULES) {
+        if ((cls === "context-length" || cls === "content-filter" || cls === "rate-limit" || cls === "overloaded") && re.test(message)) {
+          return cls;
+        }
+      }
       return "unknown";
     }
   }
   for (const [cls, re] of MESSAGE_RULES) if (re.test(message)) return cls;
   return "unknown";
+}
+
+/** The signatures of quota/billing exhaustion, as providers actually spell them. */
+const QUOTA_SIGNATURE = /insufficient_quota|quota exceeded|exceeded your current quota|billing/;
+
+/**
+ * Is this failure the ACCOUNT's quota or billing being exhausted, rather
+ * than the provider's congestion?
+ *
+ * These arrive rate-limit-SHAPED — OpenAI sends 429 + `insufficient_quota`,
+ * gateways send 402 + "quota exceeded", and the billing sentence ("You
+ * exceeded your current quota, please check your plan and billing
+ * details") rides a plain 429 — so `classifyFailure` answers `rate-limit`,
+ * which stays correct for ROUTING (a policy may switch to a model on
+ * another key or plan; `triggerFor` owns that call). But no amount of
+ * backoff within a run outlasts a quota that resets on a billing cycle:
+ * the park (rate-limit-park.ts) treats these as fail-fast, and anything
+ * that "waits out" a quota should re-ask this question, not the class.
+ */
+export function isQuotaExhaustion(error: unknown): boolean {
+  if (statusOf(error) === 402) return true;
+  const message = (error instanceof Error ? error.message : String(error ?? "")).toLowerCase();
+  return QUOTA_SIGNATURE.test(message);
 }
 
 /**

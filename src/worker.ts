@@ -963,6 +963,9 @@ export function startWorker(options: WorkerOptions): {
     ...(options.githubToken !== undefined ? { githubToken: options.githubToken } : {}),
     ...(options.repoPolicy !== undefined ? { repoPolicy: options.repoPolicy } : {}),
     artifacts: options.runtime.artifacts,
+    // One line per provider rate-limit park (rate-limit-park.ts): the worker
+    // log is where an operator sees a run waiting out a shared key's quota.
+    log,
     // The C5 liveness probe reads the run's own log to check the container
     // the run will use next (durable.ts livenessProbeTarget).
     loadEvents: (runId) => options.runtime.store.load(runId),
