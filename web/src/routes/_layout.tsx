@@ -298,6 +298,7 @@ select option { background: var(--panel); color: var(--text); }
 /* Tables scroll inside themselves on a narrow screen; the page never does. */
 .table-wrap { overflow-x: auto; }
 header.top .nav-toggle { display: none; }
+header.top nav.nav .nav-account { display: none; }
 @media (max-width: 920px) {
   /* Below desktop the nine-link nav no longer fits one row. It collapses
      behind a Menu button (toggled by NAV_PROGRESS below) and opens as a
@@ -306,7 +307,18 @@ header.top .nav-toggle { display: none; }
   header.top .spacer { order: 1; }
   header.top .nav-toggle { order: 2; display: inline-flex; align-items: center; gap: 8px;
     min-height: 44px; padding: 0 12px; font-size: 13px; }
-  header.top details.avatar { order: 3; }
+  /* One control on the right below desktop: the account items live at the
+     foot of the Menu panel instead of in a second dropdown beside it. */
+  header.top details.avatar { display: none; }
+  header.top nav.nav .nav-account { display: flex; flex-direction: column; gap: 2px;
+    margin-top: 4px; padding-top: 6px; border-top: 1px solid var(--border); }
+  header.top nav.nav .nav-account-user { display: flex; align-items: center; min-height: 36px;
+    padding: 0 12px; color: var(--dim); font-size: 12px; overflow-wrap: anywhere; }
+  header.top nav.nav .nav-account form { margin: 0; }
+  header.top nav.nav .nav-account button { display: flex; align-items: center; width: 100%;
+    min-height: 44px; padding: 0 12px; background: none; border: 0; border-radius: 6px;
+    color: var(--dim); font: inherit; font-size: 14px; text-align: left; cursor: pointer; }
+  header.top nav.nav .nav-account button:hover { color: var(--text); background: var(--panel); }
   header.top nav.nav { order: 4; flex-basis: 100%; display: none; flex-direction: column; gap: 2px;
     padding: 4px 0 6px; max-height: calc(100vh - 70px); overflow-y: auto; }
   header.top.nav-open nav.nav { display: flex; }
@@ -527,6 +539,14 @@ export default function Layout({ children, data }: { children: ComponentChildren
             {NAV_LINKS.map((l) => (
               <a href={l.href} data-match={l.match.join(",")} aria-current={l.href === current ? "page" : undefined} class={l.href === current ? "active" : undefined}>{l.label}</a>
             ))}
+            {/* The account menu's contents, shown only inside the collapsed
+                Menu panel: below desktop the avatar hides so the header has one
+                control on the right, not two. */}
+            <div class="nav-account">
+              <span class="nav-account-user">Signed in as {data?.user ?? ""}</span>
+              <a href="/account">Account</a>
+              <form method="post" action="/logout"><button type="submit">Sign out</button></form>
+            </div>
           </nav>
         )}
         {signedIn && (
