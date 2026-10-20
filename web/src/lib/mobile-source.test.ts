@@ -28,6 +28,21 @@ test("the nav collapses behind a Menu button below desktop", () => {
   assert.match(layout, /viewport-fit=cover/);
 });
 
+/** One control on the right of the header at every width: the avatar menu on
+ *  desktop, the Menu button below it — whose panel carries the account items
+ *  the hidden avatar would have offered. */
+test("below desktop the account items move into the Menu panel and the avatar hides", () => {
+  const layout = readFileSync(join(root, "routes/_layout.tsx"), "utf8");
+  const nav = /<nav class="nav" id="main-nav"[\s\S]*?<\/nav>/.exec(layout)?.[0] ?? "";
+  assert.match(nav, /class="nav-account"/);
+  assert.match(nav, /href="\/account"/);
+  assert.match(nav, /action="\/logout"/);
+  assert.match(layout, /header\.top nav\.nav \.nav-account \{ display: none; \}/);
+  const mobile = /@media \(max-width: 920px\) \{([\s\S]*?)\n\}/.exec(layout)?.[1] ?? "";
+  assert.match(mobile, /header\.top details\.avatar \{ display: none; \}/);
+  assert.match(mobile, /header\.top nav\.nav \.nav-account \{ display: flex;/);
+});
+
 /** The header's identity controls must reach a 44x44 touch target on ANY
  *  touch device — including one wider than every width breakpoint, which is
  *  why the query keys on input capability and never on width alone. */
