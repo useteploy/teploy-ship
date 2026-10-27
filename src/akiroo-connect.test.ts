@@ -7,7 +7,7 @@ import { challengeFor } from "./connect-requests.js";
 const REQUEST = "yBkFq3nJm2xQ4wZa9tPvGw";
 const VERIFIER = "Ck9wQm5uZ0FhWmxUcmFuZG9tMzJieXRlc2hlcmU";
 const DELIVERY = "RGVsaXZlcnlDb2RlRnJvbUFraXJvb0Fwcm92YWwx";
-const AKIROO = "https://lite.akiroo.com";
+const AKIROO = "https://app.akiroo.com";
 
 interface Call {
   url: string;
@@ -215,7 +215,7 @@ test("a workspace cannot answer with a different host than the one the connect w
 });
 
 test("an origin that is not a plain http(s) base is refused before anything is sent", async () => {
-  for (const origin of ["javascript:alert(1)", "https://user:pw@lite.akiroo.com", ""]) {
+  for (const origin of ["javascript:alert(1)", "https://user:pw@app.akiroo.com", ""]) {
     const { calls, fetchImpl } = recorder(() => json({ pull_token: "pt-live" }));
     const outcome = await exchange({ origin, fetchImpl });
     assert.ok(!outcome.ok, origin);

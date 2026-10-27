@@ -507,7 +507,7 @@ are not.
 **Or set two variables on the worker** (both or neither):
 
 ```
-AKIROO_URL=https://lite.akiroo.com
+AKIROO_URL=https://app.akiroo.com
 AKIROO_PULL_TOKEN=ship_pull_…
 ```
 

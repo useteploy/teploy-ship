@@ -28,9 +28,9 @@ async function withStore(fn: (store: RuntimeConfigStore) => Promise<void>): Prom
 
 test("a runtime value wins over the environment variable of the same name", async () => {
   await withStore(async (store) => {
-    await store.set("AKIROO_URL", "https://lite.akiroo.com");
+    await store.set("AKIROO_URL", "https://app.akiroo.com");
     assert.deepEqual(await resolveConfigValue(store, "AKIROO_URL", env({ AKIROO_URL: "https://stale.example" })), {
-      value: "https://lite.akiroo.com",
+      value: "https://app.akiroo.com",
       source: "runtime",
     });
   });
@@ -79,14 +79,14 @@ test("resolution trims both sides, so a pasted value with a newline still matche
 
 test("the Akiroo target resolves as a pair: runtime wins when it holds both", async () => {
   await withStore(async (store) => {
-    await store.set(AKIROO_URL_KEY, "https://lite.akiroo.com/");
+    await store.set(AKIROO_URL_KEY, "https://app.akiroo.com/");
     await store.set(AKIROO_TOKEN_KEY, "ship_pull_new");
     const r = await resolveAkirooTarget(
       store,
       env({ AKIROO_URL: "https://old.example", AKIROO_PULL_TOKEN: "ship_pull_old" }),
     );
     assert.equal(r.status, "runtime");
-    assert.deepEqual(r.target, { url: "https://lite.akiroo.com", token: "ship_pull_new" });
+    assert.deepEqual(r.target, { url: "https://app.akiroo.com", token: "ship_pull_new" });
     assert.equal(r.url.source, "runtime");
     assert.equal(r.token.source, "runtime");
   });
@@ -96,10 +96,10 @@ test("the Akiroo target falls back to the environment when the store holds neith
   await withStore(async (store) => {
     const r = await resolveAkirooTarget(
       store,
-      env({ AKIROO_URL: "https://lite.akiroo.com/", AKIROO_PULL_TOKEN: " ship_pull_env " }),
+      env({ AKIROO_URL: "https://app.akiroo.com/", AKIROO_PULL_TOKEN: " ship_pull_env " }),
     );
     assert.equal(r.status, "env");
-    assert.deepEqual(r.target, { url: "https://lite.akiroo.com", token: "ship_pull_env" });
+    assert.deepEqual(r.target, { url: "https://app.akiroo.com", token: "ship_pull_env" });
     assert.equal(r.url.source, "env");
     assert.equal(r.token.source, "env");
   });
@@ -134,7 +134,7 @@ test("a runtime token never pairs with an environment URL", async () => {
 
 test("half a connector is misconfigured, not unset — and none at all is unset", async () => {
   await withStore(async (store) => {
-    await store.set(AKIROO_URL_KEY, "https://lite.akiroo.com");
+    await store.set(AKIROO_URL_KEY, "https://app.akiroo.com");
     const half = await resolveAkirooTarget(store, env({}));
     assert.equal(half.status, "misconfigured");
     assert.match(half.reason ?? "", /AKIROO_PULL_TOKEN is not set/);
@@ -149,7 +149,7 @@ test("half a connector is misconfigured, not unset — and none at all is unset"
 // --- the stored base is re-validated on every resolve ------------------------
 
 test("normalizeAkirooBase accepts only plain http(s) origins", () => {
-  assert.equal(normalizeAkirooBase("https://lite.akiroo.com/"), "https://lite.akiroo.com");
+  assert.equal(normalizeAkirooBase("https://app.akiroo.com/"), "https://app.akiroo.com");
   // A tailnet Akiroo is a first-class deployment; a private-address blocklist
   // here would refuse the main legitimate case.
   assert.equal(normalizeAkirooBase("http://100.108.123.49:7460"), "http://100.108.123.49:7460");
@@ -159,7 +159,7 @@ test("normalizeAkirooBase accepts only plain http(s) origins", () => {
   assert.equal(normalizeAkirooBase("data:text/html,x"), null);
   assert.equal(normalizeAkirooBase("file:///etc/passwd"), null);
   // Displays as one host, authenticates as something else.
-  assert.equal(normalizeAkirooBase("https://user:pass@lite.akiroo.com"), null);
+  assert.equal(normalizeAkirooBase("https://user:pass@app.akiroo.com"), null);
   assert.equal(normalizeAkirooBase("not a url"), null);
   assert.equal(normalizeAkirooBase("   "), null);
 });
@@ -179,7 +179,7 @@ test("a stored base that is not http(s) refuses to poll rather than being sent a
 
 test("resolution reports which side won for each value independently", async () => {
   await withStore(async (store) => {
-    await store.set(AKIROO_URL_KEY, "https://lite.akiroo.com");
+    await store.set(AKIROO_URL_KEY, "https://app.akiroo.com");
     await store.set(AKIROO_TOKEN_KEY, "ship_pull_new");
     const r = await resolveAkirooTarget(store, env({ AKIROO_URL: "https://old.example" }));
     // Both from the store — and the Settings page can say so for each row,
@@ -234,17 +234,17 @@ test("the file store seals AKIROO_PULL_TOKEN on disk and reads it back", async (
   const keyed = env({ SHIP_CONFIG_KEY: "an-install-wide-config-key" });
   const store = new FileRuntimeConfig(dir, keyed);
   await store.set(AKIROO_TOKEN_KEY, "ship_pull_secret", "tyler");
-  await store.set(AKIROO_URL_KEY, "https://lite.akiroo.com", "tyler");
+  await store.set(AKIROO_URL_KEY, "https://app.akiroo.com", "tyler");
 
   const { readFile } = await import("node:fs/promises");
   const raw = await readFile(join(dir, "runtime-config.json"), "utf8");
   assert.doesNotMatch(raw, /ship_pull_secret/, "the token must not be on disk in the clear");
   // The URL is not a credential and stays legible, which is what makes a
   // misdirected connector diagnosable by looking at the file.
-  assert.match(raw, /lite\.akiroo\.com/);
+  assert.match(raw, /app\.akiroo\.com/);
 
   assert.equal(await store.get(AKIROO_TOKEN_KEY), "ship_pull_secret");
-  assert.equal(await store.get(AKIROO_URL_KEY), "https://lite.akiroo.com");
+  assert.equal(await store.get(AKIROO_URL_KEY), "https://app.akiroo.com");
 });
 
 /**
@@ -255,7 +255,7 @@ test("the file store seals AKIROO_PULL_TOKEN on disk and reads it back", async (
 test("list reports which keys are set, and never their values", async () => {
   const dir = await mkdtemp(join(tmpdir(), "ship-config-"));
   const store = new FileRuntimeConfig(dir, env({}));
-  await store.set(AKIROO_URL_KEY, "https://lite.akiroo.com", "tyler");
+  await store.set(AKIROO_URL_KEY, "https://app.akiroo.com", "tyler");
   await store.set(AKIROO_TOKEN_KEY, "ship_pull_secret", "akiroo-connect");
 
   const rows = await store.list();
@@ -268,13 +268,13 @@ test("list reports which keys are set, and never their values", async () => {
     [true, true],
   );
   assert.deepEqual(rows.find((r) => r.key === AKIROO_TOKEN_KEY)?.updatedBy, "akiroo-connect");
-  assert.doesNotMatch(JSON.stringify(rows), /ship_pull_secret|lite\.akiroo\.com/);
+  assert.doesNotMatch(JSON.stringify(rows), /ship_pull_secret|app\.akiroo\.com/);
 });
 
 test("setting an empty value removes the override rather than shadowing the environment", async () => {
   const dir = await mkdtemp(join(tmpdir(), "ship-config-"));
   const store = new FileRuntimeConfig(dir, env({}));
-  await store.set(AKIROO_URL_KEY, "https://lite.akiroo.com");
+  await store.set(AKIROO_URL_KEY, "https://app.akiroo.com");
   await store.set(AKIROO_URL_KEY, "");
   assert.equal(await store.get(AKIROO_URL_KEY), undefined);
   assert.deepEqual(await store.list(), []);
@@ -327,7 +327,7 @@ function fakeDb(): NucleusPgwire & { sql: string[] } {
 test("the Nucleus store creates its own table and upserts by config_key", async () => {
   const db = fakeDb();
   const store = new NucleusRuntimeConfig(db, env({}));
-  await store.set(AKIROO_URL_KEY, "https://lite.akiroo.com", "tyler");
+  await store.set(AKIROO_URL_KEY, "https://app.akiroo.com", "tyler");
   await store.set(AKIROO_URL_KEY, "https://other.akiroo.example", "tyler");
   assert.equal(await store.get(AKIROO_URL_KEY), "https://other.akiroo.example");
   assert.deepEqual((await store.list()).map((r) => r.key), [AKIROO_URL_KEY], "the second write must not add a twin");

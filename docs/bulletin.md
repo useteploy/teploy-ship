@@ -2,7 +2,7 @@
 
 > **Where the public face actually lives (2026-09-02).** Ship runs behind the
 > tailnet, so no member of the public can reach `/bulletin/<slug>` here. The
-> board strangers use is Akiroo's (`lite.akiroo.com/board/<slug>`), which
+> board strangers use is Akiroo's (`app.akiroo.com/board/<slug>`), which
 > carries this document's trust model — kinds, vote threshold, daily cap,
 > pin-time screening, declined-twin suppression, the four-word public
 > vocabulary — and turns a qualifying note into a Today card whose approve

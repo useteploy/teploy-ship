@@ -109,7 +109,7 @@ export async function action({ request }: { request: Request }): Promise<Connect
       state: "bad-url",
       message:
         "That is not a workspace address this Ship will talk to. It must be a plain http or https URL with a host " +
-        "and no embedded credentials — for example https://lite.akiroo.com.",
+        "and no embedded credentials — for example https://app.akiroo.com.",
     };
   }
 
@@ -215,7 +215,7 @@ export default function Connect({ data, actionData }: { data: ConnectData; actio
           id="akiroo"
           type="url"
           name="akiroo"
-          placeholder="https://lite.akiroo.com"
+          placeholder="https://app.akiroo.com"
           autocomplete="off"
           spellcheck={false}
           required

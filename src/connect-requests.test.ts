@@ -23,7 +23,7 @@ import type { ConnectRequest, ConnectRequestStore } from "./connect-requests.js"
 import { NucleusPgwire } from "./nucleus-pgwire.js";
 import type { PoolLike, QueryResultLike } from "./nucleus-pgwire.js";
 
-const AKIROO = "https://lite.akiroo.com";
+const AKIROO = "https://app.akiroo.com";
 const SHIP = "https://ship.tailnet.internal";
 
 function pending(overrides: Partial<ConnectRequest> = {}): ConnectRequest {
@@ -168,7 +168,7 @@ test("the approve link keeps the path prefix, so every leg addresses one workspa
 });
 
 test("an address that is not a plain http(s) workspace produces no approve URL at all", () => {
-  for (const bad of ["javascript:alert(1)", "https://user:pw@lite.akiroo.com", "not a url", ""]) {
+  for (const bad of ["javascript:alert(1)", "https://user:pw@app.akiroo.com", "not a url", ""]) {
     assert.equal(approveUrl({ akirooUrl: bad, requestId: "r", challenge: "c", shipUrl: SHIP }), null, bad);
   }
 });
@@ -184,8 +184,8 @@ test("the return leg compares FULL workspace addresses, prefix included", () => 
   assert.ok(!sameWorkspace(AKIROO, `${AKIROO}/tenant/a`));
   assert.ok(!sameWorkspace(`${AKIROO}/tenant/a`, `${AKIROO}/tenant/b`));
   assert.ok(!sameWorkspace(AKIROO, "https://evil.example"));
-  assert.ok(!sameWorkspace(AKIROO, "http://lite.akiroo.com"), "scheme is part of the identity");
-  assert.ok(!sameWorkspace(AKIROO, "https://user:pw@lite.akiroo.com"));
+  assert.ok(!sameWorkspace(AKIROO, "http://app.akiroo.com"), "scheme is part of the identity");
+  assert.ok(!sameWorkspace(AKIROO, "https://user:pw@app.akiroo.com"));
   // An absent parameter is a refusal at the call site, and it is a mismatch
   // here too — there is no spelling of "nothing" that names this workspace.
   assert.ok(!sameWorkspace(AKIROO, ""));
