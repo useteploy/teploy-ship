@@ -143,6 +143,13 @@ test("parseProjectRow refuses a slug that disagrees with the repo url", () => {
   assert.throws(() => parseProjectRow(row({ slug: "someone/else" })), /does not match its repo url/);
 });
 
+test("parseProjectRow takes a slug that differs from the repo url only in case", () => {
+  assert.doesNotThrow(() => parseProjectRow(row({
+    repo: "http://forge.example.internal:49152/Tyler/ship-credential-proof.git",
+    slug: "Tyler/ship-credential-proof",
+  })));
+});
+
 test("parseProjectRow refuses a half-declared preview, through S-C's validator", () => {
   assert.throws(() => parseProjectRow(row({ verification: { preview: { app: "x", smoke: "" } } })), /needs both app and smoke/);
 });

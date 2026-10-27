@@ -58,7 +58,10 @@ export function parseProjectRow(payload: Record<string, unknown>): ProjectRow {
   // would file the project under one name and allow the repo under another.
   const derived = repoSlug(repo);
   if (slug === undefined) throw new Error(`project ${projectRef} names no slug`);
-  if (derived !== null && derived !== slug) {
+  // repoSlug lower-cases, and forge owners and names are case-insensitive
+  // (Forgejo's owner is "Tyler", its clone paths say either), so compare
+  // folded: "Tyler/x" against ".../Tyler/x.git" is the same repository.
+  if (derived !== null && derived !== slug.toLowerCase()) {
     throw new Error(`project ${projectRef} slug ${slug} does not match its repo url (${derived})`);
   }
   const authority = str(payload.authority);
