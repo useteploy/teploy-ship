@@ -206,13 +206,16 @@ test("HARNESS_PACKAGES matches images/versions.json and covers every external ad
   }
 });
 
-test("the Go sandbox Dockerfile pins Go 1.25, not 1.24", async () => {
+test("the Go sandbox Dockerfile pins Go 1.27 or newer", async () => {
   // 2026-08-26: three repos need 1.25, and on a 1.24 sandbox every Go pull
   // request arrived marked `tests: failed`. A future tidy-up that pins this
   // back re-creates a day of misread pull requests, so it fails here instead.
   const raw = await readFile(new URL("../images/versions.json", import.meta.url), "utf8");
   const versions = JSON.parse(raw) as { bases: Record<string, string> };
-  assert.match(versions.bases.go!, /^golang:1\.25\./);
+  // 2026-10-30: GOTOOLCHAIN=local, so a `go 1.26` module failed on the 1.25
+  // image before any work began; six managed projects declare 1.26.
+  const minor = Number(/^golang:1\.(\d+)\./.exec(versions.bases.go!)?.[1]);
+  assert.ok(minor >= 27, `Go base ${versions.bases.go} is older than 1.27`);
   const dockerfile = await readFile(new URL("../images/sandbox-go/Dockerfile", import.meta.url), "utf8");
   assert.ok(dockerfile.includes(`ARG GO_BASE=${versions.bases.go}`), "sandbox-go Dockerfile default drifted from versions.json");
 });

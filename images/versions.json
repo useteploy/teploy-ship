@@ -24,9 +24,16 @@
       "GO 1.25, NOT 1.24. Bumped 2026-08-26 because three repos need 1.25 and",
       "on a 1.24 sandbox every Go pull request arrived marked `tests: failed` —",
       "a base-image mismatch read as the agent's fault, which cost a day (see",
-      "the same date in src/tests.ts:preExisting). Do NOT pin this back to 1.24."
+      "the same date in src/tests.ts:preExisting). Do NOT pin this back to 1.24.",
+      "",
+      "GO 1.27 (2026-10-30). The image sets GOTOOLCHAIN=local, so a go.mod that",
+      "says `go 1.26` cannot fetch its toolchain and fails before any work: by",
+      "October teploy-cli, teploy-observe, teploy-arcade, teploy-cloud, lullmail",
+      "and akiroo all declared 1.26. Go keeps backward compatibility, so the",
+      "newest release serves every repo; keep this at or above the highest",
+      "`go` line among the projects Ship works on."
     ],
-    "go": "golang:1.25.14-trixie@sha256:2c4c60ef415fbfa5e90300722293bef36c5e63fae17570ce18f580af933dbd73",
+    "go": "golang:1.27.3-trixie@sha256:c65ecfe613b539ac74c62a4c3b2c27e8f8a6076384c8f27e8a3c0f3be17cc385",
     "node": "node:22-trixie@sha256:2082d2bf902c8835655c6bcfee3594c00ea900498a9f6e2b96d3352536f9e8d8",
     "rust": "rust:1-trixie"
   },

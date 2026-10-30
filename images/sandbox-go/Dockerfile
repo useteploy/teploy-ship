@@ -21,14 +21,16 @@
 # was added. Prefer images/build.sh.
 
 ARG NODE_BASE=node:22-trixie@sha256:2082d2bf902c8835655c6bcfee3594c00ea900498a9f6e2b96d3352536f9e8d8
-ARG GO_BASE=golang:1.25.14-trixie@sha256:2c4c60ef415fbfa5e90300722293bef36c5e63fae17570ce18f580af933dbd73
+ARG GO_BASE=golang:1.27.3-trixie@sha256:c65ecfe613b539ac74c62a4c3b2c27e8f8a6076384c8f27e8a3c0f3be17cc385
 
 FROM ${NODE_BASE} AS nodejs
 
-# Go 1.25, deliberately NOT 1.24. Three repos need 1.25, and on a 1.24 sandbox
+# Go 1.25 or newer, deliberately NOT 1.24. Three repos need 1.25, and on a 1.24 sandbox
 # every Go pull request arrived marked `tests: failed` on 2026-08-26 — a
 # base-image mismatch that reviewers read as the agent's fault (the incident
 # src/tests.ts:preExisting was written for). Do not pin this back.
+# Go 1.27 since 2026-10-30: GOTOOLCHAIN=local means a `go 1.26` module cannot
+# fetch its toolchain, and six of the projects Ship works on declare 1.26.
 FROM ${GO_BASE}
 
 # Node comes from the pinned official node image, not from NodeSource's

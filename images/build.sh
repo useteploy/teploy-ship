@@ -13,7 +13,7 @@
 #   images/build.sh --tag v3 --harness claude-code go
 #
 # Produces:
-#   ship-sandbox-go:<tag>       Go 1.25 + node/npm (+ declared harnesses)
+#   ship-sandbox-go:<tag>       Go 1.27 + node/npm (+ declared harnesses)
 #   ship-sandbox-node:<tag>     node 22 + pnpm     (+ declared harnesses)
 #   ship-sandbox-rust:<tag>     rust stable + node/npm (+ declared harnesses), on request only
 #   ship-sandbox-harness:<tag>  alias of ship-sandbox-go when harnesses are baked
