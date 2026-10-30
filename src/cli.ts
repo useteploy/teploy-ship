@@ -85,6 +85,7 @@ import type { AuthorityAction } from "./governance.js";
 import { repoSlug } from "./observe.js";
 import type { EnqueueReport, NucleusShipRuntime, ShipRuntime } from "./runtime.js";
 import type { Project } from "./projects.js";
+import { assertEvidenceTarget } from "./projects.js";
 import type { IntakePolicy } from "./intake.js";
 import { NucleusCodeIndex } from "./code-index.js";
 import type { CodeSearch } from "./code-index.js";
@@ -1439,6 +1440,16 @@ async function enqueueCommand(rest: string[]): Promise<void> {
  * `set` is a full upsert: the entry becomes exactly the flags you pass, and a
  * flag you omit clears its field. Omit everything and nothing is stored.
  */
+/** Refuse a target that is not owner/name or a clone URL, before anything is opened or written. */
+function evidenceTarget(target: string): void {
+  try {
+    assertEvidenceTarget(target);
+  } catch (error) {
+    const hint = target.startsWith("-") ? "\n  the repo comes right after the subcommand; flags such as --store go after it" : "";
+    fail(`${error instanceof Error ? error.message : String(error)}${hint}`);
+  }
+}
+
 async function evidenceCommand(rest: string[]): Promise<void> {
   const config = loadConfig();
   const [sub, target] = rest;
@@ -1468,6 +1479,7 @@ async function evidenceCommand(rest: string[]): Promise<void> {
   }
   if (sub === "remove") {
     if (target === undefined) fail("a repo is required: teploy-ship evidence remove owner/name");
+    evidenceTarget(target);
     const runtime = await makeRuntime(args, config);
     try {
       await runtime.evidence.remove(target);
@@ -1479,6 +1491,7 @@ async function evidenceCommand(rest: string[]): Promise<void> {
   }
   if (sub === "set") {
     if (target === undefined || target === "") fail("a repo is required: teploy-ship evidence set owner/name --test-command \"pnpm test\"");
+    evidenceTarget(target);
     const command = args.flags["test-command"] as string | undefined;
     const timeout = args.flags["test-timeout-ms"] !== undefined ? Number(args.flags["test-timeout-ms"]) : undefined;
     if (timeout !== undefined && (!Number.isFinite(timeout) || timeout <= 0)) fail(`--test-timeout-ms must be a positive number, got: ${args.flags["test-timeout-ms"]}`);
