@@ -123,6 +123,96 @@ test("first ownership sync cannot silently erase manual verification or safety s
   assert.equal(s.forge.calls.length,0);
 });
 
+test("parseProjectRow reads the environment pair: snake_case in, validated, absent distinct from null", () => {
+  const parsed = parseProjectRow(row({ preparation: { command: " pnpm install ", timeout_ms: 120_000 }, sandbox_network: "open" }));
+  assert.deepEqual(parsed.preparation, { command: "pnpm install", timeoutMs: 120_000 });
+  assert.equal(parsed.sandbox_network, "open");
+  // timeout_ms omitted takes normalizePreparation's default.
+  assert.deepEqual(parseProjectRow(row({ preparation: { command: "make deps" } })).preparation, { command: "make deps", timeoutMs: 300_000 });
+  // The legacy spelling folds like everywhere else.
+  assert.equal(parseProjectRow(row({ sandbox_network: "egress" })).sandbox_network, "allowlist");
+  // Absent: the keys are not on the parsed row at all. Null: "none".
+  const old = parseProjectRow(row());
+  assert.equal("preparation" in old, false);
+  assert.equal("sandbox_network" in old, false);
+  const none = parseProjectRow(row({ preparation: null, sandbox_network: null }));
+  assert.equal(none.preparation, null);
+  assert.equal(none.sandbox_network, null);
+  assert.equal(parseProjectRow(row({ preparation: { command: "  " } })).preparation, null);
+});
+
+test("parseProjectRow refuses a malformed environment", () => {
+  assert.throws(() => parseProjectRow(row({ preparation: "pnpm install" })), /preparation must be an object or null/);
+  assert.throws(() => parseProjectRow(row({ preparation: { command: 7 } })), /preparation.command must be a string/);
+  assert.throws(() => parseProjectRow(row({ preparation: { command: "x", timeout_ms: 10 } })), /project project:12 preparation: Environment timeout/);
+  assert.throws(() => parseProjectRow(row({ preparation: { command: "x", timeout_ms: "60000" } })), /Environment timeout/);
+  assert.throws(() => parseProjectRow(row({ sandbox_network: "bridge" })), /sandbox_network must be/);
+  assert.throws(() => parseProjectRow(row({ sandbox_network: 1 })), /sandbox_network must be/);
+});
+
+test("a row carrying the environment applies it, snapshots it, and an operator edit shows as drift", async () => {
+  const s = sink();
+  await registerProject(s.deps(), row({ preparation: { command: "pnpm install", timeout_ms: 60_000 }, sandbox_network: "open" }));
+  const store = s.deps().projects;
+  const saved = (await store.forRepo(REPO))!;
+  assert.deepEqual(saved.preparation, { command: "pnpm install", timeoutMs: 60_000 });
+  assert.equal(saved.sandboxNetwork, "open");
+  assert.deepEqual(saved.managedBy?.fields.preparation, { command: "pnpm install", timeoutMs: 60_000 });
+  assert.equal(saved.managedBy?.fields.sandboxNetwork, "open");
+  assert.equal(managedDrift(saved).length, 0);
+  await store.set({ ...saved, sandboxNetwork: "none", preparation: { command: "npm ci", timeoutMs: 60_000 } });
+  const drift = managedDrift((await store.forRepo(REPO))!);
+  assert.deepEqual(drift.map((d) => d.field).sort(), ["preparation", "sandboxNetwork"]);
+  assert.deepEqual(drift.find((d) => d.field === "sandboxNetwork"), { field: "sandboxNetwork", local: "none", managed: "open" });
+  // Null clears as an owned field, and the record and snapshot agree.
+  await registerProject(s.deps(), row({ preparation: null, sandbox_network: null, settings_hash: "h2" }));
+  const cleared = (await store.forRepo(REPO))!;
+  assert.equal(cleared.preparation, undefined);
+  assert.equal(cleared.sandboxNetwork, undefined);
+  assert.equal(managedDrift(cleared).length, 0);
+  // A hand-set value under a null snapshot IS drift (Akiroo said none).
+  await store.set({ ...cleared, sandboxNetwork: "open" });
+  assert.deepEqual(managedDrift((await store.forRepo(REPO))!), [{ field: "sandboxNetwork", local: "open", managed: "unset" }]);
+});
+
+test("a row from an older Akiroo that omits the environment keeps the hand-set one, unmanaged and without drift", async () => {
+  const s = sink();
+  await registerProject(s.deps(), row());
+  const store = s.deps().projects;
+  await store.set({ ...(await store.forRepo(REPO))!, preparation: { command: "go mod download", timeoutMs: 90_000 }, sandboxNetwork: "allowlist" });
+  await registerProject(s.deps(), row({ settings_hash: "h2" }));
+  const after = (await store.forRepo(REPO))!;
+  assert.deepEqual(after.preparation, { command: "go mod download", timeoutMs: 90_000 });
+  assert.equal(after.sandboxNetwork, "allowlist");
+  assert.equal("preparation" in after.managedBy!.fields, false);
+  assert.equal("sandboxNetwork" in after.managedBy!.fields, false);
+  assert.equal(managedDrift(after).length, 0);
+});
+
+test("first sync: a hand-set environment refuses a row that clears it, but not one that carries it or omits it", async () => {
+  const original: Project = { repo: "tyler/site", url: REPO, autoMerge: false, autoDeploy: false,
+    preparation: { command: "pnpm install", timeoutMs: 300_000 }, sandboxNetwork: "open" };
+  for (const clearing of [{ preparation: null }, { sandbox_network: null }]) {
+    const s = sink();
+    await s.deps().projects.set(original);
+    const result = await registerProject(s.deps(), row({ verification: undefined, weekly_budget_usd: null, ...clearing }));
+    assert.equal(result.status, "failed", JSON.stringify(clearing));
+    assert.match(result.error ?? "", /environment/);
+    assert.deepEqual(await s.deps().projects.forRepo(REPO), original);
+  }
+  for (const keeping of [
+    { preparation: { command: "pnpm install", timeout_ms: 300_000 }, sandbox_network: "open" },
+    { preparation: { command: "pnpm install --frozen-lockfile", timeout_ms: 600_000 }, sandbox_network: "allowlist" },
+    {},
+  ]) {
+    const s = sink();
+    await s.deps().projects.set(original);
+    const result = await registerProject(s.deps(), row({ verification: undefined, weekly_budget_usd: null, ...keeping }));
+    assert.equal(result.status, "registered", JSON.stringify(keeping));
+    assert.notEqual((await s.deps().projects.forRepo(REPO))?.preparation, undefined);
+  }
+});
+
 test("a refused repo cannot be persisted before the allowlist check", async () => {
   const s = sink();
   const result = await registerProject(s.deps({ repoPolicy: { allowlist: "https://elsewhere.example.com" } }),row());

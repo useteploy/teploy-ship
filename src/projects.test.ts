@@ -4,7 +4,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { FileProjectStore, ProjectEvidenceStore, normalizeProject } from "./projects.js";
+import { FileProjectStore, ProjectEvidenceStore, assertEvidenceTarget, normalizeProject } from "./projects.js";
 import type { Project, ProjectStore } from "./projects.js";
 import { FileEvidenceStore } from "./evidence.js";
 import { assertRepoAllowed, effectiveAllowlist, RepoNotAllowedError } from "./repo-policy.js";
@@ -37,6 +37,26 @@ test("project store: keyed by slug, url kept, enums validated, empty fields drop
 
   await store.remove(GO_URL);
   assert.equal(await store.forRepo("tyler/ship-go"), null);
+});
+
+test("evidence set/remove refuse a target that is not owner/name or a clone URL", async () => {
+  const dir = await tempDir();
+  const projects = new FileProjectStore(dir);
+  const view = new ProjectEvidenceStore(projects, new FileEvidenceStore(dir));
+  for (const bad of ["--store", "-x/y", "store", "a/b/c", "a//b", "../b", "a/..", "ftp://host/a/b", "https://host/only", ""]) {
+    await assert.rejects(view.set({ repo: bad, testCommand: "make" }), /not a repository/, bad);
+    await assert.rejects(view.remove(bad), /not a repository/, bad);
+  }
+  assert.deepEqual(await projects.list(), [], "nothing was written for a refused target");
+  // The accepted forms keep working.
+  assert.equal(assertEvidenceTarget("Tyler/ship-go"), "Tyler/ship-go");
+  assert.equal(assertEvidenceTarget(GO_URL), GO_URL);
+  assert.equal(assertEvidenceTarget("file:///srv/team/mirror"), "file:///srv/team/mirror");
+  await view.set({ repo: "tyler/ok", testCommand: "make" });
+  await view.set({ repo: TS_URL, testCommand: "pnpm test" });
+  assert.equal((await projects.forRepo(TS_URL))?.testCommand, "pnpm test");
+  await view.remove("tyler/ok");
+  assert.equal((await projects.forRepo("tyler/ok"))?.testCommand, undefined);
 });
 
 test("evidence is a view of projects: reads through to legacy rows, writes move a repo onto its project", async () => {

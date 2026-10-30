@@ -2,6 +2,7 @@ import { canonicalRepositoryURL as repositoryIdentity, projectReference, resolve
 export { projectReference, resolveProject, ProjectIdentityError } from "./project-identity.js";
 import { normalizePreparation, type EnvironmentPreparation } from "./environment.js";
 import { join } from "node:path";
+import { parseRepoUrl } from "./git.js";
 
 import type { NucleusPgwire } from "./nucleus-pgwire.js";
 import { readJsonFile, updateJsonFile, writeJsonFile, withFileLock } from "./file-store.js";
@@ -177,6 +178,13 @@ export interface ManagedFields {
   neverAuto?: boolean;
   weeklyBudgetUSD?: number;
   verification?: ProjectVerification;
+  /**
+   * The environment pair. Present (null included) only when Akiroo's row
+   * carried the key: null = "Akiroo says none". Absent = this snapshot does not
+   * manage the field, so a hand-set value is not drift.
+   */
+  preparation?: EnvironmentPreparation | null;
+  sandboxNetwork?: NetworkTier | null;
 }
 
 /**
@@ -206,6 +214,8 @@ export function managedFieldsOf(p: Project): ManagedFields {
     ...(p.neverAuto !== undefined ? { neverAuto: p.neverAuto } : {}),
     ...(p.weeklyBudgetUSD !== undefined ? { weeklyBudgetUSD: p.weeklyBudgetUSD } : {}),
     ...(p.verification !== undefined ? { verification: p.verification } : {}),
+    ...(p.preparation !== undefined ? { preparation: p.preparation } : {}),
+    ...(p.sandboxNetwork !== undefined ? { sandboxNetwork: p.sandboxNetwork } : {}),
   };
 }
 
@@ -225,12 +235,15 @@ export interface ManagedDrift {
  */
 export function managedDrift(p: Project): ManagedDrift[] {
   if (p.managedBy === undefined) return [];
-  const show = (v: unknown): string => (v === undefined ? "unset" : typeof v === "string" ? v : JSON.stringify(v));
+  const show = (v: unknown): string => (v === undefined || v === null ? "unset" : typeof v === "string" ? v : JSON.stringify(v));
   const now = managedFieldsOf(p);
   const was = p.managedBy.fields;
-  const keys: Array<keyof ManagedFields> = ["url", "label", "sandboxImage", "authority", "neverAuto", "weeklyBudgetUSD", "verification"];
+  const keys: Array<keyof ManagedFields> = ["url", "label", "sandboxImage", "authority", "neverAuto", "weeklyBudgetUSD", "verification", "preparation", "sandboxNetwork"];
+  // Managed only when the snapshot holds the key (see ManagedFields).
+  const optIn: ReadonlySet<keyof ManagedFields> = new Set(["preparation", "sandboxNetwork"]);
   const out: ManagedDrift[] = [];
   for (const field of keys) {
+    if (optIn.has(field) && !Object.prototype.hasOwnProperty.call(was, field)) continue;
     if (JSON.stringify(now[field] ?? null) !== JSON.stringify(was[field] ?? null)) {
       out.push({ field, local: show(now[field]), managed: show(was[field]) });
     }
@@ -532,6 +545,32 @@ function evidenceOf(p: Project): RepoEvidence | null {
   };
 }
 
+const SLUG_SEGMENT = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/;
+
+/**
+ * The repository forms `evidence set` / `evidence remove` take: an owner/name
+ * slug or a clone URL parseRepoUrl accepts. Anything else used to create a
+ * record keyed by whatever string arrived — a stray `--store` among them.
+ */
+export function assertEvidenceTarget(target: string): string {
+  const value = target.trim();
+  const refuse = (): never => {
+    throw new Error(`not a repository: ${JSON.stringify(target)} — use owner/name or a clone URL (https://host/owner/name.git)`);
+  };
+  if (value === "" || value.startsWith("-")) refuse();
+  if (value.includes("://")) {
+    try {
+      parseRepoUrl(value);
+    } catch {
+      refuse();
+    }
+    return value;
+  }
+  const parts = value.split("/");
+  if (parts.length !== 2 || !parts.every((s) => SLUG_SEGMENT.test(s) && !s.includes("..") && s.length <= 255)) refuse();
+  return value;
+}
+
 /**
  * Evidence as a view of projects. `forRepo` reads the project record first and
  * falls back to the legacy evidence store, so a deployment with existing
@@ -561,6 +600,7 @@ export class ProjectEvidenceStore implements EvidenceStore {
   }
 
   async set(evidence: RepoEvidence): Promise<void> {
+    assertEvidenceTarget(evidence.repo);
     const existing = (await this.#projects.forRepo(evidence.repo)) ?? { repo: evidence.repo, autoMerge: false, autoDeploy: false };
     const stripped = stripEvidence(existing);
     await this.#projects.set({
@@ -584,6 +624,7 @@ export class ProjectEvidenceStore implements EvidenceStore {
   }
 
   async remove(repo: string): Promise<void> {
+    assertEvidenceTarget(repo);
     const project = await this.#projects.forRepo(repo);
     if (project !== null) {
       await this.#projects.set(stripEvidence(project));

@@ -8,6 +8,8 @@ import { normalizeProject } from "./projects.js";
 import type { ManagedFields, ProjectStore } from "./projects.js";
 import type { ProjectNotifier } from "./notify.js";
 import { repoSlug } from "./observe.js";
+import { normalizePreparation, type EnvironmentPreparation } from "./environment.js";
+import { NETWORK_TIER_HELP, parseNetworkTier, type NetworkTier } from "./egress.js";
 
 /**
  * L8 contract 1, Ship's half: the `project` outbox row. Akiroo is the one
@@ -37,6 +39,14 @@ export interface ProjectRow {
   never_auto?: boolean;
   weekly_budget_usd?: number;
   sandbox_image?: string;
+  /**
+   * The environment pair. Unlike the fields above, ABSENT and NULL differ:
+   * absent (undefined) is a row from an Akiroo build that predates these
+   * keys, and leaves the record's hand-set value alone and unmanaged; null is
+   * Akiroo saying "none", and clears it as an owned field.
+   */
+  preparation?: EnvironmentPreparation | null;
+  sandbox_network?: NetworkTier | null;
   settings_hash: string;
 }
 
@@ -80,6 +90,8 @@ export function parseProjectRow(payload: Record<string, unknown>): ProjectRow {
   if (sandbox !== undefined && sandbox !== null && typeof sandbox !== "string") {
     throw new Error(`project ${projectRef} sandbox_image must be a string or null`);
   }
+  const preparation = wirePreparation(payload, projectRef);
+  const sandboxNetwork = wireNetwork(payload, projectRef);
   return {
     project_ref: projectRef,
     repo,
@@ -90,8 +102,38 @@ export function parseProjectRow(payload: Record<string, unknown>): ProjectRow {
     ...(payload.never_auto === true ? { never_auto: true } : {}),
     ...(typeof budget === "number" ? { weekly_budget_usd: budget } : {}),
     ...(str(sandbox) !== undefined ? { sandbox_image: str(sandbox) } : {}),
+    ...(preparation !== undefined ? { preparation } : {}),
+    ...(sandboxNetwork !== undefined ? { sandbox_network: sandboxNetwork } : {}),
     settings_hash: hash,
   };
+}
+
+/** `{ command, timeout_ms }` on the wire; undefined = key absent, null = none (a blank command is none too). */
+function wirePreparation(payload: Record<string, unknown>, projectRef: string): EnvironmentPreparation | null | undefined {
+  const raw = payload.preparation;
+  if (raw === undefined) return undefined;
+  if (raw === null) return null;
+  if (typeof raw !== "object" || Array.isArray(raw)) throw new Error(`project ${projectRef} preparation must be an object or null`);
+  const p = raw as Record<string, unknown>;
+  if (p.command !== undefined && p.command !== null && typeof p.command !== "string") {
+    throw new Error(`project ${projectRef} preparation.command must be a string`);
+  }
+  const timeout = p.timeout_ms;
+  try {
+    return normalizePreparation({ command: p.command, ...(timeout !== undefined && timeout !== null ? { timeoutMs: timeout } : {}) }) ?? null;
+  } catch (error) {
+    throw new Error(`project ${projectRef} preparation: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/** undefined = key absent, null = none (an empty string reads as none too). */
+function wireNetwork(payload: Record<string, unknown>, projectRef: string): NetworkTier | null | undefined {
+  const raw = payload.sandbox_network;
+  if (raw === undefined) return undefined;
+  if (raw === null) return null;
+  const tier = parseNetworkTier(raw);
+  if (tier === null) throw new Error(`project ${projectRef} sandbox_network must be ${NETWORK_TIER_HELP} or null`);
+  return tier ?? null;
 }
 
 /** The wire block is snake_case; ProjectVerification is camelCase (ladder.ts). */
@@ -270,8 +312,10 @@ export async function registerProject(deps: RegisterProjectDeps, payload: Record
       if (dropsVerification || (existing.testCommand !== undefined && row.verification?.tests === undefined)
         || (existing.sandboxImage !== undefined && row.sandbox_image == null)
         || (existing.weeklyBudgetUSD !== undefined && row.weekly_budget_usd == null)
+        || (existing.preparation !== undefined && row.preparation === null)
+        || (existing.sandboxNetwork !== undefined && row.sandbox_network === null)
         || (existing.neverAuto === true && row.never_auto !== true)) {
-        throw new Error("First Akiroo sync would remove existing verification, sandbox or safety settings; reconcile them in Akiroo before syncing.");
+        throw new Error("First Akiroo sync would remove existing verification, sandbox, environment or safety settings; reconcile them in Akiroo before syncing.");
       }
     }
     const sandboxImage = row.sandbox_image ?? undefined;
@@ -284,18 +328,29 @@ export async function registerProject(deps: RegisterProjectDeps, payload: Record
       ...(row.never_auto === true ? { neverAuto: true } : {}),
       ...(weeklyBudgetUSD !== undefined ? { weeklyBudgetUSD } : {}),
       ...(row.verification !== undefined ? { verification: row.verification } : {}),
+      // Snapshotted only when the row carries the key: null records "Akiroo
+      // owns this and says none", absence records nothing (see ProjectRow).
+      ...(row.preparation !== undefined ? { preparation: row.preparation } : {}),
+      ...(row.sandbox_network !== undefined ? { sandboxNetwork: row.sandbox_network } : {}),
     };
-    // The seven managed fields are OWNED by the row: an absent one clears the
+    // The seven core managed fields are OWNED by the row: an absent one clears the
     // record's, so the live record and `applied` agree exactly until an
     // operator edits here (which is the drift the page then shows). Spreading
     // `existing` under the overrides instead would leave a stale label or
     // budget reading as permanent drift.
-    const { label: _l, sandboxImage: _si, authority: _a, neverAuto: _na, weeklyBudgetUSD: _wb, verification: _v, testCommand: _tc, managedBy: _m, ...rest } =
+    // The environment pair is owned only when the row carries it; an older
+    // Akiroo build that omits the keys leaves a hand-set environment in place.
+    const { label: _l, sandboxImage: _si, authority: _a, neverAuto: _na, weeklyBudgetUSD: _wb, verification: _v, testCommand: _tc, managedBy: _m, preparation: keptPreparation, sandboxNetwork: keptNetwork, ...rest } =
       existing ?? { repo: row.slug, autoMerge: false, autoDeploy: false };
+    const { preparation: _ap, sandboxNetwork: _an, ...appliedCore } = applied;
+    const preparation = row.preparation !== undefined ? row.preparation ?? undefined : keptPreparation;
+    const sandboxNetwork = row.sandbox_network !== undefined ? row.sandbox_network ?? undefined : keptNetwork;
     const next: Project = {
       ...rest,
       repo: row.slug,
-      ...applied,
+      ...appliedCore,
+      ...(preparation !== undefined ? { preparation } : {}),
+      ...(sandboxNetwork !== undefined ? { sandboxNetwork } : {}),
       managedBy: {
         source: "akiroo",
         ref: row.project_ref,
