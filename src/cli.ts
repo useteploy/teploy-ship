@@ -85,7 +85,7 @@ import type { AuthorityAction } from "./governance.js";
 import { repoSlug } from "./observe.js";
 import type { EnqueueReport, NucleusShipRuntime, ShipRuntime } from "./runtime.js";
 import type { Project } from "./projects.js";
-import { assertEvidenceTarget } from "./projects.js";
+import { assertEvidenceTarget, parseSandboxUser, SANDBOX_USER_HELP } from "./projects.js";
 import type { IntakePolicy } from "./intake.js";
 import { NucleusCodeIndex } from "./code-index.js";
 import type { CodeSearch } from "./code-index.js";
@@ -143,6 +143,7 @@ Usage:
   teploy-ship project set <repo>      one record per repo: clone URL (joins the
       --url <clone-url>                allowlist), sandbox image/network/limits,
       [--image <img>] [--network none|egress] [--memory-mb N] [--cpus N]
+      [--sandbox-user default|root]    root only for suites that need it
       [--policy inherit|ignore|propose|auto] [--budget <usd>]
       [--test-command <cmd>] [--test-timeout-ms N] [--observe-service <svc>]
       [--label <text>]                 flags you pass are set; others keep their value
@@ -1519,6 +1520,7 @@ async function evidenceCommand(rest: string[]): Promise<void> {
 const PROJECT_USAGE =
   "usage: teploy-ship project set <repo> [--url <clone-url>] [--image <img>] [--network none|allowlist|open] [--memory-mb N] [--cpus N]\n" +
   "           [--egress-allow <host,.suffix,host:port>]  extra allowlist entries for this repo's runs\n" +
+  "           [--sandbox-user default|root]  default = non-root sandbox user with sudo; root only for suites that need it\n" +
   "           [--policy inherit|ignore|propose|auto] [--budget <usd>] [--test-command <cmd>] [--test-timeout-ms N]\n" +
   "           [--observe-service <svc>] [--label <text>]\n" +
   "           [--build <cmd>] [--preview-app <app>] [--preview-smoke <cmd>] [--visual on|off] [--observe-window <min>]\n" +
@@ -1555,6 +1557,7 @@ async function projectCommand(rest: string[]): Promise<void> {
         if (p.sandboxImage === undefined && p.sandboxNetwork !== undefined) process.stdout.write(`  network:  ${p.sandboxNetwork}\n`);
         if (p.sandboxEgressAllow !== undefined) process.stdout.write(`  egress:   ${p.sandboxEgressAllow.join(", ")}\n`);
         if (p.sandboxLimits !== undefined) process.stdout.write(`  limits:   ${JSON.stringify(p.sandboxLimits)}\n`);
+        if (p.sandboxUser === "root") process.stdout.write(`  user:     root\n`);
         if (p.sourcePolicy !== undefined) process.stdout.write(`  policy:   ${p.sourcePolicy}\n`);
         if (p.dailyBudgetUSD !== undefined) process.stdout.write(`  budget:   $${p.dailyBudgetUSD}/day\n`);
         if (p.testCommand !== undefined) process.stdout.write(`  tests:    ${p.testCommand}\n`);
@@ -1626,6 +1629,11 @@ async function projectCommand(rest: string[]): Promise<void> {
     const networkRaw = str("network");
     const network = parseNetworkTier(networkRaw);
     if (network === null) fail(`--network must be ${NETWORK_TIER_HELP}, got: ${String(networkRaw)}`);
+    // `--sandbox-user default` (or "") clears the root opt-in; omitting the
+    // flag keeps whatever is stored.
+    const sandboxUserRaw = args.flags["sandbox-user"];
+    const sandboxUser = sandboxUserRaw === undefined ? undefined : parseSandboxUser(sandboxUserRaw === true ? "" : String(sandboxUserRaw)) ?? "default";
+    if (sandboxUser === null) fail(`--sandbox-user must be ${SANDBOX_USER_HELP}, got: ${String(sandboxUserRaw)}`);
     // `--egress-allow ""` clears the list; omitting the flag keeps it, like
     // every other field on this merging `set`. normalizeProject validates the
     // entries and refuses the save on a typo.
@@ -1688,7 +1696,7 @@ async function projectCommand(rest: string[]): Promise<void> {
       const url = str("url") ?? (/^[a-z]+:\/\//i.test(target) || target.startsWith("git@") ? target : undefined);
       const existing = (await runtime.projects.forRepo(target)) ?? { repo: target, autoMerge: false, autoDeploy: false };
       const { sourcePolicy: _p, ...kept } = {...existing,repo:existing.url ?? existing.repo};
-      const { mcp: storedMcp, delegateTargets: storedTargets, ...keep } = kept;
+      const { mcp: storedMcp, delegateTargets: storedTargets, sandboxUser: storedUser, ...keep } = kept;
       const build = str("build");
       const previewApp = str("preview-app");
       const previewSmoke = str("preview-smoke");
@@ -1719,6 +1727,7 @@ async function projectCommand(rest: string[]): Promise<void> {
         ...(str("image") !== undefined ? { sandboxImage: str("image") } : {}),
         ...(network !== undefined ? { sandboxNetwork: network } : {}),
         ...(egressAllow !== undefined ? (egressAllow.length > 0 ? { sandboxEgressAllow: egressAllow } : {}) : {}),
+        ...(sandboxUser === undefined ? (storedUser !== undefined ? { sandboxUser: storedUser } : {}) : sandboxUser === "root" ? { sandboxUser } : {}),
         ...(num("memory-mb") !== undefined || num("cpus") !== undefined
           ? { sandboxLimits: { ...existing.sandboxLimits, ...(num("memory-mb") !== undefined ? { memoryMb: num("memory-mb") } : {}), ...(num("cpus") !== undefined ? { cpus: num("cpus") } : {}) } }
           : {}),

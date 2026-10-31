@@ -4,7 +4,7 @@ import { parseRepoUrl } from "./git.js";
 import { assertRepoAllowed, credentialFor } from "./repo-policy.js";
 import type { RepoPolicyConfig } from "./repo-policy.js";
 import type { Project } from "./projects.js";
-import { normalizeProject } from "./projects.js";
+import { normalizeProject, parseSandboxUser, SANDBOX_USER_HELP } from "./projects.js";
 import type { ManagedFields, ProjectStore } from "./projects.js";
 import type { ProjectNotifier } from "./notify.js";
 import { repoSlug } from "./observe.js";
@@ -47,6 +47,11 @@ export interface ProjectRow {
    */
   preparation?: EnvironmentPreparation | null;
   sandbox_network?: NetworkTier | null;
+  /**
+   * Same absent/null rule as the environment pair. `root` opts the project's
+   * runs into root; null (or `default` on the wire) is the non-root default.
+   */
+  sandbox_user?: "root" | null;
   settings_hash: string;
 }
 
@@ -92,6 +97,7 @@ export function parseProjectRow(payload: Record<string, unknown>): ProjectRow {
   }
   const preparation = wirePreparation(payload, projectRef);
   const sandboxNetwork = wireNetwork(payload, projectRef);
+  const sandboxUser = wireSandboxUser(payload, projectRef);
   return {
     project_ref: projectRef,
     repo,
@@ -104,6 +110,7 @@ export function parseProjectRow(payload: Record<string, unknown>): ProjectRow {
     ...(str(sandbox) !== undefined ? { sandbox_image: str(sandbox) } : {}),
     ...(preparation !== undefined ? { preparation } : {}),
     ...(sandboxNetwork !== undefined ? { sandbox_network: sandboxNetwork } : {}),
+    ...(sandboxUser !== undefined ? { sandbox_user: sandboxUser } : {}),
     settings_hash: hash,
   };
 }
@@ -134,6 +141,16 @@ function wireNetwork(payload: Record<string, unknown>, projectRef: string): Netw
   const tier = parseNetworkTier(raw);
   if (tier === null) throw new Error(`project ${projectRef} sandbox_network must be ${NETWORK_TIER_HELP} or null`);
   return tier ?? null;
+}
+
+/** undefined = key absent; null = the non-root default (`default` and "" read as that too). */
+function wireSandboxUser(payload: Record<string, unknown>, projectRef: string): "root" | null | undefined {
+  const raw = payload.sandbox_user;
+  if (raw === undefined) return undefined;
+  if (raw === null) return null;
+  const user = parseSandboxUser(raw);
+  if (user === null) throw new Error(`project ${projectRef} sandbox_user must be ${SANDBOX_USER_HELP} or null`);
+  return user === "root" ? "root" : null;
 }
 
 /** The wire block is snake_case; ProjectVerification is camelCase (ladder.ts). */
@@ -314,6 +331,7 @@ export async function registerProject(deps: RegisterProjectDeps, payload: Record
         || (existing.weeklyBudgetUSD !== undefined && row.weekly_budget_usd == null)
         || (existing.preparation !== undefined && row.preparation === null)
         || (existing.sandboxNetwork !== undefined && row.sandbox_network === null)
+        || (existing.sandboxUser !== undefined && row.sandbox_user === null)
         || (existing.neverAuto === true && row.never_auto !== true)) {
         throw new Error("First Akiroo sync would remove existing verification, sandbox, environment or safety settings; reconcile them in Akiroo before syncing.");
       }
@@ -332,25 +350,29 @@ export async function registerProject(deps: RegisterProjectDeps, payload: Record
       // owns this and says none", absence records nothing (see ProjectRow).
       ...(row.preparation !== undefined ? { preparation: row.preparation } : {}),
       ...(row.sandbox_network !== undefined ? { sandboxNetwork: row.sandbox_network } : {}),
+      ...(row.sandbox_user !== undefined ? { sandboxUser: row.sandbox_user } : {}),
     };
     // The seven core managed fields are OWNED by the row: an absent one clears the
     // record's, so the live record and `applied` agree exactly until an
     // operator edits here (which is the drift the page then shows). Spreading
     // `existing` under the overrides instead would leave a stale label or
     // budget reading as permanent drift.
-    // The environment pair is owned only when the row carries it; an older
-    // Akiroo build that omits the keys leaves a hand-set environment in place.
-    const { label: _l, sandboxImage: _si, authority: _a, neverAuto: _na, weeklyBudgetUSD: _wb, verification: _v, testCommand: _tc, managedBy: _m, preparation: keptPreparation, sandboxNetwork: keptNetwork, ...rest } =
+    // The environment pair and the sandbox user are owned only when the row
+    // carries them; an older Akiroo build that omits the keys leaves a
+    // hand-set value in place.
+    const { label: _l, sandboxImage: _si, authority: _a, neverAuto: _na, weeklyBudgetUSD: _wb, verification: _v, testCommand: _tc, managedBy: _m, preparation: keptPreparation, sandboxNetwork: keptNetwork, sandboxUser: keptUser, ...rest } =
       existing ?? { repo: row.slug, autoMerge: false, autoDeploy: false };
-    const { preparation: _ap, sandboxNetwork: _an, ...appliedCore } = applied;
+    const { preparation: _ap, sandboxNetwork: _an, sandboxUser: _au, ...appliedCore } = applied;
     const preparation = row.preparation !== undefined ? row.preparation ?? undefined : keptPreparation;
     const sandboxNetwork = row.sandbox_network !== undefined ? row.sandbox_network ?? undefined : keptNetwork;
+    const sandboxUser = row.sandbox_user !== undefined ? row.sandbox_user ?? undefined : keptUser;
     const next: Project = {
       ...rest,
       repo: row.slug,
       ...appliedCore,
       ...(preparation !== undefined ? { preparation } : {}),
       ...(sandboxNetwork !== undefined ? { sandboxNetwork } : {}),
+      ...(sandboxUser !== undefined ? { sandboxUser } : {}),
       managedBy: {
         source: "akiroo",
         ref: row.project_ref,

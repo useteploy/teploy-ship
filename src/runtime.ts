@@ -1863,6 +1863,9 @@ export async function enqueueRun(
         // deployment itself configured the harness to dial.
         ...(sandboxEgressAllow !== undefined ? { sandboxEgressAllow } : {}),
         ...(project?.sandboxLimits !== undefined ? { sandboxLimits: project.sandboxLimits } : {}),
+        // The project's root opt-in (projects.ts sandboxUser). Absent leaves
+        // the user to the daemon, whose default is non-root.
+        ...(project?.sandboxUser === "root" ? { sandboxUser: "root" as const } : {}),
         // Every newly-enqueued run is steerable and index-eligible; runs
         // enqueued before these flags existed replay without the extra
         // steps (input-gated in durable). The executing worker's config

@@ -4,7 +4,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { FileProjectStore, ProjectEvidenceStore, assertEvidenceTarget, normalizeProject } from "./projects.js";
+import { FileProjectStore, ProjectEvidenceStore, assertEvidenceTarget, managedDrift, normalizeProject } from "./projects.js";
 import type { Project, ProjectStore } from "./projects.js";
 import { FileEvidenceStore } from "./evidence.js";
 import { assertRepoAllowed, effectiveAllowlist, RepoNotAllowedError } from "./repo-policy.js";
@@ -218,6 +218,61 @@ test("enqueueRun materialises the project's sandbox image, network, egress allow
   assert.deepEqual(bodies[0]!.limits, { memoryMb: 2048, cpus: 2 });
   assert.equal(bodies[1]!.image, "golang:1.24", "worker default when the run recorded nothing");
   assert.equal(bodies[1]!.network, "none");
+});
+
+test("sandboxUser: only root is stored, it reaches the run input and the daemon, and the default sends nothing", async () => {
+  // `default` is the absence of the field; anything else is refused at the save.
+  assert.equal(normalizeProject({ repo: "a/b", sandboxUser: "root", autoMerge: false, autoDeploy: false }).sandboxUser, "root");
+  assert.equal("sandboxUser" in normalizeProject({ repo: "a/b", sandboxUser: "default", autoMerge: false, autoDeploy: false }), false);
+  assert.equal(normalizeProject({ repo: "a/b", sandboxUser: " ROOT " as never, autoMerge: false, autoDeploy: false }).sandboxUser, "root");
+  assert.throws(() => normalizeProject({ repo: "a/b", sandboxUser: "ship" as never, autoMerge: false, autoDeploy: false }), /sandboxUser must be/);
+
+  const dir = await tempDir();
+  const projects = new FileProjectStore(dir);
+  await projects.set({ repo: TS_URL, url: TS_URL, sandboxUser: "root", autoMerge: false, autoDeploy: false });
+  await projects.set({ repo: GO_URL, url: GO_URL, sandboxNetwork: "allowlist", autoMerge: false, autoDeploy: false });
+  assert.equal((await projects.forRepo(TS_URL))!.sandboxUser, "root", "the opt-in survives the store round trip");
+  const inputs: Array<Record<string, unknown>> = [];
+  const runtime = {
+    kind: "file",
+    projects,
+    evidence: new ProjectEvidenceStore(projects, new FileEvidenceStore(dir)),
+    governance: { get: async () => ({ authority: {}, windows: {}, reviewers: [] }) },
+    store: {
+      append: async (_runId: string, event: { type: string; data?: { input?: Record<string, unknown> } }) => {
+        if (event.type === "run-started") inputs.push(event.data!.input!);
+      },
+    },
+    saveMeta: async () => {},
+  } as unknown as ShipRuntime;
+  await enqueueRun(runtime, { runId: "r1", task: "t", model: "m", repo: TS_URL });
+  await enqueueRun(runtime, { runId: "r2", task: "t", model: "m", repo: GO_URL });
+  assert.equal(inputs[0]!.sandboxUser, "root");
+  assert.equal("sandboxUser" in inputs[1]!, false, "a default project records nothing; the daemon decides");
+
+  const bodies: Array<Record<string, unknown>> = [];
+  const fetchImpl: typeof globalThis.fetch = async (_url, init) => {
+    bodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+    return new Response(JSON.stringify({ runId: "sbx-1", id: "sbx-1" }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const provider = sandboxProvider({ baseURL: "http://sbx", token: "t", image: "golang:1.27", network: "allowlist", fetch: fetchImpl });
+  const rootOverrides = sandboxOverridesOf({ task: "t", sandboxUser: "root" } as never);
+  assert.deepEqual(rootOverrides, { user: "root" }, "root alone is enough to produce overrides");
+  await provider.create(rootOverrides);
+  await provider.createFrom!("teploy-sbx-snap:1", rootOverrides);
+  await provider.create(sandboxOverridesOf(inputs[1] as never));
+  assert.equal(bodies[0]!.user, "root");
+  assert.equal(bodies[1]!.user, "root", "a restore boots as the same user the run started as");
+  assert.equal("user" in bodies[2]!, false, "the default sends no user field");
+});
+
+test("sandboxUser is a managed field only when Akiroo's snapshot holds it", () => {
+  const base: Project = { repo: "a/b", url: TS_URL, autoMerge: false, autoDeploy: false };
+  const managedBy = (fields: Record<string, unknown>) => ({ source: "akiroo" as const, ref: "p", hash: "h", appliedAt: "t", fields: { url: TS_URL, ...fields } });
+  assert.deepEqual(managedDrift({ ...base, sandboxUser: "root", managedBy: managedBy({}) }), [], "unmanaged: a hand-set root is not drift");
+  assert.deepEqual(managedDrift({ ...base, sandboxUser: "root", managedBy: managedBy({ sandboxUser: "root" }) }), []);
+  assert.deepEqual(managedDrift({ ...base, sandboxUser: "root", managedBy: managedBy({ sandboxUser: null }) }), [{ field: "sandboxUser", local: "root", managed: "unset" }]);
+  assert.deepEqual(managedDrift({ ...base, managedBy: managedBy({ sandboxUser: "root" }) }), [{ field: "sandboxUser", local: "unset", managed: "root" }]);
 });
 
 function task(taskId: string, repo?: string): IntakeTask {

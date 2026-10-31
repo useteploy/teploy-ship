@@ -152,6 +152,9 @@ export function sandboxOverridesDigest(overrides?: SandboxOverrides): string {
       memoryMb: overrides?.limits?.memoryMb ?? 0,
       pids: overrides?.limits?.pids ?? 0,
     },
+    // Only when set, so every digest recorded before the field existed (and
+    // every default-user one since) is unchanged.
+    ...(overrides?.user !== undefined ? { user: overrides.user } : {}),
   };
   return createHash("sha256").update(JSON.stringify(canonical)).digest("hex").slice(0, 16);
 }

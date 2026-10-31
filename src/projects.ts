@@ -20,6 +20,25 @@ import { normalizeRepoSkills, normalizeSkillPins } from "./skills.js";
 import type { RepoSkillsMode, SkillPin } from "./skills.js";
 
 /**
+ * Who a run's sandbox processes run as (teploy-sandbox's create `user`).
+ * `default` is the image's non-root sandbox account (uid 1000, passwordless
+ * sudo — what GitHub Actions runners and devcontainers do); `root` is the
+ * per-project opt-in for a suite that genuinely needs root (chown in tests).
+ * Only `root` is ever stored: `default` is the absence of the field.
+ */
+export type SandboxUser = "default" | "root";
+export const SANDBOX_USER_HELP = '"default" or "root"';
+
+/** undefined = absent or blank, null = not a sandbox user value. */
+export function parseSandboxUser(raw: unknown): SandboxUser | null | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "string") return null;
+  const value = raw.trim().toLowerCase();
+  if (value === "") return undefined;
+  return value === "default" || value === "root" ? value : null;
+}
+
+/**
  * One record per repository: everything Ship needs to know about a repo, in
  * one place, keyed the way evidence and telemetry already key it (owner/name
  * slug, see repoSlug).
@@ -70,6 +89,12 @@ export interface Project {
    */
   sandboxEgressAllow?: string[];
   sandboxLimits?: { memoryMb?: number; cpus?: number; pids?: number };
+  /**
+   * `root` runs this repo's sandbox as root instead of the non-root sandbox
+   * user (see SandboxUser). Absent = the non-root default; normalizeProject
+   * drops `default`, so a record holds `root` or nothing.
+   */
+  sandboxUser?: SandboxUser;
   /**
    * Which program edits this repo's tree: `native` (Ship's own loop) or an
    * external adapter id from HARNESS_VERSIONS (harness.ts). Absent = the
@@ -185,6 +210,8 @@ export interface ManagedFields {
    */
   preparation?: EnvironmentPreparation | null;
   sandboxNetwork?: NetworkTier | null;
+  /** Same opt-in rule as the environment pair; null = the non-root default. */
+  sandboxUser?: "root" | null;
 }
 
 /**
@@ -216,6 +243,7 @@ export function managedFieldsOf(p: Project): ManagedFields {
     ...(p.verification !== undefined ? { verification: p.verification } : {}),
     ...(p.preparation !== undefined ? { preparation: p.preparation } : {}),
     ...(p.sandboxNetwork !== undefined ? { sandboxNetwork: p.sandboxNetwork } : {}),
+    ...(p.sandboxUser === "root" ? { sandboxUser: "root" as const } : {}),
   };
 }
 
@@ -238,9 +266,9 @@ export function managedDrift(p: Project): ManagedDrift[] {
   const show = (v: unknown): string => (v === undefined || v === null ? "unset" : typeof v === "string" ? v : JSON.stringify(v));
   const now = managedFieldsOf(p);
   const was = p.managedBy.fields;
-  const keys: Array<keyof ManagedFields> = ["url", "label", "sandboxImage", "authority", "neverAuto", "weeklyBudgetUSD", "verification", "preparation", "sandboxNetwork"];
+  const keys: Array<keyof ManagedFields> = ["url", "label", "sandboxImage", "authority", "neverAuto", "weeklyBudgetUSD", "verification", "preparation", "sandboxNetwork", "sandboxUser"];
   // Managed only when the snapshot holds the key (see ManagedFields).
-  const optIn: ReadonlySet<keyof ManagedFields> = new Set(["preparation", "sandboxNetwork"]);
+  const optIn: ReadonlySet<keyof ManagedFields> = new Set(["preparation", "sandboxNetwork", "sandboxUser"]);
   const out: ManagedDrift[] = [];
   for (const field of keys) {
     if (optIn.has(field) && !Object.prototype.hasOwnProperty.call(was, field)) continue;
@@ -280,6 +308,10 @@ export function normalizeProject(input: Project): Project {
   const sandboxNetwork = parseNetworkTier(input.sandboxNetwork);
   if (sandboxNetwork === null) {
     throw new Error(`sandboxNetwork must be ${NETWORK_TIER_HELP}, got: ${String(input.sandboxNetwork)}`);
+  }
+  const sandboxUser = parseSandboxUser(input.sandboxUser);
+  if (sandboxUser === null) {
+    throw new Error(`sandboxUser must be ${SANDBOX_USER_HELP}, got: ${String(input.sandboxUser)}`);
   }
   // Throws on an entry the daemon could not act on. Refusing the SAVE is the
   // point: the alternative is a typo that surfaces days later as a blocked
@@ -349,6 +381,7 @@ export function normalizeProject(input: Project): Project {
     // SHIP_HARNESS names a vendor agent. Absent means "inherit".
     ...(harness !== undefined ? { harness } : {}),
     ...(sandboxLimits !== undefined && Object.keys(sandboxLimits).length > 0 ? { sandboxLimits } : {}),
+    ...(sandboxUser === "root" ? { sandboxUser } : {}),
     ...(normalizePreparation(input.preparation) ? { preparation: normalizePreparation(input.preparation) } : {}),
     ...(input.sourcePolicy !== undefined ? { sourcePolicy: input.sourcePolicy } : {}),
     ...(num(input.dailyBudgetUSD) !== undefined ? { dailyBudgetUSD: num(input.dailyBudgetUSD) } : {}),

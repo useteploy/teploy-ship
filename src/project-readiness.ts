@@ -8,6 +8,9 @@ export function projectReadinessKey(project: Project): string {
     network: project.sandboxNetwork ?? null,
     egress: [...(project.sandboxEgressAllow ?? [])].sort(),
     limits: project.sandboxLimits ?? null,
+    // Only when set: adding the key unconditionally would mark every existing
+    // project's readiness stale. A suite's result can depend on running as root.
+    ...(project.sandboxUser === "root" ? { user: "root" } : {}),
     harness: project.harness ?? null,
     preparation: project.preparation ?? null,
     tests: project.verification?.tests ?? project.testCommand ?? null,

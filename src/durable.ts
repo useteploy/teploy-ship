@@ -822,6 +822,14 @@ export interface DurableAgentInput {
   sandboxEgressAllow?: string[];
   sandboxLimits?: { memoryMb?: number; cpus?: number; pids?: number };
   /**
+   * `root` when the project opted its runs into root (projects.ts
+   * sandboxUser), copied at enqueue like the rest of the sandbox shape so a
+   * replay and every restore boot as the same user. Absent = the daemon's
+   * non-root sandbox user; also what every run enqueued before this existed
+   * asks for, since the daemon decides the default.
+   */
+  sandboxUser?: "root";
+  /**
    * "This run has no `repo`, but its workspace is already a git tree — scope
    * its code index here and let the diff-based passes run."
    *
@@ -1008,6 +1016,8 @@ export interface SandboxOverrides {
   /** Extra allowlist entries, unioned with the daemon's built-in registries. */
   egressAllow?: string[];
   limits?: { memoryMb?: number; cpus?: number; pids?: number };
+  /** `root` opts the container into root; absent = the daemon's non-root default. */
+  user?: "root";
   /**
    * Boot this run on the repo's warm volume (warm.ts). Derived from the
    * recorded input, never from live cache state, so a replay asks for
@@ -5656,6 +5666,7 @@ function definedOverrides(o?: SandboxOverrides): SandboxOverrides {
     ...(o?.network !== undefined ? { network: o.network } : {}),
     ...(o?.egressAllow !== undefined ? { egressAllow: o.egressAllow } : {}),
     ...(o?.limits !== undefined ? { limits: o.limits } : {}),
+    ...(o?.user !== undefined ? { user: o.user } : {}),
     ...(o?.warm !== undefined ? { warm: o.warm } : {}),
   };
 }
@@ -5719,6 +5730,7 @@ export function sandboxOverridesOf(input: DurableAgentInput): SandboxOverrides |
     network === undefined &&
     egressAllow === undefined &&
     input.sandboxLimits === undefined &&
+    input.sandboxUser !== "root" &&
     warm === null &&
     resourceClass === undefined
   ) {
@@ -5729,6 +5741,7 @@ export function sandboxOverridesOf(input: DurableAgentInput): SandboxOverrides |
     ...(network !== undefined ? { network } : {}),
     ...(egressAllow !== undefined ? { egressAllow } : {}),
     ...(input.sandboxLimits !== undefined ? { limits: input.sandboxLimits } : {}),
+    ...(input.sandboxUser === "root" ? { user: "root" as const } : {}),
     ...(warm !== null ? { warm: { repo: warm } } : {}),
     ...(resourceClass !== undefined ? { resourceClass } : {}),
   };

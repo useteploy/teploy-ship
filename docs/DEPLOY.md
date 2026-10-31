@@ -912,6 +912,18 @@ adapter drives both contracts and picks by the binary's reported version);
 rebuild when you want v2's session-resume steering, which the 1.x line cannot
 do.
 
+**Runs are not root.** Every image defines `ship` (uid 1000, home
+`/home/ship`, passwordless sudo) and owns its toolchain caches (`GOPATH`,
+`CARGO_HOME`/`RUSTUP_HOME`, corepack's pnpm; the pnpm store and `GOCACHE`
+live in the home). teploy-sandbox runs each container as that user unless
+the project opts into root — `teploy-ship project set <repo> --sandbox-user
+root` (`default` clears it), or `sandbox_user: "root"` on Akiroo's project
+row — the way GitHub Actions runners and devcontainers work: permission
+tests that root silently passes (chmod 000, then expect EACCES) behave, and
+root stays one `sudo` away. The images carry no `USER` line; the daemon picks
+per run, and an image without the account (an older build, a project's own
+image) still runs as root.
+
 **Go is pinned to 1.25, not 1.24.** Three repos need 1.25, and on a 1.24
 sandbox every Go pull request arrived marked `tests: failed` on 2026-08-26 — a
 base-image mismatch that reviewers read as the agent's fault, and it cost a

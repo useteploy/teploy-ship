@@ -54,9 +54,33 @@ RUN set -eux; \
 # python3-pytest: test detection (src/tests.ts) turns a root pytest.ini,
 # conftest.py, tox.ini or [tool.pytest] into `python3 -m pytest -q`, and an
 # image without pytest made that promise unrunnable (fresh-machine F10).
+# sudo: the sandbox user's way to root (below).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl git python3 python3-pytest \
+      ca-certificates curl git python3 python3-pytest sudo \
     && rm -rf /var/lib/apt/lists/*
+
+# The sandbox user. teploy-sandbox runs every run as `ship` (uid 1000) unless
+# the project opts into root (`teploy-ship project set <repo> --sandbox-user
+# root`), the way GitHub Actions runners and devcontainers work: a suite whose
+# permission tests root would ignore (chmod 000, then expect EACCES) behaves,
+# and root is one passwordless `sudo` away. No USER line: the daemon picks the
+# user per run (`docker run --user`), and anything else that boots this image
+# keeps getting root exactly as before. /work is handed to the user here and
+# again by the daemon at create (warm volumes land as root).
+# `!fqdn`: without it sudo resolves the container's hostname on every call and,
+# on the default network-less tier, prints "unable to resolve host" each time.
+#
+# GOPATH (/go: module cache, installed binaries) belongs to the user; GOCACHE
+# defaults to ~/.cache/go-build, which is under its home.
+RUN set -eux; \
+    groupadd --gid 1000 ship; \
+    useradd --uid 1000 --gid 1000 --create-home --home-dir /home/ship --shell /bin/bash ship; \
+    printf 'Defaults !fqdn\nship ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/ship; \
+    chmod 0440 /etc/sudoers.d/ship; \
+    visudo -cf /etc/sudoers.d/ship; \
+    mkdir -p /work; \
+    chown -R ship:ship /work "${GOPATH}"; \
+    runuser -u ship -- sh -c 'test -w "$GOPATH" && sudo -n true && go version'
 
 # The declared harnesses, BAKED — never installed at run time.
 #

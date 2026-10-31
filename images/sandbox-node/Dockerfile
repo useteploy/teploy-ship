@@ -23,15 +23,48 @@ FROM ${NODE_BASE}
 # leaving them out turns "tests: not run" into the common case.
 # python3-pytest: detection's `python3 -m pytest -q` must be runnable on the
 # stock images (fresh-machine F10; see sandbox-go/Dockerfile).
+# sudo: the sandbox user's way to root (below).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl git python3 python3-pytest build-essential \
+      ca-certificates curl git python3 python3-pytest build-essential sudo \
     && rm -rf /var/lib/apt/lists/*
+
+# The sandbox user. teploy-sandbox runs every run as `ship` (uid 1000) unless
+# the project opts into root (`teploy-ship project set <repo> --sandbox-user
+# root`), the way GitHub Actions runners and devcontainers work: a suite whose
+# permission tests root would ignore (chmod 000, then expect EACCES) behaves,
+# and root is one passwordless `sudo` away. No USER line: the daemon picks the
+# user per run (`docker run --user`), and anything else that boots this image
+# keeps getting root exactly as before. /work is handed to the user here and
+# again by the daemon at create (warm volumes land as root).
+# `!fqdn`: without it sudo resolves the container's hostname on every call and,
+# on the default network-less tier, prints "unable to resolve host" each time.
+#
+# The node base image already owns uid 1000 as `node`; it is renamed rather
+# than a second account added, so uid 1000 stays the one non-root identity.
+RUN set -eux; \
+    groupmod --new-name ship node; \
+    usermod --login ship --home /home/ship --move-home node; \
+    printf 'Defaults !fqdn\nship ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/ship; \
+    chmod 0440 /etc/sudoers.d/ship; \
+    visudo -cf /etc/sudoers.d/ship; \
+    mkdir -p /work; \
+    chown ship:ship /work; \
+    test "$(id -u ship)" = 1000
 
 # pnpm pinned through corepack. Not `npm i -g pnpm`: corepack is what a repo's
 # own packageManager field goes through, and an exact version here means a
 # lockfile resolves the same way in the sandbox as on a developer's machine.
+#
+# COREPACK_HOME is a shared path, not root's home: corepack caches the pnpm it
+# prepared there, and the sandbox user resolving it from ~/.cache instead
+# would mean a download on every run — which the default-deny network refuses.
+# The pnpm STORE needs nothing here: it defaults to ~/.local/share/pnpm/store,
+# under whichever user runs it.
+ENV COREPACK_HOME=/usr/local/share/corepack
 ARG PNPM_VERSION=10.26.1
-RUN corepack enable && corepack prepare "pnpm@${PNPM_VERSION}" --activate && pnpm -v
+RUN corepack enable && corepack prepare "pnpm@${PNPM_VERSION}" --activate && pnpm -v \
+    && chown -R ship:ship "${COREPACK_HOME}" \
+    && runuser -u ship -- sh -c 'pnpm -v && sudo -n true'
 
 # The declared harnesses, BAKED — never installed at run time. Same argument as
 # images/sandbox-go/Dockerfile: run-time installation needs sandbox egress, and

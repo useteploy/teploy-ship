@@ -213,6 +213,56 @@ test("first sync: a hand-set environment refuses a row that clears it, but not o
   }
 });
 
+test("parseProjectRow reads sandbox_user: root, default/null as the non-root default, absent distinct", () => {
+  assert.equal(parseProjectRow(row({ sandbox_user: "root" })).sandbox_user, "root");
+  assert.equal(parseProjectRow(row({ sandbox_user: "default" })).sandbox_user, null);
+  assert.equal(parseProjectRow(row({ sandbox_user: null })).sandbox_user, null);
+  assert.equal("sandbox_user" in parseProjectRow(row()), false);
+  assert.throws(() => parseProjectRow(row({ sandbox_user: "ship" })), /sandbox_user must be/);
+  assert.throws(() => parseProjectRow(row({ sandbox_user: true })), /sandbox_user must be/);
+});
+
+test("sandbox_user: applied and snapshotted when carried, cleared by null, left alone when absent", async () => {
+  const s = sink();
+  const store = s.deps().projects;
+  await registerProject(s.deps(), row({ sandbox_user: "root" }));
+  const saved = (await store.forRepo(REPO))!;
+  assert.equal(saved.sandboxUser, "root");
+  assert.equal(saved.managedBy?.fields.sandboxUser, "root");
+  assert.equal(managedDrift(saved).length, 0);
+  // An operator flips it back by hand: drift.
+  const { sandboxUser: _u, ...handEdited } = saved;
+  await store.set(handEdited);
+  assert.deepEqual(managedDrift((await store.forRepo(REPO))!), [{ field: "sandboxUser", local: "unset", managed: "root" }]);
+  // A row saying `default` clears it as an owned field.
+  await registerProject(s.deps(), row({ sandbox_user: "default", settings_hash: "h2" }));
+  const cleared = (await store.forRepo(REPO))!;
+  assert.equal(cleared.sandboxUser, undefined);
+  assert.equal(cleared.managedBy?.fields.sandboxUser, null);
+  assert.equal(managedDrift(cleared).length, 0);
+
+  const t = sink();
+  const other = t.deps().projects;
+  await registerProject(t.deps(), row());
+  await other.set({ ...(await other.forRepo(REPO))!, sandboxUser: "root" });
+  await registerProject(t.deps(), row({ settings_hash: "h2" }));
+  const kept = (await other.forRepo(REPO))!;
+  assert.equal(kept.sandboxUser, "root", "a row without the key keeps the hand-set root");
+  assert.equal("sandboxUser" in kept.managedBy!.fields, false);
+  assert.equal(managedDrift(kept).length, 0);
+});
+
+test("first sync: a hand-set root refuses a row that clears it", async () => {
+  const original: Project = { repo: "tyler/site", url: REPO, autoMerge: false, autoDeploy: false, sandboxUser: "root" };
+  for (const [extra, status] of [[{ sandbox_user: null }, "failed"], [{ sandbox_user: "default" }, "failed"], [{ sandbox_user: "root" }, "registered"], [{}, "registered"]] as const) {
+    const s = sink();
+    await s.deps().projects.set(original);
+    const result = await registerProject(s.deps(), row({ verification: undefined, weekly_budget_usd: null, ...extra }));
+    assert.equal(result.status, status, JSON.stringify(extra));
+    assert.equal((await s.deps().projects.forRepo(REPO))?.sandboxUser, "root");
+  }
+});
+
 test("a refused repo cannot be persisted before the allowlist check", async () => {
   const s = sink();
   const result = await registerProject(s.deps({ repoPolicy: { allowlist: "https://elsewhere.example.com" } }),row());

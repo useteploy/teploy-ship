@@ -76,6 +76,11 @@ test("the overrides digest is stable, order-insensitive, and BLIND to the warm v
     "limits are part of the shape",
   );
   assert.notEqual(sandboxOverridesDigest({ image: "a:1" }), sandboxOverridesDigest({ image: "a:2" }), "the image is part of the shape");
+  assert.notEqual(sandboxOverridesDigest({ user: "root" }), sandboxOverridesDigest(undefined), "the user is part of the shape");
+  // Pinned: the digest of an empty shape as recorded before `user` existed.
+  // An absent user must not change it, or every stored thread-warm record
+  // would stop matching its follow-ups.
+  assert.equal(sandboxOverridesDigest(undefined), "0a7658429a034b7e");
 });
 
 test("a clean workspace snapshots; credential material refuses", async () => {

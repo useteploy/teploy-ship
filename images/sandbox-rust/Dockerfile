@@ -43,8 +43,9 @@ RUN set -eux; \
 
 # ca-certificates + git: the run clones inside this container. python3 and
 # gcc/pkg-config: build scripts and -sys crates. curl: harness installers.
+# sudo: the sandbox user's way to root (after the toolchain, below).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl git python3 gcc pkg-config libssl-dev \
+      ca-certificates curl git python3 gcc pkg-config libssl-dev sudo \
     && rm -rf /var/lib/apt/lists/*
 
 # rustfmt + clippy: nucleus/CLAUDE.md's gate is `cargo build && cargo test --lib
@@ -57,6 +58,30 @@ RUN set -eux; rustup component add rustfmt clippy; cargo --version; rustc --vers
 # for exactly the invocation a harness or a person is most likely to use
 # when "the plain one" fails. Put the toolchain on PATH for login shells too.
 RUN printf 'export PATH=/usr/local/cargo/bin:$PATH\n' > /etc/profile.d/cargo.sh
+
+# The sandbox user. teploy-sandbox runs every run as `ship` (uid 1000) unless
+# the project opts into root (`teploy-ship project set <repo> --sandbox-user
+# root`), the way GitHub Actions runners and devcontainers work: a suite whose
+# permission tests root would ignore (chmod 000, then expect EACCES) behaves,
+# and root is one passwordless `sudo` away. No USER line: the daemon picks the
+# user per run (`docker run --user`), and anything else that boots this image
+# keeps getting root exactly as before. /work is handed to the user here and
+# again by the daemon at create (warm volumes land as root).
+# `!fqdn`: without it sudo resolves the container's hostname on every call and,
+# on the default network-less tier, prints "unable to resolve host" each time.
+#
+# CARGO_HOME (/usr/local/cargo: the registry and git checkouts a run fetches)
+# and RUSTUP_HOME belong to the user. After the component install above, so
+# those files are handed over too.
+RUN set -eux; \
+    groupadd --gid 1000 ship; \
+    useradd --uid 1000 --gid 1000 --create-home --home-dir /home/ship --shell /bin/bash ship; \
+    printf 'Defaults !fqdn\nship ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/ship; \
+    chmod 0440 /etc/sudoers.d/ship; \
+    visudo -cf /etc/sudoers.d/ship; \
+    mkdir -p /work; \
+    chown -R ship:ship /work "${CARGO_HOME}" "${RUSTUP_HOME}"; \
+    runuser -u ship -- sh -c 'test -w "$CARGO_HOME" && sudo -n true && cargo --version'
 
 # Pre-warming the registry is deliberately NOT done here. A cold `cargo test`
 # over ~650 crates spends its first minutes on the index and downloads, but a
