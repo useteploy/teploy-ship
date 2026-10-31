@@ -28,6 +28,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git python3 python3-pytest build-essential sudo \
     && rm -rf /var/lib/apt/lists/*
 
+# Document and media tools a Node app shells out to. Fylun's PDF pipeline runs
+# poppler (pdfinfo, pdftotext, pdftoppm) and its media judge runs ffprobe; on an
+# image without them those suites skip, so a change to that code was never
+# exercised by the run that made it (2026-10-30).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      poppler-utils ffmpeg \
+    && rm -rf /var/lib/apt/lists/* \
+    && pdftoppm -v 2>&1 | head -1 && ffprobe -version | head -1
+
 # The sandbox user. teploy-sandbox runs every run as `ship` (uid 1000) unless
 # the project opts into root (`teploy-ship project set <repo> --sandbox-user
 # root`), the way GitHub Actions runners and devcontainers work: a suite whose
