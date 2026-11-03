@@ -501,7 +501,7 @@ function CredentialsPanel({ p, data }: { p: Project; data: ProjectsData }) {
           <button class="sm" type="submit" name="intent" value="credential-clear">Clear</button>
         </form>
       ) : (
-        <p class="meta" style="color:var(--dim)">Storing or clearing a credential needs the policies grant. An admin can grant it on <a href="/policies">Policies</a>.</p>
+        <p class="meta" style="color:var(--dim)">Storing or clearing a credential needs the policies grant. An admin can grant it in <a href="/policies">Approval rules</a>.</p>
       )}
     </section>
   );
@@ -645,7 +645,7 @@ export default function Projects({ data }: { data: ProjectsData | SourcesData | 
   return (
     <>
       <div class="page-heading"><div><h1 class="page">Projects</h1><p class="meta">The repositories Ship works on.</p></div>{p === null && <a class="button primary" href="#add-project">Add project +</a>}</div>
-      <SubNav items={PROJECT_VIEWS} current="repos" /><p class="row-actions"><a href="/setup">Project setup checklist</a><a href="/workflows">Reusable workflows</a></p>
+      <SubNav items={PROJECT_VIEWS} current="repos" />
       {data.denied !== null && (
         <p class="card attn" style="margin:12px 0;color:var(--red)">Not applied — {deniedText(data.denied)}</p>
       )}
@@ -655,7 +655,7 @@ export default function Projects({ data }: { data: ProjectsData | SourcesData | 
       )}
       {!data.canEdit && (
         <p class="card" style="margin:12px 0;color:var(--dim)">
-          Read-only: your account may not change projects. An admin can grant it on <a href="/policies">Policies</a>.
+          Read-only: your account may not change projects. An admin can grant it in <a href="/policies">Approval rules</a>.
         </p>
       )}
       <p class="meta">Connect repositories and configure how Ship builds, tests, and delivers changes.</p>

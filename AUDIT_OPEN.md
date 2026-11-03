@@ -633,6 +633,32 @@ detail is in the programme's wave-2 status table. Items that matter for audit:
   outlives its timeout is cancelled") failed once in a loaded full-suite run
   and passed alone and on retry. Timing sensitivity; a robustness fix is owed.
 
+## 2026-11-03 — undici, vite and zod advisories (CI audit red)
+
+CI `audit` failed on new advisories. **undici** (direct, root tree: four high,
+four moderate, `>=8.0.0 <8.12.2`) moves to `^8.12.3`, and the deployed pin in
+`deploy/package.ship.json` to 8.12.3. **vite** (web devDependency, one high
+plus moderate/low, `<=6.4.3`) moves to `^6.4.4`, resolving 6.4.5, and the
+deployed SSR pin in `deploy/package.web.json` to 6.4.5. Both lockfile pairs were
+regenerated with pnpm and npm, not by hand.
+
+**zod GHSA-mrhx-c7xc-m3w5 (high), EXCEPTED, not fixed.** zod 3.25.76 is reached
+only through `@neutron-build/core` 0.3.2's content-collection module. Ship
+defines no collections and validates no request input with zod, so the memory
+exhaustion path is unreachable. The fix is zod 4.6.6+, which core 0.3.2 cannot
+load: its `dist/index.js` re-exports `content/index.js`, which imports zod 3
+names (`ZodEffects`, ...) that zod 4 removed, so an override would break boot.
+The exception lives in `deploy/audit-exceptions.json` (reason + removal
+condition) and in `web/package.json` `pnpm.auditConfig.ignoreGhsas`;
+`scripts/audit-deployment.mjs` now parses `npm audit --json`, fails on any
+other high/critical advisory, and fails if the two lists disagree (negative
+control run: emptying both lists makes the deployment audit fail on zod).
+**Remove the exception when Ship moves to `@neutron-build/core` 0.5.x**, which
+depends on zod ^4.6.7.
+
+Not addressed (moderate, below the CI gate): `@hono/node-server`
+GHSA-rmxm-3fg6-px4f (`>=1.19.10 <2.1.3`, fix is a major bump).
+
 ## 2026-10-03 — devalue advisories (web dependency, re-triage)
 
 CI `audit` began failing on three new high-severity `devalue` advisories

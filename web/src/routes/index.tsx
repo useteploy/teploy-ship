@@ -1,4 +1,7 @@
 import { submissionIdentity } from "../lib/submission.server.js";
+import { attentionRows } from "../lib/attention.server.js";
+import { AttentionTable } from "../views/attention-table.js";
+import type { AttentionRow } from "../lib/attention.server.js";
 import { TaskComposer, type TaskProject } from "../views/task-composer.js";
 import { JOURNEYS, intakeJourney, parseJourney, journeyOptions, type Journey } from "teploy-ship/journeys";
 import { workflows } from "../lib/workflows.server.js";
@@ -10,7 +13,6 @@ import { deliverEvent, enqueueRun, actorFromPrincipal, intakeActor } from "../li
 // recovery the worker's auto-launch performs, kept identical here so a manual
 // launch records exactly what an automatic one would.
 import { akirooRefFrom } from "../../../dist/akiroo.js";
-import type { RunMeta } from "teploy-ship/runtime";
 import type { IntakeTask } from "teploy-ship/runtime";
 
 import { defaultModel, shipRuntime } from "../lib/store.server.js";
@@ -23,8 +25,9 @@ export const config = { mode: "app" };
 interface InboxData {
   template?: WorkflowTemplate;
   selectedRepo: string;
-  /** Runs parked on an approval — the top priority. */
-  parked: RunMeta[];
+  /** Everything that needs a person: decisions, failures, holds, stale work. */
+  attention: AttentionRow[];
+  attentionTruncated: boolean;
   recentRequests: Array<IntakeTask & { runVisible: boolean }>;
   pendingLaunches: IntakeTask[];
   /** Proposed intake tasks awaiting a launch/dismiss decision. */
@@ -34,6 +37,8 @@ interface InboxData {
   projects: TaskProject[];
   canLaunch: boolean;
   canRequest: boolean;
+  /** May connect and configure projects (the `policies` grant). */
+  canSetup: boolean;
   requestId: string;
   submitted: string | null;
   error: string | null;
@@ -65,8 +70,9 @@ export async function loader({ request }: { request: Request }): Promise<InboxDa
   }));
   const pendingLaunches = canLaunch ? launched.filter(t => runPresence.get(t.runId!) === false) : [];
   const recentRequests = allTasks.filter(t => t.source === "team-request" && t.state !== "proposed" && (canLaunch || t.requestedBy === me?.user)).sort((a,b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 12).map(t => ({...t,runVisible: !!t.runId && runPresence.get(t.runId) === true}));
-  const parked = runs.filter((r) => r.status === "waiting" && r.eventName !== undefined);
-  return { template: (await workflows(runtime)).find(t=>t.id===query.get("workflow")), selectedRepo: query.get("repo") ?? "", canLaunch, canRequest: me?.role === "admin" || me?.role === "editor", requestId: randomUUID(), submitted: query.get("submitted"), error: query.get("error"), projects: projects.filter(p => !!p.url).map(p => ({ url: p.url ?? p.repo, label: `${p.label ?? p.repo}${p.url ? " · " + new URL(p.url).host : ""}`, requirePlanReview: p.requirePlanReview === true, planSupported: (p.harness ?? process.env.SHIP_HARNESS ?? "native") === "native" })), parked, recentRequests, pendingLaunches, proposed, store: runtime.kind, model: defaultModel(), decisionTaken, denied };
+  const attention = await attentionRows(runtime);
+  const canSetup = await may("policies", me);
+  return { attention: attention.rows, attentionTruncated: attention.truncated, canSetup, template: (await workflows(runtime)).find(t=>t.id===query.get("workflow")), selectedRepo: query.get("repo") ?? "", canLaunch, canRequest: me?.role === "admin" || me?.role === "editor", requestId: randomUUID(), submitted: query.get("submitted"), error: query.get("error"), projects: projects.filter(p => !!p.url).map(p => ({ url: p.url ?? p.repo, label: `${p.label ?? p.repo}${p.url ? " · " + new URL(p.url).host : ""}`, requirePlanReview: p.requirePlanReview === true, planSupported: (p.harness ?? process.env.SHIP_HARNESS ?? "native") === "native" })), recentRequests, pendingLaunches, proposed, store: runtime.kind, model: defaultModel(), decisionTaken, denied };
 }
 
 export async function action({ request }: { request: Request }): Promise<Response> {
@@ -215,16 +221,13 @@ export async function action({ request }: { request: Request }): Promise<Respons
 }
 
 
-function short(s: string, n: number): string {
-  return s.length > n ? `${s.slice(0, n)}…` : s;
-}
 
 // Live updates via the shared SSE helper (see _layout __shipLive): the server
 // pushes on any state change and this re-checks the inbox's own loader data.
 const POLL = `__shipLive("route:index.tsx");`;
 
 export default function Inbox({ data }: { data: InboxData }) {
-  const nothing = data.parked.length === 0 && data.proposed.length === 0;
+  const noProjects = data.projects.length === 0;
   return (
     <>
       {data.decisionTaken && (
@@ -234,55 +237,55 @@ export default function Inbox({ data }: { data: InboxData }) {
       )}
       {data.denied && (
         <p class="card attn notice" style="color:var(--red)">
-          Not applied — your account may not approve, deny or launch runs. An admin can grant it on <a href="/policies">Policies</a>.
+          Not applied — your account may not approve, deny or launch runs. An admin can grant it in <a href="/policies">Approval rules</a>.
         </p>
       )}
-      <div class="page-heading"><div><h1 class="page">Inbox</h1><p class="meta">Tasks and runs waiting for your decision.</p></div><a class="button" href="/runs">View all runs →</a></div>
+      <div class="page-heading"><div><h1 class="page">Inbox</h1><p class="meta">What needs you, and where new work starts.</p></div><a class="button" href="/runs">View all runs →</a></div>
       <div class="summary-grid">
-        <a class="summary-card" href="#approvals"><strong>{data.parked.length}</strong><span>Awaiting your decision</span></a>
+        <a class="summary-card" href="#needs-you"><strong>{data.attention.length}</strong><span>Need you</span></a>
         <a class="summary-card" href="#proposals"><strong>{data.proposed.length}</strong><span>Proposed tasks</span></a>
-        <a class="summary-card" href="/projects"><strong>{data.projects.length}</strong><span>Configured projects</span></a>
+        <a class="summary-card" href="/projects"><strong>{data.projects.length}</strong><span>Projects</span></a>
       </div>
-      <p class="row-actions" style="display:flex;gap:16px"><a href="/workflows">Choose a workflow</a><a href="/setup">Set up a project</a></p>
-      {data.template && <p class="notice">Workflow: <b>{data.template.name}</b>. Fill in the details below before starting.</p>}
-      {data.submitted && <p class="notice good" role="status">Your request was sent for approval. It has not started yet. Find it in Proposed tasks below.</p>}
-      {data.error && <p class="notice bad" role="alert">{data.error} Your draft is preserved in this browser.</p>}
-      <TaskComposer projects={data.projects} selectedRepo={data.selectedRepo} initialTask={data.template?.task} initialJourney={data.template?.journey ?? (data.template?.mode === "scan" ? "review" : "change")} initialPlan={data.template?.plan} canLaunch={data.canLaunch} canRequest={data.canRequest} requestId={data.requestId} clearDraft={!!data.submitted} />
-
-      <h2 class="section" id="approvals">
-        Needs your decision <span class="count">({data.parked.length})</span>
-      </h2>
-      {data.parked.length === 0 ? (
-        <div class="empty"><h3>You’re caught up</h3><p>Plans, approval requests, and agent questions will appear here.</p></div>
+      {noProjects ? (
+        <section class="card" id="new-task" style="margin:18px 0">
+          <h2 style="margin:0 0 6px">Connect your first repository</h2>
+          {data.canSetup ? (
+            <>
+              <p class="meta">Ship works on repositories you connect. Setup takes a clone URL, checks the environment, then runs a read-only review to prove it works.</p>
+              <a class="button primary" href="/setup">Connect a repository</a>
+            </>
+          ) : (
+            <p class="meta">Ship works on repositories an administrator connects. Ask one to add a project; you can describe tasks here once it exists.</p>
+          )}
+        </section>
       ) : (
-        data.parked.map((r) => (
-          <div key={r.runId} class="card attn">
-            <div class="row-actions">
-              <span class={`status ${r.status}`}>waiting</span>
-              <a href={`/runs/${r.runId}`}>{r.runId}</a>
-              {r.repo !== undefined && <span class="meta">{r.repo}</span>}
-              <span class="spacer" style="flex:1" />
-              <form method="post" class="row-actions">
-                <input type="hidden" name="runId" value={r.runId} />
-                {/* Binds the decision to the park this card was rendered from. */}
-                <input type="hidden" name="eventName" value={r.eventName ?? ""} />
-                <a class="button sm" href={`/runs/${r.runId}`}>Review and respond</a>
-              </form>
-            </div>
-            <div class="meta" style="margin:8px 0 0">{short(r.task, 140)}</div>
-          </div>
-        ))
+        <>
+          <p class="row-actions" style="display:flex;flex-wrap:wrap;gap:16px"><a href="/workflows">Start from a workflow</a><a href="/incidents">Open an incident from an alert</a><a href="/coordination">Change two repositories together</a></p>
+          {data.template && <p class="notice">Workflow: <b>{data.template.name}</b>. Fill in the details below before starting.</p>}
+          {data.submitted && <p class="notice good" role="status">Your request was sent for approval. It has not started yet. Find it in Proposed tasks below.</p>}
+          {data.error && <p class="notice bad" role="alert">{data.error} Your draft is preserved in this browser.</p>}
+          <TaskComposer projects={data.projects} selectedRepo={data.selectedRepo} initialTask={data.template?.task} initialJourney={data.template?.journey ?? (data.template?.mode === "scan" ? "review" : "change")} initialPlan={data.template?.plan} canLaunch={data.canLaunch} canRequest={data.canRequest} requestId={data.requestId} clearDraft={!!data.submitted} />
+        </>
+      )}
+
+      <h2 class="section" id="needs-you">
+        Needs you <span class="count">({data.attention.length})</span>
+      </h2>
+      {data.attention.length === 0 ? (
+        <div class="empty"><h3>You’re caught up</h3><p>Decisions, failures and work going stale will appear here.</p></div>
+      ) : (
+        <AttentionTable rows={data.attention} truncated={data.attentionTruncated} />
       )}
 
       {data.pendingLaunches.length > 0 && <section><h2 class="section">Starting or awaiting recovery</h2>
-        <p class="meta">These requests have a reserved task identity but no visible run yet. Retrying resumes the same request.</p>
+        <p class="meta">These requests have a reserved task identity but no visible run yet. Retrying resumes the same request. <a href="/recovery">Launch recovery →</a></p>
         {data.pendingLaunches.map(t => <article class="card" key={t.taskId}><b>{t.title}</b><form method="post"><input type="hidden" name="taskId" value={t.taskId} /><button type="submit" name="intent" value="retry-task">Retry launch</button></form></article>)}
       </section>}
       <h2 class="section" id="proposals">
         Proposed tasks <span class="count">({data.proposed.length})</span>
       </h2>
       {data.proposed.length === 0 ? (
-        <p class="empty">No proposed tasks. Label a Forgejo/GitHub issue <code>ship</code> to see it here.</p>
+        <p class="empty">No proposed tasks. Label a Forgejo or GitHub issue <code>ship</code> to see it here.</p>
       ) : (
         data.proposed.map((t) => (
           <div key={t.taskId} class="card">
@@ -300,9 +303,7 @@ export default function Inbox({ data }: { data: InboxData }) {
         ))
       )}
 
-      {data.canLaunch && <p class="meta"><a href="/recovery">Inspect pending launch recovery →</a></p>}
       {data.recentRequests.length > 0 && <section><h2 class="section">Recent requests</h2>{data.recentRequests.map(t => <article class="card" key={t.taskId}><b>{t.title}</b><p class="meta">{t.state === "launched" ? "Approved for launch" : "Dismissed"} · {t.requestedBy}</p>{t.runVisible && t.runId && <a href={`/runs/${t.runId}`}>Follow the task and its result →</a>}</article>)}</section>}
-      {nothing && data.pendingLaunches.length === 0 && <p class="empty" style="margin-top:28px">Inbox zero. <a href="/runs">See all runs →</a></p>}
       <script dangerouslySetInnerHTML={{ __html: POLL }} />
     </>
   );

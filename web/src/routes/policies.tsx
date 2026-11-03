@@ -173,12 +173,11 @@ export default function Policies({ data, actionData }: { data: PoliciesData; act
   const g = data.governance;
   return (
     <>
-      <h1 class="page">Settings</h1>
+      <div class="page-heading"><div><h1 class="page">Settings</h1><p class="meta">Manage your team, connections, and how Ship runs your work.</p></div><a class="button" href="/account">Your account</a></div>
       <SubNav items={SETTINGS_VIEWS} current="governance" />
       <p class="meta">
-        Who may do what, when auto sources may run unattended, and who reviews what Ship opens. Per-source
-        ignore / propose / auto and budgets are on <a href="/projects?view=sources">Sources</a>. The CLI edits the same store:{" "}
-        <code>teploy-ship policy</code>.
+        Who may do what, when automatic sources may run, and who reviews what Ship opens. Per-source settings
+        and budgets are on <a href="/projects?view=sources">Sources</a>.
       </p>
       {actionData?.error !== undefined && <p class="card attn" style="margin:12px 0;color:var(--red)">{actionData.error}</p>}
       {actionData?.ok !== undefined && <p class="card" style="margin:12px 0;color:var(--green)">{actionData.ok}</p>}

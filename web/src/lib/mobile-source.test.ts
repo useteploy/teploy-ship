@@ -65,9 +65,8 @@ test("the runs list renders as cards below desktop", () => {
 test("run rows show the run's repository when meta carries one", () => {
   const runs = readFileSync(join(root, "routes/runs/index.tsx"), "utf8");
   assert.match(runs, /run\.repo !== undefined && <span class="run-repo"/);
-  const inbox = readFileSync(join(root, "routes/index.tsx"), "utf8");
-  assert.match(inbox, /r\.repo !== undefined && <span class="meta">\{r\.repo\}<\/span>/);
-  const attention = readFileSync(join(root, "routes/attention.tsx"), "utf8");
+  // The Inbox's "Needs you" table (formerly /attention).
+  const attention = readFileSync(join(root, "views/attention-table.tsx"), "utf8");
   assert.match(attention, /r\.repo !== undefined && <span class="run-repo"/);
   assert.match(DESIGN_CSS, /\.run-repo \{[^}]*text-overflow: ellipsis/, "the repo line truncates rather than pushing a card wide");
 });

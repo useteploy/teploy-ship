@@ -1,4 +1,6 @@
 import { abandonAcceptedLaunch, launchDispositions, pendingLaunches, retryAcceptedLaunch, safeForDisplay } from "../lib/launch-recovery.server.js";
+import { SubNav } from "../lib/subnav.js";
+import { FLEET_VIEWS } from "../views/fleet-views.js";
 import { shipRuntime } from "../lib/store.server.js";
 import { actorFromPrincipal } from "../lib/ship.server.js";
 import { currentUser } from "../lib/session.server.js";
@@ -49,8 +51,9 @@ export async function action({ request }: { request: Request }): Promise<Respons
 }
 export default function Recovery({ data }: { data: Awaited<ReturnType<typeof loader>> }) {
   return <>
-    <header class="page-head"><h1>Launch recovery</h1><a href="/">Back to Inbox</a></header>
-    <p class="meta">Accepted tasks waiting to become visible runs. The worker retries these automatically. Retrying here keeps the original task and approvals; it cannot override a competing review decision.</p>
+    <h1 class="page">Fleet</h1>
+    <SubNav items={FLEET_VIEWS} current="recovery" />
+    <p class="meta">Accepted tasks that have not become visible runs yet. The worker retries these automatically; retrying here keeps the original task and approvals.</p>
     {data.error && <p class="notice bad" role="alert">{data.error}</p>}
     {!data.enabled && <p class="notice">This deployment has no launch journal.</p>}
     {data.enabled && data.rows.length === 0 && <p class="empty">No pending accepted launches on this page.</p>}

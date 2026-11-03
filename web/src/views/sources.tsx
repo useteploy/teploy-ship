@@ -56,7 +56,7 @@ export default function Sources({ data }: { data: SourcesData }) {
       )}
       {!data.canEdit && (
         <p class="card" style="margin:12px 0;color:var(--dim)">
-          Read-only: your account may not change policies. An admin can grant it on <a href="/policies">Policies</a>.
+          Read-only: your account may not change policies. An admin can grant it in <a href="/policies">Approval rules</a>.
         </p>
       )}
       <p class="meta">

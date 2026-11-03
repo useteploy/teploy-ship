@@ -28,21 +28,19 @@ export async function loader({ request }: { request: Request }): Promise<{ nav: 
 // changelog). `/policies` keeps its own path because its RBAC exemption is
 // path-based.
 const NAV_LINKS = [
-  { href: "/", label: "Inbox", match: [] as string[] },
-  { href: "/runs", label: "Runs", match: ["/reviews"] },
-  // The attention queue: what needs a human, nothing that merely happened.
-  { href: "/attention", label: "Attention", match: [] as string[] },
-  { href: "/incidents", label: "Incidents", match: [] as string[] },
-  { href: "/coordination", label: "Coordination", match: [] as string[] },
+  // The Inbox carries the attention queue (what needs a human) and the task
+  // composer; /attention redirects here.
+  { href: "/", label: "Inbox", match: ["/attention"] },
+  { href: "/runs", label: "Runs", match: ["/reviews", "/incidents", "/coordination"] },
   { href: "/projects", label: "Projects", match: ["/sources", "/knowledge", "/bulletin-admin", "/workflows", "/setup"] },
-  { href: "/fleet", label: "Fleet", match: ["/spend"] },
-  { href: "/settings", label: "Settings", match: ["/policies", "/users"] },
+  { href: "/fleet", label: "Fleet", match: ["/spend", "/recovery"] },
+  { href: "/settings", label: "Settings", match: ["/policies", "/users", "/skills", "/account"] },
 ];
 
 function activeHref(path: string): string | null {
   let best: string | null = null;
   for (const l of NAV_LINKS) {
-    const hit = l.href === "/" ? path === "/" : [l.href, ...l.match].some((h) => path === h || path.startsWith(h + "/"));
+    const hit = l.href === "/" ? path === "/" || l.match.includes(path) : [l.href, ...l.match].some((h) => path === h || path.startsWith(h + "/"));
     if (hit && (best === null || l.href.length > best.length)) best = l.href;
   }
   return best;
@@ -314,7 +312,7 @@ select option { background: var(--panel); color: var(--text); }
 header.top .nav-toggle { display: none; }
 header.top nav.nav .nav-account { display: none; }
 @media (max-width: 920px) {
-  /* Below desktop the nine-link nav no longer fits one row. It collapses
+  /* Below desktop the nav no longer fits one row. It collapses
      behind a Menu button (toggled by NAV_PROGRESS below) and opens as a
      full-width list of 44px rows under the header. */
   header.top { flex-wrap: wrap; }

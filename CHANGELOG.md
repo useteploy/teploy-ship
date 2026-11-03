@@ -2,6 +2,164 @@
 
 All notable changes to Teploy Ship are recorded here.
 
+## [0.4.0] - 2026-11-03
+
+Upgrade notes: read `docs/UPGRADING.md` before deploying. The image now
+compiles `dist/` and `web/dist/` itself, so there is nothing to build on the
+host first. Many feature flags changed default (see Changed); set the flag to
+`0`, `false`, `no` or `off` to keep the old behaviour. The regenerated flag
+reference is `docs/FLAGS.md`, with the rationale in
+`docs/FLAG_AUDIT_2026-10-18.md`.
+
+### Added
+- **Generic ACP harness.** One adapter drives any agent that speaks the Agent
+  Client Protocol, through an in-sandbox driver (`ship-acp`) with a
+  fail-closed permission policy: reads and writes only inside the workspace,
+  `allow_always` is never granted. Profiles cover gemini, grok,
+  cursor-agent and qwen. It stays opt-in behind `SHIP_ACP_HARNESS`; the
+  agent images are an opt-in bake.
+- **More external harnesses and per-harness models.** A codex adapter
+  (`codex exec --json`) and an OpenCode v2 adapter were added, with
+  session-resume steering for opencode and claude-code. `SHIP_HARNESS_MODEL_<ID>`
+  overrides the model per harness, and `SHIP_HARNESS_BROWSER` gives every
+  external harness a browser.
+- **Sealed harness credentials.** Behind `SHIP_HARNESS_CRED=on`, credentials
+  for external harnesses are stored sealed per project and profile (needs
+  `SHIP_CONFIG_KEY`; storing is refused while sealing is off), and are
+  delivered through the exec environment, never argv or workspace files. Run
+  enqueue now refuses an external harness whose provider host the model
+  routing policy does not allow for the data class.
+- **Delegation and delegate targets.** The coordinator gains a `delegate`
+  action that runs bounded child runs and feeds their results back as context.
+  Children are read-only, open a single parent PR, cap cost at the lesser of
+  the per-run cap and the parent's remaining budget, can use a per-child
+  model with a data-class gate, and relay needs-input to the parent.
+- **Stacked pull requests and run forks.** `SHIP_STACKED_PRS` supports stacked
+  PRs with `--onto` rebase after the base merge, with the stack lineage shown
+  on the run page and over HTTP. `SHIP_FORK` forks a run to a new branch from
+  the recorded push with its own PR.
+- **Browser perception: the `look` action.** A text-first browser action
+  (`SHIP_LOOK`) with an optional image mode, a baked `ship-browser` helper,
+  per-run resource classes so a look run is admitted at its real footprint, and
+  screencast recordings (`SHIP_LOOK_RECORD`) that withhold secrets seen on
+  screen. Recordings are linked to the run and revision, not attached.
+- **Skills registry.** Version-pinned enablement with native progressive
+  loading behind `SHIP_SKILLS`, and an import form in the dashboard.
+- **MCP client, steering and live view.** The native loop can call MCP servers
+  (`SHIP_MCP`), accept two-way steering replies (`SHIP_STEER_REPLY`), and show
+  a read-only terminal stream and running diff on the run page
+  (`SHIP_LIVE_VIEW`). Run pages also show the follow-up thread with steer and
+  ask history (`SHIP_THREAD_VIEW`).
+- **Event rules and signed intake.** A rule engine with generic signed intake
+  sits in front of `intake.propose`, with vendor webhook adapters. The
+  built-in intake sources also run as default rules in shadow mode
+  (`SHIP_EVENT_RULES=shadow`); the built-in path always wins and `doctor` gains
+  an `event-rules-shadow` check that fails on any divergence.
+- **PR watch.** Ship watches its own PRs for conflicts and failing checks with
+  bounded polling (`SHIP_PR_WATCH`). Discovery is bounded by PR age and the
+  first enable does not adopt history.
+- **Reproducing-test gate and incident evidence.** Authorised incident
+  remediation can require a reproducing test, and incident evidence now feeds
+  diagnosis, with deploy correlation offered as a hypothesis only.
+- **Warm follow-ups.** Follow-up runs on a PR thread boot from a snapshot of
+  the previous run's workspace (`SHIP_WARM_THREAD`, which needs
+  `SHIP_WARM_PARKS`), and merge-parked runs reuse the park's own image.
+  Expired or mismatched snapshots fall back to a cold run. Snapshot images are
+  swept once their run is terminal.
+- **Initial admin bootstrap.** Set `SHIP_BOOTSTRAP_ADMIN_USER` and
+  `SHIP_BOOTSTRAP_ADMIN_PASSWORD` (as teploy secrets) and the web process
+  creates the first admin at boot, once, never overwriting an existing local
+  account. Previously a fresh deployment could only log in with the
+  break-glass `SHIP_WEB_TOKEN`.
+- **Sandbox user setting.** `teploy-ship project set <repo> --sandbox-user
+  root|default` (or `sandbox_user` on Akiroo's project row) opts a project
+  into running its sandbox as root.
+- **Mobile dashboard and run cards.** The nav collapses behind a Menu button
+  below desktop, controls are touch-sized, form tables stack, and run cards
+  show each run's repository.
+- **Generated flag reference.** `docs/FLAGS.md` is generated from the source
+  with a CI drift check, and the claim ledger check now runs in CI.
+
+### Changed
+- **Dashboard navigation regrouped from eight tabs to five.** The tabs are now
+  Inbox, Runs, Projects, Fleet and Settings.
+- **The Attention queue is now the Inbox's "Needs you" section.** `/attention`
+  redirects to it.
+- **Incidents and Coordinated changes moved under Runs.** They sit beside All
+  runs and PR reviews, and their URLs are unchanged.
+- **Setup and Workflows are tabs under Projects.** Launch recovery is a tab
+  under Fleet.
+- **Settings opens on Team & access.** The Overview tab is gone, and
+  `?view=overview` still works and lands there. Approval rules and Skills now
+  share the Settings header.
+- **First-run Inbox.** With no projects, the Inbox shows a single "Connect your
+  first repository" step instead of a disabled task form.
+- **Run page decision controls.** On a run waiting for a decision, Approve and
+  Deny sit directly under the status banner. Cancel run is set apart and no
+  longer styled like Deny. "Not recorded" task-state detail and the Fork and
+  Stack forms are collapsed by default.
+- **Copy and consistency fixes.** Runs table headers and the search
+  placeholder were cleaned up, the debug "store:" text was removed from PR
+  reviews, and "Policies" links are renamed "Approval rules".
+- **Browser sessions slide.** A dashboard login now stays valid for 30 days of
+  inactivity and renews on use. Renewal re-checks every revocation rule
+  (signature, expiry, the master-credential pin, the SSO window, and that a
+  password account still exists with its current role).
+- **Flag defaults flipped on.** Twenty-one proven flags are now on when unset,
+  including `SHIP_THREAD_VIEW`, `SHIP_LIVE_VIEW`, `SHIP_PR_WATCH`,
+  `SHIP_STEER_REPLY`, `SHIP_LOOK`, `SHIP_SKILLS`, `SHIP_DELEGATE`,
+  `SHIP_WARM_THREAD`, `SHIP_FORK` and `SHIP_STACKED_PRS`. `0`, `false`, `no`
+  and `off` all disable. `SHIP_ACP_HARNESS` stays opt-in.
+- **Git credentials default to env delivery.** Tokens no longer appear in argv,
+  git config, remote URLs or sandbox files. `SHIP_GIT_CREDENTIAL=argv` opts
+  back out.
+- **Sandboxes run as a non-root user by default.** The go, node and rust
+  images define a `ship` user (uid 1000); use the per-project root opt-in
+  where a toolchain needs root. Images also gain poppler-utils and ffmpeg
+  (node) and Go 1.27.
+- **Provider rate limits park and retry instead of failing the run.** Runs
+  sleep with bounded exponential backoff (60s up to 10m steps, 60m total,
+  `SHIP_RATE_LIMIT_MAX_WAIT_MIN`) and fail only past the ceiling. A provider
+  `Retry-After` is honoured. This was the cause of 34 of 100 SWE-bench Verified
+  instances erroring in the 2026-10-19 run.
+- **Image builds compile in the image.** `dist/` and `web/dist/` are built from
+  the checkout inside the Docker build, so the host build is never shipped and
+  `scripts/check-image-sources.mjs` guards against regression. Four earlier
+  deploys had shipped stale build output.
+- **Akiroo integration.** Project rows carry the environment, evidence targets
+  must be repos, project slugs match repo URLs case-insensitively, and the
+  address is now `app.akiroo.com`.
+- **Deployment store.** The `ship-nucleus` accessory was retired after the
+  PostgreSQL move; a pre-migration tarball is the rollback path (see
+  `docs/MIGRATE_STORE.md`).
+
+### Fixed
+- **Credential-scan hardening (H2).** The scan now judges what actually ships:
+  trusted push base, home-directory leak sites, needle sweep including offset
+  base64, needle cleanup on every exit, and scan failures held rather than
+  refused.
+- **ACP and harness secret handling.** The ACP agent runs under a per-exec home
+  that is deleted afterwards, path-like fields are gated by the workspace check,
+  streamed text is redacted before truncation, and the agent process tree is
+  always killed on `maxSteps` or exit.
+- **undici and vite advisories.** undici moves to 8.12.3 (four high-severity
+  advisories) and the web build's vite to 6.4.5. A zod advisory reachable only
+  through Neutron core's unused content collections is recorded as an audit
+  exception until Ship moves to Neutron core 0.5 (`AUDIT_OPEN.md`).
+- **Dependency advisories.** `source-map-js` (GHSA-68fv-2mgg-jv7q, high) and
+  `hono` (GHSA-hxh3-vqpv-xpqv) are overridden to patched versions, which turns
+  the CI audit gate green again.
+- **Sandbox leaks and placement.** Workspaces are released on every run exit,
+  unowned containers are reaped, a sandbox pool placement race is fixed, and
+  launches are no longer held on the worker host's load when every sandbox is
+  remote.
+- **Backups and store probes.** `ship-backup.sh` supports the PostgreSQL store,
+  and `doctor` store probes work against it. Shadow write failures are now loud
+  and counted, with data-dir probes.
+- **Intake and follow-up correctness.** Linear replay is closed, intake dedupes
+  by body hash, an unresolved project identity is logged once per task, and
+  follow-ups carry a structured digest of the prior run.
+
 ## [0.3.0] - 2026-10-15
 
 ### Added

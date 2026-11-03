@@ -1,4 +1,6 @@
 import { redirect } from "../lib/http.server.js";
+import { SubNav } from "../lib/subnav.js";
+import { RUN_VIEWS } from "../views/run-views.js";
 // The incidents module is imported DIRECTLY from dist (no lib/*.server.ts
 // re-export exists for it) — safe because src/incidents.ts is self-contained
 // by construction: no value imports at all, so the client bundler never
@@ -398,13 +400,9 @@ function IncidentActions({ incident, canSteer }: { incident: IncidentRecord; can
 export default function Incidents({ data }: { data: IncidentsData }) {
   return (
     <>
-      <div class="page-heading">
-        <div>
-          <h1 class="page">Incidents</h1>
-          <p class="meta">Alert, attributed repository, read-only diagnosis with a bounded fix proposal. Remediation only by an explicit authorize; observed recovery closes the loop on its own evidence.</p>
-        </div>
-        <a href="/">Back to Inbox</a>
-      </div>
+      <h1 class="page">Runs</h1>
+      <SubNav items={RUN_VIEWS} current="incidents" />
+      <p class="meta">Paste an alert and Ship finds the repository, diagnoses it read-only and proposes a fix. Nothing changes until someone authorizes the fix.</p>
       {data.error !== null && <p class="notice bad" role="alert">{data.error}</p>}
       {data.notice !== null && <p class="notice">{data.notice}</p>}
 

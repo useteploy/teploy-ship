@@ -2,6 +2,8 @@ import type { SubNavItem } from "../lib/subnav.js";
 
 export const PROJECT_VIEWS: SubNavItem[] = [
   { key: "repos", label: "Repos", href: "/projects" },
+  { key: "setup", label: "Setup", href: "/setup" },
+  { key: "workflows", label: "Workflows", href: "/workflows" },
   { key: "sources", label: "Sources", href: "/projects?view=sources" },
   { key: "knowledge", label: "Knowledge", href: "/projects?view=knowledge" },
   // L6. Its own path rather than a `?view=` of /projects: the boards it manages

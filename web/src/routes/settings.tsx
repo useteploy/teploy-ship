@@ -433,30 +433,13 @@ function ConfigGroup({ group, advanced }: { group: Group; advanced: boolean }) {
 }
 
 export default function Settings({ data, actionData }: { data: SettingsData; actionData?: { error?: string; ok?: string; checks?: ConnectionCheck[] } }) {
-  const title = SETTINGS_VIEWS.find(view => view.key === data.view)?.label ?? "Overview";
-  const rowValue = (group: string, label: string) => data.groups.find(g => g.title === group)?.rows.find(r => r.label === label)?.value ?? "Not configured";
+  const title = SETTINGS_VIEWS.find(view => view.key === data.view)?.label ?? "Settings";
   return <>
     <div class="page-heading"><div><h1 class="page">Settings</h1><p class="meta">Manage your team, connections, and how Ship runs your work.</p></div><a class="button" href="/account">Your account</a></div>
     {data.connected && <p class="notice" role="status">Connected to <b>{data.connected}</b>. Your worker will pick up the connection on its next poll.</p>}
     <div class="settings-layout">
       <nav class="settings-nav" aria-label="Settings navigation">{SETTINGS_VIEWS.map(view => <a key={view.key} href={view.href} class={view.key === data.view ? "active" : undefined} aria-current={view.key === data.view ? "page" : undefined}>{view.label}</a>)}</nav>
       <div class="settings-content">
-        {data.view === "overview" && <>
-          <h2>Workspace overview</h2><p class="notice"><b>Where changes belong:</b> account preferences affect you; project overrides affect one repository; deployment defaults affect workers. Saved project changes apply to new runs.</p><p class="row-actions"><a href="/setup">Check project setup</a><a href="/workflows">Manage reusable workflows</a></p><p class="meta">Start with the setting you want to change. Repository-specific choices live in Projects.</p>
-          <section class="config-section"><h3>Current defaults</h3>
-            <div class="config-row"><span class="config-label">Model</span><span class="config-value">{rowValue("Runtime", "model")}</span></div>
-            <div class="config-row"><span class="config-label">Agent harness</span><span class="config-value">{rowValue("Harness", "harness")}</span></div>
-            <div class="config-row"><span class="config-label">Daily budget (USD)</span><span class="config-value">{rowValue("Budget & capacity", "SHIP_DAILY_BUDGET_USD")}</span></div>
-          </section>
-          <div class="settings-cards">
-            <a class="card" href="/settings?view=team"><h3>Team & access →</h3><p>Add teammates, assign roles, and reset passwords.</p><span class="chip">{data.users.length} named accounts</span></a>
-            <a class="card" href="/settings?view=integrations"><h3>Connections →</h3><p>Connect Akiroo and inspect Git, webhook, and Observe configuration.</p></a>
-            <a class="card" href="/projects"><h3>Project configuration →</h3><p>Choose a harness, sandbox, test command, and automation policy for each repository.</p></a>
-            <a class="card" href="/policies"><h3>Approval rules →</h3><p>Decide who can launch work and what may run unattended.</p></a>
-            <a class="card" href="/fleet?view=spend"><h3>Usage & spending →</h3><p>Review costs, budget limits, and unpriced runs.</p></a>
-            <a class="card" href="/settings?view=models"><h3>Models & execution →</h3><p>Inspect worker defaults for model access, capacity, and verification.</p></a>
-          </div>
-        </>}
         {data.view === "team" && <>
       <h2>Team & access</h2>
       <p class="meta">
@@ -525,7 +508,7 @@ export default function Settings({ data, actionData }: { data: SettingsData; act
       </table></div>
 
         </>}
-        {data.view !== "overview" && data.view !== "team" && <>
+        {data.view !== "team" && <>
           <h2>{title}</h2>
           <p class="meta">{data.view === "integrations" ? "Services that bring work into Ship and carry results back." : data.view === "models" ? "Worker defaults for new runs. A project's configuration takes precedence." : "Detailed configuration reported by this server. Expand a section to inspect its values."}</p>
           {data.view === "integrations" && <section class="connection-checks"><form method="post"><button name="intent" value="check-connections">Check service connections</button></form><p class="meta">Tests configured health endpoints from this dashboard without model inference. Worker credentials and worker network access are checked by a real run.</p>{actionData?.checks && <div role="status">{actionData.checks.map(c=><article class="check-row"><b>{c.name}</b><span>{c.state}</span><div>{c.detail}</div></article>)}</div>}</section>}
