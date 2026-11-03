@@ -28,27 +28,8 @@ import { MERGE_EVENT } from "teploy-ship/plan";
 import { UPGRADE_HOLD_EVENT } from "teploy-ship/fence";
 import type { RunMeta, IntakeTask } from "teploy-ship/runtime";
 
-/** The kinds of attention, in the order the page shows them. */
-export type AttentionKind = "decision" | "failure" | "delivery" | "schedule" | "takeover" | "aging";
-
-export interface AttentionRow {
-  id: string;
-  kind: AttentionKind;
-  /** What the thing is, in the operator's terms (task, schedule, repo). */
-  title: string;
-  /** The outcome or blocker, one line. */
-  detail: string;
-  /** The human's move. */
-  nextAction: string;
-  /** Where to make it. */
-  href: string;
-  /** Repository the row's run works on (owner/name slug), when meta has one. */
-  repo?: string;
-  /** When the blocking state landed / began, for the age column. */
-  at?: string;
-  /** Waiting longer than 72h — age is now itself the blocker. */
-  aging?: boolean;
-}
+export type { AttentionKind, AttentionRow } from "./attention-row.js";
+import type { AttentionKind, AttentionRow } from "./attention-row.js";
 
 /** Hard ceiling on rows: bounded by design, and honest about cutting off. */
 export const ATTENTION_CAP = 50;

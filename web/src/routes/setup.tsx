@@ -1,4 +1,6 @@
 import { ProjectIdentityError } from "../lib/ship.server.js";
+import { SubNav } from "../lib/subnav.js";
+import { PROJECT_VIEWS } from "../views/project-views.js";
 import { randomUUID } from "node:crypto";
 import { enqueueRun, actorFromPrincipal } from "../lib/ship.server.js";
 import { defaultModel } from "../lib/store.server.js";
@@ -179,19 +181,12 @@ export async function action({
 export default function Setup({ data }: { data: Data }) {
   return (
     <>
-      <div class="page-heading">
-        <div>
-          <h1 class="page">Project setup</h1>
-          <p class="meta">
-            Connect a repository, configure its environment, then prove the
-            first run.
-          </p>
-        </div>
-        <a class="button" href="/projects#add-project">
-          Add repository
-        </a>
-      </div>
-      <form method="get" class="row-actions">
+      <h1 class="page">Projects</h1>
+      <SubNav items={PROJECT_VIEWS} current="setup" />
+      <p class="meta">
+        Connect a repository, configure its environment, then prove the first run.
+      </p>
+      {data.projects.length > 0 && <form method="get" class="row-actions">
         <label class="field">
           Project
           <select name="repo" value={data.repo}>
@@ -201,7 +196,7 @@ export default function Setup({ data }: { data: Data }) {
           </select>
         </label>
         <button type="submit">Check setup</button>
-      </form>
+      </form>}
       <p class="meta">
         Checked {data.checkedAt.replace("T", " ").slice(0, 19)} UTC.
         Configuration checks do not run the agent or spend model credits.

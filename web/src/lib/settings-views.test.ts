@@ -1,16 +1,16 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { settingsView, groupVisible, settingLabel } from '../views/settings-views.js';
-test('settings defaults to overview and preserves existing deep links', () => {
-  assert.equal(settingsView(null), 'overview');
-  assert.equal(settingsView('invalid'), 'overview');
+test('settings defaults to team (the old overview) and preserves existing deep links', () => {
+  assert.equal(settingsView(null), 'team');
+  assert.equal(settingsView('overview'), 'team');
+  assert.equal(settingsView('invalid'), 'team');
   assert.equal(settingsView('team'), 'team');
   assert.equal(settingsView('system'), 'system');
 });
-test('team and overview never leak the full configuration table into their content', () => {
+test('team never leaks the full configuration table into their content', () => {
   for (const group of ['Harness', 'Runtime', 'Sandbox', 'Git & access']) {
     assert.equal(groupVisible('team', group), false);
-    assert.equal(groupVisible('overview', group), false);
     assert.equal(groupVisible('system', group), true);
   }
   assert.equal(groupVisible('models', 'Sandbox'), true);

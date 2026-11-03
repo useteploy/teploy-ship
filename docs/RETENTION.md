@@ -32,7 +32,7 @@ runs and events stay in the store.
 |---|---|---|---|
 | Incident index | 200 records | The `/incidents` list. Older incident records stay in the store but leave the list. | `src/incidents.ts:81` (`INCIDENTS_LIMIT`) |
 | Schedule digest history | 10 entries shown, 20 stored | Digest entries per schedule (one per settled occurrence). Oldest stored entries are dropped when the store cap is exceeded — these are derived records, not run logs. | `src/workflow-schedules.ts:128` (`DIGEST_LIMIT`), `:131` (`DIGEST_STORE_LIMIT`) |
-| Attention queue | 50 rows | The `/attention` page (one row per item needing a human). The page says when it truncated; the underlying decisions live on their own pages. | `web/src/lib/attention.server.ts:52` (`ATTENTION_CAP`) |
+| Attention queue | 50 rows | The Inbox "Needs you" section (one row per item needing a human; `/attention` redirects there). The page says when it truncated; the underlying decisions live on their own pages. | `web/src/lib/attention.server.ts:52` (`ATTENTION_CAP`) |
 | Fleet registry prune | workers unseen for 24 h | Worker rows in the fleet registry. A worker that stopped heartbeating is retired from the registry after a day — the registry is live state, not history, and would otherwise grow forever on a replaced-container fleet. | `src/worker.ts:1786` (`retentionMs = 24 * 60 * 60 * 1000`) |
 
 ## Supported history scale

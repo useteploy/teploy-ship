@@ -1,3 +1,5 @@
+import { SubNav } from "../lib/subnav.js";
+import { PROJECT_VIEWS } from "../views/project-views.js";
 import {
   workflowSchedules,
   scheduleKey,
@@ -180,21 +182,11 @@ export default function Workflows({ data }: { data: Data }) {
   const t = data.selected;
   return (
     <>
-      <div class="page-heading">
-        <div>
-          <h1 class="page">Workflows</h1>
-          <p class="meta">
-            Reusable instructions for work your team does often.
-          </p>
-        </div>
-        <a class="button" href="/projects">
-          Projects
-        </a>
-      </div>
+      <h1 class="page">Projects</h1>
+      <SubNav items={PROJECT_VIEWS} current="workflows" />
       <p class="meta">
-        Choose a workflow, select a repository, and review the instructions
-        before launching. Project permissions, verification and budgets still
-        apply.
+        Reusable instructions for work your team does often. Pick one to start
+        a task from it; project permissions, verification and budgets still apply.
       </p>
       {data.error && (
         <p class="notice bad" role="alert">

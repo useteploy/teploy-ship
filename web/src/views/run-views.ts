@@ -1,6 +1,8 @@
 import type { SubNavItem } from "../lib/subnav.js";
 
 export const RUN_VIEWS: SubNavItem[] = [
-  { key: "runs", label: "Runs", href: "/runs" },
-  { key: "reviews", label: "Reviews", href: "/runs?view=reviews" },
+  { key: "runs", label: "All runs", href: "/runs" },
+  { key: "reviews", label: "PR reviews", href: "/runs?view=reviews" },
+  { key: "incidents", label: "Incidents", href: "/incidents" },
+  { key: "coordination", label: "Coordinated changes", href: "/coordination" },
 ];

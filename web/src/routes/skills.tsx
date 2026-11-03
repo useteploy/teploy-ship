@@ -113,7 +113,7 @@ const field = "background:var(--panel);color:var(--text);border:1px solid var(--
 export default function Skills({ data, actionData }: { data: SkillsData; actionData?: ActionResult }) {
   return (
     <>
-      <h1 class="page">Settings</h1>
+      <div class="page-heading"><div><h1 class="page">Settings</h1><p class="meta">Manage your team, connections, and how Ship runs your work.</p></div><a class="button" href="/account">Your account</a></div>
       <SubNav items={SETTINGS_VIEWS} current="skills" />
       <p class="meta">
         A skill is a SKILL.md the operator imports so runs start with the team's own checklists. Versions are immutable

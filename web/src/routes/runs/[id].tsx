@@ -580,7 +580,7 @@ export default function RunDetail({ data: initialData }: { data: RunData }) {
       )}
       {data.denied !== null && (
         <p class="card attn" style="margin:12px 0;color:var(--red)">
-          Not applied — your account may not {data.denied === "steer" ? "steer or cancel runs" : "approve or deny runs"}. An admin can grant it on <a href="/policies">Policies</a>.
+          Not applied — your account may not {data.denied === "steer" ? "steer or cancel runs" : "approve or deny runs"}. An admin can grant it in <a href="/policies">Approval rules</a>.
         </p>
       )}
       {data.meta?.status === "cancelling" && (
@@ -619,6 +619,43 @@ export default function RunDetail({ data: initialData }: { data: RunData }) {
       ) : (
         <>
           <section class="task-status" aria-label="Task status"><b>{taskStatus(data.meta.status, data.meta.eventName, data.hasPr, data.journey).label}</b><p>{taskStatus(data.meta.status, data.meta.eventName, data.hasPr, data.journey).next}</p><a href="#reply">Continue the conversation</a></section>
+          {(data.meta.eventName !== undefined || active) && (
+            <form class="decide" method="post">
+              <input type="hidden" name="reason" value="" />
+              {data.meta.eventName !== undefined && (
+                <input type="hidden" name="eventName" value={data.meta.eventName} />
+              )}
+              {data.meta.eventName === UPGRADE_HOLD_EVENT && (
+                <p class="card attn" style="margin:12px 0;color:var(--yellow)">
+                  Held by the upgrade fence — this run was enqueued by a build whose workflow step sequence differs
+                  from the one now deployed, and replaying it here would break its log. Approving it cannot help: roll
+                  the deployment back (the hold releases itself, then <code>teploy-ship resume {data.runId}</code>) or
+                  cancel the run.
+                </p>
+              )}
+              {data.meta.eventName !== undefined && data.takeover.record !== undefined && (
+                <TakeoverDecisionWarning record={data.takeover.record} />
+              )}
+              {data.meta.eventName !== undefined &&
+                data.meta.eventName !== PLAN_EVENT &&
+                data.meta.eventName !== UPGRADE_HOLD_EVENT &&
+                !isAskEvent(data.meta.eventName) && (
+                <>
+                  <button class="approve" type="submit" name="intent" value="approve">
+                    Approve
+                  </button>
+                  <button class="deny" type="submit" name="intent" value="deny">
+                    Deny
+                  </button>
+                </>
+              )}
+              {active && (
+                <button type="submit" name="intent" value="cancel" style="margin-left:auto">
+                  Cancel run
+                </button>
+              )}
+            </form>
+          )}
           <TaskStatePanel data={data} />
           <details class="disclosure"><summary>Execution details</summary><p class="meta">
             <span class={`status ${data.meta.status}`}>{data.meta.status}</span> · {data.meta.model}
@@ -778,43 +815,6 @@ export default function RunDetail({ data: initialData }: { data: RunData }) {
             </div>
           )}
           <TakeoverCard data={data} />
-          {(data.meta.eventName !== undefined || active) && (
-            <form class="decide" method="post">
-              <input type="hidden" name="reason" value="" />
-              {data.meta.eventName !== undefined && (
-                <input type="hidden" name="eventName" value={data.meta.eventName} />
-              )}
-              {data.meta.eventName === UPGRADE_HOLD_EVENT && (
-                <p class="card attn" style="margin:12px 0;color:var(--yellow)">
-                  Held by the upgrade fence — this run was enqueued by a build whose workflow step sequence differs
-                  from the one now deployed, and replaying it here would break its log. Approving it cannot help: roll
-                  the deployment back (the hold releases itself, then <code>teploy-ship resume {data.runId}</code>) or
-                  cancel the run.
-                </p>
-              )}
-              {data.meta.eventName !== undefined && data.takeover.record !== undefined && (
-                <TakeoverDecisionWarning record={data.takeover.record} />
-              )}
-              {data.meta.eventName !== undefined &&
-                data.meta.eventName !== PLAN_EVENT &&
-                data.meta.eventName !== UPGRADE_HOLD_EVENT &&
-                !isAskEvent(data.meta.eventName) && (
-                <>
-                  <button class="approve" type="submit" name="intent" value="approve">
-                    Approve
-                  </button>
-                  <button class="deny" type="submit" name="intent" value="deny">
-                    Deny
-                  </button>
-                </>
-              )}
-              {active && (
-                <button class="deny" type="submit" name="intent" value="cancel">
-                  Cancel run
-                </button>
-              )}
-            </form>
-          )}
           <nav class="settings-nav" aria-label="Run workspace">{['conversation','review','changes','verification','files','activity'].map(view=><a key={view} href={`/runs/${data.runId}?view=${view}`} class={data.view===view?'active':undefined} aria-current={data.view===view?'page':undefined}>{view.charAt(0).toUpperCase()+view.slice(1)}</a>)}</nav>
           {['conversation','review'].includes(data.view) && <div class={data.view === 'review' ? 'run-review-grid' : ''}><div>
             {data.ancestors.map(h => <details class="disclosure"><summary>Earlier: {h.task.slice(0,100)} · {h.runId}</summary><a href={`/runs/${h.runId}`}>Open run</a><Conversation messages={h.messages}/></details>)}
@@ -1020,8 +1020,8 @@ function RunComposer({data}: {data: RunData}) {
             </p>
           )}
           {(!active || reviewing && data.canSteer) && data.meta.status !== 'cancelling' && data.canLaunch && <form method="post" class="message-composer"><input type="hidden" name="requestId" value={followRequestId}/><input type="hidden" name="eventName" value={followEvent}/>{reviewing && <p class="notice">Request changes on this PR before merging. A change request cancels this run’s pending merge decision and starts a linked run; the PR stays open. Read-only investigations leave the merge decision pending.</p>}<label class="field">Continue this work<textarea name="message" rows={3} required maxLength={12000} placeholder="What should Ship change or investigate next?" /></label>{data.hasPr && <label class="field">Start from<select name="target"><option value="pr">Existing pull request (checked before launch)</option><option value="base">Current default branch</option></select></label>}<label class="field">What should happen next?<select name="journey" value={followJourney} onChange={e => setFollowJourney(e.currentTarget.value)}>{JOURNEYS.map(j => <option value={j.id}>{j.label}</option>)}</select></label>{followJourney === "change" && data.requirePlanReview && <p class="notice">This project requires plan approval before code changes. The native harness is required; merge and deployment permissions remain separate.</p>}{followJourney === "change" && !data.requirePlanReview && (data.planSupported ? <label class="check-field"><input type="checkbox" name="plan" checked={followPlan} onInput={e => setFollowPlan(e.currentTarget.checked)} />Review the plan before code changes</label> : <p class="meta">This project uses an external harness, which starts work immediately. For plan review, select the native harness in Project settings before launching.</p>)}<button type="submit" name="intent" value="follow-up">Start follow-up</button><p class="meta">Keeps the conversation history and starts a fresh sandbox. The existing pull request is checked with the forge before launch. Current project approvals and budgets apply.</p></form>}
-           {data.canFork && <form method="post" class="message-composer"><input type="hidden" name="requestId" value={followRequestId}/><label class="field">Fork this work<textarea name="message" rows={2} required maxLength={12000} placeholder="What should the forked run change or investigate? It inherits this run's recorded history." /></label><label class="field">What should happen next?<select name="journey">{JOURNEYS.map(j => <option value={j.id}>{j.label}</option>)}</select></label><button type="submit" name="intent" value="fork">Fork run</button><p class="meta">Starts a new branch at this run's recorded pushed commit — or the default branch when it pushed nothing — and opens a separate pull request. This run's pull request and branch are untouched. A required plan checkpoint still applies.</p></form>}
-           {data.canStack && <form method="post" class="message-composer"><input type="hidden" name="requestId" value={followRequestId}/><label class="field">Stack a change on this PR<textarea name="message" rows={2} required maxLength={12000} placeholder="What should the stacked change do? Its branch starts where this run's pull request stands." /></label><button type="submit" name="intent" value="stack">Stack change</button><p class="meta">Starts a new branch at this run's recorded pull request head and opens a separate pull request against this run's branch, so reviewers see only the stacked change's own commits. When this run's pull request merges, the stack is rebased onto the default branch. A change run; a required plan checkpoint still applies.</p></form>}
+           {data.canFork && <details class="disclosure"><summary>Fork this work into a separate pull request</summary><form method="post" class="message-composer"><input type="hidden" name="requestId" value={followRequestId}/><label class="field">Fork this work<textarea name="message" rows={2} required maxLength={12000} placeholder="What should the forked run change or investigate? It inherits this run's recorded history." /></label><label class="field">What should happen next?<select name="journey">{JOURNEYS.map(j => <option value={j.id}>{j.label}</option>)}</select></label><button type="submit" name="intent" value="fork">Fork run</button><p class="meta">Starts a new branch at this run's recorded pushed commit — or the default branch when it pushed nothing — and opens a separate pull request. This run's pull request and branch are untouched. A required plan checkpoint still applies.</p></form></details>}
+           {data.canStack && <details class="disclosure"><summary>Stack a change on this pull request</summary><form method="post" class="message-composer"><input type="hidden" name="requestId" value={followRequestId}/><label class="field">Stack a change on this PR<textarea name="message" rows={2} required maxLength={12000} placeholder="What should the stacked change do? Its branch starts where this run's pull request stands." /></label><button type="submit" name="intent" value="stack">Stack change</button><p class="meta">Starts a new branch at this run's recorded pull request head and opens a separate pull request against this run's branch, so reviewers see only the stacked change's own commits. When this run's pull request merges, the stack is rebased onto the default branch. A change run; a required plan checkpoint still applies.</p></form></details>}
 
  </>;
 }
@@ -1567,7 +1567,7 @@ function TaskStatePanel({ data }: { data: RunData }) {
   const cells = [t.execution, t.acceptance, t.delivery];
   return <section class="task-state" aria-labelledby="ts-h">
     <h2 class="section" id="ts-h">Task state</h2>
-    <p class="meta">Three separate facts{t.attempts > 1 ? ` across ${t.attempts} attempts` : ""}. One does not imply another.</p>
+    {t.attempts > 1 && <p class="meta">Across {t.attempts} attempts.</p>}
     <div class="ts-cells">{cells.map((c) => <div class={`ts-cell ${c.tone}`}>
       <h3>{c.heading}</h3>
       <p class="ts-label">{c.label}</p>
@@ -1575,8 +1575,7 @@ function TaskStatePanel({ data }: { data: RunData }) {
     </div>)}</div>
     {t.superseded.length > 0 && <ul aria-label="Superseded approvals">{t.superseded.map((s) => <li>{s}</li>)}</ul>}
     {t.requirements.length > 0 && <><h3 class="ts-sub">Requested</h3><ol>{t.requirements.map((r) => <li>{r.statement.length > 300 ? r.statement.slice(0, 297) + "…" : r.statement}{r.current && t.requirements.length > 1 && <span class="ts-flag"> (current)</span>}</li>)}</ol></>}
-    <h3 class="ts-sub">Not recorded for this task</h3>
-    <ul>{t.notRecorded.map((n) => <li>{n}</li>)}</ul>
+    {t.notRecorded.length > 0 && <details class="disclosure"><summary>Not recorded for this task ({t.notRecorded.length})</summary><ul>{t.notRecorded.map((n) => <li>{n}</li>)}</ul></details>}
     {t.anomalies.length > 0 && <><h3 class="ts-sub">Anomalies in the records</h3><ul role="list">{t.anomalies.map((a) => <li>{a}</li>)}</ul></>}
   </section>;
 }

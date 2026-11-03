@@ -1,18 +1,18 @@
 import type { SubNavItem } from "../lib/subnav.js";
 
-export type SettingsView = "overview" | "models" | "integrations" | "team" | "system";
+export type SettingsView = "models" | "integrations" | "team" | "system";
 export const SETTINGS_VIEWS: SubNavItem[] = [
-  { key: "overview", label: "Overview", href: "/settings" },
+  { key: "team", label: "Team & access", href: "/settings" },
   { key: "models", label: "Models & execution", href: "/settings?view=models" },
   { key: "integrations", label: "Connections", href: "/settings?view=integrations" },
-  { key: "team", label: "Team & access", href: "/settings?view=team" },
   // Keep the role-open governance route; do not move its mutations under /settings.
   { key: "governance", label: "Approval rules", href: "/policies" },
   { key: "skills", label: "Skills", href: "/skills" },
   { key: "system", label: "Advanced", href: "/settings?view=system" },
 ];
 export function settingsView(value: string | null): SettingsView {
-  return ["models", "integrations", "team", "system"].includes(value ?? "") ? value as SettingsView : "overview";
+  // The old Overview tab (`?view=overview` or no view) lands on Team & access.
+  return ["models", "integrations", "system"].includes(value ?? "") ? value as SettingsView : "team";
 }
 export function groupVisible(view: SettingsView, title: string): boolean {
   if (view === "system") return true;

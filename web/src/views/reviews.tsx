@@ -48,8 +48,8 @@ export default function Reviews({ data }: { data: ReviewsData }) {
       <h1 class="page">Runs</h1>
       <SubNav items={RUN_VIEWS} current="reviews" />
       <p class="meta">
-        PR review loops. Each comment on a Ship pull request becomes a follow-up run that addresses the feedback,
-        pushes, and replies — this is the back-and-forth per PR. · store: {data.store}
+        Each comment on a Ship pull request becomes a follow-up run that addresses the feedback, pushes and
+        replies. One row per pull request.
       </p>
 
       {data.threads.length === 0 ? (

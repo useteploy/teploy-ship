@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { SubNav } from "../lib/subnav.js";
+import { RUN_VIEWS } from "../views/run-views.js";
 
 import { actorFromPrincipal } from "../lib/ship.server.js";
 import { defaultModel, shipRuntime } from "../lib/store.server.js";
@@ -259,13 +261,9 @@ function MissionPanel({ mission }: { mission: { view: MissionView } | { error: s
 export default function Coordination({ data }: { data: CoordinationData }) {
   return (
     <>
-      <div class="page-heading">
-        <div>
-          <h1 class="page">Coordination</h1>
-          <p class="meta">One parent intent across two repositories: the API change first, the client change against its merged commit.</p>
-        </div>
-        <a class="button" href="/runs">View all runs →</a>
-      </div>
+      <h1 class="page">Runs</h1>
+      <SubNav items={RUN_VIEWS} current="coordination" />
+      <p class="meta">One change across two repositories: the API change lands first, then the client change is built against it.</p>
       {data.created && (
         <p class="notice good" role="status">
           Coordination started — the API-side run is queued. The client side will start only after it merges.
@@ -279,7 +277,7 @@ export default function Coordination({ data }: { data: CoordinationData }) {
       {data.error && <p class="notice bad" role="alert">{data.error}</p>}
       {data.denied && (
         <p class="notice bad" role="alert">
-          Not applied — creating or retrying a coordination launches work and spends budget, and your account may not approve runs. An admin can grant it on <a href="/policies">Policies</a>.
+          Not applied — creating or retrying a coordination launches work and spends budget, and your account may not approve runs. An admin can grant it in <a href="/policies">Approval rules</a>.
         </p>
       )}
       {data.coordinations.length === 0 && (
