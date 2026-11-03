@@ -142,6 +142,10 @@ reference is `docs/FLAGS.md`, with the rationale in
   that is deleted afterwards, path-like fields are gated by the workspace check,
   streamed text is redacted before truncation, and the agent process tree is
   always killed on `maxSteps` or exit.
+- **undici and vite advisories.** undici moves to 8.12.3 (four high-severity
+  advisories) and the web build's vite to 6.4.5. A zod advisory reachable only
+  through Neutron core's unused content collections is recorded as an audit
+  exception until Ship moves to Neutron core 0.5 (`AUDIT_OPEN.md`).
 - **Dependency advisories.** `source-map-js` (GHSA-68fv-2mgg-jv7q, high) and
   `hono` (GHSA-hxh3-vqpv-xpqv) are overridden to patched versions, which turns
   the CI audit gate green again.

@@ -10,7 +10,7 @@
     "openid-client": "6.8.4",
     "preact": "10.25.4",
     "teploy-ship": "file:..",
-    "vite": "6.4.3"
+    "vite": "6.4.5"
   },
   "overrides": {
     "nanoid@<4": ">=3.3.18",
