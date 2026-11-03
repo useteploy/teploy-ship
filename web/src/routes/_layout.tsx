@@ -3,7 +3,7 @@ import type { ComponentChildren } from "preact";
 import faviconUrl from "../favicon.svg?url";
 import type { MiddlewareFn } from "@neutron-build/core";
 
-import { currentUser, requiredRole, roleAllows, sameOrigin, isMutating } from "../lib/session.server.js";
+import { currentUser, requiredRole, roleAllows, sameOrigin, isMutating, renewedSessionCookie, SESSION_COOKIE } from "../lib/session.server.js";
 import { withSecurityHeaders } from "../lib/response-security.server.js";
 import { teployNav } from "../lib/nav.server.js";
 import type { NavData } from "../lib/nav.server.js";
@@ -151,8 +151,22 @@ const authorizeRequest: MiddlewareFn = async (request, _context, next) => {
       headers: { "content-type": "text/plain; charset=utf-8" },
     });
   }
-  return next();
+  return withSessionRenewal(request, await next());
 };
+
+/**
+ * Slide a browser session's 30-day expiry forward (at most daily) on any
+ * authorized page or API request. A response that already sets the session
+ * cookie (logout, a fresh login) owns it and is left alone.
+ */
+async function withSessionRenewal(request: Request, response: Response): Promise<Response> {
+  if (response.headers.getSetCookie().some((c) => c.startsWith(`${SESSION_COOKIE}=`))) return response;
+  const cookie = await renewedSessionCookie(request);
+  if (cookie === null) return response;
+  const headers = new Headers(response.headers);
+  headers.append("set-cookie", cookie);
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
 
 /**
  * App shell. Styles are inline and minimal on purpose — this is an

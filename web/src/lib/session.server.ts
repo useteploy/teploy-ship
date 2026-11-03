@@ -55,6 +55,12 @@ const SESSION_TTL_S = 60 * 60 * 24 * 30;
  * a server-side session store.
  */
 const SSO_REAUTH_S = 60 * 60 * 12;
+/**
+ * Sessions are idle-sliding: a cookie in use is re-issued with a fresh 30-day
+ * expiry, but at most once per this interval, so an active user is never
+ * logged out and an idle one still expires 30 days after their last visit.
+ */
+const SESSION_RENEW_AFTER_S = 60 * 60 * 24;
 
 export { roleAllows };
 
@@ -91,27 +97,43 @@ export function tokenMatches(presented: string | null): boolean {
 
 // ── Stateless signed sessions ────────────────────────────────────────────
 
-export function signSession(p: Principal, kind: SessionKind = "pw", now = Date.now()): string {
-  const exp = Math.floor(now / 1000) + SESSION_TTL_S;
+/** `rv` carries an SSO session's original re-auth deadline through a renewal;
+ * omitted, a fresh one is set (login). */
+export function signSession(p: Principal, kind: SessionKind = "pw", now = Date.now(), rv?: number): string {
+  const iat = Math.floor(now / 1000);
+  const exp = iat + SESSION_TTL_S;
   const payload = Buffer.from(
     JSON.stringify({
       u: p.user,
       ...(p.display !== undefined && p.display !== p.user ? { d: p.display } : {}),
       r: p.role,
       k: kind,
+      iat,
       exp,
       // Only the master-credential identity is pinned to the token; pinning
       // account sessions would make rotation log every user out for nothing.
       ...(p.user === "token" ? { cv: credentialVersion() } : {}),
       // When the IdP's assertion must be refreshed (SSO only).
-      ...(kind === "sso" ? { rv: Math.floor(now / 1000) + SSO_REAUTH_S } : {}),
+      ...(kind === "sso" ? { rv: rv ?? iat + SSO_REAUTH_S } : {}),
     }),
   ).toString("base64url");
   const sig = createHmac("sha256", sessionSecret()).update(payload).digest("base64url");
   return `${payload}.${sig}`;
 }
 
+/** A verified session plus the claims renewal needs. */
+interface VerifiedSession extends Session {
+  iat?: number;
+  rv?: number;
+}
+
 export function verifySession(token: string | null, now = Date.now()): Session | null {
+  const v = verifySessionClaims(token, now);
+  if (v === null) return null;
+  return { user: v.user, ...(v.display !== undefined ? { display: v.display } : {}), role: v.role, kind: v.kind };
+}
+
+function verifySessionClaims(token: string | null, now: number): VerifiedSession | null {
   if (token === null || token === "") return null;
   const dot = token.indexOf(".");
   if (dot <= 0) return null;
@@ -134,6 +156,7 @@ export function verifySession(token: string | null, now = Date.now()): Session |
       cv?: string;
       rv?: number;
       d?: string;
+      iat?: number;
     };
     const seconds = Math.floor(now / 1000);
     if (typeof claims.exp !== "number" || claims.exp < seconds) return null;
@@ -149,6 +172,8 @@ export function verifySession(token: string | null, now = Date.now()): Session |
       ...(typeof claims.d === "string" ? { display: claims.d } : {}),
       role: normalizeRole(claims.r),
       kind,
+      ...(typeof claims.iat === "number" ? { iat: claims.iat } : {}),
+      ...(kind === "sso" ? { rv: claims.rv } : {}),
     };
   } catch {
     return null;
@@ -270,9 +295,9 @@ export function requestIsSecure(request: Request): boolean {
   return publicOrigin(request).startsWith("https://");
 }
 
-export function sessionSetCookie(p: Principal, secure: boolean, kind: SessionKind = "pw"): string {
+export function sessionSetCookie(p: Principal, secure: boolean, kind: SessionKind = "pw", now = Date.now(), rv?: number): string {
   const parts = [
-    `${SESSION_COOKIE}=${signSession(p, kind)}`,
+    `${SESSION_COOKIE}=${signSession(p, kind, now, rv)}`,
     "Path=/",
     "HttpOnly",
     "SameSite=Lax",
@@ -280,6 +305,36 @@ export function sessionSetCookie(p: Principal, secure: boolean, kind: SessionKin
   ];
   if (secure) parts.push("Secure");
   return parts.join("; ");
+}
+
+/**
+ * The Set-Cookie that slides a browser session forward, or null when none is due.
+ *
+ * Due when the cookie was issued more than SESSION_RENEW_AFTER_S ago (a cookie
+ * without `iat` predates sliding and counts as old). Every revocation rule
+ * still applies, because the cookie must first pass verifySession (signature,
+ * expiry, the master-credential `cv` pin, the SSO `rv` window) and a password
+ * session must still have its account — whose CURRENT role is what gets
+ * signed. An SSO session keeps its original `rv`: sliding the cookie never
+ * extends how long an IdP assertion is trusted. Bearer callers are not
+ * browsers and get nothing.
+ */
+export async function renewedSessionCookie(request: Request, now = Date.now()): Promise<string | null> {
+  const auth = request.headers.get("authorization");
+  if (auth?.startsWith("Bearer ") === true && tokenMatches(auth.slice(7))) return null;
+  const s = verifySessionClaims(readCookie(request, SESSION_COOKIE), now);
+  if (s === null) return null;
+  if (s.iat !== undefined && Math.floor(now / 1000) - s.iat < SESSION_RENEW_AFTER_S) return null;
+  let principal: Principal;
+  if (s.user === "token" || s.kind === "sso") {
+    principal = { user: s.user, ...(s.display !== undefined ? { display: s.display } : {}), role: s.role };
+  } else {
+    const runtime = await shipRuntime();
+    const stored = await runtime.users.get(s.user);
+    if (stored === null) return null;
+    principal = { user: stored.username, role: stored.role };
+  }
+  return sessionSetCookie(principal, requestIsSecure(request), s.kind, now, s.rv);
 }
 
 /**
