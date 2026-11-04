@@ -40,7 +40,10 @@ export interface IncidentIntakeDeps {
   runtime?: {
     config: IncidentConfig;
     projects: { list(): Promise<readonly IncidentProjectView[]> };
-    deliveries: { claim(source: string, deliveryId: string): Promise<boolean> };
+    deliveries: {
+      claim(source: string, deliveryId: string): Promise<boolean>;
+      release?(source: string, deliveryId: string): Promise<void>;
+    };
   };
 }
 
@@ -93,14 +96,17 @@ export async function handleIncidentIntake(request: Request, deps: IncidentIntak
  * /api/incidents/intake/dash, rather than a header-family dispatch on the
  * Observe URL: the two senders hold different secrets, and one URL per
  * sender keeps "which secret verifies this?" a property of the path, never
- * of headers the caller chose. The layout's /api/incidents/intake prefix
- * exemption already covers it.
+ * of headers the caller chose. The layout exempts both exact paths from the
+ * bearer gate.
  *
  * Auth: X-Teploy-Signature (sha256=hex HMAC-SHA256(secret, "<ts>.<body>"))
  * + X-Teploy-Timestamp within 300s, against SHIP_DASH_INTAKE_SECRET — a
  * separate secret from the Observe intake's. Unset = 503, nothing written.
- * Dedupe: X-Teploy-Delivery (Dash's delivery_id, stable across retries of
- * one delivery), falling back to the body's delivery_id, then the signature.
+ * Dedupe: the body's delivery_id (inside the signed message, stable across
+ * retries of one delivery), falling back to the X-Teploy-Delivery header
+ * (same value, but not signed), then the signature. The claim is given back
+ * if processing throws, so Dash's retry is processed rather than answered
+ * "duplicate" — losing a recovery that way would leave an incident open.
  * Below that, intakeDashEvent groups on incident_id (fallback rule_id /
  * monitor_id). kind "test" is acknowledged 200 with nothing recorded.
  */
@@ -124,20 +130,27 @@ export async function handleDashIncidentIntake(request: Request, deps: IncidentI
 
   const runtime = deps.runtime ?? (await shipRuntime());
   const bodyDelivery = typeof payload.delivery_id === "string" && payload.delivery_id.trim() !== "" ? payload.delivery_id.trim() : null;
-  const deliveryId = firstHeader(request, "x-teploy-delivery") ?? bodyDelivery ?? firstHeader(request, "x-teploy-signature");
+  const deliveryId = bodyDelivery ?? firstHeader(request, "x-teploy-delivery") ?? firstHeader(request, "x-teploy-signature");
   // Keyed with the kind: a delivery id is unique per delivery group, and
   // scoping it by kind keeps an opened and its recovery apart even from a
   // sender that reuses ids across kinds.
   const kind = typeof payload.kind === "string" && payload.kind.trim() !== "" ? payload.kind.trim() : String(payload.status ?? "");
-  if (deliveryId !== null && !(await runtime.deliveries.claim("dash-incident-intake", `${deliveryId}:${kind}`))) {
+  const claimKey = deliveryId !== null ? `${deliveryId}:${kind}` : null;
+  if (claimKey !== null && !(await runtime.deliveries.claim("dash-incident-intake", claimKey))) {
     return json(200, { ok: true, skipped: "duplicate delivery" });
   }
 
-  const result = await intakeDashEvent(
-    { config: runtime.config, projects: runtime.projects },
-    payload,
-    { rawEvent: safeForDisplay(body, 8_192) },
-  );
+  let result: Awaited<ReturnType<typeof intakeDashEvent>>;
+  try {
+    result = await intakeDashEvent(
+      { config: runtime.config, projects: runtime.projects },
+      payload,
+      { rawEvent: safeForDisplay(body, 8_192) },
+    );
+  } catch (error) {
+    if (claimKey !== null) await runtime.deliveries.release?.("dash-incident-intake", claimKey).catch(() => undefined);
+    throw error;
+  }
   if (result.kind === "skipped") return json(200, { ok: true, skipped: result.reason });
   return json(result.kind === "created" ? 201 : 200, {
     ok: true,

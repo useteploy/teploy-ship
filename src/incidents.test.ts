@@ -1616,3 +1616,73 @@ test("AUTO-DIAGNOSE: off without project opt-in; after N minutes it starts ONE r
   assert.equal(enqueued.length, 2);
   assert.ok(enqueued.every((o) => o.mode === "scan"));
 });
+
+test("RECOVERY BEFORE OPEN: a recovery with no record marks the episode settled; the late open and repeats are skipped", async () => {
+  const config = memoryConfig();
+  const deps = { config, projects: projects(DASH_PROJECTS) };
+  const early = await intakeDashEvent(deps, { ...DASH_OPENED, incident_id: "inc_early", kind: "incident_recovered", status: "up" }, { now, newId });
+  assert.equal(early.kind, "skipped");
+  assert.match(early.kind === "skipped" ? early.reason : "", /before its open/);
+  const lateOpen = await intakeDashEvent(deps, { ...DASH_OPENED, incident_id: "inc_early" }, { now, newId });
+  assert.equal(lateOpen.kind, "skipped");
+  const lateRepeat = await intakeDashEvent(deps, { ...DASH_OPENED, incident_id: "inc_early", kind: "incident_repeat" }, { now, newId });
+  assert.equal(lateRepeat.kind, "skipped");
+  assert.equal((await listIncidents(config)).length, 0, "no incident that would never close");
+  // Other episodes are unaffected.
+  assert.equal((await intakeDashEvent(deps, { ...DASH_OPENED, incident_id: "inc_other" }, { now, newId })).kind, "created");
+});
+
+test("dash intake: a v2 recovery closes an incident a v1 down opened on the same monitor", async () => {
+  const config = memoryConfig();
+  const deps = { config, projects: projects(DASH_PROJECTS) };
+  const v1 = await intakeDashEvent(deps, { monitor_id: "fleet-8f1c", monitor_name: "app.akiroo.com", status: "down", source: "monitor" }, { now, newId });
+  assert.equal(v1.kind, "created");
+  const up = await intakeDashEvent(deps, { ...DASH_OPENED, kind: "incident_recovered", status: "up" }, { now, newId });
+  assert.equal(up.kind, "recovered");
+  assert.equal(up.kind === "recovered" && up.record.id, v1.kind === "created" ? v1.record.id : "");
+});
+
+test("dash intake: an audit finding with no app is not an incident", async () => {
+  const config = memoryConfig();
+  const deps = { config, projects: projects(DASH_PROJECTS) };
+  const audit = await intakeDashEvent(deps, { ...DASH_OPENED, source: "audit", app: "", service: "", incident_id: "inc_audit" }, { now, newId });
+  assert.equal(audit.kind, "skipped");
+  assert.equal((await listIncidents(config)).length, 0);
+  // With an app it is attributable like any other source.
+  assert.equal((await intakeDashEvent(deps, { ...DASH_OPENED, source: "audit", incident_id: "inc_audit2" }, { now, newId })).kind, "created");
+});
+
+test("diagnose re-reads before saving: a Dash recovery pushed during the enqueue is kept and applied once the run settles", async () => {
+  const config = memoryConfig();
+  const deps = { config, projects: projects(DASH_PROJECTS) };
+  const opened = await intakeDashEvent(deps, DASH_OPENED, { now, newId });
+  const id = opened.kind === "created" ? opened.record.id : "";
+  let runId = "";
+  await diagnoseIncident(
+    {
+      config,
+      model: "m",
+      newRunId,
+      now,
+      enqueue: async (o) => {
+        runId = o.runId;
+        // Dash's recovery lands while the enqueue is in flight.
+        const r = await intakeDashEvent(deps, { ...DASH_OPENED, kind: "incident_recovered", status: "up", message: "back" }, { now, newId });
+        assert.equal(r.kind, "recovered");
+      },
+    },
+    id,
+  );
+  const during = (await listIncidents(config))[0]!;
+  assert.equal(during.status, "diagnosing");
+  assert.equal(during.dash?.resolution?.message, "back", "the recovery was not overwritten by the stale copy");
+  const logs: Record<string, IncidentEventLog[]> = {
+    [runId]: [
+      { type: "run-started", data: { input: { mode: "scan" } } },
+      { type: "step-completed", name: "scan-findings", data: { result: { found: true, findings: [] } } },
+      { type: "run-completed", data: { output: { summary: "Confidence: low" } } },
+    ],
+  };
+  await sweepIncidents({ config, store: { load: async (r) => logs[r] ?? [] } });
+  assert.equal((await listIncidents(config))[0]!.status, "recovered");
+});

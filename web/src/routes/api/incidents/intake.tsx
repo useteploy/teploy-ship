@@ -10,9 +10,9 @@ export const config = { mode: "app" };
  * facts (payload shape, signature, delivery id).
  *
  * This path authenticates by HMAC inside the route, exactly like /hooks/*;
- * the layout's bearer gate exempts the /api/incidents/intake prefix
- * (_layout.tsx). Teploy Dash deliveries have their own route under the same
- * prefix, /api/incidents/intake/dash, with their own secret.
+ * the layout's bearer gate exempts this exact path (_layout.tsx). Teploy Dash
+ * deliveries have their own route, /api/incidents/intake/dash, with their
+ * own secret and their own exact exemption.
  */
 export async function action({ request }: { request: Request }): Promise<Response> {
   return handleIncidentIntake(request);

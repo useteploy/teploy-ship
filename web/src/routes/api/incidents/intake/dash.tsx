@@ -8,7 +8,7 @@ export const config = { mode: "app" };
  * its incident_id owns, or closes it on a pushed recovery. Auth (X-Teploy-*
  * HMAC against SHIP_DASH_INTAKE_SECRET), dedupe and the outcomes live in
  * lib/incident-intake.server.ts (handleDashIncidentIntake). The bearer-gate
- * exemption is the /api/incidents/intake prefix in _layout.tsx.
+ * exemption is an exact path match in _layout.tsx.
  */
 export async function action({ request }: { request: Request }): Promise<Response> {
   return handleDashIncidentIntake(request);

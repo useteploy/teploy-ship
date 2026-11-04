@@ -183,3 +183,61 @@ test("Dash test-send: kind test is a 200 ack with no record; retired is resolved
 
   assert.equal((await handleDashIncidentIntake(signed("{nope", { "x-teploy-delivery": "m1" }), { runtime, secret: SECRET })).status, 400);
 });
+
+test("Dash recovery before its open, over the wire: the late open (Dash's retry) is skipped, no incident left open", async () => {
+  const { runtime, values } = memoryRuntime();
+  const up = await handleDashIncidentIntake(signed(body({ kind: "incident_recovered", status: "up", delivery_id: "up-1" })), { runtime, secret: SECRET });
+  assert.equal(up.status, 200);
+  const late = await handleDashIncidentIntake(signed(body({ delivery_id: "open-1" })), { runtime, secret: SECRET });
+  assert.equal(late.status, 200);
+  assert.match(await late.text(), /already recovered before its open/);
+  assert.equal([...values.keys()].filter((k) => k.startsWith("SHIP_INCIDENT_inc")).length, 0);
+});
+
+test("Dash dedupe keys on the SIGNED body delivery_id over the unsigned header; a failed write releases the claim", async () => {
+  const { runtime, claimed } = memoryRuntime();
+  await handleDashIncidentIntake(signed(body({ delivery_id: "signed-id" }), { "x-teploy-delivery": "header-id" }), { runtime, secret: SECRET });
+  assert.deepEqual(claimed, ["signed-id:incident_opened"]);
+
+  // Processing throws after the claim: the claim is given back, so Dash's retry is processed.
+  const failing = memoryRuntime();
+  const released: string[] = [];
+  let fail = true;
+  const config = failing.runtime.config;
+  const flaky = {
+    ...failing.runtime,
+    config: {
+      get: config.get.bind(config),
+      async set(key: string, value: string) {
+        if (fail) throw new Error("store unavailable");
+        await config.set(key, value);
+      },
+    },
+    deliveries: {
+      ...failing.runtime.deliveries,
+      async release(_source: string, id: string) {
+        released.push(id);
+        failing.claimed.splice(failing.claimed.indexOf(id), 1);
+      },
+    },
+  };
+  await assert.rejects(handleDashIncidentIntake(signed(body({ delivery_id: "retry-me" })), { runtime: flaky, secret: SECRET }));
+  assert.deepEqual(released, ["retry-me:incident_opened"]);
+  fail = false;
+  const retry = await handleDashIncidentIntake(signed(body({ delivery_id: "retry-me" })), { runtime: flaky, secret: SECRET });
+  assert.equal(retry.status, 201, "the retry is processed, not answered duplicate");
+});
+
+test("a non-ASCII signature header is a 401, not a 500", async () => {
+  const { runtime } = memoryRuntime();
+  const ts = String(Math.floor(Date.now() / 1000));
+  const raw = body();
+  // Same character count as a real signature, more bytes.
+  const sig = `sha256=${"é".repeat(64)}`;
+  const req = new Request("https://ship.test/api/incidents/intake/dash", {
+    method: "POST",
+    body: raw,
+    headers: { "x-teploy-timestamp": ts, "x-teploy-signature": sig },
+  });
+  assert.equal((await handleDashIncidentIntake(req, { runtime, secret: SECRET })).status, 401);
+});

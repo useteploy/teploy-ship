@@ -41,3 +41,28 @@ test("the Nucleus log claims through an atomic setNX with a TTL", async () => {
   assert.equal(calls[0]!.key, "ship:delivery:github:d1");
   assert.ok((calls[0]!.ttl ?? 0) > 0, "entries must expire so the ledger cannot grow forever");
 });
+
+test("FileDeliveryLog: a released claim can be claimed again; an unreleased one cannot", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ship-deliveries-release-"));
+  const log = new FileDeliveryLog(dir);
+  assert.equal(await log.claim("s", "a"), true);
+  assert.equal(await log.claim("s", "a"), false);
+  await log.release("s", "a");
+  assert.equal(await log.claim("s", "a"), true);
+  assert.equal(await log.claim("s", "a"), false);
+  await rm(dir, { recursive: true, force: true });
+});
+
+test("the Nucleus log releases with a compare-and-delete on its own value", async () => {
+  const seen = new Map<string, string>();
+  const db = {
+    kv: {
+      setNX: async (key: string, value: string): Promise<boolean> => (seen.has(key) ? false : (seen.set(key, value), true)),
+      cdel: async (key: string, expected: string): Promise<boolean> => seen.get(key) === expected && seen.delete(key),
+    },
+  } as unknown as NucleusPgwire;
+  const log = new NucleusDeliveryLog(db);
+  assert.equal(await log.claim("dash", "d1"), true);
+  await log.release("dash", "d1");
+  assert.equal(await log.claim("dash", "d1"), true);
+});

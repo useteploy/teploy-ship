@@ -227,7 +227,11 @@ async function verifyTimestampedSignature(
   // secret, so that delivery must be refused rather than treated as "no
   // signature to check".
   const expected = `sha256=${createHmac("sha256", secret).update(`${timestamp}.${body}`).digest("hex")}`;
-  if (signature.length !== expected.length || !timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {
+  // Byte lengths, not string lengths: a non-ASCII header has more bytes than
+  // characters, and timingSafeEqual throws (a 500) on unequal buffers.
+  const given = Buffer.from(signature);
+  const wanted = Buffer.from(expected);
+  if (given.length !== wanted.length || !timingSafeEqual(given, wanted)) {
     return json(401, { title: `bad ${scheme.label} signature` });
   }
   // Checked AFTER the MAC, so the value being range-checked is one the sender

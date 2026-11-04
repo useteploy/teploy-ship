@@ -61,9 +61,9 @@ import type {
  *    leg is inert). Observe-sourced incidents only; a Dash-sourced incident
  *    is closed by Dash's own pushed recovery (intakeDashEvent below).
  * 3. The intake routes authenticate by HMAC inside the route, like /hooks/*;
- *    the layout's bearer-gate exemption for the /api/incidents/intake prefix
- *    LANDED (web/src/routes/_layout.tsx), which covers both
- *    /api/incidents/intake (Observe) and /api/incidents/intake/dash (Dash).
+ *    the layout's bearer-gate exemption LANDED (web/src/routes/_layout.tsx),
+ *    as two exact paths: /api/incidents/intake (Observe) and
+ *    /api/incidents/intake/dash (Dash).
  * 4. The web routes import this module DIRECTLY (dist/incidents.js). That is
  *    safe because this file stays browser-loadable by construction — its only
  *    value imports are pure helpers with no dependency of their own
@@ -1070,6 +1070,29 @@ const DASH_IN_FLIGHT: readonly IncidentStatus[] = ["diagnosing", "remediating"];
 /** Statuses where a Dash record is settled — no firing event moves it except the v1 reopen below. */
 const DASH_SETTLED: readonly IncidentStatus[] = ["recovered", "resolved", "closed"];
 
+/** Config key holding the Dash episodes that recovered before Ship saw them open (bounded, newest first). */
+export const DASH_SETTLED_EPISODES_KEY = "SHIP_INCIDENT_DASH_SETTLED";
+/** How many settled-before-open episodes are remembered; Dash's retry backoff spans minutes, so this is generous. */
+const DASH_SETTLED_EPISODES_MAX = 500;
+
+async function readDashSettled(config: IncidentConfig): Promise<string[]> {
+  try {
+    const parsed = JSON.parse((await config.get(DASH_SETTLED_EPISODES_KEY)) ?? "[]") as unknown;
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+async function dashEpisodeSettled(config: IncidentConfig, incidentId: string): Promise<boolean> {
+  return (await readDashSettled(config)).includes(incidentId);
+}
+
+async function markDashEpisodeSettled(config: IncidentConfig, incidentId: string): Promise<void> {
+  const ids = (await readDashSettled(config)).filter((id) => id !== incidentId);
+  await config.set(DASH_SETTLED_EPISODES_KEY, JSON.stringify([incidentId, ...ids].slice(0, DASH_SETTLED_EPISODES_MAX)), "incidents");
+}
+
 /** Apply a recorded Dash resolution to a record whose status is free to move. */
 function applyDashResolution(record: IncidentRecord): IncidentRecord {
   const resolution = record.dash?.resolution;
@@ -1115,6 +1138,12 @@ export async function intakeDashEvent(
   if (fingerprint === null) {
     return { kind: "skipped", reason: "the Dash event carries no incident_id, rule_id or monitor_id — nothing to group on" };
   }
+  // An audit finding with no app (channel health, Dash's own configuration)
+  // is about Dash, not about code in any repo: nothing to attribute or
+  // diagnose, so it never becomes an incident here.
+  if (wireString(payload.source) === "audit" && wireString(payload.app) === "") {
+    return { kind: "skipped", reason: "Dash audit finding with no app — not an incident about a repository" };
+  }
   const episodeKeyed = wireString(payload.incident_id) !== "";
   const service = dashServiceOf(payload);
   const now = new Date(options.now?.() ?? Date.now()).toISOString();
@@ -1125,10 +1154,28 @@ export async function intakeDashEvent(
   const existing = (await listIncidents(deps.config)).filter(
     (i) => i.source === "dash" && i.dash?.fingerprint === fingerprint,
   );
-  const open = existing.find((i) => !DASH_SETTLED.includes(i.status));
+  let open = existing.find((i) => !DASH_SETTLED.includes(i.status));
 
   if (event === "recovered") {
+    if (open === undefined && episodeKeyed) {
+      // A v2 recovery also closes an incident a v1 "down" opened for the same
+      // rule, which is keyed on the monitor rather than the episode.
+      const ruleKeys = [wireString(payload.rule_id), wireString(payload.monitor_id)].filter((k) => k !== "");
+      open = (await listIncidents(deps.config)).find(
+        (i) => i.source === "dash" && i.dash !== undefined && !i.dash.episodeKeyed &&
+          ruleKeys.includes(i.dash.fingerprint) && !DASH_SETTLED.includes(i.status),
+      );
+    }
     if (open === undefined || open.dash === undefined) {
+      // RECOVERY BEFORE OPEN: Dash's outbox retries a failed open with
+      // backoff while a later recovery goes straight out, so the recovery can
+      // land first. Remember the episode as settled, so the late open (and
+      // any repeat) is skipped instead of opening an incident that never
+      // closes — and that auto-diagnose would scan after the outage ended.
+      if (episodeKeyed && existing.length === 0) {
+        await markDashEpisodeSettled(deps.config, fingerprint);
+        return { kind: "skipped", reason: "Dash recovery arrived before its open; the episode is recorded as settled" };
+      }
       return { kind: "skipped", reason: "Dash recovery for an incident Ship has no open record of" };
     }
     const reason = wireString(payload.reason);
@@ -1164,6 +1211,9 @@ export async function intakeDashEvent(
     };
     await saveRecord(deps.config, next);
     return { kind: "refired", record: next };
+  }
+  if (episodeKeyed && (await dashEpisodeSettled(deps.config, fingerprint))) {
+    return { kind: "skipped", reason: `Dash incident ${fingerprint} already recovered before its open arrived; a late delivery does not open it` };
   }
   if (episodeKeyed && existing.length > 0) {
     return { kind: "skipped", reason: `Dash incident ${fingerprint} already settled here (${existing[0]!.status}); a late or retried delivery does not reopen it` };
@@ -1519,8 +1569,14 @@ export async function diagnoseIncident(deps: DiagnoseDeps, incidentId: string): 
     trust: "external",
     ...(deps.actor !== undefined ? { actor: deps.actor } : {}),
   });
+  // Re-read before saving: gathering evidence and enqueueing take time, and
+  // a Dash recovery pushed meanwhile lives in the stored `dash` block. Saving
+  // the stale copy would drop it; keeping it lets the sweep apply it once
+  // this run settles (applyDashResolution).
+  const latest = await loadIncident(deps.config, incidentId);
   const next: IncidentRecord = {
     ...staged,
+    ...(latest?.dash !== undefined ? { dash: latest.dash } : {}),
     status: "diagnosing",
     diagnosisRunId: runId,
   };
@@ -2308,16 +2364,21 @@ export async function sweepIncidentAutoDiagnose(
       limited += 1;
       continue;
     }
+    const at = new Date(nowMs).toISOString();
     try {
+      // The ledger entry is written BEFORE the enqueue: a crash between the
+      // two then costs one slot of the cap, never an uncounted scan.
+      ledger.push(at);
+      await deps.config.set(INCIDENT_AUTO_DIAGNOSE_LEDGER_KEY, JSON.stringify(ledger), "incidents");
       const { projects: _p, ...diagnoseDeps } = deps;
-      const record = await diagnoseIncident(
+      await diagnoseIncident(
         { ...diagnoseDeps, actor: deps.actor ?? { id: "ship:auto-diagnose", display: "auto-diagnose", kind: "intake" } },
         incident.id,
       );
-      const at = new Date(nowMs).toISOString();
-      await saveRecord(deps.config, { ...record, autoDiagnosedAt: at });
-      ledger.push(at);
-      await deps.config.set(INCIDENT_AUTO_DIAGNOSE_LEDGER_KEY, JSON.stringify(ledger), "incidents");
+      // Stamp the freshest copy, so nothing saved since diagnoseIncident's
+      // own save is overwritten.
+      const record = await loadIncident(deps.config, incident.id);
+      if (record !== null) await saveRecord(deps.config, { ...record, autoDiagnosedAt: at });
       started.push(incident.id);
     } catch (error) {
       errors.push({ id: incident.id, error: error instanceof Error ? error.message : String(error) });

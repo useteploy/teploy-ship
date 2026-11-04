@@ -24,6 +24,12 @@ import { stateDir } from "./run-store.js";
 export interface DeliveryLog {
   /** Record this delivery. True iff THIS caller claimed it (i.e. it is new). */
   claim(source: string, deliveryId: string): Promise<boolean>;
+  /**
+   * Give a claim back: the receiver claimed the delivery, then failed to
+   * process it, and the sender's retry must be processed rather than answered
+   * "duplicate". Best-effort; optional so structural test doubles keep working.
+   */
+  release?(source: string, deliveryId: string): Promise<void>;
 }
 
 /** How long a delivery id is remembered. Far longer than any forge retries. */
@@ -55,7 +61,9 @@ export class FileDeliveryLog implements DeliveryLog {
   }
 
   async #seen(key: string, days: string[]): Promise<boolean> {
-    for (const day of days) {
+    let state = false;
+    // Oldest first, so a later day's release (or re-claim) wins.
+    for (const day of [...days].reverse()) {
       let raw: string;
       try {
         raw = await readFile(this.#path(day), "utf8");
@@ -67,9 +75,14 @@ export class FileDeliveryLog implements DeliveryLog {
         if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
         raw = "";
       }
-      if (raw.split("\n").includes(key)) return true;
+      // The LAST mention of the key decides: a release appends "-key", so a
+      // claim followed by a release reads as unseen.
+      for (const line of raw.split("\n")) {
+        if (line === key) state = true;
+        else if (line === `-${key}`) state = false;
+      }
     }
-    return false;
+    return state;
   }
 
   async claim(source: string, deliveryId: string): Promise<boolean> {
@@ -92,6 +105,20 @@ export class FileDeliveryLog implements DeliveryLog {
       settle();
     }
   }
+
+  async release(source: string, deliveryId: string): Promise<void> {
+    const key = `${source}:${deliveryId}`;
+    const previous = this.#claimLock;
+    let settle: () => void = () => {};
+    this.#claimLock = new Promise<void>((resolve) => (settle = resolve));
+    await previous;
+    try {
+      await mkdir(this.#dir, { recursive: true });
+      await appendFile(this.#path(new Date().toISOString().slice(0, 10)), `-${key}\n`);
+    } finally {
+      settle();
+    }
+  }
 }
 
 /**
@@ -108,5 +135,9 @@ export class NucleusDeliveryLog implements DeliveryLog {
 
   async claim(source: string, deliveryId: string): Promise<boolean> {
     return this.#db.kv.setNX(`ship:delivery:${source}:${deliveryId}`, "1", { ttl: DELIVERY_TTL_S });
+  }
+
+  async release(source: string, deliveryId: string): Promise<void> {
+    await this.#db.kv.cdel(`ship:delivery:${source}:${deliveryId}`, "1");
   }
 }
