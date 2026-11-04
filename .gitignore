@@ -25,3 +25,6 @@ swebench/*.durable-events/
 ship-secrets.env
 *.secrets.env
 teploy.install.yml
+
+# neutron-ts 0.5 build scratch (generated runtime entry)
+web/.neutron/

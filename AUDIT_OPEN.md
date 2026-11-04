@@ -1394,3 +1394,27 @@ Open, deliberately not in the slice:
   sandbox daemon.
 - No live soak yet. The flag earns its own one-run flip (web + worker, both
   enqueue) on the 2026-10-16 pattern.
+
+## 2026-11-03 — web on @neutron-build/core + cli 0.5.2; zod and hono advisories CLOSED
+
+Web moved from core/CLI 0.3.2 to 0.5.2 (create 0.1.11, vite 8.3.4, which CLI
+0.5.2 requires). zod now resolves 4.6.7, so the **GHSA-mrhx-c7xc-m3w5
+exception is removed** from `deploy/audit-exceptions.json` and
+`web/package.json` `pnpm.auditConfig.ignoreGhsas`. **@hono/node-server
+GHSA-rmxm-3fg6-px4f** has no patched 1.x (affected `>=1.19.10 <2.1.3`; 1.19.17
+and 1.19.18 are inside it), so the override is forced to `>=2.1.3` (resolves
+2.1.6) over core's declared `^1.19.14`; core's server boots and serves on it
+(local preview, image smoke). No web/src API change was needed (typecheck,
+tests and build clean). Two framework-shape changes:
+
+- `web/vite.config.ts` no longer registers `neutronPlugin()`; CLI 0.5 injects
+  its own configured copy and warns that a second one is concatenated.
+- neutron-ts 0.5 emits a server bundle (`dist/server/start` +
+  `dist/.neutron-server-bundle.json`) whose externals are symlinks into the
+  builder's pnpm store. The runtime image installs with npm, so the links
+  dangle and preview died at boot (`ERR_MODULE_NOT_FOUND
+  @neutron-external/marked-...`) — caught only by building the image. The
+  Dockerfile now deletes the bundle in the runtime stage, so preview SSRs from
+  web/src through Vite exactly as on 0.3.2. Using the bundle (faster boot,
+  lower RSS) needs the runtime stage to run the same node_modules layout as
+  the build; deferred.
