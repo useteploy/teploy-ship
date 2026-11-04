@@ -4,7 +4,7 @@ import { sweepSchedulesForWorker, sweepScheduleDigests } from "./workflow-schedu
 import { serveWorkspaceRequests } from "./workspace-requests.js";
 import { clearLiveView, liveViewEnabled, serveLiveDiffs } from "./live-view.js";
 import { loadTakeover } from "./takeover.js";
-import { sweepIncidents, sweepIncidentRecovery, type IncidentDeliveryFact, type IncidentEvidenceReaders, type IncidentRecoveryReader } from "./incidents.js";
+import { sweepIncidents, sweepIncidentRecovery, sweepIncidentAutoDiagnose, type IncidentDeliveryFact, type IncidentEvidenceReaders, type IncidentRecoveryReader } from "./incidents.js";
 import { launchNext, listCoordinations } from "./coordination.js";
 import { policyFromEnv as workspacePolicyFromEnv } from "./repo-policy.js";
 import { NondeterminismError, completeSleep, executeRunExclusive } from "@neutron-build/workflow";
@@ -230,6 +230,20 @@ function incidentRecoveryReader(env: NodeJS.ProcessEnv = process.env): IncidentR
  */
 export function incidentEvidenceEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return (env.SHIP_INCIDENT_EVIDENCE ?? "").trim().toLowerCase() === "on";
+}
+
+/**
+ * The opt-in read-only auto-diagnosis leg's worker gate. Only the exact value
+ * `on` enables it; each project must ALSO opt in (incidentAutoDiagnoseMinutes).
+ */
+export function incidentAutoDiagnoseEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return (env.SHIP_INCIDENT_AUTO_DIAGNOSE ?? "").trim().toLowerCase() === "on";
+}
+
+/** Deployment-wide cap on auto-started diagnoses per rolling hour (default 3). */
+export function incidentAutoDiagnoseMaxPerHour(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number(env.SHIP_INCIDENT_AUTO_DIAGNOSE_MAX_PER_HOUR);
+  return Number.isInteger(n) && n > 0 ? n : 3;
 }
 
 /** The delivery-store view incidentEvidenceDeps reads: delivery.ts's DeliveryStore, structural. */
@@ -2116,6 +2130,35 @@ export function startWorker(options: WorkerOptions): {
         if (r.recovered > 0) log(`[worker] incidents: ${r.recovered} recovered`);
         for (const e of r.errors) log(`[worker] incidents recovery: ${e.id}: ${e.error}`);
       })().catch(e => log(`[worker] incident recovery: ${e instanceof Error ? e.message : String(e)}`)))
+      // Opt-in read-only auto-diagnosis: an automatically-sourced incident
+      // (Dash or Observe) still attributed-and-undiagnosed past its
+      // project's incidentAutoDiagnoseMinutes gets the SAME scan-only
+      // diagnosis the page's button starts. Off unless
+      // SHIP_INCIDENT_AUTO_DIAGNOSE=on AND the project opts in; capped per
+      // rolling hour; remediation is never reached from here (Decision 13).
+      .then(() => (async () => {
+        if (!incidentAutoDiagnoseEnabled()) return;
+        const evidence = incidentEvidenceDeps(options.runtime);
+        const r = await sweepIncidentAutoDiagnose(
+          {
+            config: options.runtime.config,
+            projects: options.runtime.projects,
+            enqueue: async (enqueueOptions) => {
+              await enqueueRun(options.runtime, {
+                ...enqueueOptions,
+                actor: enqueueOptions.actor ?? { id: "ship:auto-diagnose", display: "auto-diagnose", kind: "intake" },
+              });
+            },
+            model: modelId,
+            newRunId: () => `run-${randomUUID().slice(0, 8)}`,
+            ...(evidence !== undefined ? { evidence } : {}),
+          },
+          { maxPerHour: incidentAutoDiagnoseMaxPerHour() },
+        );
+        for (const id of r.started) log(`[worker] incidents: auto-diagnosis started for ${id}`);
+        if (r.limited > 0) log(`[worker] incidents: ${r.limited} auto-diagnosis(es) held by the hourly cap`);
+        for (const e of r.errors) log(`[worker] incidents auto-diagnose: ${e.id}: ${e.error}`);
+      })().catch(e => log(`[worker] incident auto-diagnose: ${e instanceof Error ? e.message : String(e)}`)))
       // S18: advance coordinations — launch the next child when its
       // dependency merged, hold on failure. One pass per coordination is
       // cheap; the record's own fencing makes a slow pass harmless.

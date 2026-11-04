@@ -10,6 +10,7 @@ declare module "@neutron-build/core" {
     | `/api/event-rules/${string}/dry-run`
     | "/api/event-sources"
     | "/api/incidents/intake"
+    | "/api/incidents/intake/dash"
     | "/api/policies"
     | `/api/runs/${string}/decide`
     | `/api/runs/${string}/findings`

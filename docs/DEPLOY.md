@@ -450,6 +450,54 @@ firing carries a new `alert_id`, which is the dedupe key — so a long
 outage proposes a fresh incident each cooldown. Dismiss the duplicates,
 or raise the rule's cooldown.
 
+### Teploy Dash alerts — incidents in
+
+Teploy Dash owns uptime, backup, restore-test, domain, operation and audit
+signals and can push them to Ship as **incidents** (the Incidents page, not
+the inbox). Point a Dash `ship` (or plain `webhook`) channel at:
+
+```
+https://ship.example.com/api/incidents/intake/dash
+```
+
+and give it the same secret you set on Ship's **web** process as
+`SHIP_DASH_INTAKE_SECRET`. Unset, the route answers 503 and nothing is
+written. It is a different route and a different secret from the Observe
+incident intake (`/api/incidents/intake`, `SHIP_INCIDENT_INTAKE_SECRET`):
+each sender verifies against its own path.
+
+The wire contract is Event v2 (v1 bodies are read by `status` alone):
+`X-Teploy-Signature: sha256=<hex HMAC-SHA256(secret, "<unix-seconds>.<body>")>`
+with the seconds in `X-Teploy-Timestamp` (refused outside ±300 s), and
+`X-Teploy-Delivery` as the dedupe key (a resent delivery collapses). What
+Ship does with each event:
+
+- `incident_opened` / `incident_repeat` / v1 `down` — one incident per
+  `incident_id` (fallback `rule_id`, then `monitor_id`); a repeat updates the
+  open one, never a second record.
+- `incident_recovered` / `status: "up"` — closes it as **recovered**, with
+  Dash's message kept as the evidence; `reason: "retired"` closes it as
+  **resolved**. Dash's own `recover_after` already judged recovery, so Ship's
+  Observe recovery watch does not touch Dash incidents. A recovery that
+  arrives while a diagnosis or remediation run is in flight is applied when
+  that run settles.
+- `kind: "test"` — answered 200, nothing recorded.
+
+**Attribution** binds an incident to one repository by its `app` (fallback
+`service`, then `monitor_name`), matched exactly against the project's
+**Teploy apps** (`teploy-ship project set <repo> --teploy-apps a,b`, or the
+Projects page), then its **deploy app**, then its **Observe service**. No
+match, or two projects claiming the name, parks the incident on
+needs-attribution with the candidates listed.
+
+**Auto-diagnose (opt-in, read-only).** With `SHIP_INCIDENT_AUTO_DIAGNOSE=on`
+on the worker, a project that sets `--incident-auto-diagnose <minutes>` gets
+the read-only diagnosis scan started for a Dash or Observe incident still
+open and undiagnosed after that many minutes — once per incident, at most
+`SHIP_INCIDENT_AUTO_DIAGNOSE_MAX_PER_HOUR` (default 3) per hour across the
+deployment. A remediation run still starts only from an explicit authorize on
+the Incidents page.
+
 ### Connecting Ship to Akiroo
 
 Akiroo is a workspace; Ship is the thing that does the work. The hop

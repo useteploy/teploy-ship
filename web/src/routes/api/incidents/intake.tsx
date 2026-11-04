@@ -9,11 +9,10 @@ export const config = { mode: "app" };
  * lib/incident-intake.server.ts; see its header for the Observe-side wire
  * facts (payload shape, signature, delivery id).
  *
- * INTEGRATION (orchestrator-owned file): this path authenticates by HMAC
- * inside the route, exactly like /hooks/*, but the layout middleware's
- * exemption list does not know it yet — until _layout.tsx's check gains
- * `|| path.startsWith("/api/incidents/intake")`, Observe's POST is answered
- * by the bearer gate with a 401 and nothing is created.
+ * This path authenticates by HMAC inside the route, exactly like /hooks/*;
+ * the layout's bearer gate exempts the /api/incidents/intake prefix
+ * (_layout.tsx). Teploy Dash deliveries have their own route under the same
+ * prefix, /api/incidents/intake/dash, with their own secret.
  */
 export async function action({ request }: { request: Request }): Promise<Response> {
   return handleIncidentIntake(request);
