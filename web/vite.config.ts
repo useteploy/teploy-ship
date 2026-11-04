@@ -1,7 +1,8 @@
 import { defineConfig } from "vite";
 import preact from "@preact/preset-vite";
-import { neutronPlugin } from "@neutron-build/core/vite";
 
+// neutron-ts injects its own configured neutronPlugin() in build and dev; a
+// second copy here is concatenated, not replaced (CLI 0.5 warns about it).
 export default defineConfig({
-  plugins: [preact(), neutronPlugin()],
+  plugins: [preact()],
 });

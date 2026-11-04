@@ -158,6 +158,13 @@ COPY web/index.html web/tsconfig.json web/vite.config.ts web/neutron.config.ts w
 # npm here, not pnpm: pnpm 10 hard-fails on esbuild's postinstall in this
 # layout, while npm runs the required postinstall correctly.
 RUN cd web && npm ci --omit=dev --no-audit --no-fund
+# neutron-ts 0.5 also emits a server bundle (dist/server/start + its manifest)
+# whose externals are symlinks into the BUILDER's pnpm store
+# (node_modules/.pnpm/...). This stage installs with npm, so every link dangles
+# and preview dies at boot with ERR_MODULE_NOT_FOUND. Without the manifest,
+# preview SSRs route modules from web/src through Vite against this npm tree,
+# exactly as it did on core 0.3.2.
+RUN rm -rf web/dist/.neutron-server-bundle.json web/dist/server
 
 ENV NODE_ENV=production
 ENV SHIP_WEB_HOST=0.0.0.0

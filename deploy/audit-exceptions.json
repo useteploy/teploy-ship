@@ -1,9 +1,1 @@
-[
-  {
-    "ghsa": "GHSA-mrhx-c7xc-m3w5",
-    "package": "zod",
-    "reason": "zod 3.25.76 is reached only through @neutron-build/core 0.3.2's content-collection module, which Ship never uses: no collections are defined and no request input is validated with zod. The patched release is zod 4.6.6+, a major version core 0.3.2 cannot load (it imports zod 3 exports such as ZodEffects).",
-    "dropWhen": "Ship moves to @neutron-build/core 0.5.x, which depends on zod ^4.6.7.",
-    "recorded": "2026-11-03"
-  }
-]
+[]

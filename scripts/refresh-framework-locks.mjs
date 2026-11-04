@@ -16,8 +16,8 @@ if (process.argv.length > 2) {
   process.exit(0);
 }
 assertNoPendingPublication(root);
-// Fail before changing any tracked lockfile. CLI also requires create 0.1.9.
-for (const name of ['@neutron-build/core@0.3.2', '@neutron-build/cli@0.3.2', '@neutron-build/create@0.1.9']) {
+// Fail before changing any tracked lockfile. CLI also requires create 0.1.11.
+for (const name of ['@neutron-build/core@0.5.2', '@neutron-build/cli@0.5.2', '@neutron-build/create@0.1.11']) {
   run('npm', ['view', name, 'dist.integrity'], root);
 }
 const stage = mkdtempSync(join(tmpdir(), 'ship-framework-locks-'));
@@ -37,7 +37,7 @@ try {
     run('npm', ['install', '--package-lock-only', '--ignore-scripts', '--no-audit', '--no-fund'], cwd);
   }
   const lock = JSON.parse(readFileSync(join(npmStage, 'web/package-lock.json'), 'utf8'));
-  for (const [name, version] of [['core', '0.3.2'], ['cli', '0.3.2'], ['create', '0.1.9']]) {
+  for (const [name, version] of [['core', '0.5.2'], ['cli', '0.5.2'], ['create', '0.1.11']]) {
     const entry = lock.packages[`node_modules/@neutron-build/${name}`];
     if (entry?.version !== version || !entry.integrity || !entry.resolved?.startsWith('https://registry.npmjs.org/')) {
       throw new Error(`Invalid registry release lock for ${name}`);
