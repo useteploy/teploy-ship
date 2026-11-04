@@ -469,8 +469,10 @@ each sender verifies against its own path.
 The wire contract is Event v2 (v1 bodies are read by `status` alone):
 `X-Teploy-Signature: sha256=<hex HMAC-SHA256(secret, "<unix-seconds>.<body>")>`
 with the seconds in `X-Teploy-Timestamp` (refused outside ±300 s), and
-`X-Teploy-Delivery` as the dedupe key (a resent delivery collapses). What
-Ship does with each event:
+the body's `delivery_id` as the dedupe key (it is signed; the
+`X-Teploy-Delivery` header is the fallback), so a resent delivery collapses.
+A delivery that fails to process is not remembered, so Dash's retry goes
+through. What Ship does with each event:
 
 - `incident_opened` / `incident_repeat` / v1 `down` — one incident per
   `incident_id` (fallback `rule_id`, then `monitor_id`); a repeat updates the
@@ -481,7 +483,10 @@ Ship does with each event:
   Observe recovery watch does not touch Dash incidents. A recovery that
   arrives while a diagnosis or remediation run is in flight is applied when
   that run settles.
-- `kind: "test"` — answered 200, nothing recorded.
+- A recovery that arrives **before** its open (Dash retries a failed open
+  with backoff) marks that `incident_id` settled; the late open is skipped.
+- `kind: "test"`, and `source: "audit"` with no app — answered 200, nothing
+  recorded.
 
 **Attribution** binds an incident to one repository by its `app` (fallback
 `service`, then `monitor_name`), matched exactly against the project's
