@@ -131,8 +131,9 @@ test("SEAM: no migration probes for a column with SELECT", async () => {
 test("SEAM: every enqueueRun call site passes an actor", async () => {
   const sites: Array<[string, number]> = [
     ["../src/cli.ts", 1],
-    // The intake sweep and L7's Akiroo scan launcher.
-    ["../src/worker.ts", 2],
+    // The intake sweep, L7's Akiroo scan launcher, and the opt-in incident
+    // auto-diagnosis (read-only scan, actor ship:auto-diagnose).
+    ["../src/worker.ts", 3],
     ["../web/src/routes/index.tsx", 2],
     // D3's scan launcher. Added deliberately, which is what this list is for.
     ["../web/src/routes/api/runs/scan.tsx", 1],

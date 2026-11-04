@@ -6,6 +6,7 @@ import {
   authorizeRemediation,
   attributeIncident,
   attributeServiceMatch,
+  attributeTeployApp,
   closeIncident,
   createIncident,
   deployRevisionsIn,
@@ -15,6 +16,7 @@ import {
   digestIncidentRemediation,
   gatherIncidentEvidence,
   gradeDiagnosis,
+  intakeDashEvent,
   intakeObserveAlert,
   listIncidents,
   observeAlertProse,
@@ -22,9 +24,11 @@ import {
   observeFingerprintOf,
   observeReadValue,
   remediationTask,
+  sweepIncidentAutoDiagnose,
   sweepIncidentRecovery,
   sweepIncidents,
   type IncidentConfig,
+  type IncidentDashWire,
   type IncidentDeliveryFact,
   type IncidentEnqueueOptions,
   type IncidentEventLog,
@@ -1347,4 +1351,338 @@ test("EV5 NEGATIVE: an alert whose service matches two projects parks needs-attr
     /Attribute this incident/,
   );
   assert.equal(calls.length, 0, "no run is enqueued for an unattributed incident");
+});
+
+// ------------------------------------------------------------- dash intake
+
+const DASH_PROJECTS: IncidentProjectView[] = [
+  { repo: "tyler/akiroo", url: "https://git.example.com/tyler/akiroo.git", teployApps: ["akiroo-lite"] },
+  { repo: "tyler/site", url: "https://git.example.com/tyler/site.git", deployApp: "marketing-site" },
+  { repo: "tyler/web", url: "https://git.example.com/tyler/web.git", observeService: "fylun-web" },
+  { repo: "tyler/web-cache", url: "https://git.example.com/tyler/web-cache.git", observeService: "web" },
+];
+
+const DASH_OPENED: IncidentDashWire = {
+  monitor_id: "fleet-8f1c",
+  monitor_name: "app.akiroo.com",
+  status: "down",
+  message: "unexpected status 502",
+  occurred_at: "2026-11-03T22:31:00Z",
+  source: "monitor",
+  delivery_id: "dl-1",
+  version: 2,
+  kind: "incident_opened",
+  reason: "",
+  incident_id: "inc_3f9a",
+  rule_id: "fleet-8f1c",
+  service: "akiroo-lite",
+  app: "akiroo-lite",
+  server: "deploy-home2",
+  target: "https://app.akiroo.com/",
+  severity: "critical",
+  started_at: "2026-11-03T22:28:00Z",
+  duration_s: 0,
+  consecutive_failures: 3,
+  url: "https://dash.example.internal/monitors/fleet-8f1c",
+};
+
+test("dash attribution: teployApps, then deployApp, then observeService — exact only, ambiguity refuses", () => {
+  const byApps = attributeTeployApp(DASH_PROJECTS, "Akiroo-Lite");
+  assert.equal(byApps.kind === "attributed" && byApps.repo, "tyler/akiroo");
+  assert.equal(byApps.kind === "attributed" && byApps.teployApp, "Akiroo-Lite");
+  const byDeploy = attributeTeployApp(DASH_PROJECTS, "marketing-site");
+  assert.equal(byDeploy.kind === "attributed" && byDeploy.repo, "tyler/site");
+  const byService = attributeTeployApp(DASH_PROJECTS, "fylun-web");
+  assert.equal(byService.kind === "attributed" && byService.repo, "tyler/web");
+  assert.equal(byService.kind === "attributed" && byService.observeService, "fylun-web");
+  // No substring step: "fylun" would bind tyler/web through attributeServiceMatch, never here.
+  assert.equal(attributeTeployApp(DASH_PROJECTS, "fylun").kind, "refused");
+  const twice = attributeTeployApp(
+    [...DASH_PROJECTS, { repo: "tyler/akiroo-fork", teployApps: ["akiroo-lite"] }],
+    "akiroo-lite",
+  );
+  assert.equal(twice.kind, "refused");
+  assert.equal(twice.kind === "refused" && twice.candidates.length, 2);
+  // The first key with ANY match decides: a teployApps hit is not overruled by an observeService elsewhere.
+  const layered = attributeTeployApp(
+    [{ repo: "tyler/a", teployApps: ["shared"] }, { repo: "tyler/b", observeService: "shared" }],
+    "shared",
+  );
+  assert.equal(layered.kind === "attributed" && layered.repo, "tyler/a");
+  assert.equal(attributeTeployApp(DASH_PROJECTS, "  ").kind, "refused");
+});
+
+test("dash intake: opened creates a source-dash incident keyed on incident_id, attributed by app; repeat updates, never duplicates; recovered closes with Dash's message", async () => {
+  const config = memoryConfig();
+  const deps = { config, projects: projects(DASH_PROJECTS) };
+  const opened = await intakeDashEvent(deps, DASH_OPENED, { now, newId, rawEvent: JSON.stringify(DASH_OPENED) });
+  assert.equal(opened.kind, "created");
+  const record = opened.kind === "created" ? opened.record : (undefined as never);
+  assert.equal(record.source, "dash");
+  assert.equal(record.status, "attributed");
+  assert.equal(record.attribution?.repo, "tyler/akiroo");
+  assert.equal(record.attribution?.teployApp, "akiroo-lite");
+  assert.equal(record.dash?.fingerprint, "inc_3f9a");
+  assert.equal(record.dash?.episodeKeyed, true);
+  assert.equal(record.dash?.service, "akiroo-lite");
+  assert.equal(record.dash?.monitorId, "fleet-8f1c");
+  assert.equal(record.dash?.monitorName, "app.akiroo.com");
+  assert.equal(record.dash?.target, "https://app.akiroo.com/");
+  assert.equal(record.dash?.server, "deploy-home2");
+  assert.equal(record.dash?.severity, "critical");
+  assert.equal(record.dash?.sourceKind, "monitor");
+  assert.equal(record.dash?.eventCount, 1);
+  assert.match(record.alertText, /unexpected status 502/);
+  assert.match(record.dash?.raw ?? "", /inc_3f9a/);
+
+  const repeat = await intakeDashEvent(deps, { ...DASH_OPENED, kind: "incident_repeat", delivery_id: "dl-2", duration_s: 120, severity: "warning", consecutive_failures: 7 }, { now, newId });
+  assert.equal(repeat.kind, "refired");
+  assert.equal(repeat.kind === "refired" && repeat.record.id, record.id);
+  assert.equal(repeat.kind === "refired" && repeat.record.dash?.eventCount, 2);
+  assert.equal(repeat.kind === "refired" && repeat.record.dash?.severity, "warning");
+  assert.equal(repeat.kind === "refired" && repeat.record.dash?.consecutiveFailures, 7);
+  assert.equal((await listIncidents(config)).length, 1);
+
+  const recovered = await intakeDashEvent(
+    deps,
+    { ...DASH_OPENED, kind: "incident_recovered", status: "up", delivery_id: "dl-3", message: "200 OK after 3 checks", duration_s: 300, occurred_at: "2026-11-03T22:36:00Z" },
+    { now, newId },
+  );
+  assert.equal(recovered.kind, "recovered");
+  const after = (await listIncidents(config))[0]!;
+  assert.equal(after.status, "recovered");
+  assert.equal(after.dash?.resolution?.kind, "recovered");
+  assert.equal(after.dash?.resolution?.message, "200 OK after 3 checks");
+  assert.equal(after.dash?.resolution?.durationS, 300);
+  assert.equal(after.dash?.resolution?.occurredAt, "2026-11-03T22:36:00Z");
+
+  // A late/retried repeat for the SAME episode does not reopen it.
+  const late = await intakeDashEvent(deps, { ...DASH_OPENED, kind: "incident_repeat", delivery_id: "dl-4" }, { now, newId });
+  assert.equal(late.kind, "skipped");
+  assert.equal((await listIncidents(config))[0]!.status, "recovered");
+  // A recovery with nothing open is skipped, not a record.
+  assert.equal((await intakeDashEvent(deps, { ...DASH_OPENED, incident_id: "inc_other", kind: "incident_recovered", status: "up" }, { now, newId })).kind, "skipped");
+  // A new episode (new incident_id) opens a fresh incident.
+  const next = await intakeDashEvent(deps, { ...DASH_OPENED, incident_id: "inc_4b00", delivery_id: "dl-5" }, { now, newId });
+  assert.equal(next.kind, "created");
+  assert.equal((await listIncidents(config)).length, 2);
+});
+
+test("dash intake: kind test is acknowledged with nothing recorded; status 'up' alone is a recovery", async () => {
+  const config = memoryConfig();
+  const deps = { config, projects: projects(DASH_PROJECTS) };
+  const probe = await intakeDashEvent(deps, { ...DASH_OPENED, kind: "test" }, { now, newId });
+  assert.equal(probe.kind, "skipped");
+  assert.match(probe.kind === "skipped" ? probe.reason : "", /test/);
+  assert.equal((await listIncidents(config)).length, 0);
+
+  await intakeDashEvent(deps, DASH_OPENED, { now, newId });
+  // A kind Ship does not know, with status "up": status is authoritative for resolution.
+  const up = await intakeDashEvent(deps, { ...DASH_OPENED, kind: "incident_future", status: "up" }, { now, newId });
+  assert.equal(up.kind, "recovered");
+});
+
+test("dash intake: reason 'retired' resolves the incident (resolved, not recovered); a human-closed record is never moved", async () => {
+  const config = memoryConfig();
+  const deps = { config, projects: projects(DASH_PROJECTS) };
+  const opened = await intakeDashEvent(deps, DASH_OPENED, { now, newId });
+  const retired = await intakeDashEvent(deps, { ...DASH_OPENED, kind: "incident_recovered", status: "up", reason: "retired", message: "monitor deleted" }, { now, newId });
+  assert.equal(retired.kind, "resolved");
+  const record = (await listIncidents(config))[0]!;
+  assert.equal(record.id, opened.kind === "created" ? opened.record.id : "");
+  assert.equal(record.status, "resolved");
+  assert.equal(record.dash?.resolution?.kind, "retired");
+  assert.equal(record.dash?.resolution?.reason, "retired");
+
+  const second = await intakeDashEvent(deps, { ...DASH_OPENED, incident_id: "inc_closed" }, { now, newId });
+  const id = second.kind === "created" ? second.record.id : "";
+  await closeIncident({ config }, id, { by: "tyler", reason: "known" });
+  const up = await intakeDashEvent(deps, { ...DASH_OPENED, incident_id: "inc_closed", kind: "incident_recovered", status: "up" }, { now, newId });
+  assert.equal(up.kind, "skipped");
+  assert.equal((await listIncidents(config)).find((i) => i.id === id)!.status, "closed");
+});
+
+test("dash intake v1: a body with no version groups on monitor_id; down -> up -> down reopens the same record", async () => {
+  const config = memoryConfig();
+  const deps = { config, projects: projects(DASH_PROJECTS) };
+  const v1 = { monitor_id: "mon-1", monitor_name: "fylun-web", status: "down", message: "timeout", occurred_at: "2026-11-03T10:00:00Z", source: "monitor" };
+  const first = await intakeDashEvent(deps, v1, { now, newId });
+  assert.equal(first.kind, "created");
+  assert.equal(first.kind === "created" && first.record.dash?.fingerprint, "mon-1");
+  assert.equal(first.kind === "created" && first.record.dash?.episodeKeyed, false);
+  // service falls back to monitor_name, which attributes via observeService.
+  assert.equal(first.kind === "created" && first.record.attribution?.repo, "tyler/web");
+  assert.equal((await intakeDashEvent(deps, { ...v1, status: "up" }, { now, newId })).kind, "recovered");
+  const again = await intakeDashEvent(deps, v1, { now, newId });
+  assert.equal(again.kind, "reopened");
+  assert.equal(again.kind === "reopened" && again.record.reopens, 1);
+  assert.equal(again.kind === "reopened" && again.record.dash?.resolution, undefined);
+  assert.equal((await listIncidents(config)).length, 1);
+  // No identity at all: skipped.
+  assert.equal((await intakeDashEvent(deps, { status: "down", message: "x" }, { now, newId })).kind, "skipped");
+});
+
+test("dash intake: a recovery during an in-flight diagnosis is held, then applied by the sweep once the run settles", async () => {
+  const config = memoryConfig();
+  const deps = { config, projects: projects(DASH_PROJECTS) };
+  const opened = await intakeDashEvent(deps, DASH_OPENED, { now, newId });
+  const id = opened.kind === "created" ? opened.record.id : "";
+  const enqueued: IncidentEnqueueOptions[] = [];
+  await diagnoseIncident({ config, enqueue: async (o) => { enqueued.push(o); }, model: "m", newRunId, now }, id);
+  assert.match(enqueued[0]!.task, /Teploy Dash opened an incident on the Teploy app "akiroo-lite"/);
+  assert.equal(enqueued[0]!.mode, "scan");
+
+  const held = await intakeDashEvent(deps, { ...DASH_OPENED, kind: "incident_recovered", status: "up", message: "healthy" }, { now, newId });
+  assert.equal(held.kind, "resolution-pending");
+  assert.equal((await listIncidents(config))[0]!.status, "diagnosing");
+
+  const runId = enqueued[0]!.runId;
+  const logs: Record<string, IncidentEventLog[]> = {
+    [runId]: [
+      { type: "run-started", data: { input: { mode: "scan" } } },
+      { type: "step-completed", name: "scan-findings", data: { result: { found: true, findings: [] } } },
+      { type: "run-completed", data: { output: { summary: "nothing found\nConfidence: low" } } },
+    ],
+  };
+  const swept = await sweepIncidents({ config, store: { load: async (r) => logs[r] ?? [] } });
+  assert.equal(swept.digested, 1);
+  const after = (await listIncidents(config))[0]!;
+  assert.equal(after.status, "recovered");
+  assert.ok(after.diagnosis !== undefined, "the diagnosis still digested before the recovery applied");
+});
+
+test("observe-sourced records are untouched by the Dash path, and the Observe recovery watch skips dash records", async () => {
+  const config = memoryConfig();
+  await intakeDashEvent({ config, projects: projects(DASH_PROJECTS) }, DASH_OPENED, { now, newId });
+  let reads = 0;
+  const r = await sweepIncidentRecovery({ config, readHealth: async () => { reads += 1; return { kind: "absent" } as IncidentServiceRead; } }, { now });
+  assert.equal(r.checked, 0);
+  assert.equal(reads, 0);
+  // Grouping is per-source: an Observe alert with the same identity opens its own record.
+  const observed = await intakeObserveAlert({ config, projects: projects() }, { rule_id: "inc_3f9a", site_id: "fylun-web", metric: "error_rate", threshold: 1 }, { now, newId });
+  assert.equal(observed.kind, "created");
+  assert.equal((await listIncidents(config)).length, 2);
+});
+
+// ----------------------------------------------------------- auto-diagnose
+
+test("AUTO-DIAGNOSE: off without project opt-in; after N minutes it starts ONE read-only scan, once per incident, under the hourly cap", async () => {
+  const config = memoryConfig();
+  let t = 1_800_000_000_000;
+  const clockAt = (): number => t;
+  const optedIn: IncidentProjectView[] = [
+    { repo: "tyler/akiroo", url: "https://git.example.com/tyler/akiroo.git", teployApps: ["akiroo-lite", "akiroo-b", "akiroo-c"], incidentAutoDiagnoseMinutes: 10 },
+    { repo: "tyler/site", url: "https://git.example.com/tyler/site.git", deployApp: "marketing-site" },
+  ];
+  const deps = { config, projects: projects(optedIn) };
+  await intakeDashEvent(deps, DASH_OPENED, { now: clockAt, newId });
+  await intakeDashEvent(deps, { ...DASH_OPENED, incident_id: "inc_site", app: "marketing-site" }, { now: clockAt, newId });
+  await intakeDashEvent(deps, { ...DASH_OPENED, incident_id: "inc_info", app: "akiroo-b", severity: "info" }, { now: clockAt, newId });
+  await intakeDashEvent(deps, { ...DASH_OPENED, incident_id: "inc_c", app: "akiroo-c" }, { now: clockAt, newId });
+  const enqueued: IncidentEnqueueOptions[] = [];
+  const auto = {
+    config,
+    projects: projects(optedIn),
+    enqueue: async (o: IncidentEnqueueOptions) => { enqueued.push(o); },
+    model: "m",
+    newRunId,
+    now: clockAt,
+  };
+
+  t += 5 * 60_000;
+  assert.deepEqual((await sweepIncidentAutoDiagnose(auto, { now: clockAt })).started, [], "too early");
+
+  t += 6 * 60_000;
+  const first = await sweepIncidentAutoDiagnose(auto, { now: clockAt, maxPerHour: 1 });
+  assert.equal(first.started.length, 1);
+  assert.equal(first.limited, 1, "the second eligible incident is held by the cap");
+  assert.equal(enqueued.length, 1);
+  assert.equal(enqueued[0]!.mode, "scan");
+  assert.equal(enqueued[0]!.repo, "https://git.example.com/tyler/akiroo.git");
+  assert.equal(enqueued[0]!.actor?.kind, "intake");
+  const started = (await listIncidents(config)).find((i) => i.id === first.started[0])!;
+  assert.equal(started.status, "diagnosing");
+  assert.ok(started.autoDiagnosedAt !== undefined);
+
+  // Still within the hour: the cap holds. An hour later the next one starts; the non-opted-in
+  // project and the info-severity incident never do, and nothing fires twice.
+  assert.equal((await sweepIncidentAutoDiagnose(auto, { now: clockAt, maxPerHour: 1 })).started.length, 0);
+  t += 61 * 60_000;
+  const second = await sweepIncidentAutoDiagnose(auto, { now: clockAt, maxPerHour: 1 });
+  assert.equal(second.started.length, 1);
+  assert.notEqual(second.started[0], first.started[0]);
+  t += 61 * 60_000;
+  assert.equal((await sweepIncidentAutoDiagnose(auto, { now: clockAt, maxPerHour: 5 })).started.length, 0);
+  assert.equal(enqueued.length, 2);
+  assert.ok(enqueued.every((o) => o.mode === "scan"));
+});
+
+test("RECOVERY BEFORE OPEN: a recovery with no record marks the episode settled; the late open and repeats are skipped", async () => {
+  const config = memoryConfig();
+  const deps = { config, projects: projects(DASH_PROJECTS) };
+  const early = await intakeDashEvent(deps, { ...DASH_OPENED, incident_id: "inc_early", kind: "incident_recovered", status: "up" }, { now, newId });
+  assert.equal(early.kind, "skipped");
+  assert.match(early.kind === "skipped" ? early.reason : "", /before its open/);
+  const lateOpen = await intakeDashEvent(deps, { ...DASH_OPENED, incident_id: "inc_early" }, { now, newId });
+  assert.equal(lateOpen.kind, "skipped");
+  const lateRepeat = await intakeDashEvent(deps, { ...DASH_OPENED, incident_id: "inc_early", kind: "incident_repeat" }, { now, newId });
+  assert.equal(lateRepeat.kind, "skipped");
+  assert.equal((await listIncidents(config)).length, 0, "no incident that would never close");
+  // Other episodes are unaffected.
+  assert.equal((await intakeDashEvent(deps, { ...DASH_OPENED, incident_id: "inc_other" }, { now, newId })).kind, "created");
+});
+
+test("dash intake: a v2 recovery closes an incident a v1 down opened on the same monitor", async () => {
+  const config = memoryConfig();
+  const deps = { config, projects: projects(DASH_PROJECTS) };
+  const v1 = await intakeDashEvent(deps, { monitor_id: "fleet-8f1c", monitor_name: "app.akiroo.com", status: "down", source: "monitor" }, { now, newId });
+  assert.equal(v1.kind, "created");
+  const up = await intakeDashEvent(deps, { ...DASH_OPENED, kind: "incident_recovered", status: "up" }, { now, newId });
+  assert.equal(up.kind, "recovered");
+  assert.equal(up.kind === "recovered" && up.record.id, v1.kind === "created" ? v1.record.id : "");
+});
+
+test("dash intake: an audit finding with no app is not an incident", async () => {
+  const config = memoryConfig();
+  const deps = { config, projects: projects(DASH_PROJECTS) };
+  const audit = await intakeDashEvent(deps, { ...DASH_OPENED, source: "audit", app: "", service: "", incident_id: "inc_audit" }, { now, newId });
+  assert.equal(audit.kind, "skipped");
+  assert.equal((await listIncidents(config)).length, 0);
+  // With an app it is attributable like any other source.
+  assert.equal((await intakeDashEvent(deps, { ...DASH_OPENED, source: "audit", incident_id: "inc_audit2" }, { now, newId })).kind, "created");
+});
+
+test("diagnose re-reads before saving: a Dash recovery pushed during the enqueue is kept and applied once the run settles", async () => {
+  const config = memoryConfig();
+  const deps = { config, projects: projects(DASH_PROJECTS) };
+  const opened = await intakeDashEvent(deps, DASH_OPENED, { now, newId });
+  const id = opened.kind === "created" ? opened.record.id : "";
+  let runId = "";
+  await diagnoseIncident(
+    {
+      config,
+      model: "m",
+      newRunId,
+      now,
+      enqueue: async (o) => {
+        runId = o.runId;
+        // Dash's recovery lands while the enqueue is in flight.
+        const r = await intakeDashEvent(deps, { ...DASH_OPENED, kind: "incident_recovered", status: "up", message: "back" }, { now, newId });
+        assert.equal(r.kind, "recovered");
+      },
+    },
+    id,
+  );
+  const during = (await listIncidents(config))[0]!;
+  assert.equal(during.status, "diagnosing");
+  assert.equal(during.dash?.resolution?.message, "back", "the recovery was not overwritten by the stale copy");
+  const logs: Record<string, IncidentEventLog[]> = {
+    [runId]: [
+      { type: "run-started", data: { input: { mode: "scan" } } },
+      { type: "step-completed", name: "scan-findings", data: { result: { found: true, findings: [] } } },
+      { type: "run-completed", data: { output: { summary: "Confidence: low" } } },
+    ],
+  };
+  await sweepIncidents({ config, store: { load: async (r) => logs[r] ?? [] } });
+  assert.equal((await listIncidents(config))[0]!.status, "recovered");
 });

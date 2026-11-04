@@ -667,3 +667,12 @@ test("enqueueRun adds the tailnet preview host (and main's host for the visual r
   assert.equal(inputs[2]!.supersedePreviews, true, "a follow-up on a pull request removes the older runs' previews");
   assert.deepEqual(inputs[3]!.sandboxEgressAllow, ["rubygems.org", ".100.101.102.103.sslip.io"], "without the tailnet setting only the explicit entries remain");
 });
+
+test("normalizeProject: teployApps fold to lower case and de-duplicate; empty clears; auto-diagnose minutes must be positive", () => {
+  const p = normalizeProject({ repo: "a/b", teployApps: [" Akiroo-Lite ", "akiroo-lite", "", "api"], incidentAutoDiagnoseMinutes: 9.2, autoMerge: false, autoDeploy: false });
+  assert.deepEqual(p.teployApps, ["akiroo-lite", "api"]);
+  assert.equal(p.incidentAutoDiagnoseMinutes, 10);
+  const cleared = normalizeProject({ repo: "a/b", teployApps: [], incidentAutoDiagnoseMinutes: 0, autoMerge: false, autoDeploy: false });
+  assert.equal("teployApps" in cleared, false);
+  assert.equal("incidentAutoDiagnoseMinutes" in cleared, false);
+});

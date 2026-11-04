@@ -179,33 +179,68 @@ export async function shadowBuiltin(
  * meaningful — an attacker replaying a captured body cannot move the clock
  * without invalidating the MAC.
  *
- * Freshness matters more here than on the forge receivers, because Observe
- * stamps no delivery id, so `claimDelivery` has nothing of its own to dedupe
- * on. The window is SHIP_OBSERVE_MAX_SKEW_S seconds either side of now
- * (default 300); a body older than that is refused even with a valid MAC.
+ * The freshness window is the replay bound for a captured body. Observe does
+ * stamp a stable X-Observe-Delivery per firing (webhooks.go, reused across
+ * retries) and the receivers dedupe on it, but the delivery id is not inside
+ * the signed message, so the signed timestamp is what stops a replay with a
+ * fresh header. The window is SHIP_OBSERVE_MAX_SKEW_S seconds either side of
+ * now (default 300); a body older than that is refused even with a valid MAC.
  *
  * Returns null on success, or the response to send.
  */
 export async function verifyObserveSignature(request: Request, body: string, secret: string): Promise<Response | null> {
+  return verifyTimestampedSignature(request, body, secret, {
+    signatureHeader: "x-observe-signature",
+    timestampHeader: "x-observe-timestamp",
+    label: "observe",
+    skew: Number(process.env.SHIP_OBSERVE_MAX_SKEW_S),
+  });
+}
+
+/**
+ * Verify a Teploy Dash webhook signature (Event v1/v2, plan DASH_AUTOCONFIG
+ * 2.5): `X-Teploy-Signature: sha256=<hex HMAC-SHA256(secret, "<unix-seconds>.
+ * <raw body>")>` with the seconds in `X-Teploy-Timestamp` — the same
+ * Stripe-style scheme as Observe, under the X-Teploy-* header family, with a
+ * fixed 300-second freshness window either side of now.
+ */
+export async function verifyTeploySignature(request: Request, body: string, secret: string): Promise<Response | null> {
+  return verifyTimestampedSignature(request, body, secret, {
+    signatureHeader: "x-teploy-signature",
+    timestampHeader: "x-teploy-timestamp",
+    label: "teploy",
+    skew: 300,
+  });
+}
+
+async function verifyTimestampedSignature(
+  request: Request,
+  body: string,
+  secret: string,
+  scheme: { signatureHeader: string; timestampHeader: string; label: string; skew: number },
+): Promise<Response | null> {
   const { createHmac, timingSafeEqual } = await import("node:crypto");
-  const signature = request.headers.get("x-observe-signature") ?? "";
-  const timestamp = request.headers.get("x-observe-timestamp") ?? "";
+  const signature = request.headers.get(scheme.signatureHeader) ?? "";
+  const timestamp = request.headers.get(scheme.timestampHeader) ?? "";
   // An unsigned delivery lands here as two empty headers: Observe omits both
   // when its stored secret is blank (webhooks.go:141). Ship requires the
   // secret, so that delivery must be refused rather than treated as "no
   // signature to check".
   const expected = `sha256=${createHmac("sha256", secret).update(`${timestamp}.${body}`).digest("hex")}`;
-  if (signature.length !== expected.length || !timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {
-    return json(401, { title: "bad observe signature" });
+  // Byte lengths, not string lengths: a non-ASCII header has more bytes than
+  // characters, and timingSafeEqual throws (a 500) on unequal buffers.
+  const given = Buffer.from(signature);
+  const wanted = Buffer.from(expected);
+  if (given.length !== wanted.length || !timingSafeEqual(given, wanted)) {
+    return json(401, { title: `bad ${scheme.label} signature` });
   }
-  // Checked AFTER the MAC, so the value being range-checked is one Observe
+  // Checked AFTER the MAC, so the value being range-checked is one the sender
   // actually signed rather than a header any caller can set.
   const sent = Number(timestamp);
-  if (!Number.isFinite(sent)) return json(401, { title: "bad observe signature timestamp" });
-  const skew = Number(process.env.SHIP_OBSERVE_MAX_SKEW_S);
-  const window = Number.isFinite(skew) && skew > 0 ? skew : 300;
+  if (!Number.isFinite(sent)) return json(401, { title: `bad ${scheme.label} signature timestamp` });
+  const window = Number.isFinite(scheme.skew) && scheme.skew > 0 ? scheme.skew : 300;
   if (Math.abs(Date.now() / 1000 - sent) > window) {
-    return json(401, { title: "observe delivery is outside the freshness window", detail: `${window}s` });
+    return json(401, { title: `${scheme.label} delivery is outside the freshness window`, detail: `${window}s` });
   }
   return null;
 }

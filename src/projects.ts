@@ -119,6 +119,21 @@ export interface Project {
   testCommand?: string;
   testTimeoutMs?: number;
   observeService?: string;
+  /**
+   * The Teploy app names this repository deploys as. A Teploy Dash incident
+   * (incidents.ts intakeDashEvent) is attributed by its `app` against these
+   * first, then `deployApp`, then `observeService` — exact names, one project
+   * or refuse. Absent = Dash attribution falls back to the other two.
+   */
+  teployApps?: string[];
+  /**
+   * Opt-in: minutes an automatically-sourced incident (Dash or Observe) may
+   * sit attributed and undiagnosed before the worker starts the READ-ONLY
+   * diagnosis scan for it (incidents.ts sweepIncidentAutoDiagnose; worker
+   * gate SHIP_INCIDENT_AUTO_DIAGNOSE=on). Absent = never. Remediation is
+   * never automatic (Decision 13).
+   */
+  incidentAutoDiagnoseMinutes?: number;
   sensitivePaths?: string[];
   classThresholds?: { seriousLines?: number; seriousFiles?: number };
   scan?: { every: string; lastRunAt?: string };
@@ -360,6 +375,12 @@ export function normalizeProject(input: Project): Project {
     const out = (v ?? []).map((s) => s.trim()).filter((s) => s !== "");
     return out.length > 0 ? out : undefined;
   };
+  // App names are machine identities: folded to lower case and de-duplicated
+  // at save, so attribution's exact compare never meets two spellings.
+  const teployApps = (() => {
+    const out = [...new Set((list(input.teployApps) ?? []).map((a) => a.toLowerCase()))];
+    return out.length > 0 ? out : undefined;
+  })();
   // Throws on a server a run could not act on; undefined clears the field.
   const mcp = normalizeMcp(input.mcp);
   // Throws on a malformed id; [] is kept (no targets), absent stays absent.
@@ -387,6 +408,8 @@ export function normalizeProject(input: Project): Project {
     ...(num(input.dailyBudgetUSD) !== undefined ? { dailyBudgetUSD: num(input.dailyBudgetUSD) } : {}),
     ...(num(input.testTimeoutMs) !== undefined ? { testTimeoutMs: num(input.testTimeoutMs) } : {}),
     ...(str(input.observeService) !== undefined ? { observeService: str(input.observeService) } : {}),
+    ...(teployApps !== undefined ? { teployApps } : {}),
+    ...(num(input.incidentAutoDiagnoseMinutes) !== undefined ? { incidentAutoDiagnoseMinutes: Math.ceil(num(input.incidentAutoDiagnoseMinutes)!) } : {}),
     ...(list(input.sensitivePaths) !== undefined ? { sensitivePaths: list(input.sensitivePaths) } : {}),
     ...(input.classThresholds !== undefined ? { classThresholds: input.classThresholds } : {}),
     ...(input.scan !== undefined ? { scan: input.scan } : {}),

@@ -160,6 +160,7 @@ const STATUS_CLASS: Record<IncidentStatus, string> = {
   remediating: "queued",
   remediated: "completed",
   "remediation-failed": "failed",
+  resolved: "completed",
   closed: "",
 };
 
@@ -434,6 +435,16 @@ export default function Incidents({ data }: { data: IncidentsData }) {
             <code>{incident.id}</code>
             <span class="meta">{when(incident.createdAt)}</span>
             {incident.source === "observe" && <span class="chip">observe</span>}
+            {incident.source === "dash" && <span class="chip">dash</span>}
+            {incident.dash !== undefined && (
+              <span class="meta">
+                {incident.dash.sourceKind !== "" ? `${incident.dash.sourceKind}, ` : ""}
+                {incident.dash.severity !== "" ? `${incident.dash.severity}, ` : ""}
+                {incident.dash.eventCount} event(s){incident.reopens !== undefined ? `, reopened ${incident.reopens}x` : ""},
+                last seen {when(incident.dash.lastSeenAt)}
+              </span>
+            )}
+            {incident.autoDiagnosedAt !== undefined && <span class="chip">auto-diagnosed</span>}
             {incident.observe !== undefined && (
               <span class="meta">
                 {incident.observe.alertCount} firing(s){incident.reopens !== undefined ? `, reopened ${incident.reopens}x` : ""},
@@ -443,6 +454,21 @@ export default function Incidents({ data }: { data: IncidentsData }) {
             {incident.serviceHint !== undefined && <span class="chip">hint: {incident.serviceHint}</span>}
           </p>
           <pre style="margin:0 0 8px;white-space:pre-wrap;word-break:break-word">{incident.alertText}</pre>
+          {incident.dash?.raw !== undefined && (
+            <details class="disclosure" style="margin:0 0 8px">
+              <summary>The raw Dash event (redacted, bounded)</summary>
+              <pre style="margin:0;white-space:pre-wrap;word-break:break-word">{incident.dash.raw}</pre>
+            </details>
+          )}
+          {incident.dash?.resolution !== undefined && (
+            <p class="meta" style="margin:0 0 6px">
+              {incident.dash.resolution.kind === "retired" ? "Resolved: Dash retired the rule behind this incident" : "Recovered, as reported by Dash"}
+              {incident.dash.resolution.occurredAt !== undefined ? ` at ${when(incident.dash.resolution.occurredAt)}` : ""}
+              {incident.dash.resolution.durationS !== undefined ? ` after ${incident.dash.resolution.durationS}s` : ""}
+              {incident.dash.resolution.message !== "" ? ` — ${incident.dash.resolution.message}` : ""}
+              {incident.status === "diagnosing" || incident.status === "remediating" ? " (applies once the run in flight settles)" : ""}.
+            </p>
+          )}
           {incident.observe?.raw !== undefined && (
             <details class="disclosure" style="margin:0 0 8px">
               <summary>The raw Observe alert (redacted, bounded)</summary>
@@ -452,7 +478,10 @@ export default function Incidents({ data }: { data: IncidentsData }) {
 
           {incident.attribution !== undefined ? (
             <p style="margin:0 0 6px">
-              Attributed to <code>{incident.attribution.repo}</code> (Observe service <code>{incident.attribution.observeService}</code>).
+              Attributed to <code>{incident.attribution.repo}</code>{" "}
+              {incident.attribution.teployApp !== undefined
+                ? <>(Teploy app <code>{incident.attribution.teployApp}</code>)</>
+                : <>(Observe service <code>{incident.attribution.observeService}</code>)</>}.
             </p>
           ) : incident.attributionRefusal !== undefined ? (
             <div style="margin:0 0 6px">
@@ -488,7 +517,7 @@ export default function Incidents({ data }: { data: IncidentsData }) {
               <input type="hidden" name="intent" value="attribute" />
               <input type="hidden" name="id" value={incident.id} />
               <div class="field" style="flex:1;min-width:min(200px,100%)">
-                <label for={`hint-${incident.id}`}>Observe service (corrected, optional)</label>
+                <label for={`hint-${incident.id}`}>{incident.source === "dash" ? "Teploy app" : "Observe service"} (corrected, optional)</label>
                 <input id={`hint-${incident.id}`} name="serviceHint" type="text" placeholder={incident.serviceHint ?? "name the exact service"} />
               </div>
               <button type="submit" class="sm">Attribute</button>

@@ -1,10 +1,10 @@
-import { BodyTooLarge, firstHeader, json, parseJson, readCappedBody, verifyObserveSignature } from "./webhook.server.js";
+import { BodyTooLarge, firstHeader, json, parseJson, readCappedBody, verifyObserveSignature, verifyTeploySignature } from "./webhook.server.js";
 // dist/incidents.js directly, the same as the incidents route: the module is
 // self-contained by construction (no value imports), so the client bundler
 // never reaches node:fs through it. Everything node-only here stays behind
 // the .server strip.
-import { intakeObserveAlert } from "../../../dist/incidents.js";
-import type { IncidentConfig, IncidentObserveWire, IncidentProjectView } from "../../../dist/incidents.js";
+import { intakeDashEvent, intakeObserveAlert } from "../../../dist/incidents.js";
+import type { IncidentConfig, IncidentDashWire, IncidentObserveWire, IncidentProjectView } from "../../../dist/incidents.js";
 // redact.js is equally self-contained and only ever loaded server-side from
 // here; safeForDisplay is the bounded-output helper every run surface uses.
 import { safeForDisplay } from "../../../dist/redact.js";
@@ -40,7 +40,10 @@ export interface IncidentIntakeDeps {
   runtime?: {
     config: IncidentConfig;
     projects: { list(): Promise<readonly IncidentProjectView[]> };
-    deliveries: { claim(source: string, deliveryId: string): Promise<boolean> };
+    deliveries: {
+      claim(source: string, deliveryId: string): Promise<boolean>;
+      release?(source: string, deliveryId: string): Promise<void>;
+    };
   };
 }
 
@@ -78,6 +81,76 @@ export async function handleIncidentIntake(request: Request, deps: IncidentIntak
     // bounded-output treatment every run surface gives tool output.
     { rawAlert: safeForDisplay(body, 8_192) },
   );
+  if (result.kind === "skipped") return json(200, { ok: true, skipped: result.reason });
+  return json(result.kind === "created" ? 201 : 200, {
+    ok: true,
+    outcome: result.kind,
+    incidentId: result.record.id,
+    status: result.record.status,
+  });
+}
+
+/**
+ * The Teploy Dash receiver for the incident store (plan DASH_AUTOCONFIG 2.5,
+ * Event v2 — v1 bodies are read by `status`). Its own route,
+ * /api/incidents/intake/dash, rather than a header-family dispatch on the
+ * Observe URL: the two senders hold different secrets, and one URL per
+ * sender keeps "which secret verifies this?" a property of the path, never
+ * of headers the caller chose. The layout exempts both exact paths from the
+ * bearer gate.
+ *
+ * Auth: X-Teploy-Signature (sha256=hex HMAC-SHA256(secret, "<ts>.<body>"))
+ * + X-Teploy-Timestamp within 300s, against SHIP_DASH_INTAKE_SECRET — a
+ * separate secret from the Observe intake's. Unset = 503, nothing written.
+ * Dedupe: the body's delivery_id (inside the signed message, stable across
+ * retries of one delivery), falling back to the X-Teploy-Delivery header
+ * (same value, but not signed), then the signature. The claim is given back
+ * if processing throws, so Dash's retry is processed rather than answered
+ * "duplicate" — losing a recovery that way would leave an incident open.
+ * Below that, intakeDashEvent groups on incident_id (fallback rule_id /
+ * monitor_id). kind "test" is acknowledged 200 with nothing recorded.
+ */
+export async function handleDashIncidentIntake(request: Request, deps: IncidentIntakeDeps = {}): Promise<Response> {
+  const secret = deps.secret ?? process.env.SHIP_DASH_INTAKE_SECRET;
+  if (secret === undefined || secret === "") {
+    return json(503, { title: "Dash incident intake disabled: SHIP_DASH_INTAKE_SECRET is not set" });
+  }
+  let body: string;
+  try {
+    body = await readCappedBody(request);
+  } catch (error) {
+    if (error instanceof BodyTooLarge) return json(413, { title: "payload too large" });
+    throw error;
+  }
+  const refused = await verifyTeploySignature(request, body, secret);
+  if (refused !== null) return refused;
+
+  const payload = parseJson<IncidentDashWire>(body);
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return json(400, { title: "malformed JSON body" });
+
+  const runtime = deps.runtime ?? (await shipRuntime());
+  const bodyDelivery = typeof payload.delivery_id === "string" && payload.delivery_id.trim() !== "" ? payload.delivery_id.trim() : null;
+  const deliveryId = bodyDelivery ?? firstHeader(request, "x-teploy-delivery") ?? firstHeader(request, "x-teploy-signature");
+  // Keyed with the kind: a delivery id is unique per delivery group, and
+  // scoping it by kind keeps an opened and its recovery apart even from a
+  // sender that reuses ids across kinds.
+  const kind = typeof payload.kind === "string" && payload.kind.trim() !== "" ? payload.kind.trim() : String(payload.status ?? "");
+  const claimKey = deliveryId !== null ? `${deliveryId}:${kind}` : null;
+  if (claimKey !== null && !(await runtime.deliveries.claim("dash-incident-intake", claimKey))) {
+    return json(200, { ok: true, skipped: "duplicate delivery" });
+  }
+
+  let result: Awaited<ReturnType<typeof intakeDashEvent>>;
+  try {
+    result = await intakeDashEvent(
+      { config: runtime.config, projects: runtime.projects },
+      payload,
+      { rawEvent: safeForDisplay(body, 8_192) },
+    );
+  } catch (error) {
+    if (claimKey !== null) await runtime.deliveries.release?.("dash-incident-intake", claimKey).catch(() => undefined);
+    throw error;
+  }
   if (result.kind === "skipped") return json(200, { ok: true, skipped: result.reason });
   return json(result.kind === "created" ? 201 : 200, {
     ok: true,

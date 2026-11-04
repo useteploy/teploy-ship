@@ -83,14 +83,16 @@ const authorizeRequest: MiddlewareFn = async (request, _context, next) => {
   // Ship starts the handshake now, so the operator is already signed in here
   // before anything begins and the exemption bought nothing but a route outside
   // the role gate. Both /connect pages check admin themselves as well.
-  // /api/incidents/intake is the one /api/* exception: it is Observe's
-  // machine POST surface (S17 auto-intake), authenticated by its own
+  // /api/incidents/intake and /api/incidents/intake/dash are the only /api/*
+  // exceptions, matched exactly (a prefix would exempt any future route under
+  // them): Observe's machine POST surface (S17 auto-intake) and Teploy Dash's (SHIP_DASH_INTAKE_SECRET,
+  // X-Teploy-* signature). Each is authenticated by its own
   // HMAC-SHA256 signature check on every request (web/src/lib/
   // incident-intake.server.ts) — a shared secret, not a session, because the
-  // sender is Observe's webhook worker, not a browser. Exempting it from the
+  // sender is a webhook worker, not a browser. Exempting it from the
   // bearer gate moves the authority to that check; an unsigned or wrongly
   // signed POST still gets 401 from the route itself.
-  if (path === "/login" || path === "/health" || path.startsWith("/hooks/") || path.startsWith("/bulletin/") || path.startsWith("/oidc/") || path.startsWith("/assets/") || path === "/favicon.ico" || path.startsWith("/api/incidents/intake")) {
+  if (path === "/login" || path === "/health" || path.startsWith("/hooks/") || path.startsWith("/bulletin/") || path.startsWith("/oidc/") || path.startsWith("/assets/") || path === "/favicon.ico" || path === "/api/incidents/intake" || path === "/api/incidents/intake/dash") {
     return next();
   }
 

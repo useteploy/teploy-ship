@@ -359,6 +359,10 @@ export async function action({ request }: { request: Request }): Promise<Respons
     testCommand: str("testCommand"),
     testTimeoutMs: num("testTimeoutMs"),
     observeService: str("observeService"),
+    // Dash attribution keys (comma list; empty clears) and the opt-in
+    // read-only auto-diagnosis delay. normalizeProject folds and validates.
+    teployApps: (str("teployApps") ?? "").split(",").map((a) => a.trim()).filter((a) => a !== ""),
+    incidentAutoDiagnoseMinutes: num("incidentAutoDiagnoseMinutes"),
     // The two unattended-action flags (L5 / L4). Guarded by the same `auto`
     // grant as setting an intake policy to `auto` — merging without a human is
     // a stronger form of the same authority, not a different one — and a
@@ -579,6 +583,8 @@ function ProjectForm({ p, data }: { p: Project | null; data: ProjectsData }) {
       <Field label="test timeout ms" name="testTimeoutMs" value={p?.testTimeoutMs !== undefined ? String(p.testTimeoutMs) : undefined} placeholder="default" type="number" />
       <Field label="Observe service" name="observeService" value={p?.observeService} placeholder="none" />
       <Field label="deploy app" name="deployApp" value={p?.deployApp} placeholder="teploy.yml default" />
+      <Field label="Teploy apps (Dash incidents, comma list)" name="teployApps" value={p?.teployApps?.join(", ")} placeholder="deploy app, then Observe service" />
+      <Field label="auto-diagnose incidents after (minutes)" name="incidentAutoDiagnoseMinutes" value={p?.incidentAutoDiagnoseMinutes !== undefined ? String(p.incidentAutoDiagnoseMinutes) : undefined} placeholder="off" type="number" />
       <Field label="build command (ladder)" name="build" value={p?.verification?.build} placeholder="none declared" />
       <Field label="preview app (ladder)" name="previewApp" value={p?.verification?.preview?.app} placeholder="none declared" />
       <Field label="preview smoke command" name="previewSmoke" value={p?.verification?.preview?.smoke} placeholder={`run against PREVIEW_URL`} />

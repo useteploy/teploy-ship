@@ -1523,6 +1523,8 @@ const PROJECT_USAGE =
   "           [--sandbox-user default|root]  default = non-root sandbox user with sudo; root only for suites that need it\n" +
   "           [--policy inherit|ignore|propose|auto] [--budget <usd>] [--test-command <cmd>] [--test-timeout-ms N]\n" +
   "           [--observe-service <svc>] [--label <text>]\n" +
+  "           [--teploy-apps <app,app>]  Teploy app names Dash incidents attribute on; \"\" clears\n" +
+  "           [--incident-auto-diagnose <minutes>]  opt-in read-only diagnosis of an incident still open that long; 0 clears\n" +
   "           [--build <cmd>] [--preview-app <app>] [--preview-smoke <cmd>] [--visual on|off] [--observe-window <min>]\n" +
   "           [--authority propose|send|auto_trivial|auto_normal|none] [--never-auto on|off]\n" +
   "           [--mcp <json|file>]  MCP servers + manifests + grants for SHIP_MCP (docs/MCP_DESIGN.md); --mcp \"\" clears\n" +
@@ -1563,6 +1565,8 @@ async function projectCommand(rest: string[]): Promise<void> {
         if (p.testCommand !== undefined) process.stdout.write(`  tests:    ${p.testCommand}\n`);
         if (p.testTimeoutMs !== undefined) process.stdout.write(`  timeout:  ${p.testTimeoutMs}ms\n`);
         if (p.observeService !== undefined) process.stdout.write(`  observe:  ${p.observeService}\n`);
+        if (p.teployApps !== undefined) process.stdout.write(`  apps:     ${p.teployApps.join(", ")}\n`);
+        if (p.incidentAutoDiagnoseMinutes !== undefined) process.stdout.write(`  auto-diagnose: after ${p.incidentAutoDiagnoseMinutes}m\n`);
         if (p.verification !== undefined) {
           const v = p.verification;
           const rungs = [
@@ -1685,6 +1689,17 @@ async function projectCommand(rest: string[]): Promise<void> {
       const raw = args.flags["delegate-targets"] === true ? "" : String(args.flags["delegate-targets"]).trim();
       delegateTargets = raw === "" ? null : raw.toLowerCase() === "none" ? [] : raw.split(",").map((s) => s.trim()).filter((s) => s !== "");
     }
+    // Dash attribution keys: a comma list; "" clears. Omitting keeps them.
+    const teployAppsRaw = args.flags["teploy-apps"];
+    const teployApps = teployAppsRaw === undefined
+      ? undefined
+      : (teployAppsRaw === true ? "" : String(teployAppsRaw)).split(",").map((s) => s.trim()).filter((s) => s !== "");
+    // Opt-in read-only auto-diagnosis delay in minutes; 0 clears.
+    const autoDiagnoseRaw = args.flags["incident-auto-diagnose"];
+    const autoDiagnose = autoDiagnoseRaw === undefined ? undefined : Number(autoDiagnoseRaw);
+    if (autoDiagnose !== undefined && (!Number.isInteger(autoDiagnose) || autoDiagnose < 0)) {
+      fail(`--incident-auto-diagnose must be a whole number of minutes (0 clears it), got: ${String(autoDiagnoseRaw)}`);
+    }
     const windowRaw = args.flags["observe-window"];
     const observeWindow = windowRaw === undefined ? undefined : Number(windowRaw);
     if (observeWindow !== undefined && (!Number.isFinite(observeWindow) || observeWindow < 0 || !Number.isInteger(observeWindow))) {
@@ -1736,6 +1751,8 @@ async function projectCommand(rest: string[]): Promise<void> {
         ...(str("test-command") !== undefined ? { testCommand: str("test-command") } : {}),
         ...(num("test-timeout-ms") !== undefined ? { testTimeoutMs: num("test-timeout-ms") } : {}),
         ...(str("observe-service") !== undefined ? { observeService: str("observe-service") } : {}),
+        ...(teployApps !== undefined ? { teployApps } : {}),
+        ...(autoDiagnose !== undefined ? { incidentAutoDiagnoseMinutes: autoDiagnose > 0 ? autoDiagnose : undefined } : {}),
         ...(verification !== undefined ? { verification } : {}),
         ...(authority !== undefined ? (authority === "none" ? {} : { authority: authority as Project["authority"] }) : {}),
         ...(neverAuto !== undefined ? (neverAuto ? { neverAuto: true } : {}) : {}),
