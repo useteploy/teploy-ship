@@ -1030,8 +1030,9 @@ export function startWorker(options: WorkerOptions): {
     // under the flag pair — an off deployment gets no store, and the step
     // records itself skipped on workers that have nothing behind them.
     ...(threadWarmSweepStore !== undefined ? { threadWarm: threadWarmSweepStore } : {}),
-    // Where this worker reads service health (OBSERVE_URL + OBSERVE_READ_TOKEN
-    // + OBSERVE_SERVICE). Absent unless all three are set.
+    // Where this worker reads service health (the family env contract's
+    // endpoint spelling + OBSERVE_READ_TOKEN + OBSERVE_SERVICE). Absent
+    // unless all three are set.
     ...(telemetryTargetFromEnv() !== undefined ? { telemetry: telemetryTargetFromEnv()! } : {}),
     // The project's test command (SHIP_TEST_COMMAND), run by Ship after the
     // agent stops rather than trusted from the agent's own account.

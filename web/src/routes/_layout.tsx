@@ -66,7 +66,8 @@ const authorizeRequest: MiddlewareFn = async (request, _context, next) => {
   // Runs only on the server (middleware is a routing concept, never
   // hydrated), so this is a safe, guaranteed-once-per-process place to
   // install the catch-alls for anything that escapes a request entirely.
-  // No-op unless OBSERVE_URL and OBSERVE_API_KEY are set.
+  // installProcessErrorHooks is a no-op unless an Observe endpoint + ingest
+  // key are set (any family env spelling — observe.server.ts resolves it).
   installProcessErrorHooks();
   const url = new URL(request.url);
   const path = url.pathname;

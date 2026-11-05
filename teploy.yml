@@ -217,9 +217,14 @@ env:
   #   teploy-ship evidence set tyler/fylun --observe-service fylun-web
   # which also makes the run read THAT service regardless of OBSERVE_SERVICE.
   #
-  # OBSERVE_READ_TOKEN is a share token and is set via `teploy secret set`.
+  # Endpoint names follow the Teploy family contract (plan DASH_AUTOCONFIG
+  # 10.3): OBSERVE_ENDPOINT is the standard spelling; OBSERVE_URL (below) is
+  # the deprecated one and still works. OBSERVE_READ_TOKEN is a share token
+  # and is set via `teploy secret set`. An obs_svc_ service token with
+  # alerts:read (OBSERVE_SERVICE_TOKEN + OBSERVE_SITE) additionally proves
+  # the connection on Settings and shows alert state on the Incidents page.
   SHIP_TELEMETRY: "1"
-  OBSERVE_URL: http://100.108.123.49:3000
+  OBSERVE_ENDPOINT: http://100.108.123.49:3000
   OBSERVE_SERVICE: fylun-web
   # Without a repo (here OR in per-repo evidence) the leg is OFF, by design:
   # on 2026-08-21 a worker watching fylun-web put its RED metrics on a pull

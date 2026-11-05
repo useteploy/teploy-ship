@@ -1418,3 +1418,64 @@ tests and build clean). Two framework-shape changes:
   web/src through Vite exactly as on 0.3.2. Using the bundle (faster boot,
   lower RSS) needs the runtime stage to run the same node_modules layout as
   the build; deferred.
+
+## 2026-11-05 — Programme B (siblings): discovery default-off deviation, deferred items
+
+Programme B's Ship slice (branch `programme-b-siblings`) shipped the label,
+the discovery document, the family env contract and service-token
+`alerts:read`. Three things are open or deferred, with reasons:
+
+- **Discovery is opt-in (`SHIP_DISCOVERY`), a deviation from plan 10.1's
+  "unauthenticated GET" as Observe ships it.** Observe can serve the document
+  unconditionally because it has two listeners and keeps the route off the
+  internet-facing one. Ship has ONE web port carrying both the dashboard and
+  the HMAC-authenticated webhook receivers (`/hooks/*`,
+  `/api/incidents/intake*`), and that port is what an operator may publish
+  (GitHub/Dash deliveries). Serving version + dashboard URL there by default
+  is exactly what Observe's ingest listener refuses to do, so Ship expresses
+  the same default-deny as a flag: 404 until the operator declares the port
+  private. CONSEQUENCE FOR THE DASH HALF (not yet built): a Ship container
+  found by the `dev.teploy.product` label with discovery off must read as
+  "found, not discoverable" — probe 404 is an answer, not an error. Pinned by
+  `web/src/lib/discovery.server.test.ts` (default-deny + exact-path exemption
+  + `[.]`-escaped route-name tests).
+- **No `reidentify` command.** A restored copy of the store claims the
+  original `instance_id` (same store, same id). Observe automates re-identity
+  because it must also revoke every service token; Ship mints nothing against
+  the id yet, so the documented procedure is manual: remove the
+  `SHIP_INSTANCE_ID` runtime-config key before starting the copy (DEPLOY.md,
+  Sibling discovery). Revisit when Ship grows credentials pinned to the id —
+  then it owes the same revoke-and-reidentify as Observe.
+- **Ship exposes no service-token surface of its own.** Programme B's Ship row
+  makes Ship a CLIENT of Observe's service API; Dash→Ship stays the HMAC
+  webhook (`SHIP_DASH_INTAKE_SECRET`). If Dash later needs machine-to-machine
+  reads from Ship (fleet status, run outcomes), the honest shape is an
+  `ship_svc_`-style scoped surface mirroring Observe's `/api/v1/service/*`
+  boundary — deliberately not started here, and the discovery `capabilities`
+  list is where it would be advertised.
+
+### 2026-11-05 addendum — pre-existing image quirk observed while smoking Programme B
+
+Building this branch's image and running `scripts/smoke-image.sh` locally
+fails at the `/setup` step with `EACCES` on `/data/...tmp`, and **main's
+image (2aca112) fails identically in the same Docker Desktop environment** —
+not a regression from this branch. Root cause, observed live: the Dockerfile
+declares `VOLUME /data` (line ~178) BEFORE `RUN mkdir -p /data && chown -R
+node:node /app /data` (line ~186), and Docker discards changes made to a
+volume path after the `VOLUME` instruction — so the shipped image's `/data`
+is `root:root` (`docker run --rm --entrypoint sh teploy-ship:ci -c 'ls -ld
+/data'`), and `FileProjectStore.#read()`'s lazy v2-migration write fails for
+uid 1000 whenever the store runs on an anonymous or unwritable volume. teploy
+deploys mount a named volume chowned 1000:1000, which is why production and
+CI's ubuntu runners are unaffected; the local Desktop failure mode also
+involved volume mounts reporting ownership differently per container (a
+Desktop sync artifact). Fix when touched next: move `VOLUME /data` below the
+chown (one line). Left alone here deliberately — this slice is Programme B,
+and the quirk predates it by three weeks (7490a91, 2026-10-18).
+
+Programme B in-image verification that DID pass locally (with a writable
+/data, `--user root`): `/setup` 200; `/.well-known/teploy.json` off → 404,
+on → the five-field document with the image-baked `SHIP_VERSION`, a stable
+`instance_id` across requests, `dashboard_url` from `SHIP_DASHBOARD_URL`,
+and `dash_intake` only while `SHIP_DASH_INTAKE_SECRET` is set; `/health`
+reports the baked version.

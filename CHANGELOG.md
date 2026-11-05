@@ -2,6 +2,49 @@
 
 All notable changes to Teploy Ship are recorded here.
 
+## [Unreleased]
+
+Programme B — Siblings (plan `DASH_AUTOCONFIG` section 10, owner-approved
+2026-11-03): Ship joins the family's discovery and Observe env contract.
+Nothing here breaks an existing deployment: the legacy `OBSERVE_URL` keeps
+working everywhere, and discovery is off until you turn it on.
+
+### Added
+- **Sibling identity and discovery.** The image carries
+  `LABEL dev.teploy.product=ship`, and `SHIP_DISCOVERY=on` (web) serves
+  `GET /.well-known/teploy.json`: `{product, version, instance_id,
+  dashboard_url, capabilities}`, mirroring Observe's document. Default off —
+  Ship's one web port also carries the internet-facing webhook receivers, so
+  the flag is the operator's declaration that the port is private (Observe
+  expresses the same default-deny by keeping the route off its ingest
+  listener). `instance_id` is generated once and persisted in the store
+  (`SHIP_INSTANCE_ID` config key); `dashboard_url` comes only from
+  `SHIP_DASHBOARD_URL` / `SHIP_PUBLIC_URL`, never a Host header;
+  `capabilities` advertises `dash_intake` only while `SHIP_DASH_INTAKE_SECRET`
+  is set. The image also carries its version now (`SHIP_VERSION`, from
+  `deploy/build-image.sh`), which `/health` reports instead of a perpetual
+  `dev`.
+- **Standard Observe env names** (plan 10.3). `OBSERVE_ENDPOINT` +
+  `OBSERVE_API_KEY`, or the OTLP spelling (`OTEL_EXPORTER_OTLP_ENDPOINT` with
+  `x-api-key` in `OTEL_EXPORTER_OTLP_HEADERS`; honoured only with an Observe
+  credential and only for HTTP transports), configure every Observe egress
+  and read: run events, selfwatch logs, web error reporting and spans, the
+  telemetry evidence leg and incident recovery. `OTEL_SERVICE_NAME` and
+  `OTEL_RESOURCE_ATTRIBUTES=service.version=…` carry the self-observation
+  identity. `OBSERVE_URL` is deprecated, still works, and warns once per
+  process naming the replacement.
+- **Service-token `alerts:read`.** `OBSERVE_SERVICE_TOKEN` (an `obs_svc_`
+  token) + `OBSERVE_SITE` read `/api/v1/service/sites/{site}/alerts/*` with
+  Bearer auth: the Settings connection check upgrades from a bare `/health`
+  ping to an end-to-end proof of endpoint, credential, scope and site
+  ownership, and the Incidents page shows the site's recent triggered alerts.
+  Observe's refusals (401/403/404/429/503) are reported as themselves; a
+  refused read never renders as "nothing fired".
+
+### Changed
+- `deploy/build-image.sh` passes the version into the image
+  (`--build-arg SHIP_VERSION`); a dev build carries the short git revision.
+
 ## [0.4.0] - 2026-11-03
 
 Upgrade notes: read `docs/UPGRADING.md` before deploying. The image now
