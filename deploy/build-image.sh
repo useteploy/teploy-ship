@@ -35,7 +35,14 @@ if [ -n "${VERSION}" ]; then
 fi
 
 echo "==> docker build ${TAG} (compiles dist/ and web/dist/ in the builder stage)"
-docker build -t "${TAG}" .
+# A versioned build carries its version into the image (SHIP_VERSION: /health
+# and the sibling discovery document). An unversioned dev build falls back to
+# the short git revision so the doc still names real code.
+VERSION_ARG="dev-$(git rev-parse --short HEAD 2>/dev/null || echo dev)"
+if [ -n "${VERSION}" ]; then
+  VERSION_ARG="${VERSION}"
+fi
+docker build --build-arg SHIP_VERSION="${VERSION_ARG}" -t "${TAG}" .
 
 if [ "${PUSH}" -eq 1 ]; then
   if [ -z "${VERSION}" ]; then
