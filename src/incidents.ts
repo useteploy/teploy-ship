@@ -1138,11 +1138,12 @@ export async function intakeDashEvent(
   if (fingerprint === null) {
     return { kind: "skipped", reason: "the Dash event carries no incident_id, rule_id or monitor_id — nothing to group on" };
   }
-  // An audit finding with no app (channel health, Dash's own configuration)
-  // is about Dash, not about code in any repo: nothing to attribute or
-  // diagnose, so it never becomes an incident here.
-  if (wireString(payload.source) === "audit" && wireString(payload.app) === "") {
-    return { kind: "skipped", reason: "Dash audit finding with no app — not an incident about a repository" };
+  // An audit or domain finding with no app (channel health, a hand-routed
+  // domain) is not about code in any repo: nothing to attribute or diagnose,
+  // so it never becomes an incident here.
+  const dashSource = wireString(payload.source);
+  if ((dashSource === "audit" || dashSource === "domain") && wireString(payload.app) === "") {
+    return { kind: "skipped", reason: `Dash ${dashSource} finding with no app — not an incident about a repository` };
   }
   const episodeKeyed = wireString(payload.incident_id) !== "";
   const service = dashServiceOf(payload);
@@ -2357,6 +2358,9 @@ export async function sweepIncidentAutoDiagnose(
     if (incident.status !== "attributed" || incident.attribution === undefined) continue;
     if (incident.autoDiagnosedAt !== undefined) continue;
     if (incident.source === "dash" && incident.dash?.severity === "info") continue;
+    // A DNS or certificate problem is not in the code: a repository scan would
+    // spend a run and find nothing. A person can still diagnose it by hand.
+    if (incident.source === "dash" && incident.dash?.sourceKind === "domain") continue;
     const minutes = optIn(incident.attribution.repo);
     if (minutes === undefined) continue;
     if (nowMs - Date.parse(incident.createdAt) < minutes * 60_000) continue;

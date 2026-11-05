@@ -1566,6 +1566,21 @@ test("observe-sourced records are untouched by the Dash path, and the Observe re
 
 // ----------------------------------------------------------- auto-diagnose
 
+test("AUTO-DIAGNOSE: a domain incident never starts a scan; the problem is not in the code", async () => {
+  const config = memoryConfig();
+  let t = 1_800_000_000_000;
+  const clockAt = (): number => t;
+  const optedIn: IncidentProjectView[] = [
+    { repo: "tyler/akiroo", url: "https://git.example.com/tyler/akiroo.git", teployApps: ["akiroo-lite", "akiroo-b", "akiroo-c"], incidentAutoDiagnoseMinutes: 10 },
+  ];
+  await intakeDashEvent({ config, projects: projects(optedIn) }, { ...DASH_OPENED, source: "domain", incident_id: "inc_dns" }, { now: clockAt, newId });
+  const enqueued: IncidentEnqueueOptions[] = [];
+  const auto = { config, projects: projects(optedIn), enqueue: async (o: IncidentEnqueueOptions) => { enqueued.push(o); }, model: "m", newRunId, now: clockAt };
+  t += 60 * 60_000;
+  assert.deepEqual((await sweepIncidentAutoDiagnose(auto, { now: clockAt })).started, []);
+  assert.equal(enqueued.length, 0);
+});
+
 test("AUTO-DIAGNOSE: off without project opt-in; after N minutes it starts ONE read-only scan, once per incident, under the hourly cap", async () => {
   const config = memoryConfig();
   let t = 1_800_000_000_000;
@@ -1640,6 +1655,15 @@ test("dash intake: a v2 recovery closes an incident a v1 down opened on the same
   const up = await intakeDashEvent(deps, { ...DASH_OPENED, kind: "incident_recovered", status: "up" }, { now, newId });
   assert.equal(up.kind, "recovered");
   assert.equal(up.kind === "recovered" && up.record.id, v1.kind === "created" ? v1.record.id : "");
+});
+
+test("dash intake: a domain finding with no app is not an incident", async () => {
+  const config = memoryConfig();
+  const deps = { config, projects: projects(DASH_PROJECTS) };
+  const skipped = await intakeDashEvent(deps, { ...DASH_OPENED, source: "domain", app: "", service: "", incident_id: "inc_dom" }, { now, newId });
+  assert.equal(skipped.kind, "skipped");
+  assert.equal((await listIncidents(config)).length, 0);
+  assert.equal((await intakeDashEvent(deps, { ...DASH_OPENED, source: "domain", incident_id: "inc_dom2" }, { now, newId })).kind, "created");
 });
 
 test("dash intake: an audit finding with no app is not an incident", async () => {
