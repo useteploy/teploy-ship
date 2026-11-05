@@ -1,5 +1,8 @@
 import { checkConnections } from "../lib/connections.server.js";
 import type { ConnectionCheck } from "../lib/connections.server.js";
+// Pure module (safe for this route's graph, like the dist/incidents.js import
+// on the incidents route); used in the loader only.
+import { observeWiringFromEnv } from "../../../dist/observe-endpoint.js";
 import {
   AKIROO_ORG_ID_KEY,
   AKIROO_ORG_NAME_KEY,
@@ -278,14 +281,18 @@ export async function loader({ request }: { request: Request }): Promise<Setting
         title: "Observe (dogfood)",
         rows: [
           {
+            // The resolver is the truth: any family spelling arms the emitter
+            // (observe-endpoint.ts), and it enforces the credential rule.
             label: "emitter",
-            value: (process.env.OBSERVE_URL ?? "") !== "" && (process.env.OBSERVE_API_KEY ?? "") !== "" ? "enabled" : "disabled",
-            ok: (process.env.OBSERVE_URL ?? "") !== "" && (process.env.OBSERVE_API_KEY ?? "") !== "",
-            hint: "each completed run emits an LLM event to Observe",
+            value: observeWiringFromEnv(process.env) === null ? "disabled" : "enabled",
+            ok: observeWiringFromEnv(process.env) !== null,
+            hint: "each completed run emits an LLM event to Observe; endpoint/key accept the family env contract (OBSERVE_ENDPOINT + OBSERVE_API_KEY, the OTLP spelling, or the deprecated OBSERVE_URL)",
           },
-          safeUrl("OBSERVE_URL"),
+          safeUrl("OBSERVE_ENDPOINT"),
+          { ...safeUrl("OBSERVE_URL"), hint: "deprecated — set OBSERVE_ENDPOINT instead; still works and warns once per process" },
           secret("OBSERVE_API_KEY"),
-          value("OBSERVE_SITE", "from key"),
+          { ...value("OBSERVE_SITE", "from key"), hint: "also the site the alerts:read service token reads" },
+          { ...secret("OBSERVE_SERVICE_TOKEN"), hint: "obs_svc_ token with alerts:read: proves the connection on this page and shows alert state on the incidents page" },
         ],
       },
       {

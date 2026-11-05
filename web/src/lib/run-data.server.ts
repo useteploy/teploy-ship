@@ -248,7 +248,7 @@ function planFrom(events: { type: string; name?: string; data?: unknown }[]): st
 // This is the one route with an open reliability question (b7d5db3: a run
 // page occasionally 500'd with the trigger never pinned down), so it gets a
 // trace span in addition to the ErrorBoundary every route already has —
-// no-op unless OBSERVE_URL/OBSERVE_API_KEY are set.
+// no-op unless an Observe endpoint + ingest key are set (any family spelling).
 export async function runData({ params, request }: { params: { id: string }; request: Request }): Promise<RunData> {
   const runId = params.id;
   const query = new URL(request.url).searchParams;

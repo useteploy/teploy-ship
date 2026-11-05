@@ -3,6 +3,7 @@ declare module "@neutron-build/core" {
   interface NeutronGeneratedRouteMap {
     paths:
     | "/"
+    | "/.well-known/teploy.json"
     | "/account"
     | `/api/artifacts/${string}`
     | "/api/bulletin/sweep"

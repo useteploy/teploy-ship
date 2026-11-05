@@ -194,7 +194,9 @@ reported as "not run", never as failed.
 
 ## Telemetry on the pull request
 
-`SHIP_TELEMETRY=1`, plus `OBSERVE_URL`, `OBSERVE_READ_TOKEN` and
+`SHIP_TELEMETRY=1`, plus an Observe endpoint (`OBSERVE_ENDPOINT` — the
+Teploy family's standard name; the deprecated `OBSERVE_URL` and the
+`OTEL_EXPORTER_OTLP_*` spelling also work), `OBSERVE_READ_TOKEN` and
 `OBSERVE_SERVICE` on the worker, and a run that opens a PR also reads the
 affected service's RED metrics from Observe over two adjacent windows and posts
 the comparison — requests, errors, error rate, p95, p99, Apdex.
@@ -209,6 +211,24 @@ raw counts instead. A preview environment serves almost nothing, so that is the
 common case, and a confident percentage computed from nine requests would look
 like proof while being noise. Where a comparison *is* reported, it is labelled
 correlation — other deploys and traffic mix are not controlled for.
+
+## Siblings and Observe wiring
+
+Ship is a Teploy family product: the image carries
+`LABEL dev.teploy.product=ship`, and with `SHIP_DISCOVERY=on` the web process
+serves `GET /.well-known/teploy.json` so a Teploy Dash can recognise the
+instance — product, version, a persisted `instance_id`, and a
+`dashboard_url` taken only from operator-set env, never guessed. It is off by
+default because that one port also carries the internet-facing webhook
+receivers; see `docs/DEPLOY.md` (Sibling discovery).
+
+Talking to Observe follows the family env contract everywhere (`OBSERVE_ENDPOINT`
++ `OBSERVE_API_KEY`, or the `OTEL_EXPORTER_OTLP_*` spelling): run events,
+self-observation logs, web error reporting and the telemetry reads all resolve
+their wiring the same way. With an `obs_svc_` **service token**
+(`OBSERVE_SERVICE_TOKEN`, scope `alerts:read`) plus `OBSERVE_SITE`, the
+Settings connection check proves the whole wiring end-to-end and the Incidents
+page shows what has actually fired upstream.
 
 ## The stack it stands on
 

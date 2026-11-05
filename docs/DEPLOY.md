@@ -274,6 +274,8 @@ cookies minted without `Secure`.
 |---|---|---|
 | `SHIP_PUBLIC_URL` | _(none)_ | The external URL Ship is reached at, e.g. `https://ship.example.com`. Authoritative when set — use this behind a proxy in preference to `SHIP_TRUST_PROXY`. Also makes run links in notifications clickable and shows full webhook URLs on `/sources`. |
 | `SHIP_TRUST_PROXY` | _(unset)_ | Set to `1` to believe `X-Forwarded-Proto`/`X-Forwarded-Host`. Only set this when a reverse proxy you control is the sole path to Ship. |
+| `SHIP_DISCOVERY` | off | Serve `/.well-known/teploy.json` so a Teploy Dash can recognise this instance (see [Sibling discovery](#sibling-discovery-programme-b)). Off by default because this one port also carries the webhook receivers; turn it on only when the port is not internet-facing. |
+| `SHIP_DASHBOARD_URL` | _(falls back to `SHIP_PUBLIC_URL`)_ | The dashboard URL published in the discovery document when it differs from the public URL (nothing else reads it). |
 
 If you terminate TLS at a proxy, set one of these — otherwise Ship sees a
 plain-HTTP request and will not mark the session cookie `Secure`.
@@ -502,6 +504,42 @@ open and undiagnosed after that many minutes — once per incident, at most
 `SHIP_INCIDENT_AUTO_DIAGNOSE_MAX_PER_HOUR` (default 3) per hour across the
 deployment. A remediation run still starts only from an explicit authorize on
 the Incidents page.
+
+### Sibling discovery (Programme B)
+
+The image carries `LABEL dev.teploy.product=ship`, so a Teploy Dash scanning
+its fleet can find this container. What it confirms it with:
+
+```
+GET /.well-known/teploy.json
+-> {"product":"ship","version":…,"instance_id":…,
+    "dashboard_url":…,"capabilities":["dash_intake"]}
+```
+
+Unauthenticated, no secrets, grants nothing — it is how another Teploy
+product recognises this instance *before* an admin connects anything. The
+document mirrors Observe's (`teploy-observe` `cmd/observe/discovery.go`):
+
+- **Default off**, and that is deliberate. Observe keeps this document off
+  its internet-facing ingest listener; Ship has one port for both the
+  dashboard and the HMAC-authenticated webhook receivers, and it may be the
+  port you publish. `SHIP_DISCOVERY=on` on the **web** process is your
+  declaration that this port is not internet-facing; until then the route
+  answers 404 like any unknown path.
+- `instance_id` is generated once and persisted in the store (config key
+  `SHIP_INSTANCE_ID`), so it survives container replacement — and a restored
+  copy claims to be the original. Before running a restored copy alongside
+  the original, remove that config key (Settings shows it as a runtime
+  config entry) so the copy takes a new identity. Observe automates this
+  with `observe reidentify` because it must also revoke service tokens;
+  Ship mints nothing yet, so the manual step is the whole job.
+- `dashboard_url` is `SHIP_DASHBOARD_URL`, falling back to `SHIP_PUBLIC_URL`
+  (one port serves dashboard and webhooks, so the public URL *is* the
+  dashboard URL). Never taken from the request's Host header; empty means
+  unknown and the client must ask.
+- `capabilities` says only what a consumer can do next, conditioned on the
+  wiring that makes it true: `dash_intake` appears only while
+  `SHIP_DASH_INTAKE_SECRET` is set.
 
 ### Connecting Ship to Akiroo
 
@@ -1247,6 +1285,11 @@ which executes model-authored commands.
 | `SHIP_TEST_DETECT` | on | Read the repo's root at enqueue and infer its suite (`0` turns it off). See [Detecting the test command](#test-detect). |
 | `SHIP_TEST_TIMEOUT_MS` | `900000` | Ceiling. A suite that hits it is reported as **not run**, never as failed — a killed suite did not fail, it never finished. |
 | `SHIP_TELEMETRY` | on (unset) | Ask every newly-enqueued run to read the affected service's error rate and latency around its change and put the numbers on the pull request; on since 2026-10-18, so unset asks and `0`/`false`/`no`/`off` stops asking (inert without the `OBSERVE_*` config). Needs the three `OBSERVE_*` reads below. |
+| `OBSERVE_ENDPOINT` | unset | The **family-standard** name (plan DASH_AUTOCONFIG 10.3) for the Observe base URL — the one a Teploy Dash will set on every app it wires for telemetry. All Observe egress and reads resolve their endpoint through `src/observe-endpoint.ts`: this name, the deprecated `OBSERVE_URL` (still works, warns once), or the OTLP spelling below. |
+| `OBSERVE_API_KEY` | unset | The Observe ingest key (`x-api-key`), paired with the endpoint above. Arms the LLM-event emitter, the selfwatch log emitter and the web process's error/span reporting. |
+| `OBSERVE_URL` | unset | **Deprecated** spelling of `OBSERVE_ENDPOINT`. Still works everywhere the new name works. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_EXPORTER_OTLP_PROTOCOL` | unset | The OTLP spelling of the same wiring. Honoured only with an Observe credential (`OBSERVE_API_KEY` or `x-api-key` in the headers) — an OTLP endpoint with none is another vendor's collector and wires nothing — and only for HTTP transports (`http/protobuf`, `http/json`; `grpc` is left to real OTel SDKs with a warning). `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES=service.version=…` override Ship's self-observation identity when the platform sets them. |
+| `OBSERVE_SERVICE_TOKEN` | unset | An Observe **service token** (`obs_svc_...`, scope `alerts:read`): with `OBSERVE_SITE` it makes the Settings connection check a real end-to-end proof (Bearer against `/api/v1/service/sites/{site}/alerts/*`) and shows the site's recent alerts on the incidents page. This token cannot reach the traces surface, and the share token below cannot reach the service API — two credentials, two surfaces, no crossover. |
 | `OBSERVE_READ_TOKEN` | unset | An Observe **share token** (`X-Share-Token`), not the ingest key. Share tokens are GET-only, pinned server-side to their own site, long-lived and revocable — the only credential in Observe a worker can hold. Mint one from the site's share menu; revoke it to take the worker's read access away. Requires an Observe with share-token auth on `/api/v1/traces/services`, released in **v0.1.8**. Proven live 2026-08-20. |
 | `OBSERVE_SERVICE` | unset | The service name as it appears in traces. Without it there is nothing to look up and the read stays off. |
 | `OBSERVE_REPO` | unset | **Required, and the leg is off without it.** The repository `OBSERVE_SERVICE` is built from, e.g. `tyler/fylun-web`. A run on any other repo records the telemetry step as disabled and reads nothing. Learned live on 2026-08-21: a worker watching `fylun-web` reported its RED metrics on a pull request that changed one line of Go in an unrelated repo, so the reviewer saw "p95 up 2653ms" under a change that could not have caused it. `OBSERVE_MIN_REQUESTS` guards against too *little* data; this guards against data about the wrong *thing*, which is worse because it reads as a finding rather than as noise. Matched on owner/name, so clone URLs and bare slugs all agree. |
@@ -1257,7 +1300,7 @@ which executes model-authored commands.
 | `SHIP_DAILY_AUTO_LIMIT` | `10` | Auto-launches per source per day, **fleet-wide** (it used to be per worker). |
 | `SHIP_PUBLISH_MAX_FILES` | `200` | Above this, the PR is raised as a **draft** explaining why — not refused, because a big diff can be a real refactor and only a human knows. Also `SHIP_PUBLISH_MAX_ADDED_LINES` (20000), `SHIP_PUBLISH_MAX_FILE_BYTES` (2 MiB), and binaries. What *is* refused: key material, `.env`/`.ssh`/`.npmrc`-style paths, symlinks, and submodule pointers — none of which can be un-published. |
 | `SHIP_PUBLISH_HARD_MAX_FILES` | unset | The blast-radius cap: above this many files the push is **refused outright** — the refusal is a recorded step and the work stays in the run's log. Unset by default; set it lower than the draft limit above when the worker runs unattended against real repositories. |
-| `SHIP_SELFWATCH_INTERVAL_S` | `60` | The worker's self-observability pass: queue depth, worker heartbeat ages, and stuck-run detection (no recorded event for 30 min while a run is neither finished nor parked). Emitted to Observe's log ingest when `OBSERVE_URL` + `OBSERVE_API_KEY` are set (`service_name: teploy-ship`); anomalies are logged locally either way. `0` disables. Detection reports and never kills — a stuck-looking run may be a long thinking call. |
+| `SHIP_SELFWATCH_INTERVAL_S` | `60` | The worker's self-observability pass: queue depth, worker heartbeat ages, and stuck-run detection (no recorded event for 30 min while a run is neither finished nor parked). Emitted to Observe's log ingest when an Observe endpoint + ingest key are set (`service_name: teploy-ship`, overridable via `OTEL_SERVICE_NAME`); anomalies are logged locally either way. `0` disables. Detection reports and never kills — a stuck-looking run may be a long thinking call. |
 | `SHIP_WEBHOOK_MAX_BYTES` | `1048576` | Cap on a webhook body, applied **before** the signature is computed. |
 | `SHIP_SESSION_SECRET` | derived from `SHIP_WEB_TOKEN` | Signs dashboard sessions. Setting it lets account sessions survive a token rotation; sessions established *with the master token* still die on rotation, so rotating remains revocation. |
 | `SHIP_TRUST_PROXY` | unset | Believe `X-Forwarded-Proto`/`-Host`/`-For`. Only set it when something in front actually overwrites those headers. |

@@ -28,7 +28,7 @@ const LABELS: Record<string, string> = {
   SHIP_MAX_INODE_USED_PCT: "Maximum inode use (%)", SHIP_DISK_PATH: "Disk to monitor", SHIP_MAX_STEPS: "Maximum agent steps",
   AI_GATEWAY_URL: "AI gateway address", AI_GATEWAY_KEY: "Gateway credential", ANTHROPIC_API_KEY: "Anthropic credential", OPENAI_API_KEY: "OpenAI credential",
   SHIP_SANDBOX_URL: "Sandbox service", SHIP_SANDBOX_IMAGE: "Default sandbox image", SHIP_SANDBOX_NETWORK: "Network policy", SHIP_SANDBOX_TOKEN: "Sandbox credential",
-  OBSERVE_URL: "Observe address", OBSERVE_API_KEY: "Ingest credential", OBSERVE_SITE: "Telemetry site", OBSERVE_READ_TOKEN: "Read credential",
+  OBSERVE_URL: "Observe address", OBSERVE_ENDPOINT: "Observe address (standard)", OBSERVE_API_KEY: "Ingest credential", OBSERVE_SITE: "Telemetry site", OBSERVE_READ_TOKEN: "Read credential", OBSERVE_SERVICE_TOKEN: "Service token (alerts:read)",
   SHIP_TEST_COMMAND: "Default test command", OBSERVE_SERVICE: "Observed service", OBSERVE_REPO: "Observed repository", SHIP_PREVIEW_DIR: "Preview checkout",
   AKIROO_URL: "Akiroo address", AKIROO_PULL_TOKEN: "Workspace credential", SHIP_WEBHOOK_SECRET: "Webhook signing secret", SHIP_PUBLIC_URL: "Public Ship address",
   SHIP_INTAKE_POLICIES: "Source policies", SHIP_GIT_TOKENS: "Git credentials by origin", SHIP_GIT_TOKEN: "Default Git credential", SHIP_GITHUB_TOKEN: "GitHub credential",

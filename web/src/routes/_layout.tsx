@@ -66,7 +66,8 @@ const authorizeRequest: MiddlewareFn = async (request, _context, next) => {
   // Runs only on the server (middleware is a routing concept, never
   // hydrated), so this is a safe, guaranteed-once-per-process place to
   // install the catch-alls for anything that escapes a request entirely.
-  // No-op unless OBSERVE_URL and OBSERVE_API_KEY are set.
+  // installProcessErrorHooks is a no-op unless an Observe endpoint + ingest
+  // key are set (any family env spelling — observe.server.ts resolves it).
   installProcessErrorHooks();
   const url = new URL(request.url);
   const path = url.pathname;
@@ -92,7 +93,13 @@ const authorizeRequest: MiddlewareFn = async (request, _context, next) => {
   // sender is a webhook worker, not a browser. Exempting it from the
   // bearer gate moves the authority to that check; an unsigned or wrongly
   // signed POST still gets 401 from the route itself.
-  if (path === "/login" || path === "/health" || path.startsWith("/hooks/") || path.startsWith("/bulletin/") || path.startsWith("/oidc/") || path.startsWith("/assets/") || path === "/favicon.ico" || path === "/api/incidents/intake" || path === "/api/incidents/intake/dash") {
+  // /.well-known/teploy.json is the sibling discovery document, matched
+  // exactly: unauthenticated by design, no secrets, and DEFAULT-OFF — the
+  // route itself answers 404 until SHIP_DISCOVERY is on, because this one
+  // port also carries the internet-facing webhook receivers (see
+  // lib/discovery.server.ts). The exemption only removes the login
+  // redirect; it grants nothing the route does not re-check.
+  if (path === "/login" || path === "/health" || path.startsWith("/hooks/") || path.startsWith("/bulletin/") || path.startsWith("/oidc/") || path.startsWith("/assets/") || path === "/favicon.ico" || path === "/api/incidents/intake" || path === "/api/incidents/intake/dash" || path === "/.well-known/teploy.json") {
     return next();
   }
 

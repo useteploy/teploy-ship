@@ -2,17 +2,23 @@ import { canonicalRepositoryURL, repoSlug } from "./repository-reference.js";
 export { repoSlug } from "./repository-reference.js";
 import { costUSD } from "./pricing.js";
 import type { RunUsage } from "./durable.js";
+import { observeBaseFromEnv, observeWiringFromEnv } from "./observe-endpoint.js";
 
 /**
  * Ship dogfooding into Observe: each completed run is emitted as an LLM event
  * so its model, tokens, cost, and outcome show up in Observe's dashboards
- * alongside everything else you run. Opt-in — a no-op unless OBSERVE_URL and
- * OBSERVE_API_KEY are set — and always fire-and-forget so telemetry never
- * blocks or fails a run.
+ * alongside everything else you run. Opt-in — a no-op unless an Observe
+ * endpoint and ingest key are set — and always fire-and-forget so telemetry
+ * never blocks or fails a run.
  *
- *   OBSERVE_URL      https://observe.example.com
- *   OBSERVE_API_KEY  ingest key (maps to a site)
- *   OBSERVE_SITE     optional explicit site id (X-Observe-Site)
+ * The env contract is the family standard (see observe-endpoint.ts):
+ *
+ *   OBSERVE_ENDPOINT                  https://observe.example.com   (standard)
+ *   OBSERVE_API_KEY                   ingest key (maps to a site)
+ *   OBSERVE_SITE                      optional explicit site id (X-Observe-Site)
+ *   OBSERVE_URL                       legacy spelling, deprecated, still works
+ *   OTEL_EXPORTER_OTLP_ENDPOINT/_HEADERS/_PROTOCOL
+ *                                    the OTLP spelling of the same wiring
  */
 export interface ObserveRunEvent {
   runId: string;
@@ -33,10 +39,9 @@ export interface ObserveEmitter {
 const NOOP: ObserveEmitter = { emitRun: () => {}, enabled: false };
 
 export function makeObserveEmitter(log: (line: string) => void = () => {}): ObserveEmitter {
-  const base = (process.env.OBSERVE_URL ?? "").replace(/\/+$/, "");
-  const key = process.env.OBSERVE_API_KEY ?? "";
-  if (base === "" || key === "") return NOOP;
-  const site = process.env.OBSERVE_SITE ?? "";
+  const wiring = observeWiringFromEnv(process.env, log);
+  if (wiring === null) return NOOP;
+  const { base, ingestKey: key, site } = wiring;
 
   return {
     enabled: true,
@@ -133,7 +138,14 @@ export interface TelemetryTarget {
 
 /** Read this worker's telemetry target. All three parts or nothing. */
 export function telemetryTargetFromEnv(env: NodeJS.ProcessEnv = process.env): TelemetryTarget | undefined {
-  const url = (env.OBSERVE_URL ?? "").replace(/\/+$/, "");
+  // The base URL follows the family env contract (standard, legacy or OTLP
+  // spelling — observe-endpoint.ts); the credential stays the share token,
+  // which the contract does not replace. The base resolver demands no ingest
+  // key: URL + share token with no OBSERVE_API_KEY is a valid read-only
+  // wiring and always has been.
+  const base = observeBaseFromEnv(env);
+  if (base === null) return undefined;
+  const url = base.base;
   const token = (env.OBSERVE_READ_TOKEN ?? "").trim();
   const service = (env.OBSERVE_SERVICE ?? "").trim();
   // No OBSERVE_REPO means no telemetry, deliberately. See TelemetryTarget.repo:

@@ -26,6 +26,7 @@ import type { CommandRunner } from "./deploy.js";
 import { parseSupersededMark, previewSupersededKey } from "./preview-supersede.js";
 import { telemetryTargetFromEnv } from "./observe.js";
 import { readServiceHealth } from "./observe.js";
+import { observeBaseFromEnv } from "./observe-endpoint.js";
 import { testTargetFromEnv } from "./tests.js";
 import type { ExecutorProvider, RunUsage, SandboxOverrides } from "./durable.js";
 import { enqueueRun, proposeExternal } from "./runtime.js";
@@ -196,7 +197,9 @@ export interface WorkerOptions {
 /**
  * The observed-recovery loop's health reader (S17 completion): reads ONE
  * service's RED numbers over the last poll window through the share-token
- * surface. Built from OBSERVE_URL + OBSERVE_READ_TOKEN only — the service
+ * surface. Built from the family env contract's base URL (OBSERVE_ENDPOINT,
+ * the OTLP spelling, or the deprecated OBSERVE_URL — observe-endpoint.ts)
+ * plus OBSERVE_READ_TOKEN only — the service
  * comes from each incident's own attribution at call time, so unlike
  * telemetryTargetFromEnv there is no OBSERVE_SERVICE/OBSERVE_REPO floor (and
  * `repo` is carried as the incident's attributed repo, keeping the
@@ -205,9 +208,13 @@ export interface WorkerOptions {
  * undefined ⇒ the sweep leg is inert.
  */
 function incidentRecoveryReader(env: NodeJS.ProcessEnv = process.env): IncidentRecoveryReader | undefined {
-  const url = (env.OBSERVE_URL ?? "").replace(/\/+$/, "");
+  // The base URL follows the family env contract (observe-endpoint.ts:
+  // OBSERVE_ENDPOINT, the OTLP spelling, or the deprecated OBSERVE_URL); the
+  // credential stays the share token.
+  const base = observeBaseFromEnv(env);
   const token = (env.OBSERVE_READ_TOKEN ?? "").trim();
-  if (url === "" || token === "") return undefined;
+  if (base === null || token === "") return undefined;
+  const url = base.base;
   const windowMs = (Number(env.SHIP_INCIDENT_RECOVERY_POLL_SECONDS) > 0
     ? Number(env.SHIP_INCIDENT_RECOVERY_POLL_SECONDS)
     : 60) * 1_000;
@@ -1023,8 +1030,9 @@ export function startWorker(options: WorkerOptions): {
     // under the flag pair — an off deployment gets no store, and the step
     // records itself skipped on workers that have nothing behind them.
     ...(threadWarmSweepStore !== undefined ? { threadWarm: threadWarmSweepStore } : {}),
-    // Where this worker reads service health (OBSERVE_URL + OBSERVE_READ_TOKEN
-    // + OBSERVE_SERVICE). Absent unless all three are set.
+    // Where this worker reads service health (the family env contract's
+    // endpoint spelling + OBSERVE_READ_TOKEN + OBSERVE_SERVICE). Absent
+    // unless all three are set.
     ...(telemetryTargetFromEnv() !== undefined ? { telemetry: telemetryTargetFromEnv()! } : {}),
     // The project's test command (SHIP_TEST_COMMAND), run by Ship after the
     // agent stops rather than trusted from the agent's own account.

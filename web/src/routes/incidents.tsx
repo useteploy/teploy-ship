@@ -21,6 +21,10 @@ import { enqueueRun, actorFromPrincipal, incidentEvidenceDeps } from "../lib/shi
 import { shipRuntime, defaultModel } from "../lib/store.server.js";
 import { currentUser } from "../lib/session.server.js";
 import { may } from "../lib/authority.server.js";
+// Pure module (see its header): safe for the route graph like dist/incidents.js.
+// Used from the loader only — the client bundle never calls it.
+import { observeServiceAuthFromEnv, readAlertHistory } from "../../../dist/observe-service.js";
+import type { ObserveAlertHistoryEntry } from "../../../dist/observe-service.js";
 
 export const config = { mode: "app" };
 
@@ -51,16 +55,26 @@ export async function loader({ request }: { request: Request }): Promise<Inciden
   // the designated driver.
   await sweepIncidents({ config: runtime.config, store: runtime.store });
   const me = await currentUser(request);
-  const [incidents, canSteer, canApprove] = await Promise.all([
+  // Observe alert state (Programme B): when an obs_svc_ alerts:read service
+  // token is wired, the page also shows what has actually fired on the
+  // configured site, so an operator scanning incidents sees the upstream
+  // truth next to Ship's records. Bounded (10 entries, 5s); a refused or
+  // unreachable read renders as its reason, never as "nothing fired".
+  const auth = observeServiceAuthFromEnv(process.env);
+  const [incidents, canSteer, canApprove, observeAlerts] = await Promise.all([
     listIncidents(runtime.config),
     may("steer", me),
     may("approve", me),
+    auth === undefined
+      ? Promise.resolve(null)
+      : readAlertHistory(auth, 10).then((read) => ({ siteId: auth.siteId, read })),
   ]);
   const query = new URL(request.url).searchParams;
   return {
     incidents,
     canSteer,
     canAuthorize: canSteer || canApprove,
+    observeAlerts,
     error: query.get("error"),
     notice: query.get("notice"),
   };
@@ -70,6 +84,8 @@ export interface IncidentsData {
   incidents: IncidentRecord[];
   canSteer: boolean;
   canAuthorize: boolean;
+  /** Present only when a service token is wired: upstream alert state, or why it could not be read. */
+  observeAlerts: { siteId: string; read: { kind: "ok"; value: ObserveAlertHistoryEntry[] } | { kind: "rejected"; reason: string } } | null;
   error: string | null;
   notice: string | null;
 }
@@ -166,6 +182,44 @@ const STATUS_CLASS: Record<IncidentStatus, string> = {
 
 function when(iso: string): string {
   return new Date(iso).toISOString().slice(0, 19).replace("T", " ");
+}
+
+/**
+ * Upstream alert state (Programme B): the configured site's recent triggered
+ * alerts, read with the obs_svc_ alerts:read service token. A refused or
+ * unreachable read is shown AS that reason — "cannot read" and "nothing
+ * fired" are different facts and only one of them is about the site.
+ */
+function ObserveAlerts({ siteId, read }: { siteId: string; read: NonNullable<IncidentsData["observeAlerts"]>["read"] }) {
+  if (read.kind === "rejected") {
+    return (
+      <div class="card" style="margin:14px 0">
+        <p class="meta" style="margin:0">Observe alert state is unreadable — {read.reason}. Ship incidents and recovery are unaffected; this panel needs a valid OBSERVE_SERVICE_TOKEN with alerts:read on site {siteId}.</p>
+      </div>
+    );
+  }
+  return (
+    <div class="card" style="margin:14px 0">
+      <p class="meta" style="margin:0 0 6px">Observe alerts, site <code>{siteId}</code> (last {read.value.length === 10 ? "10" : String(read.value.length)}, via the alerts:read service token)</p>
+      {read.value.length === 0 ? (
+        <p class="meta" style="margin:0">Nothing has fired on this site.</p>
+      ) : (
+        <div class="table-wrap"><table class="runs" style="margin:0">
+          <thead><tr><th>Rule</th><th>Status</th><th>Value / threshold</th><th>Triggered</th></tr></thead>
+          <tbody>
+            {read.value.map((entry) => (
+              <tr key={entry.alert_id}>
+                <td><code>{entry.rule_id}</code></td>
+                <td>{entry.status}</td>
+                <td>{entry.metric_value.toFixed(2)} / {entry.threshold.toFixed(2)}</td>
+                <td>{entry.triggered_at === "" ? "" : when(entry.triggered_at)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table></div>
+      )}
+    </div>
+  );
 }
 
 function StatusChip({ incident }: { incident: IncidentRecord }) {
@@ -426,6 +480,8 @@ export default function Incidents({ data }: { data: IncidentsData }) {
       ) : (
         <p class="meta">Opening and working incidents takes the steer grant; your account may read them.</p>
       )}
+
+      {data.observeAlerts !== null && <ObserveAlerts siteId={data.observeAlerts.siteId} read={data.observeAlerts.read} />}
 
       {data.incidents.length === 0 && <p class="empty">No incidents yet.</p>}
       {data.incidents.map((incident) => (

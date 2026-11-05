@@ -90,6 +90,12 @@ RUN cd web && pnpm run build && test -d dist/assets
 #   docker pull node:22-slim && docker images --digests node
 FROM node:22-slim@sha256:f32b81066cde10a75dbac96646099533316d94bac4150c55da1636e1f0ffdc46
 
+# Sibling identity (Programme B, plan DASH_AUTOCONFIG 10.1): Teploy Dash finds
+# candidate instances by this label, then confirms them with
+# GET /.well-known/teploy.json before doing anything. The teploy-cli builder
+# stage above does not need it — only the image a fleet can see does.
+LABEL dev.teploy.product=ship
+
 # git: repo runs clone/push inside this container (worker role, local
 # executor path). ca-certificates for https remotes. rsync + openssh-client:
 # `teploy build` syncs the build context through a LOCAL rsync that shells
@@ -168,6 +174,11 @@ RUN rm -rf web/dist/.neutron-server-bundle.json web/dist/server
 
 ENV NODE_ENV=production
 ENV SHIP_WEB_HOST=0.0.0.0
+# Served by /health and /.well-known/teploy.json. Passed by
+# deploy/build-image.sh when it builds a versioned tag; a source build via
+# `teploy deploy` leaves it at "dev" — the same answer /health gives today.
+ARG SHIP_VERSION=dev
+ENV SHIP_VERSION=${SHIP_VERSION}
 # durable state lives on a volume in file-store mode; nucleus mode needs none
 ENV TEPLOY_SHIP_STATE=/data
 VOLUME /data
