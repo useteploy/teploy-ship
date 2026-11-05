@@ -6,12 +6,17 @@
  * reliability question (see the same commit's message).
  *
  * Opt-in and always fire-and-forget, same convention as the worker's LLM-event
- * emitter (teploy-ship/src/observe.ts) — a no-op unless OBSERVE_URL and
- * OBSERVE_API_KEY are set, and telemetry never blocks or fails a request:
+ * emitter (teploy-ship/src/observe.ts) — a no-op unless an Observe endpoint
+ * and ingest key are set, and telemetry never blocks or fails a request.
+ * The env contract is the family standard (teploy-ship/src/observe-endpoint.ts,
+ * imported from dist/ — a pure module, safe for the client graph this file is
+ * bundled into):
  *
- *   OBSERVE_URL      https://observe.example.com
- *   OBSERVE_API_KEY  ingest key (maps to a site)
- *   OBSERVE_SITE     optional explicit site id (X-Observe-Site)
+ *   OBSERVE_ENDPOINT / OBSERVE_API_KEY     standard (plus optional OBSERVE_SITE)
+ *   OTEL_EXPORTER_OTLP_ENDPOINT/_HEADERS   the OTLP spelling of the same wiring
+ *   OBSERVE_URL                            legacy spelling, deprecated, works
+ *   OTEL_SERVICE_NAME / OTEL_RESOURCE_ATTRIBUTES
+ *                                          self-observation identity, when set
  *
  * Errors post to Observe's Sentry-shaped error ingest (POST /api/v1/errors —
  * grouping, source maps, the Issues UI). The run-page span posts a minimal
@@ -20,10 +25,15 @@
  * so no OTel SDK dependency is needed for one route's timing.
  */
 
+import { observeWiringFromEnv } from "../../../dist/observe-endpoint.js";
+import type { ObserveWiring } from "../../../dist/observe-endpoint.js";
+
 interface ObserveConfig {
   base: string;
   key: string;
   site: string;
+  serviceName: string;
+  resourceAttributes: Record<string, string>;
 }
 
 // Route modules in this framework get bundled for the client too (hydration
@@ -36,12 +46,22 @@ function isNode(): boolean {
   return typeof process !== "undefined" && typeof process.env === "object";
 }
 
+// Resolved per call, exactly as before: the web tests (and any future
+// env-rotating harness) change process.env between calls, and the resolve is
+// three map lookups. The OBSERVE_URL deprecation notice stays once per
+// process via the resolver's own latch. console.warn (not the fetch-failure
+// silence in post()): that notice names a replacement and must be visible.
 function config(): ObserveConfig | null {
   if (!isNode()) return null;
-  const base = (process.env.OBSERVE_URL ?? "").replace(/\/+$/, "");
-  const key = process.env.OBSERVE_API_KEY ?? "";
-  if (base === "" || key === "") return null;
-  return { base, key, site: process.env.OBSERVE_SITE ?? "" };
+  const wiring = observeWiringFromEnv(process.env, (line) => console.warn(line));
+  if (wiring === null) return null;
+  return {
+    base: wiring.base,
+    key: wiring.ingestKey,
+    site: wiring.site,
+    serviceName: wiring.serviceName ?? "teploy-ship-web",
+    resourceAttributes: wiring.resourceAttributes,
+  };
 }
 
 function post(path: string, body: unknown): void {
@@ -136,14 +156,24 @@ export function startSpan(name: string, attributes: Record<string, AttrPrimitive
   const spanId = hex(8);
   return {
     end(status: "ok" | "error" = "ok", extraAttrs: Record<string, AttrPrimitive> = {}): void {
+      const cfg = config();
+      if (cfg === null) return;
       const endMs = Date.now();
       post("/v1/traces", {
         resourceSpans: [
           {
-            resource: { attributes: otlpAttrs({ "service.name": "teploy-ship-web" }) },
+            resource: {
+              attributes: otlpAttrs({
+                "service.name": cfg.serviceName,
+                // The family contract ships service.version (and whatever
+                // else the platform set) via OTEL_RESOURCE_ATTRIBUTES; a
+                // span that can name its version should.
+                ...cfg.resourceAttributes,
+              }),
+            },
             scopeSpans: [
               {
-                scope: { name: "teploy-ship", version: "" },
+                scope: { name: "teploy-ship", version: cfg.resourceAttributes["service.version"] ?? "" },
                 spans: [
                   {
                     traceId,

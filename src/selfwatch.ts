@@ -1,5 +1,6 @@
 import type { ShipRuntime } from "./runtime.js";
 import type { WorkerInfo } from "./fleet.js";
+import { observeWiringFromEnv } from "./observe-endpoint.js";
 
 /**
  * Ship watching itself: queue depth, worker liveness, and stuck-run detection.
@@ -182,16 +183,19 @@ export interface ObserveLogEmitter {
 const NOOP: ObserveLogEmitter = { enabled: false, emitLog: () => {} };
 
 /**
- * The log ingest counterpart of makeObserveEmitter (observe.ts): same env
- * pair (OBSERVE_URL + OBSERVE_API_KEY), fire-and-forget, never throws into
- * the caller. Service name is fixed so Ship's self-observations are
- * filterable in Observe's log search.
+ * The log ingest counterpart of makeObserveEmitter (observe.ts): the same env
+ * contract (resolved by observe-endpoint.ts — standard OBSERVE_ENDPOINT, the
+ * OTLP spelling, or the deprecated OBSERVE_URL which still works),
+ * fire-and-forget, never throws into the caller. Service name defaults to
+ * "teploy-ship" so Ship's self-observations are filterable in Observe's log
+ * search; OTEL_SERVICE_NAME (the family contract's per-app name) overrides it
+ * when the platform sets one.
  */
 export function makeObserveLogEmitter(log: (line: string) => void = () => {}): ObserveLogEmitter {
-  const base = (process.env.OBSERVE_URL ?? "").replace(/\/+$/, "");
-  const key = process.env.OBSERVE_API_KEY ?? "";
-  if (base === "" || key === "") return NOOP;
-  const site = process.env.OBSERVE_SITE ?? "";
+  const wiring = observeWiringFromEnv(process.env, log);
+  if (wiring === null) return NOOP;
+  const { base, ingestKey: key, site } = wiring;
+  const serviceName = wiring.serviceName ?? "teploy-ship";
   return {
     enabled: true,
     emitLog(entry) {
@@ -203,7 +207,7 @@ export function makeObserveLogEmitter(log: (line: string) => void = () => {}): O
         body: JSON.stringify({
           level: entry.level,
           message: entry.message,
-          service_name: "teploy-ship",
+          service_name: serviceName,
           ...(entry.attributes !== undefined ? { attributes: entry.attributes } : {}),
         }),
       }).catch((err) => log(`[selfwatch] emit failed: ${err instanceof Error ? err.message : String(err)}`));
