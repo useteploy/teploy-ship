@@ -4,6 +4,8 @@ All notable changes to Teploy Ship are recorded here.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-05
+
 Programme B — Siblings (plan `DASH_AUTOCONFIG` section 10, owner-approved
 2026-11-03): Ship joins the family's discovery and Observe env contract.
 Nothing here breaks an existing deployment: the legacy `OBSERVE_URL` keeps
