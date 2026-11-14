@@ -291,6 +291,11 @@ test("every handler refuses a caller below its role by itself (no middleware)", 
     const module = (await import(file)) as Partial<Record<Handler, HandlerFn>>;
     for (const handler of ["loader", "action"] as const) {
       const entry = ROUTE_ACCESS[pattern as RoutePattern] as { loader?: string; action?: string };
+      // The module's real exports, not a reading of its source: a handler
+      // exported in a spelling the source check above does not know (a plain
+      // `export function loader`, a re-export) must still be classified, or it
+      // would ship with no entry and no check here.
+      assert.equal(typeof module[handler] === "function", entry[handler] !== undefined, `${pattern}: ${handler} is ${entry[handler] === undefined ? "exported but not classified" : "classified but not exported"}`);
       if (entry[handler] === undefined || entry[handler] === "public") continue;
       const need = routeNeed(pattern as RoutePattern, handler) as Role;
       const fn = module[handler];
