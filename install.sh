@@ -241,12 +241,23 @@ fi
 # An existing Ship on Nucleus. This script deploys PostgreSQL now, and doing
 # that over a Nucleus install would point Ship at an empty database while its
 # runs, projects and users sit in the old store. Stop and say what to do.
-if remote 'docker inspect ship-nucleus >/dev/null 2>&1' 2>/dev/null; then
+#
+# "No such container" and "ssh could not ask" are different answers. Plain ssh
+# in batch mode refuses a host this machine has never connected to, which is
+# exactly the state of a new laptop pointed at an old install — so an
+# unreachable server is asked again once teploy has enrolled its host key
+# (below, after provisioning), instead of being taken for an empty one.
+nucleus_state() {
+  remote 'if docker inspect ship-nucleus >/dev/null 2>&1; then echo present; else echo absent; fi' 2>/dev/null | tail -n 1 || echo unreachable
+}
+refuse_nucleus() {
   die "${host} runs Ship on Nucleus (container ship-nucleus). install.sh now deploys a PostgreSQL store and will not
 switch an existing install underneath its data. Move it first (docs/MIGRATE_STORE.md: scripts/migrate-store.mjs
 copies the data), or keep deploying it by hand from a Nucleus teploy.yml (the commented block in
 teploy.example.yml)."
-fi
+}
+nucleus="$(nucleus_state)"
+case "${nucleus}" in present) refuse_nucleus ;; absent) ;; *) nucleus="unreachable" ;; esac
 
 if [ -f "${secrets_file}" ]; then
   say "reusing ${secrets_file}"
@@ -268,15 +279,38 @@ ask() {
   sec_put "$1" "${value}"
 }
 
+# One secret from the server's own store, or non-zero when it holds none.
+#
+# The EXIT STATUS decides, never the output: `teploy secret get` prints a
+# "Connecting to user@host..." banner on stdout before the value (hence the
+# last line), and for a key that is not set it prints the banner and fails.
+# Reading the last line without the status took the banner for the value.
+server_secret() {
+  local out
+  out="$(tp secret get "$1" 2>/dev/null)" || return 1
+  out="$(printf '%s\n' "${out}" | tail -n 1)"
+  [ -n "${out}" ] || return 1
+  printf '%s' "${out}"
+}
+
 say "secrets"
 # Generated, never copied between installs: a second Ship has no business
 # sharing the first one's dashboard token or webhook HMAC. SHIP_CONFIG_KEY
 # seals credentials Ship stores (the Akiroo pull token; harness credentials
 # are refused without it) — unset, they would sit in the store in the clear.
 # Keep it with the bundle: values sealed under it are unreadable without it.
+#
+# A re-run WITHOUT the bundle (another laptop, a lost file) must not rotate
+# them underneath a running install either: a new SHIP_CONFIG_KEY makes every
+# credential already sealed under the old one unreadable, and a new
+# SHIP_WEBHOOK_SECRET silently breaks the webhooks configured on the forge. So:
+# the bundle, else what this server already holds, else a new one.
 for key in SHIP_WEB_TOKEN SHIP_SESSION_SECRET SHIP_WEBHOOK_SECRET SHIP_CONFIG_KEY; do
   if sec_get "${key}" >/dev/null; then
     note "${key}: from bundle"
+  elif held="$(server_secret "${key}")"; then
+    sec_put "${key}" "${held}"
+    note "${key}: from ${host}'s secret store"
   else
     sec_put "${key}" "$(openssl rand -hex 32)"
     note "${key}: generated"
@@ -292,10 +326,10 @@ done
 db_password="$(sec_get SHIP_DB_PASSWORD || sec_get PGPASSWORD || true)"
 if [ -n "${db_password}" ]; then
   note "SHIP_DB_PASSWORD: from bundle"
-elif remote 'docker inspect ship-postgres >/dev/null 2>&1' 2>/dev/null; then
-  db_password="$(tp secret get SHIP_DB_PASSWORD 2>/dev/null | tail -n 1 || true)"
-  [ -n "${db_password}" ] || die "${host} already runs ship-postgres, but its password is in neither ${secrets_file} nor the server's secret store. Restore the bundle (--secrets-file) rather than letting this script generate a password the existing database would refuse."
+elif db_password="$(server_secret SHIP_DB_PASSWORD || server_secret PGPASSWORD)"; then
   note "SHIP_DB_PASSWORD: from ${host}'s secret store"
+elif remote 'docker inspect ship-postgres >/dev/null 2>&1' 2>/dev/null; then
+  die "${host} already runs ship-postgres, but its password is in neither ${secrets_file} nor the server's secret store. Restore the bundle (--secrets-file) rather than letting this script generate a password the existing database would refuse."
 else
   db_password="$(openssl rand -hex 32)"
   note "SHIP_DB_PASSWORD: generated"
@@ -329,6 +363,16 @@ if [ "${skip_setup}" -eq 0 ]; then
   say "provisioning ${server} (${ssh_user}@${host})"
   # Idempotent: teploy setup re-runs cleanly on a box it already provisioned.
   teploy setup "${host}" --name "${server}" --user "${ssh_user}" --yes
+fi
+
+# The Nucleus check that could not be made before this machine knew the host.
+if [ "${nucleus}" = "unreachable" ]; then
+  case "$(nucleus_state)" in
+    present) refuse_nucleus ;;
+    absent) ;;
+    *) note "WARNING: plain ssh to ${ssh_user}@${host} does not work from here, so this script could not check"
+       note "for an existing Ship on Nucleus (or a sandbox daemon). If this server already runs one, stop now." ;;
+  esac
 fi
 
 # --------------------------------------------------------------------------
