@@ -58,6 +58,7 @@ import { runAgent } from "./agent.js";
 import { refusalMessage } from "./publish-policy.js";
 import { defaultApprovalPolicy, resolveApprovalPolicy } from "./approval.js";
 import { secretEnvNames } from "./guard.js";
+import { shipVersion } from "./version.js";
 import { durableAgent, durableRecoveryInput, repoKeyOf, sandboxProvider } from "./durable.js";
 import { rateLimitParkInput } from "./rate-limit-park.js";
 import { isAskEvent } from "./ask.js";
@@ -111,6 +112,7 @@ import { bold, dim, green, promptApproval, red, renderEvent, renderUsage, yellow
 const USAGE = `teploy-ship — coding agent on your own stack
 
 Usage:
+  teploy-ship --version               print the version (the same one /health reports)
   teploy-ship run "<task>"            live run in the terminal (streamed, interactive approvals)
       [--model provider/model]        default SHIP_MODEL, else zai/glm-5.3
       [--sandbox <url> --sandbox-token <t> [--sandbox-image <img>] [--sandbox-network none|egress]]
@@ -2691,6 +2693,12 @@ async function main(): Promise<void> {
     }
   }
   switch (command) {
+    case "--version":
+    case "-v":
+    case "version":
+      // The same answer /health and the discovery document give (src/version.ts).
+      process.stdout.write(`${shipVersion()}\n`);
+      return;
     case "run":
       return runCommand(rest);
     case "runs":

@@ -68,11 +68,21 @@ COPY web/package.json web/pnpm-lock.yaml web/
 RUN pnpm --dir web install --frozen-lockfile
 
 # The CLI: same command CI runs, `tsc` against the copied src/ and tsconfig.
+#
+# Then dist/VERSION, the one place the running version is read from
+# (src/version.ts: /health, the discovery document, `teploy-ship --version`).
+# The release workflow and deploy/build-image.sh pass SHIP_VERSION; a source
+# build through `teploy deploy` cannot pass a build arg, and .git never enters
+# the build context, so it falls back to package.json's version — real code,
+# not "dev" (SHIP-05: every published image up to 0.5.0 reported "dev").
 COPY tsconfig.json ./
 COPY src/ src/
+ARG SHIP_VERSION=""
 RUN pnpm run build \
   && test -f dist/cli.js \
-  && test -f dist/worker.js
+  && test -f dist/worker.js \
+  && node -e 'const v = (process.env.SHIP_VERSION || "").trim(); const out = v !== "" && v !== "dev" ? v.replace(/^v(?=[0-9])/, "") : require("./package.json").version; require("fs").writeFileSync("dist/VERSION", out + "\n"); console.log("ship version: " + out)' \
+  && test -s dist/VERSION
 
 # The web app: `neutron-ts build` per web/package.json (which also drops
 # dist/index.html — the runtime stage ships web/index.html from source for the
@@ -174,11 +184,10 @@ RUN rm -rf web/dist/.neutron-server-bundle.json web/dist/server
 
 ENV NODE_ENV=production
 ENV SHIP_WEB_HOST=0.0.0.0
-# Served by /health and /.well-known/teploy.json. Passed by
-# deploy/build-image.sh when it builds a versioned tag; a source build via
-# `teploy deploy` leaves it at "dev" — the same answer /health gives today.
-ARG SHIP_VERSION=dev
-ENV SHIP_VERSION=${SHIP_VERSION}
+# No ENV SHIP_VERSION: the version is dist/VERSION, written by the builder
+# stage (an env var set here would shadow it, and used to say "dev"). Prove
+# the CLI reads it before the image can exist.
+RUN node dist/cli.js --version
 # durable state lives on a volume in file-store mode; nucleus mode needs none
 ENV TEPLOY_SHIP_STATE=/data
 VOLUME /data
