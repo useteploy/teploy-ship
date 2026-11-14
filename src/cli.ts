@@ -59,6 +59,7 @@ import { refusalMessage } from "./publish-policy.js";
 import { defaultApprovalPolicy, resolveApprovalPolicy } from "./approval.js";
 import { secretEnvNames } from "./guard.js";
 import { shipVersion } from "./version.js";
+import { withDirectCredentialCheck } from "./model-credential.js";
 import { durableAgent, durableRecoveryInput, repoKeyOf, sandboxProvider } from "./durable.js";
 import { rateLimitParkInput } from "./rate-limit-park.js";
 import { isAskEvent } from "./ask.js";
@@ -453,9 +454,11 @@ function baseModel(modelId: string): ModelAdapter {
     }
     return createOpenAI({ baseURL: gatewayURL, apiKey: gatewayKey, provider: "gateway" })(modelId);
   }
+  // The OpenAI-shaped fallback's own missing-key error names OPENAI_API_KEY
+  // for every model; the wrapper names the variable that fixes THIS one.
   return modelId.startsWith("anthropic/")
     ? anthropic(modelId.slice("anthropic/".length), { cache: true })
-    : openai(modelId.replace(/^openai\//, ""));
+    : withDirectCredentialCheck(openai(modelId.replace(/^openai\//, "")), modelId);
 }
 
 /** Parse a numeric flag within a range, turning an ArgError into a clean CLI exit. */
