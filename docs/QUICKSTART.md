@@ -7,18 +7,29 @@ to see the loop work.
 
 `docs/DEPLOY.md` is the full deployment and security model. Read it second.
 
+> **Read this before you point it at anything.** This path installs **no
+> sandbox**. Without the sandbox daemon, every command the agent runs executes
+> **inside the worker container, as the worker's own user, next to every secret
+> the worker holds** — your git token, your model key, the database password.
+> Ship removes those variables from the commands' environment, but the same
+> user can read them back from the worker process. Ship refuses tasks that
+> arrive from webhooks, Slack or issues on such a worker; a task you type is
+> still exposed to prompt injection in the repository content and pages it
+> reads. Use it for your own repositories and your own tasks, and install the
+> sandbox (`docs/DEPLOY.md` §3) before giving it anything else.
+
 **What you need before you start**
 
 - A Linux box you can `ssh` into, with Docker. Ship brings up three containers
-  (web, worker, and a Nucleus store) and idles at roughly 200 MB.
+  (web, worker, and a PostgreSQL store) and idles at roughly 200 MB.
 - The `teploy` CLI on your machine: `brew install useteploy/tap/teploy`
   (macOS). On Linux, take the binary from a
   [release](https://github.com/useteploy/teploy-cli/releases/latest)
   (`teploy_linux_amd64.tar.gz`; verify against the release's `checksums.txt`)
   and put it on your PATH.
-- Node 22, pnpm 10 and git on the machine you run the install from — Ship's
-  `dist/` and `web/dist/` are built there, not on the server
-  (`corepack enable && corepack prepare pnpm@10 --activate`).
+- Ship's source on the machine you run the install from — a `git clone` or an
+  unpacked release tarball. **No Node or pnpm is needed locally**: the image
+  compiles `dist/` and `web/dist/` on the server, from that source.
 - A model key. An Anthropic API key works as-is. A key for an
   Anthropic-COMPATIBLE endpoint (z.ai's GLM route) works too, wired
   differently — see "Model keys that are not Anthropic's" below.
@@ -34,15 +45,18 @@ to see the loop work.
 ## The whole thing, in one command
 
 ```sh
-git clone <your-ship-remote> teploy-ship && cd teploy-ship
+git clone https://github.com/useteploy/teploy-ship && cd teploy-ship
 ./install.sh --host 203.0.113.10 --user root --allow https://github.com/your-org mybox
 # an Anthropic-compatible endpoint instead of Anthropic:
 #   ./install.sh ... --model-url https://api.z.ai/api/anthropic --model glm-5.3 mybox
 ```
 
 It provisions the server, generates `SHIP_WEB_TOKEN` / `SHIP_SESSION_SECRET` /
-`SHIP_WEBHOOK_SECRET`, asks for the two values only you can supply (a forge
-token and a model key), builds Ship, and deploys. It builds the sandbox images
+`SHIP_WEBHOOK_SECRET` / `SHIP_CONFIG_KEY` and the database password, asks for
+the two values only you can supply (a forge token and a model key), builds
+Ship on the server, and deploys it with a PostgreSQL store. Everything it
+generated is in `ship-secrets.env` (chmod 600) — keep it: a re-run reuses it,
+and the database only accepts the password it was created with. It builds the sandbox images
 only when a sandbox daemon is installed — nothing else uses them, and they were
 three quarters of the install's wall clock. `--allow` is the forge origin your
 token may be sent to; without it every repository is refused until you add a
@@ -69,7 +83,7 @@ teploy setup 203.0.113.10 --name mybox                    # installs Docker + Ca
 ## 2. Get Ship
 
 ```sh
-git clone <your-ship-remote> teploy-ship && cd teploy-ship
+git clone https://github.com/useteploy/teploy-ship && cd teploy-ship
 ```
 
 **No local build is needed — and none is used.** `teploy deploy` syncs the
@@ -88,8 +102,10 @@ cp teploy.example.yml teploy.yml     # then change the lines marked CHANGE
 teploy validate                      # parses it and checks the server
 ```
 
-The example is the minimal shape: web, worker and the Nucleus store, tests on,
-no sandbox. The 2026-09-24 rerun deployed it with only the CHANGE lines edited
+The example is the minimal shape: web, worker and the PostgreSQL store
+(pgvector's pg17 build, password authentication on), tests on, no sandbox.
+Nucleus, the store Ship used before 2026-10-14, is still supported as a
+commented opt-in in the example; nothing new should start on it. The 2026-09-24 rerun deployed it with only the CHANGE lines edited
 and got a verified pull request from it.
 
 ## 3. Set the secrets
@@ -97,15 +113,23 @@ and got a verified pull request from it.
 Never in `teploy.yml`. From the repo directory:
 
 ```sh
+db_password="$(openssl rand -hex 32)"
 teploy secret set \
   SHIP_WEB_TOKEN="$(openssl rand -hex 32)" \
   SHIP_SESSION_SECRET="$(openssl rand -hex 32)" \
   SHIP_WEBHOOK_SECRET="$(openssl rand -hex 32)" \
+  SHIP_CONFIG_KEY="$(openssl rand -hex 32)" \
+  SHIP_DB_PASSWORD="$db_password" PGPASSWORD="$db_password" \
   ANTHROPIC_API_KEY="sk-ant-…" \
   SHIP_GIT_TOKEN="<your git token>"
 ```
 
-Keep `SHIP_WEB_TOKEN` — it is your dashboard login.
+Keep `SHIP_WEB_TOKEN` — it is your dashboard login. The database password goes
+in twice, same value: `SHIP_DB_PASSWORD` is what the postgres accessory reads,
+`PGPASSWORD` is what web and worker read (the store URL in `teploy.yml` stays
+password-free). Keep it: PostgreSQL only applies it when it first creates its
+data directory. `SHIP_CONFIG_KEY` seals the credentials Ship stores; keep it
+too, since values sealed under it cannot be read without it.
 
 ### Model keys that are not Anthropic's
 
@@ -142,8 +166,9 @@ ssh root@203.0.113.10 'mkdir -p /deployments/ship/volumes/ship-data && chown 100
 teploy deploy
 ```
 
-This builds the image on the server, starts the Nucleus accessory, health-checks
-the web process, and only then stops the old containers. Roughly two minutes on
+This builds the image on the server, starts the PostgreSQL accessory,
+health-checks the web process (`/health` answers 503 until it can reach the
+store), and only then stops the old containers. Roughly two minutes on
 a first run, fifteen seconds after that.
 
 The dashboard is now at `http://<server>:7460`, and `ingress: host` publishes it
@@ -152,6 +177,10 @@ The dashboard is now at `http://<server>:7460`, and `ingress: host` publishes it
 ```sh
 ufw allow from 100.64.0.0/10 to any port 7460   # Tailscale-only, for example
 ```
+
+Docker-published ports bypass ordinary `ufw` rules, so check from a client
+that should be refused that it is; `docs/DEPLOY.md` has the Docker-aware
+options.
 
 ## 5. Give it something to do
 
@@ -166,14 +195,14 @@ entrypoint is `node /app/dist/cli.js` (there is no `teploy-ship` on its PATH):
 ```sh
 ssh root@203.0.113.10 'docker exec $(docker ps -qf name=ship-worker) node /app/dist/cli.js \
   enqueue "The failing test in parser_test.go describes the bug. Fix it." \
-  --repo https://github.com/your-org/your-repo --store nucleus'
+  --repo https://github.com/your-org/your-repo --store postgres'
 ```
 
 It answers with the run id and a `tests:` line saying which suite the run will
 run (or that it will run none, and why). A bare `teploy-ship enqueue` on your
 laptop writes to the CLI's LOCAL file store — the deployment's worker never
 sees it. The store is not published outside the server's docker network, on
-purpose; `--store nucleus --nucleus-url …` from elsewhere needs a route to it
+purpose; `--store postgres --nucleus-url …` from elsewhere needs a route to it
 (a second worker does this — `teploy-ship join`), and such an enqueue inherits
 the evidence asks the deployment's worker published at boot.
 
@@ -181,8 +210,8 @@ That queues a durable run. A worker picks it up within a few seconds; the
 same `docker exec … node /app/dist/cli.js` prefix runs these:
 
 ```sh
-teploy-ship runs --store nucleus                  # what exists, and its state
-teploy-ship explain <run-id> --store nucleus      # what happened, and what to do about it
+teploy-ship runs --store postgres                  # what exists, and its state
+teploy-ship explain <run-id> --store postgres      # what happened, and what to do about it
 ```
 
 `explain` is the one to reach for when a run does not do what you expected. It

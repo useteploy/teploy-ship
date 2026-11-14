@@ -49,18 +49,31 @@ TTLs too. Config defaults live in `~/.config/teploy-ship/config.json`
 
 Clean VM to a working Ship: provisions the server, generates the secrets that
 should never be shared between installs, asks for the two only you can supply,
-builds Ship and deploys. It builds sandbox images only when a sandbox daemon
-is installed. See the quickstart for measured timings.
+builds Ship on the server and deploys it with a PostgreSQL store (Nucleus, the
+earlier store, remains a by-hand opt-in). Nothing is built locally — a git
+clone or a release tarball is all it needs. It builds sandbox images only when
+a sandbox daemon is installed. See the quickstart for measured timings.
+
+> **Trust model of the default install: there is no sandbox.** Every command
+> the agent runs executes inside the worker container, as the worker's own
+> user, next to every secret the worker holds (git token, model key, database
+> password) — removing them from the command's environment is a filter, not a
+> boundary. Ship refuses tasks from webhooks, Slack and issues there, but a task
+> you type can still meet a prompt injection in the code or pages it reads. Keep
+> it to your own repositories and tasks until the sandbox daemon is installed
+> ([docs/DEPLOY.md](docs/DEPLOY.md) §3).
 
 A second box joins the Ship you already have rather than becoming another one:
 
 ```sh
 ./install.sh --export-secrets ship.env --host <controller> --user <u> oldbox
 teploy-ship join http://<controller>:7460 --secrets ship.env \
-  --nucleus-url postgres://nucleus:<pw>@<controller>:5432/nucleus --start
+  --nucleus-url postgres://ship@<controller>:5432/ship --start
 ```
 
-`join` verifies the controller, its token, the store, every sandbox daemon in
+(`NUCLEUS_URL`/`--nucleus-url` is the store URL's historical name; it names the
+PostgreSQL store too, and the bundle's `PGPASSWORD` carries its password.)
+`join` verifies the controller, its token, the store and its dialect, every sandbox daemon in
 the pool, the forge (with the token a run will actually present), the model
 route and the forge co-location gate — and writes nothing and starts nothing
 unless all of them answered. It never fetches credentials over the network; you
@@ -78,7 +91,7 @@ Akiroo or direct store access.
 request that carries its test result, skipping everything
 you do not need to see the loop work.
 
-The full bring-up — dashboard + worker + Nucleus via one `teploy
+The full bring-up — dashboard + worker + PostgreSQL via one `teploy
 deploy`, webhook wiring, the default-deny sandbox, embeddings, and the
 security model — is in **[docs/DEPLOY.md](docs/DEPLOY.md)**.
 
