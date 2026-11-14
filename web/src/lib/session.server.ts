@@ -245,9 +245,19 @@ const AUTHORITY_PATHS = ["/runs", "/api/runs", "/sources", "/projects", "/workfl
 
 /** Minimum role for a request. Reads → viewer, mutations → editor, admin areas
  * → admin. Fails closed: an unclassified mutation requires editor, never
- * viewer. Self-service password change (/account) is allowed for any user. */
+ * viewer. Self-service password change (/account) is allowed for any user.
+ *
+ * `path` must be the path the router dispatches on — `gatePath()` in
+ * route-access.server.ts — never a raw request path: this compares strings, and
+ * `/%73ettings` is not `/settings` to it (SHIP-01). */
 export function requiredRole(method: string, path: string): Role {
-  if (ADMIN_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`))) return "admin";
+  // The admin areas are matched without regard to case. The router is
+  // case-sensitive, so `/Settings` is a 404 today; this keeps it a 403 for a
+  // non-admin even if a case-insensitive front end or a future route changed
+  // that. Only this branch is folded: the branches below LOWER the requirement,
+  // and a path that merely resembles one of theirs must not get that.
+  const folded = path.toLowerCase();
+  if (ADMIN_PREFIXES.some((p) => folded === p || folded.startsWith(`${p}/`))) return "admin";
   if (path === "/" || AUTHORITY_PATHS.some((p) => path === p || path.startsWith(`${p}/`))) return "viewer";
   if (path === "/account" || path.startsWith("/account/") || path === "/logout") return "viewer";
   return method === "GET" || method === "HEAD" ? "viewer" : "editor";

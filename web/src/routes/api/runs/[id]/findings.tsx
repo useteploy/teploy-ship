@@ -3,6 +3,7 @@ import type { ScanFinding } from "teploy-ship/runtime";
 
 import { currentUser } from "../../../../lib/session.server.js";
 import { shipRuntime } from "../../../../lib/store.server.js";
+import { requireRouteRole } from "../../../../lib/route-access.server.js";
 
 export const config = { mode: "app" };
 
@@ -24,6 +25,7 @@ export const config = { mode: "app" };
  * authenticated role can already read the run page they appear on.
  */
 export async function loader({ request, params }: LoaderArgs): Promise<Response> {
+  await requireRouteRole(request, "/api/runs/:id/findings", "loader");
   const principal = await currentUser(request);
   if (principal === null) return json(401, { error: "unauthorized — send Authorization: Bearer <SHIP_WEB_TOKEN>" });
   const runId = (params as { id?: string }).id ?? "";

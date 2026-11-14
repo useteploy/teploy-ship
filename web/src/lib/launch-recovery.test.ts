@@ -16,7 +16,8 @@ test("recovery requires current launch authority and publishes the accepted task
   const at=new Date().toISOString();
   await runtime.launches!.prepare({runId:"run-recovery",requestHash:"a".repeat(64),started:{v:1,seq:0,type:"run-started",at,data:{workflow:"test",input:{task:"Recover me"}}},meta:{runId:"run-recovery",task:"Recover me",model:"test",status:"queued",createdAt:at,updatedAt:at}});
   await assert.rejects(loader({request:request("viewer")}),e=>e instanceof Response && e.status===403);
-  assert.equal((await action({request:request("viewer",true)})).status,403);
+  // The action's role floor is editor (route-access.server.ts); the refusal is thrown, as the loader's is.
+  await assert.rejects(action({request:request("viewer",true)}),e=>e instanceof Response && e.status===403);
   assert.equal((await runtime.store.load("run-recovery")).length,0);
   assert.equal((await loader({request:request("admin")})).rows[0].summary,"Recover me");
   for(let i=0;i<2;i++)assert.equal((await action({request:request("admin",true)})).headers.get("location"),"/runs/run-recovery");

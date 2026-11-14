@@ -43,8 +43,8 @@ const loaderArgs = (url: string, id: string) =>
   ({ request: new Request(url), params: { id }, context: undefined }) as unknown as Parameters<typeof threadRoute.loader>[0];
 
 test("unauthenticated reads are refused before anything else", async () => {
-  const res = await threadRoute.loader(loaderArgs("http://localhost/api/runs/x/thread", "x"));
-  assert.equal(res.status, 401);
+  // The route's own role check (route-access.server.ts) answers by throwing the 401.
+  await assert.rejects(threadRoute.loader(loaderArgs("http://localhost/api/runs/x/thread", "x")), (e) => e instanceof Response && e.status === 401);
 });
 
 test("flag off (the explicit off value): the API says it is disabled, and the run page payload is unchanged", async () => {
@@ -56,7 +56,7 @@ test("flag off (the explicit off value): the API says it is disabled, and the ru
     assert.match(String((await res.json()).error), /SHIP_THREAD_VIEW/);
     // Equivalence: flag off, the run page loader carries no thread key at all —
     // the page renders exactly what it rendered before this view existed.
-    const off = await runRoute.loader(({ request: new Request("http://localhost/runs/tv-root"), params: { id: "tv-root" }, context: undefined }) as unknown as Parameters<typeof runRoute.loader>[0]);
+    const off = await runRoute.loader(({ request: new Request("http://localhost/runs/tv-root", { headers: { authorization: "Bearer thread-tests" } }), params: { id: "tv-root" }, context: undefined }) as unknown as Parameters<typeof runRoute.loader>[0]);
     assert.equal("threadView" in off, false);
   } finally {
     delete process.env.SHIP_THREAD_VIEW;
@@ -111,9 +111,9 @@ test("flag on: an unknown run id is a 404, not an empty chain", async () => {
 
 test("flag on: the run page payload gains exactly one key — nothing else moves", async () => {
   process.env.SHIP_THREAD_VIEW = "on";
-  const on = await runRoute.loader({ params: { id: "tv-a" }, request: new Request("http://localhost/runs/tv-a") });
+  const on = await runRoute.loader({ params: { id: "tv-a" }, request: new Request("http://localhost/runs/tv-a", { headers: { authorization: "Bearer thread-tests" } }) });
   process.env.SHIP_THREAD_VIEW = "off";
-  const off = await runRoute.loader({ params: { id: "tv-a" }, request: new Request("http://localhost/runs/tv-a") });
+  const off = await runRoute.loader({ params: { id: "tv-a" }, request: new Request("http://localhost/runs/tv-a", { headers: { authorization: "Bearer thread-tests" } }) });
   assert.equal(on.threadView, true);
   assert.equal("threadView" in off, false);
   // followUpRequestId is a fresh UUID on every load, before and after this

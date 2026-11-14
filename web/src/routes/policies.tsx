@@ -6,6 +6,7 @@ import { may, deniedMessage } from "../lib/authority.server.js";
 import { AUTHORITY_ACTIONS, GLOBAL_WINDOW, autoAllowedNow, formatWindow } from "../lib/ship.server.js";
 import { SubNav } from "../lib/subnav.js";
 import { SETTINGS_VIEWS } from "../views/settings-views.js";
+import { requireRouteRole } from "../lib/route-access.server.js";
 
 export const config = { mode: "app" };
 
@@ -39,6 +40,7 @@ interface PoliciesData {
 }
 
 export async function loader({ request }: { request: Request }): Promise<PoliciesData> {
+  await requireRouteRole(request, "/policies", "loader");
   const runtime = await shipRuntime();
   const me = await currentUser(request);
   const [governance, canEdit, policies] = await Promise.all([runtime.governance.get(), may("policies", me), runtime.policies.list()]);
@@ -68,6 +70,7 @@ export async function loader({ request }: { request: Request }): Promise<Policie
 type ActionResult = { error?: string; ok?: string };
 
 export async function action({ request }: { request: Request }): Promise<ActionResult> {
+  await requireRouteRole(request, "/policies", "action");
   const runtime = await shipRuntime();
   const me = await currentUser(request);
   const form = await request.formData();

@@ -1,6 +1,7 @@
 // Throw resource responses for compatibility with Neutron dev, which otherwise tries to render them.
 import { runData } from "../../../../lib/run-data.server.js";
 import { currentUser } from "../../../../lib/session.server.js";
+import { requireRouteRole } from "../../../../lib/route-access.server.js";
 export const config = { mode: "app" };
 export async function loader({
   request,
@@ -9,6 +10,7 @@ export async function loader({
   request: Request;
   params: { id: string };
 }): Promise<Response> {
+  await requireRouteRole(request, "/api/runs/:id/workspace", "loader");
   if (!(await currentUser(request)))
     throw new Response("Unauthorized", { status: 401 });
   // Hono replaces global Response; inherited Response.json returns the native

@@ -25,6 +25,7 @@ import { may } from "../lib/authority.server.js";
 // Used from the loader only — the client bundle never calls it.
 import { observeServiceAuthFromEnv, readAlertHistory } from "../../../dist/observe-service.js";
 import type { ObserveAlertHistoryEntry } from "../../../dist/observe-service.js";
+import { requireRouteRole } from "../lib/route-access.server.js";
 
 export const config = { mode: "app" };
 
@@ -48,6 +49,7 @@ export const config = { mode: "app" };
  * links runs and renders outcomes; it couples nothing to delivery state.
  */
 export async function loader({ request }: { request: Request }): Promise<IncidentsData> {
+  await requireRouteRole(request, "/incidents", "loader");
   const runtime = await shipRuntime();
   // Opportunistic digest so incidents settle on view even where the worker
   // sweep wiring has not landed yet; sweepIncidents is idempotent and the
@@ -91,6 +93,7 @@ export interface IncidentsData {
 }
 
 export async function action({ request }: { request: Request }): Promise<Response> {
+  await requireRouteRole(request, "/incidents", "action");
   const me = await currentUser(request);
   const form = await request.formData();
   const intent = String(form.get("intent") ?? "");

@@ -7,6 +7,7 @@ import { may, deniedMessage } from "../lib/authority.server.js";
 import { SubNav } from "../lib/subnav.js";
 import { SETTINGS_VIEWS } from "../views/settings-views.js";
 import { importNotice, provenanceLine } from "../views/skills-views.js";
+import { requireRouteRole } from "../lib/route-access.server.js";
 
 export const config = { mode: "app" };
 
@@ -32,6 +33,7 @@ interface SkillsData {
 }
 
 export async function loader({ request }: { request: Request }): Promise<SkillsData> {
+  await requireRouteRole(request, "/skills", "loader");
   const runtime = await shipRuntime();
   const me = await currentUser(request);
   const canEdit = await may("policies", me);
@@ -53,6 +55,7 @@ export async function loader({ request }: { request: Request }): Promise<SkillsD
 type ActionResult = { error?: string; ok?: string };
 
 export async function action({ request }: { request: Request }): Promise<ActionResult> {
+  await requireRouteRole(request, "/skills", "action");
   const runtime = await shipRuntime();
   const me = await currentUser(request);
   const form = await request.formData();

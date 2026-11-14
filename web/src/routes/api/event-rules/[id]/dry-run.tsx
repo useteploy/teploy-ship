@@ -1,4 +1,5 @@
 import { handleEventRuleDryRun } from "../../../../lib/event-rules.server.js";
+import { requireRouteRole } from "../../../../lib/route-access.server.js";
 
 export const config = { mode: "app" };
 
@@ -11,6 +12,7 @@ export const config = { mode: "app" };
  * ring append.
  */
 export async function action({ request, params }: { request: Request; params: { id: string } }): Promise<Response> {
+  await requireRouteRole(request, "/api/event-rules/:id/dry-run", "action");
   return handleEventRuleDryRun(params.id, request);
 }
 

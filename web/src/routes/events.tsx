@@ -1,4 +1,5 @@
 import { subscribe } from "../lib/sse-hub.server.js";
+import { requireRouteRole } from "../lib/route-access.server.js";
 
 export const config = { mode: "app" };
 
@@ -11,6 +12,7 @@ export const config = { mode: "app" };
  * No default export → the framework serves the loader's raw Response.
  */
 export async function loader({ request }: { request: Request }): Promise<Response> {
+  await requireRouteRole(request, "/events", "loader");
   const encoder = new TextEncoder();
   let unsubscribe: () => void = () => {};
   let heartbeat: ReturnType<typeof setInterval> | undefined;

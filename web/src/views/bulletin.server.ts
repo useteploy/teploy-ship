@@ -30,6 +30,7 @@ import { currentUser } from "../lib/session.server.js";
 import { redirect } from "../lib/http.server.js";
 import { shipRuntime, webToken } from "../lib/store.server.js";
 import type { AdminBoard, AdminNote, BulletinAdminData, BulletinData, NoteView } from "./bulletin.js";
+import { requireRouteRole } from "../lib/route-access.server.js";
 
 /**
  * L6 — server half of the Bulletin.
@@ -341,6 +342,7 @@ async function adminBoard(bulletin: BulletinStore, board: BulletinBoard): Promis
 }
 
 export async function adminLoader({ request }: { request: Request }): Promise<BulletinAdminData> {
+  await requireRouteRole(request, "/bulletin-admin", "loader");
   const [bulletin, runtime, me] = await Promise.all([bulletinStore(), shipRuntime(), currentUser(request)]);
   const url = new URL(request.url);
   const slug = url.searchParams.get("board") ?? "";
@@ -402,6 +404,7 @@ function adminBack(slug: string, params: string): Response {
 }
 
 export async function adminAction({ request }: { request: Request }): Promise<Response> {
+  await requireRouteRole(request, "/bulletin-admin", "action");
   const [bulletin, runtime, me] = await Promise.all([bulletinStore(), shipRuntime(), currentUser(request)]);
   const form = await request.formData();
   const intent = String(form.get("intent") ?? "");

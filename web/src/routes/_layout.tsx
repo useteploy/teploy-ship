@@ -4,6 +4,7 @@ import faviconUrl from "../favicon.svg?url";
 import type { MiddlewareFn } from "@neutron-build/core";
 
 import { currentUser, requiredRole, roleAllows, sameOrigin, isMutating, renewedSessionCookie, SESSION_COOKIE } from "../lib/session.server.js";
+import { gatePath } from "../lib/route-access.server.js";
 import { withSecurityHeaders } from "../lib/response-security.server.js";
 import { teployNav } from "../lib/nav.server.js";
 import type { NavData } from "../lib/nav.server.js";
@@ -70,7 +71,16 @@ const authorizeRequest: MiddlewareFn = async (request, _context, next) => {
   // key are set (any family env spelling — observe.server.ts resolves it).
   installProcessErrorHooks();
   const url = new URL(request.url);
-  const path = url.pathname;
+  // Decide on the path the ROUTER dispatches on, not on the bytes the client
+  // sent (SHIP-01). The framework hands middleware the raw request and matches
+  // routes on a decoded, slash-collapsed path, so `/%73ettings` and
+  // `//settings` both ran the Settings route while this gate, comparing the raw
+  // string, took them for an unclassified page. Anything gatePath cannot
+  // reduce to one unambiguous path is refused here, before any exemption.
+  const path = gatePath(url.pathname);
+  if (path === null) {
+    return new Response("Bad Request", { status: 400, headers: { "content-type": "text/plain; charset=utf-8" } });
+  }
   // /hooks/* authenticates via webhook HMAC inside the route, not bearer;
   // /health is the family-convention liveness probe (teploy's deploy gate
   // polls it before any login could exist).
