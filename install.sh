@@ -4,10 +4,18 @@
 #   ./install.sh --host 203.0.113.10 --user root mybox
 #
 # In order: provisions the server (teploy setup), collects secrets — generating
-# the ones it can, asking for the two it cannot — and deploys Ship, whose image
-# compiles from this checkout on the server (no local Node/pnpm build).
+# the ones it can, asking for the two it cannot — and deploys Ship with a
+# PostgreSQL store, whose image compiles from this directory on the server (no
+# local Node/pnpm build; a git clone or an unpacked release tarball both work).
 # Sandbox images are built only when a daemon is installed. See QUICKSTART
 # for measured timings; the latest minimal path still needs a clean timed pass.
+#
+# TRUST MODEL without a sandbox daemon (the default): agent commands run
+# INSIDE the worker container, as the worker's own user, next to every secret
+# the worker holds (git token, model key, database password). Ship refuses
+# tasks from webhooks/Slack/issues there, but a task YOU type still reads
+# repository content and web pages a prompt injection could hide in. Install
+# teploy-sandbox (docs/DEPLOY.md section 3) before trusting it with more.
 #
 # Moving to a SECOND host — the thing that was impossible before this script,
 # because Ship's secrets lived only in teploy's age store on one server and
@@ -28,7 +36,10 @@
 # than standing up a whole second Ship:
 #
 #   teploy-ship join http://<old-ip>:7460 --secrets ship.env \
-#     --nucleus-url postgres://nucleus:<pw>@<old-ip>:5432/nucleus --start
+#     --nucleus-url postgres://ship@<old-ip>:5432/ship --start
+#
+# (NUCLEUS_URL is the store URL's historical name; it names the PostgreSQL
+# store too. The password travels as PGPASSWORD in the bundle.)
 #
 # Options:
 #   --host <addr>            server address (required)
@@ -48,6 +59,11 @@
 #   --skip-images            do not build the sandbox images
 #   --skip-setup             the server is already provisioned for teploy
 #   --yes                    never prompt; fail instead
+#
+# Ship on Nucleus is no longer installed by this script (production left it
+# on 2026-10-14). An existing Nucleus install is detected and left alone:
+# docs/MIGRATE_STORE.md moves it, or keep deploying it by hand (the Nucleus
+# block in teploy.example.yml).
 set -euo pipefail
 
 repo="$(cd "$(dirname "$0")" && pwd -P)"
@@ -87,7 +103,7 @@ while [ $# -gt 0 ]; do
     --skip-images) skip_images=1; shift ;;
     --skip-setup) skip_setup=1; shift ;;
     -y|--yes) assume_yes=1; shift ;;
-    -h|--help) sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,/^set -euo pipefail$/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) die "unknown option: $1" ;;
     *) server="$1"; shift ;;
   esac
@@ -181,14 +197,15 @@ if [ -n "${export_only}" ]; then
     {
       echo ""
       echo "# Non-secret worker settings, read from container ${worker}."
-      echo "# NUCLEUS_URL below is almost certainly a docker network alias, which"
-      echo "# only THIS box can resolve. teploy-ship join refuses it and says so;"
-      echo "# pass --nucleus-url with the controller's tailnet address."
+      echo "# NUCLEUS_URL below (the store URL, PostgreSQL or Nucleus) is almost"
+      echo "# certainly a docker network alias, which only THIS box can resolve."
+      echo "# teploy-ship join refuses it and says so; pass --nucleus-url with the"
+      echo "# controller's tailnet address."
     } >> "${export_only}"
     # Only the families Ship reads. A blanket dump would carry PATH, NODE_VERSION
     # and the container's own TEPLOY_SHIP_STATE=/data into a bundle that is then
     # sourced on a host where none of them are true.
-    remote "docker inspect ${worker} --format '{{range .Config.Env}}{{println .}}{{end}}'" \
+    remote "docker inspect '${worker}' --format '{{range .Config.Env}}{{println .}}{{end}}'" \
       | grep -E '^(NUCLEUS_URL|AI_GATEWAY_URL|OBSERVE_[A-Z_]*|SHIP_[A-Z0-9_]*|ANTHROPIC_BASE_URL)=' \
       | while IFS= read -r line; do
           key="${line%%=*}"
@@ -198,6 +215,16 @@ if [ -n "${export_only}" ]; then
           printf '%s\n' "${line}" >> "${export_only}"
           note "${key}"
         done
+    # The store's dialect is a command-line flag (`worker --store postgres`),
+    # not an env var, so it is not in the block above. join needs it to start
+    # the worker on the same store — a hard-coded nucleus once broke every
+    # KV call against a PostgreSQL controller.
+    store="$(remote "docker inspect '${worker}' --format '{{range .Config.Cmd}}{{println .}}{{end}}'" \
+      | sed -n '/^--store$/{n;p;}' | head -n 1 || true)"
+    if [ -n "${store}" ] && ! grep -q '^SHIP_STORE=' "${export_only}"; then
+      printf 'SHIP_STORE=%s\n' "${store}" >> "${export_only}"
+      note "SHIP_STORE (${store}, from the worker's command line)"
+    fi
   fi
 
   chmod 600 "${export_only}"
@@ -206,8 +233,19 @@ if [ -n "${export_only}" ]; then
   note "  ./install.sh --secrets-file ${export_only} --host <new-ip> --user <user> <name>"
   note "or join an EXISTING fleet as a second worker, without deploying a dashboard:"
   note "  teploy-ship join http://${host}:7460 --secrets ${export_only} \\"
-  note "    --nucleus-url postgres://nucleus:<pw>@${host}:5432/nucleus"
+  note "    --nucleus-url postgres://ship@${host}:5432/ship"
+  note "  (the store publishes no host port by default: join explains what to open)"
   exit 0
+fi
+
+# An existing Ship on Nucleus. This script deploys PostgreSQL now, and doing
+# that over a Nucleus install would point Ship at an empty database while its
+# runs, projects and users sit in the old store. Stop and say what to do.
+if remote 'docker inspect ship-nucleus >/dev/null 2>&1' 2>/dev/null; then
+  die "${host} runs Ship on Nucleus (container ship-nucleus). install.sh now deploys a PostgreSQL store and will not
+switch an existing install underneath its data. Move it first (docs/MIGRATE_STORE.md: scripts/migrate-store.mjs
+copies the data), or keep deploying it by hand from a Nucleus teploy.yml (the commented block in
+teploy.example.yml)."
 fi
 
 if [ -f "${secrets_file}" ]; then
@@ -232,8 +270,11 @@ ask() {
 
 say "secrets"
 # Generated, never copied between installs: a second Ship has no business
-# sharing the first one's dashboard token or webhook HMAC.
-for key in SHIP_WEB_TOKEN SHIP_SESSION_SECRET SHIP_WEBHOOK_SECRET; do
+# sharing the first one's dashboard token or webhook HMAC. SHIP_CONFIG_KEY
+# seals credentials Ship stores (the Akiroo pull token; harness credentials
+# are refused without it) — unset, they would sit in the store in the clear.
+# Keep it with the bundle: values sealed under it are unreadable without it.
+for key in SHIP_WEB_TOKEN SHIP_SESSION_SECRET SHIP_WEBHOOK_SECRET SHIP_CONFIG_KEY; do
   if sec_get "${key}" >/dev/null; then
     note "${key}: from bundle"
   else
@@ -241,6 +282,26 @@ for key in SHIP_WEB_TOKEN SHIP_SESSION_SECRET SHIP_WEBHOOK_SECRET; do
     note "${key}: generated"
   fi
 done
+
+# The PostgreSQL password, under the two names that read it: SHIP_DB_PASSWORD
+# for the accessory (POSTGRES_PASSWORD: secret:SHIP_DB_PASSWORD in
+# teploy.example.yml) and PGPASSWORD for web and worker (the store URL stays
+# password-free). Postgres applies it only when it first creates its data
+# directory, so a re-run must keep the one already in use: from the bundle,
+# else from the server, and only on a server without a database, a new one.
+db_password="$(sec_get SHIP_DB_PASSWORD || sec_get PGPASSWORD || true)"
+if [ -n "${db_password}" ]; then
+  note "SHIP_DB_PASSWORD: from bundle"
+elif remote 'docker inspect ship-postgres >/dev/null 2>&1' 2>/dev/null; then
+  db_password="$(tp secret get SHIP_DB_PASSWORD 2>/dev/null | tail -n 1 || true)"
+  [ -n "${db_password}" ] || die "${host} already runs ship-postgres, but its password is in neither ${secrets_file} nor the server's secret store. Restore the bundle (--secrets-file) rather than letting this script generate a password the existing database would refuse."
+  note "SHIP_DB_PASSWORD: from ${host}'s secret store"
+else
+  db_password="$(openssl rand -hex 32)"
+  note "SHIP_DB_PASSWORD: generated"
+fi
+sec_put SHIP_DB_PASSWORD "${db_password}"
+sec_put PGPASSWORD "${db_password}"
 if [ -n "${git_token}" ]; then sec_put SHIP_GIT_TOKEN "${git_token}"; fi
 if [ -n "${github_token}" ]; then sec_put SHIP_GITHUB_TOKEN "${github_token}"; fi
 # An Anthropic-compatible endpoint takes the key as AI_GATEWAY_KEY: Ship's
@@ -283,14 +344,17 @@ sandbox_url=""
 sandbox_token=""
 if remote 'systemctl is-active --quiet teploy-sandbox' 2>/dev/null; then
   sandbox_url="http://172.18.0.1:7439"
-  sandbox_token="$(remote 'sudo -n cat /var/lib/teploy-sandbox/token 2>/dev/null || cat /var/lib/teploy-sandbox/token' | tr -d '\r\n')"
+  sandbox_token="$(remote 'sudo -n cat /var/lib/teploy-sandbox/token 2>/dev/null || cat /var/lib/teploy-sandbox/token' 2>/dev/null | tr -d '\r\n' || true)"
   say "sandbox daemon: running"
   [ -n "${sandbox_token}" ] || note "WARNING: could not read /var/lib/teploy-sandbox/token — set SHIP_SANDBOX_TOKEN yourself"
 else
   say "sandbox daemon: NOT installed"
   note "Ship will run operator-typed tasks inside the worker container and REFUSE"
   note "tasks arriving from webhooks/Slack/issues, which need an isolated executor."
-  note "docs/DEPLOY.md section 3 installs teploy-sandbox; re-run this afterwards."
+  note "Without one, agent commands run AS THE WORKER, beside every secret it holds"
+  note "(git token, model key, database password) — a prompt injection in a repo or"
+  note "page a task reads can reach them. docs/DEPLOY.md section 3 installs"
+  note "teploy-sandbox; re-run this afterwards."
 fi
 
 image="node:22"
@@ -345,7 +409,9 @@ say "writing teploy.install.yml"
   fi
   echo "  SHIP_REPO_ALLOWLIST: \"${allowlist}\""
   echo "  SHIP_EMBED_MODEL: \"\""
-  echo "  OBSERVE_URL: \"\""
+  # OBSERVE_ENDPOINT is the family's standard name (OBSERVE_URL, the old one,
+  # still works on installs that set it).
+  echo "  OBSERVE_ENDPOINT: \"\""
   echo "  OBSERVE_SERVICE: \"\""
   echo "  OBSERVE_REPO: \"\""
   echo "  SHIP_TELEMETRY: \"\""
@@ -371,7 +437,15 @@ say "writing teploy.install.yml"
 install_stage=$(mktemp -d "${TMPDIR:-/tmp}/ship-install.XXXXXXXX")
 trap 'rm -rf -- "${install_stage}"' EXIT
 bash "${repo}/deploy/stage-install.sh" "${repo}" "${install_stage}"
-install_version=$(git -C "${repo}" rev-parse --short HEAD)
+# The deploy's version label: the git revision in a clone; in an unpacked
+# release tarball (no .git) the package version plus a timestamp, so two
+# deploys of the same tarball are still told apart.
+if install_version="$(git -C "${repo}" rev-parse --short HEAD 2>/dev/null)"; then
+  :
+else
+  pkg_version="$(sed -n 's/^  "version": "\([^"]*\)",$/\1/p' "${repo}/package.json" | head -n 1)"
+  install_version="${pkg_version:-source}-$(date -u +%Y%m%d%H%M%S)"
+fi
 
 say "setting secrets on ${server}"
 args=()
@@ -396,15 +470,19 @@ say "Ship is up"
 note "dashboard  http://${host}:7460"
 note "login      the SHIP_WEB_TOKEN in ${secrets_file}"
 note ""
-note "Firewall it — ingress: host publishes 7460 with no TLS:"
-note "  ufw allow from 100.64.0.0/10 to any port 7460"
+note "Firewall it — ingress: host publishes 7460 on every interface with no TLS,"
+note "and Docker-published ports bypass ordinary ufw rules: use a Docker-aware"
+note "firewall (docs/DEPLOY.md) or bind the port to a private address."
 note ""
 if [ -z "${allowlist}" ]; then
-  note "SHIP_REPO_ALLOWLIST is unset, so a repo URL is REFUSED until you add the"
+  note "SHIP_REPO_ALLOWLIST is unset: a repo URL you type yourself is allowed, but"
+  note "one arriving from a webhook, Slack or an issue is REFUSED until you add the"
   note "project on the dashboard's Projects page (or pass --allow next time)."
   note ""
 fi
-note "First run:"
-note "  teploy-ship enqueue \"fix the failing test\" --repo <clone-url>"
+note "First run: open the dashboard and compose the task on the Inbox. From a"
+note "terminal, the CLI is inside the worker container (not on this machine):"
+note "  ssh ${ssh_user}@${host} 'docker exec \$(docker ps -qf name=ship-worker) node /app/dist/cli.js \\"
+note "    enqueue \"fix the failing test\" --repo <clone-url> --store postgres'"
 note "The test command is detected from the repo's own tree; override it per repo"
 note "on the Projects page when the guess is wrong."

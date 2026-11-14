@@ -143,8 +143,22 @@ test("flags win over the bundle", () => {
   assert.equal(result.env.SHIP_MODEL, "anthropic/claude-sonnet-5");
 });
 
-test("the worker is planned onto the shared store, always", () => {
-  assert.equal(plan().env.SHIP_STORE, "nucleus");
+// SHIP-03: join used to hard-code SHIP_STORE=nucleus and `worker --store
+// nucleus`, so against a PostgreSQL controller every KV and stream call failed
+// (`function kv_setnx … does not exist`). The store is now stated or asked.
+test("the store is the one stated: --store over the bundle's SHIP_STORE, never a hard-coded nucleus", () => {
+  const fromBundle = planJoin({ controller: "http://c:7460", bundle: { ...parseEnvFile(BUNDLE), SHIP_STORE: "postgres" } });
+  assert.equal(fromBundle.store, "postgres");
+  assert.equal(fromBundle.env.SHIP_STORE, "postgres");
+  const flagWins = planJoin({ controller: "http://c:7460", bundle: { ...parseEnvFile(BUNDLE), SHIP_STORE: "postgres" }, store: "nucleus" });
+  assert.equal(flagWins.store, "nucleus");
+  assert.equal(flagWins.env.SHIP_STORE, "nucleus");
+});
+
+test("an unstated store is left unstated by the plan, not guessed", () => {
+  const result = plan();
+  assert.equal(result.store, undefined);
+  assert.equal(result.env.SHIP_STORE, undefined);
 });
 
 test("a trailing slash on the controller URL never doubles up", () => {
@@ -198,13 +212,16 @@ const HEALTHY = {
   "https://api.github.com/user": { status: 200, body: JSON.stringify({ login: "im-tyler" }) },
 };
 
+const POSTGRES_VERSION = "PostgreSQL 17.6 (Debian 17.6-1.pgdg120+1) on x86_64-pc-linux-gnu, compiled by gcc";
+const NUCLEUS_VERSION = "PostgreSQL 16.0 (Nucleus 1.1.1)";
+
 const deps = (over: Partial<CheckDeps> & { planOver?: Partial<Parameters<typeof planJoin>[0]> } = {}): CheckDeps => ({
   plan: plan({
     ...over.planOver,
     overrides: { NUCLEUS_URL: "postgres://nucleus:pw@100.76.150.126:5432/nucleus", ...over.planOver?.overrides },
   }),
   fetch: fakeFetch(HEALTHY),
-  pingStore: async () => {},
+  pingStore: async () => POSTGRES_VERSION,
   detect: async () => ({ colocated: [], unknown: [] }),
   env: {},
   ...over,
@@ -253,11 +270,56 @@ test("an alias that DOES resolve is not refused — it is called what it is", as
   // A box already on the controller's docker network resolves ship-nucleus
   // fine. Refusing something that demonstrably works teaches an operator that
   // the tool guesses; the honest answer is that it works and buys nothing.
-  const checks = await runJoinChecks({ ...deps(), plan: plan(), pingStore: async () => {} });
+  const checks = await runJoinChecks({ ...deps(), plan: plan(), pingStore: async () => POSTGRES_VERSION });
   const store = by(checks, "store");
   assert.equal(store.status, "warn");
   assert.match(store.detail, /no redundancy|buys no redundancy/);
   assert.equal(joinReady(checks), true);
+});
+
+test("an unstated store is settled by the engine's own answer — PostgreSQL", async () => {
+  const d = deps();
+  const checks = await runJoinChecks(d);
+  assert.equal(by(checks, "store-kind").status, "ok");
+  assert.match(by(checks, "store-kind").detail, /identifies as postgres/);
+  assert.equal(d.plan.store, "postgres", "the worker will be started with --store postgres");
+  assert.equal(d.plan.env.SHIP_STORE, "postgres");
+});
+
+test("an unstated store is settled by the engine's own answer — Nucleus stays a working opt-in", async () => {
+  const d = deps({ pingStore: async () => NUCLEUS_VERSION });
+  const checks = await runJoinChecks(d);
+  assert.equal(joinReady(checks), true, formatChecks(checks));
+  assert.equal(d.plan.store, "nucleus");
+});
+
+test("a bundle that says nucleus against a PostgreSQL engine fails HERE, not as kv_setnx on every call", async () => {
+  const d = deps({ planOver: { bundle: { ...parseEnvFile(BUNDLE), SHIP_STORE: "nucleus" } } });
+  const checks = await runJoinChecks(d);
+  const kind = by(checks, "store-kind");
+  assert.equal(kind.status, "fail");
+  assert.match(kind.detail, /store nucleus selected but the engine identifies as postgres/);
+  assert.match(kind.fix ?? "", /--store postgres/);
+  assert.equal(joinReady(checks), false);
+});
+
+test("a stated store that matches the engine passes", async () => {
+  const checks = await runJoinChecks(deps({ planOver: { store: "postgres" } }));
+  assert.equal(by(checks, "store-kind").status, "ok");
+  assert.equal(joinReady(checks), true, formatChecks(checks));
+});
+
+test("a file store in the bundle is refused: a worker needs a shared store", async () => {
+  const checks = await runJoinChecks(deps({ planOver: { bundle: { ...parseEnvFile(BUNDLE), SHIP_STORE: "file" } } }));
+  assert.equal(by(checks, "store-kind").status, "fail");
+  assert.equal(joinReady(checks), false);
+});
+
+test("an unstated store whose engine will not say what it is fails rather than guessing", async () => {
+  const checks = await runJoinChecks(deps({ pingStore: async () => {} }));
+  const kind = by(checks, "store-kind");
+  assert.equal(kind.status, "fail");
+  assert.match(kind.fix ?? "", /--store postgres/);
 });
 
 test("a store that is addressable but unreachable fails without leaking the password", async () => {

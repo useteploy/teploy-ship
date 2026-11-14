@@ -668,7 +668,11 @@ test("the durable arm wakes a rate-limit park itself and the run finishes", asyn
     log: (line) => lines.push(line),
   });
   assert.equal(run.status, "finished", "the park must carry the run to completion, not end it");
-  assert.deepEqual(waits, [60_000], "one wake wait of the first backoff step");
+  // wakeAt is stamped a moment before the wait is computed against the real
+  // clock, so an elapsed millisecond (or several seconds on a loaded runner)
+  // shortens the wait. Exact equality with 60000 flaked as 59999.
+  assert.equal(waits.length, 1, "one wake wait");
+  assert.ok(waits[0] > 55_000 && waits[0] <= 60_000, `one wake wait of the first backoff step, got ${waits[0]}`);
   assert.equal(run.counts.rateLimitParks, 1, "the runlog counts the park");
   assert.ok(lines.some((l) => l.includes("rate-limited")), "the park narrates once per wait");
   assert.equal(run.counts.thinks >= 1, true);

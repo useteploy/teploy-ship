@@ -5,6 +5,7 @@ import { shipRuntime } from "./store.server.js";
 // is .server-stripped, so the client bundle never reaches the runtime through
 // it.
 import { DISCOVERY_PATH, discoveryDoc, ensureInstanceId } from "../../../dist/discovery.js";
+import { shipVersion } from "../../../dist/version.js";
 
 /**
  * Programme B — GET /.well-known/teploy.json (plan DASH_AUTOCONFIG 10.1):
@@ -68,7 +69,8 @@ export async function handleDiscovery(deps: DiscoveryDeps = {}): Promise<Respons
     // /health's store-unreachable 503.
     return json(503, { title: `instance id unavailable: ${error instanceof Error ? error.message : String(error)}` });
   }
-  const body = JSON.stringify(discoveryDoc(deps.env ?? process.env, id));
+  const env = deps.env ?? process.env;
+  const body = JSON.stringify(discoveryDoc(env, id, shipVersion(env)));
   return new Response(body, {
     status: 200,
     headers: { "content-type": "application/json", "cache-control": "no-store" },

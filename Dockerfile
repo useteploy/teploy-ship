@@ -3,30 +3,41 @@
 #   docker run … teploy-ship worker   (executes durable runs)
 # Built by deploy/build-image.sh.
 #
-# The teploy CLI, built from a pinned SOURCE COMMIT (see the runtime stage for
+# The teploy CLI, from a checksum-pinned RELEASE (see the runtime stage for
 # why the image carries it at all).
 #
-# Why source, not the release download this used to be: the tailnet preview
-# mode (the 2026-09-24 preview ruling — `preview deploy --base-domain/--http-only/
-# --allow-ip`, advertised as the `preview-exposure` capability) landed in
-# teploy-cli de73a22, and no release carries it yet (latest v0.1.37). Ship
-# refuses a tailnet preview on a CLI without the capability, so a release pin
-# would leave SHIP_PREVIEW_TAILNET_IP unusable. Cutting a CLI release is the
-# owner's call, not a Ship deploy's — so the pin is a full commit SHA on the
-# public GitHub main, which is as content-addressed as a checksum, and the
-# build proves the capability before the image can exist.
-#
-# Go back to the checksum-verified release download (git history of this
-# file, pre-L8) once a release at or after TEPLOY_COMMIT exists.
-FROM golang:1.26-bookworm@sha256:a688600ca24f8a4d3ca77f95b0dd40704a9fc787c826660eb7ba0b641b8b175d AS teploy-cli
-ARG TEPLOY_COMMIT=2041c615a8a467ef9173d9ba8698a0d73e80a26a
-ARG TEPLOY_VERSION_LABEL=0.1.37-next.2041c61
+# 2026-09-24 to 2026-11: this stage built the CLI from a pinned source commit
+# (de73a22's tailnet preview mode — `preview deploy --base-domain/--http-only/
+# --allow-ip`, the `preview-exposure` capability — was in no release yet).
+# v0.1.55 carries it, so the image is back on the release download. The
+# sha256 of each archive is pinned HERE, not read from the release's own
+# checksums.txt: a checksum fetched from the same place as the archive proves
+# only that the download was not truncated. To bump: take the two
+# teploy_linux_*.tar.gz lines from the new release's checksums.txt.
+# Ship's argv against the CLI (build, preview deploy/list/destroy, deploy,
+# rollback, status, version --json) was checked against v0.1.55's flags.
+# Same pinned base as the other stages (a Debian bookworm slim), so no new
+# digest enters the build; curl is installed in this throwaway stage only.
+FROM node:22-slim@sha256:f32b81066cde10a75dbac96646099533316d94bac4150c55da1636e1f0ffdc46 AS teploy-cli
+ARG TEPLOY_VERSION=0.1.55
+ARG TEPLOY_SHA256_AMD64=fbcb8cb5378c163b50c539452025fb3ce58b41d403d6dc2f6be537be41dbee39
+ARG TEPLOY_SHA256_ARM64=48d83c2e38921f20dd4245d23778fe00ad5c830d6963268dc976ab6d97c127ff
+ARG TARGETARCH
 RUN set -eux; \
-    git clone --quiet --filter=blob:none --no-checkout https://github.com/useteploy/teploy-cli /src; \
-    cd /src; \
-    git checkout --quiet --detach "${TEPLOY_COMMIT}"; \
-    test "$(git rev-parse HEAD)" = "${TEPLOY_COMMIT}"; \
-    CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${TEPLOY_VERSION_LABEL}" -o /out/teploy ./cmd/teploy; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) arch=amd64; sum="${TEPLOY_SHA256_AMD64}" ;; \
+      arm64) arch=arm64; sum="${TEPLOY_SHA256_ARM64}" ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    cd /tmp; \
+    curl -fsSL -o teploy.tar.gz "https://github.com/useteploy/teploy-cli/releases/download/v${TEPLOY_VERSION}/teploy_linux_${arch}.tar.gz"; \
+    # Verify before extracting, not after.
+    echo "${sum}  teploy.tar.gz" | sha256sum -c -; \
+    tar -xzf teploy.tar.gz teploy; \
+    install -D -m 0755 teploy /out/teploy; \
+    /out/teploy version --json | grep -q "\"version\":\"${TEPLOY_VERSION}\""; \
     /out/teploy version --json | grep -q '"preview-exposure"'
 
 # ---------------------------------------------------------------------------
@@ -68,11 +79,21 @@ COPY web/package.json web/pnpm-lock.yaml web/
 RUN pnpm --dir web install --frozen-lockfile
 
 # The CLI: same command CI runs, `tsc` against the copied src/ and tsconfig.
+#
+# Then dist/VERSION, the one place the running version is read from
+# (src/version.ts: /health, the discovery document, `teploy-ship --version`).
+# The release workflow and deploy/build-image.sh pass SHIP_VERSION; a source
+# build through `teploy deploy` cannot pass a build arg, and .git never enters
+# the build context, so it falls back to package.json's version — real code,
+# not "dev" (SHIP-05: every published image up to 0.5.0 reported "dev").
 COPY tsconfig.json ./
 COPY src/ src/
+ARG SHIP_VERSION=""
 RUN pnpm run build \
   && test -f dist/cli.js \
-  && test -f dist/worker.js
+  && test -f dist/worker.js \
+  && node -e 'const v = (process.env.SHIP_VERSION || "").trim(); const out = v !== "" && v !== "dev" ? v.replace(/^v(?=[0-9])/, "") : require("./package.json").version; require("fs").writeFileSync("dist/VERSION", out + "\n"); console.log("ship version: " + out)' \
+  && test -s dist/VERSION
 
 # The web app: `neutron-ts build` per web/package.json (which also drops
 # dist/index.html — the runtime stage ships web/index.html from source for the
@@ -127,8 +148,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
 #
 # Needs >= v0.1.36 (host-bind volume keys for the delivery-copy mounts, the
 # known_hosts mismatch diagnostics) and, for tailnet previews, the
-# `preview-exposure` capability — which is why it is built from source in the
-# `teploy-cli` stage above rather than downloaded from a release.
+# `preview-exposure` capability — the `teploy-cli` stage above refuses a
+# binary without it.
 COPY --from=teploy-cli /out/teploy /usr/local/bin/teploy
 # Prove the binary runs here rather than discovering it at deploy time — a
 # binary that could not start inside a slim base is a mistake this stack has
@@ -174,11 +195,10 @@ RUN rm -rf web/dist/.neutron-server-bundle.json web/dist/server
 
 ENV NODE_ENV=production
 ENV SHIP_WEB_HOST=0.0.0.0
-# Served by /health and /.well-known/teploy.json. Passed by
-# deploy/build-image.sh when it builds a versioned tag; a source build via
-# `teploy deploy` leaves it at "dev" — the same answer /health gives today.
-ARG SHIP_VERSION=dev
-ENV SHIP_VERSION=${SHIP_VERSION}
+# No ENV SHIP_VERSION: the version is dist/VERSION, written by the builder
+# stage (an env var set here would shadow it, and used to say "dev"). Prove
+# the CLI reads it before the image can exist.
+RUN node dist/cli.js --version
 # durable state lives on a volume in file-store mode; nucleus mode needs none
 ENV TEPLOY_SHIP_STATE=/data
 VOLUME /data

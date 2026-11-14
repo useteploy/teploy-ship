@@ -15,8 +15,11 @@
 #
 # Secrets are never in this file. Set them with `teploy secret set`
 # (QUICKSTART step 3): SHIP_WEB_TOKEN, SHIP_SESSION_SECRET,
-# SHIP_WEBHOOK_SECRET, SHIP_GIT_TOKEN, and the model key (ANTHROPIC_API_KEY, or
-# AI_GATEWAY_KEY for an Anthropic-compatible endpoint — see env below).
+# SHIP_WEBHOOK_SECRET, SHIP_CONFIG_KEY, SHIP_GIT_TOKEN, the model key
+# (ANTHROPIC_API_KEY, or AI_GATEWAY_KEY for an Anthropic-compatible endpoint —
+# see env below), and the database password TWICE under two names, same
+# value: SHIP_DB_PASSWORD (the postgres accessory reads it) and PGPASSWORD
+# (web and worker read it; the URL below stays password-free).
 app: ship
 # CHANGE: the box you registered in step 1 (a servers.yml name or a raw IP).
 server: mybox
@@ -34,27 +37,53 @@ platform: linux/amd64
 # teploy's processes are one command string each (not maps). The image's
 # entrypoint is `node dist/cli.js`, so these are teploy-ship subcommands.
 processes:
-  web: web --store nucleus --port 7460
-  worker: worker --store nucleus --interval 5
+  web: web --store postgres --port 7460
+  worker: worker --store postgres --interval 5
 
 memory: 1g
 
-# The store. Reachable only on the app's docker network (alias ship-nucleus);
-# NUCLEUS_ALLOW_NO_AUTH is safe for that reason and no other — do not publish
-# its port. Pinned: bump deliberately (teploy.yml explains why).
+# The store: PostgreSQL 17, the official pgvector build (so the optional
+# code-index embeddings, SHIP_EMBED_MODEL, work unchanged), pinned — a storage
+# engine is the last thing that should change underneath you unannounced.
+# Production moved here from Nucleus on 2026-10-14; this is the same shape as
+# teploy.yml and the community template. Password authentication is on, and it
+# publishes no host port: it is reachable only on the teploy docker network
+# (alias ship-postgres).
 accessories:
-  nucleus:
-    image: ghcr.io/neutron-build/nucleus:v1.1.1
+  postgres:
+    image: pgvector/pgvector:0.8.0-pg17
     port: 5432
-    memory: 1500m
+    memory: 1g
     env:
-      NUCLEUS_ALLOW_NO_AUTH: "1"
-      NUCLEUS_MAX_MEMORY_MB: "1024"
+      POSTGRES_DB: ship
+      POSTGRES_USER: ship
+      POSTGRES_PASSWORD: secret:SHIP_DB_PASSWORD
     volumes:
-      nucleus-data: /data
+      pgdata: /var/lib/postgresql/data
+
+# NUCLEUS (opt-in, legacy). Ship still speaks Nucleus (`--store nucleus`) for
+# installs that run on it; nothing new should start there. To deploy on it
+# anyway, replace the accessory above with this one, set both processes to
+# `--store nucleus`, and set NUCLEUS_URL below to
+# postgres://nucleus@ship-nucleus:5432/nucleus (no password: the accessory
+# runs with NUCLEUS_ALLOW_NO_AUTH, so anything on the docker network can read
+# and write the store). Moving an existing Nucleus install to PostgreSQL:
+# docs/MIGRATE_STORE.md.
+#   nucleus:
+#     image: ghcr.io/neutron-build/nucleus:v1.1.1
+#     port: 5432
+#     memory: 1500m
+#     env:
+#       NUCLEUS_ALLOW_NO_AUTH: "1"
+#       NUCLEUS_MAX_MEMORY_MB: "1024"
+#     volumes:
+#       nucleus-data: /data
 
 env:
-  NUCLEUS_URL: postgres://nucleus@ship-nucleus:5432/nucleus
+  # The store URL for BOTH stores, under its historical name. The password is
+  # not in it: it rides PGPASSWORD (an app secret), so URI delimiters in a
+  # password cannot change where the connection goes.
+  NUCLEUS_URL: postgres://ship@ship-postgres:5432/ship?sslmode=disable
   # CHANGE: the forge origin (or owner prefix) your SHIP_GIT_TOKEN may be sent
   # to. Without it every repository URL is refused, deliberately. Adding a
   # repo on the dashboard's Projects page allows it too.

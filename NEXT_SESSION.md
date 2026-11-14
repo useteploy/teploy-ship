@@ -16,8 +16,8 @@ Private detail: `../_internal/SHIP_SESSION_STATE_2026-10-17-design.md` (append-o
   skills (Q4-a/b), look recordings (Q3b/c, after six live fixes), Observe EV1 issue alerts (deployed to Observe).
 - **Merged, not yet live-proven:** EV2 event rules + EV4 vendor adapters (flag off), EV5 incident evidence,
   EV6 repro-test gate (flag off), DS1 stacked PRs + UI (flag on; no soak yet), snapshot GC.
-- **Open PRs under security review (do not merge until a Claude review passes):** #135 H2 credential store
-  (round 3 in progress), #145 H3 ACP driver (round 2 in progress).
+- **PRs #135 (H2 credential store) and #145 (H3 ACP driver)** were merged on 2026-10-18 and
+  shipped in 0.4.0; no PRs are open (corrected 2026-11-14).
 - **Next:** finish H2/H3 reviews; DS1 live soak; H4 Gemini on a real binary (needs a Gemini API key in the
   credential store); EV3 built-ins in shadow; EV7/X4' after A9; G1 parity run on the frozen task set.
 - **Gotchas:** the worker-container CLI writes to a file store, use the web API (`examples/http-client.mjs`,

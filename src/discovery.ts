@@ -89,11 +89,16 @@ export function discoveryCapabilities(env: NodeJS.ProcessEnv): string[] {
   return caps;
 }
 
-/** The document for this process. `instanceId` comes from the store (below). */
-export function discoveryDoc(env: NodeJS.ProcessEnv, instanceId: string): DiscoveryDoc {
+/**
+ * The document for this process. `instanceId` comes from the store (below).
+ * `version` is injected (src/version.ts `shipVersion()`, which reads the
+ * image's dist/VERSION) so this module stays free of node imports; without it
+ * the document falls back to SHIP_VERSION, else "dev".
+ */
+export function discoveryDoc(env: NodeJS.ProcessEnv, instanceId: string, version?: string): DiscoveryDoc {
   return {
     product: "ship",
-    version: (env.SHIP_VERSION ?? "").trim() !== "" ? env.SHIP_VERSION!.trim() : "dev",
+    version: version ?? ((env.SHIP_VERSION ?? "").trim() !== "" ? env.SHIP_VERSION!.trim() : "dev"),
     instance_id: instanceId,
     dashboard_url: discoveryDashboardURL(env),
     capabilities: discoveryCapabilities(env),

@@ -123,8 +123,7 @@ may negotiate** — an ed25519-only `known_hosts` reads as exactly this
 mismatch even though your key is fine. Add the missing algorithms' keys for
 the host (the file must also be readable by uid 1000 in the container). teploy
 CLI v0.1.37+ names the missing algorithms in the error; the container image
-builds the CLI from a pinned commit newer than that (Dockerfile
-`TEPLOY_COMMIT`), so it does.
+carries v0.1.55 (Dockerfile `TEPLOY_VERSION`), so it does.
 
 ## Deploys and upgrades
 

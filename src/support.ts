@@ -52,6 +52,7 @@ import { auditRow } from "./audit.js";
 import type { RunMeta } from "./run-store.js";
 import type { WorkerInfo } from "./fleet.js";
 import { buildFingerprint } from "./step-fingerprint.js";
+import { shipVersion } from "./version.js";
 import { computeHealth, healthWarnings } from "./selfwatch.js";
 import { SECRET_PATTERNS, redactionMarker } from "./secret-patterns.js";
 
@@ -420,7 +421,9 @@ export function defaultReadPackage(): { version: string; dependencies: Record<st
     const raw = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8");
     const pkg = JSON.parse(raw) as { version?: string; dependencies?: Record<string, string> };
     if (typeof pkg.version !== "string") return undefined;
-    return { version: pkg.version, dependencies: pkg.dependencies ?? {} };
+    // The image's runtime package.json is a deploy manifest with a placeholder
+    // version; the release is what src/version.ts resolves (dist/VERSION).
+    return { version: shipVersion(), dependencies: pkg.dependencies ?? {} };
   } catch {
     return undefined;
   }

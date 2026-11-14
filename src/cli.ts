@@ -58,6 +58,8 @@ import { runAgent } from "./agent.js";
 import { refusalMessage } from "./publish-policy.js";
 import { defaultApprovalPolicy, resolveApprovalPolicy } from "./approval.js";
 import { secretEnvNames } from "./guard.js";
+import { shipVersion } from "./version.js";
+import { withDirectCredentialCheck } from "./model-credential.js";
 import { durableAgent, durableRecoveryInput, repoKeyOf, sandboxProvider } from "./durable.js";
 import { rateLimitParkInput } from "./rate-limit-park.js";
 import { isAskEvent } from "./ask.js";
@@ -111,6 +113,7 @@ import { bold, dim, green, promptApproval, red, renderEvent, renderUsage, yellow
 const USAGE = `teploy-ship — coding agent on your own stack
 
 Usage:
+  teploy-ship --version               print the version (the same one /health reports)
   teploy-ship run "<task>"            live run in the terminal (streamed, interactive approvals)
       [--model provider/model]        default SHIP_MODEL, else zai/glm-5.3
       [--sandbox <url> --sandbox-token <t> [--sandbox-image <img>] [--sandbox-network none|egress]]
@@ -194,8 +197,11 @@ Usage:
                                       join never fetches credentials over the network;
                                       you carry them. See src/join.ts for the reasoning.
       [--token <t>]                   the controller's SHIP_WEB_TOKEN (default: from the bundle)
-      [--nucleus-url <url>]           REQUIRED on a second box — the bundled one is a
-                                      docker alias only the controller's box can resolve
+      [--nucleus-url <url>]           the store URL (PostgreSQL or Nucleus). REQUIRED on a
+                                      second box — the bundled one is a docker alias only
+                                      the controller's box can resolve
+      [--store postgres|nucleus]      the store's dialect (default: the bundle's SHIP_STORE,
+                                      else whatever the engine identifies itself as)
       [--sandbox <url[,url]>]         sandbox daemons to add to SHIP_SANDBOX_URL (B2: a list)
       [--sandbox-token <t>] [--sandbox-image <img>]
       [--git-token <t>] [--github-token <t>] [--model <id>] [--allow <origins>]
@@ -451,9 +457,11 @@ function baseModel(modelId: string): ModelAdapter {
     }
     return createOpenAI({ baseURL: gatewayURL, apiKey: gatewayKey, provider: "gateway" })(modelId);
   }
+  // The OpenAI-shaped fallback's own missing-key error names OPENAI_API_KEY
+  // for every model; the wrapper names the variable that fixes THIS one.
   return modelId.startsWith("anthropic/")
     ? anthropic(modelId.slice("anthropic/".length), { cache: true })
-    : openai(modelId.replace(/^openai\//, ""));
+    : withDirectCredentialCheck(openai(modelId.replace(/^openai\//, "")), modelId);
 }
 
 /** Parse a numeric flag within a range, turning an ArgError into a clean CLI exit. */
@@ -505,9 +513,14 @@ async function joinCommand(rest: string[]): Promise<void> {
     fail(`cannot read ${secretsPath}: ${error instanceof Error ? error.message : String(error)}`);
   }
 
+  const storeFlag = args.flags.store as string | undefined;
+  if (storeFlag !== undefined && storeFlag !== "postgres" && storeFlag !== "nucleus") {
+    fail(`unknown --store: ${storeFlag} (a worker needs postgres or nucleus)`);
+  }
   const plan = planJoin({
     controller,
     bundle: parseEnvFile(bundleText),
+    ...(storeFlag !== undefined ? { store: storeFlag } : {}),
     ...(args.flags.sandbox !== undefined ? { addSandbox: args.flags.sandbox as string } : {}),
     overrides: {
       ...(args.flags["nucleus-url"] !== undefined ? { NUCLEUS_URL: args.flags["nucleus-url"] as string } : {}),
@@ -558,13 +571,26 @@ async function joinCommand(rest: string[]): Promise<void> {
     fetch: globalThis.fetch,
     pingStore: async (url) => {
       // A real connection and a real round trip. Nothing schema-shaped: join
-      // must never migrate a store it is only asking about.
+      // must never migrate a store it is only asking about. version() is what
+      // tells PostgreSQL from Nucleus when --store was not stated.
+      //
+      // The store password rides PGPASSWORD (the DSN stays password-free, as
+      // in teploy.example.yml), and the bundle is a file, not this process's
+      // environment — so ask with exactly the password the worker will have,
+      // neither the bundle-less shell's nor none at all.
+      const saved = process.env.PGPASSWORD;
+      if (plan.env.PGPASSWORD !== undefined) process.env.PGPASSWORD = plan.env.PGPASSWORD;
+      else delete process.env.PGPASSWORD;
       const { NucleusPgwire } = await import("./nucleus-pgwire.js");
       const db = new NucleusPgwire(url, `join-${hostname()}-${process.pid}`);
       try {
-        await db.query("SELECT 1");
+        const rows = await db.query("SELECT version() AS version");
+        const version = rows[0]?.version;
+        return typeof version === "string" ? version : undefined;
       } finally {
         await db.close().catch(() => {});
+        if (saved !== undefined) process.env.PGPASSWORD = saved;
+        else delete process.env.PGPASSWORD;
       }
     },
     ...(sandboxProbe !== undefined ? { sandboxProbe } : {}),
@@ -596,14 +622,16 @@ async function joinCommand(rest: string[]): Promise<void> {
   );
   process.stderr.write(`${green("verified")} — wrote ${path}\n${dim(summarisePlan(plan))}\n\n`);
 
+  // The store check settles plan.store or the join fails, so this is set.
+  const store = plan.store ?? "postgres";
   if (args.flags.start !== true) {
     process.stderr.write(
       `${bold("start the worker")}\n` +
-        `  set -a; . ${path}; set +a; teploy-ship worker --store nucleus\n\n` +
+        `  set -a; . ${path}; set +a; teploy-ship worker --store ${store}\n\n` +
         `${bold("or make it resident")} (systemd, so it survives a reboot)\n` +
         `  sudo tee /etc/systemd/system/teploy-ship-worker.service <<'UNIT'\n` +
         `  [Unit]\n  Description=Teploy Ship worker\n  After=network-online.target\n\n` +
-        `  [Service]\n  EnvironmentFile=${path}\n  ExecStart=${process.argv[1] ?? "teploy-ship"} worker --store nucleus\n` +
+        `  [Service]\n  EnvironmentFile=${path}\n  ExecStart=${process.argv[1] ?? "teploy-ship"} worker --store ${store}\n` +
         `  Restart=always\n  RestartSec=5\n\n  [Install]\n  WantedBy=multi-user.target\n  UNIT\n` +
         `  sudo systemctl enable --now teploy-ship-worker\n\n` +
         `${dim("or re-run with --start to run it in the foreground now.")}\n`,
@@ -612,7 +640,7 @@ async function joinCommand(rest: string[]): Promise<void> {
   }
 
   process.stderr.write(`${bold("starting the worker")}\n\n`);
-  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), "worker", "--store", "nucleus"], {
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), "worker", "--store", store], {
     stdio: "inherit",
     env: { ...process.env, ...plan.env },
   });
@@ -2691,6 +2719,12 @@ async function main(): Promise<void> {
     }
   }
   switch (command) {
+    case "--version":
+    case "-v":
+    case "version":
+      // The same answer /health and the discovery document give (src/version.ts).
+      process.stdout.write(`${shipVersion()}\n`);
+      return;
     case "run":
       return runCommand(rest);
     case "runs":

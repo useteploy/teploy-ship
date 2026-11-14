@@ -1563,6 +1563,14 @@ Desktop sync artifact). Fix when touched next: move `VOLUME /data` below the
 chown (one line). Left alone here deliberately — this slice is Programme B,
 and the quirk predates it by three weeks (7490a91, 2026-10-18).
 
+**Correction (2026-11-14, release evaluation):** the root-owned `/data` does
+NOT hold for the published image. The last layer of
+`ghcr.io/useteploy/teploy-ship:0.5.0` carries `data/` owned `1000:1000` —
+BuildKit keeps changes made to a path after its `VOLUME` instruction; the
+local failure above came from the legacy builder / Docker Desktop. Moving
+`VOLUME /data` below the chown is still the right one-line hygiene fix (so
+every builder agrees), but no shipped image is affected.
+
 Programme B in-image verification that DID pass locally (with a writable
 /data, `--user root`): `/setup` 200; `/.well-known/teploy.json` off → 404,
 on → the five-field document with the image-baked `SHIP_VERSION`, a stable

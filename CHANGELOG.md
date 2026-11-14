@@ -4,6 +4,43 @@ All notable changes to Teploy Ship are recorded here.
 
 ## [Unreleased]
 
+### Changed
+- **The install path sets up PostgreSQL, not Nucleus.** `teploy.example.yml`
+  (what `install.sh` deploys) runs a pinned `pgvector/pgvector:0.8.0-pg17`
+  accessory with password authentication and both processes on
+  `--store postgres` — the store production moved to on 2026-10-14.
+  `install.sh` generates the database password (as `SHIP_DB_PASSWORD` and
+  `PGPASSWORD`) and `SHIP_CONFIG_KEY`, writes `OBSERVE_ENDPOINT` rather than
+  the deprecated `OBSERVE_URL`, works from a release tarball, and refuses to
+  deploy over an existing Ship on Nucleus (see `docs/MIGRATE_STORE.md`).
+  Nucleus remains supported as an explicit opt-in.
+- The image bundles the teploy CLI **v0.1.55** release (sha256-pinned) instead
+  of a source build of a pre-0.1.37 commit.
+
+### Fixed
+- **`teploy-ship join` no longer hard-codes Nucleus.** It runs the worker on
+  `--store`, else the bundle's `SHIP_STORE`, else the dialect the engine
+  reports, and refuses a stated store the engine contradicts — against a
+  PostgreSQL controller every KV and stream call used to fail.
+- **`/health` checks the store whatever it is.** It probed only when the store
+  was Nucleus, so on PostgreSQL it answered 200 with the database down. It now
+  answers 503 when the configured store is unreachable, and adds `store` /
+  `store_kind` next to the legacy `nucleus` field (kept, with the same value).
+  A database that was down at the first request no longer pins a 503 for the
+  life of the web process.
+- **The published image reports its real version.** 0.5.0 reported `dev`:
+  the release workflow passed no build arg. The builder stage now bakes
+  `dist/VERSION` (the release's version, or `package.json`'s for a
+  `teploy deploy` source build), read by `/health`, discovery, the support
+  bundle and the new `teploy-ship --version`.
+- A missing model key names the variable for the configured provider
+  (the gateway pair for the default `zai/` model) instead of `OPENAI_API_KEY`.
+
+### Docs
+- QUICKSTART, README and DEPLOY state the no-sandbox trust model where the
+  install decision is made, and DEPLOY's §5 no longer claims agent commands
+  "never see" the worker's secrets on the local executor.
+
 ## [0.5.0] - 2026-11-05
 
 Programme B — Siblings (plan `DASH_AUTOCONFIG` section 10, owner-approved

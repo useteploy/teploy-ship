@@ -17,7 +17,18 @@ import type { ShipRuntime } from "teploy-ship/runtime";
 let runtime: Promise<ShipRuntime> | null = null;
 
 export function shipRuntime(): Promise<ShipRuntime> {
-  runtime ??= create();
+  if (runtime === null) {
+    const pending = create();
+    runtime = pending;
+    // A store that was down when the first request arrived must not pin a
+    // rejected runtime for the life of the process: /health would answer 503
+    // (and every page fail) long after the database came back, with nothing
+    // restarting the container. Forget a failed attempt so the next caller
+    // retries — the same reset discovery.server.ts does for its instance id.
+    pending.catch(() => {
+      if (runtime === pending) runtime = null;
+    });
+  }
   return runtime;
 }
 
