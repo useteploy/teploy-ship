@@ -1,5 +1,6 @@
 import { shipRuntime } from "../lib/store.server.js";
 import { currentUser } from "../lib/session.server.js";
+import { requireRouteRole } from "../lib/route-access.server.js";
 
 export const config = { mode: "app" };
 
@@ -10,11 +11,13 @@ interface AccountData {
 }
 
 export async function loader({ request }: { request: Request }): Promise<AccountData> {
+  await requireRouteRole(request, "/account", "loader");
   const me = await currentUser(request);
   return { user: me?.user ?? "", role: me?.role ?? "viewer", tokenSession: me?.user === "token" };
 }
 
 export async function action({ request }: { request: Request }): Promise<{ error?: string; ok?: string }> {
+  await requireRouteRole(request, "/account", "action");
   const me = await currentUser(request);
   if (me === null) return { error: "Not signed in." };
   if (me.user === "token") {

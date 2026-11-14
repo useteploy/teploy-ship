@@ -22,6 +22,7 @@ import {
 import { missionViewEnabled, missionViewFor } from "../../../dist/mission-view.js";
 import type { MissionView } from "../../../dist/mission-view.js";
 import type { CoordinationChild, CoordinationCheckState, CoordinationCost, CoordinationRecord } from "../../../dist/coordination.js";
+import { requireRouteRole } from "../lib/route-access.server.js";
 
 export const config = { mode: "app" };
 
@@ -48,6 +49,7 @@ interface CoordinationData {
 }
 
 export async function loader({ request }: { request: Request }): Promise<CoordinationData> {
+  await requireRouteRole(request, "/coordination", "loader");
   const runtime = await shipRuntime();
   const me = await currentUser(request);
   const canApprove = await may("approve", me);
@@ -83,6 +85,7 @@ export async function loader({ request }: { request: Request }): Promise<Coordin
 }
 
 export async function action({ request }: { request: Request }): Promise<Response> {
+  await requireRouteRole(request, "/coordination", "action");
   const form = await request.formData();
   const intent = String(form.get("intent") ?? "");
   const runtime = await shipRuntime();

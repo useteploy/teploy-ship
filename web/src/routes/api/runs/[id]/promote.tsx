@@ -5,6 +5,7 @@ import { currentUser } from "../../../../lib/session.server.js";
 import { may } from "../../../../lib/authority.server.js";
 import { shipRuntime } from "../../../../lib/store.server.js";
 import { redirect } from "../../../../lib/http.server.js";
+import { requireRouteRole } from "../../../../lib/route-access.server.js";
 
 export const config = { mode: "app" };
 
@@ -25,6 +26,7 @@ export const config = { mode: "app" };
  * reason, visibly, until it is.
  */
 export async function action({ request, params }: ActionArgs): Promise<Response> {
+  await requireRouteRole(request, "/api/runs/:id/promote", "action");
   if (request.method !== "POST") {
     return new Response(JSON.stringify({ error: "method not allowed — POST only" }), {
       status: 405,

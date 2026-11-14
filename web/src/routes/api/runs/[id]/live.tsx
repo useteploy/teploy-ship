@@ -1,6 +1,7 @@
 import type { LoaderArgs } from "@neutron-build/core";
 
 import { liveViewResponse } from "../../../../lib/live-view.server.js";
+import { requireRouteRole } from "../../../../lib/route-access.server.js";
 
 export const config = { mode: "app" };
 
@@ -14,6 +15,7 @@ export const config = { mode: "app" };
  * Loader only, on purpose: an observer has nothing to submit here.
  */
 export async function loader({ request, params }: LoaderArgs): Promise<Response> {
+  await requireRouteRole(request, "/api/runs/:id/live", "loader");
   return liveViewResponse(request, (params as { id?: string }).id ?? "");
 }
 

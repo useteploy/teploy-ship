@@ -1,9 +1,11 @@
 import { redirect } from "../lib/http.server.js";
+import { requireRouteRole } from "../lib/route-access.server.js";
 
 export const config = { mode: "app" };
 
 /** Old path: the content moved to /projects (C4 nav compression). */
 export async function loader({ request }: { request: Request }): Promise<Response> {
+  await requireRouteRole(request, "/sources", "loader");
   const q = new URL(request.url).searchParams;
   const to = new URL("/projects?view=sources", "http://x");
   for (const [k, v] of q) if (!to.searchParams.has(k)) to.searchParams.set(k, v);

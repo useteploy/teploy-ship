@@ -2,6 +2,7 @@
 import { shipRuntime } from "../../../lib/store.server.js";
 import { currentUser, type Principal } from "../../../lib/session.server.js";
 import { mayViewArtifact } from "../../../lib/run-access.server.js";
+import { requireRouteRole } from "../../../lib/route-access.server.js";
 export const config = { mode: "app" };
 export async function loader({
   request,
@@ -13,6 +14,7 @@ export async function loader({
   /** Tests only: stands in for run-access mayViewRun. */
   mayView?: (user: Principal, runId: string) => Promise<boolean>;
 }): Promise<Response> {
+  await requireRouteRole(request, "/api/artifacts/:id", "loader");
   const user = await currentUser(request);
   if (!user) throw new Response("Unauthorized", { status: 401 });
   const artifact = await (await shipRuntime()).artifacts?.get(params.id);

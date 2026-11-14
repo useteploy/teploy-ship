@@ -909,11 +909,27 @@ test("S01: authenticated clone and fetch scrub the remote in the same shell invo
 
   const withToken = seen.filter(c => c.includes("TOK@"));
   assert.equal(withToken.length, 2, "only the clone and the fetch carry the credential");
-  for (const command of withToken) {
-    assert.ok(command.includes(`git remote set-url origin ${ref.cloneUrl}`), `scrub rides the same exec: ${command}`);
-    assert.ok(command.includes("exit $rc"), "the credentialed step's own status is the one reported");
-  }
+  const [clone, fetch] = withToken as [string, string];
+  // The clone is the one step that writes the URL it was given into
+  // .git/config, so its scrub still rides the same exec — now through the
+  // hardened git (SHIP-02), like the clone itself.
+  assert.ok(clone.includes(`ship_git_here remote set-url origin '${ref.cloneUrl}'`), `scrub rides the same exec: ${clone}`);
+  assert.ok(clone.includes("exit $rc"), "the credentialed step's own status is the one reported");
+  // The warm fetch used to write the token URL into the remote and scrub it
+  // afterwards. It no longer writes it at all: the hardened git is handed the
+  // URL and never touches the workspace's config, so there is nothing to scrub.
+  assert.ok(!/set-url|remote add|config /.test(bodyOf(fetch)), `the fetch writes no URL anywhere: ${bodyOf(fetch)}`);
+  // And neither shares a shell with an ordinary git command.
+  for (const command of withToken) assert.ok(!/(^|[^_a-z-])git\s/.test(bodyOf(command)), `only the hardened git runs beside a credential: ${bodyOf(command)}`);
 });
+
+/** A credentialed command without the hardened-git wrapper in front of it (git-hardened.ts). */
+function bodyOf(command: string): string {
+  const marker = "ship_git_here() {";
+  const at = command.indexOf(marker);
+  assert.ok(at !== -1, "a credentialed command runs under the hardened wrapper");
+  return command.slice(command.indexOf("\n", at) + 1);
+}
 
 test("S01: env credential mode keeps the token out of argv and the URL, argv mode does not", () => {
   const ref = { kind: "forgejo" as const, base: "https://forge.example", owner: "o", repo: "r", cloneUrl: "https://forge.example/o/r.git" };

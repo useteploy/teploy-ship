@@ -19,6 +19,13 @@ process.env.SHIP_CONFIG_KEY = "h2-web-test-key";
 
 const { shipRuntime } = await import("./store.server.js");
 const projectsRoute = await import("../routes/projects.js");
+const { signSession, SESSION_COOKIE } = await import("./session.server.js");
+// Handlers check the caller's role themselves now (route-access.server.ts), so
+// a request with no session is a 401 before the route's own grant check runs.
+// The "not permitted" cases therefore ride a signed-in viewer, who holds no
+// grant — which is the case these tests were always about.
+const ADMIN = { authorization: "Bearer h2-web-tests" };
+const VIEWER = { cookie: `${SESSION_COOKIE}=${signSession({ user: "viewer", role: "viewer" }, "sso")}` };
 
 const REPO_URL = "https://git.example.com/team/creds";
 const STORED = "sk-ant-WEBSTORED-4242424242";
@@ -26,7 +33,7 @@ const STORED = "sk-ant-WEBSTORED-4242424242";
 function request(path: string, fields: Record<string, string>, auth = true) {
   return new Request("http://localhost" + path, {
     method: "POST",
-    headers: auth ? { authorization: "Bearer h2-web-tests" } : {},
+    headers: auth ? ADMIN : VIEWER,
     body: new URLSearchParams(fields),
   });
 }
@@ -52,7 +59,7 @@ test("an admin stores and clears a sealed harness credential through the project
   assert.equal(rows[0]!.setBy, "token", "presence names who stored it — and nothing else about the value");
 
   // The loader shows presence to a reader, never a value.
-  const page = (await projectsRoute.loader({ request: new Request(`http://localhost/projects?repo=${encodeURIComponent(REPO_URL)}`) })) as { credentials: { presence: unknown[] } | null };
+  const page = (await projectsRoute.loader({ request: new Request(`http://localhost/projects?repo=${encodeURIComponent(REPO_URL)}`, { headers: ADMIN }) })) as { credentials: { presence: unknown[] } | null };
   assert.ok(page.credentials !== null);
   assert.ok(!JSON.stringify(page).includes(STORED), "no page payload carries the value");
 
@@ -81,5 +88,5 @@ test("NEGATIVE CONTROL — a principal without the policies grant can neither st
   });
   assert.match(deniedClear.headers.get("location") ?? "", /denied=policies/);
   const after = await presenceOf(REPO_URL);
-  assert.deepEqual(after, before, "an unauthenticated action changed nothing — presence included");
+  assert.deepEqual(after, before, "an ungranted action changed nothing — presence included");
 });

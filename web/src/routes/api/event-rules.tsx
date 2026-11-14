@@ -1,6 +1,7 @@
 import { handleEventRuleSave, handleEventRulesList } from "../../lib/event-rules.server.js";
 import { currentUser } from "../../lib/session.server.js";
 import { deniedMessage, may } from "../../lib/authority.server.js";
+import { requireRouteRole } from "../../lib/route-access.server.js";
 
 export const config = { mode: "app" };
 
@@ -11,11 +12,13 @@ export const config = { mode: "app" };
  * that is Decision 12's floor, not a setting. The acting user is recorded
  * as the rule's `by`.
  */
-export async function loader(): Promise<Response> {
+export async function loader({ request }: { request: Request }): Promise<Response> {
+  await requireRouteRole(request, "/api/event-rules", "loader");
   return handleEventRulesList();
 }
 
 export async function action({ request }: { request: Request }): Promise<Response> {
+  await requireRouteRole(request, "/api/event-rules", "action");
   const principal = await currentUser(request);
   if (principal === null) return new Response(JSON.stringify({ title: "Unauthorized", status: 401 }), { status: 401, headers: { "content-type": "application/problem+json" } });
   // A rule is intake policy: the same `policies` grant as the Projects and

@@ -7,6 +7,7 @@ import { RUN_VIEWS } from "../../views/run-views.js";
 import Reviews from "../../views/reviews.js";
 import { loader as reviewsLoader } from "../../views/reviews.server.js";
 import type { ReviewsData } from "../../views/reviews.js";
+import { requireRouteRole } from "../../lib/route-access.server.js";
 
 export const config = { mode: "app" };
 
@@ -20,6 +21,7 @@ interface RunsData {
 }
 
 export async function loader({ request }: { request: Request }): Promise<RunsData | ReviewsData> {
+  await requireRouteRole(request, "/runs", "loader");
   if (new URL(request.url).searchParams.get("view") === "reviews") return reviewsLoader();
   const runtime = await shipRuntime();
   const [runs, places] = await Promise.all([runtime.listMeta(), runtime.placement.all()]);
