@@ -33,8 +33,14 @@ to see the loop work.
 - A model key. An Anthropic API key works as-is. A key for an
   Anthropic-COMPATIBLE endpoint (z.ai's GLM route) works too, wired
   differently — see "Model keys that are not Anthropic's" below.
-- A git token for the repository you want Ship to work in — a Forgejo access
-  token or a GitHub PAT with `repo` scope.
+- A git token for the repository you want Ship to work in, scoped to that
+  repository and nothing else: on GitHub a **fine-grained** personal access
+  token for the one repository with "Contents" and "Pull requests" read/write
+  (not a classic `repo`-scope PAT, which covers every repository you can
+  write); on Forgejo an access token for an account that can write only there.
+  Protect the default branch as well. Ship's own git commands carry this token
+  inside the environment the agent works in, so its reach is what a mistake
+  costs (`AUDIT_OPEN.md`, "SHIP-02").
 - `ssh` to the server working from this machine, with the server's keys in
   `known_hosts` for **every** key type: teploy may negotiate ECDSA where your
   own `ssh` used ED25519, and refuses the mismatch. `ssh-keyscan <server-ip>

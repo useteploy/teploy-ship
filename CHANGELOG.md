@@ -4,7 +4,40 @@ All notable changes to Teploy Ship are recorded here.
 
 ## [Unreleased]
 
+### Security
+- **A signed-in editor could make themselves an admin, and a viewer could read
+  Settings, by percent-encoding one letter of the path** (`POST /%73ettings`).
+  The role gate compared the raw request path while the router dispatched on
+  the decoded one, and the Settings handlers had no check of their own. The
+  gate now decides on the path the router dispatches on (and answers 400 to a
+  path two readers could read two ways: an encoded slash, backslash, dot, NUL
+  or percent sign, a `.`/`..` segment, a control character), and every loader
+  and action checks its own role from one table
+  (`web/src/lib/route-access.server.ts`). Not reachable without a session.
+  Upgrade if anyone but an admin can sign in.
+- **The forge token could be captured by git configuration or hooks in the
+  workspace the agent controls** (two `git config` lines, written by a
+  prompt-injected agent or by the repository's own test command). Ship's
+  credentialed clone, fetch and push no longer open the workspace's git
+  directory: they run against a per-command shadow directory with a config the
+  harness wrote, a scrubbed environment and no hooks
+  (`src/git-hardened.ts`). What this does NOT close — a process the agent left
+  running in the same container — is recorded in `AUDIT_OPEN.md` ("SHIP-02",
+  tier 2); use a single-repository token and protect the default branch.
+- The GitHub and Forgejo webhook receivers answer 401, not 500, to a signature
+  header with non-ASCII bytes.
+
 ### Changed
+- **Ship's own clone, fetch and push ignore the repository's and the operator's
+  git configuration** (see Security). Consequences an operator can meet:
+  repository hooks do not run for Ship's push — a `pre-push` hook, which is how
+  git-lfs uploads objects, is not run, so changes to LFS-tracked files are
+  pushed as pointers without their objects; `~/.gitconfig`, `~/.netrc` and
+  every inherited `GIT_*` variable (`GIT_SSL_CAINFO`, `GIT_SSL_NO_VERIFY`, …)
+  are not read on the worker or in the sandbox — a private CA or a proxy
+  belongs in the system `/etc/gitconfig` of the image that runs the git
+  (`http.sslCAInfo`, `http.proxy`), which is still read; a warm workspace
+  refreshes only the remote's default branch.
 - **The install path sets up PostgreSQL, not Nucleus.** `teploy.example.yml`
   (what `install.sh` deploys) runs a pinned `pgvector/pgvector:0.8.0-pg17`
   accessory with password authentication and both processes on
