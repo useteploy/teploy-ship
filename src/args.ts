@@ -71,7 +71,7 @@ export const COMMAND_FLAGS: Record<string, FlagSpec> = {
   },
   join: {
     boolean: ["start"],
-    value: ["secrets", "token", "nucleus-url", "sandbox", "sandbox-token", "sandbox-image", "git-token", "github-token", "model", "allow"],
+    value: ["secrets", "token", "nucleus-url", "store", "sandbox", "sandbox-token", "sandbox-image", "git-token", "github-token", "model", "allow"],
   },
   web: { boolean: ["dev"], value: ["port", "token", "model"] },
   support: { value: ["out", "log-lines", "days"] },
