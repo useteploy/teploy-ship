@@ -1,5 +1,95 @@
 # Open audit items
 
+## 2026-11-14 — SHIP-02: the forge token was reachable from the workspace the agent controls (tier 1 fixed, tier 2 open)
+
+Found by the wave-1 release review and reproduced through Ship's own
+`commitAndPush`: every credentialed `git clone` / `fetch` / `push` in
+`src/git.ts` ran as an ordinary git command in the workspace the agent had just
+finished editing, with the credential in that process's environment. Git reads
+`.git/config`, `.git/config.worktree`, whatever they include and `.git/hooks`
+on every command, so two `git config` lines (`protocol.ext.allow always`, a
+`url."ext::sh …".insteadOf` for the forge) — written by a prompt-injected agent
+or by the repository's own test command, which Ship runs before the push —
+handed the token to a script of the workspace's choosing. `core.fsmonitor`,
+`core.sshCommand`, `core.hooksPath` / a `pre-push` hook, `core.gitProxy`,
+`http.proxy`, an `include.path` and a worktree config were equivalent routes.
+The S01 entry below (2026-10-02) covered argv and `.git/config` residue only.
+
+**Tier 1 — fixed (branch `fix/security-role-gate-git-hardening`).** One hardened
+invocation (`src/git-hardened.ts`), and all thirteen credentialed call sites go
+through it (`credentialedGit` in `src/git.ts`). It is an allow-list, not a
+deny-list: the credentialed git never opens the workspace's git directory. It
+runs against a shadow directory the harness creates per command, holding a
+config the harness wrote (bare, the object format, `origin` = the URL on record)
+and symlinks to the workspace's `objects`, `refs`, `packed-refs`, `shallow` and
+`FETCH_HEAD` — so the data is the workspace's and none of its configuration,
+hooks, attributes or index is. Around it: every inherited `GIT_*` unset, HOME /
+XDG pointed at an empty directory and `GIT_CONFIG_GLOBAL=/dev/null`, the
+executing/redirecting keys pinned on the command line, `protocol.allow=never`
+plus the URL's own transport, no submodule recursion, no gc, no prompt, and a
+refusal (exit 97) if git would rewrite the remote URL. The credential leaves
+the environment as the script's first act and is exported only inside the
+subshell that execs the hardened git; no ordinary git command shares a shell
+with it (checkouts are separate, credential-free execs). Pinned by
+`src/git-hardened.test.ts`: a forge that requires the token (git's smart-HTTP
+backend behind Basic auth), 26 rigged workspaces plus hostile `GIT_*` / global
+config, each asserting the push, the rebase fetch + force push and the warm
+reuse reach the forge while no program, file or second server the workspace
+names sees the credential; 13 of them carry an in-test control showing an
+ordinary credentialed push in the same workspace does leak or redirect.
+
+Behaviour that changed with it, deliberately: `pre-push` and every other hook
+no longer run for Ship's own fetch and push (a repository that relied on a
+`pre-push` hook — git-lfs installs one — does not get it from Ship's push);
+the operator's `~/.gitconfig` is not read by the credentialed git (system
+`/etc/gitconfig` still is: it belongs to whoever built the image, as the git
+binary does); a warm reuse asks the remote for its default branch and fetches
+that one branch by explicit refspec instead of the workspace's configured
+refspec; a PR head is fetched into `refs/remotes/origin/<branch>` and checked
+out from there. **Owed:** one live clone → push → rebase on a private
+repository through the real sandbox on Forgejo and on GitHub (the suite uses a
+local smart-HTTP forge and `LocalExecutor`; the sandbox images' git 2.39 and
+`dash` were not exercised here beyond a manual `/bin/dash` pass).
+
+**Tier 2 — open, not built.** The agent and the credentialed git still share a
+container and a uid. Tier 1 does not stop:
+
+- a process the agent left running reading `/proc/<pid>/environ` of the
+  credentialed git (or of the shell that started it, whose initial environment
+  held the credential), or racing the shadow directory under `/tmp`;
+- replacing the `git` on `PATH`: the sandbox run user has passwordless sudo
+  (`teploy-sandbox` `runtime.go`), and on a local executor anything writable on
+  `PATH` will do;
+- `SHIP_GIT_CREDENTIAL=argv`, where the token is on a command line by
+  definition;
+- on a local executor, reading the worker's own environment (recorded
+  separately: SHIP-07).
+
+The fix is to stop running credentialed git inside the agent's container:
+bundle in the workspace with no credential, read the bundle out through the
+executor, and fetch/push from a repository the harness owns on the worker (or
+in a second, agent-free container); same shape in reverse for fetches. Design
+note in the wave-2 hand-back (`ship-sec`). **Until then, operators taking
+untrusted work should give Ship a fine-grained, single-repository token
+(contents + pull requests only) and protect the default branch** — with both,
+the worst a captured token does is push a branch to the one repository the
+run was already allowed to push to. `docs/QUICKSTART.md` still recommends a
+classic `repo`-scope PAT; that guidance needs changing (docs lane).
+
+**Other secrets in the environment of processes that run workspace-controlled
+code — surveyed 2026-11-14:**
+
+| Where | What | Verdict |
+|---|---|---|
+| `git.ts` credentialed clone/fetch/push | forge token (`GIT_CONFIG_*`) | fixed at tier 1 above; tier 2 residual |
+| `harness-external.ts` / `harness-acp.ts` `forwardEnv` | model/provider keys forwarded to a vendor agent CLI | by design — that CLI is the agent; bounded by the sealed per-project credentials, the egress allow-list and the forwarded-credential scan on push/snapshot. Use gateway-scoped keys |
+| `thread-warm.ts` `workspaceSecretValueScan` | the same forwarded values, base64, as scan needles; the scan runs `git` in the workspace | no new exposure — only values already handed to that workspace |
+| `ladder-steps.ts` smoke/flow steps | `PREVIEW_URL`, `FLOW_OUT` | not secrets |
+| native harness, tests step, kernel, stdio MCP servers | nothing passed per exec (`mcp.ts` refuses secrets on stdio servers) | clean on a sandbox executor |
+| `LocalExecutor` everywhere (`cli.ts`, `eval.ts`, `stack-import.ts`) | the worker's environment minus `secretEnvNames()` | **gap**: the name pattern misses `SHIP_GIT_TOKENS` (plural), `PGPASSWORD`, `SHIP_SLACK_WEBHOOK_URL`, `SHIP_NOTIFY_URL`, and any credential-bearing URL not on its four-name list (`AI_GATEWAY_URL` with userinfo). And the child shares the worker's uid, so `/proc/<worker>/environ` has everything regardless (SHIP-07). Not fixed here |
+| `deploy.ts` `hostRunner` (preview leg) | `teploy build` / `teploy preview deploy` run on the worker host, in a worktree of the AGENT's branch, with the worker's whole environment | **suspected exposure**: the branch's own `teploy.yml` is read there, and `teploy-cli` runs a static app's `build:` lines through `sh -c` locally (`internal/deploy/static.go` `runLocalBuild`); `docker build` of an agent-authored Dockerfile also runs on that host. Not reproduced. Pass a minimal environment to `hostRunner` and confirm which `teploy.yml` keys execute locally |
+| `harness-probes.ts` `LocalExecutor` without a denylist | diagnostic rigs in a temp dir with scripted models | not a workspace an agent controls |
+
 ## 2026-10-18 — leaked sandbox containers: runs that ended without releasing their workspace
 
 Found live on compute-1 (100.107.192.39) 2026-10-18: 14 running
