@@ -8,6 +8,7 @@ import { UPGRADE_HOLD_EVENT, upgradeHoldRefusal } from "teploy-ship/fence";
 import { currentUser } from "../../../../lib/session.server.js";
 import { may } from "../../../../lib/authority.server.js";
 import { shipRuntime } from "../../../../lib/store.server.js";
+import { requireRouteRole } from "../../../../lib/route-access.server.js";
 
 export const config = { mode: "app" };
 
@@ -64,6 +65,7 @@ interface DecideBody {
 }
 
 export async function action({ request, params }: ActionArgs): Promise<Response> {
+  await requireRouteRole(request, "/api/runs/:id/decide", "action");
   if (request.method !== "POST") {
     return json(405, { error: "method not allowed — POST only" });
   }

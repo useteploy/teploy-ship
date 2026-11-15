@@ -19,6 +19,7 @@ import { shipRuntime, defaultModel } from "../lib/store.server.js";
 import { SETTINGS_VIEWS, settingsView, groupVisible, settingLabel, groupLabel } from "../views/settings-views.js";
 import { currentUser } from "../lib/session.server.js";
 import type { Principal } from "../lib/session.server.js";
+import { requireRouteRole } from "../lib/route-access.server.js";
 
 export const config = { mode: "app" };
 
@@ -190,9 +191,11 @@ function sealingRow(): Row {
 }
 
 export async function loader({ request }: { request: Request }): Promise<SettingsData> {
+  // Admin, checked here and not only by the layout's path list (SHIP-01). The
+  // principal used to default to an admin when there was no session at all.
+  const me = await requireRouteRole(request, "/settings", "loader");
   const runtime = await shipRuntime();
   const num = (name: string, def: string): Row => value(name, `default (${def})`);
-  const me = (await currentUser(request)) ?? { user: "token", role: "admin" as Role };
   const users = await runtime.users.list();
   const params = new URL(request.url).searchParams;
   const view = settingsView(params.get("view"));
@@ -379,6 +382,10 @@ async function ensureAdminRemains(runtime: ShipRuntime, undo: () => Promise<void
 }
 
 export async function action({ request }: { request: Request }): Promise<{ error?: string; ok?: string; checks?: ConnectionCheck[] }> {
+  // Every intent below creates, promotes, re-passwords or deletes an account.
+  // The role is checked HERE: the layout's gate was the only check, and one
+  // percent-encoded letter in the path walked an editor past it (SHIP-01).
+  await requireRouteRole(request, "/settings", "action");
   const runtime = await shipRuntime();
   const form = await request.formData();
   const intent = String(form.get("intent") ?? "");

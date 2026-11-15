@@ -7,6 +7,7 @@ import { FLEET_VIEWS } from "../views/fleet-views.js";
 import Spend from "../views/spend.js";
 import { loader as spendLoader } from "../views/spend.server.js";
 import type { SpendData } from "../views/spend.js";
+import { requireRouteRole } from "../lib/route-access.server.js";
 
 export const config = { mode: "app" };
 
@@ -28,6 +29,7 @@ interface FleetData {
 }
 
 export async function loader({ request }: { request: Request }): Promise<FleetData | SpendData> {
+  await requireRouteRole(request, "/fleet", "loader");
   if (new URL(request.url).searchParams.get("view") === "spend") return spendLoader();
   const runtime = await shipRuntime();
   const now = Date.now();

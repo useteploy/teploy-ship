@@ -91,7 +91,7 @@ test("F16: SHIP_TEST_DETECT=0 on the worker turns checkout detection off; an unr
 test("F17: a failed clone's words reach the error (they were in stdout via 2>&1), with the token redacted", async () => {
   const ref = parseRepoUrl("http://forge.example:3000/tyler/fixture");
   const { ex } = executor((c) =>
-    c.startsWith("git clone")
+    c.includes("ship_git_clone clone")
       ? { exitCode: 128, stdout: "Cloning into '.'...\nfatal: Authentication failed for 'http://forge.example:3000/tyler/fixture.git/'\n" }
       : {},
   );

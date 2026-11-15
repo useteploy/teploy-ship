@@ -39,7 +39,13 @@ export async function action({ request }: { request: Request }): Promise<Respons
   }
   const signature = request.headers.get("x-hub-signature-256") ?? "";
   const expected = `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`;
-  if (signature.length !== expected.length || !timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {
+  // Byte lengths, not string lengths (as the Slack receiver does): the header
+  // is caller-chosen, a non-ASCII one has more bytes than characters, and
+  // timingSafeEqual throws on unequal buffers — an unsigned request must be a
+  // 401, never a 500.
+  const signatureBytes = Buffer.from(signature);
+  const expectedBytes = Buffer.from(expected);
+  if (signatureBytes.length !== expectedBytes.length || !timingSafeEqual(signatureBytes, expectedBytes)) {
     return json(401, { title: "bad webhook signature" });
   }
 

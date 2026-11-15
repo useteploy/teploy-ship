@@ -18,6 +18,7 @@ import type { WorkflowTemplate } from "../lib/workflows.server.js";
 import { shipRuntime } from "../lib/store.server.js";
 import { currentUser } from "../lib/session.server.js";
 import { may } from "../lib/authority.server.js";
+import { requireRouteRole } from "../lib/route-access.server.js";
 export const config = { mode: "app" };
 interface DigestRow {
   runId: string;
@@ -38,6 +39,7 @@ interface Data {
   error: string | null;
 }
 export async function loader({ request }: { request: Request }): Promise<Data> {
+  await requireRouteRole(request, "/workflows", "loader");
   const q = new URL(request.url).searchParams;
   const runtime = await shipRuntime();
   const templates = await workflows(runtime);
@@ -80,6 +82,7 @@ export async function action({
 }: {
   request: Request;
 }): Promise<Response> {
+  await requireRouteRole(request, "/workflows", "action");
   const me = await currentUser(request);
   if (!(await may("policies", me)))
     return new Response("Not permitted", { status: 403 });

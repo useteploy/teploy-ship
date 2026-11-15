@@ -13,6 +13,13 @@ process.env.SHIP_WEB_TOKEN = "workspace-tests";
 // budget for the "manual" source is not what they are about.
 process.env.SHIP_DAILY_BUDGET_USD = "100";
 const { shipRuntime } = await import("./store.server.js");
+const { signSession, SESSION_COOKIE } = await import("./session.server.js");
+// Handlers check the caller's role themselves now (route-access.server.ts), so
+// a request with no session is a 401 before the route's own grant check runs.
+// The "not permitted" cases therefore ride a signed-in viewer, who holds no
+// grant — which is the case these tests were always about.
+const ADMIN = { authorization: "Bearer workspace-tests" };
+const VIEWER = { cookie: `${SESSION_COOKIE}=${signSession({ user: "viewer", role: "viewer" }, "sso")}` };
 const templates = await import("../routes/workflows.js");
 const setup = await import("../routes/setup.js");
 const run = await import("../routes/runs/[id].js");
@@ -21,7 +28,7 @@ const { threadHistory } = await import("./workspace.server.js");
 function request(path: string, fields: Record<string, string>, auth = true) {
   return new Request("http://localhost" + path, {
     method: "POST",
-    headers: auth ? { authorization: "Bearer workspace-tests" } : {},
+    headers: auth ? ADMIN : VIEWER,
     body: new URLSearchParams({...(fields.intent === "follow-up" ? {requestId:randomUUID()} : {}), ...fields}),
   });
 }
@@ -46,7 +53,7 @@ test("workflows require policy authority and persist through the shared store", 
   });
   assert.equal(res.status, 303);
   const page = await templates.loader({
-    request: new Request("http://localhost/workflows?edit=custom-test"),
+    request: new Request("http://localhost/workflows?edit=custom-test", { headers: ADMIN }),
   });
   assert.equal(page.selected?.task, "Run meaningful tests");
   assert.equal(page.selected?.mode, "scan");
@@ -64,7 +71,7 @@ test("workflows require policy authority and persist through the shared store", 
   assert.equal(
     (
       await templates.loader({
-        request: new Request("http://localhost/workflows"),
+        request: new Request("http://localhost/workflows", { headers: ADMIN }),
       })
     ).templates.some((t) => t.id === "custom-test"),
     false,
@@ -418,7 +425,7 @@ test('guided connection binds an unbound project without resetting policies and 
   assert.equal((await runtime.projects.forRepo(first))?.requirePlanReview,true);
   assert.equal((await runtime.projects.forRepo(first))?.testCommand,'make check');
   await setup.action({request:request('/setup',{url:second,tests:'pnpm test'})});
-  const page=await setup.loader({request:new Request(`http://localhost/setup?repo=${encodeURIComponent(second)}`)});
+  const page=await setup.loader({request:new Request(`http://localhost/setup?repo=${encodeURIComponent(second)}`, { headers: ADMIN })});
   assert.equal(page.selected?.url,second);
   assert.equal(page.selected?.testCommand,'pnpm test');
   assert.equal((await runtime.projects.forRepo(first))?.testCommand,'make check');
@@ -431,9 +438,9 @@ test("takeover panel ops require steer authority per request and carry the opera
   await enqueueRun(runtime, {runId:id,repo:'https://github.com/team/repo',task:'Panel',model:'test',source:'manual',trust:'operator'});
   const meta = await runtime.loadMeta(id); assert.ok(meta);
   await runtime.saveMeta({...meta,status:'waiting',eventName:'ship-ask-1'});
-  // no credential: the steer grant is re-checked on every POST, never cached in the page
+  // no grant (a signed-in viewer): the steer grant is re-checked on every POST, never cached in the page
   for (const intent of ["takeover-console", "takeover-read", "takeover-write"]) {
-    const denied = await run.action({params:{id},request:new Request("http://localhost/runs/"+id,{method:"POST",body:new URLSearchParams({intent, path:"src/a.ts", command:"echo hi", content:"x"})})});
+    const denied = await run.action({params:{id},request:new Request("http://localhost/runs/"+id,{method:"POST",headers:VIEWER,body:new URLSearchParams({intent, path:"src/a.ts", command:"echo hi", content:"x"})})});
     assert.match(denied.headers.get("location") ?? "", /denied=steer/, intent);
   }
   const res = await run.action({params:{id},request:request("/runs/"+id,{intent:"takeover-console",command:"echo hi",tab:"console"})});
@@ -483,8 +490,8 @@ test("the browser tab: steer authority per POST, action shape recorded, file:// 
   await enqueueRun(runtime, {runId:id,repo:'https://github.com/team/repo',task:'Browser',model:'test',source:'manual',trust:'operator'});
   const meta = await runtime.loadMeta(id); assert.ok(meta);
   await runtime.saveMeta({...meta,status:'waiting',eventName:'ship-ask-1'});
-  // no credential: the steer grant is re-checked on every POST
-  const denied = await run.action({params:{id},request:new Request("http://localhost/runs/"+id,{method:"POST",body:new URLSearchParams({intent:"takeover-browser",tab:"browser",browser:JSON.stringify({action:"navigate",url:"http://localhost:8000/"})})})});
+  // no grant (a signed-in viewer): the steer grant is re-checked on every POST
+  const denied = await run.action({params:{id},request:new Request("http://localhost/runs/"+id,{method:"POST",headers:VIEWER,body:new URLSearchParams({intent:"takeover-browser",tab:"browser",browser:JSON.stringify({action:"navigate",url:"http://localhost:8000/"})})})});
   assert.match(denied.headers.get("location") ?? "", /denied=steer/);
   // an authorized POST rides the redirect back to the browser tab
   const res = await run.action({params:{id},request:request("/runs/"+id,{intent:"takeover-browser",tab:"browser",browser:JSON.stringify({action:"navigate",url:"http://localhost:8000/"})})});
@@ -502,7 +509,7 @@ test("the browser tab: steer authority per POST, action shape recorded, file:// 
     output: "Browser navigate http://localhost:8000/ — http://localhost:8000/ (1280x800, png, 1.2 KB).",
     browser: { artifact: "a".repeat(64), url: "http://localhost:8000/", width: 1280, height: 800, format: "png" },
   }));
-  const data = await run.loader({params:{id},request:new Request("http://localhost/runs/"+id+"?tab=browser",{})});
+  const data = await run.loader({params:{id},request:new Request("http://localhost/runs/"+id+"?tab=browser", { headers: ADMIN })});
   assert.equal(data.takeoverTab, "browser");
   // only a well-formed artifact reference survives the loader; the screenshot itself never rides the reply
   assert.equal(data.takeover.reply?.browser?.artifact, "a".repeat(64));
@@ -511,7 +518,7 @@ test("the browser tab: steer authority per POST, action shape recorded, file:// 
     id: "r-b2", at: new Date().toISOString(), kind: "takeover-browser", output: "x",
     browser: { artifact: "../../etc/passwd", image: "aGVsbG8=" },
   }));
-  const hostile = await run.loader({params:{id},request:new Request("http://localhost/runs/"+id+"?tab=browser",{})});
+  const hostile = await run.loader({params:{id},request:new Request("http://localhost/runs/"+id+"?tab=browser", { headers: ADMIN })});
   assert.equal(hostile.takeover.reply?.browser?.artifact, undefined, "a malformed reference is dropped, not rendered into a URL");
   assert.equal(data.takeover.reply?.browser?.url, "http://localhost:8000/");
 });

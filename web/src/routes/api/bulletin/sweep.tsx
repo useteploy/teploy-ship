@@ -1,4 +1,5 @@
 import { runBulletinSweep } from "../../../views/bulletin.server.js";
+import { requireRouteRole } from "../../../lib/route-access.server.js";
 
 export const config = { mode: "app" };
 
@@ -20,7 +21,8 @@ export const config = { mode: "app" };
  * editor role for a POST. It is idempotent: a note already promoted is refused
  * by `autoEligible` with `already-sent`, so a doubled cron does not double-send.
  */
-export async function action(): Promise<Response> {
+export async function action({ request }: { request: Request }): Promise<Response> {
+  await requireRouteRole(request, "/api/bulletin/sweep", "action");
   const lines: string[] = [];
   const result = await runBulletinSweep((line) => {
     lines.push(line);

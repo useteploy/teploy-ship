@@ -2,6 +2,7 @@ import type { AgentExecutor } from "@neutron-build/agents";
 
 import { isWebm, LOOK_IMAGE_DATA_CLASS, RECORDING_DATA_CLASS } from "./artifacts.js";
 import { frameUntrusted } from "./guard.js";
+import { hardenedGitScript, shellQuote } from "./git-hardened.js";
 import { forgeFetch } from "./forge-egress.js";
 import { publishLimitsFromEnv, screenPublication } from "./publish-policy.js";
 import type { PublishLimits, PublishScreen } from "./publish-policy.js";
@@ -13,6 +14,13 @@ import type { PublishLimits, PublishScreen } from "./publish-policy.js";
  * repo on a work branch and nothing else. (On a sandbox executor commands
  * are argv-exec'd; on a local executor the push URL is briefly visible in
  * the process list — acceptable for the trusted-local path.)
+ *
+ * "Harness-side" is about who ISSUES the command, not where it runs: every
+ * one of them executes in the workspace the agent controls. So each clone,
+ * fetch and push that carries the credential goes through `credentialedGit`
+ * below — the hardened invocation in git-hardened.ts, which never reads the
+ * workspace's git configuration or hooks — and no other git command shares a
+ * shell with it (SHIP-02).
  */
 
 /**
@@ -198,8 +206,13 @@ function redactUrls(text: string): string {
   return text.replace(/\/\/[^@/\s'"]+@/g, "//***@");
 }
 
-async function git(executor: AgentExecutor, command: string, timeoutMs = 120_000, env?: Record<string, string>): Promise<string> {
-  const result = await executor.exec(command, env === undefined ? { timeoutMs } : { timeoutMs, env });
+/**
+ * An ordinary git command in the workspace. It reads the workspace's config
+ * and hooks, so it takes NO per-exec environment: a credential goes through
+ * `credentialedGit` below, never through here.
+ */
+async function git(executor: AgentExecutor, command: string, timeoutMs = 120_000): Promise<string> {
+  const result = await executor.exec(command, { timeoutMs });
   if (result.exitCode !== 0 || result.timedOut === true) {
     // The clone and the fetch run `2>&1` so a failure's words land in STDOUT;
     // reading stderr alone made every one of them "exit 128" with nothing
@@ -214,6 +227,63 @@ async function git(executor: AgentExecutor, command: string, timeoutMs = 120_000
 }
 
 /**
+ * Run `body` under the hardened git (git-hardened.ts) with the credential for
+ * `ref`, and return the raw result. `body` is shell that calls `ship_git`,
+ * `ship_git_plain`, `ship_git_clone` or `ship_git_here` against
+ * "$SHIP_GIT_URL" — and NEVER plain `git`: an ordinary git command reads the
+ * workspace's config and hooks, and anything those start would be a child of
+ * the shell this credential was handed to. Follow-on commands (checkout,
+ * rev-parse in the work tree) are separate, credential-free execs.
+ *
+ * The remote is always `ref.cloneUrl`, a value this process holds: nothing
+ * the workspace contains can name, rewrite or add to the push/fetch target.
+ */
+async function execCredentialed(executor: AgentExecutor, ref: RepoRef, token: string, body: string, timeoutMs = 300_000): Promise<Awaited<ReturnType<AgentExecutor["exec"]>>> {
+  const cred = gitCredential(ref, token);
+  const command = hardenedGitScript(cred.url, body);
+  return executor.exec(command, cred.env === undefined ? { timeoutMs } : { timeoutMs, env: cred.env });
+}
+
+/** `execCredentialed`, failing the way `git()` does. The error names the body, never the wrapper around it. */
+async function credentialedGit(executor: AgentExecutor, ref: RepoRef, token: string, body: string, timeoutMs = 300_000): Promise<string> {
+  const result = await execCredentialed(executor, ref, token, body, timeoutMs);
+  if (result.exitCode !== 0 || result.timedOut === true) {
+    const said = (result.stderr ?? "").trim() !== "" ? result.stderr : (result.stdout ?? "");
+    const tail = said.trim().split("\n").slice(-15).join("\n").slice(-2000);
+    const timedOut = result.timedOut === true ? ` — timed out after ${Math.round(timeoutMs / 1000)}s` : "";
+    throw new Error(`git step failed (exit ${result.exitCode}${timedOut}): ${redactUrls(body)}\n${redactUrls(tail)}`);
+  }
+  return result.stdout.trim();
+}
+
+/**
+ * Refresh a warm clone's default branch from the remote and point
+ * `refs/remotes/origin/HEAD` at it — the fetch half of every warm reuse.
+ *
+ * The remote is ASKED for its default branch (`ls-remote --symref`) and that
+ * one branch is fetched by explicit refspec: the refspec configured in the
+ * workspace's `.git/config` is the agent's to edit and is not read. The
+ * branch name is taken through a character class before it is used and is
+ * checked again by `assertGitSafe` where the caller reads it back.
+ */
+async function refreshOrigin(executor: AgentExecutor, ref: RepoRef, token: string): Promise<void> {
+  await credentialedGit(
+    executor,
+    ref,
+    token,
+    `_sg_head=$(ship_git ls-remote --symref origin HEAD 2>&1) || { printf '%s\\n' "$_sg_head"; exit 1; }; ` +
+      `_sg_b=$(printf '%s\\n' "$_sg_head" | sed -n 's|^ref: refs/heads/\\([A-Za-z0-9._/-]*\\)[[:space:]]*HEAD$|\\1|p' | head -n 1); ` +
+      `[ -n "$_sg_b" ] || { echo "the remote did not name a default branch"; exit 1; }; ` +
+      `ship_git fetch --depth 50 --prune origin "+refs/heads/$_sg_b:refs/remotes/origin/$_sg_b" 2>&1 && ` +
+      `ship_git_plain symbolic-ref refs/remotes/origin/HEAD "refs/remotes/origin/$_sg_b" 2>&1`,
+  );
+  // The agent-facing remote goes back to the canonical credential-free URL, as
+  // it always did. Best effort and credential-free: the fetch above never
+  // read it.
+  await executor.exec(`git remote set-url origin ${shellQuote(ref.cloneUrl)} >/dev/null 2>&1`, { timeoutMs: 60_000 }).catch(() => undefined);
+}
+
+/**
  * Clone with the credential and leave the remote credential-free, in ONE
  * shell invocation. `git clone <url-with-token>` writes the token into
  * .git/config; scrubbing it in a separate exec left a window (and, if the
@@ -224,13 +294,15 @@ async function git(executor: AgentExecutor, command: string, timeoutMs = 120_000
  * recorded limitation (AUDIT_OPEN.md, S01 Git credential placement).
  */
 async function cloneCredentialFree(executor: AgentExecutor, ref: RepoRef, token: string): Promise<void> {
-  const cred = gitCredential(ref, token);
-  await git(
+  // The workspace is empty here (clone refuses anything else), so there is no
+  // local config or hook to distrust yet; the hardened git still runs with the
+  // scrubbed environment, no global config and the transport allow-list.
+  await credentialedGit(
     executor,
-    `git clone --depth 50 ${cred.url} . 2>&1; rc=$?; ` +
-      `git remote set-url origin ${ref.cloneUrl} >/dev/null 2>&1; exit $rc`,
-    300_000,
-    cred.env,
+    ref,
+    token,
+    `ship_git_clone clone --depth 50 "$SHIP_GIT_URL" . 2>&1; rc=$?; ` +
+      `ship_git_here remote set-url origin ${shellQuote(ref.cloneUrl)} >/dev/null 2>&1; exit $rc`,
   );
 }
 
@@ -314,21 +386,12 @@ export async function reuseRepo(
   options: { ref: RepoRef; token: string; runId: string },
 ): Promise<RepoCheckout> {
   const { ref, token, runId } = options;
-  // Fetch under the credential and scrub it back off the remote in the SAME
-  // shell, whatever happened: separate exec calls left a window where a dead
-  // worker or a failed step kept a token in a config file the agent can read.
   // The template was cloned by an earlier run, so refs/remotes/origin/HEAD may
   // be stale or absent; asking the remote is the only honest answer to "what
-  // is the default branch".
-  const cred = gitCredential(ref, token);
-  await git(
-    executor,
-    `git remote set-url origin ${cred.url} && ` +
-      "{ git fetch --depth 50 --prune origin 2>&1 && git remote set-head origin -a 2>&1; }; rc=$?; " +
-      `git remote set-url origin ${ref.cloneUrl} >/dev/null 2>&1; exit $rc`,
-    300_000,
-    cred.env,
-  );
+  // is the default branch". The credential never enters a config file: the
+  // fetch runs under the hardened git (refreshOrigin), which is handed the URL
+  // and reads nothing from this workspace's configuration.
+  await refreshOrigin(executor, ref, token);
 
   const base = assertGitSafe("branch", (await git(executor, "git symbolic-ref --short refs/remotes/origin/HEAD")).replace(/^origin\//, ""));
   // Drop the previous run's tree before switching: an unmergeable local
@@ -382,15 +445,7 @@ export async function checkoutRepoAtSha(
   // from the default branch's tip, silently dropping the fork point.
   const warmReuse = options.warm === true && (await hasClone(executor));
   if (warmReuse) {
-    const refresh = gitCredential(ref, token);
-    await git(
-      executor,
-      `git remote set-url origin ${refresh.url} && ` +
-        "{ git fetch --depth 50 --prune origin 2>&1 && git remote set-head origin -a 2>&1; }; rc=$?; " +
-        `git remote set-url origin ${ref.cloneUrl} >/dev/null 2>&1; exit $rc`,
-      300_000,
-      refresh.env,
-    );
+    await refreshOrigin(executor, ref, token);
   } else {
     await cloneCredentialFree(executor, ref, token);
   }
@@ -410,20 +465,21 @@ export async function checkoutRepoAtSha(
   // credential exactly as setupRepoForPr does for the branch it names.
   const source = options.headRepo !== undefined ? parseRepoUrl(options.headRepo) : ref;
   const sourceToken = options.headRepo !== undefined ? (options.headToken ?? "") : token;
-  const cred = gitCredential(source, sourceToken);
+  const sourceBranch = options.branch !== undefined ? assertGitSafe("branch", options.branch) : undefined;
   const branch = `ship/${runId}`;
   // Both fetches are best effort: the checkout below is what decides whether
   // the recorded commit arrived, and it fails naming the sha if it did not
   // (the branch was deleted on the remote and the forge refuses sha fetches).
-  await git(
+  await credentialedGit(
     executor,
-    "{ " +
-      (options.branch !== undefined ? `git fetch --depth 50 ${cred.url} ${options.branch} 2>&1 || true; ` : "") +
-      `git fetch --depth 50 ${cred.url} ${sha} 2>&1 || true; ` +
-      `}; git checkout -B ${branch} ${sha}`,
-    300_000,
-    cred.env,
+    source,
+    sourceToken,
+    (sourceBranch !== undefined ? `ship_git fetch --depth 50 "$SHIP_GIT_URL" ${sourceBranch} 2>&1 || true; ` : "") +
+      `ship_git fetch --depth 50 "$SHIP_GIT_URL" ${sha} 2>&1 || true`,
   );
+  // Its own exec: a checkout reads the workspace's config and hooks, and must
+  // not share a shell with the credential.
+  await git(executor, `git checkout -B ${branch} ${sha}`, 300_000);
   return { branch, base };
 }
 
@@ -453,15 +509,7 @@ export async function setupStackedRepo(
   // fresh credential-free clone.
   const warmReuse = options.warm === true && (await hasClone(executor));
   if (warmReuse) {
-    const refresh = gitCredential(ref, token);
-    await git(
-      executor,
-      `git remote set-url origin ${refresh.url} && ` +
-        "{ git fetch --depth 50 --prune origin 2>&1 && git remote set-head origin -a 2>&1; }; rc=$?; " +
-        `git remote set-url origin ${ref.cloneUrl} >/dev/null 2>&1; exit $rc`,
-      300_000,
-      refresh.env,
-    );
+    await refreshOrigin(executor, ref, token);
   } else {
     await cloneCredentialFree(executor, ref, token);
   }
@@ -477,19 +525,14 @@ export async function setupStackedRepo(
     // state in this run's workspace is a correctness problem (reuseRepo).
     await git(executor, "rm -rf .teploy-agent");
   }
-  const cred = gitCredential(ref, token);
   const work = `ship/${runId}`;
   // The explicit refspec (not a bare branch fetch) is what establishes
   // refs/remotes/origin/<branch> — the ref the push ahead-count and the
   // published diff count from. The checkout then stands on the RECORDED sha,
   // not the branch tip: the tip may have moved since enqueue, and the rebase
   // contract is "commits above the recorded head are this stack's own".
-  await git(
-    executor,
-    `git fetch --depth 50 ${cred.url} +refs/heads/${branch}:refs/remotes/origin/${branch} 2>&1 && git checkout -B ${work} ${sha}`,
-    300_000,
-    cred.env,
-  );
+  await credentialedGit(executor, ref, token, `ship_git fetch --depth 50 "$SHIP_GIT_URL" +refs/heads/${branch}:refs/remotes/origin/${branch} 2>&1`);
+  await git(executor, `git checkout -B ${work} ${sha}`, 300_000);
   return { branch: work, base: branch };
 }
 
@@ -502,12 +545,15 @@ export async function setupStackedRepo(
  */
 export async function recordBaseSha(executor: AgentExecutor, ref: RepoRef, token: string, checkout: RepoCheckout): Promise<RepoCheckout> {
   const base = assertGitSafe("base", checkout.base);
-  const cred = gitCredential(ref, token);
   try {
-    const result = await executor.exec(
-      `git fetch --depth 50 ${cred.url} +refs/heads/${base}:refs/remotes/origin/${base} >/dev/null 2>&1; ` +
-        `git rev-parse --verify -q 'refs/remotes/origin/${base}^{commit}'`,
-      cred.env === undefined ? { timeoutMs: 300_000 } : { timeoutMs: 300_000, env: cred.env },
+    // Read back through the hardened git as well: the answer is a ref value,
+    // and asking the workspace's own git for it would run in this shell.
+    const result = await execCredentialed(
+      executor,
+      ref,
+      token,
+      `ship_git fetch --depth 50 "$SHIP_GIT_URL" +refs/heads/${base}:refs/remotes/origin/${base} >/dev/null 2>&1; ` +
+        `ship_git_plain rev-parse --verify -q 'refs/remotes/origin/${base}^{commit}'`,
     );
     const sha = result.stdout.trim();
     return result.exitCode === 0 && /^[0-9a-f]{40,64}$/.test(sha) ? { ...checkout, baseSha: sha } : checkout;
@@ -578,8 +624,12 @@ export async function commitAndPush(
   const targetToken = checkout.headRepo !== undefined ? (options.headToken ?? "") : token;
   // Pushing the same commit twice is a no-op, which is what makes the publish
   // step safe to replay after a crash between the push and the PR call.
-  const pushCred = gitCredential(target, targetToken);
-  await git(executor, `git push ${pushCred.url} HEAD:refs/heads/${checkout.branch} 2>&1`, 300_000, pushCred.env);
+  //
+  // The target is the URL on record for this task — `ref`, or the fork the
+  // forge named for the PR — and is handed to the hardened git as the only
+  // remote it has. The commit is pushed by the sha just read, not by `HEAD`:
+  // the hardened git has no work tree and no HEAD of the workspace's to read.
+  await credentialedGit(executor, target, targetToken, `ship_git push "$SHIP_GIT_URL" ${assertGitSafe("sha", sha)}:refs/heads/${assertGitSafe("branch", checkout.branch)} 2>&1`);
   return { kind: "pushed", sha, ...(screen !== undefined && screen.warnings.length > 0 ? { screen } : {}) };
 }
 
@@ -976,13 +1026,12 @@ export async function setupRepoForPr(
   // blindly (a fork is chosen by whoever opened the PR).
   const source = checkout.headRepo !== undefined ? parseRepoUrl(checkout.headRepo) : ref;
   const sourceToken = checkout.headRepo !== undefined ? (options.headToken ?? "") : token;
-  const sourceCred = gitCredential(source, sourceToken);
-  await git(
-    executor,
-    `git fetch --depth 50 ${sourceCred.url} ${checkout.branch}:${checkout.branch} 2>&1 && git checkout ${checkout.branch}`,
-    300_000,
-    sourceCred.env,
-  );
+  // Fetched into the remote-tracking ref and checked out from it in a second,
+  // credential-free exec (the shape reuseRepoForPr already has). The hardened
+  // git has no work tree, so it would not refuse to move a branch that is
+  // checked out here; `checkout -B` moves the branch AND the tree together.
+  await credentialedGit(executor, source, sourceToken, `ship_git fetch --depth 50 "$SHIP_GIT_URL" +refs/heads/${checkout.branch}:refs/remotes/origin/${checkout.branch} 2>&1`);
+  await git(executor, `git checkout --no-track -B ${checkout.branch} refs/remotes/origin/${checkout.branch}`, 300_000);
   return checkout;
 }
 
@@ -1005,21 +1054,14 @@ export async function reuseRepoForPr(
   options: { ref: RepoRef; token: string; checkout: RepoCheckout; headToken?: string },
 ): Promise<RepoCheckout> {
   const { ref, token, checkout } = options;
-  // The fetch happens under the credential and the remote is scrubbed back
-  // to the credential-free URL in the SAME shell whatever happened — the
-  // one-window rule cloneCredentialFree and reuseRepo already follow. The
-  // source is the fork for a fork PR, same as the cold path.
+  // The fetch runs under the hardened git, which is handed the source URL and
+  // never writes it (or the credential) to the workspace's config. The source
+  // is the fork for a fork PR, same as the cold path.
   const source = checkout.headRepo !== undefined ? parseRepoUrl(checkout.headRepo) : ref;
   const sourceToken = checkout.headRepo !== undefined ? (options.headToken ?? "") : token;
-  const sourceCred = gitCredential(source, sourceToken);
-  await git(
-    executor,
-    `git remote set-url origin ${sourceCred.url} && ` +
-      `{ git fetch --depth 50 --prune origin +refs/heads/${checkout.branch}:refs/remotes/origin/${checkout.branch} 2>&1; }; rc=$?; ` +
-      `git remote set-url origin ${ref.cloneUrl} >/dev/null 2>&1; exit $rc`,
-    300_000,
-    sourceCred.env,
-  );
+  await credentialedGit(executor, source, sourceToken, `ship_git fetch --depth 50 --prune origin +refs/heads/${checkout.branch}:refs/remotes/origin/${checkout.branch} 2>&1`);
+  // The agent-facing remote stays the base repository's credential-free URL.
+  await executor.exec(`git remote set-url origin ${shellQuote(ref.cloneUrl)} >/dev/null 2>&1`, { timeoutMs: 60_000 }).catch(() => undefined);
   // Drop the previous turn's tree before resetting: an unmergeable local
   // change would fail the reset, and nothing here is worth keeping except
   // what git ignores. Harness scratch goes too — a previous run's kernel
@@ -1474,8 +1516,7 @@ export async function rebaseOntoBase(
   let before: string;
   try {
     before = await git(executor, "git rev-parse HEAD");
-    const fetchCred = gitCredential(ref, token);
-    await git(executor, `git fetch ${fetchCred.url} ${checkout.base} 2>&1`, 300_000, fetchCred.env);
+    await credentialedGit(executor, ref, token, `ship_git fetch "$SHIP_GIT_URL" ${assertGitSafe("base", checkout.base)} 2>&1`);
   } catch (error) {
     return { kind: "failed", reason: error instanceof Error ? error.message : String(error) };
   }
@@ -1492,12 +1533,11 @@ export async function rebaseOntoBase(
   }
   try {
     const sha = await git(executor, "git rev-parse HEAD");
-    const forceCred = gitCredential(ref, token);
-    await git(
+    await credentialedGit(
       executor,
-      `git push --force-with-lease=refs/heads/${checkout.branch}:${before} ${forceCred.url} HEAD:refs/heads/${checkout.branch} 2>&1`,
-      300_000,
-      forceCred.env,
+      ref,
+      token,
+      `ship_git push --force-with-lease=refs/heads/${checkout.branch}:${assertGitSafe("sha", before)} "$SHIP_GIT_URL" ${assertGitSafe("sha", sha)}:refs/heads/${assertGitSafe("branch", checkout.branch)} 2>&1`,
     );
     return { kind: "rebased", sha, base };
   } catch (error) {
@@ -1575,14 +1615,14 @@ export async function rebaseStackedOnto(
   const { ref, token, checkout } = options;
   const onto = assertGitSafe("branch", options.onto);
   const oldBase = assertGitSafe("sha", options.oldBase);
-  const cred = gitCredential(ref, token);
+  const headBranch = assertGitSafe("branch", checkout.branch);
   let before: string;
   try {
     before = await git(executor, "git rev-parse HEAD");
     // The branch first (its head is the expected-heads value), then the new
     // base — a bare fetch leaves each at FETCH_HEAD, so the order is load-bearing.
-    await git(executor, `git fetch --depth 50 ${cred.url} +refs/heads/${checkout.branch}:refs/remotes/origin/${checkout.branch} 2>&1`, 300_000, cred.env);
-    await git(executor, `git fetch --depth 50 ${cred.url} +refs/heads/${onto}:refs/remotes/origin/${onto} 2>&1`, 300_000, cred.env);
+    await credentialedGit(executor, ref, token, `ship_git fetch --depth 50 "$SHIP_GIT_URL" +refs/heads/${headBranch}:refs/remotes/origin/${headBranch} 2>&1`);
+    await credentialedGit(executor, ref, token, `ship_git fetch --depth 50 "$SHIP_GIT_URL" +refs/heads/${onto}:refs/remotes/origin/${onto} 2>&1`);
   } catch (error) {
     return { kind: "failed", reason: error instanceof Error ? error.message : String(error) };
   }
@@ -1621,11 +1661,11 @@ export async function rebaseStackedOnto(
       const retargeted = await retargetPullRequest(ref, token, options.pr, onto, options.fetchImpl);
       if (!retargeted.ok) throw new Error(`the rebase succeeded but the retarget failed (the pull request keeps its base): ${retargeted.reason}`);
     }
-    await git(
+    await credentialedGit(
       executor,
-      `git push --force-with-lease=refs/heads/${checkout.branch}:${before} ${cred.url} HEAD:refs/heads/${checkout.branch} 2>&1`,
-      300_000,
-      cred.env,
+      ref,
+      token,
+      `ship_git push --force-with-lease=refs/heads/${headBranch}:${assertGitSafe("sha", before)} "$SHIP_GIT_URL" ${assertGitSafe("sha", sha)}:refs/heads/${headBranch} 2>&1`,
     );
     const ontoSha = await git(executor, `git rev-parse --verify refs/remotes/origin/${onto}^{commit}`).catch(() => "");
     return { kind: "rebased", sha, base: onto, ...(/^[0-9a-f]{40,64}$/.test(ontoSha) ? { baseSha: ontoSha } : {}) };

@@ -6,8 +6,10 @@ import { actorFromPrincipal } from "../lib/ship.server.js";
 import { currentUser } from "../lib/session.server.js";
 import { may } from "../lib/authority.server.js";
 import { redirect } from "../lib/http.server.js";
+import { requireRouteRole } from "../lib/route-access.server.js";
 export const config = { mode: "app" };
 export async function loader({ request }: { request: Request }) {
+  await requireRouteRole(request, "/recovery", "loader");
   if (!(await may("approve", await currentUser(request)))) throw new Response("Not permitted", { status: 403 });
   const runtime = await shipRuntime();
   const query = new URL(request.url).searchParams;
@@ -27,6 +29,7 @@ export async function loader({ request }: { request: Request }) {
   return { ...page, abandoned, ...(dispositionsError !== undefined ? { dispositionsError } : {}), error: query.get("error"), enabled: !!runtime.launches };
 }
 export async function action({ request }: { request: Request }): Promise<Response> {
+  await requireRouteRole(request, "/recovery", "action");
   if (!(await may("approve", await currentUser(request)))) return new Response("Not permitted", { status: 403 });
   const runtime = await shipRuntime();
   const form = await request.formData();

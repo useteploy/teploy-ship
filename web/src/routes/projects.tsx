@@ -32,6 +32,7 @@ import type { SourcesData } from "../views/sources.js";
 import Knowledge from "../views/knowledge.js";
 import { loader as knowledgeLoader, action as knowledgeAction } from "../views/knowledge.server.js";
 import type { KnowledgeData } from "../views/knowledge.js";
+import { requireRouteRole } from "../lib/route-access.server.js";
 
 export const config = { mode: "app" };
 
@@ -111,6 +112,7 @@ function viewOf(request: Request): string {
 }
 
 export async function loader({ request }: { request: Request }): Promise<ProjectsData | SourcesData | KnowledgeData> {
+  await requireRouteRole(request, "/projects", "loader");
   const view = viewOf(request);
   if (view === "sources") return sourcesLoader({ request });
   if (view === "knowledge") return knowledgeLoader({ request });
@@ -190,6 +192,7 @@ export async function loader({ request }: { request: Request }): Promise<Project
 }
 
 export async function action({ request }: { request: Request }): Promise<Response> {
+  await requireRouteRole(request, "/projects", "action");
   const view = viewOf(request);
   if (view === "sources") return sourcesAction({ request });
   if (view === "knowledge") return knowledgeAction({ request });

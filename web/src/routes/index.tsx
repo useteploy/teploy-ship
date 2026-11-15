@@ -19,6 +19,7 @@ import { defaultModel, shipRuntime } from "../lib/store.server.js";
 import { redirect } from "../lib/http.server.js";
 import { currentUser } from "../lib/session.server.js";
 import { may } from "../lib/authority.server.js";
+import { requireRouteRole } from "../lib/route-access.server.js";
 
 export const config = { mode: "app" };
 
@@ -52,6 +53,7 @@ interface InboxData {
 const TERMINAL = ["completed", "failed", "cancelled"];
 
 export async function loader({ request }: { request: Request }): Promise<InboxData> {
+  await requireRouteRole(request, "/", "loader");
   const runtime = await shipRuntime();
   const query = new URL(request.url).searchParams;
   const decisionTaken = query.get("decision") === "taken";
@@ -76,6 +78,7 @@ export async function loader({ request }: { request: Request }): Promise<InboxDa
 }
 
 export async function action({ request }: { request: Request }): Promise<Response> {
+  await requireRouteRole(request, "/", "action");
   const form = await request.formData();
   const intent = String(form.get("intent") ?? "new-run");
   const runtime = await shipRuntime();

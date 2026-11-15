@@ -25,6 +25,19 @@ jobs:
       - name: Install pnpm
         run: npm install -g pnpm@10
 
+      # The image reports package.json's version when no build arg reaches it
+      # (a source build through `teploy deploy`), so the tag and the manifest
+      # must agree. 0.5.0 was tagged with package.json still at 0.4.0.
+      - name: Tag matches package.json
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "v${pkg}" != "${TAG%%-*}" ] && [ "v${pkg}" != "${TAG}" ]; then
+            echo "tag ${TAG} does not match package.json version ${pkg}" >&2
+            exit 1
+          fi
+
       # The release path used to build and push WITHOUT running the tests, so
       # "tagged" carried no more assurance than "committed". A tag is the point
       # where that matters most.
@@ -88,6 +101,11 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Baked into dist/VERSION by the builder stage and reported by
+          # /health, the discovery document and `teploy-ship --version`.
+          # Without it every published image up to 0.5.0 said "dev".
+          build-args: |
+            SHIP_VERSION=${{ steps.meta.outputs.version }}
           # An SBOM and provenance travel with the image, so "what is in the
           # thing running in production" is answerable after the fact.
           sbom: true

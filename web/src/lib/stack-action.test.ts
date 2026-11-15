@@ -96,9 +96,9 @@ test("the stack action enqueues a change on the base's recorded head and touches
   // off the recorded input — runId, pr, branch and the head it was cut at —
   // exactly the way the fork page reads forkedFrom. The base's own page
   // carries no such key.
-  const page = await loader({ params: { id: stackRunId }, request: new Request(`http://ship.test/runs/${stackRunId}`) });
+  const page = await loader({ params: { id: stackRunId }, request: new Request(`http://ship.test/runs/${stackRunId}`, { headers: { cookie: `${SESSION_COOKIE}=${signSession({ user: "admin", role: "admin" }, "sso")}` } }) });
   assert.deepEqual(page.stackedOn, { runId: "run-sbase1", pr: 3, branch: "ship/run-sbase1", sha: SHA });
-  const basePage = await loader({ params: { id: "run-sbase1" }, request: new Request("http://ship.test/runs/run-sbase1") });
+  const basePage = await loader({ params: { id: "run-sbase1" }, request: new Request("http://ship.test/runs/run-sbase1", { headers: { cookie: `${SESSION_COOKIE}=${signSession({ user: "admin", role: "admin" }, "sso")}` } }) });
   assert.equal(basePage.stackedOn, undefined, "a non-stacked run renders no lineage: the key sits undefined exactly like forkedFrom");
 });
 

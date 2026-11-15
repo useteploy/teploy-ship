@@ -72,6 +72,10 @@
 import { parseSandboxUrls } from "./sandbox-pool.js";
 import { detectForgeColocation, colocationRefusal, colocationOverridden } from "./colocation.js";
 import type { ColocationResult, SandboxProbe } from "./colocation.js";
+import { engineOf } from "./install-doctor.js";
+
+/** The shared stores a worker can claim runs from. */
+export type JoinStore = "nucleus" | "postgres";
 
 /** One dependency, asked and answered. */
 export interface JoinCheck {
@@ -181,6 +185,8 @@ export interface JoinInput {
   addSandbox?: string;
   /** Flag overrides, applied over the bundle. */
   overrides?: Record<string, string | undefined>;
+  /** --store, which wins over the bundle's SHIP_STORE. */
+  store?: string;
 }
 
 export interface JoinPlan {
@@ -191,6 +197,14 @@ export interface JoinPlan {
   sandboxUrls: string[];
   /** The controller token, kept OUT of env — join uses it, the worker must not. */
   webToken?: string;
+  /**
+   * The store dialect the worker will run with (`worker --store <this>`):
+   * --store, else the bundle's SHIP_STORE. Unset means "not stated" — the
+   * store check then settles it from the engine's own identity, never a guess.
+   */
+  store?: JoinStore;
+  /** Set when the stated store is not one a worker can run on. */
+  storeProblem?: string;
   /** Non-fatal notes about what was dropped or defaulted. */
   notes: string[];
 }
@@ -224,9 +238,26 @@ export function planJoin(input: JoinInput): JoinPlan {
     env[key] = value;
   }
 
-  // A worker reads runs from the shared store, so this is not optional and not
-  // a default. `--store nucleus` is added to the command line, not the env.
-  env.SHIP_STORE = "nucleus";
+  // Which shared store. This was hard-coded to "nucleus", so a box joined to a
+  // PostgreSQL controller (production's store since 2026-10-14, and the
+  // install default) ran a worker whose every KV and stream call failed with
+  // `function kv_setnx … does not exist` (SHIP-03). Now: --store, else the
+  // bundle's SHIP_STORE (install.sh --export-secrets reads it off the running
+  // worker's command line), else settled by the store check from the engine.
+  // `worker` takes it as `--store <kind>` on its command line; SHIP_STORE in
+  // the written env records it for a reader.
+  let storeProblem: string | undefined;
+  let store: JoinStore | undefined;
+  const statedStore = (input.store ?? input.bundle.SHIP_STORE ?? "").trim();
+  if (statedStore === "nucleus" || statedStore === "postgres") {
+    store = statedStore;
+    env.SHIP_STORE = statedStore;
+  } else {
+    delete env.SHIP_STORE;
+    if (statedStore !== "") {
+      storeProblem = `store "${statedStore}" is not a shared store — a worker needs --store postgres or --store nucleus`;
+    }
+  }
 
   const sandboxUrls = parseSandboxUrls([env.SHIP_SANDBOX_URL, input.addSandbox].filter((v) => v !== undefined).join(","));
   if (sandboxUrls.length > 0) {
@@ -248,18 +279,22 @@ export function planJoin(input: JoinInput): JoinPlan {
     env,
     sandboxUrls,
     ...(webToken !== undefined && webToken !== "" ? { webToken } : {}),
+    ...(store !== undefined ? { store } : {}),
+    ...(storeProblem !== undefined ? { storeProblem } : {}),
     notes,
   };
 }
 
 /**
- * Is this Nucleus URL reachable from anywhere but the box it was exported from?
+ * Is this store URL (NUCLEUS_URL, which names the PostgreSQL store too)
+ * reachable from anywhere but the box it was exported from?
  *
  * This is THE failure a second box hits, and it is worth naming rather than
- * letting it surface as a DNS error. `ship-nucleus` is a docker network alias
- * (MASTER_PLAN B3: "a second host literally cannot reach the store"), and the
- * container publishes no host port — verified 2026-08-26, `docker port
- * ship-nucleus` on deploy-test prints nothing. A hostname with no dot in it,
+ * letting it surface as a DNS error. `ship-postgres` (or the older
+ * `ship-nucleus`) is a docker network alias (MASTER_PLAN B3: "a second host
+ * literally cannot reach the store"), and the accessory publishes no host
+ * port — verified 2026-08-26, `docker port ship-nucleus` on deploy-test
+ * prints nothing. A hostname with no dot in it,
  * that is not localhost and not an IP literal, is a container alias in every
  * case Ship produces.
  */
@@ -278,8 +313,12 @@ export interface CheckDeps {
   plan: JoinPlan;
   /** Injected in tests; the CLI passes global fetch. */
   fetch: typeof globalThis.fetch;
-  /** Connect to the store and run one round trip. Resolves on success. */
-  pingStore: (url: string) => Promise<void>;
+  /**
+   * Connect to the store and run one round trip. Resolves on success, with the
+   * engine's `version()` string when it can — that is what tells PostgreSQL
+   * from Nucleus when the store kind was not stated.
+   */
+  pingStore: (url: string) => Promise<string | void>;
   /** The co-location detector, injected so the test does not touch the network. */
   detect?: (origins: string[], probe?: SandboxProbe) => Promise<ColocationResult>;
   /** Set when the caller could build a sandbox probe (it needs a live executor). */
@@ -353,7 +392,7 @@ export async function runJoinChecks(deps: CheckDeps): Promise<JoinCheck[]> {
   // 2. The controller answers, and its own store is healthy.
   try {
     const { status, body } = await get(deps.fetch, `${plan.controller}/health`);
-    const parsed = JSON.parse(body) as { status?: string; nucleus?: string; worker?: string; version?: string };
+    const parsed = JSON.parse(body) as { status?: string; store?: string; store_kind?: string; nucleus?: string; worker?: string; version?: string };
     if (status !== 200 || parsed.status !== "ok") {
       checks.push({
         name: "controller",
@@ -367,7 +406,9 @@ export async function runJoinChecks(deps: CheckDeps): Promise<JoinCheck[]> {
         name: "controller",
         what: "the controller is up and its store is reachable",
         status: "ok",
-        detail: `${plan.controller} version ${parsed.version ?? "?"}, nucleus ${parsed.nucleus ?? "?"}, workers ${parsed.worker ?? "?"}`,
+        // `store`/`store_kind` since 0.5.1; an older controller only has the
+        // legacy `nucleus` field, which it left "n/a" on PostgreSQL.
+        detail: `${plan.controller} version ${parsed.version ?? "?"}, store ${parsed.store_kind !== undefined ? `${parsed.store_kind} ` : ""}${parsed.store ?? parsed.nucleus ?? "?"}, workers ${parsed.worker ?? "?"}`,
       });
     }
   } catch (error) {
@@ -435,35 +476,38 @@ export async function runJoinChecks(deps: CheckDeps): Promise<JoinCheck[]> {
   //    message rather than a DNS error.
   const nucleusUrl = env.NUCLEUS_URL ?? "";
   const alias = nucleusUrl === "" ? null : isContainerAlias(nucleusUrl);
+  const storeWhat = "this box can reach the shared store";
   if (nucleusUrl === "") {
     checks.push({
       name: "store",
-      what: "this box can reach the shared Nucleus",
+      what: storeWhat,
       status: "fail",
-      detail: "NUCLEUS_URL is not set",
-      fix: "pass --nucleus-url postgres://nucleus@<controller-tailnet-ip>:5432/nucleus",
+      detail: "NUCLEUS_URL is not set (it names the store for PostgreSQL and Nucleus alike)",
+      fix: "pass --nucleus-url postgres://ship@<controller-tailnet-ip>:5432/ship (the password rides PGPASSWORD in the bundle)",
     });
   } else {
     // ASK FIRST, INTERPRET SECOND. An earlier draft refused a container alias
     // on sight, which is wrong in one real case: a box already on the
-    // controller's own docker network resolves `ship-nucleus` perfectly well.
+    // controller's own docker network resolves `ship-postgres` perfectly well.
     // Refusing something that demonstrably works teaches an operator that the
     // tool guesses, so the alias only shapes the EXPLANATION of a failure —
     // and, when it works, the warning that this is not actually a second box.
     let reached = true;
     let error: unknown;
+    let version: string | undefined;
     try {
-      await deps.pingStore(nucleusUrl);
+      const answered = await deps.pingStore(nucleusUrl);
+      if (typeof answered === "string") version = answered;
     } catch (caught) {
       reached = false;
       error = caught;
     }
     if (reached && alias === null) {
-      checks.push({ name: "store", what: "this box can reach the shared Nucleus", status: "ok", detail: `connected and answered: ${redactUrlPassword(nucleusUrl)}` });
+      checks.push({ name: "store", what: storeWhat, status: "ok", detail: `connected and answered: ${redactUrlPassword(nucleusUrl)}` });
     } else if (reached) {
       checks.push({
         name: "store",
-        what: "this box can reach the shared Nucleus",
+        what: storeWhat,
         status: "warn",
         detail:
           `connected — but NUCLEUS_URL names "${alias}", a docker network alias, so this box is on the controller's ` +
@@ -472,23 +516,62 @@ export async function runJoinChecks(deps: CheckDeps): Promise<JoinCheck[]> {
     } else if (alias !== null) {
       checks.push({
         name: "store",
-        what: "this box can reach the shared Nucleus",
+        what: storeWhat,
         status: "fail",
         detail:
           `NUCLEUS_URL points at "${alias}", which is a docker network alias on the controller's box, not an ` +
-          `address — and it did not resolve here (${why(error)}). ship-nucleus publishes no host port either.`,
+          `address — and it did not resolve here (${why(error)}). The store accessory publishes no host port either.`,
         fix:
-          "on the controller, publish Nucleus on its tailnet address and give it a password, then join with " +
-          "--nucleus-url postgres://nucleus:<pw>@<controller-tailnet-ip>:5432/nucleus. " +
-          "This is MASTER_PLAN B3's PRE-DECIDED store decision: Nucleus over the tailnet, with credentials.",
+          "on the controller, publish the store on its tailnet address (password authentication on), then join with " +
+          "--nucleus-url postgres://ship@<controller-tailnet-ip>:5432/ship — the bundle's PGPASSWORD carries the password. " +
+          "This is MASTER_PLAN B3's PRE-DECIDED store decision: the store over the tailnet, with credentials.",
       });
     } else {
       checks.push({
         name: "store",
-        what: "this box can reach the shared Nucleus",
+        what: storeWhat,
         status: "fail",
         detail: `${redactUrlPassword(nucleusUrl)}: ${why(error)}`,
-        fix: "check the address, the firewall, and that Nucleus accepts a password login from off-box",
+        fix: "check the address, the firewall, and that the store accepts a password login from off-box (PGPASSWORD in the bundle)",
+      });
+    }
+
+    // 4b. Which dialect the worker speaks. The two KV/stream surfaces are not
+    //     interchangeable (engine built-ins vs plain tables), so a mismatch
+    //     fails here instead of as `kv_setnx … does not exist` on every call.
+    const engine = reached ? engineOf(version) : undefined;
+    const storeKindWhat = "the worker will speak the store's own dialect";
+    if (plan.storeProblem !== undefined) {
+      checks.push({ name: "store-kind", what: storeKindWhat, status: "fail", detail: plan.storeProblem, fix: "pass --store postgres (the default store) or --store nucleus" });
+    } else if (plan.store !== undefined && engine !== undefined && engine !== plan.store) {
+      checks.push({
+        name: "store-kind",
+        what: storeKindWhat,
+        status: "fail",
+        detail: `store ${plan.store} selected but the engine identifies as ${engine}`,
+        fix: `pass --store ${engine}, or point --nucleus-url at the ${plan.store} store`,
+      });
+    } else if (plan.store !== undefined) {
+      checks.push({
+        name: "store-kind",
+        what: storeKindWhat,
+        status: "ok",
+        detail: engine !== undefined ? `--store ${plan.store}, and the engine identifies as ${engine}` : `--store ${plan.store} (stated; ${reached ? "the engine did not identify itself" : "the store did not answer, see above"})`,
+      });
+    } else if (engine !== undefined) {
+      // Not stated anywhere: the engine's own answer settles it. This is the
+      // one thing a check writes back into the plan, because it is the one
+      // setting only the store can answer.
+      plan.store = engine;
+      plan.env.SHIP_STORE = engine;
+      checks.push({ name: "store-kind", what: storeKindWhat, status: "ok", detail: `not stated; the engine identifies as ${engine}, so the worker runs --store ${engine}` });
+    } else {
+      checks.push({
+        name: "store-kind",
+        what: storeKindWhat,
+        status: "fail",
+        detail: reached ? "the store kind is not stated and the engine did not identify itself" : "the store kind is not stated, and the store could not be asked",
+        fix: "pass --store postgres (the default store) or --store nucleus",
       });
     }
   }

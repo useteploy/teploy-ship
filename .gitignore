@@ -28,3 +28,8 @@ teploy.install.yml
 
 # neutron-ts 0.5 build scratch (generated runtime entry)
 web/.neutron/
+
+# Local clutter: Finder metadata, and Claude Code's per-checkout state (it can
+# hold a whole agent worktree, which one `git add -A` would commit).
+.DS_Store
+.claude/

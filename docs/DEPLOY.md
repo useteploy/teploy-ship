@@ -1,8 +1,15 @@
 # Self-hosting Teploy Ship
 
 Issues in, pull requests out, on your own box. One `teploy deploy` from
-this repo brings up the dashboard, the worker, and a Nucleus store; the
+this repo brings up the dashboard, the worker, and a PostgreSQL store; the
 optional gateway and sandbox daemon complete the production shape.
+
+> **Without the sandbox daemon (the default install), agent commands run inside
+> the worker container, as the worker's own user, next to every secret the
+> worker holds** — the git token, the model key, the database password. Ship
+> refuses tasks from webhooks, Slack and issues on such a worker, but a task you
+> type still reads repository content and web pages that can carry a prompt
+> injection. Treat a no-sandbox install as operator-only; §3 is the way out.
 
 > **Setting Ship up for the first time?** [QUICKSTART.md](QUICKSTART.md) is the
 > ten-minute path; this document is the complete model behind it.
@@ -22,7 +29,7 @@ optional gateway and sandbox daemon complete the production shape.
 | Piece | What | How it deploys |
 |---|---|---|
 | `ship` (web + worker) | dashboard/webhooks + the durable agent executor | `teploy deploy` from this repo (server-side image build) |
-| `ship-nucleus` | durable runs, intake, spend, code index | accessory in `teploy.yml` (automatic) |
+| `ship-postgres` | durable runs, intake, spend, code index (PostgreSQL 17, pgvector build; Nucleus is a legacy opt-in, `--store nucleus`) | accessory in `teploy.yml` (automatic) |
 | `ship-gateway` | BYO-model AI gateway; provider keys never reach ship | `teploy deploy` from `../teploy-gateway` (optional but recommended) |
 | `teploy-sandbox` | per-run containers with default-deny egress | systemd service on the host (see below) |
 | sandbox images | what a run's container boots | `images/build.sh` on the server (see [Sandbox images](#sandbox-images)) |
@@ -93,7 +100,7 @@ to the Ship you already have — one dashboard, one store, more execution —
 
 ```sh
 teploy-ship join http://<controller>:7460 --secrets ship.env \
-  --nucleus-url postgres://nucleus:<pw>@<controller-tailnet-ip>:5432/nucleus \
+  --nucleus-url postgres://ship@<controller-tailnet-ip>:5432/ship \
   --sandbox http://172.18.0.1:7439 --start
 ```
 
@@ -103,9 +110,10 @@ before it writes anything:
 | Check | What it proves |
 |---|---|
 | `bundle` | the file carries a startable configuration, and names what is missing if not |
-| `controller` | `GET /health` is 200 and the controller's own store is `ok` |
+| `controller` | `GET /health` is 200 and the controller's own store is `ok` (`store`; older controllers only report the legacy `nucleus` field) |
 | `controller-token` | the controller *accepts* this token — a typo fails here, not on the Fleet page |
-| `store` | a real connection and a real round trip to Nucleus |
+| `store` | a real connection and a real round trip to the store, with the bundle's `PGPASSWORD` |
+| `store-kind` | the worker will speak the store's dialect: `--store`, else the bundle's `SHIP_STORE`, else what the engine's `version()` says; a stated kind the engine contradicts fails here instead of as `kv_setnx … does not exist` on every call |
 | `sandbox:<url>` | **every** daemon in the pool answers `/health` and accepts `SHIP_SANDBOX_TOKEN` |
 | `forge:<origin>` | the forge authenticates the deploy token. "Set" is not "works" |
 | `model` | the gateway answers, or the worker will call the provider directly |
@@ -128,11 +136,13 @@ are dropped on the way in rather than shared between hosts.
 
 Two things a first join usually trips over, both reported by name:
 
-- **`NUCLEUS_URL` is a docker network alias.** `postgres://nucleus@ship-nucleus`
-  resolves only inside the controller's own docker network, and `ship-nucleus`
-  publishes no host port. Publish Nucleus on the tailnet with a password and
-  pass `--nucleus-url`. (This is the store decision in `_internal/MASTER_PLAN.md`
-  B3: Nucleus over the tailnet, with credentials.)
+- **`NUCLEUS_URL` is a docker network alias.** (`NUCLEUS_URL` is the store
+  URL's historical name; it names the PostgreSQL store too.)
+  `postgres://ship@ship-postgres` resolves only inside the controller's own
+  docker network, and the accessory publishes no host port. Publish the store
+  on the tailnet (it already requires a password) and pass `--nucleus-url`.
+  (This is the store decision in `_internal/MASTER_PLAN.md` B3: the store over
+  the tailnet, with credentials.)
 - **`AI_GATEWAY_URL` is the same shape** (`http://ship-gateway:8089`). Publish
   the gateway on the tailnet, or clear it and set `ANTHROPIC_API_KEY` so this
   worker calls the provider directly.
@@ -1162,9 +1172,15 @@ agent gets a ```search action.
   `injection-guard` step on the run timeline.
 - **Egress**: sandbox runs can only reach allowlisted hosts; everything
   else has no route.
-- **Secrets**: agent commands never see operator env secrets (scrubbed
-  on local executors, absent in sandboxes); git tokens are used
-  harness-side only and are picked per host (Forgejo vs GitHub).
+- **Secrets**: in a sandbox, agent commands run in their own container,
+  which holds none of the operator's env secrets. On the local executor —
+  the default install, with no sandbox daemon — they run in the worker
+  container as the worker's own user: Ship removes the secret variables it
+  knows from each command's environment, but that is a filter, not a
+  boundary. The same user can read the worker process's environment
+  (`/proc/<pid>/environ`), the data volume, and the store with the worker's
+  credentials. Treat a no-sandbox install as operator-only (§3). Git tokens
+  are picked per host (Forgejo vs GitHub).
 - **Spend**: per-source daily budgets + global concurrency caps.
 
 ### Forge co-location
@@ -1192,16 +1208,19 @@ with the explanation rather than with a worker that exits during startup.
 
 ## Day-2
 
-- `teploy deploy` redeploys; secrets persist. Run state lives in
-  Nucleus (accessory volume) — containers are disposable.
+- `teploy deploy` redeploys; secrets persist. Run state lives in the
+  store (the postgres accessory's volume) — containers are disposable.
 - The data volume (`/deployments/ship/volumes/ship-data`, mounted at `/data`)
   must be owned by uid 1000. `install.sh` does it on a fresh install; a volume
   teploy creates later is root-owned, and every file-backed shadow then
   records nothing (2026-10-16 incident). Fix: `chown 1000:1000
   /deployments/ship/volumes/ship-data`. Web and worker log an ERROR at
   startup when it is wrong, and `teploy-ship doctor` fails `data-dir-writable`.
-- `teploy accessory upgrade nucleus ghcr.io/neutron-build/nucleus:latest`
-  picks up engine updates.
+- The store image is pinned (`pgvector/pgvector:0.8.0-pg17`): bump it
+  deliberately with `teploy accessory upgrade postgres <image>`. A pgvector
+  release within pg17 is low-risk; a PostgreSQL major version is a
+  dump/restore, not a redeploy. (A legacy Nucleus install upgrades its
+  `nucleus` accessory the same way.)
 - CI runs on Forgejo Actions (`.forgejo/workflows/ci.yml`) with a
   sibling-Neutron checkout — register any docker-labeled runner.
 
@@ -1244,7 +1263,7 @@ new deployment actually has to set.
 | `SHIP_LIVE_VIEW` | on (unset) | Live view on the run page (D5 — S12, S10): while a run is active, a read-only terminal tail of the native loop's bash actions and a running diff of the workspace against the run's base, polled every 2 s from `GET /api/runs/<id>/live`. On unless explicitly turned off (`0`/`false`/`no`/`off`). Set it on **both** web (shows the panel, serves the endpoint) and worker (records output, serves diffs); off on either side, that half is inert — the worker does no extra store read, exec or write and bash actions run through the plain exec exactly as before. Terminal: the bash action's exec streams through the sandbox daemon (same `ExecResult` as the plain exec), and a redacted tail of at most 8,000 characters is written to a `SHIP_LIVE_OUTPUT_<run>` config row at most once a second (plus a trailing flush), so output reaches the page in about 3 s plus store latency; written from inside the executing step only, never recorded, so replays and the step fingerprint are unchanged. External harness output and evidence legs (tests, preview) are not streamed. Diff: computed only while somebody has the page open (a `SHIP_LIVE_WATCH_<run>` heartbeat the endpoint refreshes every 5 s, abandoned after 15 s), at most once per 3 s per run and 5 runs per worker tick, as ONE read-only git command in the sandbox (no optional locks, hooks, fsmonitor, external diff or textconv) that records its own sandbox-clock instant, HEAD, the resolved base (a PR run's checked-out head, otherwise the merge-base with `origin/<base>`) and a sha256 of the exact bytes; untracked files are shown as new files, ignored files (`.env`, dependency trees) are never read; bounded to 9,000 bytes and redacted. Skipped while a takeover holds the workspace. Access is the run page's (any signed-in role); the endpoint has no write surface. Rows are removed when the run settles. |
 | `SHIP_PREVIEW` | unset | Ask every newly-enqueued run to deploy its branch to a preview environment and link the URL on the pull request. Per-run, and only the request — whether a preview can happen is `SHIP_PREVIEW_DIR` below. |
 | `SHIP_PREVIEW_DIR` | unset | **The switch.** A clone **of the repository being fixed**, on the WORKER host, containing the app's `teploy.yml`. Ship fetches the run's branch into a detached `git worktree` beside it and builds THERE — building in the directory itself would deploy whatever commit it happens to sit on and label it as the fix. Your checkout is never moved and the worktree is always removed. Deploy credentials stay on the worker — they are never placed in the agent's sandbox, which executes model-authored commands. Without this a run that asked for a preview records the step as disabled. |
-| `SHIP_PREVIEW_BIN` | `teploy` | Path to the CLI. Needs a CLI with `teploy build`, released in **v0.1.27**; older binaries can only produce an image by deploying to production, which is exactly what a preview must not do. **The container image ships it**, built in the Dockerfile's `teploy-cli` stage from a pinned source commit (`ARG TEPLOY_COMMIT`, a full SHA on the CLI's public main; the stage refuses to finish unless the binary advertises `preview-exposure`). It was a checksum-verified release download until tailnet previews needed a CLI newer than the latest release; it goes back to the release pin once a release carries that commit. Set this only to point at a different binary. |
+| `SHIP_PREVIEW_BIN` | `teploy` | Path to the CLI. Needs a CLI with `teploy build`, released in **v0.1.27**; older binaries can only produce an image by deploying to production, which is exactly what a preview must not do. **The container image ships it**: the Dockerfile's `teploy-cli` stage downloads release v0.1.55 and verifies it against a sha256 pinned in the Dockerfile (`ARG TEPLOY_VERSION`, `TEPLOY_SHA256_AMD64`/`_ARM64`); the stage refuses to finish unless the binary reports that version and advertises `preview-exposure`. (From 2026-09-24 it was built from a pinned source commit, because no release carried tailnet previews yet.) Set this only to point at a different binary. |
 | `SHIP_PREVIEW_TTL` | `24h` | Passed to `teploy preview deploy --ttl`. The CLI prunes expired previews on the next preview deploy for that app. |
 | `SHIP_PREVIEW_DESTINATION` | unset | Destination overlay (`-d staging`), applied to every command so a preview cannot land on the wrong server. |
 | `SHIP_PREVIEW_TIMEOUT_MS` | `900000` | Per-command ceiling. The server-side image build is the slow step. |

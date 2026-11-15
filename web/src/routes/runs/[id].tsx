@@ -32,12 +32,14 @@ import { LIVE_POLL_MS, diffView, terminalView, type DiffTone, type LiveBody } fr
 // the projection itself lives server-side (thread-chain.server.ts).
 import type { ThreadRunView, ThreadView } from "../../lib/thread-chain.server.js";
 import { SteerComposer, ThreadHistory, utcStamp } from "../../views/steer-thread.js";
+import { requireRouteRole } from "../../lib/route-access.server.js";
 
 export const config = { mode: "app" };
 
 // Shared server data must not import a route module: production route transforms
 // own its loader export and cannot be used as a resource-handler dependency.
 export async function loader(args: { params: { id: string }; request: Request }): Promise<RunData> {
+  await requireRouteRole(args.request, "/runs/:id", "loader");
   return runData(args);
 }
 
@@ -70,6 +72,7 @@ export async function action({
   request: Request;
   params: { id: string };
 }): Promise<Response> {
+  await requireRouteRole(request, "/runs/:id", "action");
   const form = await request.formData();
   const intent = String(form.get("intent") ?? "");
   const runtime = await shipRuntime();

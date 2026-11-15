@@ -12,6 +12,7 @@ import { readiness } from "../lib/readiness.server.js";
 import type { ReadinessCheck } from "../lib/readiness.server.js";
 import { stackDetectEnabled, suggestionsFor } from "../lib/stack-suggest.server.js";
 import type { SuggestionResult } from "../lib/stack-suggest.server.js";
+import { requireRouteRole } from "../lib/route-access.server.js";
 export const config = { mode: "app" };
 interface Data {
   selected: Project | null;
@@ -28,6 +29,7 @@ interface Data {
   suggestions: SuggestionResult | null;
 }
 export async function loader({ request }: { request: Request }): Promise<Data> {
+  await requireRouteRole(request, "/setup", "loader");
   const runtime = await shipRuntime(),
     projects = await runtime.projects.list(),
     repo =
@@ -72,6 +74,7 @@ export async function action({
 }: {
   request: Request;
 }): Promise<Response> {
+  await requireRouteRole(request, "/setup", "action");
   if (!(await may("policies", await currentUser(request))))
     return new Response("Not permitted", { status: 403 });
   const me = await currentUser(request);

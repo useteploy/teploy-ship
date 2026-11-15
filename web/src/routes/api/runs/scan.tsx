@@ -7,6 +7,7 @@ import { DailyBudgetExceededError, RepoNotAllowedError, assertRepoAllowedForOper
 import { currentUser } from "../../../lib/session.server.js";
 import { may } from "../../../lib/authority.server.js";
 import { defaultModel, shipRuntime } from "../../../lib/store.server.js";
+import { requireRouteRole } from "../../../lib/route-access.server.js";
 
 export const config = { mode: "app" };
 
@@ -43,6 +44,7 @@ const DEFAULT_SCAN_TASK =
   "the source — over style preferences.";
 
 export async function action({ request }: ActionArgs): Promise<Response> {
+  await requireRouteRole(request, "/api/runs/scan", "action");
   if (request.method !== "POST") return json(405, { error: "method not allowed — POST only" });
   const principal = await currentUser(request);
   if (principal === null) return json(401, { error: "unauthorized — send Authorization: Bearer <SHIP_WEB_TOKEN>" });
